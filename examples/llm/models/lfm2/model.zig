@@ -222,7 +222,10 @@ pub const Model = struct {
     ) struct { zml.Tensor, Cache, zml.Tensor.Rng } {
         stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq }), "Tokens should have tags {{.batch, .seq}}, got {f}", .{tokens.shape()});
 
-        const embeds = self.embed_tokens.forward(tokens);
+        const embeds = TokenEmbedding.forward(.{
+            .embedding = self.embed_tokens,
+            .tokens = tokens,
+        }).hidden;
 
         var hidden = embeds;
         var cache = cache_;
@@ -230,20 +233,31 @@ pub const Model = struct {
         var conv_cache_index = zml.Tensor.scalar(@as(u32, 0), .u32);
         var kv_cache_index = zml.Tensor.scalar(@as(u32, 0), .u32);
         for (self.layers) |layer| {
-            hidden, cache, conv_cache_index, kv_cache_index = layer.forward(
-                hidden,
-                tokens_position_offset,
-                actual_seq_len,
-                cache,
-                conv_cache_index,
-                kv_cache_index,
-                attention_metadata,
-                attention_parameters,
-                conv_parameters,
-            );
+            const result = DecoderLayer.forward(.{
+                .layer = layer,
+                .hidden = hidden,
+                .tokens_position_offset = tokens_position_offset,
+                .actual_seq_len = actual_seq_len,
+                .cache = cache,
+                .conv_cache_index = conv_cache_index,
+                .kv_cache_index = kv_cache_index,
+                .attention_metadata = attention_metadata,
+                .attention_parameters = attention_parameters,
+                .conv_parameters = conv_parameters,
+            });
+            hidden = result.hidden;
+            cache = result.cache;
+            conv_cache_index = result.conv_cache_index;
+            kv_cache_index = result.kv_cache_index;
         }
-        const new_tokens, const new_rng = self.lm_head.forward(hidden, self.embed_tokens, tokens, rng);
-        return .{ new_tokens, cache.reuseBuffer(cache_), new_rng };
+        const result = LmHead.forward(.{
+            .lm_head = self.lm_head,
+            .embed_tokens = self.embed_tokens,
+            .hidden = hidden,
+            .tokens = tokens,
+            .rng = rng,
+        });
+        return .{ result.tokens, cache.reuseBuffer(cache_), result.rng };
     }
 
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
@@ -254,14 +268,23 @@ pub const Model = struct {
 pub const TokenEmbedding = struct {
     weight: zml.Tensor,
 
+    pub const Input = struct {
+        embedding: TokenEmbedding,
+        tokens: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+    };
+
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
         return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) };
     }
 
-    pub fn forward(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
-        stdx.debug.assert(tokens.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{tokens});
-        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight zml.Tensor to be a 2D matrix, got {f}", .{self.weight});
-        return self.weight.gather(.{ .voc = tokens }, .{});
+    pub fn forward(input: Input) Output {
+        stdx.debug.assert(input.tokens.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{input.tokens});
+        stdx.debug.assert(input.embedding.weight.rank() == 2, "TokenEmbedding expects it's weight zml.Tensor to be a 2D matrix, got {f}", .{input.embedding.weight});
+        return .{ .hidden = input.embedding.weight.gather(.{ .voc = input.tokens }, .{}) };
     }
 
     pub fn unembed(self: TokenEmbedding, embeds: zml.Tensor) zml.Tensor {
@@ -274,6 +297,19 @@ pub const LmHead = struct {
     embedding_norm: RmsNorm,
     sampling_strategy: zml.nn.SamplingStrategy,
 
+    pub const Input = struct {
+        lm_head: LmHead,
+        embed_tokens: TokenEmbedding,
+        hidden: zml.Tensor,
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    };
+
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    };
+
     pub fn init(store: zml.io.TensorStore.View, config: Config, sampling_strategy: zml.nn.SamplingStrategy) LmHead {
         return .{
             .embedding_norm = RmsNorm.init(store.withPrefix("embedding_norm"), config.norm_eps, .d),
@@ -281,10 +317,11 @@ pub const LmHead = struct {
         };
     }
 
-    pub fn forward(self: LmHead, hidden: zml.Tensor, embed_tokens: TokenEmbedding, tokens: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const logits = embed_tokens.unembed(self.embedding_norm.forward(hidden));
-        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
+    pub fn forward(input: Input) Output {
+        const self = input.lm_head;
+        const logits = input.embed_tokens.unembed(self.embedding_norm.forward(input.hidden));
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, input.rng);
+        return .{ .tokens = new_tokens.convert(input.tokens.dtype()).reuseBuffer(input.tokens), .rng = new_rng };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -300,6 +337,26 @@ pub const DecoderLayer = struct {
     operator_norm: RmsNorm,
     ffn_norm: RmsNorm,
     feed_forward: Mlp,
+
+    pub const Input = struct {
+        layer: DecoderLayer,
+        hidden: zml.Tensor,
+        tokens_position_offset: zml.Tensor,
+        actual_seq_len: zml.Tensor,
+        cache: Cache,
+        conv_cache_index: zml.Tensor,
+        kv_cache_index: zml.Tensor,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+        conv_parameters: ConvParameters,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+        cache: Cache,
+        conv_cache_index: zml.Tensor,
+        kv_cache_index: zml.Tensor,
+    };
 
     pub fn parseOperatorKind(layer_type: []const u8) OperatorKind {
         return std.meta.stringToEnum(OperatorKind, layer_type) orelse {
@@ -325,30 +382,20 @@ pub const DecoderLayer = struct {
         };
     }
 
-    pub fn forward(
-        self: DecoderLayer,
-        input: zml.Tensor,
-        tokens_position_offset: zml.Tensor,
-        actual_seq_len: zml.Tensor,
-        cache_: Cache,
-        conv_cache_index_: zml.Tensor,
-        kv_cache_index_: zml.Tensor,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
-        conv_parameters: ConvParameters,
-    ) struct { zml.Tensor, Cache, zml.Tensor, zml.Tensor } {
-        var cache = cache_;
-        var conv_cache_index = conv_cache_index_;
-        var kv_cache_index = kv_cache_index_;
+    pub fn forward(input: Input) Output {
+        const self = input.layer;
+        var cache = input.cache;
+        var conv_cache_index = input.conv_cache_index;
+        var kv_cache_index = input.kv_cache_index;
         const residual = switch (self.operator) {
             .conv => |operator| b: {
                 const residual, const updated_conv_cache = operator.forward(
-                    self.operator_norm.forward(input),
-                    tokens_position_offset,
-                    actual_seq_len,
+                    self.operator_norm.forward(input.hidden),
+                    input.tokens_position_offset,
+                    input.actual_seq_len,
                     cache.conv,
                     conv_cache_index,
-                    conv_parameters,
+                    input.conv_parameters,
                 );
                 cache.conv = updated_conv_cache;
                 conv_cache_index = conv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
@@ -356,12 +403,12 @@ pub const DecoderLayer = struct {
             },
             .self_attn => |operator| b: {
                 const residual, const updated_kv_cache = operator.forward(
-                    self.operator_norm.forward(input),
-                    tokens_position_offset,
+                    self.operator_norm.forward(input.hidden),
+                    input.tokens_position_offset,
                     cache.kv,
                     kv_cache_index,
-                    attention_metadata,
-                    attention_parameters,
+                    input.attention_metadata,
+                    input.attention_parameters,
                 );
                 cache.kv = updated_kv_cache;
                 kv_cache_index = kv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
@@ -369,13 +416,13 @@ pub const DecoderLayer = struct {
             },
         };
 
-        const x = input.add(residual);
+        const x = input.hidden.add(residual);
 
         return .{
-            x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).reuseBuffer(input),
-            cache.reuseBuffer(cache_),
-            conv_cache_index.reuseBuffer(conv_cache_index_),
-            kv_cache_index.reuseBuffer(kv_cache_index_),
+            .hidden = x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).reuseBuffer(input.hidden),
+            .cache = cache.reuseBuffer(input.cache),
+            .conv_cache_index = conv_cache_index.reuseBuffer(input.conv_cache_index),
+            .kv_cache_index = kv_cache_index.reuseBuffer(input.kv_cache_index),
         };
     }
 

@@ -9,9 +9,10 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    model_buffers: *model.Buffers,
-    compiled_model: *const inference.CompiledModel,
-    decode_runner: inference.KernelExe.Runner,
+    compiled_model: *inference.CompiledModel,
+    prefill: inference.KernelRunner,
+    decode: inference.KernelRunner,
+    layer_index_buffers: []zml.Buffer,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -27,7 +28,7 @@ pub const Session = struct {
         io: std.Io,
         platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        compiled_model: *const inference.CompiledModel,
+        compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
@@ -37,25 +38,46 @@ pub const Session = struct {
         var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-        var decode_runner = try compiled_model.decode.initRunner(
-            allocator,
-            io,
-            platform,
-            model_buffers,
-        );
-        errdefer decode_runner.deinit(allocator);
+        const layer_types = compiled_model.loaded_model.inner.config.text_config.layer_types;
+        const layer_index_buffers = try allocator.alloc(zml.Buffer, layer_types.len);
+        errdefer allocator.free(layer_index_buffers);
+        var initialized_layer_index_buffers: usize = 0;
+        errdefer for (layer_index_buffers[0..initialized_layer_index_buffers]) |*buffer| buffer.deinit();
+        var full_attention_index: u32 = 0;
+        var linear_attention_index: u32 = 0;
+        for (layer_index_buffers, layer_types) |*buffer, layer_type| {
+            buffer.* = try switch (layer_type) {
+                .full_attention => b: {
+                    defer full_attention_index += 1;
+                    break :b zml.Buffer.scalar(io, platform, full_attention_index, .u32);
+                },
+                .linear_attention => b: {
+                    defer linear_attention_index += 1;
+                    break :b zml.Buffer.scalar(io, platform, linear_attention_index, .u32);
+                },
+            };
+            initialized_layer_index_buffers += 1;
+        }
+
+        const generated_token_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
+        errdefer generated_token_slice.free(allocator);
+
+        var prefill = try inference.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers);
+        errdefer prefill.deinit(allocator);
+        const decode = try inference.KernelRunner.init(allocator, &compiled_model.decode, model_buffers);
 
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .model_buffers = model_buffers,
             .compiled_model = compiled_model,
-            .decode_runner = decode_runner,
+            .prefill = prefill,
+            .decode = decode,
+            .layer_index_buffers = layer_index_buffers,
             .kv_cache_buffers = kv_cache_buffers,
             .rng_buffers = rng_buffers,
             .tokenizer = tokenizer,
-            .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
+            .generated_token_slice = generated_token_slice,
             .seqlen = compiled_model.params.seqlen,
             .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
             .special_tokens = compiled_model.loaded_model.inner.special_tokens,
@@ -65,7 +87,10 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        self.decode_runner.deinit(self.allocator);
+        self.prefill.deinit(self.allocator);
+        self.decode.deinit(self.allocator);
+        for (self.layer_index_buffers) |*buffer| buffer.deinit();
+        self.allocator.free(self.layer_index_buffers);
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
         self.generated_token_slice.free(self.allocator);
@@ -94,16 +119,13 @@ pub const Session = struct {
         var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer prefill_token_index_buffer.deinit();
 
-        try self.compiled_model.prefill.run(.{
-            .allocator = self.allocator,
+        inference.run(&self.prefill, .{
             .io = self.io,
-            .platform = self.platform,
-            .model_buffers = self.model_buffers,
             .tokens_buf = &prefill_tokens_buffer,
             .token_index_buf = &prefill_token_index_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
-        });
+        }, self.layer_index_buffers);
 
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
         const generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
@@ -141,16 +163,13 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            try self.decode_runner.run(.{
-                .allocator = self.allocator,
+            inference.run(&self.decode, .{
                 .io = self.io,
-                .platform = self.platform,
-                .model_buffers = self.model_buffers,
                 .tokens_buf = &current_token_buffer,
                 .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
-            });
+            }, self.layer_index_buffers);
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }

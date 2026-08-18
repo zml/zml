@@ -220,8 +220,13 @@ pub const Model = struct {
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
         const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
-        const new_tokens, const new_rng, _ = self.sampler().sampleTokens(text_model_output, rng, null);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+        const result = Sampler.sampleTokens(.{
+            .sampler = self.sampler(),
+            .hidden = text_model_output,
+            .rng = rng,
+            .token_index = token_index,
+        });
+        return .{ result.tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, result.rng };
     }
 
     pub fn sampler(self: Model) Sampler {
@@ -238,19 +243,49 @@ pub const Sampler = struct {
     lm_head: zml.nn.Linear,
     gen_options: Model.GenOptions,
 
-    pub fn sampleTokens(
-        self: Sampler,
-        out: zml.Tensor,
+    pub const Input = struct {
+        sampler: Sampler,
+        hidden: zml.Tensor,
         rng: zml.Tensor.Rng,
-        token_index: ?zml.Tensor,
-    ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
-        const x = self.norm.forward(out);
+        token_index: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        token_index: zml.Tensor,
+    };
+
+    pub fn sampleTokens(input: Input) Output {
+        const self = input.sampler;
+        const x = self.norm.forward(input.hidden);
         const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
-        if (token_index) |token_idx| {
-            return .{ next_tokens.convert(.u32), new_rng, token_idx.addConstant(1) };
-        }
-        return .{ next_tokens.convert(.u32), new_rng, null };
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
+        return .{
+            .tokens = next_tokens.convert(.u32),
+            .rng = new_rng,
+            .token_index = input.token_index.addConstant(1),
+        };
+    }
+};
+
+pub const EmbedTokens = struct {
+    embed_tokens: zml.nn.TokenEmbedding,
+
+    pub const Input = struct {
+        embedding: EmbedTokens,
+        tokens: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+    };
+
+    pub fn forward(input: Input) Output {
+        const tokens = input.tokens.withPartialTags(.{.s});
+        return .{ .hidden = input.embedding.embed_tokens.forward(tokens)
+            .withPartialTags(.{.d})
+            .withPartitioning(.{ .d = .replicated }) };
     }
 };
 
@@ -297,7 +332,10 @@ pub const TextModel = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
     ) struct { zml.Tensor, KvCache } {
-        var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
+        var hidden_states = EmbedTokens.forward(.{
+            .embedding = .{ .embed_tokens = self.embed_tokens },
+            .tokens = tokens,
+        }).hidden;
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
@@ -318,6 +356,30 @@ pub const TransformerLayer = struct {
     attn: Attn,
     mlp: Mlp,
     post_attention_layernorm: RmsNorm,
+
+    pub const SelfAttnInput = struct {
+        layer: TransformerLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        cache: KvCache.SelfAttnCache,
+    };
+
+    pub const SelfAttnOutput = struct {
+        hidden: zml.Tensor,
+        cache: KvCache.SelfAttnCache,
+    };
+
+    pub const LinearAttnInput = struct {
+        layer: TransformerLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        cache: KvCache.GatedDeltaNetCache,
+    };
+
+    pub const LinearAttnOutput = struct {
+        hidden: zml.Tensor,
+        cache: KvCache.GatedDeltaNetCache,
+    };
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_index: usize) !TransformerLayer {
         const is_full_attention = config.text_config.layer_types[layer_index] == .full_attention;
@@ -383,12 +445,9 @@ pub const TransformerLayer = struct {
         return .{ mlp_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0), updated_kv_cache };
     }
 
-    pub fn forwardSelfAttn(
-        self: TransformerLayer,
-        x0: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache.SelfAttnCache,
-    ) struct { zml.Tensor, KvCache.SelfAttnCache } {
+    pub fn forwardSelfAttn(input: SelfAttnInput) SelfAttnOutput {
+        const self = input.layer;
+        const x0 = input.hidden;
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
@@ -396,22 +455,22 @@ pub const TransformerLayer = struct {
             .full_attention => |self_attn| self_attn,
             .linear_attention => unreachable,
         };
-        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, token_index, kv_cache);
+        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache);
 
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
         const mlp_output = self.mlp.forward(normalized_hidden).withPartitioning(.{ .d = .replicated });
 
-        return .{ mlp_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0), updated_kv_cache };
+        return .{
+            .hidden = mlp_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
+            .cache = updated_kv_cache,
+        };
     }
 
-    pub fn forwardLinearAttn(
-        self: TransformerLayer,
-        x0: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache.GatedDeltaNetCache,
-    ) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
-        _ = token_index;
+    pub fn forwardLinearAttn(input: LinearAttnInput) LinearAttnOutput {
+        const self = input.layer;
+        const x0 = input.hidden;
+        _ = input.token_index;
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
@@ -419,13 +478,16 @@ pub const TransformerLayer = struct {
             .linear_attention => |linear_attn| linear_attn,
             .full_attention => unreachable,
         };
-        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, kv_cache);
+        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, input.cache);
 
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
         const mlp_output = self.mlp.forward(normalized_hidden).withPartitioning(.{ .d = .replicated });
 
-        return .{ mlp_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0), updated_kv_cache };
+        return .{
+            .hidden = mlp_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
+            .cache = updated_kv_cache,
+        };
     }
 };
 

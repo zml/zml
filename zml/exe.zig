@@ -4,11 +4,14 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
+const mem = @import("mem.zig");
 const meta = @import("meta.zig");
+const module = @import("module.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
+const Tensor = @import("tensor.zig").Tensor;
 
 pub const Exe = struct {
     platform: *const Platform,
@@ -259,6 +262,42 @@ pub const Exe = struct {
         }
     };
 
+    /// An executable together with reusable argument and result storage.
+    /// A runner owns all three values and must not be used concurrently.
+    pub const Runner = struct {
+        exe: Exe,
+        args: Arguments,
+        results: Results,
+
+        /// Takes ownership of the executable and allocates reusable argument and result storage.
+        pub fn init(exe: Exe, allocator: std.mem.Allocator) !Runner {
+            errdefer exe.deinit();
+            var arguments = try exe.args(allocator);
+            errdefer arguments.deinit(allocator);
+            var results_ = try exe.results(allocator);
+            errdefer results_.deinit(allocator);
+            return .{ .exe = exe, .args = arguments, .results = results_ };
+        }
+
+        pub fn deinit(self: *Runner, allocator: std.mem.Allocator) void {
+            self.results.deinit(allocator);
+            self.args.deinit(allocator);
+            self.exe.deinit();
+        }
+
+        pub fn run(self: *Runner, input_values: anytype, output_values: anytype) void {
+            self.args.set(input_values);
+            self.exe.call(self.args, &self.results);
+            self.results.fill(output_values);
+        }
+
+        pub fn runOpts(self: *Runner, io: std.Io, input_values: anytype, output_values: anytype, opts: CallOpts) void {
+            self.args.set(input_values);
+            self.exe.callOpts(io, self.args, &self.results, opts);
+            self.results.fill(output_values);
+        }
+    };
+
     pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
@@ -328,3 +367,216 @@ pub const Exe = struct {
         return self.internalCall(null, arguments, results_, .{});
     }
 };
+
+/// A typed executable whose input and output buffer structures are derived from
+/// the function used to compile it.
+pub fn TypedExe(comptime function_: anytype) type {
+    const function_info = switch (@typeInfo(@TypeOf(function_))) {
+        .@"fn" => |info| info,
+        else => @compileError("TypedExe expects a function, got " ++ @typeName(@TypeOf(function_))),
+    };
+    if (function_info.is_var_args or function_info.params.len != 1) {
+        @compileError("TypedExe function must accept exactly one input struct");
+    }
+
+    const FunctionInput = typedFunctionInput(function_);
+    const FunctionOutput = typedFunctionOutput(function_);
+
+    return struct {
+        raw: Exe,
+
+        pub const Input = mem.Bufferized(FunctionInput);
+        pub const Output = typedOutputDestinations(mem.Bufferized(FunctionOutput));
+
+        const Self = @This();
+
+        pub fn init(raw: Exe) Self {
+            return .{ .raw = raw };
+        }
+
+        pub fn compile(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: module.CompilationOptions,
+            args: std.meta.ArgsTuple(@TypeOf(function_)),
+        ) module.CompileError!Self {
+            return .{ .raw = try module.Compiler(function_).compile(allocator, io, platform, opts, args) };
+        }
+
+        pub fn deinit(self: *const Self) void {
+            self.raw.deinit();
+        }
+
+        /// An executable together with reusable argument and result storage.
+        /// A runner owns all three values and must not be used concurrently.
+        pub fn Runner(comptime baked_fields: anytype) type {
+            const count = countBackedFields(Input, baked_fields);
+
+            return struct {
+                exe: Exe,
+                args: Exe.Arguments,
+                results: Exe.Results,
+
+                const RunnerSelf = @This();
+
+                pub const BakedInput = structFieldRange(Input, 0, count);
+                pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".fields.len);
+
+                pub fn init(exe: *const Self, allocator: std.mem.Allocator, baked: BakedInput) !RunnerSelf {
+                    var arguments = try exe.raw.args(allocator);
+                    errdefer arguments.deinit(allocator);
+                    var results = try exe.raw.results(allocator);
+                    errdefer results.deinit(allocator);
+                    arguments.bake(baked);
+                    return .{ .exe = exe.raw, .args = arguments, .results = results };
+                }
+
+                pub fn deinit(self: *RunnerSelf, allocator: std.mem.Allocator) void {
+                    self.results.deinit(allocator);
+                    self.args.deinit(allocator);
+                }
+
+                pub fn run(self: *RunnerSelf, io: std.Io, call: struct {
+                    inputs: NonBakedInput,
+                    outputs: Output,
+                    opts: Exe.CallOpts = .{},
+                }) void {
+                    self.args.set(call.inputs);
+                    self.exe.callOpts(io, self.args, &self.results, call.opts);
+                    self.results.fill(call.outputs);
+                }
+            };
+        }
+    };
+}
+
+fn countBackedFields(comptime Input: type, comptime baked_fields: anytype) usize {
+    const baked_info = switch (@typeInfo(@TypeOf(baked_fields))) {
+        .@"struct" => |info| info,
+        else => @compileError("TypedExe baked fields must be a tuple of enum literals"),
+    };
+    if (!baked_info.is_tuple) {
+        @compileError("TypedExe baked fields must be a tuple of enum literals");
+    }
+
+    const input_fields = @typeInfo(Input).@"struct".fields;
+    if (baked_info.fields.len > input_fields.len) {
+        @compileError("TypedExe baked fields must be a prefix of its bufferized input fields");
+    }
+
+    inline for (baked_info.fields, 0..) |tuple_field, i| {
+        const baked_field = @field(baked_fields, tuple_field.name);
+        if (@TypeOf(baked_field) != @EnumLiteral()) {
+            @compileError("TypedExe baked fields must be enum literals");
+        }
+        if (!std.mem.eql(u8, @tagName(baked_field), input_fields[i].name)) {
+            @compileError("TypedExe baked fields must be an ordered prefix of its bufferized input fields");
+        }
+    }
+    return baked_info.fields.len;
+}
+
+fn structFieldRange(comptime Struct: type, comptime start: usize, comptime end: usize) type {
+    const fields = @typeInfo(Struct).@"struct".fields[start..end];
+    var field_names: [fields.len][]const u8 = undefined;
+    var field_types: [fields.len]type = undefined;
+    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    for (&field_names, &field_types, &field_attrs, fields) |*name, *T, *attrs, field| {
+        name.* = field.name;
+        T.* = field.type;
+        attrs.* = .{
+            .@"comptime" = field.is_comptime,
+            .@"align" = field.alignment,
+            .default_value_ptr = field.default_value_ptr,
+        };
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+}
+
+fn typedFunctionInput(comptime function_: anytype) type {
+    const Input = @typeInfo(@TypeOf(function_)).@"fn".params[0].type orelse
+        @compileError("TypedExe function must have a concrete input type");
+    validateTypedExeStruct("input", Input);
+    return Input;
+}
+
+fn typedFunctionOutput(comptime function_: anytype) type {
+    const Output = @typeInfo(@TypeOf(function_)).@"fn".return_type orelse @compileError("TypedExe function must return an output struct");
+    validateTypedExeStruct("output", Output);
+    return Output;
+}
+
+fn validateTypedExeStruct(comptime role: []const u8, comptime T: type) void {
+    const info = switch (@typeInfo(T)) {
+        .@"struct" => |info| info,
+        else => @compileError("TypedExe " ++ role ++ " must be a struct, got " ++ @typeName(T)),
+    };
+    if (info.is_tuple) {
+        @compileError("TypedExe " ++ role ++ " must use named fields");
+    }
+}
+
+fn typedOutputDestinations(comptime BufferizedOutput: type) type {
+    const output_info = @typeInfo(BufferizedOutput).@"struct";
+    const fields = output_info.fields;
+    var field_names: [fields.len][]const u8 = undefined;
+    var field_types: [fields.len]type = undefined;
+    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    for (&field_names, &field_types, &field_attrs, fields) |*name, *T, *attrs, field| {
+        name.* = field.name;
+        T.* = *field.type;
+        attrs.* = .{ .@"align" = @alignOf(*field.type) };
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+}
+
+test "TypedExe derives baked and runtime calls from a function" {
+    const Inputs = struct {
+        weights: struct {
+            tensor: Tensor,
+            scale: f32,
+        },
+        bias: Tensor,
+        tokens: Tensor,
+        token_count: usize,
+    };
+    const Outputs = struct {
+        hidden: Tensor,
+        cache: struct {
+            key: Tensor,
+            length: usize,
+        },
+        metadata: usize,
+    };
+    const Functions = struct {
+        fn forward(inputs: Inputs) Outputs {
+            _ = inputs;
+            return undefined;
+        }
+    };
+
+    const Model = TypedExe(Functions.forward);
+    try std.testing.expect(@hasField(Model.Input, "weights"));
+    try std.testing.expect(@hasField(Model.Input, "bias"));
+    try std.testing.expect(@hasField(Model.Input, "tokens"));
+    try std.testing.expect(!@hasField(Model.Input, "token_count"));
+    try std.testing.expect(!@hasField(@FieldType(Model.Input, "weights"), "scale"));
+
+    const Baked = Model.Runner(.{ .weights, .bias }).BakedInput;
+    try std.testing.expect(@hasField(Baked, "weights"));
+    try std.testing.expect(@hasField(Baked, "bias"));
+    try std.testing.expect(!@hasField(Baked, "tokens"));
+
+    const Runtime = Model.Runner(.{ .weights, .bias }).NonBakedInput;
+    try std.testing.expect(!@hasField(Runtime, "weights"));
+    try std.testing.expect(!@hasField(Runtime, "bias"));
+    try std.testing.expectEqual(Buffer, @FieldType(Runtime, "tokens"));
+
+    try std.testing.expectEqual(*Buffer, @FieldType(Model.Output, "hidden"));
+    try std.testing.expectEqual(
+        *mem.Bufferized(@FieldType(Outputs, "cache")),
+        @FieldType(Model.Output, "cache"),
+    );
+    try std.testing.expect(!@hasField(Model.Output, "metadata"));
+}
