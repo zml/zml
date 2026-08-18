@@ -21,12 +21,8 @@ pub const Linear = struct {
     tag: Shape.Tag,
     quant: ?Quant = null,
 
-    /// What turns `weight` back into real numbers.
-    ///
-    /// `scheme` is decided when the checkpoint is read, not re-derived here. A checkpoint
-    /// routinely mixes schemes layer by layer -- the same `mlp.gate_proj` is NVFP4 in one
-    /// layer and FP8 in another -- and only the loader has seen the key names that tell
-    /// the conventions apart.
+    /// What turns `weight` back into real numbers. `scheme` is decided when the checkpoint is
+    /// read, not re-derived here: only the loader has seen the key names.
     pub const Quant = struct {
         scheme: QuantScheme,
         /// Per-block or per-channel scales, laid out as `scheme` describes.
@@ -39,24 +35,23 @@ pub const Linear = struct {
         input_scale: ?TensorScale = null,
     };
 
-    /// A per-tensor scale, carrying the direction the producer wrote it in.
+    /// A per-tensor scale, carrying the direction its producer wrote it in: ModelOpt writes
+    /// `amax/(448*6)` and means a multiplier, compressed-tensors `448*6/amax` and means a
+    /// divisor. Only the key name separates them, so the loader decides.
     ///
-    /// ModelOpt writes `amax/(448*6)` and means a multiplier; compressed-tensors writes
-    /// `448*6/amax` and means a divisor. Only the key name separates them, so the loader
-    /// decides -- and the direction travels with the value rather than beside it, because a
-    /// model struct is built from `Tensor.fromShape` placeholders (`io.zig`,
-    /// `View.maybeCreateTensor`): no op can run there, so nothing can be normalised at load.
+    /// The direction travels with the value rather than beside it, because a model struct holds
+    /// `Tensor.fromShape` placeholders: no op can run at load, so nothing can be normalised
+    /// there, and every reader would otherwise have to remember a flag.
     pub const TensorScale = union(Direction) {
         multiplier: Tensor,
         divisor: Tensor,
 
-        /// Named rather than inferred so callers can spell the field type, and so a mismatch
-        /// names `Direction` instead of an anonymous tag type.
+        /// Named so callers can spell the field type.
         pub const Direction = enum { multiplier, divisor };
 
         /// The value as a multiplier, ready to broadcast onto an accumulator. A single value
-        /// carries no meaningful axis name, so it is flattened to a scalar and broadcasts
-        /// anywhere; a per-output-channel vector keeps its axis and broadcasts by tag.
+        /// carries no meaningful axis name, so it becomes a scalar and broadcasts anywhere; a
+        /// per-output-channel vector keeps its axis and broadcasts by tag.
         pub fn asMultiplier(self: TensorScale) Tensor {
             const raw = switch (self) {
                 inline else => |t| t,
@@ -92,9 +87,6 @@ pub const Linear = struct {
         const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
         const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
 
-        // A packed NVFP4 weight arrives as `u8` with a halved contracted axis; the bitcast
-        // that widens it is free, so it stays in the graph rather than being a store-level
-        // reinterpret (`Shape.byteSize` has no sub-byte case).
         const weight = if (isPackedNvfp4(q.scheme, self.weight.dtype())) unpackNvfp4(self.weight, self.tag) else self.weight;
 
         var lhs = x.convert(.bf16);
@@ -121,17 +113,12 @@ pub const Linear = struct {
 /// Number of contracted values sharing one NVFP4 scale.
 pub const nvfp4_block_size = 16;
 
-/// How a `Linear`'s scales map onto its weight.
+/// How a `Linear`'s scales map onto its weight, which is always `[out, contracted]` with the
+/// contracted axis last and named by `Linear.tag`.
 ///
-/// Every scheme here is legal to emit as an `xla.scaled_dot` composite: a backend either
-/// claims it (Metal's `ClassifyMetalScaledMatmul`, Triton, cuDNN) or XLA expands it into a
-/// dequantize and a plain dot. Which one a tensor uses is settled by whoever read the
-/// checkpoint -- see `llmd/quant.zig` -- because the key names, not the shapes, are what
-/// separate the naming conventions.
-///
-/// A weight is always `[out, contracted]`, with the contracted axis last and named by
-/// `Linear.tag`. The tag says nothing about which axis is which: a row-parallel `down_proj`
-/// names its output axis `.d` and its contracted axis `.dout`.
+/// Every scheme here is legal to emit as an `xla.scaled_dot` composite: a backend either claims
+/// it (Metal's `ClassifyMetalScaledMatmul`, Triton, cuDNN) or XLA expands it into a dequantize
+/// and a plain dot.
 pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
     nvfp4,
@@ -143,14 +130,9 @@ pub const QuantScheme = enum {
     /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
     fp8_per_tensor,
 
-    /// Whether `scale` is a grid this scheme can wear over a `[out, contracted]` `weight`.
-    ///
-    /// This mirrors the question the backends ask of the composite (Metal's
-    /// `ClassifyMetalScaledMatmul`, Triton's `IsSupportedScaleGrid`): a pair accepted here is
-    /// one a backend is expected to claim. Adding a scheme is an enum value plus an arm here --
-    /// the switch is exhaustive, so it cannot be forgotten.
-    ///
-    /// The arms are mutually exclusive, so `classify` does not depend on their order.
+    /// Whether `scale` is a grid this scheme can wear over `weight`. Mirrors the question the
+    /// backends ask of the composite, so a pair accepted here is one a backend is expected to
+    /// claim. The arms are mutually exclusive, so `classify` does not depend on their order.
     pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {
         // Rank 3 is a stacked MoE weight, which goes through the MoE custom calls, not this path.
         if (weight.rank() != 2) return false;
@@ -163,12 +145,9 @@ pub const QuantScheme = enum {
             .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
                 scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
-            // A per-tensor scale is spelled as a scalar or `[1]`, and by DeepSeek-style
-            // producers also under the `weight_scale_inv` key.
             .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
-            // The `count() > 1` on the two grids is what keeps the arms disjoint: a lone value
-            // is per-tensor even where a `[1, 1]` bf16 scale over a 128x128 weight would also
-            // read as a one-tile block grid.
+            // `count() > 1` is what keeps the two grids disjoint from per-tensor: a lone value
+            // over a 128x128 weight would otherwise also read as a one-tile block grid.
             .fp8_per_channel => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
                 scale.count() > 1 and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) == 1,
@@ -188,11 +167,9 @@ pub const QuantScheme = enum {
         return null;
     }
 
-    /// How this scheme quantizes x, or `null` if it is weight-only and x stays bf16.
-    ///
-    /// Listing the weight-only schemes rather than writing `else` is deliberate: a scheme added
-    /// to this enum stops the build here, instead of inheriting the weight-only path and
-    /// quietly running at the wrong speed.
+    /// How this scheme quantizes x, or `null` if it is weight-only and x stays bf16. The
+    /// weight-only schemes are listed rather than left to an `else`, so a new scheme stops the
+    /// build here instead of quietly inheriting the weight-only path.
     pub fn activationQuant(self: QuantScheme) ?ActivationQuant {
         return switch (self) {
             .nvfp4 => .nvfp4,
@@ -201,10 +178,10 @@ pub const QuantScheme = enum {
     }
 };
 
-/// How a scheme quantizes activations. One switch, two readers: `Linear.forwardWeight` decides
-/// whether to quantize x, and `llmd/quant.zig` decides whether an `input_scale` belongs in the
-/// model struct at all -- which is why the platform check is on `ActivationQuant` and not on
-/// `QuantScheme` (a model struct is built before a platform is known).
+/// How a scheme quantizes activations. Two readers: `Linear.forwardWeight` decides whether to
+/// quantize x, and the loader decides whether an `input_scale` belongs in the model struct at
+/// all -- which is why `supportedOn` takes the platform rather than the scheme knowing it, a
+/// model struct being built before a platform is known.
 pub const ActivationQuant = enum {
     nvfp4,
 
@@ -222,13 +199,11 @@ pub const ActivationQuant = enum {
     }
 };
 
-/// Whether the checkpoint stores this weight bit-packed -- two f4e2m1 per `u8` byte -- so its
-/// last axis is half the logical contraction and has to be widened before the dot.
-///
-/// NVFP4 ships both ways: ModelOpt packs into `u8`, other producers write native `f4e2m1`. So
-/// neither the scheme nor the dtype answers it alone, and both sides of the seam must ask the
-/// same question -- the loader names the packed axis `.kw` exactly when `forwardWeight` will
-/// unpack it, and a mismatch leaves the dot with no axis to contract.
+/// Whether the checkpoint stores this weight bit-packed -- two f4e2m1 per `u8` -- so its last
+/// axis is half the logical contraction and has to be widened before the dot. NVFP4 ships both
+/// ways, so neither the scheme nor the dtype answers it alone, and both sides of the seam must
+/// ask the same question: the loader names the packed axis `.kw` exactly when `forwardWeight`
+/// will unpack it, and a mismatch leaves the dot with no axis to contract.
 pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
     return scheme == .nvfp4 and weight_dtype == .u8;
 }
@@ -424,10 +399,9 @@ pub fn scaledDot(
         break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
     };
 
-    // XLA's composite rewriter requires a scale to have the rank of the operand it scales
-    // (`composite_rewriter.cc`, `IsSupportedScaledOperand`), so a per-tensor scale goes in as
-    // an all-ones grid. A scalar would leave the composite unclaimed, which is not a slow
-    // path but a compile failure naming `zml$scaled_dot_unmatched`.
+    // XLA's composite rewriter requires a scale to have the rank of the operand it scales, so a
+    // per-tensor scale goes in as an all-ones grid. A scalar would leave the composite
+    // unclaimed, which is a compile failure naming `zml$scaled_dot_unmatched`, not a slow path.
     const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
         rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
     else
@@ -484,12 +458,9 @@ fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
     return major >= 10;
 }
 
-/// Rescales an accumulator by the per-tensor scales the quantized dot left out.
-///
-/// `wgs` is a scalar for a single projection, and one value per output channel when several
-/// projections with different per-tensor scales were fused into one weight -- which is exact,
-/// since the scale multiplies output rows and every row belongs to exactly one projection.
-/// The two are applied separately rather than pre-multiplied so a scalar and a vector can mix.
+/// Rescales an accumulator by the per-tensor scales the quantized dot left out. `wgs` is a
+/// scalar for a single projection and one value per output channel for a fused one. The two are
+/// applied separately rather than pre-multiplied, so a scalar and a vector can mix.
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
     if (igs == null and wgs == null) return acc;
 
