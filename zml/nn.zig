@@ -19,14 +19,29 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
-    scales: ?Tensor = null,
-    global_scale: ?Tensor = null,
-    input_global_scale: ?Tensor = null,
-    /// compressed-tensors stores global scales as divisors (`448*6/amax`) where ModelOpt
-    /// stores multipliers (`amax/(448*6)`). Everything downstream wants multipliers, so a
-    /// checkpoint using the former is flagged here and inverted at forward time (we can't
-    /// invert at load: building the model struct emits no ops).
-    reciprocal_global_scales: bool = false,
+    quant: ?Quant = null,
+
+    /// What turns `weight` back into real numbers.
+    ///
+    /// `scheme` is decided when the checkpoint is read, not re-derived here. A checkpoint
+    /// routinely mixes schemes layer by layer -- the same `mlp.gate_proj` is NVFP4 in one
+    /// layer and FP8 in another -- and only the loader has seen the key names that tell
+    /// the conventions apart.
+    pub const Quant = struct {
+        scheme: QuantScheme,
+        /// Per-block or per-channel scales, laid out as `scheme` describes.
+        scales: Tensor,
+        /// Per-tensor weight scale. A single value, or one per output channel when
+        /// projections with different scales were fused into one weight -- in which case it
+        /// is tagged with the output axis so it broadcasts onto the accumulator.
+        weight_scale: ?Tensor = null,
+        /// Per-tensor activation scale. Only NVFP4 uses it, to quantize x.
+        input_scale: ?Tensor = null,
+        /// `weight_scale` and `input_scale` hold divisors rather than multipliers:
+        /// compressed-tensors writes `448*6/amax` where ModelOpt writes `amax/(448*6)`.
+        /// Inverted at forward time, since building the model struct emits no ops.
+        reciprocal_tensor_scales: bool = false,
+    };
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -34,71 +49,6 @@ pub const Linear = struct {
             .bias = bias,
             .tag = zml.Shape.toTag(tag),
         };
-    }
-
-    /// How tensor parallelism cuts a `Linear`.
-    pub const Shard = enum {
-        /// Split the output axis: each device owns a slice of the outputs (column parallel).
-        out,
-        /// Split the contracted axis: each device computes a partial sum (row parallel).
-        contracted,
-        /// Replicate the whole layer.
-        none,
-    };
-
-    /// Loads a `Linear` from a checkpoint, quantized or not.
-    ///
-    /// Recognizes both quantization naming conventions in the wild, and checkpoints that mix
-    /// schemes layer by layer -- which scheme a tensor uses is decided from its shapes by
-    /// `QuantScheme.of`, never from a config:
-    ///   - ModelOpt:           `weight`,        `weight_scale`, `weight_scale_2`,      `input_scale`
-    ///   - compressed-tensors: `weight_packed`, `weight_scale`, `weight_global_scale`, `input_global_scale`
-    ///
-    /// `out_tag` names the weight's axis 0 and `k_tag` its contracted axis 1. Tensors are
-    /// built with internal axis names and renamed after, because partitioning is keyed by
-    /// comptime field name and the caller's tags aren't known here.
-    pub fn initFromStore(
-        store: zml.io.TensorStore.View,
-        comptime out_tag: @EnumLiteral(),
-        comptime k_tag: @EnumLiteral(),
-        shard: Shard,
-    ) Linear {
-        // Probe with `getShape`, not `hasKey`: `hasKey` matches on prefix, so `hasKey("weight")`
-        // is true for a layer that only has `weight_packed`.
-        const is_packed = store.getShape("weight_packed") != null;
-        const weight_key = if (is_packed) "weight_packed" else "weight";
-
-        const weight_ = switch (shard) {
-            .out => store.createTensor(weight_key, .{ .doutq, .kq }, .{ .doutq = .model, .kq = .replicated }),
-            .contracted => store.createTensor(weight_key, .{ .doutq, .kq }, .{ .doutq = .replicated, .kq = .model }),
-            .none => store.createTensor(weight_key, .{ .doutq, .kq }, .replicated),
-        };
-        const out_named = weight_.renameAxis(0, out_tag);
-        // `unpackNvfp4` wants the packed axis named `.kw` and renames the unpacked result
-        // to `k_tag` itself.
-        const weight = if (is_packed) out_named.renameAxis(1, .kw) else out_named.renameAxis(1, k_tag);
-
-        const bias = switch (shard) {
-            .out => store.maybeCreateTensor("bias", .{.doutq}, .{ .doutq = .model }),
-            .contracted, .none => store.maybeCreateTensor("bias", .{.doutq}, .{ .doutq = .replicated }),
-        };
-
-        const globals = loadGlobalScales(store);
-        return .{
-            .weight = weight,
-            .bias = if (bias) |b| b.renameAxis(0, out_tag) else null,
-            .tag = zml.Shape.toTag(k_tag),
-            .scales = loadScales(store, shard),
-            .global_scale = globals.weight,
-            .input_global_scale = globals.input,
-            .reciprocal_global_scales = globals.reciprocal,
-        };
-    }
-
-    /// Global scales are scalars, so they carry no meaningful axis names.
-    fn asMultiplier(self: Linear, g: Tensor) Tensor {
-        const s = g.convert(.f32).asScalar();
-        return if (self.reciprocal_global_scales) Tensor.scalar(1.0, .f32).div(s) else s;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
@@ -111,159 +61,62 @@ pub const Linear = struct {
     }
 
     fn forwardWeight(self: Linear, x: Tensor) Tensor {
-        const scales = self.scales orelse return x.dot(self.weight, self.tag);
+        const q = self.quant orelse return x.dot(self.weight, self.tag);
 
-        const igs: ?Tensor = if (self.input_global_scale) |g| self.asMultiplier(g) else null;
-        const wgs: ?Tensor = if (self.global_scale) |g| self.asMultiplier(g) else null;
+        const wgs: ?Tensor = if (q.weight_scale) |g| asMultiplier(g, q.reciprocal_tensor_scales) else null;
+        const igs: ?Tensor = if (q.input_scale) |g| asMultiplier(g, q.reciprocal_tensor_scales) else null;
+
+        // A packed NVFP4 weight arrives as `u8` with a halved contracted axis; the bitcast
+        // that widens it is free, so it stays in the graph rather than being a store-level
+        // reinterpret (`Shape.byteSize` has no sub-byte case).
+        const weight = if (self.weight.dtype() == .u8) unpackNvfp4(self.weight, self.tag) else self.weight;
 
         const platform = zml.module.CompilationContext.current().platform;
-        const scheme: QuantScheme = .of(self.weight.shape(), scales.shape());
-
-        const weight = unpackWeight(self.weight, self.tag);
-        if (scheme == .nvfp4 and supportsNvfp4ActivationQuant(platform)) {
-            const q = quantizeNvfp4(x.convert(.bf16), igs, self.tag);
-            const acc = scaledDot(q.values, weight, q.scales, scales, self.tag);
+        if (q.scheme == .nvfp4 and supportsNvfp4ActivationQuant(platform)) {
+            const quantized = quantizeNvfp4(x.convert(.bf16), igs, self.tag);
+            const acc = scaledDot(quantized.values, weight, quantized.scales, q.scales, self.tag);
             return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
         }
 
-        const acc = scaledDot(x.convert(.bf16), weight, null, scales, self.tag);
+        const acc = scaledDot(x.convert(.bf16), weight, null, q.scales, self.tag);
         return applyGlobalScale(acc, null, wgs).convert(x.dtype());
     }
 };
 
-/// Loads `weight_scale`, cutting it the same way as the weight it scales. A scale with a
-/// single group per row (per-channel, `[N, 1]`) can't be split along the contraction, so a
-/// row-parallel layer replicates it.
-fn loadScales(store: zml.io.TensorStore.View, shard: Linear.Shard) ?Tensor {
-    const shape = store.getShape("weight_scale") orelse return null;
-    if (shape.rank() == 0) return store.createTensor("weight_scale", .{}, .replicated);
-
-    stdx.debug.assert(shape.rank() == 2, "Linear.initFromStore expects weight_scale to be a scalar or rank 2 [out, groups], got {f}", .{shape});
-    return switch (shard) {
-        .out => store.createTensor("weight_scale", .{ .doutq, .sc }, .{ .doutq = .model, .sc = .replicated }),
-        .contracted => if (shape.dim(1) > 1)
-            store.createTensor("weight_scale", .{ .doutq, .sc }, .{ .doutq = .replicated, .sc = .model })
-        else
-            store.createTensor("weight_scale", .{ .doutq, .sc }, .replicated),
-        .none => store.createTensor("weight_scale", .{ .doutq, .sc }, .replicated),
-    };
-}
-
-/// The weight and activation global scales, under either naming convention.
-fn loadGlobalScales(store: zml.io.TensorStore.View) struct { weight: ?Tensor, input: ?Tensor, reciprocal: bool } {
-    // ModelOpt spells these `weight_scale_2` / `input_scale` and means multipliers;
-    // compressed-tensors spells them `*_global_scale` and means divisors.
-    if (store.getShape("weight_scale_2") != null or store.getShape("input_scale") != null) {
-        return .{
-            .weight = loadScalar(store, "weight_scale_2"),
-            .input = loadScalar(store, "input_scale"),
-            .reciprocal = false,
-        };
-    }
-    return .{
-        .weight = loadScalar(store, "weight_global_scale"),
-        .input = loadScalar(store, "input_global_scale"),
-        .reciprocal = true,
-    };
-}
-
-/// Loads a single-element tensor, which checkpoints spell as either rank 0 or `[1]`.
-fn loadScalar(store: zml.io.TensorStore.View, key: []const u8) ?Tensor {
-    const shape = store.getShape(key) orelse return null;
-    stdx.debug.assert(shape.count() == 1, "Linear.initFromStore expects {s} to hold a single value, got {f}", .{ key, shape });
-    return if (shape.rank() == 0)
-        store.createTensor(key, .{}, .replicated)
-    else
-        store.createTensor(key, .{.g}, .replicated);
+/// A per-tensor scale as a multiplier, whichever way round the checkpoint stored it.
+///
+/// A single value carries no meaningful axis name, so it is flattened to a scalar and
+/// broadcasts anywhere. A per-output-channel vector keeps its axis, and broadcasts by tag.
+fn asMultiplier(scale: Tensor, reciprocal: bool) Tensor {
+    const s = if (scale.shape().count() == 1) scale.convert(.f32).asScalar() else scale.convert(.f32);
+    return if (reciprocal) Tensor.scalar(1.0, .f32).broad(s.shape()).div(s) else s;
 }
 
 /// Number of contracted values sharing one NVFP4 scale.
 pub const nvfp4_block_size = 16;
 
-/// How a `Linear`'s `scales` maps onto its `weight`: a pure function of shapes and dtypes.
+/// How a `Linear`'s scales map onto its weight.
 ///
-/// This mirrors the backend-side classifiers (XLA's `ClassifyMetalScaledMatmul`) predicate
-/// for predicate, and the two must stay in sync. A checkpoint routinely mixes schemes layer
-/// by layer -- the same `mlp.gate_proj` is NVFP4 in one layer and FP8 in another -- so the
-/// scheme is read off the shapes per tensor, never from a config.
+/// Every scheme here is legal to emit as an `xla.scaled_dot` composite: a backend either
+/// claims it (Metal's `ClassifyMetalScaledMatmul`, Triton, cuDNN) or XLA expands it into a
+/// dequantize and a plain dot. Which one a tensor uses is settled by whoever read the
+/// checkpoint -- see `llmd/quant.zig` -- because the key names, not the shapes, are what
+/// separate the naming conventions.
 ///
 /// A weight is always `[out, contracted]`, with the contracted axis last and named by
 /// `Linear.tag`. The tag says nothing about which axis is which: a row-parallel `down_proj`
 /// names its output axis `.d` and its contracted axis `.dout`.
 pub const QuantScheme = enum {
-    /// f4e2m1 values (`u8`-packed or native) with an f8e4m3fn scale per 16 contracted values.
+    /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
     nvfp4,
-    /// f8e4m3fn values with one bf16 scale per output channel, constant along the contraction.
+    /// f8e4m3fn values, one bf16 scale per output channel, constant along the contraction.
     fp8_per_channel,
-    /// A layout no backend is known to fuse. `Linear` emits the composite anyway, so this
-    /// surfaces as a compile error naming `zml$scaled_dot_unmatched` rather than silently
-    /// running slow -- see `scaledDotReference`.
-    unknown,
-
-    pub fn of(weight: Shape, scales: Shape) QuantScheme {
-        if (weight.rank() != 2 or scales.rank() != 2) return .unknown;
-        if (scales.dim(0) != weight.dim(0)) return .unknown;
-        const k = logicalContractedSize(weight);
-
-        if (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) {
-            if (scales.dtype() == .f8e4m3fn and scales.dim(1) * nvfp4_block_size == k) return .nvfp4;
-            return .unknown;
-        }
-        if (weight.dtype() == .f8e4m3fn and scales.dtype() == .bf16 and scales.dim(1) == 1) {
-            return .fp8_per_channel;
-        }
-        return .unknown;
-    }
+    /// f8e4m3fn values, one bf16 scale per 128x128 tile.
+    fp8_block128,
+    /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
+    /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
+    fp8_per_tensor,
 };
-
-/// Size of the contracted axis, accounting for `u8` sub-byte packing.
-fn logicalContractedSize(weight: Shape) i64 {
-    const k = weight.dim(weight.rank() - 1);
-    return if (weight.dtype() == .u8) 2 * k else k;
-}
-
-test QuantScheme {
-    const of = QuantScheme.of;
-    // Shapes taken from Qwen3.6-27B-NVFP4, which carries both schemes at once.
-    const nvfp4_weight: Shape = .init(.{ .dout = 17408, .kw = 2560 }, .u8);
-    const fp8_weight: Shape = .init(.{ .dout = 10240, .d = 5120 }, .f8e4m3fn);
-
-    try std.testing.expectEqual(QuantScheme.nvfp4, of(nvfp4_weight, .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn)));
-    try std.testing.expectEqual(QuantScheme.fp8_per_channel, of(fp8_weight, .init(.{ .dout = 10240, .sc = 1 }, .bf16)));
-
-    // Native (unpacked) f4e2m1 values are the same scheme, with K no longer doubled.
-    try std.testing.expectEqual(QuantScheme.nvfp4, of(
-        .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
-        .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn),
-    ));
-
-    // Everything a backend would refuse, and must therefore not be classified.
-    const unknown: QuantScheme = .unknown;
-    // Group 32 (MXFP4) rather than 16.
-    try std.testing.expectEqual(unknown, of(nvfp4_weight, .init(.{ .dout = 17408, .sc = 160 }, .f8e4m3fn)));
-    // e8m0 scales.
-    try std.testing.expectEqual(unknown, of(nvfp4_weight, .init(.{ .dout = 17408, .sc = 320 }, .f8e8m0)));
-    // Per-tensor: a scalar scale.
-    try std.testing.expectEqual(unknown, of(fp8_weight, .init(.{}, .f32)));
-    // Per-channel, but f32 rather than bf16.
-    try std.testing.expectEqual(unknown, of(fp8_weight, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
-    // A 128x128 block grid: the scale has fewer rows than the weight.
-    try std.testing.expectEqual(unknown, of(
-        .init(.{ .dout = 32768, .d = 1024 }, .f8e4m3fn),
-        .init(.{ .dout = 256, .sc = 8 }, .bf16),
-    ));
-    // FP8 values with a group scale: valid MXFP8, but nothing here fuses it.
-    try std.testing.expectEqual(unknown, of(fp8_weight, .init(.{ .dout = 10240, .sc = 160 }, .f8e8m0)));
-}
-
-/// Unpacks `u8`-packed NVFP4 values; any other dtype passes through unchanged.
-///
-/// A packed weight must arrive tagged `[<out>, .kw]`. We deliberately don't retag it here:
-/// naming the output axis `.dout` would collide with `k_tag` on a layer that contracts
-/// along `.dout`, like a row-parallel `down_proj`.
-fn unpackWeight(weight: Tensor, k_tag: Shape.Tag) Tensor {
-    return if (weight.dtype() == .u8) unpackNvfp4(weight, k_tag) else weight;
-}
 
 /// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
 /// which is merged with the unpacked pair and renamed to `k_tag`.
@@ -382,12 +235,17 @@ pub fn scaledDot(
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
-        var lhs_scale_shape = lhs.shape().withDtype(.bf16);
-        for (0..lhs.rank()) |i| {
-            lhs_scale_shape = lhs_scale_shape.setDim(i, 1);
-        }
-        break :blk Tensor.constantTensor(lhs_scale_shape, DataType.bf16.one().asBytes());
+        break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
     };
+
+    // XLA's composite rewriter requires a scale to have the rank of the operand it scales
+    // (`composite_rewriter.cc`, `IsSupportedScaledOperand`), so a per-tensor scale goes in as
+    // an all-ones grid. A scalar would leave the composite unclaimed, which is not a slow
+    // path but a compile failure naming `zml$scaled_dot_unmatched`.
+    const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
+        rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
+    else
+        rhs_scale;
 
     const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
@@ -401,13 +259,21 @@ pub fn scaledDot(
         }),
     });
 
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale };
+    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
 
     const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
     });
 
     return outs[0];
+}
+
+/// `shape` with every dimension collapsed to 1: the shape a scale takes when it is constant
+/// over the operand it scales.
+fn onesGrid(shape: Shape, dt: DataType) Shape {
+    var res = shape.withDtype(dt);
+    for (0..res.rank()) |i| res = res.setDim(i, 1);
+    return res;
 }
 
 fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
@@ -432,14 +298,19 @@ fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
     return major >= 10;
 }
 
+/// Rescales an accumulator by the per-tensor scales the quantized dot left out.
+///
+/// `wgs` is a scalar for a single projection, and one value per output channel when several
+/// projections with different per-tensor scales were fused into one weight -- which is exact,
+/// since the scale multiplies output rows and every row belongs to exactly one projection.
+/// The two are applied separately rather than pre-multiplied so a scalar and a vector can mix.
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
-    const combined: ?Tensor = if (igs) |i|
-        (if (wgs) |w| i.mul(w) else i)
-    else
-        wgs;
-    const alpha = combined orelse return acc;
-    const f32_acc = acc.convert(.f32);
-    return f32_acc.mul(alpha.broad(f32_acc.shape())).convert(acc.dtype());
+    if (igs == null and wgs == null) return acc;
+
+    var res = acc.convert(.f32);
+    if (wgs) |w| res = res.mul(w.convert(.f32).broad(res.shape()));
+    if (igs) |i| res = res.mul(i.convert(.f32).broad(res.shape()));
+    return res.convert(acc.dtype());
 }
 
 pub const TokenEmbedding = struct {
