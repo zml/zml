@@ -14,6 +14,20 @@ patchelf(
 )
 
 patchelf(
+    name = "libdnnl_so_3",
+    src = "@intel-oneapi-dnnl-2026.0//:libdnnl_so_3",
+    set_rpath = "$ORIGIN",
+    soname = "libdnnl.so.3",
+)
+
+patchelf(
+    name = "libtbb_so_12",
+    src = "@intel-oneapi-tbb-2023.1//:libtbb_so_12",
+    set_rpath = "$ORIGIN",
+    soname = "libtbb.so.12",
+)
+
+patchelf(
     name = "libsycl_so",
     src = "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1//:libsycl_so",
     set_rpath = "$ORIGIN",
@@ -59,6 +73,7 @@ ONEAPI_MPI_LIB = "mpi/2021.18/lib"
 ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
 ONEAPI_TCM_VERSION = "1.5"
 ONEAPI_UMF_VERSION = "1.1"
+
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
 ONEAPI_TCM_LIB = "tcm/{}/lib".format(ONEAPI_TCM_VERSION)
@@ -67,11 +82,13 @@ ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":libdnnl_so_3",
         ":libiga64_so_2",
-        ":libigdfcl_so_2",
         ":libigc_so_2",
+        ":libigdfcl_so_2",
         ":libpjrt_oneapi_so",
         ":libsycl_so",
+        ":libtbb_so_12",
         ":libze_intel_gpu_so",
         "@intel-oneapi-ccl-2022.1//:ccl_runtime",
         "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1//:sycl_runtime",
@@ -103,8 +120,10 @@ copy_to_directory(
         "libiga64_so_2": "lib",
         "libigdfcl_so_2": "lib",
         "libigc_so_2": "lib",
+        "libdnnl_so_3": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
+        "libtbb_so_12": "lib",
         ONEAPI_CCL_LIB: "lib",
         ONEAPI_COMPILER_LIB: "lib",
         ONEAPI_MPI_LIB: "lib",
