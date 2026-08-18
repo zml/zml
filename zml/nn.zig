@@ -122,9 +122,12 @@ pub const nvfp4_block_size = 16;
 /// - A backend claims the scaled dot directly -- Metal's `ClassifyMetalScaledMatmul`, Triton's
 ///   `IsSupportedScaleGrid`, cuDNN's `blockScaledDot`.
 /// - Otherwise `ScaledDotRewriter` expands it into convert + broadcast + multiply + dot. On
-///   CUDA that expansion is pulled straight back into a Triton GEMM fusion, so the weight
-///   stays quantized in HBM and is widened in-register; on Metal nothing fuses into
-///   `__metal$gemm`, so the dequantized weight really is materialized.
+///   Metal that is the end of it -- nothing fuses into `__metal$gemm`, so the dequantized
+///   weight is materialized in HBM. On CUDA `GemmFusion` may pull the chain back into a Triton
+///   GEMM, leaving the weight quantized; whether it does depends on the scale grid, and a
+///   128x128 grid expands to a broadcast plus a reshape that `CalculateBitcastOfBroadcast`
+///   refuses to hoist ("mixes operand and broadcast dimensions"). Unmeasured -- check the
+///   fusion's parameter dtype in a dump before assuming either way.
 /// - On CPU and TPU there is no expansion at all: `CompositeRewriter` is GPU-only, so the
 ///   composite inlines to `scaledDotReference` and fails on `zml$scaled_dot_unmatched`.
 pub const QuantScheme = enum {
