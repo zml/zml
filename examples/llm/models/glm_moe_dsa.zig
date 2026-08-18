@@ -1,3 +1,5 @@
+pub const inference = @import("glm_moe_dsa/inference.zig");
+pub const CompilationParameters = inference.CompilationParameters;
 pub const model = @import("glm_moe_dsa/model.zig");
 pub const Config = model.Config;
 pub const InitOptions = model.InitOptions;
@@ -5,3 +7,5 @@ pub const LoadedModel = model.LoadedModel;
 pub const Model = model.Model;
 pub const Buffers = model.Buffers;
 pub const Cache = model.Cache;
+pub const session = @import("glm_moe_dsa/session.zig");
+pub const Session = session.Session;

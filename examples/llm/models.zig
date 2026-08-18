@@ -6,6 +6,7 @@ const common = @import("models/common.zig");
 pub const Shardings = common.Shardings;
 pub const GenerationOptions = common.GenerationOptions;
 pub const parseConfig = common.parseConfig;
+pub const glm_moe_dsa = @import("models/glm_moe_dsa.zig");
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
@@ -14,6 +15,7 @@ pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
 const log = std.log.scoped(.llm);
 
 pub const ModelType = enum {
+    glm_moe_dsa,
     lfm2,
     llama,
     qwen3_5,
@@ -25,6 +27,7 @@ const RawConfig = struct {
 };
 
 pub const LoadedModel = union(ModelType) {
+    glm_moe_dsa: glm_moe_dsa.LoadedModel,
     lfm2: lfm2.LoadedModel,
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
@@ -94,6 +97,7 @@ pub const LoadedModel = union(ModelType) {
 
 pub const CompiledModel = struct {
     const Inner = union(ModelType) {
+        glm_moe_dsa: glm_moe_dsa.inference.CompiledModel,
         lfm2: lfm2.inference.CompiledModel,
         llama: llama.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
@@ -131,6 +135,7 @@ pub const CompiledModel = struct {
 };
 
 pub const Buffers = union(ModelType) {
+    glm_moe_dsa: glm_moe_dsa.Buffers,
     lfm2: lfm2.Buffers,
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
@@ -139,6 +144,7 @@ pub const Buffers = union(ModelType) {
 
 pub const Session = struct {
     const Inner = union(ModelType) {
+        glm_moe_dsa: glm_moe_dsa.Session,
         lfm2: lfm2.Session,
         llama: llama.Session,
         qwen3_5: qwen3_5.Session,

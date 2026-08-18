@@ -4,6 +4,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const common = @import("../common.zig");
+const inference = @import("inference.zig");
 
 const log = std.log.scoped(.glm_moe_dsa);
 
@@ -18,6 +19,10 @@ pub const RopeParameters = struct {
 pub const Config = struct {
     attention_bias: bool,
     dtype: []const u8,
+    eos_token_id: stdx.json.Union(union(enum) {
+        int: u32,
+        ints: []u32,
+    }),
     first_k_dense_replace: u32,
     hidden_size: i64,
     index_head_dim: i64,
@@ -37,6 +42,7 @@ pub const Config = struct {
     num_attention_heads: i64,
     num_experts_per_tok: u32,
     num_hidden_layers: u32,
+    pad_token_id: u32,
     q_lora_rank: i64,
     qk_nope_head_dim: i64,
     qk_rope_head_dim: i64,
@@ -51,6 +57,7 @@ pub const Config = struct {
 pub const InitOptions = struct {
     layer_limit: ?usize = null,
     index_topk_override: ?u32 = null,
+    sampling_strategy: zml.nn.SamplingStrategy = .{},
 };
 
 pub const LoadedModel = struct {
@@ -58,6 +65,28 @@ pub const LoadedModel = struct {
     parsed_config: std.json.Parsed(Config),
 
     pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        generation: common.GenerationOptions,
+    ) !LoadedModel {
+        return initWithOptions(allocator, io, repo, store, .{
+            .sampling_strategy = generation.sampling_strategy,
+        });
+    }
+
+    pub fn initForTesting(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        options: InitOptions,
+    ) !LoadedModel {
+        return initWithOptions(allocator, io, repo, store, options);
+    }
+
+    fn initWithOptions(
         allocator: std.mem.Allocator,
         io: std.Io,
         repo: std.Io.Dir,
@@ -94,6 +123,28 @@ pub const LoadedModel = struct {
         _ = self;
         Model.unloadBuffers(buffers, allocator);
     }
+
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.Backend,
+        shardings: common.Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !inference.CompiledModel {
+        _ = backend;
+        const moe_backend = try zml.moe.Backend.auto(platform, self.inner.embed_tokens.weight.dtype());
+        const parameters = try inference.CompilationParameters.init(
+            self.inner,
+            self.parsed_config.value,
+            @intCast(seqlen),
+            moe_backend,
+            shardings,
+        );
+        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, parameters, progress);
+    }
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -105,6 +156,7 @@ pub const Model = struct {
     lm_head: zml.nn.Linear,
     config: Config,
     index_topk: u32,
+    sampling_strategy: zml.nn.SamplingStrategy,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -144,6 +196,7 @@ pub const Model = struct {
             .lm_head = .init(root_store.withPrefix("lm_head").createTensor("weight", .{ .voc, .d }, .{ .voc = .model, .d = .replicated }), null, .d),
             .config = config,
             .index_topk = index_topk,
+            .sampling_strategy = options.sampling_strategy,
         };
     }
 
@@ -248,6 +301,36 @@ pub const Model = struct {
         hidden = self.norm.forward(hidden);
         const logits = self.lm_head.forward(hidden).withPartialTags(.{ .b, .s, .voc });
         return .{ logits, cache.reuseBuffer(cache_) };
+    }
+
+    pub fn sampler(self: Model) Sampler {
+        return .{
+            .norm = self.norm,
+            .lm_head = self.lm_head,
+            .sampling_strategy = self.sampling_strategy,
+        };
+    }
+};
+
+pub const Sampler = struct {
+    norm: RmsNorm,
+    lm_head: zml.nn.Linear,
+    sampling_strategy: zml.nn.SamplingStrategy,
+
+    pub fn sampleTokens(
+        self: Sampler,
+        hidden: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        token_index: ?zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
+        const normalized = self.norm.forward(hidden);
+        const logits = self.lm_head.forward(normalized).withPartialTags(.{ .b, .s, .voc });
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+        return .{
+            next_tokens.convert(.u32),
+            new_rng,
+            if (token_index) |index| index.addConstant(1) else null,
+        };
     }
 };
 
@@ -733,6 +816,49 @@ pub const DecoderLayer = struct {
             moe_parameters,
         );
         return .{ after_attention.add(mlp).withPartitioning(.{ .d = .replicated }), updated_cache, topk };
+    }
+
+    pub fn forwardFull(
+        self: DecoderLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        cache: Cache,
+        layer_index: zml.Tensor,
+        moe_metadata: zml.moe.Metadata,
+        moe_parameters: zml.moe.Parameters,
+    ) struct { zml.Tensor, Cache, zml.Tensor } {
+        const output, const updated_cache, const topk = self.forward(
+            hidden,
+            token_index,
+            cache,
+            layer_index,
+            null,
+            moe_metadata,
+            moe_parameters,
+        );
+        return .{ output, updated_cache.reuseBuffer(cache), topk.? };
+    }
+
+    pub fn forwardShared(
+        self: DecoderLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        cache: Cache,
+        layer_index: zml.Tensor,
+        previous_topk: zml.Tensor,
+        moe_metadata: zml.moe.Metadata,
+        moe_parameters: zml.moe.Parameters,
+    ) struct { zml.Tensor, Cache } {
+        const output, const updated_cache, _ = self.forward(
+            hidden,
+            token_index,
+            cache,
+            layer_index,
+            previous_topk,
+            moe_metadata,
+            moe_parameters,
+        );
+        return .{ output, updated_cache.reuseBuffer(cache) };
     }
 };
 

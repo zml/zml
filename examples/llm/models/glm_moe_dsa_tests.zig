@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var repo_model = try glm.LoadedModel.init(allocator, io, repo, store.view(), .{
+    var repo_model = try glm.LoadedModel.initForTesting(allocator, io, repo, store.view(), .{
         .layer_limit = 4,
         .index_topk_override = 8,
     });
