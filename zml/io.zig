@@ -59,6 +59,20 @@ pub const TensorStore = struct {
         return tensor_desc_ptr;
     }
 
+    /// A stable copy of a registry entry, owned by the store.
+    ///
+    /// `registry.tensors` is a hash map, so registering a derived tensor -- which models do
+    /// while they are still creating other tensors -- can rehash it and invalidate every
+    /// pointer previously taken into it. Sources therefore refer to these copies, never to
+    /// the map. `name` and `file_uri` already live in the registry's arena, which does not
+    /// move, so copying the descriptor is enough.
+    fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
+        const entry = self.getPtrFromKey(key) orelse return null;
+        const copy = self.arena.allocator().create(safetensors.Tensor) catch |e| std.debug.panic("Not handling {} errors", .{e});
+        copy.* = entry.*;
+        return copy;
+    }
+
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
         const sources = self.id_to_sources.get(id) orelse return null;
         stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
@@ -135,7 +149,9 @@ pub const TensorStore = struct {
             };
         }
 
-        fn prefix(self: *const View) ?[]const u8 {
+        /// The prefix every subkey is resolved against, `null` at the root. Needed to build
+        /// a full registry key, which is what registering a derived tensor takes.
+        pub fn prefix(self: *const View) ?[]const u8 {
             return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
         }
 
@@ -150,7 +166,7 @@ pub const TensorStore = struct {
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const source = self.store.getPtrFromKey(key) orelse return null;
+            const source = self.store.dupeSource(key) orelse return null;
 
             const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
             errdefer self.store.arena.allocator().free(sources);
@@ -167,7 +183,8 @@ pub const TensorStore = struct {
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+            return self.maybeCreateTensor(subkey, tagz, partitioning) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
         fn applyTags(shape_: Shape, tagz: anytype) Shape {
@@ -211,7 +228,7 @@ pub const TensorStore = struct {
             var buffer: [256]u8 = undefined;
             for (sources) |subkey| {
                 const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                const tensor = self.store.getPtrFromKey(key) orelse return null;
+                const tensor = self.store.dupeSource(key) orelse return null;
                 tensor_list.appendAssumeCapacity(tensor);
             }
 
