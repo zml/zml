@@ -1,0 +1,62 @@
+schema_version: 1
+moonshot_commit: c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721
+zml_baseline: 49a12235bb4be0a674f0937cc60cc0265a4f65a2
+entries:
+  - official: KimiRMSNorm.forward
+    zml: zml.nn.rmsNorm
+    checkpoint_prefix: language_model.model.layers.*.*_layernorm
+    decision: reuse_after_fp32_reduction_parity
+    test: kimi_k3_tests.testRmsNorm
+  - official: SituAndMul.forward
+    zml: examples.llm.models.kimi_k3.situ
+    checkpoint_prefix: language_model.model.layers.*.mlp
+    decision: implement_exact_beta_4_linear_beta_25
+    test: kimi_k3_tests.testSitu
+  - official: _apply_attn_res
+    zml: examples.llm.models.kimi_k3.attn_res
+    checkpoint_prefix: language_model.model.layers.*.attn_res
+    decision: new
+    test: kimi_k3_tests.testAttnRes
+  - official: KimiDeltaAttention.forward
+    zml: examples.llm.models.kimi_k3.kda
+    donor: examples.llm.models.qwen3_5.GatedDeltaNet
+    checkpoint_prefix: language_model.model.layers.*.self_attn
+    decision: reuse_cache_structure_only_replace_math
+    test: kimi_k3_tests.testKdaPrefillDecode
+  - official: KimiMLAAttention.forward
+    zml: examples.llm.models.kimi_k3.mla
+    checkpoint_prefix: language_model.model.layers.*.self_attn
+    decision: new_expanded_then_latent
+    test: kimi_k3_tests.testMlaExpandedLatentEquivalence
+  - official: KimiMoEGate.forward
+    zml: examples.llm.models.kimi_k3.router
+    checkpoint_prefix: language_model.model.layers.*.block_sparse_moe.gate
+    decision: replace_qwen_routing_math
+    test: kimi_k3_tests.testRouter
+  - official: KimiSparseMoeBlock.forward
+    zml: examples.llm.models.kimi_k3.latent_moe
+    donor: zml.moe.forwardMoe
+    checkpoint_prefix: language_model.model.layers.*.block_sparse_moe
+    decision: reuse_dispatch_concepts_add_latent_wrapper
+    test: kimi_k3_tests.testLatentMoe
+  - official: KimiDynamicCache
+    zml: examples.llm.models.kimi_k3.cache
+    donor: examples.llm.models.qwen3_5.HybridCache
+    checkpoint_prefix: null
+    decision: reuse_ownership_and_shape_patterns
+    test: kimi_k3_tests.testCacheContinuation
+  - official: packed weight_packed and weight_scale
+    zml: zml.nn.scaledDot
+    checkpoint_prefix: language_model.model.layers.*.block_sparse_moe.experts.*
+    decision: reuse_primitives_verify_nibble_and_scale_orientation
+    test: kimi_k3_tests.testMxfp4
+  - official: KimiLinearModel and KimiLinearForCausalLM
+    zml: examples.llm.models.kimi_k3.model
+    checkpoint_prefix: language_model
+    decision: reuse_compiled_layer_architecture
+    test: kimi_k3_tests.testPrefix
+  - official: TikTokenTokenizer
+    zml: zml.tokenizer
+    checkpoint_prefix: tiktoken.model
+    decision: convert_to_tokenizer_json_or_add_narrow_loader
+    test: kimi_k3_tests.testTokenizerCorpus

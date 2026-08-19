@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "authority": {
+    "repository": "https://huggingface.co/moonshotai/Kimi-K3",
+    "commit": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
+    "config_path": "/ephemeral/kimi-k3/moonshot/kimi-k3/config.json",
+    "index_path": "/ephemeral/kimi-k3/moonshot/kimi-k3/model.safetensors.index.json"
+  },
+  "scope": "text_only_nvidia_gpu",
+  "architecture": {
+    "decoder_layers": 93,
+    "hidden_size": 7168,
+    "vocabulary_size": 163840,
+    "context_length": 1048576,
+    "dtype": "BF16",
+    "rms_norm_epsilon": 0.00001,
+    "dense_layers_zero_based": [0],
+    "moe_layers_zero_based": "1..92",
+    "mla_layers_zero_based": [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63, 67, 71, 75, 79, 83, 87, 91, 92],
+    "kda_rule_zero_based": "all layer IDs in 0..92 not listed in mla_layers_zero_based",
+    "attnres_block_size": 12
+  },
+  "kda": {
+    "heads": 96,
+    "key_dim": 128,
+    "value_dim": 128,
+    "projection_width": 12288,
+    "short_convolution_kernel": 4,
+    "gate_lower_bound": -5.0,
+    "full_rank_gate": true
+  },
+  "mla": {
+    "heads": 96,
+    "q_lora_rank": 1536,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "value_head_dim": 128,
+    "nope": true,
+    "output_gate": true
+  },
+  "moe": {
+    "latent_dim": 3584,
+    "routed_experts": 896,
+    "selected_experts": 16,
+    "shared_experts": 2,
+    "expert_intermediate": 3072,
+    "router_activation": "sigmoid",
+    "router_method": "noaux_tc",
+    "renormalize": true,
+    "situ_gate_beta": 4.0,
+    "situ_up_beta": 25.0
+  },
+  "quantization": {
+    "format": "mxfp4-pack-quantized",
+    "logical_weight_dtype": "E2M1",
+    "packed_storage_dtype": "U8",
+    "scale_dtype": "E8M0_U8",
+    "group_size": 32,
+    "nibble_order": "must_be_proven_by_fixture_before_native_kernel"
+  },
+  "cache_layouts": {
+    "kda_recurrent_state": "[batch, 96 heads, 128 key, 128 value]",
+    "kda_convolution_tail": "three projected streams, kernel_size - 1 positions",
+    "mla_latent_kv_per_token": "[batch, sequence, 512]",
+    "mla_rope_key_per_token": "[batch, sequence, 64]"
+  },
+  "layer_boundary_expectations": {
+    "0": "kda_dense",
+    "1": "kda_moe",
+    "2": "kda_moe",
+    "3": "mla_moe",
+    "91": "mla_moe",
+    "92": "mla_moe"
+  },
+  "production_invariants": {
+    "layer_limit_test_only": true,
+    "missing_tensor_policy": "hard_error_with_exact_names",
+    "weight_lookup": "tensor_name_not_shard_number",
+    "all_routed_experts_required": true,
+    "route_override_test_only": true,
+    "model_weight_downloads": false,
+    "cpu_inference_fallback": false
+  }
+}

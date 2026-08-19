@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "classes": {
+    "exact": {"atol": 0.0, "rtol": 0.0, "applies_to": ["ids", "masks", "shapes", "dtypes", "expert_sets", "tokenization", "metadata"]},
+    "fp32_strict": {"atol": 0.00001, "rtol": 0.00001, "applies_to": ["scalar_oracles", "router_score_reference"]},
+    "bf16_projection": {"atol": 0.001, "rtol": 0.01, "applies_to": ["isolated_norms", "isolated_projections"]},
+    "calibrate_from_fixture": {"atol": null, "rtol": null, "applies_to": ["recurrence", "full_layers", "quantized_kernels"], "rule": "A milestone must record error distributions and close fraction before accepting a value."}
+  },
+  "topk_unsorted_policy": "Compare selected expert sets exactly, then align weights by expert ID before numerical comparison."
+}

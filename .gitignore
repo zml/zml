@@ -27,6 +27,8 @@ zig-out/
 # Python slope
 .venv
 venv
+**/__pycache__/
+*.py[cod]
 
 # Editor specific
 ## Neovim
