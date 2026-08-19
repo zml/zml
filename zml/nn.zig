@@ -28,13 +28,24 @@ pub const Linear = struct {
         input_scale: ?TensorScale = null,
     };
 
-    // Subject to change if doing operations at load time becomes easier
+    /// A per-tensor scale and the polarity its producer wrote it in -- ModelOpt writes multipliers,
+    /// compressed-tensors writes divisors.
+    ///
+    /// The two travel together instead of being normalised where the polarity is known, because a
+    /// reciprocal is a `Tensor` op and `Tensor` ops need a live `CompilationContext`. That exists
+    /// only while tracing a compiled function; model init, where the scale is declared, has neither
+    /// a context nor an `std.Io` to read the value with. Load time is not the escape hatch it looks
+    /// like either: llmd's pack programs reach only bindings with several sources, and most global
+    /// scales are single-source. So polarity is recorded where it is known and applied where ops
+    /// are legal.
     pub const TensorScale = struct {
         value: Tensor,
         direction: Direction,
 
         pub const Direction = enum { multiplier, divisor };
 
+        /// The form every consumer wants: f32 -- the Metal MoE backend rejects anything else --
+        /// rank 0 when it is a single value, and a multiplier.
         pub fn asMultiplier(self: TensorScale) Tensor {
             const s = self.value.convert(.f32);
             const flat = if (s.shape().count() == 1) s.asScalar() else s; // essentially normalization
@@ -161,10 +172,6 @@ pub const ActivationQuant = enum {
 
 pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
     return scheme == .nvfp4 and weight_dtype == .u8;
-}
-
-pub fn storedContractionTag(scheme: ?QuantScheme, weight_dtype: DataType, k_tag: Shape.Tag) Shape.Tag {
-    return if (isPackedNvfp4(scheme, weight_dtype)) Shape.toTag(.kw) else k_tag;
 }
 
 // Note: This test will evolve as we support more (for example, MXFP4/8 will be added)
