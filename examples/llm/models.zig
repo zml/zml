@@ -88,7 +88,10 @@ pub const LoadedModel = union(ModelType) {
                 try m.compile(allocator, io, platform, backend, shardings, seqlen, progress),
             ),
         };
-        return .{ .inner = inner, .seqlen = @intCast(seqlen) };
+        return .{
+            .inner = inner,
+            .seqlen = @intCast(seqlen),
+        };
     }
 };
 

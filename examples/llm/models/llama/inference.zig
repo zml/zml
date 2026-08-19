@@ -110,14 +110,10 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
-pub const EmbedExe = zml.TypedExe(model.EmbedTokens.forward);
-pub const LayerExe = zml.TypedExe(model.TransformerLayer.forward);
-pub const SampleExe = zml.TypedExe(model.LmHead.forward);
-
 pub const KernelExe = struct {
-    embed: EmbedExe,
-    layer: LayerExe,
-    sample: SampleExe,
+    embed: zml.FnExe(model.EmbedTokens.forward),
+    layer: zml.FnExe(model.TransformerLayer.forward),
+    sample: zml.FnExe(model.LmHead.forward),
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
@@ -127,26 +123,26 @@ pub const KernelExe = struct {
 };
 
 pub const KernelRunner = struct {
-    embed: EmbedExe.Runner(.{.embedding}),
-    layers: []LayerExe.Runner(.{.layer}),
-    sample: SampleExe.Runner(.{.lm_head}),
+    embed: zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}),
+    layers: []zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}),
+    sample: zml.FnExe(model.LmHead.forward).Runner(.{.lm_head}),
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
-        var embed = try EmbedExe.Runner(.{.embedding}).init(&exe.embed, allocator, .{
+        var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{
             .embedding = .{ .embed_tokens = buffers.model.embed_tokens },
         });
         errdefer embed.deinit(allocator);
 
-        const layers = try allocator.alloc(LayerExe.Runner(.{.layer}), buffers.model.layers.len);
+        const layers = try allocator.alloc(zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}), buffers.model.layers.len);
         errdefer allocator.free(layers);
         var initialized_layers: usize = 0;
         errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
         for (layers, buffers.model.layers) |*layer, layer_buffers| {
-            layer.* = try LayerExe.Runner(.{.layer}).init(&exe.layer, allocator, .{ .layer = layer_buffers });
+            layer.* = try zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}).init(&exe.layer, allocator, .{ .layer = layer_buffers });
             initialized_layers += 1;
         }
 
-        var sample = try SampleExe.Runner(.{.lm_head}).init(&exe.sample, allocator, .{
+        var sample = try zml.FnExe(model.LmHead.forward).Runner(.{.lm_head}).init(&exe.sample, allocator, .{
             .lm_head = .{
                 .lm_head = buffers.lm_head,
                 .embed_tokens = buffers.model.embed_tokens,
@@ -234,7 +230,7 @@ fn compileEmbed(
     seqlen: usize,
     phase: Phase,
     progress: *std.Progress.Node,
-) !EmbedExe {
+) !zml.FnExe(model.EmbedTokens.forward) {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start(phase.startMessage("embed_tokens"), 1);
     defer node.end();
@@ -244,7 +240,7 @@ fn compileEmbed(
 
     const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
 
-    return EmbedExe.compile(allocator, io, platform, .{
+    return zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, platform, .{
         .shardings = &parameters.shardings.all(),
         .program_name = phase.programName("llama", "embed_tokens"),
     }, .{.{
@@ -263,7 +259,7 @@ fn compileLayer(
     attention_parameters: zml.attention.Parameters,
     phase: Phase,
     progress: *std.Progress.Node,
-) !LayerExe {
+) !zml.FnExe(model.TransformerLayer.forward) {
     progress.increaseEstimatedTotalItems(1);
 
     var node = progress.start(phase.startMessage("transformer layer"), 1);
@@ -279,7 +275,7 @@ fn compileLayer(
 
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
-    return LayerExe.compile(
+    return zml.FnExe(model.TransformerLayer.forward).compile(
         allocator,
         io,
         platform,
@@ -308,7 +304,7 @@ fn compileSample(
     seqlen: usize,
     phase: Phase,
     progress: *std.Progress.Node,
-) !SampleExe {
+) !zml.FnExe(model.LmHead.forward) {
     progress.increaseEstimatedTotalItems(1);
 
     var node = progress.start(phase.startMessage("lm_head"), 1);
@@ -324,7 +320,7 @@ fn compileSample(
 
     const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
 
-    return SampleExe.compile(allocator, io, platform, .{
+    return zml.FnExe(model.LmHead.forward).compile(allocator, io, platform, .{
         .shardings = &parameters.shardings.all(),
         .program_name = phase.programName("llama", "lm_head"),
     }, .{.{

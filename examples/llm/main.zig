@@ -132,7 +132,9 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    var compiled_model = try allocator.create(models.CompiledModel);
+    defer allocator.destroy(compiled_model);
+    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
@@ -163,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         tokenizer,
-        &compiled_model,
+        compiled_model,
         &model_buffers,
     );
     defer llm_chat.deinit();
