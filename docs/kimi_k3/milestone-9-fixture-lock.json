@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "milestone": 9,
+  "generator": "tools/kimi_k3/export_layer0_prefix_reference.py",
+  "seed": 20260819,
+  "token_ids": [1, 42, 32000, 160000],
+  "greedy_token": 4202,
+  "tensor_count": 15,
+  "tensor_file_sha256": "c470653705d17a647f0b574c76bedb9ee434f814d73a932fdeb699ed456ef755",
+  "tensor_semantic_sha256": "6f35e2906880085829d5e411cc4d7fcc1b598397055fe7460ab91865ab05b15d",
+  "checkpoint_shards": {
+    "model-00001-of-000096.safetensors": "975584c00f85a95fce8ae0f840af8cef69c2ef4db00d34cab3e2cbdfc60f6e51",
+    "model-00094-of-000096.safetensors": "ad66e1cb96b86963e63d6a0a466b6a407b13c9815cb480fe612480cc6bb3b6e1"
+  }
+}

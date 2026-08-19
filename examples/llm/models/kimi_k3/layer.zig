@@ -147,3 +147,101 @@ pub fn forwardLayer0(input: zml.Tensor, weights: Layer0Weights, cache: kda.Cache
         .cache = attention.cache,
     };
 }
+
+pub const PrefixWeights = struct {
+    embedding: zml.Tensor,
+    layer0: Layer0Weights,
+    output_res_norm: zml.Tensor,
+    output_res_projection: zml.Tensor,
+    final_norm: zml.Tensor,
+    lm_head: zml.Tensor,
+
+    pub fn init(root: zml.io.TensorStore.View) PrefixWeights {
+        return .{
+            .embedding = root.createTensor(
+                "language_model.model.embed_tokens.weight",
+                .{ .voc, .d },
+                .{ .voc = .replicated, .d = .replicated },
+            ),
+            .layer0 = .init(root),
+            .output_res_norm = root.createTensor(
+                "language_model.model.output_attn_res_norm.weight",
+                .{.d},
+                .{ .d = .replicated },
+            ),
+            .output_res_projection = root.createTensor(
+                "language_model.model.output_attn_res_proj.weight",
+                .{ .one, .d },
+                .{ .one = .replicated, .d = .replicated },
+            ),
+            .final_norm = root.createTensor(
+                "language_model.model.norm.weight",
+                .{.d},
+                .{ .d = .replicated },
+            ),
+            .lm_head = root.createTensor(
+                "language_model.lm_head.weight",
+                .{ .voc, .d },
+                .{ .voc = .replicated, .d = .replicated },
+            ),
+        };
+    }
+};
+
+// KIMI_K3_TEMP_REMOVE_M20: end-to-end prefix activations are returned for
+// Gate A differential debugging and removed from production arity in M20.
+pub const PrefixResult = struct {
+    embedding: zml.Tensor,
+    layer_output: zml.Tensor,
+    block_residual: zml.Tensor,
+    output_candidates: zml.Tensor,
+    output_selector_weights: zml.Tensor,
+    output_selected: zml.Tensor,
+    final_norm: zml.Tensor,
+    logits: zml.Tensor,
+    greedy_token: zml.Tensor,
+    cache: kda.Cache,
+};
+
+pub fn forwardPrefix(tokens: zml.Tensor, weights: PrefixWeights, cache: kda.Cache) PrefixResult {
+    const embedding = weights.embedding.gather(.{ .voc = tokens.convert(.u32) }, .{});
+    const result = forwardLayer0(embedding, weights.layer0, cache);
+    const token_count = embedding.dim(.b) * embedding.dim(.s);
+    const prefix = result.output.merge(.{ .token = .{ .b, .s } });
+    const active = zml.Tensor.scalar(true, .bool).reshape(.{ .source = 1 });
+    const selected = attn_res.select(
+        prefix,
+        result.block_residual,
+        active,
+        weights.output_res_norm,
+        weights.output_res_projection.squeeze(.one),
+        1e-5,
+    );
+    const output_selected = selected.output.reshape(.{
+        .b = embedding.dim(.b),
+        .s = embedding.dim(.s),
+        .d = embedding.dim(.d),
+    });
+    const final_norm = primitives.rmsNorm(output_selected, weights.final_norm, 1e-5);
+    const logits = final_norm.dot(weights.lm_head, .d);
+    const greedy_token = logits.slice1d(.s, .{
+        .start = logits.dim(.s) - 1,
+        .end = logits.dim(.s),
+    }).squeeze(.s).argMax(.voc).indices.squeeze(.voc).convert(.i64);
+    const output_candidates = zml.Tensor.concatenate(&.{
+        result.block_residual,
+        prefix.reshape(.{ .token = token_count, .source = 1, .d = embedding.dim(.d) }),
+    }, .source);
+    return .{
+        .embedding = embedding,
+        .layer_output = result.output,
+        .block_residual = result.block_residual,
+        .output_candidates = output_candidates,
+        .output_selector_weights = selected.probabilities,
+        .output_selected = output_selected,
+        .final_norm = final_norm,
+        .logits = logits,
+        .greedy_token = greedy_token,
+        .cache = result.cache,
+    };
+}

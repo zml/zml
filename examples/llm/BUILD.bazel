@@ -97,6 +97,16 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# KIMI_K3_TEMP_REMOVE_M20: one-layer S2 prefix differential harness is retained
+# through bring-up and removed after permanent end-to-end tests replace it.
+zig_binary(
+    name = "kimi_k3_prefix_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_prefix_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 # KIMI_K3_TEMP_REMOVE_M20: temporary construction/explain binary for bring-up;
 # remove it when the production LLM CLI exposes the validated K3 explain path.
 zig_binary(
