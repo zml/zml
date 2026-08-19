@@ -79,8 +79,13 @@
     "torch": "2.11.0+cu128",
     "torch_cuda": "12.8",
     "nvidia_driver_api_detected": "12.8",
-    "nvidia_smi": "present but unable to communicate with the driver in this container",
-    "cuda_available_in_container": false,
+    "nvidia_smi": "NVIDIA H100 PCIe, driver 570.195.03, 81559 MiB, compute capability 9.0",
+    "gpu_uuid": "GPU-0f3ff95b-7755-7ff2-f5a4-ddf7e7bc7255",
+    "cuda_available_in_elevated_execution": true,
+    "cpu_inference_fallback": false,
+    "transformers": "5.15.1",
+    "fla_core": "0.5.2",
+    "compressed_tensors": "0.18.0",
     "pjrt_nvidia": "not available in this container"
   },
   "study_bundle_manifest": {

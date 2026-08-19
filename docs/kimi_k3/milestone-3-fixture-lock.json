@@ -1,0 +1,1716 @@
+{
+  "fixtures": {
+    "s0-operators": {
+      "tensors": {
+        "s0.kda.chunk.out": {
+          "dtype": "bfloat16",
+          "sha256": "8d4269997447ee0a95fa9445718629ab8a06f23c2322de14fa33d341c3511337",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.chunk.state": {
+          "dtype": "float32",
+          "sha256": "fe8baf5e0b8cc3b6536aa5f64ad4a493c2e04ccdd807add884b638dac6a71c05",
+          "shape": [
+            1,
+            2,
+            16,
+            16
+          ]
+        },
+        "s0.kda.k": {
+          "dtype": "bfloat16",
+          "sha256": "b4b161270aaad66e6ec3d22d7c262fe007d5a72842e12c90ef015a46f1c797e9",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.log_alpha.numpy": {
+          "dtype": "float32",
+          "sha256": "e9583356b38c5841302a10a89f056b206d110af964bb15e12a540b2d87b9b77e",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.numpy.out": {
+          "dtype": "float32",
+          "sha256": "f30a9dcbae47e7157fbe2effc82f214459c05a6c1655057541fe80809a59cd4c",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.numpy.state": {
+          "dtype": "float32",
+          "sha256": "2efe7600bf17d8508e32d5799c6f20525a993eaff1203e584eb671e177a61907",
+          "shape": [
+            1,
+            2,
+            16,
+            16
+          ]
+        },
+        "s0.kda.q": {
+          "dtype": "bfloat16",
+          "sha256": "02127c602dda5f4d2de344d366e831fb60843705a35bde922a237194c2d1c6c9",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.raw_beta": {
+          "dtype": "float32",
+          "sha256": "b852d196b3322c603f0167b2b0bc519940cc4352aeec06a94adcd8b49f25646b",
+          "shape": [
+            1,
+            16,
+            2
+          ]
+        },
+        "s0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "a3ec317947460140b6d8046af0aa7eb6b0e977cb4655727c1ff20d76321fc738",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.recurrent.out": {
+          "dtype": "bfloat16",
+          "sha256": "347322ce2b56e9792b221d4e6be75549a7177918d76e23c10d3d1819c82d5b71",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.kda.recurrent.state": {
+          "dtype": "float32",
+          "sha256": "6e36957cf8a9b8439fbbd5f96b32c1f43d87d7c0ca19922f0e41950958ad5b7f",
+          "shape": [
+            1,
+            2,
+            16,
+            16
+          ]
+        },
+        "s0.kda.v": {
+          "dtype": "bfloat16",
+          "sha256": "f304d6c52895a0320c8ebc106c3428057070f6da9454f85d4434b5668ecd5a70",
+          "shape": [
+            1,
+            16,
+            2,
+            16
+          ]
+        },
+        "s0.mxfp4.packed": {
+          "dtype": "uint8",
+          "sha256": "60cb726a7b504afad51ba332cb43568486003f1f902ad50607e38f3c4c6aee8e",
+          "shape": [
+            1,
+            2
+          ]
+        },
+        "s0.mxfp4.scale": {
+          "dtype": "float32",
+          "sha256": "bafe70a90f392d1fcbe33c473022fe20fdab97434e6123652a2b55827be0c6b0",
+          "shape": [
+            3
+          ]
+        },
+        "s0.mxfp4.scale_e8m0": {
+          "dtype": "uint8",
+          "sha256": "caa8fcc6c761ba1abd4f8023a7977a8d20b41f0756c95eed656cd7a0ac368a03",
+          "shape": [
+            3
+          ]
+        },
+        "s0.mxfp4.unpacked": {
+          "dtype": "float32",
+          "sha256": "c7a2166431d07109b5b30fdcecf3a979fd7aeff1990cb97cd01af75e0c8e8349",
+          "shape": [
+            1,
+            4
+          ]
+        },
+        "s0.router.hidden": {
+          "dtype": "float32",
+          "sha256": "09258d99c65287b478c9009dd8131b7955e4b19c6b795ecc8b0ff6be2300a9e9",
+          "shape": [
+            1,
+            3,
+            8
+          ]
+        },
+        "s0.router.raw_scores": {
+          "dtype": "float32",
+          "sha256": "6d3161120cf74437ee6a54dcf10668c664dff3f8a3796810f44c842cc4b387b6",
+          "shape": [
+            1,
+            3,
+            6
+          ]
+        },
+        "s0.router.selection_scores": {
+          "dtype": "float32",
+          "sha256": "f882113492749a278ae19f396ed5d61e32bca522783763d0d35e1b76452fa484",
+          "shape": [
+            1,
+            3,
+            6
+          ]
+        },
+        "s0.router.topk_ids": {
+          "dtype": "int64",
+          "sha256": "7e64485bd0d6e5206f343e1e435f798f8cd639e8f55ec0a3a1e3341f436a9842",
+          "shape": [
+            3,
+            3
+          ]
+        },
+        "s0.router.topk_weights": {
+          "dtype": "float32",
+          "sha256": "df3b13d1a488e2a57fc36182207843e26ea664172f8c052d4d897afe1f0f6901",
+          "shape": [
+            3,
+            3
+          ]
+        }
+      }
+    },
+    "s1-layer0-len1": {
+      "tensors": {
+        "layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "8672b46ef97770246d0f090498835d9edefe12ac51da1183a16ca942d6ad9bb8",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.attnres.mlp.weights": {
+          "dtype": "float32",
+          "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c",
+          "shape": [
+            1,
+            1
+          ]
+        },
+        "layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "8672b46ef97770246d0f090498835d9edefe12ac51da1183a16ca942d6ad9bb8",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "b00fed1d54d64517767c9ba66295a739c3b549f8eb16832a946e9acd6a2b7943",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.kda.beta": {
+          "dtype": "float32",
+          "sha256": "129351ec5fa3265ee4175cf632f326617384c105dabecf26c24a9f3920537278",
+          "shape": [
+            1,
+            1,
+            96
+          ]
+        },
+        "layers.0.kda.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "63c53055275f7126533f1702a5fa2b485b142ce85aa8c99545ae8de73cbf214e",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "f585348f3551f230043c3aeb3adc56368d9c69f3be8abb78038b6746f5e503b1",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "a5851d6e9c74136581f00a0327965dd52c405bf42c794085e69f9e464ada709c",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "d6cf64790bf80b0ddf4750c8815c438932c3984d3be05ed7fd82666f962c9d49",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "fd79bc14d8969ffa1355a6370aa8bf24ce2069e7d0d7ce9cb6c89bc014f4d7b8",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.log_alpha": {
+          "dtype": "float32",
+          "sha256": "a4f88452c47701c38fb251f96ef45b97c42b0cdf494665ad86ff4911db163a6d",
+          "shape": [
+            1,
+            1,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "92dfdc7cfd4b5585025b0ed3c367413a99cf779c267a02cd3661338dbed8b4d1",
+          "shape": [
+            1,
+            1,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "4b5a215ca4a7e906da0fae9a65a1d79aff50f30f5c85a36fe9cf6c779b47ffbd",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "2ec0e3e5685c7efdca55a128a8b006cb698dbe79d6a7efb582f9629149fecb0b",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "dc3af916e037df5779addb92f1b164c77a7d7f71b88450b5b234eb58a1b434d8",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "2b4ee6298da38f9bc208a873f832626393524f81f3706e76addb3dc01b59e9e5",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "13216dfed612521ed58cbb5173e580d418b4540c5f84c234eca739f70c7a3dca",
+          "shape": [
+            1,
+            1,
+            96
+          ]
+        },
+        "layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "b93aa6c20fe5c1b1f560fca579333ca713d75c2ab4c8b7cebfe192f805bb0b05",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.recurrent_state.in": {
+          "dtype": "float32",
+          "sha256": "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "ea6dbc72b8e7c00d6bf73d7be2c714ecb032a91af58463610f44e4d88090406d",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "9afafc80a898b40ec8ec51c629b1198e9c54734c037e0dd44a3acdd0e20a6c80",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "061dd4440a77123e7f0ffe6f865b68ecb70a9ed86ebbbbbaa2c5264d3cf46321",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "28177ac010ebb7cea3cc550c5565be73d7e2954d6438972ad31bebf32a4798fa",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "f6273dbed7b5b7960c9dad8f38b026eea59338eb42a15bbba7d6d428af3dd144",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "3f1cb170bf571757dd2035c8e05ecff125da5099831966cc94d63e9ea35ee063",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "f67d46886b930c8bbbeafd9295ca83a241ec52de28f504704047fdb146adbdab",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "bc27e33f2f531d127f2f9e9a5aaf576108965325150773ca7f5337b580e0fdea",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "c0202880ff5bc41c41d488c47f0e805af4ab70120a6c6bcfe351c900012a9afe",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        }
+      }
+    },
+    "s1-layer0-len16": {
+      "tensors": {
+        "layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "3c94887a821691bd2383df70c5b5f945f386d5492b53bd9545a129664a7558bb",
+          "shape": [
+            16,
+            1,
+            7168
+          ]
+        },
+        "layers.0.attnres.mlp.weights": {
+          "dtype": "float32",
+          "sha256": "9628e545ed3ac074e5a6cbf542a642b62482fbfca9b4cb3ea4743a1874256e37",
+          "shape": [
+            16,
+            1
+          ]
+        },
+        "layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "3c94887a821691bd2383df70c5b5f945f386d5492b53bd9545a129664a7558bb",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        },
+        "layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "eb1127291b720241e5c419a22bc8cdc73dc56c5a60b7af2d12861c8ef64cb3a1",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        },
+        "layers.0.kda.beta": {
+          "dtype": "float32",
+          "sha256": "dda23f4a08759ca5e3834cab59cd5091976b66e95e10076c51354ea495316972",
+          "shape": [
+            1,
+            16,
+            96
+          ]
+        },
+        "layers.0.kda.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "a8b9073089fa5011d244a4e02b3c483601f9f7183451a19d50bfb4b84e981d3a",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "3218eb7c36514b2c7cbe2e3925320064d68751b03ddb20ca0ef6799a29ebcebe",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "779c7c2d6aa4199fd6fcc16f277991db614acb8c8f18a048215daedc0baa0f9c",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "2eb3aca0f528978c52e0a7c33090157e7d1919d6b2b95f17a766d0e209c63973",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "930c146254269bf8be4d2d93a55fbf2e645ae1fd76d8bac21e52a4f16aa3370e",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.log_alpha": {
+          "dtype": "float32",
+          "sha256": "108d5b87c92ec6b5f206f5f543d7160cc0189610ec477339be4f8802703723d9",
+          "shape": [
+            1,
+            16,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "1fc8f9074e510c9b5634bee65aef71a8ca9cde4f704e95ce17086a88bdb52bd5",
+          "shape": [
+            1,
+            16,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "f1ac2282a9052752199e25c3471f9abac6c7e499266b619574c26254c426c118",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        },
+        "layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "059a8e64253e685128d7e78b661971ce513e3dda0b9ba719db16079e6ed1a2b6",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "fe7309f970f4c27d28b532426b12ca494f21e0ee19dbd56aa2a67d377ac12cfb",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "3057c59c427d43e58dcaa8ce2dae8332308b0096c0e84b6b7734e60617ff6e44",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "992e4ebe5ce4d2cfd3ffac4281ceec2741a52469b2e66f997ff104844236ffd7",
+          "shape": [
+            1,
+            16,
+            96
+          ]
+        },
+        "layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "575e24ef087dab303898b70985cdb14739b9fe7017f4ba266054d8e000443cc6",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.recurrent_state.in": {
+          "dtype": "float32",
+          "sha256": "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "e4702f07d45e29a08fe2a30cd4a1ee20f3d7e379d980f8b44c1fcbf7b3a72c47",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "81f751a3b842c34c76acf21969ff9854350e13ce6c6d613a3f47cecb5d023b9e",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "c8865f4c2e23b23d0aa030a22cee672cf3eb9b920dd8c907a3645aae399364cd",
+          "shape": [
+            1,
+            16,
+            12288
+          ]
+        },
+        "layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "b8224db5c7db67a766fd781c811c535665f1af14915f52b7687629c9da3490ab",
+          "shape": [
+            1,
+            16,
+            33792
+          ]
+        },
+        "layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "fc9b632a0f6311efd728ab1657763e962d0d0b1694ef109f7c0389ad09d6288f",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        },
+        "layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "0390662ebb1e3fffa748c45c1367e5e7cd0d6d372095fc91cb8e92856a5daf2c",
+          "shape": [
+            1,
+            16,
+            33792
+          ]
+        },
+        "layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "4c787140d63e28918218bdbf595f2daf4a432c611e0ce6d93780329eeec93d17",
+          "shape": [
+            1,
+            16,
+            33792
+          ]
+        },
+        "layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "e41a3047b12d2254c570229bfd427d860a51334b16e2ad118a16ecc9246d4baf",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        },
+        "layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "77cbe26136a0aa594981adfc729b1dc07a42b0c259c5f59bcc4e69207158b436",
+          "shape": [
+            1,
+            16,
+            7168
+          ]
+        }
+      }
+    },
+    "s1-layer0-len4": {
+      "tensors": {
+        "layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "c26df3339132eb0f7df3030682f3cd7b7b11538ecdddff6fa74a1ad1ce33aac2",
+          "shape": [
+            4,
+            1,
+            7168
+          ]
+        },
+        "layers.0.attnres.mlp.weights": {
+          "dtype": "float32",
+          "sha256": "f6bb1294da2f78cd935b01c7656280df5eaa0439e9d97bc03775825a41a508e4",
+          "shape": [
+            4,
+            1
+          ]
+        },
+        "layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "c26df3339132eb0f7df3030682f3cd7b7b11538ecdddff6fa74a1ad1ce33aac2",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "b2a26b847f679f09e525c2d39a9b4b68cd92f5eeaddd3ffa9f42da65036408fd",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "layers.0.kda.beta": {
+          "dtype": "float32",
+          "sha256": "93eb7688d527dc5d8e836debcf10d70d8e28624664a6e3c6cd9c58a5034f3643",
+          "shape": [
+            1,
+            4,
+            96
+          ]
+        },
+        "layers.0.kda.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "48fa7ee256f2194e2e34df4a211bda4d028d957428d4051667038bce9a830934",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "b3354e0e0ee84b6512d75e3a9ee2e061fd04f8aed547f31568f47835739fe902",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "ec72932cfde33f21449395d2d4cf5ddf004d05def70a1626c35dbc844132f815",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "60ca69405751af74cde4770b82152f8163a7d563b76313ca0b6d138d3fe297cb",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "6890ca916df2c1235405b14422ad7c9951fbc65ff7488342819de1e14393bb41",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.log_alpha": {
+          "dtype": "float32",
+          "sha256": "5b69b0e88ef65f1d5e8c2c1a093848a73e497cb40dcb28cb9d1964cfa5a47a68",
+          "shape": [
+            1,
+            4,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "7eeb6bb9be96c81d5a6027d18204b543bd04b00e653e3d8cd04815b7c59e49c5",
+          "shape": [
+            1,
+            4,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "65cf5e854b22ed4c7ea774e1b8e9e6bd9e7b4985c987bacf6f89c201bc539426",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "39a90b63cabbb8109ffb2be1fcb894c5f27dc98affa3c9489a489673c7de7eb6",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "1bec0964c73320a51a2a2dd4285e8b3188ea59c79d46a62b82d4426681a560eb",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "4e86da084df4e5a4359e5158a48c5ba59218f09a36ac84850b0d628a349845e9",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "6036af357823adbab5e03797fe3db838611db3ec0e3f9dce1c6304f25b0122dc",
+          "shape": [
+            1,
+            4,
+            96
+          ]
+        },
+        "layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "04dd082637b8154b0f09ac20de8b04ccce63ce2ef54275380ee2e04734f98c42",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.recurrent_state.in": {
+          "dtype": "float32",
+          "sha256": "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "50172a940ade59e5891c6ad4aa92d3d1005b31565f9a555c9f9d5cfd3c086226",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "e9bbda30e87e9aebcc50b685b8213367f651b3a88443646251e2a152212357c4",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "3988a25c58f35e8b6b025068a5a6949e39e49460a33416ade745c5a697e800f0",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "7f1990df8b5a03f2063d86d420a5aa8a39bd1b7a08bb152768a10bb9ade564c9",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "0761276935008885c6c069a9a8f07ee7d836711743e8d800002964da7ae001f4",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "6ed81bd9e1a5c7cf6ab03b24d444bcdac36d90130ebecd6d557d1257efbe9e41",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "49fdb5e5a80eb60ab16debcbedeb251db1e75d0d88d1d04591138d3c5e906825",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "6dfdb5f12ce31c2d7bb46f673556b3ba5dafbf81c684d8ea91ea2f6d851485e8",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "b841f69e0058c630811276fb3c7feee0898c60bb4ffef92ad306e89b31f20f0a",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        }
+      }
+    },
+    "s1-layer0-len8": {
+      "tensors": {
+        "layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "e2de25be185b4995d7dc6a6ae5c0959bd2a6ca8bbf1bbd9fe7efaabf08c52e2c",
+          "shape": [
+            8,
+            1,
+            7168
+          ]
+        },
+        "layers.0.attnres.mlp.weights": {
+          "dtype": "float32",
+          "sha256": "4f05df05f8da9356bd66425351f166a5f7305b7c805e6900d9ec0f50790c9886",
+          "shape": [
+            8,
+            1
+          ]
+        },
+        "layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "e2de25be185b4995d7dc6a6ae5c0959bd2a6ca8bbf1bbd9fe7efaabf08c52e2c",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        },
+        "layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "06038a429b7fe6bf31f8d4f50121adf0cc8cb528e95fc5e31320d3cd8903d626",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        },
+        "layers.0.kda.beta": {
+          "dtype": "float32",
+          "sha256": "4a3ef30fa6ee4c8a4f1acfc3f57adba0bf6cbf84c213a43fbe2053fa1baac932",
+          "shape": [
+            1,
+            8,
+            96
+          ]
+        },
+        "layers.0.kda.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "7b513dca4dc5a67447026b973af5d057a4e41d97e327447b70291271e4cd4e2e",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "a6662e52550bcb9f32bc1636a0c5a7a4db75392b60d320d1a4571fb0fb94e85f",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "a71b4b66a0453dbbd0f4103068acd195e9a01d1c1d5b7c272b9aaec22c6c4bdb",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "510a57364186614584cbb8d777df7ee2c5215524a4688a0220706a0189b38b97",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "2ba1465f064d0bb357e72f1b340ef071c9d2bbf5dbdbd50bc21355c6c89d9685",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.log_alpha": {
+          "dtype": "float32",
+          "sha256": "d59ec17e2a9e55f8a4f9882c06c2a6906e637358d5838f74b7fd7239cad8719e",
+          "shape": [
+            1,
+            8,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "50074219be9533f73a3e08c1f793b0ef6a5b08c8278300a71c43238145f7f5fb",
+          "shape": [
+            1,
+            8,
+            96,
+            128
+          ]
+        },
+        "layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "27b9fa441c933fc06d052f5719e2ad452b5aeb38ad55a0adff256fb9f60bf118",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        },
+        "layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "8f93ad2f3207f5633f3662248e534428eadaade7ba7919e25815f8c0de30b962",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "f3ec62c5b8f35a124aec73a2172425f43a3d715745e25b35ff0fc09a8250b2cb",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "643762aa2ac62427688b9f1786be0c0b1e46d4131e76eabb27b46c6d24faf547",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "cf6bffd7fad907e951a67be0fa06ec08f14065ec1733f2f34b6f509fd62b3406",
+          "shape": [
+            1,
+            8,
+            96
+          ]
+        },
+        "layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "28e071019913082781409157570a27372d95411629efc98f2f22897c87ea726f",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.recurrent_state.in": {
+          "dtype": "float32",
+          "sha256": "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "394a89249fbf7126154361836993d546e4efba6c7cd478b26dcce0d51f832588",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "d87768315cde370bd3d8e8f13033b846eb18bcbb76b0857e1767965496ad5026",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "8e93a4fd9e67649ef51486c5fd2b735aeafab7debe771ac4b314509ffb73a5de",
+          "shape": [
+            1,
+            8,
+            12288
+          ]
+        },
+        "layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "5e1306ac0875884187664ab4bc58462edd4525895ea15e5b8a2accf69998a4eb",
+          "shape": [
+            1,
+            8,
+            33792
+          ]
+        },
+        "layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "8da7af90e32ceb30a1401d9d9980da99b388b4a45174e2fa3196cba687359171",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        },
+        "layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "9863f44f71c3a94dbec4ee096411a4ef16273c965fa7ef4f7b331f412f3b2d86",
+          "shape": [
+            1,
+            8,
+            33792
+          ]
+        },
+        "layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "1583d966ab03e424172cab3b7ddd26b57d7b57f4eed6a8062a8e89e04303089c",
+          "shape": [
+            1,
+            8,
+            33792
+          ]
+        },
+        "layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "11031391f5a34e96f070bc44ec2c2d764ce4b4b8d40609099416c8f22be72c8a",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        },
+        "layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "8c473bce89e0f400bb4df0e61fadd64a7f1a640a0419585c4635b1fcaf7de5f1",
+          "shape": [
+            1,
+            8,
+            7168
+          ]
+        }
+      }
+    },
+    "s1-layer0-prefill4-decode1": {
+      "tensors": {
+        "decode.cache.conv_state.0.in": {
+          "dtype": "bfloat16",
+          "sha256": "48fa7ee256f2194e2e34df4a211bda4d028d957428d4051667038bce9a830934",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "1efbcada7f66e398b06f9f05a4262cd05964bdad641ae8293416ec030635c958",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.conv_state.1.in": {
+          "dtype": "bfloat16",
+          "sha256": "b3354e0e0ee84b6512d75e3a9ee2e061fd04f8aed547f31568f47835739fe902",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "690239a8b5fe48fb84fe09d18f97a89c5b2163cf17fb37348b677a475b7cd01a",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.conv_state.2.in": {
+          "dtype": "bfloat16",
+          "sha256": "ec72932cfde33f21449395d2d4cf5ddf004d05def70a1626c35dbc844132f815",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "2d5f1b72bbeadb8815b0915b1bca714a564f5d994379867f3d84d47975907ce4",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "decode.cache.recurrent_state.in": {
+          "dtype": "float32",
+          "sha256": "50172a940ade59e5891c6ad4aa92d3d1005b31565f9a555c9f9d5cfd3c086226",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "decode.cache.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "55fe339b18a50852175cb0dfe3904a8a9a25b87038b5ed0e048000a28750367d",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "decode.layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "c6f5fcfca0773b88413b9c04f3fd9409eeebade6294a0cd0ef215ba40d57bc60",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "c6f5fcfca0773b88413b9c04f3fd9409eeebade6294a0cd0ef215ba40d57bc60",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "4295db227fc681d87b4d96a40106743a54d0bea59f227bea2cb53dd392a152f4",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "b78c8db5c8e530746270407a901e6c521aea06b9eb086a5430bc0c7ede161c12",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "e904516b6fefb1cad97639ce72c0b98d125f8a1e1ba9dcf57edf4de2f0bcfe11",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "8d7843c69dc3426e1325176247769f04057a904e9fd7c28c9eed3161f4ae0457",
+          "shape": [
+            1,
+            1,
+            96,
+            128
+          ]
+        },
+        "decode.layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "b0290df8096d744e02bce500ed292dbfb3cf7e6ed8fd85675b750717c1af7b6c",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "995bfeb36fe4fcbe767203926e68137b4023016a74d0d213b7571ac9d27a73b6",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "b9c49dfa88c02e071cc6693265f4e80259e6b179c9431a61f369019e4a712554",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "d9986ba0645b156da07b92a336876c25b5c32be0cce88ef1170acb1a0ac05248",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "7abf00910298b535f72615c9d3dfd9c881663d0a882180a4f6d14061731c7149",
+          "shape": [
+            1,
+            1,
+            96
+          ]
+        },
+        "decode.layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "28cc8c1d2f91f32638763920c84923ade1c7e236bdc17c25b9e6ac9afdcedadd",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "bfaa09a4544233361f3a8011306dca8c5cf284ad304d903001b05845825575ea",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "ee89d0bd15023879f2e2c58143658bef5c36faddc98d6911554068c335a288a1",
+          "shape": [
+            1,
+            1,
+            12288
+          ]
+        },
+        "decode.layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "1f2b262351d9419e8664cb383e5228ca0a2c63938061ced5285d63827bceeea8",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "decode.layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "5a0fd733489825bff428f1a34c5166d3d7115a56005a4bcdca655e3112716c51",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "4ff6b039407fb197ad86d7011681ded04eebdfcbd2ffd6cd1304c8f68b4a6641",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "decode.layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "3bfb4ca990673eaf5a2ebd7297f7bf9dee6e39295a4e3bba16b6ccb38bbbbdfd",
+          "shape": [
+            1,
+            1,
+            33792
+          ]
+        },
+        "decode.layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "0115ca2faacba15bc42c59758653d248a958053592cd69dc15a0b1985ca0d530",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "decode.layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "0bb9407d50cd71832bbec67f1a100ad1277ed9f5d5fd5a22affdbd5d3b21003e",
+          "shape": [
+            1,
+            1,
+            7168
+          ]
+        },
+        "prefill.cache.conv_state.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "48fa7ee256f2194e2e34df4a211bda4d028d957428d4051667038bce9a830934",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "prefill.cache.conv_state.1.out": {
+          "dtype": "bfloat16",
+          "sha256": "b3354e0e0ee84b6512d75e3a9ee2e061fd04f8aed547f31568f47835739fe902",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "prefill.cache.conv_state.2.out": {
+          "dtype": "bfloat16",
+          "sha256": "ec72932cfde33f21449395d2d4cf5ddf004d05def70a1626c35dbc844132f815",
+          "shape": [
+            1,
+            12288,
+            4
+          ]
+        },
+        "prefill.cache.recurrent_state.out": {
+          "dtype": "float32",
+          "sha256": "50172a940ade59e5891c6ad4aa92d3d1005b31565f9a555c9f9d5cfd3c086226",
+          "shape": [
+            1,
+            96,
+            128,
+            128
+          ]
+        },
+        "prefill.layers.0.attnres.block_residual.out": {
+          "dtype": "bfloat16",
+          "sha256": "c26df3339132eb0f7df3030682f3cd7b7b11538ecdddff6fa74a1ad1ce33aac2",
+          "shape": [
+            4,
+            1,
+            7168
+          ]
+        },
+        "prefill.layers.0.input": {
+          "dtype": "bfloat16",
+          "sha256": "c26df3339132eb0f7df3030682f3cd7b7b11538ecdddff6fa74a1ad1ce33aac2",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "prefill.layers.0.input_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "b2a26b847f679f09e525c2d39a9b4b68cd92f5eeaddd3ffa9f42da65036408fd",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "prefill.layers.0.kda.k_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "60ca69405751af74cde4770b82152f8163a7d563b76313ca0b6d138d3fe297cb",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.k_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "6890ca916df2c1235405b14422ad7c9951fbc65ff7488342819de1e14393bb41",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.norm_gated.out": {
+          "dtype": "bfloat16",
+          "sha256": "7eeb6bb9be96c81d5a6027d18204b543bd04b00e653e3d8cd04815b7c59e49c5",
+          "shape": [
+            1,
+            4,
+            96,
+            128
+          ]
+        },
+        "prefill.layers.0.kda.out": {
+          "dtype": "bfloat16",
+          "sha256": "65cf5e854b22ed4c7ea774e1b8e9e6bd9e7b4985c987bacf6f89c201bc539426",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "prefill.layers.0.kda.output_gate": {
+          "dtype": "bfloat16",
+          "sha256": "39a90b63cabbb8109ffb2be1fcb894c5f27dc98affa3c9489a489673c7de7eb6",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.q_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "1bec0964c73320a51a2a2dd4285e8b3188ea59c79d46a62b82d4426681a560eb",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.q_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "4e86da084df4e5a4359e5158a48c5ba59218f09a36ac84850b0d628a349845e9",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.raw_beta": {
+          "dtype": "bfloat16",
+          "sha256": "6036af357823adbab5e03797fe3db838611db3ec0e3f9dce1c6304f25b0122dc",
+          "shape": [
+            1,
+            4,
+            96
+          ]
+        },
+        "prefill.layers.0.kda.raw_decay": {
+          "dtype": "bfloat16",
+          "sha256": "04dd082637b8154b0f09ac20de8b04ccce63ce2ef54275380ee2e04734f98c42",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.v_conv.out": {
+          "dtype": "bfloat16",
+          "sha256": "e9bbda30e87e9aebcc50b685b8213367f651b3a88443646251e2a152212357c4",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.kda.v_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "3988a25c58f35e8b6b025068a5a6949e39e49460a33416ade745c5a697e800f0",
+          "shape": [
+            1,
+            4,
+            12288
+          ]
+        },
+        "prefill.layers.0.mlp.gate_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "7f1990df8b5a03f2063d86d420a5aa8a39bd1b7a08bb152768a10bb9ade564c9",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "prefill.layers.0.mlp.out": {
+          "dtype": "bfloat16",
+          "sha256": "0761276935008885c6c069a9a8f07ee7d836711743e8d800002964da7ae001f4",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "prefill.layers.0.mlp.situ.out": {
+          "dtype": "bfloat16",
+          "sha256": "6ed81bd9e1a5c7cf6ab03b24d444bcdac36d90130ebecd6d557d1257efbe9e41",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "prefill.layers.0.mlp.up_proj.out": {
+          "dtype": "bfloat16",
+          "sha256": "49fdb5e5a80eb60ab16debcbedeb251db1e75d0d88d1d04591138d3c5e906825",
+          "shape": [
+            1,
+            4,
+            33792
+          ]
+        },
+        "prefill.layers.0.out": {
+          "dtype": "bfloat16",
+          "sha256": "6dfdb5f12ce31c2d7bb46f673556b3ba5dafbf81c684d8ea91ea2f6d851485e8",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        },
+        "prefill.layers.0.post_attention_layernorm.out": {
+          "dtype": "bfloat16",
+          "sha256": "b841f69e0058c630811276fb3c7feee0898c60bb4ffef92ad306e89b31f20f0a",
+          "shape": [
+            1,
+            4,
+            7168
+          ]
+        }
+      }
+    }
+  },
+  "moonshot_revision": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
+  "policy": "Per-tensor hashes are stable; safetensors container hashes are not locked because header key order is non-canonical.",
+  "schema_version": 1
+}
