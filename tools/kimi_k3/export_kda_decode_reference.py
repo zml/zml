@@ -117,6 +117,8 @@ def manual_step(
     caches: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     state: torch.Tensor,
 ) -> tuple[dict[str, torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
+    heads = layer.num_heads
+    head_dim = layer.head_dim
     q_proj = F.linear(hidden, layer.q_proj.weight)
     k_proj = F.linear(hidden, layer.k_proj.weight)
     v_proj = F.linear(hidden, layer.v_proj.weight)
@@ -124,15 +126,15 @@ def manual_step(
     k_conv, k_cache = conv_step(k_proj, caches[1], layer.k_conv1d.weight)
     v_conv, v_cache = conv_step(v_proj, caches[2], layer.v_conv1d.weight)
 
-    q = q_conv.reshape(hidden.shape[0], HEADS, HEAD_DIM)
-    k = k_conv.reshape(hidden.shape[0], HEADS, HEAD_DIM)
-    v = v_conv.reshape(hidden.shape[0], HEADS, HEAD_DIM)
+    q = q_conv.reshape(hidden.shape[0], heads, head_dim)
+    k = k_conv.reshape(hidden.shape[0], heads, head_dim)
+    v = v_conv.reshape(hidden.shape[0], heads, head_dim)
     q_norm = q.float() * torch.rsqrt(q.float().square().sum(dim=-1, keepdim=True) + 1e-6)
     k_norm = k.float() * torch.rsqrt(k.float().square().sum(dim=-1, keepdim=True) + 1e-6)
 
     decay_rank = F.linear(hidden, layer.f_a_proj.weight)
     raw_decay = F.linear(decay_rank, layer.f_b_proj.weight).reshape_as(q)
-    decay_with_bias = raw_decay.float() + layer.dt_bias.float().reshape(HEADS, HEAD_DIM)
+    decay_with_bias = raw_decay.float() + layer.dt_bias.float().reshape(heads, head_dim)
     log_alpha = LOWER_BOUND * torch.sigmoid(layer.A_log.float().exp()[None, :, None] * decay_with_bias)
     alpha = log_alpha.exp()
     raw_beta = F.linear(hidden, layer.b_proj.weight).float()
@@ -142,7 +144,7 @@ def manual_step(
     prediction = torch.einsum("bhvk,bhk->bhv", decayed_state, k_norm)
     error = (v.float() - prediction) * beta.unsqueeze(-1)
     next_state = decayed_state + torch.einsum("bhv,bhk->bhvk", error, k_norm)
-    recurrent_output = torch.einsum("bhvk,bhk->bhv", next_state, q_norm) / math.sqrt(HEAD_DIM)
+    recurrent_output = torch.einsum("bhvk,bhk->bhv", next_state, q_norm) / math.sqrt(head_dim)
 
     output_gate = F.linear(hidden, layer.g_proj.weight).reshape_as(recurrent_output)
     variance = recurrent_output.square().mean(dim=-1, keepdim=True)

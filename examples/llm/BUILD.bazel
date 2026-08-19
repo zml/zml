@@ -67,6 +67,16 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# KIMI_K3_TEMP_REMOVE_M20: sequential prefill/split differential harness is
+# retained during staged bring-up and removed after permanent cache tests land.
+zig_binary(
+    name = "kimi_k3_kda_prefill_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_kda_prefill_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 # KIMI_K3_TEMP_REMOVE_M20: temporary construction/explain binary for bring-up;
 # remove it when the production LLM CLI exposes the validated K3 explain path.
 zig_binary(

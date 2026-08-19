@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "milestone": 8,
+  "generator": "tools/kimi_k3/export_kda_prefill_reference.py",
+  "seed": 20260822,
+  "lengths": [1, 4, 8, 16],
+  "split_points": 25,
+  "tensor_count": 426,
+  "tensor_semantic_sha256": "be1c93820d50e1c25d47c4e5ae3cb1ce0e9540213453d5cc0befdcfe343d466f",
+  "official_comparison_count": 170,
+  "checkpoint_weights_used": false
+}

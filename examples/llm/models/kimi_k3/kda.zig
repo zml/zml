@@ -63,6 +63,11 @@ const ConvResult = struct {
     cache: zml.Tensor,
 };
 
+const ConvSequenceResult = struct {
+    output: zml.Tensor,
+    cache: zml.Tensor,
+};
+
 /// Exact single-token `ShortConvolution.step`: shift the full kernel window,
 /// append the projected token, correlate per channel, then apply SiLU.
 fn convStep(projected: zml.Tensor, previous: zml.Tensor, weight: zml.Tensor) ConvResult {
@@ -75,6 +80,145 @@ fn convStep(projected: zml.Tensor, previous: zml.Tensor, weight: zml.Tensor) Con
     const cache = zml.Tensor.concatenate(&.{ retained, current }, .kernel);
     const output = cache.mul(weight.broad(cache.shape())).sum(.kernel).squeeze(.kernel).silu();
     return .{ .output = output, .cache = cache };
+}
+
+/// Readable causal sequence convolution with a full Moonshot decode window.
+/// Concatenating the prior width-W window and slicing outputs at W makes the
+/// first new token consume cache[1..W] plus itself, exactly like `step`.
+fn convSequence(projected: zml.Tensor, previous: zml.Tensor, weight: zml.Tensor) ConvSequenceResult {
+    const projected_sequence = projected.rename(.{ .out = .channel });
+    const history = previous.transpose(.{ .b, .kernel, .channel }).rename(.{ .kernel = .s });
+    const input = zml.Tensor.concatenate(&.{ history, projected_sequence }, .s);
+    const kernel = weight.reshape(.{
+        .channel = weight.dim(.channel),
+        .one = 1,
+        .kernel = weight.dim(.kernel),
+    });
+    const mixed = primitives.causalDepthwiseConv1d(
+        input.rename(.{ .b = .batch, .s = .sequence }),
+        kernel,
+    ).silu().rename(.{ .batch = .b, .sequence = .s });
+    const output = mixed.slice1d(.s, .{
+        .start = previous.dim(.kernel),
+        .end = input.dim(.s),
+    });
+    const final_history = input.slice1d(.s, .{
+        .start = input.dim(.s) - previous.dim(.kernel),
+        .end = input.dim(.s),
+    }).rename(.{ .s = .kernel }).transpose(.{ .b, .channel, .kernel });
+    return .{ .output = output, .cache = final_history };
+}
+
+pub const CompactResult = struct {
+    output: zml.Tensor,
+    cache: Cache,
+};
+
+pub fn decodeCompact(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    const result = decode(hidden, weights, cache);
+    return .{ .output = result.projection_output, .cache = result.cache };
+}
+
+const Scan = struct {
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    alpha: zml.Tensor,
+    beta: zml.Tensor,
+
+    pub const State = struct {
+        recurrent: zml.Tensor,
+        outputs: zml.Tensor,
+        step: zml.Tensor,
+    };
+
+    fn sliceStep(input: zml.Tensor, step: zml.Tensor) zml.Tensor {
+        return input.dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = step, .len = 1 } }).squeeze(.s);
+    }
+
+    pub fn cond(scan: Scan, state: State) zml.Tensor {
+        return state.step.cmp(.LT, .scalar(scan.q.dim(.s), .i32));
+    }
+
+    pub fn body(scan: Scan, state: State) State {
+        const q = sliceStep(scan.q, state.step);
+        const k = sliceStep(scan.k, state.step);
+        const v = sliceStep(scan.v, state.step);
+        const alpha = sliceStep(scan.alpha, state.step);
+        const beta = sliceStep(scan.beta, state.step);
+        const decayed = state.recurrent.mul(alpha.broad(state.recurrent.shape()));
+        const prediction = decayed.dot(k, .k);
+        const error_value = v.sub(prediction).mul(beta.broad(prediction.shape()));
+        const recurrent = decayed.add(
+            error_value.broad(state.recurrent.shape()).mul(k.broad(state.recurrent.shape())),
+        );
+        const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.k))));
+        const output = recurrent.dot(q, .k).scale(scale);
+        return .{
+            .recurrent = recurrent,
+            .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, output),
+            .step = state.step.addConstant(1),
+        };
+    }
+};
+
+/// Sequential graph-level KDA prefill oracle. Milestone 18 replaces this
+/// correctness path with chunked kernels after cache equivalence is proven.
+pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    const q_proj = linear(hidden, weights.q_weight);
+    const k_proj = linear(hidden, weights.k_weight);
+    const v_proj = linear(hidden, weights.v_weight);
+    const q_conv = convSequence(q_proj, cache.q_conv, weights.q_conv_weight);
+    const k_conv = convSequence(k_proj, cache.k_conv, weights.k_conv_weight);
+    const v_conv = convSequence(v_proj, cache.v_conv, weights.v_conv_weight);
+    const heads = weights.a_log.dim(.h);
+    const head_dim = weights.norm_weight.dim(.v);
+    const q = primitives.normalizeL2(
+        q_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim }),
+        1e-6,
+    ).convert(.f32);
+    const k = primitives.normalizeL2(
+        k_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim }),
+        1e-6,
+    ).convert(.f32);
+    const v = v_conv.output.rename(.{ .channel = .mix })
+        .splitAxis(.mix, .{ .h = heads, .v = head_dim }).convert(.f32);
+    const decay_rank = linear(hidden, weights.decay_a_weight).rename(.{ .out = .rank });
+    const raw_decay = decay_rank.dot(weights.decay_b_weight, .rank)
+        .rename(.{ .channel = .mix })
+        .splitAxis(.mix, .{ .h = heads, .k = head_dim })
+        .convert(.f32);
+    const decay_input = raw_decay.add(weights.dt_bias.convert(.f32).broad(raw_decay.shape()));
+    const decay_rate = weights.a_log.convert(.f32).exp()
+        .reshape(.{ .b = 1, .s = 1, .h = heads, .k = 1 })
+        .broad(raw_decay.shape());
+    const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
+    const beta = linear(hidden, weights.beta_weight).rename(.{ .out = .h }).convert(.f32).sigmoid();
+    const initial_state: Scan.State = .{
+        .recurrent = cache.recurrent_state.convert(.f32),
+        .outputs = zml.Tensor.zeroes(v.shape()),
+        .step = .scalar(0, .i32),
+    };
+    const final = zml.ops.@"while"(Scan, .{ .q = q, .k = k, .v = v, .alpha = alpha, .beta = beta }, initial_state);
+    const output_gate = linear(hidden, weights.gate_weight)
+        .rename(.{ .out = .mix })
+        .splitAxis(.mix, .{ .h = heads, .v = head_dim })
+        .convert(.f32);
+    const variance = final.outputs.powByConst(2).mean(.v);
+    const norm_gated = final.outputs
+        .mul(variance.addConstant(1e-5).rsqrt().broad(final.outputs.shape()))
+        .mul(weights.norm_weight.convert(.f32).broad(final.outputs.shape()))
+        .mul(output_gate.sigmoid());
+    const output = norm_gated.merge(.{ .out = .{ .h, .v } }).dot(weights.output_weight, .out);
+    return .{
+        .output = output,
+        .cache = .{
+            .q_conv = q_conv.cache,
+            .k_conv = k_conv.cache,
+            .v_conv = v_conv.cache,
+            .recurrent_state = final.recurrent,
+        },
+    };
 }
 
 /// Readable Kimi K3 fused-recurrent decode equation.
