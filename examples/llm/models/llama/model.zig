@@ -543,6 +543,9 @@ const SelfAttn = struct {
             .cuda_fa3 => attention_metadata,
             .nki => attention_metadata,
             .metal_fa => attention_metadata,
+            .vulkan_fa => .{ .vulkan_fa = .{
+                .num_tokens = attention_metadata.vulkan_fa.num_tokens,
+            } },
         };
 
         const attn_output = zml.attention.attention.attention(

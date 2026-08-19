@@ -148,6 +148,7 @@ pub const Session = struct {
                 .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
+            .vulkan_fa => .{ .vulkan_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
@@ -186,6 +187,7 @@ pub const Session = struct {
                 .layer_id = try .scalar(self.io, self.platform, 0, .u16),
                 .num_tokens = try .scalar(self.io, self.platform, 1, .u32),
             } },
+            .vulkan_fa => .{ .vulkan_fa = .{ .num_tokens = try .scalar(self.io, self.platform, 1, .u32) } },
             .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);

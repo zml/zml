@@ -120,6 +120,7 @@ pub const Session = struct {
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (params.attention_metadata) {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
+            .vulkan_fa => .{ .vulkan_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             else => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
