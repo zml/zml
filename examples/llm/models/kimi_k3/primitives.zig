@@ -6,7 +6,9 @@ const zml = @import("zml");
 /// the checkpoint weight directly (Kimi weights are not offset by one).
 pub fn rmsNorm(input: zml.Tensor, weight: zml.Tensor, eps: f32) zml.Tensor {
     const normalized = zml.nn.rmsNorm(input, .d, eps);
-    return normalized.mul(weight.broad(normalized.shape()));
+    return normalized.convert(.f32)
+        .mul(weight.convert(.f32).broad(normalized.shape()))
+        .convert(input.dtype());
 }
 
 /// KDA q/k normalization.  The explicit FP32 conversion is required because

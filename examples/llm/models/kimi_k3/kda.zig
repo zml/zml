@@ -78,7 +78,9 @@ fn convStep(projected: zml.Tensor, previous: zml.Tensor, weight: zml.Tensor) Con
     });
     const retained = previous.slice1d(.kernel, .{ .start = 1, .end = previous.dim(.kernel) });
     const cache = zml.Tensor.concatenate(&.{ retained, current }, .kernel);
-    const output = cache.mul(weight.broad(cache.shape())).sum(.kernel).squeeze(.kernel).silu();
+    const output = cache.convert(.f32)
+        .mul(weight.convert(.f32).broad(cache.shape()))
+        .sum(.kernel).squeeze(.kernel).silu().convert(projected.dtype());
     return .{ .output = output, .cache = cache };
 }
 
@@ -95,9 +97,9 @@ fn convSequence(projected: zml.Tensor, previous: zml.Tensor, weight: zml.Tensor)
         .kernel = weight.dim(.kernel),
     });
     const mixed = primitives.causalDepthwiseConv1d(
-        input.rename(.{ .b = .batch, .s = .sequence }),
-        kernel,
-    ).silu().rename(.{ .batch = .b, .sequence = .s });
+        input.convert(.f32).rename(.{ .b = .batch, .s = .sequence }),
+        kernel.convert(.f32),
+    ).silu().convert(projected.dtype()).rename(.{ .batch = .b, .sequence = .s });
     const output = mixed.slice1d(.s, .{
         .start = previous.dim(.kernel),
         .end = input.dim(.s),
@@ -171,7 +173,7 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult
     const q_conv = convSequence(q_proj, cache.q_conv, weights.q_conv_weight);
     const k_conv = convSequence(k_proj, cache.k_conv, weights.k_conv_weight);
     const v_conv = convSequence(v_proj, cache.v_conv, weights.v_conv_weight);
-    const heads = weights.a_log.dim(.h);
+    const heads = weights.dt_bias.dim(.h);
     const head_dim = weights.norm_weight.dim(.v);
     const q = primitives.normalizeL2(
         q_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim }),
@@ -189,7 +191,7 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult
         .splitAxis(.mix, .{ .h = heads, .k = head_dim })
         .convert(.f32);
     const decay_input = raw_decay.add(weights.dt_bias.convert(.f32).broad(raw_decay.shape()));
-    const decay_rate = weights.a_log.convert(.f32).exp()
+    const decay_rate = weights.a_log.slice1d(.h, .{ .start = 0, .end = heads }).convert(.f32).exp()
         .reshape(.{ .b = 1, .s = 1, .h = heads, .k = 1 })
         .broad(raw_decay.shape());
     const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
@@ -209,7 +211,8 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult
         .mul(variance.addConstant(1e-5).rsqrt().broad(final.outputs.shape()))
         .mul(weights.norm_weight.convert(.f32).broad(final.outputs.shape()))
         .mul(output_gate.sigmoid());
-    const output = norm_gated.merge(.{ .out = .{ .h, .v } }).dot(weights.output_weight, .out);
+    const output = norm_gated.merge(.{ .out = .{ .h, .v } })
+        .convert(hidden.dtype()).dot(weights.output_weight, .out);
     return .{
         .output = output,
         .cache = .{
@@ -233,7 +236,7 @@ pub fn decode(hidden: zml.Tensor, weights: Weights, cache: Cache) DecodeResult {
     const k_conv = convStep(k_proj, cache.k_conv, weights.k_conv_weight);
     const v_conv = convStep(v_proj, cache.v_conv, weights.v_conv_weight);
 
-    const heads = weights.a_log.dim(.h);
+    const heads = weights.dt_bias.dim(.h);
     const head_dim = weights.norm_weight.dim(.v);
     const q = q_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim });
     const k = k_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim });
@@ -247,7 +250,7 @@ pub fn decode(hidden: zml.Tensor, weights: Weights, cache: Cache) DecodeResult {
         .splitAxis(.mix, .{ .h = heads, .k = head_dim })
         .convert(.f32);
     const decay_input = raw_decay.add(weights.dt_bias.convert(.f32).broad(raw_decay.shape()));
-    const decay_rate = weights.a_log.convert(.f32).exp()
+    const decay_rate = weights.a_log.slice1d(.h, .{ .start = 0, .end = heads }).convert(.f32).exp()
         .reshape(.{ .b = 1, .h = heads, .k = 1 })
         .broad(raw_decay.shape());
     const log_alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0);
@@ -275,7 +278,7 @@ pub fn decode(hidden: zml.Tensor, weights: Weights, cache: Cache) DecodeResult {
     const norm_gated = normalized
         .mul(weights.norm_weight.convert(.f32).broad(normalized.shape()))
         .mul(output_gate.sigmoid());
-    const flattened = norm_gated.merge(.{ .out = .{ .h, .v } });
+    const flattened = norm_gated.merge(.{ .out = .{ .h, .v } }).convert(hidden.dtype());
     const projection_output = flattened.dot(weights.output_weight, .out);
 
     return .{
