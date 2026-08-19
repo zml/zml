@@ -9,5 +9,7 @@ pub const Model = model.Model;
 pub const LoadedModel = model.LoadedModel;
 pub const primitives = @import("kimi_k3/primitives.zig");
 pub const attn_res = @import("kimi_k3/attn_res.zig");
+pub const kda = @import("kimi_k3/kda.zig");
+pub const kda_cache = @import("kimi_k3/kda_cache.zig");
 pub const session = @import("kimi_k3/session.zig");
 pub const Session = session.Session;

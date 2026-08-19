@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "milestone": 7,
+  "generator": "tools/kimi_k3/export_kda_decode_reference.py",
+  "seed": 20260821,
+  "steps": 4,
+  "tensor_count": 127,
+  "tensor_semantic_sha256": "105108955e28e45d482648c8e084fdbac5207d3e6cf5170d33b8f68f5b3980a3",
+  "official_comparison_count": 52,
+  "numpy_comparison_count": 104,
+  "state_layout": "batch,head,value,key",
+  "conv_cache_layout": "batch,channel,kernel",
+  "checkpoint_weights_used": false
+}
