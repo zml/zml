@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "milestone": 11,
+  "generator": "tools/kimi_k3/export_moe_reference.py",
+  "selected_expert_count": 61,
+  "route_count": 64,
+  "matrix_probe_count": 183,
+  "tensor_count": 32,
+  "tensor_semantic_sha256": "0ba5e75f3cefb48d5b62f1100984400619f38908738319eb61789f29e24bf249",
+  "router_fixture_semantic_sha256": "4eb2f2606d40a86f317253d4baba3329693871ce1742144646c8417a0f5da664",
+  "checkpoint_shards": {
+    "model-00002-of-000096.safetensors": "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"
+  },
+  "compact_map_scope": "test fixture and harness only"
+}
