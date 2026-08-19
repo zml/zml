@@ -63,20 +63,6 @@ pub const Backend = enum {
         };
     }
 
-    pub fn load(
-        backend: Backend,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *zml.Platform,
-    ) !void {
-        return switch (backend) {
-            .flashinfer_cutlass => cutlass_flashinfer.load(allocator, io, platform),
-            .triton => {},
-            .mosaic_tpu => {},
-            .metal => {},
-        };
-    }
-
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),

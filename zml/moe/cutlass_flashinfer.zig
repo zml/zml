@@ -142,7 +142,7 @@ const Output = struct {
 };
 
 const Attributes = struct {
-    backend: u64 = 0,
+    runners: u64 = 0,
     num_tokens: i64,
     hidden_size: i64,
     intermediate_size: i64,
@@ -166,13 +166,20 @@ pub const Variant = enum {
     nvfp4xnvfp4,
 };
 
-const maxCudaDevices = 16;
+const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
-pub const Backend = struct {
-    runners: [std.meta.fields(Variant).len][maxCudaDevices]?DeviceRunner =
+pub fn getRunners(platform: *const zml.Platform) ?*Runners {
+    return switch (platform.state) {
+        .cuda => |cuda_state| cuda_state.fi_cutlass_moe_runners,
+        else => null,
+    };
+}
+
+pub const Runners = struct {
+    runners: [std.meta.fields(Variant).len][max_num_devices]?DeviceRunner =
         @splat(@splat(null)),
 
-    pub fn deinit(self: *Backend) void {
+    pub fn deinit(self: *Runners) void {
         for (&self.runners) |*variant_runners| {
             for (variant_runners) |device_runner| {
                 if (device_runner) |runner| {
@@ -182,8 +189,8 @@ pub const Backend = struct {
         }
     }
 
-    fn ensureRunner(self: *Backend, device: i32, variant: Variant) !DeviceRunner {
-        if (device < 0 or device >= maxCudaDevices) return error.UnsupportedDevice;
+    fn ensureRunner(self: *Runners, device: i32, variant: Variant) !DeviceRunner {
+        if (device < 0 or device >= max_num_devices) return error.UnsupportedDevice;
 
         const index: usize = @intCast(device);
         const variant_index: usize = @intFromEnum(variant);
@@ -234,14 +241,14 @@ fn runnerOptions(device: i32, variant: Variant) fi_cutlass_moe.RunnerOptions {
     return options;
 }
 
-fn backendFromAttributes(attributes: Attributes) !*Backend {
-    if (attributes.backend == 0) return error.BackendNotLoaded;
-    return @ptrFromInt(attributes.backend);
+fn runnersFromAttributes(attributes: Attributes) !*Runners {
+    if (attributes.runners == 0) return error.RunnersNotLoaded;
+    return @ptrFromInt(attributes.runners);
 }
 
-fn currentBackend() !*Backend {
-    return zml.module.CompilationContext.current().platform.flashinfer_cutlass_moe orelse
-        error.BackendNotLoaded;
+fn currentRunners() !*Runners {
+    const platform = zml.module.CompilationContext.current().platform;
+    return getRunners(platform) orelse error.RunnersNotLoaded;
 }
 
 fn cutlassActivation(activation: Activation) i32 {
@@ -278,8 +285,8 @@ fn ffiCallNvfp4(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const backend = try backendFromAttributes(attributes);
-    const deviceRunner = try backend.ensureRunner(device, .nvfp4xnvfp4);
+    const runners = try runnersFromAttributes(attributes);
+    const deviceRunner = try runners.ensureRunner(device, .nvfp4xnvfp4);
     const context = makeContext(attributes);
 
     var io = std.mem.zeroes(fi_cutlass_moe.Io);
@@ -335,8 +342,8 @@ fn ffiCallBf16(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const backend = try backendFromAttributes(attributes);
-    const deviceRunner = try backend.ensureRunner(device, .bf16xbf16);
+    const runners = try runnersFromAttributes(attributes);
+    const deviceRunner = try runners.ensureRunner(device, .bf16xbf16);
     const context = makeContext(attributes);
 
     var io = std.mem.zeroes(fi_cutlass_moe.Io);
@@ -394,11 +401,12 @@ pub fn load(
     platform: *zml.Platform,
 ) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        if (platform.flashinfer_cutlass_moe != null) return;
+        const cuda_state = platform.state.getCudaState() orelse return error.UnsupportedPlatform;
+        if (cuda_state.fi_cutlass_moe_runners != null) return;
         try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
-        const backend = try allocator.create(Backend);
-        backend.* = .{};
-        platform.flashinfer_cutlass_moe = backend;
+        const runners = try allocator.create(Runners);
+        runners.* = .{};
+        cuda_state.fi_cutlass_moe_runners = runners;
         return;
     }
     return error.UnsupportedPlatform;
@@ -414,13 +422,13 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.flashinfer_cutlass_moe == null) return false;
+    if (getRunners(platform) == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;
 }
 
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
-    if (platform.flashinfer_cutlass_moe == null) return false;
+    if (getRunners(platform) == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
     return compute_capability == 100 or compute_capability == 120;
 }
@@ -430,8 +438,8 @@ pub fn tacticCounts(
     device: i32,
     variant: Variant,
 ) !struct { gemm1: i32, gemm2: i32 } {
-    const backend = platform.flashinfer_cutlass_moe orelse return error.BackendNotLoaded;
-    const deviceRunner = try backend.ensureRunner(device, variant);
+    const runners = getRunners(platform) orelse return error.RunnersNotLoaded;
+    const deviceRunner = try runners.ensureRunner(device, variant);
     var gemm1: i32 = 0;
     var gemm2: i32 = 0;
     try checkStatus(
@@ -580,7 +588,7 @@ pub fn fusedExpertsNvfp4(
     scales: Nvfp4Scales,
     options: Options,
 ) !zml.Tensor {
-    const backend = try currentBackend();
+    const runners = try currentRunners();
     var attributes = try validateInputs(
         hidden_states,
         fc1_weights,
@@ -590,8 +598,8 @@ pub fn fusedExpertsNvfp4(
         scales,
         options,
     );
-    attributes.backend = @intFromPtr(backend);
-    const deviceRunner = try backend.ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
+    attributes.runners = @intFromPtr(runners);
+    const deviceRunner = try runners.ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
@@ -677,9 +685,9 @@ pub fn fusedExpertsBf16(
         return error.InvalidShape;
     }
 
-    const backend = try currentBackend();
+    const runners = try currentRunners();
     const attributes: Attributes = .{
-        .backend = @intFromPtr(backend),
+        .runners = @intFromPtr(runners),
         .num_tokens = batch * sequence,
         .hidden_size = hiddenSize,
         .intermediate_size = intermediateSize,
@@ -692,7 +700,7 @@ pub fn fusedExpertsBf16(
         .gemm1_tactic = options.gemm1_tactic,
         .gemm2_tactic = options.gemm2_tactic,
     };
-    const deviceRunner = try backend.ensureRunner(options.workspace_query_device, .bf16xbf16);
+    const deviceRunner = try runners.ensureRunner(options.workspace_query_device, .bf16xbf16);
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
