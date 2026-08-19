@@ -19,9 +19,32 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
-    scales: ?Tensor = null,
-    global_scale: ?Tensor = null,
-    input_global_scale: ?Tensor = null,
+    quant: ?Quant = null,
+
+    pub const Quant = struct {
+        scheme: QuantScheme, // decided when the checkpoint is read
+        scales: Tensor,
+        weight_scale: ?TensorScale = null,
+        input_scale: ?TensorScale = null,
+    };
+
+    /// A per-tensor scale and the polarity its producer wrote it in
+    pub const TensorScale = struct {
+        value: Tensor,
+        direction: Direction,
+
+        pub const Direction = enum { multiplier, divisor };
+
+        pub fn asMultiplier(self: TensorScale) Tensor {
+            const s = self.value.convert(.f32);
+            const flat = if (s.shape().count() == 1) s.asScalar() else s; // essentially normalization
+
+            return switch (self.direction) {
+                .multiplier => flat,
+                .divisor => Tensor.scalar(1.0, .f32).broad(flat.shape()).div(flat),
+            };
+        }
+    };
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -41,40 +64,185 @@ pub const Linear = struct {
     }
 
     fn forwardWeight(self: Linear, x: Tensor) Tensor {
-        const scales = self.scales orelse return x.dot(self.weight, self.tag);
+        const q = self.quant orelse return x.dot(self.weight, self.tag);
 
-        const weight = if (self.weight.dtype() == .u8)
-            unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
-        else
-            self.weight;
+        const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
+        const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
 
-        const igs: ?Tensor = if (self.input_global_scale) |g| g.convert(.f32).asScalar() else null;
-        const wgs: ?Tensor = if (self.global_scale) |g| g.convert(.f32).asScalar() else null;
+        const weight = if (isPackedNvfp4(q.scheme, self.weight.dtype())) unpackNvfp4(self.weight, self.tag) else self.weight;
+
+        var lhs = x.convert(.bf16);
+        var lhs_scale: ?Tensor = null;
+        var undo: ?Tensor = null;
 
         const platform = zml.module.CompilationContext.current().platform;
-        if (weight.dtype() == .f4e2m1 and supportsNvfp4ActivationQuant(platform)) {
-            const q = quantizeNvfp4(x.convert(.bf16), igs, self.tag);
-            const acc = scaledDot(q.values, weight, q.scales, scales, self.tag);
-            return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
+        if (q.scheme.activationQuant()) |aq| {
+            if (aq.supportedOn(platform)) {
+                const quantized = aq.apply(lhs, igs, self.tag);
+                lhs = quantized.values;
+                lhs_scale = quantized.scales;
+                undo = igs;
+            }
         }
 
-        const acc = scaledDot(x.convert(.bf16), weight, null, scales, self.tag);
-        return applyGlobalScale(acc, null, wgs).convert(x.dtype());
+        const acc = scaledDot(lhs, weight, lhs_scale, q.scales, self.tag);
+        return applyGlobalScale(acc, undo, wgs).convert(x.dtype());
     }
 };
 
+pub const nvfp4_block_size = 16;
+
+pub const QuantScheme = enum {
+    /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
+    /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
+    nvfp4,
+    /// f8e4m3fn values, one bf16 scale per output channel, constant along the contraction.
+    /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
+    fp8_per_channel,
+    /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+    /// vendors publish themselves, under `weight_scale_inv`.
+    fp8_block128,
+    /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
+    /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
+    fp8_per_tensor,
+
+    pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {
+        if (weight.rank() != 2) return false;
+
+        const n = weight.dim(0);
+        const k = if (isPackedNvfp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+
+        return switch (self) {
+            .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
+                scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
+                scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
+            .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
+            .fp8_per_channel => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+                scale.count() > 1 and scale.rank() == 2 and
+                scale.dim(0) == n and scale.dim(1) == 1,
+            .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+                scale.count() > 1 and scale.rank() == 2 and
+                @rem(n, 128) == 0 and @rem(k, 128) == 0 and
+                scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+        };
+    }
+
+    pub fn classify(weight: Shape, scale: Shape) ?QuantScheme {
+        for (std.enums.values(QuantScheme)) |scheme| {
+            if (scheme.accepts(weight, scale)) return scheme;
+        }
+
+        return null;
+    }
+
+    pub fn activationQuant(self: QuantScheme) ?ActivationQuant {
+        return switch (self) {
+            .nvfp4 => .nvfp4,
+            .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+        };
+    }
+};
+
+pub const ActivationQuant = enum {
+    nvfp4,
+
+    fn supportedOn(self: ActivationQuant, platform: *const zml.Platform) bool {
+        return switch (self) {
+            .nvfp4 => supportsNvfp4ActivationQuant(platform),
+        };
+    }
+
+    fn apply(self: ActivationQuant, x: Tensor, global_scale: ?Tensor, axis: Shape.Tag) QuantizedActivations {
+        return switch (self) {
+            .nvfp4 => quantizeNvfp4(x, global_scale, axis),
+        };
+    }
+};
+
+pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
+    return scheme == .nvfp4 and weight_dtype == .u8;
+}
+
+// Note: This test will evolve as we support more (for example, MXFP4/8 will be added)
+test "QuantScheme.classify" {
+    const expect = std.testing.expectEqual;
+
+    // unsloth/Qwen3.6-27B-NVFP4: compressed-tensors, carrying both of its schemes under
+    // `weight_scale` -- NVFP4 on the MLPs of layers 0-55, FP8 per-channel everywhere else.
+    const nvfp4_packed: Shape = .init(.{ .dout = 17408, .kw = 2560 }, .u8);
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn)));
+    try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f8e4m3fn),
+        .init(.{ .dout = 17408, .sc = 1 }, .bf16),
+    ));
+
+    // nvidia/Gemma-4-31B-IT-NVFP4: ModelOpt, packed values under the plain `weight` name.
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(
+        .init(.{ .dout = 21504, .kw = 2688 }, .u8),
+        .init(.{ .dout = 21504, .sc = 336 }, .f8e4m3fn),
+    ));
+
+    // Native (unpacked) f4e2m1, with K no longer doubled.
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
+        .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn),
+    ));
+
+    // Qwen/Qwen3.6-27B-FP8: block 128, spelled `weight_scale_inv`.
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f8e4m3fn),
+        .init(.{ .dout = 136, .sc = 40 }, .bf16),
+    ));
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 5120, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 40, .sc = 48 }, .bf16),
+    ));
+
+    // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
+
+    // Rejected: everything no backend here can express.
+    const fp8: Shape = .init(.{ .dout = 10240, .d = 5120 }, .f8e4m3fn);
+    // Group 32 (MXFP4) rather than 16.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e4m3fn)));
+    // e8m0 scales: valid MX, nothing here fuses or expands it.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e8m0)));
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 160 }, .f8e8m0)));
+    // Per-channel, but f32 rather than bf16.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
+    // A block grid that is neither per-channel nor 128x128.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 160, .sc = 80 }, .bf16)));
+    // Stacked MoE weights are rank 3 and go through the MoE path, not this one.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .expert = 128, .dout = 1408, .kw = 1408 }, .u8),
+        .init(.{ .expert = 128, .dout = 1408, .sc = 176 }, .f8e4m3fn),
+    ));
+
+    // A one-tile block grid is indistinguishable from a per-tensor scale by shape alone; the
+    // `count() > 1` guard on the grids is what makes per-tensor win.
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(
+        .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .bf16),
+    ));
+}
+
+/// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
+/// which is merged with the unpacked pair and renamed to `k_tag`.
 pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
     stdx.debug.assert(w.dtype() == .u8, "unpackNvfp4 expects packed u8 weights, got {}", .{w.dtype()});
-    return w.bitCast(.f4e2m1)
+    return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ .kw, .bitcast } })
         .renameTag(.kb, Shape.toTag(k_tag));
 }
 
-pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) struct {
+pub const QuantizedActivations = struct {
     values: Tensor,
     scales: Tensor,
-} {
-    const block_size = 16;
+};
+
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) QuantizedActivations {
+    const block_size = nvfp4_block_size;
     const value_max = 6.0;
     const scale_min_normal = 0x1p-6;
     const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
@@ -178,12 +346,13 @@ pub fn scaledDot(
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
-        var lhs_scale_shape = lhs.shape().withDtype(.bf16);
-        for (0..lhs.rank()) |i| {
-            lhs_scale_shape = lhs_scale_shape.setDim(i, 1);
-        }
-        break :blk Tensor.constantTensor(lhs_scale_shape, DataType.bf16.one().asBytes());
+        break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
     };
+
+    const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
+        rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
+    else
+        rhs_scale;
 
     const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
@@ -197,13 +366,23 @@ pub fn scaledDot(
         }),
     });
 
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale };
+    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
 
     const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
     });
 
     return outs[0];
+}
+
+/// `shape` with every dimension collapsed to 1
+fn onesGrid(shape: Shape, dt: DataType) Shape {
+    var res = shape.withDtype(dt);
+    for (0..res.rank()) |i| {
+        res = res.setDim(i, 1);
+    }
+
+    return res;
 }
 
 fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
@@ -229,13 +408,20 @@ fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
 }
 
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
-    const combined: ?Tensor = if (igs) |i|
-        (if (wgs) |w| i.mul(w) else i)
-    else
-        wgs;
-    const alpha = combined orelse return acc;
-    const f32_acc = acc.convert(.f32);
-    return f32_acc.mul(alpha.broad(f32_acc.shape())).convert(acc.dtype());
+    if (igs == null and wgs == null) {
+        return acc;
+    }
+
+    var res = acc.convert(.f32);
+    if (wgs) |w| {
+        res = res.mul(w.convert(.f32).broad(res.shape()));
+    }
+
+    if (igs) |i| {
+        res = res.mul(i.convert(.f32).broad(res.shape()));
+    }
+
+    return res.convert(acc.dtype());
 }
 
 pub const TokenEmbedding = struct {

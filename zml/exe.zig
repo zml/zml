@@ -327,7 +327,9 @@ pub const Exe = struct {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
                         if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                            ev.await(self.platform.pjrt_api, io.?) catch |err| {
+                                std.debug.panic("PJRT execution failed with: {}", .{err});
+                            };
                         }
                         ev.deinit(self.platform.pjrt_api);
                     }
@@ -336,7 +338,10 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
-                        ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                        ev.await(self.platform.pjrt_api, io.?) catch |err| {
+                            std.debug.panic("PJRT execution failed with: {}", .{err});
+                        };
+                        ev.deinit(self.platform.pjrt_api);
                     }
                 }
             },
