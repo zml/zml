@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "milestone": 5,
+  "generator": "tools/kimi_k3/export_primitive_reference.py",
+  "seed": 20260819,
+  "tensor_count": 42,
+  "tensor_semantic_sha256": "c0ee3f15f6762b895943740e18f48fc73fd4edf5e1b86b0a3bed11a3002c33a5",
+  "source_shards": {
+    "model-00001-of-000096.safetensors": "975584c00f85a95fce8ae0f840af8cef69c2ef4db00d34cab3e2cbdfc60f6e51",
+    "model-00002-of-000096.safetensors": "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"
+  },
+  "selected_real_slice_sha256": {
+    "rms_real.weight": "74177ae149c5b29b39ac14ef5a7cb0cea8c922c8102ccbbaddc10275960ab099",
+    "mxfp4_real.packed": "b5df6c06d2f9ff2f61ae0345eb07af2c6d5ce568b6f13319eee9e0c30ec4a879",
+    "mxfp4_real.scale_e8m0": "ef90d9c1ec76b1edc9edfaf2c0c05359c10ccc49ae8ecf7b7fd25ce9c02e86a4"
+  }
+}

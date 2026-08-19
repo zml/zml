@@ -7,5 +7,6 @@ pub const Config = model.Config;
 pub const Buffers = model.Buffers;
 pub const Model = model.Model;
 pub const LoadedModel = model.LoadedModel;
+pub const primitives = @import("kimi_k3/primitives.zig");
 pub const session = @import("kimi_k3/session.zig");
 pub const Session = session.Session;
