@@ -72,6 +72,7 @@ pub const LoadedModel = struct {
         generation: common.GenerationOptions,
     ) !LoadedModel {
         return initWithOptions(allocator, io, repo, store, .{
+            .index_topk_override = generation.glm_index_topk,
             .sampling_strategy = generation.sampling_strategy,
         });
     }
@@ -220,7 +221,7 @@ pub const Model = struct {
         var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 32,
             .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
+            .parallelism = 32,
         });
         defer loader.deinit();
 
@@ -243,11 +244,25 @@ pub const Model = struct {
         }
         try loader.await(io);
 
-        // Hub checkpoints store each expert projection separately. Pack those tensors once at
-        // load time into the layout consumed by zml.moe, with the expert axis sharded.
-        for (self.layers, buffers.layers) |layer, *layer_buffers| switch (layer.feed_forward) {
+        // Hub checkpoints store every expert projection separately. Concatenate their bytes
+        // directly in final row-major order, then upload only each device's expert shard.
+        // Reuse one staging allocation across every layer. Allocating these multi-gigabyte
+        // projections separately makes the kernel demand-zero every page before each load.
+        var expert_staging_size: usize = 0;
+        for (self.layers) |layer| switch (layer.feed_forward) {
             .dense => {},
             .sparse => |moe| {
+                expert_staging_size = @max(expert_staging_size, moe.experts.gate_up_proj.shape().byteSize());
+                expert_staging_size = @max(expert_staging_size, moe.experts.down_proj.shape().byteSize());
+            },
+        };
+        const expert_staging = try allocator.alloc(u8, expert_staging_size);
+        defer allocator.free(expert_staging);
+
+        for (self.layers, buffers.layers, 0..) |layer, *layer_buffers, layer_index| switch (layer.feed_forward) {
+            .dense => {},
+            .sparse => |moe| {
+                const started: std.Io.Timestamp = .now(io, .awake);
                 try loadPackedExperts(
                     allocator,
                     io,
@@ -258,7 +273,9 @@ pub const Model = struct {
                     progress,
                     moe.experts,
                     &layer_buffers.feed_forward.sparse.experts,
+                    expert_staging,
                 );
+                log.info("Loaded expert layer {} [{f}]", .{ layer_index, started.untilNow(io, .awake) });
             },
         };
 
@@ -986,36 +1003,6 @@ fn applyCausalMask(scores: zml.Tensor, positions: zml.Tensor, key_tag: anytype) 
     return zml.Tensor.select(valid, scores, zml.Tensor.constant(scores.dtype().minValue()).broad(scores.shape()));
 }
 
-fn sourceInputs(allocator: std.mem.Allocator, store: *const zml.io.TensorStore, tensor: zml.Tensor) ![]zml.Tensor {
-    const sources = store.getSourcesById(tensor.id) orelse return error.MissingExpertWeights;
-    const inputs = try allocator.alloc(zml.Tensor, sources.len);
-    for (sources, inputs) |source, *input| input.* = .fromShape(source.shape.withReplicatedPartitioning());
-    return inputs;
-}
-
-fn packGateUp(inputs: []const zml.Tensor) zml.Tensor {
-    const allocator = zml.module.CompilationContext.current().allocator;
-    const expert_count = @divExact(inputs.len, 2);
-    const experts = allocator.alloc(zml.Tensor, expert_count) catch @panic("OOM");
-    defer allocator.free(experts);
-    for (experts, 0..) |*expert, i| {
-        expert.* = zml.Tensor.concatenate(&.{ inputs[2 * i], inputs[2 * i + 1] }, 0).insertAxes(0, .{.expert});
-    }
-    return zml.Tensor.concatenate(experts, .expert)
-        .withTags(.{ .expert, .dout, .d })
-        .withPartitioning(.{ .expert = .experts, .dout = .replicated, .d = .replicated });
-}
-
-fn packDown(inputs: []const zml.Tensor) zml.Tensor {
-    const allocator = zml.module.CompilationContext.current().allocator;
-    const experts = allocator.alloc(zml.Tensor, inputs.len) catch @panic("OOM");
-    defer allocator.free(experts);
-    for (inputs, experts) |input, *expert| expert.* = input.insertAxes(0, .{.expert});
-    return zml.Tensor.concatenate(experts, .expert)
-        .withTags(.{ .expert, .dout, .d })
-        .withPartitioning(.{ .expert = .experts, .dout = .replicated, .d = .replicated });
-}
-
 fn loadPackedExperts(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1026,20 +1013,80 @@ fn loadPackedExperts(
     progress: *std.Progress.Node,
     experts: Experts,
     buffers: *zml.Bufferized(Experts),
+    staging: []u8,
 ) !void {
-    var arena_state: std.heap.ArenaAllocator = .init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    try loadConcatenatedSources(allocator, io, platform, loader, store, shardings, progress, "gate_up", experts.gate_up_proj, &buffers.gate_up_proj, staging);
+    try loadConcatenatedSources(allocator, io, platform, loader, store, shardings, progress, "down", experts.down_proj, &buffers.down_proj, staging);
+}
 
-    const gate_up_inputs = try sourceInputs(allocator, store, experts.gate_up_proj);
-    defer allocator.free(gate_up_inputs);
-    const gate_up_exe = try platform.compileFn(allocator, io, packGateUp, .{gate_up_inputs}, .{ .shardings = shardings });
-    defer gate_up_exe.deinit();
-    try loader.loadExecute(arena, io, experts.gate_up_proj, &buffers.gate_up_proj, store, shardings, &gate_up_exe, .{ .progress = progress });
+fn loadConcatenatedSources(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    loader: *zml.io.Loader,
+    store: *const zml.io.TensorStore,
+    shardings: []const zml.Sharding,
+    progress: *std.Progress.Node,
+    projection_name: []const u8,
+    tensor: zml.Tensor,
+    buffer: *zml.Buffer,
+    staging: []u8,
+) !void {
+    const sources = store.getSourcesById(tensor.id) orelse return error.MissingExpertWeights;
+    const total_bytes = tensor.shape().byteSize();
+    if (staging.len < total_bytes) return error.ExpertStagingBufferTooSmall;
+    const packed_bytes = staging[0..total_bytes];
+    const loaded = try allocator.alloc(bool, sources.len);
+    defer allocator.free(loaded);
+    @memset(loaded, false);
 
-    const down_inputs = try sourceInputs(allocator, store, experts.down_proj);
-    defer allocator.free(down_inputs);
-    const down_exe = try platform.compileFn(allocator, io, packDown, .{down_inputs}, .{ .shardings = shardings });
-    defer down_exe.deinit();
-    try loader.loadExecute(arena, io, experts.down_proj, &buffers.down_proj, store, shardings, &down_exe, .{ .progress = progress });
+    const scale = 1024;
+    var node = progress.start("Loading concatenated expert projection", total_bytes / scale);
+    defer node.end();
+
+    var source_bytes: usize = 0;
+    for (sources) |source| source_bytes = std.math.add(usize, source_bytes, @intCast(source.byteSize())) catch return error.InvalidExpertBindingSize;
+    if (source_bytes != packed_bytes.len) return error.InvalidExpertBindingSize;
+
+    const read_started: std.Io.Timestamp = .now(io, .awake);
+    var offset: usize = 0;
+    for (sources, loaded) |source, *source_loaded| {
+        const source_size: usize = @intCast(source.byteSize());
+        loader.group.async(io, readExpertSource, .{
+            io,
+            source,
+            packed_bytes[offset..][0..source_size],
+            source_loaded,
+        });
+        offset += source_size;
+    }
+
+    try loader.await(io);
+    const read_elapsed = read_started.untilNow(io, .awake);
+    for (loaded) |source_loaded| if (!source_loaded) return error.ExpertLoadFailed;
+    node.setCompletedItems(total_bytes / scale);
+    _ = loader.bytes_loaded.fetchAdd(total_bytes, .monotonic);
+
+    const sharding = zml.Sharding.pickSharding(shardings, tensor.shape(), .explicit_axis_binding) orelse platform.replicated_sharding;
+    const upload_started: std.Io.Timestamp = .now(io, .awake);
+    buffer.* = try zml.Buffer.fromBytes(io, platform, tensor.shape(), sharding, packed_bytes);
+    log.debug("Loaded {s} expert projection [pack={f}, upload={f}]", .{ projection_name, read_elapsed, upload_started.untilNow(io, .awake) });
+}
+
+fn readExpertSource(
+    io: std.Io,
+    source: *const zml.safetensors.Tensor,
+    destination: []u8,
+    loaded: *bool,
+) void {
+    var reader = source.reader(io, &.{}, .{}) catch |err| {
+        log.err("Failed to open expert tensor {s}: {}", .{ source.name, err });
+        return;
+    };
+    defer reader.deinit();
+    _ = reader.interface.readSliceAll(destination) catch |err| {
+        log.err("Failed to read expert tensor {s}: {}", .{ source.name, err });
+        return;
+    };
+    loaded.* = true;
 }

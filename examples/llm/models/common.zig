@@ -9,6 +9,7 @@ pub const SessionOptions = struct {
 
 pub const GenerationOptions = struct {
     sampling_strategy: zml.nn.SamplingStrategy = .{},
+    glm_index_topk: ?u32 = null,
 };
 
 pub const Phase = enum {

@@ -18,8 +18,10 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
+    glm_index_topk: ?u32 = null,
     backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
+    gpu_memory_fraction: f32 = 0.90,
     profile: bool = false,
 
     pub const help =
@@ -32,8 +34,12 @@ const Args = struct {
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
+        \\   --glm-index-topk=<number>
+        \\                       Override GLM's DSA index width for reduced-memory bring-up
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
+        \\   --gpu-memory-fraction=<number>
+        \\                       Fraction of each GPU available to XLA's allocator (default: 0.90)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
@@ -83,7 +89,12 @@ pub fn main(init: std.process.Init) !void {
     //
     // Platform and Backend Selection
     //
-    const platform: *zml.Platform = try .auto(allocator, io, .{});
+    const platform: *zml.Platform = try .auto(allocator, io, .{
+        .xla_gpu = .{ .allocator = .{ .bfc = .{
+            .preallocate = true,
+            .memory_fraction = args.gpu_memory_fraction,
+        } } },
+    });
     defer platform.deinit(allocator, io);
 
     log.info("\n{f}", .{platform.fmtVerbose()});
@@ -115,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         .sampling_strategy = .{
             .topk = args.topk,
         },
+        .glm_index_topk = args.glm_index_topk,
     };
 
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
