@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "implementation_root": "/ephemeral/kimi-k3/zml",
+    "inference_backend": "nvidia_gpu_only",
+    "cpu_inference_fallback": false,
+    "model_weight_downloads": false,
+    "local_checkpoint_root": "/ephemeral/kimi-k3/moonshot/kimi-k3"
+  },
+  "zml": {
+    "repository": "https://github.com/zml/zml.git",
+    "commit": "49a12235bb4be0a674f0937cc60cc0265a4f65a2",
+    "license": "Apache-2.0",
+    "license_sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  "supplied_zml_snapshot": {
+    "matched_commit": "c58d81a7b3b2be54d418774c63bd05521e1af337",
+    "comparison": "byte-identical to the official commit, excluding generated bazel-* links",
+    "disposition": "replaced as the target by the plan-pinned clean checkout"
+  },
+  "moonshot": {
+    "repository": "https://huggingface.co/moonshotai/Kimi-K3",
+    "commit": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
+    "license": "Kimi K3 License",
+    "license_sha256": "20c797ce19af0c17de52c6afb144644768a591c521655f5ebf5712c9850f2887",
+    "source_manifest": "docs/kimi_k3/moonshot-source-sha256.json"
+  },
+  "donors": {
+    "brabier/glm5.2": {
+      "repository": "https://github.com/zml/zml.git",
+      "commit": "b4f0af76e4c464c0f533420b94fdb1fba838c5e3",
+      "license": "Apache-2.0",
+      "license_sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    "dmehala/deepseek-v4": {
+      "repository": "https://github.com/zml/zml.git",
+      "commit": "c47c0f099bfc892d9509dc7f1fe77899152d233e",
+      "license": "Apache-2.0",
+      "license_sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    }
+  },
+  "checkpoint_files": {
+    "model-00001-of-000096.safetensors": {
+      "bytes": 2341216112,
+      "sha256": "975584c00f85a95fce8ae0f840af8cef69c2ef4db00d34cab3e2cbdfc60f6e51"
+    },
+    "model-00002-of-000096.safetensors": {
+      "bytes": 16990911504,
+      "sha256": "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"
+    },
+    "model-00003-of-000096.safetensors": {
+      "bytes": 16990911504,
+      "sha256": "e54af9de4c554956082364010f732443bcd5097390f0121a33fb35e37280b5a9"
+    },
+    "model-00004-of-000096.safetensors": {
+      "bytes": 16567501776,
+      "sha256": "5955fd8feda89b1af8400c25e885e7177d47edff155f54b318beb8dd1cec5c05"
+    },
+    "model-00094-of-000096.safetensors": {
+      "bytes": 4697664072,
+      "sha256": "ad66e1cb96b86963e63d6a0a466b6a407b13c9815cb480fe612480cc6bb3b6e1"
+    }
+  },
+  "checkpoint_metadata": {
+    "model.safetensors.index.json": {
+      "bytes": 59764096,
+      "sha256": "a1c5210650ce71d2d3ae9ec5a101ac4afd3cf4b10091be589853437eb967febd"
+    },
+    "tiktoken.model": {
+      "bytes": 2795286,
+      "sha256": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103"
+    }
+  },
+  "toolchain": {
+    "bazel": "9.1.1",
+    "zig": "0.16.0 (Bazel toolchain)",
+    "python": "3.12.14",
+    "uv": "0.12.5",
+    "torch": "2.11.0+cu128",
+    "torch_cuda": "12.8",
+    "nvidia_driver_api_detected": "12.8",
+    "nvidia_smi": "present but unable to communicate with the driver in this container",
+    "cuda_available_in_container": false,
+    "pjrt_nvidia": "not available in this container"
+  },
+  "study_bundle_manifest": {
+    "path": "doc/SHA256SUMS.txt",
+    "sha256": "c7d9d4a1ee3c57990469a7fa31bf10b72aada203bfba05e14471ac0406978cae"
+  }
+}

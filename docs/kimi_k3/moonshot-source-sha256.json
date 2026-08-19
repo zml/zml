@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "repository": "https://huggingface.co/moonshotai/Kimi-K3",
+  "commit": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
+  "files": {
+    "LICENSE": "20c797ce19af0c17de52c6afb144644768a591c521655f5ebf5712c9850f2887",
+    "config.json": "9710e121a58d03ac92c8d6da287a19541994319afbbe6d6202af001ffd379213",
+    "configuration_kimi_k3.py": "735eb9ebe593e17d231e08e1df7f7be9b5ee0e079f511aa201f9572077b416ae",
+    "encoding_k3.py": "b9cb7ae100fed34b9337f80dacee5abbf7e261fe9b74bc0e76366701d46f5333",
+    "generation_config.json": "c6648c25e9705af7fba8847e243840d21b5cc63ddeb6297f750a7ddbb6a02836",
+    "kimi_k3_processor.py": "ec9f7e86d2ab0eee07a8e7e7c037046e77ac3c25a710ad1298ec13be3b585b54",
+    "kimi_k3_vision_processing.py": "d122b30bfd3a51a6f05d4bfcfda1e657827322b1353f7caefeebc2835d7736b5",
+    "media_utils.py": "78403540328f9847d6b7ebc5c44eb2e6a752863de0afb7d0710728bb161dc60d",
+    "model.safetensors.index.json": "a1c5210650ce71d2d3ae9ec5a101ac4afd3cf4b10091be589853437eb967febd",
+    "modeling_kimi_k3.py": "b9171c96726eda55234c92ac8dfae7e24c512fda68968ae8f2c3782b42665ea2",
+    "modeling_kimi_linear.py": "9e3564c70ac21854ce5a090cc946c5dc76b70d1050ef50840449181a20fff44a",
+    "preprocessor_config.json": "4be333605990c53a816e586dee9d5dd545afb7a59947c17f8f7ef26b4782668e",
+    "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+    "tokenization_kimi.py": "f28ea66e2d862a2a5814970b2ce40c2f7d8296ff09aed90a7e7def689b906944",
+    "tokenizer_config.json": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e"
+  }
+}
