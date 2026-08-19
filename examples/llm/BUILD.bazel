@@ -127,6 +127,16 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# KIMI_K3_TEMP_REMOVE_M20: expanded MLA Gate C differential harness is
+# retained during bring-up and removed after latent-cache tests replace it.
+zig_binary(
+    name = "kimi_k3_mla_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_mla_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 # KIMI_K3_TEMP_REMOVE_M20: temporary construction/explain binary for bring-up;
 # remove it when the production LLM CLI exposes the validated K3 explain path.
 zig_binary(

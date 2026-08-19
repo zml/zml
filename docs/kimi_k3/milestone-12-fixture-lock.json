@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "milestone": 12,
+  "generator": "tools/kimi_k3/export_mla_reference.py",
+  "lengths": [1, 4, 8, 16],
+  "decode_past_length": 4,
+  "boundary_count_per_case": 28,
+  "tensor_count": 150,
+  "tensor_semantic_sha256": "e642fb2ccf9fda74a7cfb013eb330a2c697c8511874d0aae0b0296d312c787a2",
+  "checkpoint_shards": {
+    "model-00004-of-000096.safetensors": "5955fd8feda89b1af8400c25e885e7177d47edff155f54b318beb8dd1cec5c05"
+  },
+  "cache_kind": "expanded per-head K/V correctness oracle"
+}

@@ -14,5 +14,6 @@ pub const kda_cache = @import("kimi_k3/kda_cache.zig");
 pub const layer = @import("kimi_k3/layer.zig");
 pub const router = @import("kimi_k3/router.zig");
 pub const moe = @import("kimi_k3/moe.zig");
+pub const mla = @import("kimi_k3/mla.zig");
 pub const session = @import("kimi_k3/session.zig");
 pub const Session = session.Session;
