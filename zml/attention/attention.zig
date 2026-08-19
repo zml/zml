@@ -5,6 +5,7 @@ const attnd = @import("attnd.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
 const nki = @import("nki/attention.zig");
+const vulkan = @import("vulkan_attention.zig");
 
 const Attention = @This();
 
@@ -15,6 +16,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
     metal_fa,
+    vulkan_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -32,7 +34,8 @@ pub const Backend = enum {
             },
             .neuron => .nki,
             .metal => .metal_fa,
-            .cpu, .rocm, .tpu, .oneapi, .vulkan => .vanilla,
+            .vulkan => .vulkan_fa,
+            .cpu, .rocm, .tpu, .oneapi => .vanilla,
         };
     }
 };
@@ -44,6 +47,7 @@ pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
     metal_fa: void,
+    vulkan_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -52,6 +56,7 @@ pub const Parameters = union(Backend) {
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
         metal_fa: void,
+        vulkan_fa: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
@@ -61,6 +66,7 @@ pub const Parameters = union(Backend) {
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
                 .metal_fa => .{ .metal_fa = {} },
+                .vulkan_fa => .{ .vulkan_fa = {} },
             };
         }
     };
@@ -73,6 +79,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
             .metal_fa => .{ .metal_fa = {} },
+            .vulkan_fa => .{ .vulkan_fa = {} },
         };
     }
 };
@@ -84,6 +91,7 @@ pub const Metadata = union(Backend) {
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
     metal_fa: metal.Metadata,
+    vulkan_fa: vulkan.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -92,6 +100,7 @@ pub const Metadata = union(Backend) {
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
         metal_fa: void,
+        vulkan_fa: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
@@ -101,6 +110,7 @@ pub const Metadata = union(Backend) {
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .metal_fa => .{ .metal_fa = {} },
+                .vulkan_fa => .{ .vulkan_fa = {} },
             };
         }
     };
@@ -113,6 +123,7 @@ pub const Metadata = union(Backend) {
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
             .metal_fa => .{ .metal_fa = .init() },
+            .vulkan_fa => .{ .vulkan_fa = vulkan.Metadata.init() },
         };
     }
 
@@ -132,6 +143,7 @@ pub const Metadata = union(Backend) {
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
             .metal_fa => |*v| metal.Metadata.deinitBuffer(v),
+            .vulkan_fa => |*v| vulkan.Metadata.deinitBuffer(v),
         }
     }
 };
@@ -149,21 +161,24 @@ pub const Metadata = union(Backend) {
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     return switch (parameters) {
-        .vanilla => b: {
-            // Generate the attention mask.
-            const seq_len = k.dim(.k);
-            var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
-
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
-            break :b attn_output;
-        },
+        .vanilla => vanillaAttention(q, k, v, token_index),
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
         .nki => |params| nki.attention(q, k, v, token_index, params),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
+        .vulkan_fa => if (q.dtype() == .bf16 and q.dim(.hd) >= 16 and q.dim(.hd) <= 256 and @mod(q.dim(.hd), 16) == 0 and @mod(q.dim(.h), k.dim(.h)) == 0)
+            vulkan.attention(q, k, v, token_index, metadata.vulkan_fa)
+        else
+            vanillaAttention(q, k, v, token_index),
     };
+}
+
+fn vanillaAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
+    const seq_len = k.dim(.k);
+    var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
+
+    // XLA folds this full logical mask into the downstream attention operations.
+    attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
+    return zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
 }
