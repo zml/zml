@@ -236,15 +236,13 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 
 // State union tagged on target platform to handle related resources
 pub const State = union(Target) {
-    cpu: EmptyState,
+    cpu: void,
     cuda: CudaState,
-    rocm: EmptyState,
-    tpu: EmptyState,
-    neuron: EmptyState,
-    oneapi: EmptyState,
-    metal: EmptyState,
-
-    pub const EmptyState = struct {};
+    rocm: void,
+    tpu: void,
+    neuron: void,
+    oneapi: void,
+    metal: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -259,13 +257,13 @@ pub const State = union(Target) {
 
     pub fn init(target: Target) State {
         return switch (target) {
-            .cpu => .{ .cpu = .{} },
+            .cpu => .{ .cpu = void },
             .cuda => .{ .cuda = .{} },
-            .rocm => .{ .rocm = .{} },
-            .tpu => .{ .tpu = .{} },
-            .neuron => .{ .neuron = .{} },
-            .oneapi => .{ .oneapi = .{} },
-            .metal => .{ .metal = .{} },
+            .rocm => .{ .rocm = void },
+            .tpu => .{ .tpu = void },
+            .neuron => .{ .neuron = void },
+            .oneapi => .{ .oneapi = void },
+            .metal => .{ .metal = void },
         };
     }
 
