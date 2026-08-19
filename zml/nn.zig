@@ -28,7 +28,7 @@ pub const Linear = struct {
         input_scale: ?TensorScale = null,
     };
 
-    // Subject to change if doing operations at load time becomes easier
+    /// A per-tensor scale and the polarity its producer wrote it in
     pub const TensorScale = struct {
         value: Tensor,
         direction: Direction,
@@ -161,10 +161,6 @@ pub const ActivationQuant = enum {
 
 pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
     return scheme == .nvfp4 and weight_dtype == .u8;
-}
-
-pub fn storedContractionTag(scheme: ?QuantScheme, weight_dtype: DataType, k_tag: Shape.Tag) Shape.Tag {
-    return if (isPackedNvfp4(scheme, weight_dtype)) Shape.toTag(.kw) else k_tag;
 }
 
 // Note: This test will evolve as we support more (for example, MXFP4/8 will be added)
@@ -353,9 +349,6 @@ pub fn scaledDot(
         break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
     };
 
-    // XLA's composite rewriter requires a scale to have the rank of the operand it scales, so a
-    // per-tensor scale goes in as an all-ones grid. A scalar would leave the composite
-    // unclaimed, which is a compile failure naming `zml$scaled_dot_unmatched`, not a slow path.
     const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
         rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
     else
@@ -382,11 +375,13 @@ pub fn scaledDot(
     return outs[0];
 }
 
-/// `shape` with every dimension collapsed to 1: the shape a scale takes when it is constant
-/// over the operand it scales.
+/// `shape` with every dimension collapsed to 1
 fn onesGrid(shape: Shape, dt: DataType) Shape {
     var res = shape.withDtype(dt);
-    for (0..res.rank()) |i| res = res.setDim(i, 1);
+    for (0..res.rank()) |i| {
+        res = res.setDim(i, 1);
+    }
+
     return res;
 }
 
@@ -412,15 +407,20 @@ fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
     return major >= 10;
 }
 
-/// Rescales an accumulator by the per-tensor scales the quantized dot left out. `wgs` is a
-/// scalar for a single projection and one value per output channel for a fused one. The two are
-/// applied separately rather than pre-multiplied, so a scalar and a vector can mix.
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
-    if (igs == null and wgs == null) return acc;
+    if (igs == null and wgs == null) {
+        return acc;
+    }
 
     var res = acc.convert(.f32);
-    if (wgs) |w| res = res.mul(w.convert(.f32).broad(res.shape()));
-    if (igs) |i| res = res.mul(i.convert(.f32).broad(res.shape()));
+    if (wgs) |w| {
+        res = res.mul(w.convert(.f32).broad(res.shape()));
+    }
+
+    if (igs) |i| {
+        res = res.mul(i.convert(.f32).broad(res.shape()));
+    }
+
     return res.convert(acc.dtype());
 }
 
