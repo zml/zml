@@ -168,13 +168,6 @@ pub const Variant = enum {
 
 const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
-pub fn getRunners(platform: *const zml.Platform) ?*Runners {
-    return switch (platform.state) {
-        .cuda => |cuda_state| cuda_state.fi_cutlass_moe_runners,
-        else => null,
-    };
-}
-
 pub const Runners = struct {
     runners: [std.meta.fields(Variant).len][max_num_devices]?DeviceRunner =
         @splat(@splat(null)),
@@ -248,7 +241,8 @@ fn runnersFromAttributes(attributes: Attributes) !*Runners {
 
 fn currentRunners() !*Runners {
     const platform = zml.module.CompilationContext.current().platform;
-    return getRunners(platform) orelse error.RunnersNotLoaded;
+    const runners = platform.state.cuda.fi_cutlass_moe_runners;
+    return runners orelse error.RunnersNotLoaded;
 }
 
 fn cutlassActivation(activation: Activation) i32 {
@@ -422,13 +416,13 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (getRunners(platform) == null) return false;
+    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;
 }
 
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
-    if (getRunners(platform) == null) return false;
+    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
     return compute_capability == 100 or compute_capability == 120;
 }
@@ -438,7 +432,7 @@ pub fn tacticCounts(
     device: i32,
     variant: Variant,
 ) !struct { gemm1: i32, gemm2: i32 } {
-    const runners = getRunners(platform) orelse return error.RunnersNotLoaded;
+    const runners = platform.state.cuda.fi_cutlass_moe_runners orelse return error.RunnersNotLoaded;
     const deviceRunner = try runners.ensureRunner(device, variant);
     var gemm1: i32 = 0;
     var gemm2: i32 = 0;

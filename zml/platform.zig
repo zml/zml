@@ -257,13 +257,13 @@ pub const State = union(Target) {
 
     pub fn init(target: Target) State {
         return switch (target) {
-            .cpu => .{ .cpu = void },
+            .cpu => .{ .cpu = {} },
             .cuda => .{ .cuda = .{} },
-            .rocm => .{ .rocm = void },
-            .tpu => .{ .tpu = void },
-            .neuron => .{ .neuron = void },
-            .oneapi => .{ .oneapi = void },
-            .metal => .{ .metal = void },
+            .rocm => .{ .rocm = {} },
+            .tpu => .{ .tpu = {} },
+            .neuron => .{ .neuron = {} },
+            .oneapi => .{ .oneapi = {} },
+            .metal => .{ .metal = {} },
         };
     }
 
