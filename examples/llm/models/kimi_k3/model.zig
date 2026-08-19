@@ -178,6 +178,88 @@ pub const CachePlan = struct {
     }
 };
 
+/// Stable mapping from logical layers to packed per-family cache arrays.
+/// Attention Residual workspace is deliberately absent: it is block-local
+/// scratch state, not token-persistent generation state.
+pub const CacheOrdinal = union(enum) {
+    kda: usize,
+    mla: usize,
+};
+
+pub const CacheMemory = struct {
+    kda_bytes: u64,
+    mla_bytes: u64,
+    total_bytes: u64,
+};
+
+pub const PackedCachePlan = struct {
+    layer_ordinals: []CacheOrdinal,
+    kda_count: usize,
+    mla_count: usize,
+    attn_res_persisted: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, config: Config) !PackedCachePlan {
+        const layer_count: usize = @intCast(config.text_config.num_hidden_layers);
+        const ordinals = try allocator.alloc(CacheOrdinal, layer_count);
+        errdefer allocator.free(ordinals);
+        var kda_count: usize = 0;
+        var mla_count: usize = 0;
+        for (ordinals, 0..) |*cache_ordinal, logical_index| {
+            if (config.text_config.isKdaLayer(logical_index)) {
+                cache_ordinal.* = .{ .kda = kda_count };
+                kda_count += 1;
+            } else {
+                cache_ordinal.* = .{ .mla = mla_count };
+                mla_count += 1;
+            }
+        }
+        return .{
+            .layer_ordinals = ordinals,
+            .kda_count = kda_count,
+            .mla_count = mla_count,
+        };
+    }
+
+    pub fn deinit(self: PackedCachePlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.layer_ordinals);
+    }
+
+    pub fn ordinal(self: PackedCachePlan, logical_layer: usize) !CacheOrdinal {
+        if (logical_layer >= self.layer_ordinals.len) return error.CacheLayerOutOfRange;
+        return self.layer_ordinals[logical_layer];
+    }
+
+    /// Validate an append before any dynamic cache write. The checked add
+    /// distinguishes integer overflow from a configured context overflow.
+    pub fn validateAppend(position: u64, new_tokens: u64, max_tokens: u64) !u64 {
+        const end = std.math.add(u64, position, new_tokens) catch return error.CachePositionOverflow;
+        if (end > max_tokens) return error.CacheCapacityExceeded;
+        return end;
+    }
+
+    /// Persistent cache bytes for BF16 convolution/MLA state and FP32 KDA
+    /// recurrence. AttnRes contributes zero persistent bytes by contract.
+    pub fn memoryBytes(self: PackedCachePlan, batch: u64, mla_tokens: u64) !CacheMemory {
+        const conv_values_per_kda: u64 = 3 * 12288 * 4;
+        const recurrent_values_per_kda: u64 = 96 * 128 * 128;
+        const conv_bytes_per_kda = try std.math.mul(u64, conv_values_per_kda, 2);
+        const recurrent_bytes_per_kda = try std.math.mul(u64, recurrent_values_per_kda, 4);
+        const kda_bytes_per_layer = try std.math.add(u64, conv_bytes_per_kda, recurrent_bytes_per_kda);
+        var kda_bytes = try std.math.mul(u64, kda_bytes_per_layer, @intCast(self.kda_count));
+        kda_bytes = try std.math.mul(u64, kda_bytes, batch);
+
+        const mla_bytes_per_layer_token: u64 = (512 + 64) * 2;
+        var mla_bytes = try std.math.mul(u64, mla_bytes_per_layer_token, @intCast(self.mla_count));
+        mla_bytes = try std.math.mul(u64, mla_bytes, batch);
+        mla_bytes = try std.math.mul(u64, mla_bytes, mla_tokens);
+        return .{
+            .kda_bytes = kda_bytes,
+            .mla_bytes = mla_bytes,
+            .total_bytes = try std.math.add(u64, kda_bytes, mla_bytes),
+        };
+    }
+};
+
 pub const Model = struct {
     arena: std.heap.ArenaAllocator,
     layers: []TransformerLayer,

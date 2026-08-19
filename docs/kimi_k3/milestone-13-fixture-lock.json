@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "milestone": 13,
+  "generator": "tools/kimi_k3/export_mla_cache_cases.py",
+  "source_semantic_sha256": "e642fb2ccf9fda74a7cfb013eb330a2c697c8511874d0aae0b0296d312c787a2",
+  "tensor_semantic_sha256": "a1bd9a0d0b2e714c81db811317c2428ec6a1dad0d77bfdc0e18ecc330ace5db3",
+  "tensor_count": 70,
+  "case_count": 14,
+  "full_lengths": [1, 4, 8, 16],
+  "split_points": [1, 2, 3],
+  "repeated_decode_steps": 4,
+  "cache_values_per_token": 576,
+  "latent_bytes_per_token_layer_bf16": 1152,
+  "all_mla_layers_1m_token_bytes": 27648000000,
+  "all_kda_layers_persistent_bytes_batch1": 454459392,
+  "attn_res_persistent_bytes": 0
+}

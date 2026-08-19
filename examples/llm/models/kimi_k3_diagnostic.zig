@@ -56,6 +56,26 @@ pub fn main(init: std.process.Init) !void {
     var cache_plan = try model.CachePlan.init(allocator, parsed.value, selection);
     defer cache_plan.deinit(allocator);
     if (cache_plan.layers.len != selected_count) return error.CachePlanCountMismatch;
+    var packed_cache = try model.PackedCachePlan.init(allocator, parsed.value);
+    defer packed_cache.deinit(allocator);
+    if (packed_cache.kda_count != 69 or packed_cache.mla_count != 24 or packed_cache.attn_res_persisted) return error.PackedCachePlanMismatch;
+    if (try packed_cache.ordinal(0) != .kda or (try packed_cache.ordinal(0)).kda != 0) return error.KdaCacheOrdinalMismatch;
+    if (try packed_cache.ordinal(3) != .mla or (try packed_cache.ordinal(3)).mla != 0) return error.MlaCacheOrdinalMismatch;
+    if (try packed_cache.ordinal(92) != .mla or (try packed_cache.ordinal(92)).mla != 23) return error.FinalMlaCacheOrdinalMismatch;
+    const million_token_memory = try packed_cache.memoryBytes(1, 1_000_000);
+    if (million_token_memory.kda_bytes != 454_459_392 or
+        million_token_memory.mla_bytes != 27_648_000_000 or
+        million_token_memory.total_bytes != 28_102_459_392)
+    {
+        return error.PackedCacheMemoryMismatch;
+    }
+    if (try model.PackedCachePlan.validateAppend(1_048_575, 1, 1_048_576) != 1_048_576) return error.CacheAppendBoundaryMismatch;
+    if (model.PackedCachePlan.validateAppend(1_048_576, 1, 1_048_576)) |_| {
+        return error.ExpectedCacheCapacityError;
+    } else |err| if (err != error.CacheCapacityExceeded) return err;
+    if (model.PackedCachePlan.validateAppend(std.math.maxInt(u64), 1, std.math.maxInt(u64))) |_| {
+        return error.ExpectedCachePositionOverflow;
+    } else |err| if (err != error.CachePositionOverflow) return err;
     if (!model.Model.isIgnoredTensorName("vision_tower.blocks.0.weight") or
         !model.Model.isIgnoredTensorName("mm_projector.proj.weight") or
         model.Model.isIgnoredTensorName("language_model.model.layers.0.input_layernorm.weight"))
@@ -69,8 +89,15 @@ pub fn main(init: std.process.Init) !void {
     if (args.metadata_only) {
         if (args.expect_missing) return error.ExpectedTensorConstruction;
         try stdout.interface.print(
-            "KIMI_K3_METADATA_PASS layers={} requested_tensors={}\n",
-            .{ selected_count, plannedTensorCount(parsed.value, selection) },
+            "KIMI_K3_METADATA_PASS layers={} requested_tensors={} kda_caches={} mla_caches={} mla_1m_bytes={} attnres_persisted={}\n",
+            .{
+                selected_count,
+                plannedTensorCount(parsed.value, selection),
+                packed_cache.kda_count,
+                packed_cache.mla_count,
+                million_token_memory.mla_bytes,
+                packed_cache.attn_res_persisted,
+            },
         );
         try stdout.interface.flush();
         return;

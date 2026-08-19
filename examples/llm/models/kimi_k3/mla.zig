@@ -20,6 +20,23 @@ pub const ExpandedCache = struct {
     value: zml.Tensor,
 };
 
+/// Production-shaped MLA temporal state: normalized compressed KV plus the
+/// unrotated extra key. This is 576 BF16 values per token and MLA layer.
+pub const LatentCache = struct {
+    compressed: zml.Tensor,
+    extra_key: zml.Tensor,
+};
+
+// KIMI_K3_TEMP_REMOVE_M20: absorbed-query and latent-readout boundaries are
+// returned for cache-algebra differential diagnosis and removed in cleanup.
+pub const LatentResult = struct {
+    output: zml.Tensor,
+    probabilities: zml.Tensor,
+    cache: LatentCache,
+    q_absorbed: zml.Tensor,
+    latent_aggregation: zml.Tensor,
+};
+
 // KIMI_K3_TEMP_REMOVE_M20: named MLA boundaries are returned to the isolated
 // differential harness and removed from the production result during cleanup.
 pub const Result = struct {
@@ -147,4 +164,68 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights) Result {
 /// Readable expanded-cache single-step continuation used for Gate C.
 pub fn decode(hidden: zml.Tensor, weights: Weights, cache: ExpandedCache) Result {
     return core(hidden, weights, cache);
+}
+
+fn latentCore(hidden: zml.Tensor, weights: Weights, past: ?LatentCache) LatentResult {
+    const heads: i64 = 96;
+    const q_a = linear(hidden, weights.q_a_proj, .d);
+    const q_norm = weightedRmsNorm(q_a, weights.q_a_norm, .rank);
+    const q_b = linear(q_norm, weights.q_b_proj, .rank);
+    const q_heads = q_b.splitAxis(.mix, .{ .h = heads, .hd = 192 })
+        .transpose(.{ .b, .h, .s, .hd }).rename(.{ .s = .q });
+    const q_pass = q_heads.slice1d(.hd, .{ .start = 0, .end = 128 });
+    const q_extra = q_heads.slice1d(.hd, .{ .start = 128, .end = 192 });
+
+    const kv_a = linear(hidden, weights.kv_a_proj, .d);
+    const compressed = kv_a.slice1d(.kv_mix, .{ .start = 0, .end = 512 })
+        .rename(.{ .kv_mix = .kv_rank });
+    const compressed_new = weightedRmsNorm(compressed, weights.kv_a_norm, .kv_rank)
+        .rename(.{ .s = .k });
+    const extra_new = kv_a.slice1d(.kv_mix, .{ .start = 512, .end = 576 })
+        .rename(.{ .kv_mix = .hd, .s = .k });
+    const cache: LatentCache = if (past) |previous| .{
+        .compressed = zml.Tensor.concatenate(&.{ previous.compressed, compressed_new }, .k),
+        .extra_key = zml.Tensor.concatenate(&.{ previous.extra_key, extra_new }, .k),
+    } else .{ .compressed = compressed_new, .extra_key = extra_new };
+
+    const kv_up = weights.kv_b_proj.reshape(.{ .h = heads, .kv_width = 256, .kv_rank = 512 });
+    const key_up = kv_up.slice1d(.kv_width, .{ .start = 0, .end = 128 })
+        .rename(.{ .kv_width = .hd });
+    const value_up = kv_up.slice1d(.kv_width, .{ .start = 128, .end = 256 })
+        .rename(.{ .kv_width = .v });
+    const q_absorbed = q_pass.dot(key_up, .hd);
+    const content_scores = q_absorbed.dot(cache.compressed, .kv_rank);
+    const extra_scores = q_extra.dot(cache.extra_key, .hd);
+    const scores = content_scores.add(extra_scores).scale(1.0 / std.math.sqrt(192.0));
+    const past_length: i64 = if (past) |previous| previous.compressed.dim(.k) else 0;
+    const query_index = zml.Tensor.iota(scores.shape(), .q).addConstant(past_length);
+    const key_index = zml.Tensor.iota(scores.shape(), .k);
+    const masked_scores = key_index.cmp(.LE, query_index).select(
+        scores,
+        zml.Tensor.scalar(-std.math.inf(f32), scores.dtype()),
+    );
+    const probabilities = masked_scores.convert(.f32).softmax(.k).convert(q_heads.dtype());
+    const latent_aggregation = probabilities.dot(cache.compressed, .k);
+    const aggregation = latent_aggregation.dot(value_up, .kv_rank);
+    const flattened = aggregation.transpose(.{ .b, .q, .h, .v })
+        .rename(.{ .q = .s }).merge(.{ .out = .{ .h, .v } });
+    const gate = linear(hidden, weights.gate_proj, .d).sigmoid();
+    const output = linear(flattened.mul(gate), weights.output_proj, .out);
+    return .{
+        .output = output,
+        .probabilities = probabilities,
+        .cache = cache,
+        .q_absorbed = q_absorbed,
+        .latent_aggregation = latent_aggregation,
+    };
+}
+
+/// Production-shaped latent-cache causal prefill.
+pub fn latentPrefill(hidden: zml.Tensor, weights: Weights) LatentResult {
+    return latentCore(hidden, weights, null);
+}
+
+/// Production-shaped latent-cache continuation for decode or split prefill.
+pub fn latentContinue(hidden: zml.Tensor, weights: Weights, cache: LatentCache) LatentResult {
+    return latentCore(hidden, weights, cache);
 }
