@@ -327,7 +327,9 @@ pub const Exe = struct {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
                         if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                            ev.await(self.platform.pjrt_api, io.?) catch |err| {
+                                std.debug.panic("PJRT execution failed with: {}", .{err});
+                            };
                         }
                         ev.deinit(self.platform.pjrt_api);
                     }
@@ -336,8 +338,6 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
-                        // A failed execution reports through this event, not through `execute`:
-                        // swallowing it here leaves the caller holding an untouched result buffer.
                         ev.await(self.platform.pjrt_api, io.?) catch |err| {
                             std.debug.panic("PJRT execution failed with: {}", .{err});
                         };
