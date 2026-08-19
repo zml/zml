@@ -273,13 +273,6 @@ pub const State = union(Target) {
             else => {},
         }
     }
-
-    pub fn getCudaState(self: *State) ?*CudaState {
-        return switch (self.*) {
-            .cuda => |*cuda_state| cuda_state,
-            else => null,
-        };
-    }
 };
 
 pub const Platform = struct {

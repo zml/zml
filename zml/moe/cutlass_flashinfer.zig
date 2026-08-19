@@ -395,7 +395,7 @@ pub fn load(
     platform: *zml.Platform,
 ) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        const cuda_state = platform.state.getCudaState() orelse return error.UnsupportedPlatform;
+        var cuda_state = &platform.state.cuda;
         if (cuda_state.fi_cutlass_moe_runners != null) return;
         try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
         const runners = try allocator.create(Runners);
