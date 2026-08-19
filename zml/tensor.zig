@@ -1287,6 +1287,20 @@ pub const Tensor = struct {
         return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice());
     }
 
+    pub const DotPrecision = enum { fast, high, highest };
+
+    /// Matrix multiplication with an explicit StableHLO accumulation precision.
+    /// Use `.highest` for numerically sensitive FP32 reductions such as routing.
+    pub fn dotWithPrecision(lhs: Tensor, rhs: Tensor, args: anytype, precision: DotPrecision) Tensor {
+        const dot_axes = lhs.dotAxes(rhs, args);
+        return lhs.dotGeneralWithPrecision(
+            rhs,
+            dot_axes.contracting.constSlice(),
+            dot_axes.batching.constSlice(),
+            precision,
+        );
+    }
+
     pub const DotAxes = struct {
         contracting: stdx.BoundedArray([2]i8, constants.MAX_RANK),
         batching: stdx.BoundedArray([2]i8, constants.MAX_RANK),
@@ -1391,6 +1405,16 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
+        return lhs.dotGeneralWithPrecision(rhs, contracting_axes, batching_axes, .fast);
+    }
+
+    pub fn dotGeneralWithPrecision(
+        lhs: Tensor,
+        rhs: Tensor,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+        precision: DotPrecision,
+    ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
@@ -1451,7 +1475,11 @@ pub const Tensor = struct {
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
                 .lhs_contracting_dimensions = lhs_contracting_axes.constSlice(),
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
-                .dot_precision = .fast,
+                .dot_precision = switch (precision) {
+                    .fast => .fast,
+                    .high => .high,
+                    .highest => .highest,
+                },
             },
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());

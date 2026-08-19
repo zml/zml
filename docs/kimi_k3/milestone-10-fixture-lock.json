@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "milestone": 10,
+  "generator": "tools/kimi_k3/export_router_reference.py",
+  "cases": ["bias", "grouped", "real", "tie"],
+  "official_checked_rows": 8,
+  "tensor_count": 34,
+  "tensor_file_sha256": "50976775fa1a35be1e0ef379661eddf73164a4a4bf66840e6d46638c1959e46d",
+  "tensor_semantic_sha256": "4eb2f2606d40a86f317253d4baba3329693871ce1742144646c8417a0f5da664",
+  "prefix_fixture_semantic_sha256": "6f35e2906880085829d5e411cc4d7fcc1b598397055fe7460ab91865ab05b15d",
+  "checkpoint_shards": {
+    "model-00002-of-000096.safetensors": "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"
+  },
+  "tie_policy": "stable descending order; exact ties select lower expert index first"
+}
