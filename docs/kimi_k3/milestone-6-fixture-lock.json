@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "milestone": 6,
+  "generator": "tools/kimi_k3/export_attn_res_reference.py",
+  "seed": 20260820,
+  "tensor_count": 120,
+  "tensor_semantic_sha256": "82e7da72316ac98f77fb22f78673479ad4fa666379c8b0493f43a46c80198619",
+  "official_comparison_count": 12,
+  "source_shards": {
+    "model-00001-of-000096.safetensors": "975584c00f85a95fce8ae0f840af8cef69c2ef4db00d34cab3e2cbdfc60f6e51",
+    "model-00002-of-000096.safetensors": "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5",
+    "model-00003-of-000096.safetensors": "e54af9de4c554956082364010f732443bcd5097390f0121a33fb35e37280b5a9",
+    "model-00004-of-000096.safetensors": "5955fd8feda89b1af8400c25e885e7177d47edff155f54b318beb8dd1cec5c05",
+    "model-00094-of-000096.safetensors": "ad66e1cb96b86963e63d6a0a466b6a407b13c9815cb480fe612480cc6bb3b6e1"
+  }
+}

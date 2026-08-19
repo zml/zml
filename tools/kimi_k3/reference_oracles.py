@@ -180,6 +180,52 @@ class RouterResult:
     selection_scores: np.ndarray
 
 
+@dataclass(frozen=True)
+class AttentionResidualResult:
+    output: np.ndarray
+    candidates: np.ndarray
+    scores: np.ndarray
+    masked_scores: np.ndarray
+    probabilities: np.ndarray
+
+
+def attention_residual_select(
+    prefix_sum: np.ndarray,
+    block_sources: np.ndarray,
+    active_mask: np.ndarray,
+    norm_weight: np.ndarray,
+    projection_weight: np.ndarray,
+    eps: float = 1e-6,
+) -> AttentionResidualResult:
+    """K3 depth-residual selector with padded block slots and an active mask.
+
+    Candidate order is all fixed-capacity block slots followed by the current
+    prefix.  Inactive block scores become negative infinity; the prefix is
+    always active.  Scores use normalized candidates while the weighted sum
+    uses the original FP32 candidates, matching Moonshot ``_apply_attn_res``.
+    """
+    prefix = np.asarray(prefix_sum, dtype=np.float32)
+    blocks = np.asarray(block_sources, dtype=np.float32)
+    mask = np.asarray(active_mask, dtype=bool)
+    if blocks.shape[0] != prefix.shape[0] or blocks.shape[-1] != prefix.shape[-1]:
+        raise ValueError("block sources must match prefix token/hidden dimensions")
+    if mask.shape != (blocks.shape[1],):
+        raise ValueError("active mask must contain one entry per block slot")
+    candidates = np.concatenate((blocks, prefix[:, None, :]), axis=1)
+    normalized = candidates / np.sqrt(
+        np.mean(candidates * candidates, axis=-1, keepdims=True) + np.float32(eps)
+    )
+    direction = np.asarray(norm_weight, dtype=np.float32) * np.asarray(
+        projection_weight, dtype=np.float32
+    )
+    scores = np.sum(normalized * direction, axis=-1)
+    candidate_mask = np.concatenate((mask, np.ones((1,), dtype=bool)))
+    masked_scores = np.where(candidate_mask[None, :], scores, -np.inf)
+    probabilities = softmax(masked_scores)
+    output = np.sum(probabilities[..., None] * candidates, axis=1)
+    return AttentionResidualResult(output, candidates, scores, masked_scores, probabilities)
+
+
 def route(
     hidden: np.ndarray,
     weight: np.ndarray,

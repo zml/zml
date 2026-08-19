@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from reference_oracles import (
+    attention_residual_select,
     causal_conv_tail,
     causal_depthwise_conv1d,
     decode_e8m0,
@@ -112,3 +113,25 @@ def test_mxfp4_block_expansion_and_linear() -> None:
     assert weight.shape == (2, 32)
     value = np.arange(64, dtype=np.float32).reshape(2, 32) / 16.0
     np.testing.assert_allclose(mxfp4_linear(value, packed, scale), value @ weight.T)
+
+
+def test_attention_residual_masks_stale_sources() -> None:
+    prefix = np.asarray([[1.0, 2.0, -1.0, 0.5]], dtype=np.float32)
+    blocks = np.asarray(
+        [[[0.5, -1.0, 2.0, 3.0], [1e6, -1e6, 1e6, -1e6]]], dtype=np.float32
+    )
+    norm = np.asarray([1.0, 0.75, 1.25, 0.5], dtype=np.float32)
+    proj = np.asarray([-0.5, 0.25, 1.0, 0.75], dtype=np.float32)
+    masked = attention_residual_select(prefix, blocks, [True, False], norm, proj)
+    compact = attention_residual_select(prefix, blocks[:, :1], [True], norm, proj)
+    np.testing.assert_allclose(masked.output, compact.output, atol=1e-6)
+    np.testing.assert_allclose(masked.probabilities[:, [0, 2]], compact.probabilities)
+    np.testing.assert_array_equal(masked.probabilities[:, 1], 0.0)
+
+
+def test_attention_residual_scores_normalized_but_values_are_not() -> None:
+    prefix = np.asarray([[100.0, 0.0]], dtype=np.float32)
+    blocks = np.asarray([[[1.0, 0.0]]], dtype=np.float32)
+    result = attention_residual_select(prefix, blocks, [True], [1.0, 1.0], [1.0, 0.0])
+    np.testing.assert_allclose(result.probabilities, [[0.5, 0.5]], atol=1e-6)
+    np.testing.assert_allclose(result.output, [[50.5, 0.0]], atol=1e-4)

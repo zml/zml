@@ -47,6 +47,16 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# KIMI_K3_TEMP_REMOVE_M20: Attention Residual differential harness retained
+# during staged K3 bring-up and removed after production-path tests replace it.
+zig_binary(
+    name = "kimi_k3_attn_res_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_attn_res_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 # KIMI_K3_TEMP_REMOVE_M20: temporary construction/explain binary for bring-up;
 # remove it when the production LLM CLI exposes the validated K3 explain path.
 zig_binary(
