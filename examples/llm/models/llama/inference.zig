@@ -77,6 +77,9 @@ pub const Args = struct {
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(attention.Metadata),
+    // Index of the last real prompt token. Only consumed by the Vulkan FA
+    // prefill lm_head; decode passes a valid buffer that remains unused.
+    last_token_index_buf: *zml.Buffer,
 };
 
 pub const CompiledModel = struct {
@@ -296,6 +299,7 @@ const ComposedKernelExe = struct {
     embed_tokens: zml.Exe,
     layer: zml.Exe,
     lm_head: zml.Exe,
+    uses_vulkan_last_token_index: bool,
 
     const EmbedTokens = struct {
         embed_tokens: zml.nn.TokenEmbedding,
@@ -319,19 +323,25 @@ const ComposedKernelExe = struct {
         phase: Phase,
         progress: *std.Progress.Node,
     ) !ComposedKernelExe {
+        const uses_vulkan_last_token_index = phase == .prefill and switch (attention_parameters) {
+            .vulkan_fa => true,
+            else => false,
+        };
+
         const embed_tokens = try ComposedKernelExe.compileEmbedTokens(allocator, io, platform, llama_model.model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
         const layer = try ComposedKernelExe.compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress);
         errdefer layer.deinit();
 
-        const lm_head = try ComposedKernelExe.compileLmHead(allocator, io, platform, llama_model, parameters, seqlen, phase, progress);
+        const lm_head = try ComposedKernelExe.compileLmHead(allocator, io, platform, llama_model, parameters, seqlen, uses_vulkan_last_token_index, phase, progress);
         errdefer lm_head.deinit();
 
         return .{
             .embed_tokens = embed_tokens,
             .layer = layer,
             .lm_head = lm_head,
+            .uses_vulkan_last_token_index = uses_vulkan_last_token_index,
         };
     }
 
@@ -420,7 +430,16 @@ const ComposedKernelExe = struct {
         args: Args,
         hidden_buf: *zml.Buffer,
     ) void {
-        exe_args.set(.{ hidden_buf, args.tokens_buf, args.rng_buffers });
+        if (self.uses_vulkan_last_token_index) {
+            exe_args.set(.{
+                hidden_buf,
+                args.tokens_buf,
+                args.rng_buffers,
+                args.last_token_index_buf,
+            });
+        } else {
+            exe_args.set(.{ hidden_buf, args.tokens_buf, args.rng_buffers });
+        }
         self.lm_head.call(exe_args.*, results);
 
         var new_tokens, var new_rng = results.get(struct {
@@ -572,6 +591,7 @@ const ComposedKernelExe = struct {
         llama_model: model.Model,
         parameters: CompilationOptions,
         seqlen: usize,
+        uses_vulkan_last_token_index: bool,
         phase: Phase,
         progress: *std.Progress.Node,
     ) !zml.Exe {
@@ -589,6 +609,35 @@ const ComposedKernelExe = struct {
         ).withPartitioning(.{ .d = .replicated }));
 
         const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
+
+        if (uses_vulkan_last_token_index) {
+            const VulkanPrefillLmHead = struct {
+                lm_head: model.LmHead,
+
+                pub fn forward(
+                    self: @This(),
+                    hidden_: zml.Tensor,
+                    tokens_: zml.Tensor,
+                    rng: zml.Tensor.Rng,
+                    last_index: zml.Tensor,
+                ) struct { zml.Tensor, zml.Tensor.Rng } {
+                    const tokens_tagged = tokens_.withPartialTags(.{.s});
+                    const last_hidden = hidden_.withPartialTags(.{ .s, .d })
+                        .dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = last_index, .len = 1 } });
+                    const last_token = tokens_tagged.dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = last_index, .len = 1 } });
+
+                    const next_token, const new_rng = self.lm_head.forward(last_hidden, last_token, rng);
+                    const output = tokens_tagged.dynamicUpdateSlice(.{ .s = last_index }, next_token).reuseBuffer(tokens_);
+                    return .{ output, new_rng };
+                }
+            };
+
+            const last_index: zml.Tensor = .init(.{}, .u32);
+            return platform.compile(allocator, io, VulkanPrefillLmHead{ .lm_head = model.LmHead.init(llama_model) }, .forward, .{ hidden, tokens, parameters.rng, last_index }, .{
+                .shardings = &parameters.shardings.all(),
+                .program_name = phase.programName("llama", "lm_head"),
+            });
+        }
 
         return platform.compile(allocator, io, model.LmHead.init(llama_model), .forward, .{ hidden, tokens, parameters.rng }, .{
             .shardings = &parameters.shardings.all(),

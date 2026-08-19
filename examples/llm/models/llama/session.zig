@@ -132,6 +132,8 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        if (all_tokens.len == 0) return error.EmptyPrompt;
+
         const prefill_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{self.seqlen}, .u32));
         defer prefill_tokens_slice.free(self.allocator);
         @memset(prefill_tokens_slice.items(u32), 0);
@@ -139,6 +141,9 @@ pub const Session = struct {
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
+
+        var last_token_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len - 1, .u32);
+        defer last_token_index_buffer.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (params.attention_metadata) {
@@ -163,6 +168,7 @@ pub const Session = struct {
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
+            .last_token_index_buf = &last_token_index_buffer,
         });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
@@ -211,6 +217,7 @@ pub const Session = struct {
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
+                .last_token_index_buf = &self.token_index_buffers[all_tokens.items.len],
             });
             last_token_id = try current_token_buffer.getValue(u32, self.io);
         }
