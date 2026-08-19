@@ -1,0 +1,11 @@
+pub const inference = @import("kimi_k3/inference.zig");
+pub const CompilationParameters = inference.CompilationParameters;
+pub const CompilationOptions = inference.CompilationOptions;
+pub const CompiledModel = inference.CompiledModel;
+pub const model = @import("kimi_k3/model.zig");
+pub const Config = model.Config;
+pub const Buffers = model.Buffers;
+pub const Model = model.Model;
+pub const LoadedModel = model.LoadedModel;
+pub const session = @import("kimi_k3/session.zig");
+pub const Session = session.Session;
