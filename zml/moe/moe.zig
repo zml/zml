@@ -896,11 +896,18 @@ const Triton = struct {
                             .activation_limit = ctx.activation_limit,
                         };
                         const OverflowFallback = struct {
-                            fn cond(overflow: zml.Tensor, _: zml.Tensor, _: anytype) zml.Tensor {
-                                return overflow;
+                            fallback: @TypeOf(fallback_ctx),
+
+                            pub const State = struct {
+                                overflow: zml.Tensor,
+                                output: zml.Tensor,
+                            };
+                            pub fn cond(_: @This(), state: State) zml.Tensor {
+                                return state.overflow;
                             }
 
-                            fn body(_: zml.Tensor, _: zml.Tensor, fallback: anytype) struct { zml.Tensor, zml.Tensor } {
+                            pub fn body(self: @This(), _: State) State {
+                                const fallback = self.fallback;
                                 const dense_output = forwardMoeLocal_fp4(
                                     fallback.input,
                                     fallback.topk_ids,
@@ -914,16 +921,15 @@ const Triton = struct {
                                     null,
                                     fallback.activation_limit,
                                 );
-                                return .{ zml.Tensor.scalar(false, .bool), dense_output };
+                                return .{ .overflow = zml.Tensor.scalar(false, .bool), .output = dense_output };
                             }
                         };
                         const loop_state = zml.ops.@"while"(
-                            .{ routes.overflow, compact_output },
-                            OverflowFallback.cond,
-                            OverflowFallback.body,
-                            .{fallback_ctx},
+                            OverflowFallback,
+                            .{ .fallback = fallback_ctx },
+                            .{ .overflow = routes.overflow, .output = compact_output },
                         );
-                        break :blk loop_state[1];
+                        break :blk loop_state.output;
                     } else forwardMoeLocal_fp4(
                         sharded_inputs[0],
                         local_topk_ids,

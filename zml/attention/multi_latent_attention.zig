@@ -249,8 +249,11 @@ const Triton = struct {
             const q_dim = q.dim(.hd);
             const q_heads = q.dim(.h);
             const nope_rank = q_dim - rope_rank;
+            const value_rank = opts.value_rank orelse q_dim;
             const kernel_lora_rank: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(nope_rank)));
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(kernel_lora_rank))), "expected kernel lora rank ({}) to be a power of two", .{kernel_lora_rank});
+            stdx.debug.assert(value_rank <= kv_cache.dim(.hd), "expected value rank ({}) to fit in KV cache head dim ({})", .{ value_rank, kv_cache.dim(.hd) });
+            stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(value_rank))), "expected value rank ({}) to be a power of two", .{value_rank});
 
             const block_size = kv_cache.dim(.k_chunk);
 
@@ -261,7 +264,7 @@ const Triton = struct {
             stdx.debug.assert(@mod(q_heads, block_m) == 0, "expected q heads ({}) to be divisible by block_m ({})", .{ q_heads, block_m });
 
             const q_strides = q.shape().computeElementStrides().constSlice();
-            const out_shape = q.shape();
+            const out_shape = q.shape().setDim(.hd, value_rank);
             const out_strides = out_shape.computeElementStrides().constSlice();
             const k_strides = kv_cache.shape().computeElementStrides().constSlice();
             const v_strides = kv_cache.shape().computeElementStrides().constSlice();
@@ -308,7 +311,7 @@ const Triton = struct {
                     .qk_lora_rank = nope_rank,
                     .kv_lora_rank = kernel_lora_rank,
                     .rope_offset = nope_rank,
-                    .value_rank = q_dim,
+                    .value_rank = value_rank,
                     .tile_size = @min(topk_final.dim(.topk), 16),
                     .use_attn_sink = if (sink_) |_| true else false,
                     .all_decode = !parameters.options_.is_prefill,
@@ -318,7 +321,7 @@ const Triton = struct {
                 .num_stages = 2,
             });
 
-            return out.output.reshape(q.shape());
+            return out.output.reshape(out_shape);
         }
 
         pub fn sparseAttention(
@@ -333,8 +336,9 @@ const Triton = struct {
             stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
             stdx.debug.assert(kv.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv.shape()});
             stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
-            stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
             stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
+
+            const out_shape = q.shape().setDim(.hd, opts.value_rank orelse q.dim(.hd));
 
             return zml.ops.manualComputation(
                 .{
@@ -348,7 +352,7 @@ const Triton = struct {
                     parameters.query_start_len,
                     sink,
                 },
-                q.shape(),
+                out_shape,
                 .{
                     .opts = opts,
                     .options = parameters.options_,
@@ -380,6 +384,7 @@ const Triton = struct {
 
 pub const AttentionOptions = struct {
     rope_rank: i64,
+    value_rank: ?i64 = null,
     scale: ?f32 = null,
 };
 
