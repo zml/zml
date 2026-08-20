@@ -96,7 +96,7 @@ pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
     /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
     nvfp4,
-    /// f8e4m3fn values, one bf16 scale per output channel, constant along the contraction.
+    /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
     /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
     fp8_per_channel,
     /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
@@ -117,7 +117,8 @@ pub const QuantScheme = enum {
                 scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
             .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
-            .fp8_per_channel => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+            .fp8_per_channel => weight.dtype() == .f8e4m3fn and
+                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                 scale.count() > 1 and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) == 1,
             .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
@@ -209,8 +210,9 @@ test "QuantScheme.classify" {
     // e8m0 scales: valid MX, nothing here fuses or expands it.
     try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e8m0)));
     try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 160 }, .f8e8m0)));
-    // Per-channel, but f32 rather than bf16.
-    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
+    // Per-channel in f32: what fusing per-tensor projections produces. The Metal
+    // per-channel kernels have f32 entries, so this is a real scheme, not a decline.
+    try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
     // A block grid that is neither per-channel nor 128x128.
     try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 160, .sc = 80 }, .bf16)));
     // Stacked MoE weights are rank 3 and go through the MoE path, not this one.
