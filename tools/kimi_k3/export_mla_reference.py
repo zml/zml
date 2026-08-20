@@ -27,7 +27,7 @@ from export_reference import (
 )
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 OUTPUT = ROOT / "artifacts/fixtures/milestone-12"
 SHARD = "model-00004-of-000096.safetensors"
 SHARD_SHA256 = "5955fd8feda89b1af8400c25e885e7177d47edff155f54b318beb8dd1cec5c05"

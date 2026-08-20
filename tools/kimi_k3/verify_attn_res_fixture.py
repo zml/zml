@@ -12,7 +12,7 @@ import numpy as np
 from safetensors import safe_open
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 
 
 def semantic_sha256(tensors: dict[str, np.ndarray]) -> str:

@@ -14,7 +14,7 @@ from export_layer0_prefix_reference import semantic_sha256
 from export_reference import MOONSHOT_REVISION, _save_fixture, sha256_file
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 SOURCE = ROOT / "artifacts/fixtures/milestone-12"
 OUTPUT = ROOT / "artifacts/fixtures/milestone-13"
 SOURCE_SEMANTIC_SHA256 = "e642fb2ccf9fda74a7cfb013eb330a2c697c8511874d0aae0b0296d312c787a2"

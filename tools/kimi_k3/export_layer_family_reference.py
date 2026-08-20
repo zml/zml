@@ -30,7 +30,7 @@ from export_reference import (
 from export_router_reference import canonical_route, RouteConfig
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 OUTPUT = ROOT / "artifacts/fixtures/milestone-14"
 PREFIX_FIXTURE = ROOT / "artifacts/fixtures/milestone-9/s2-layer0-prefix-len4.safetensors"
 SHARDS = {

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "policy": {
-    "implementation_root": "/ephemeral/kimi-k3/zml",
+    "implementation_root": "/dev/shm/kimi-k3/zml",
     "inference_backend": "nvidia_gpu_only",
     "cpu_inference_fallback": false,
     "model_weight_downloads": false,
-    "local_checkpoint_root": "/ephemeral/kimi-k3/moonshot/kimi-k3"
+    "local_checkpoint_root": "/dev/shm/kimi-k3/moonshot/kimi-k3"
   },
   "zml": {
     "repository": "https://github.com/zml/zml.git",

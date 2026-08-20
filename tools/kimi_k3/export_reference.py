@@ -31,7 +31,7 @@ from safetensors.torch import save_file
 from reference_oracles import decode_e8m0, kda_log_alpha, kda_scan, route, unpack_e2m1
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 DEFAULT_CHECKPOINT = ROOT / "moonshot/kimi-k3"
 DEFAULT_OUTPUT = ROOT / "artifacts/fixtures/milestone-3"
 MOONSHOT_REVISION = "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721"

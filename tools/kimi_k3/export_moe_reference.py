@@ -27,7 +27,7 @@ from export_reference import (
 )
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 OUTPUT = ROOT / "artifacts/fixtures/milestone-11"
 ROUTER_FIXTURE = ROOT / "artifacts/fixtures/milestone-10/router-reference.safetensors"
 ROUTER_SEMANTIC_SHA256 = "4eb2f2606d40a86f317253d4baba3329693871ce1742144646c8417a0f5da664"

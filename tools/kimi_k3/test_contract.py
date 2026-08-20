@@ -13,7 +13,7 @@ SPEC = importlib.util.spec_from_file_location("validate_contract", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
-WORKSPACE = Path("/ephemeral/kimi-k3")
+WORKSPACE = Path("/dev/shm/kimi-k3")
 
 
 @pytest.fixture

@@ -25,7 +25,7 @@ from safetensors.numpy import save_file
 from export_reference import deterministic_setup, import_official
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 CHECKPOINT = ROOT / "moonshot/kimi-k3"
 OUTPUT = ROOT / "artifacts/fixtures/milestone-7"
 SEED = 20260821

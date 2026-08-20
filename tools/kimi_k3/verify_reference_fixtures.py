@@ -137,7 +137,7 @@ def main() -> None:
         "fixture_dir",
         nargs="?",
         type=Path,
-        default=Path("/ephemeral/kimi-k3/artifacts/fixtures/milestone-3"),
+        default=Path("/dev/shm/kimi-k3/artifacts/fixtures/milestone-3"),
     )
     parser.add_argument(
         "--lock",

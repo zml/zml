@@ -180,7 +180,7 @@ def memory_estimates() -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", type=Path, default=Path("/ephemeral/kimi-k3"))
+    parser.add_argument("--workspace", type=Path, default=Path("/dev/shm/kimi-k3"))
     args = parser.parse_args()
     workspace = args.workspace.resolve()
     config = json.loads((workspace / "moonshot" / "kimi-k3" / "config.json").read_text())

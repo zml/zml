@@ -3,8 +3,8 @@
   "authority": {
     "repository": "https://huggingface.co/moonshotai/Kimi-K3",
     "commit": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
-    "config_path": "/ephemeral/kimi-k3/moonshot/kimi-k3/config.json",
-    "index_path": "/ephemeral/kimi-k3/moonshot/kimi-k3/model.safetensors.index.json"
+    "config_path": "/dev/shm/kimi-k3/moonshot/kimi-k3/config.json",
+    "index_path": "/dev/shm/kimi-k3/moonshot/kimi-k3/model.safetensors.index.json"
   },
   "scope": "text_only_nvidia_gpu",
   "architecture": {

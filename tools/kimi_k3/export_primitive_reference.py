@@ -41,7 +41,7 @@ from reference_oracles import (
 )
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 DEFAULT_CHECKPOINT = ROOT / "moonshot/kimi-k3"
 DEFAULT_OUTPUT = ROOT / "artifacts/fixtures/milestone-5"
 SEED = 20260819

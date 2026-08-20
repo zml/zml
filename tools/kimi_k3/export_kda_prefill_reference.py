@@ -28,7 +28,7 @@ from export_kda_decode_reference import (
 from export_reference import deterministic_setup, import_official
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 OUTPUT = ROOT / "artifacts/fixtures/milestone-8"
 SEED = 20260822
 LENGTHS = (1, 4, 8, 16)

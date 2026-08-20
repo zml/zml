@@ -18,7 +18,7 @@ from export_reference import deterministic_setup, import_official
 from reference_oracles import AttentionResidualResult, attention_residual_select
 
 
-ROOT = Path("/ephemeral/kimi-k3")
+ROOT = Path("/dev/shm/kimi-k3")
 CHECKPOINT = ROOT / "moonshot/kimi-k3"
 OUTPUT = ROOT / "artifacts/fixtures/milestone-6"
 SEED = 20260820
