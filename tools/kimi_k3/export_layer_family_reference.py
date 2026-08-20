@@ -215,6 +215,57 @@ def selected_moe(
     }
 
 
+def attention_forward(
+    layer: Any,
+    hidden: torch.Tensor,
+    cache: Any,
+    past_length: int,
+) -> torch.Tensor:
+    if layer.is_linear_attn:
+        return layer.self_attn(hidden, cache_params=cache)
+    sequence = hidden.shape[1]
+    return layer.self_attn(
+        hidden,
+        attention_mask=causal_mask(sequence, past_length + sequence, past_length),
+        past_key_values=cache,
+    )
+
+
+def snapshot_cache(cache: Any, layer_index: int, linear: bool, prefix: str) -> dict[str, torch.Tensor]:
+    if linear:
+        tensors = {
+            f"{prefix}.recurrent": cache.recurrent_states[layer_index].clone(),
+        }
+        for index, value in enumerate(cache.conv_states[layer_index]):
+            tensors[f"{prefix}.conv{index}"] = value.clone()
+        return tensors
+    return {
+        f"{prefix}.key": cache.key_cache[layer_index].clone(),
+        f"{prefix}.value": cache.value_cache[layer_index].clone(),
+    }
+
+
+def close_report(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    actual_f32 = actual.float()
+    expected_f32 = expected.float()
+    delta = (actual_f32 - expected_f32).abs()
+    close = torch.isclose(actual_f32, expected_f32, atol=atol, rtol=rtol)
+    return {
+        "atol": atol,
+        "rtol": rtol,
+        "max_abs": float(delta.max().item()) if delta.numel() else 0.0,
+        "mean_abs": float(delta.mean().item()) if delta.numel() else 0.0,
+        "close_fraction": float(close.float().mean().item()) if close.numel() else 1.0,
+        "passed": bool(close.all().item()),
+    }
+
+
 def run_layer(
     checkpoint: Path,
     config: Any,
@@ -225,20 +276,16 @@ def run_layer(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
     layer, layer_weights = load_layer(checkpoint, config, modeling, layer_index)
     batch, sequence, width = hidden.shape
+    if sequence != 4:
+        raise RuntimeError(f"layer-family decode contract requires four tokens, got {sequence}")
+
     selected_input = modeling._apply_attn_res(
         hidden.reshape(-1, width), block_residual,
         layer.self_attention_res_proj, layer.self_attention_res_norm,
     ).reshape_as(hidden)
     input_norm = layer.input_layernorm(selected_input)
     cache = modeling.KimiDynamicCache(config)
-    if layer.is_linear_attn:
-        attention = layer.self_attn(input_norm, cache_params=cache)
-    else:
-        attention = layer.self_attn(
-            input_norm,
-            attention_mask=causal_mask(sequence, sequence, 0),
-            past_key_values=cache,
-        )
+    attention = attention_forward(layer, input_norm, cache, 0)
     prefix_after_attention = hidden + attention
     selected_mlp = modeling._apply_attn_res(
         prefix_after_attention.reshape(-1, width), block_residual,
@@ -277,14 +324,124 @@ def run_layer(
         **{f"weights.layer.{name}": value for name, value in layer_weights.items()},
         **{f"weights.selected.{name}": value for name, value in packed.items()},
         **{f"weights.dense.{name}": value for name, value in dense.items()},
+        **snapshot_cache(cache, layer_index, layer.is_linear_attn, "cache"),
     }
-    if layer.is_linear_attn:
-        tensors["cache.recurrent"] = cache.recurrent_states[layer_index]
-        for index, value in enumerate(cache.conv_states[layer_index]):
-            tensors[f"cache.conv{index}"] = value
-    else:
-        tensors["cache.key"] = cache.key_cache[layer_index]
-        tensors["cache.value"] = cache.value_cache[layer_index]
+
+    warm_hidden = hidden[:, :-1]
+    warm_blocks = block_residual[:-1]
+    warm_selected = modeling._apply_attn_res(
+        warm_hidden.reshape(-1, width), warm_blocks,
+        layer.self_attention_res_proj, layer.self_attention_res_norm,
+    ).reshape_as(warm_hidden)
+    warm_norm = layer.input_layernorm(warm_selected)
+    decode_cache = modeling.KimiDynamicCache(config)
+    _ = attention_forward(layer, warm_norm, decode_cache, 0)
+    decode_cache_in = snapshot_cache(
+        decode_cache, layer_index, layer.is_linear_attn, "decode.cache_in"
+    )
+
+    decode_hidden = hidden[:, -1:]
+    decode_blocks = block_residual[-1:]
+    decode_selected_input = modeling._apply_attn_res(
+        decode_hidden.reshape(-1, width), decode_blocks,
+        layer.self_attention_res_proj, layer.self_attention_res_norm,
+    ).reshape_as(decode_hidden)
+    decode_input_norm = layer.input_layernorm(decode_selected_input)
+    decode_attention = attention_forward(layer, decode_input_norm, decode_cache, sequence - 1)
+    decode_prefix = decode_hidden + decode_attention
+    decode_selected_mlp = modeling._apply_attn_res(
+        decode_prefix.reshape(-1, width), decode_blocks,
+        layer.mlp_res_proj, layer.mlp_res_norm,
+    ).reshape_as(decode_hidden)
+    decode_moe_input = layer.post_attention_layernorm(decode_selected_mlp)
+    decode_route = canonical_route(
+        decode_moe_input,
+        layer.block_sparse_moe.gate.weight,
+        layer.block_sparse_moe.gate.e_score_correction_bias,
+        RouteConfig(top_k=16),
+    )
+    missing_decode_experts = sorted(set(decode_route["topk_ids"].flatten().tolist()) - set(selected))
+    if missing_decode_experts:
+        raise RuntimeError(
+            f"layer-{layer_index} decode route escaped prefill compact map: {missing_decode_experts}"
+        )
+    decode_local_ids = torch.tensor(
+        [
+            [global_to_local[int(expert)] for expert in row]
+            for row in decode_route["topk_ids"].reshape(-1, 16)
+        ],
+        dtype=torch.int64,
+    ).reshape_as(decode_route["topk_ids"]).cuda()
+    decode_moe = selected_moe(
+        decode_moe_input,
+        decode_route["topk_weights"],
+        decode_local_ids,
+        packed,
+        dense,
+    )
+    decode_output = decode_prefix + decode_moe["output"]
+    decode_cache_out = snapshot_cache(
+        decode_cache, layer_index, layer.is_linear_attn, "decode.cache_out"
+    )
+    tensors.update({
+        "decode.input": decode_hidden,
+        "decode.block_residual": decode_blocks,
+        "decode.selected_input": decode_selected_input,
+        "decode.input_norm": decode_input_norm,
+        "decode.attention_output": decode_attention,
+        "decode.prefix_after_attention": decode_prefix,
+        "decode.selected_mlp": decode_selected_mlp,
+        "decode.moe_input": decode_moe_input,
+        "decode.route.global_ids": decode_route["topk_ids"],
+        "decode.route.local_ids": decode_local_ids,
+        "decode.route.weights": decode_route["topk_weights"],
+        "decode.output": decode_output,
+        **{f"decode.moe.{name}": value for name, value in decode_moe.items()},
+        **decode_cache_in,
+        **decode_cache_out,
+    })
+
+    prefill_last_ids = route["topk_ids"][:, -1:]
+    decode_ids = decode_route["topk_ids"]
+    prefill_sorted, prefill_order = torch.sort(prefill_last_ids, dim=-1)
+    decode_sorted, decode_order = torch.sort(decode_ids, dim=-1)
+    route_sets_match = torch.equal(decode_sorted, prefill_sorted)
+    prefill_set = set(prefill_last_ids.flatten().tolist())
+    decode_set = set(decode_ids.flatten().tolist())
+    route_comparison: dict[str, Any] = {
+        "sets_match": route_sets_match,
+        "overlap_count": len(prefill_set & decode_set),
+        "union_count": len(prefill_set | decode_set),
+        "prefill_only": sorted(prefill_set - decode_set),
+        "decode_only": sorted(decode_set - prefill_set),
+    }
+    comparisons: dict[str, Any] = {
+        "attention_output": close_report(
+            decode_attention, attention[:, -1:], atol=5e-2, rtol=2e-2
+        ),
+        "output": close_report(decode_output, output[:, -1:], atol=5e-2, rtol=2e-2),
+    }
+    if route_sets_match:
+        comparisons["route_weights_aligned"] = close_report(
+            torch.gather(decode_route["topk_weights"], -1, decode_order),
+            torch.gather(route["topk_weights"][:, -1:], -1, prefill_order),
+            atol=2e-4,
+            rtol=2e-4,
+        )
+    full_cache = snapshot_cache(cache, layer_index, layer.is_linear_attn, "full")
+    for name, decode_value in decode_cache_out.items():
+        suffix = name.removeprefix("decode.cache_out.")
+        expected_value = full_cache[f"full.{suffix}"]
+        atol = 5e-3 if suffix == "recurrent" else 5e-2
+        comparisons[f"cache.{suffix}"] = close_report(
+            decode_value, expected_value, atol=atol, rtol=2e-2
+        )
+    if not all(report["passed"] for report in comparisons.values()):
+        raise RuntimeError(
+            f"layer-{layer_index} prefill/decode reference mismatch: "
+            f"routes={route_comparison} comparisons={comparisons}"
+        )
+
     return output, tensors, {
         "layer": layer_index,
         "attention": "kda" if layer.is_linear_attn else "mla",
@@ -292,9 +449,17 @@ def run_layer(
         "selected_expert_count": len(selected),
         "route_count": int(route["topk_ids"].numel()),
         "compact_map_scope": "fixture and isolated harness only",
+        "decode": {
+            "warm_tokens": sequence - 1,
+            "decode_tokens": 1,
+            "route_count": int(decode_route["topk_ids"].numel()),
+            "route_comparison": route_comparison,
+            "comparisons": comparisons,
+        },
     }
 
 
+@torch.inference_mode()
 def build(
     checkpoint: Path,
     configuration: Any,
@@ -312,7 +477,10 @@ def build(
         hidden, layer_tensors, layer_details = run_layer(
             checkpoint, config, modeling, layer_index, hidden, block_residual
         )
-        tensors.update({f"layer{layer_index}.{name}": value.cpu() for name, value in layer_tensors.items()})
+        tensors.update({
+            f"layer{layer_index}.{name}": value.detach().contiguous().cpu()
+            for name, value in layer_tensors.items()
+        })
         details[str(layer_index)] = layer_details
         torch.cuda.empty_cache()
     return tensors, details

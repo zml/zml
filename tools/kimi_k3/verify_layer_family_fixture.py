@@ -37,6 +37,18 @@ def main() -> None:
             raise SystemExit(f"layer-family inventory mismatch: {layer}")
         if details["route_count"] != 64 or "isolated harness" not in details["compact_map_scope"]:
             raise SystemExit(f"layer-family route scope mismatch: {layer}")
+        decode = details.get("decode", {})
+        if (
+            decode.get("warm_tokens") != 3
+            or decode.get("decode_tokens") != 1
+            or decode.get("route_count") != 16
+            or not isinstance(decode.get("route_comparison", {}).get("sets_match"), bool)
+            or decode["route_comparison"].get("overlap_count", -1) < 0
+            or decode["route_comparison"].get("union_count", -1) < 1
+            or not decode.get("comparisons")
+            or not all(report.get("passed") for report in decode["comparisons"].values())
+        ):
+            raise SystemExit(f"layer-family decode contract mismatch: {layer}")
 
     tensors: dict[str, torch.Tensor] = {}
     with safe_open(path, framework="pt", device="cpu") as values:
@@ -51,7 +63,7 @@ def main() -> None:
                 raise SystemExit(f"layer-family tensor hash mismatch: {name}")
             if value.is_floating_point() and not torch.isfinite(value).all():
                 raise SystemExit(f"non-finite layer-family tensor: {name}")
-    if len(tensors) != 163 or semantic_sha256(tensors) != manifest["tensor_semantic_sha256"]:
+    if len(tensors) != 240 or semantic_sha256(tensors) != manifest["tensor_semantic_sha256"]:
         raise SystemExit("layer-family aggregate semantic mismatch")
     for layer in (1, 2, 3):
         prefix = f"layer{layer}"
@@ -62,6 +74,30 @@ def main() -> None:
         expected_output = tensors[f"{prefix}.prefix_after_attention"] + tensors[f"{prefix}.moe.output"]
         if not torch.equal(expected_output, tensors[f"{prefix}.output"]):
             raise SystemExit(f"layer-family final residual mismatch: {layer}")
+        decode = f"{prefix}.decode"
+        if not torch.equal(
+            tensors[f"{decode}.route.global_ids"],
+            torch.tensor(
+                manifest["layers"][str(layer)]["selected_global_experts"], dtype=torch.int64
+            )[tensors[f"{decode}.route.local_ids"]],
+        ):
+            raise SystemExit(f"layer-family decode global/local route mismatch: {layer}")
+        prefill_ids = set(tensors[f"{prefix}.route.global_ids"][:, -1:].flatten().tolist())
+        decode_ids = set(tensors[f"{decode}.route.global_ids"].flatten().tolist())
+        route_comparison = manifest["layers"][str(layer)]["decode"]["route_comparison"]
+        if (
+            route_comparison["sets_match"] != (prefill_ids == decode_ids)
+            or route_comparison["overlap_count"] != len(prefill_ids & decode_ids)
+            or route_comparison["union_count"] != len(prefill_ids | decode_ids)
+            or route_comparison["prefill_only"] != sorted(prefill_ids - decode_ids)
+            or route_comparison["decode_only"] != sorted(decode_ids - prefill_ids)
+        ):
+            raise SystemExit(f"layer-family decode route evidence mismatch: {layer}")
+        decode_expected = (
+            tensors[f"{decode}.prefix_after_attention"] + tensors[f"{decode}.moe.output"]
+        )
+        if not torch.equal(decode_expected, tensors[f"{decode}.output"]):
+            raise SystemExit(f"layer-family decode final residual mismatch: {layer}")
         if layer < 3 and not torch.equal(tensors[f"{prefix}.output"], tensors[f"layer{layer + 1}.input"]):
             raise SystemExit(f"layer-family sequential handoff mismatch: {layer}")
     print(json.dumps({
