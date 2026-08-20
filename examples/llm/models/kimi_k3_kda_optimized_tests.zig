@@ -12,6 +12,9 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const Args = struct {
     only: []const u8 = "",
     fixture: []const u8,
+    profile: bool = false,
+    profile_repository: []const u8 = "/tmp/kimi-k3-kda-profile",
+    profile_session: []const u8 = "milestone-18-kda",
 
     pub const help =
         \\Use kimi_k3_kda_optimized_tests --fixture=<kda-optimized-cases.safetensors>
@@ -209,6 +212,10 @@ const Context = struct {
     }
 
     fn runCase(self: *Context, one: Case) !void {
+        // KIMI_K3_TEMP_REMOVE_M20: model-family span is bring-up profiling
+        // instrumentation replaced by permanent inference spans in cleanup.
+        var span = zml.tracer.span("kimi_k3.kda.optimized_case", .{});
+        defer span.end();
         var optimized_inputs = try self.loadInputs(one.name);
         defer zml.Buffer.deinitAll(Inputs, &optimized_inputs);
         const symbolic = inputTensors(optimized_inputs);
@@ -271,6 +278,18 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.fixture);
+    var profiler: ?zml.Platform.Profiler = null;
+    defer if (profiler) |*active_profiler| {
+        _ = active_profiler.stop() catch {};
+        active_profiler.deinit();
+    };
+    if (args.profile) {
+        profiler = try platform.profiler(allocator, io, .{
+            .repository_path = args.profile_repository,
+            .session_id = args.profile_session,
+        });
+        try profiler.?.start();
+    }
     defer registry.deinit();
     var tensor_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer tensor_store.deinit();
