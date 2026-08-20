@@ -338,9 +338,9 @@ fn symbolicCommon() layer.MoeLayerWeights {
                 .routed_down = .init(.{ .latent = 3584, .d = 7168 }, .bf16),
                 .routed_norm = .init(.{ .latent = 3584 }, .bf16),
                 .routed_up = .init(.{ .d = 7168, .latent = 3584 }, .bf16),
-                .shared_gate = .init(.{ .intermediate = 3072, .d = 7168 }, .bf16),
-                .shared_up = .init(.{ .intermediate = 3072, .d = 7168 }, .bf16),
-                .shared_down = .init(.{ .d = 7168, .intermediate = 3072 }, .bf16),
+                .shared_gate = .init(.{ .intermediate = 6144, .d = 7168 }, .bf16),
+                .shared_up = .init(.{ .intermediate = 6144, .d = 7168 }, .bf16),
+                .shared_down = .init(.{ .d = 7168, .intermediate = 6144 }, .bf16),
             },
         },
     };
