@@ -23,7 +23,9 @@ pub const Type = struct {
             .f8e4m3b11fnuz => .float(ctx, .f8e4m3b11fnuz),
             .f8e5m2 => .float(ctx, .f8e5m2),
             .f8e5m2fnuz => .float(ctx, .f8e5m2fnuz),
-            .f8e8m0 => @panic("Unsupported type"),
+            // Apache-2.0 donor brabier/glm5.2 at locked commit b4f0af76:
+            // restore the MLIR spelling required by its native MXFP4 path.
+            .f8e8m0 => .float(ctx, .f8e8m0fnu),
             .bf16 => .float(ctx, .bf16),
             .f16 => .float(ctx, .f16),
             .f32 => .float(ctx, .f32),
@@ -51,6 +53,7 @@ pub const Type = struct {
         const mapping = .{
             .{ .bool, mlir.Type.int(ctx, .i1) },
 
+            .{ .f8e8m0, mlir.Type.float(ctx, .f8e8m0fnu) },
             .{ .f8e4m3b11fnuz, mlir.Type.float(ctx, .f8e4m3b11fnuz) },
             .{ .f8e4m3fn, mlir.Type.float(ctx, .f8e4m3fn) },
             .{ .f8e4m3fnuz, mlir.Type.float(ctx, .f8e4m3fnuz) },

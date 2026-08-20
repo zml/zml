@@ -137,3 +137,20 @@ pub fn slowMxfp4Linear(input: zml.Tensor, packed_values: zml.Tensor, scale: zml.
     const rhs = weight.reshape(.{ .token = 1, .out = weight.dim(.out), .d = weight.dim(.d) }).broad(product_shape);
     return lhs.mul(rhs).sum(.d).squeeze(.d);
 }
+
+/// Native weight-only MXFP4 projection. The checkpoint bytes are reinterpreted
+/// without dequantizing a BF16/F32 weight matrix: low-nibble-first E2M1 values
+/// contract in blocks of 32 with their biased E8M0 scale bytes.
+pub fn nativeMxfp4Linear(input: zml.Tensor, packed_values: zml.Tensor, scale: zml.Tensor) zml.Tensor {
+    const weight = packed_values.bitCast(.f4e2m1)
+        .merge(.{ .d = .{ .kw, .bitcast } });
+    const native_scale = scale.bitCast(.f8e8m0);
+    const acc = zml.nn.scaledDot(
+        input.convert(.bf16),
+        weight,
+        null,
+        native_scale,
+        .d,
+    );
+    return acc.convert(input.dtype());
+}

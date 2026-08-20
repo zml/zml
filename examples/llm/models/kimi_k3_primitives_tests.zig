@@ -38,6 +38,14 @@ const Forward = struct {
     fn situ(gate: zml.Tensor, up: zml.Tensor) zml.Tensor {
         return primitives.situGlu(gate, up);
     }
+
+    fn slowMxfp4Bf16(input: zml.Tensor, packed_values: zml.Tensor, scale: zml.Tensor) zml.Tensor {
+        return primitives.slowMxfp4Linear(input.convert(.bf16), packed_values, scale).convert(.f32);
+    }
+
+    fn nativeMxfp4(input: zml.Tensor, packed_values: zml.Tensor, scale: zml.Tensor) zml.Tensor {
+        return primitives.nativeMxfp4Linear(input.convert(.bf16), packed_values, scale).convert(.f32);
+    }
 };
 
 const Context = struct {
@@ -125,9 +133,10 @@ const Context = struct {
         try self.pass(name, started, lhs.shape());
     }
 
-    fn compareSlowMxfp4Linear(
+    fn compareMxfp4Linear(
         self: *Context,
         name: []const u8,
+        comptime function: anytype,
         first_key: []const u8,
         second_key: []const u8,
         third_key: []const u8,
@@ -149,7 +158,7 @@ const Context = struct {
         const exe = try self.platform.compileFn(
             self.allocator,
             self.io,
-            primitives.slowMxfp4Linear,
+            function,
             .{ first, second, third },
             .{ .shardings = &.{self.sharding} },
         );
@@ -159,11 +168,83 @@ const Context = struct {
             self.allocator,
             self.io,
             &exe,
-            primitives.slowMxfp4Linear,
+            function,
             .{ first_buffer, second_buffer, third_buffer },
         );
         defer actual.deinit();
         try zml.testing.expectClose(self.io, actual, expected, opts);
+        try self.pass(name, started, first.shape());
+    }
+
+    fn compareNativeMxfp4Linear(
+        self: *Context,
+        name: []const u8,
+        first_key: []const u8,
+        second_key: []const u8,
+        third_key: []const u8,
+        opts: zml.testing.CompareOpts,
+    ) !void {
+        @setEvalBranchQuota(100_000);
+        var first_buffer = try loadBuffer(self, first_key);
+        defer first_buffer.deinit();
+        var second_buffer = try loadBuffer(self, second_key);
+        defer second_buffer.deinit();
+        var third_buffer = try loadBuffer(self, third_key);
+        defer third_buffer.deinit();
+        const first = zml.Tensor.fromShape(first_buffer.shape()).withTags(.{ .token, .d });
+        const second = zml.Tensor.fromShape(second_buffer.shape()).withTags(.{ .out, .kw });
+        const third = zml.Tensor.fromShape(third_buffer.shape()).withTags(.{ .out, .block });
+        const shardings = &.{self.sharding};
+        const slow_exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            Forward.slowMxfp4Bf16,
+            .{ first, second, third },
+            .{ .shardings = shardings },
+        );
+        defer slow_exe.deinit();
+        const native_exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            Forward.nativeMxfp4,
+            .{ first, second, third },
+            .{ .shardings = shardings },
+        );
+        defer native_exe.deinit();
+        var expected = try zml.testing.autoCall(
+            self.allocator,
+            self.io,
+            &slow_exe,
+            Forward.slowMxfp4Bf16,
+            .{ first_buffer, second_buffer, third_buffer },
+        );
+        defer expected.deinit();
+        const started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+        var actual = try zml.testing.autoCall(
+            self.allocator,
+            self.io,
+            &native_exe,
+            Forward.nativeMxfp4,
+            .{ first_buffer, second_buffer, third_buffer },
+        );
+        defer actual.deinit();
+        // KIMI_K3_TEMP_REMOVE_M20: the full native/oracle error distribution
+        // is printed while calibrating the packed kernel and removed in M20.
+        var actual_host = try actual.toSliceAlloc(self.allocator, self.io);
+        defer actual_host.free(self.allocator);
+        var expected_host = try expected.toSliceAlloc(self.allocator, self.io);
+        defer expected_host.free(self.allocator);
+        const report = try zml.testing.compareSlices(
+            self.allocator,
+            f32,
+            f32,
+            actual_host.items(f32),
+            expected_host.items(f32),
+            opts,
+        );
+        try self.stdout.print("KIMI_K3_MXFP4_CALIBRATION name={s}\n{f}\n", .{ name, report });
+        try self.stdout.flush();
+        try zml.testing.expectClose(self.io, actual_host, expected_host, opts);
         try self.pass(name, started, first.shape());
     }
 
@@ -238,10 +319,12 @@ pub fn main(init: std.process.Init) !void {
     try ctx.compareUnary("e8m0_decode", primitives.decodeE8m0, "mxfp4.scale_e8m0", "mxfp4.expected_scale", .{ .out, .block }, strict);
     try ctx.compareUnary("block32_expand", primitives.expandBlock32Scale, "mxfp4.scale_e8m0", "mxfp4.expected_expanded", .{ .out, .block }, strict);
     try ctx.compareBinary("mxfp4_dequant", primitives.dequantizeMxfp4, "mxfp4.packed", "mxfp4.scale_e8m0", "mxfp4.expected_weight", .{ .out, .kw }, .{ .out, .block }, strict);
-    try ctx.compareSlowMxfp4Linear("mxfp4_slow_linear", "mxfp4.linear_input", "mxfp4.packed", "mxfp4.scale_e8m0", "mxfp4.expected_linear", strict);
+    try ctx.compareMxfp4Linear("mxfp4_slow_linear", primitives.slowMxfp4Linear, "mxfp4.linear_input", "mxfp4.packed", "mxfp4.scale_e8m0", "mxfp4.expected_linear", strict);
+    try ctx.compareNativeMxfp4Linear("mxfp4_native_linear", "mxfp4.linear_input", "mxfp4.packed", "mxfp4.scale_e8m0", .{ .absolute_tolerance = 0.25, .relative_tolerance = 0.025, .minimum_close_fraction = 1.0 });
     try ctx.compareBinary("mxfp4_real_dequant", primitives.dequantizeMxfp4, "mxfp4_real.packed", "mxfp4_real.scale_e8m0", "mxfp4_real.expected_weight", .{ .out, .kw }, .{ .out, .block }, strict);
-    try ctx.compareSlowMxfp4Linear("mxfp4_real_slow_linear", "mxfp4_real.linear_input", "mxfp4_real.packed", "mxfp4_real.scale_e8m0", "mxfp4_real.expected_linear", strict);
+    try ctx.compareMxfp4Linear("mxfp4_real_slow_linear", primitives.slowMxfp4Linear, "mxfp4_real.linear_input", "mxfp4_real.packed", "mxfp4_real.scale_e8m0", "mxfp4_real.expected_linear", strict);
+    try ctx.compareNativeMxfp4Linear("mxfp4_real_native_linear", "mxfp4_real.linear_input", "mxfp4_real.packed", "mxfp4_real.scale_e8m0", .{});
 
-    try stdout_file.interface.writeAll("KIMI_K3_PRIMITIVES_ALL_PASS count=20 backend=cuda\n");
+    try stdout_file.interface.writeAll("KIMI_K3_PRIMITIVES_ALL_PASS count=22 backend=cuda\n");
     try stdout_file.interface.flush();
 }
