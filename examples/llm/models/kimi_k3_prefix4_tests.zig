@@ -25,6 +25,9 @@ const Args = struct {
     layer_family_fixture: []const u8,
     prefix4_fixture: []const u8,
     head_only: bool = false,
+    profile: bool = false,
+    profile_repository: []const u8 = "/tmp/kimi-k3-profile",
+    profile_session: []const u8 = "milestone-15-prefix4",
 
     pub const help =
         \\Use kimi_k3_prefix4_tests --weights=<S4-directory> [fixture arguments]
@@ -812,6 +815,19 @@ pub fn main(init: std.process.Init) !void {
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
+
+    var profiler: ?zml.Platform.Profiler = null;
+    defer if (profiler) |*active_profiler| {
+        _ = active_profiler.stop() catch {};
+        active_profiler.deinit();
+    };
+    if (args.profile) {
+        profiler = try platform.profiler(allocator, io, .{
+            .repository_path = args.profile_repository,
+            .session_id = args.profile_session,
+        });
+        try profiler.?.start();
+    }
 
     var weight_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.weights);
     defer weight_registry.deinit();
