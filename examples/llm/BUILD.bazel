@@ -117,9 +117,19 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# KIMI_K3_TEMP_REMOVE_M20: grouped MXFP4 boundary/routing differential
+# harness retained during bring-up and removed after permanent coverage lands.
+zig_binary(
+    name = "kimi_k3_grouped_mxfp4_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_grouped_mxfp4_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
 # KIMI_K3_TEMP_REMOVE_M20: selected-expert Gate B differential harness is
 # retained during bring-up and removed after full expert execution replaces it.
-zig_binary(
     name = "kimi_k3_moe_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/kimi_k3_moe_tests.zig",

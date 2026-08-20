@@ -48,7 +48,37 @@ const Result = struct {
     probe_w1: zml.Tensor,
     probe_w2: zml.Tensor,
     probe_w3: zml.Tensor,
+    partitioned_route_outputs: zml.Tensor,
+    partitioned_combined_latent: zml.Tensor,
 };
+
+// KIMI_K3_TEMP_REMOVE_M20: two logical expert partitions on the same H100
+// validate global-to-local maps until the permanent distributed suite lands.
+fn partitionedBankLinear(
+    input: zml.Tensor,
+    expert_ids: zml.Tensor,
+    bank: moe.Mxfp4Bank,
+    comptime output_tag: zml.Shape.Tag,
+) zml.Tensor {
+    const expert_count = bank.values.dim(.expert);
+    const split = @divTrunc(expert_count, 2);
+    const right_count = expert_count - split;
+    const left_valid = expert_ids.cmp(.LT, zml.Tensor.scalar(split, expert_ids.dtype()));
+    const right_valid = expert_ids.cmp(.GE, zml.Tensor.scalar(split, expert_ids.dtype()));
+    const left_ids = left_valid.select(expert_ids, zml.Tensor.scalar(split, expert_ids.dtype()));
+    const right_local = expert_ids.addConstant(-split);
+    const right_ids = right_valid.select(right_local, zml.Tensor.scalar(right_count, expert_ids.dtype()));
+    const left_bank: moe.Mxfp4Bank = .{
+        .values = bank.values.slice1d(.expert, .{ .end = split }),
+        .scale = bank.scale.slice1d(.expert, .{ .end = split }),
+    };
+    const right_bank: moe.Mxfp4Bank = .{
+        .values = bank.values.slice1d(.expert, .{ .start = split }),
+        .scale = bank.scale.slice1d(.expert, .{ .start = split }),
+    };
+    return moe.nativeBankLinear(input, left_ids, left_bank, output_tag)
+        .add(moe.nativeBankLinear(input, right_ids, right_bank, output_tag));
+}
 
 fn forwardSelected(
     hidden: zml.Tensor,
@@ -71,6 +101,18 @@ fn forwardSelected(
         weights.experts.w2,
         zml.Shape.toTag(.latent),
     );
+    const partitioned_gate = partitionedBankLinear(expert_input, local_ids, weights.experts.w1, zml.Shape.toTag(.intermediate));
+    const partitioned_up = partitionedBankLinear(expert_input, local_ids, weights.experts.w3, zml.Shape.toTag(.intermediate));
+    const partitioned_activated = primitives.situGlu(partitioned_gate, partitioned_up);
+    const partitioned_route_outputs = partitionedBankLinear(
+        partitioned_activated.rename(.{ .intermediate = .d }),
+        local_ids,
+        weights.experts.w2,
+        zml.Shape.toTag(.latent),
+    );
+    const partitioned_combined_latent = partitioned_route_outputs.convert(.f32)
+        .mul(weights_flat.convert(.f32).broad(partitioned_route_outputs.shape()))
+        .sum(.route).squeeze(.route).convert(hidden.dtype());
     const combined_latent = route_outputs.convert(.f32)
         .mul(weights_flat.convert(.f32).broad(route_outputs.shape()))
         .sum(.route).squeeze(.route).convert(hidden.dtype());
@@ -95,6 +137,8 @@ fn forwardSelected(
         .probe_w1 = moe.probeLinear(probes.w13, weights.experts.w1),
         .probe_w2 = moe.probeLinear(probes.w2, weights.experts.w2),
         .probe_w3 = moe.probeLinear(probes.w13, weights.experts.w3),
+        .partitioned_route_outputs = partitioned_route_outputs,
+        .partitioned_combined_latent = partitioned_combined_latent,
     };
 }
 
@@ -205,6 +249,16 @@ pub fn main(init: std.process.Init) !void {
     );
     defer exe.deinit();
     const compile_us = @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - compile_started, 1000);
+    const cold_execute_started = std.Io.Clock.now(.real, io).toNanoseconds();
+    var cold_actual = try zml.testing.autoCall(
+        allocator,
+        io,
+        &exe,
+        forwardSelected,
+        .{ hidden, local_ids, route_weights, weights, probes },
+    );
+    const cold_execute_us = @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - cold_execute_started, 1000);
+    zml.Buffer.deinitAll(Result, &cold_actual);
     const execute_started = std.Io.Clock.now(.real, io).toNanoseconds();
     var actual = try zml.testing.autoCall(
         allocator,
@@ -234,13 +288,15 @@ pub fn main(init: std.process.Init) !void {
     try support.compare(allocator, io, platform, store, "probe.w1.output", actual.probe_w1, fp32_tolerance, sharding);
     try support.compare(allocator, io, platform, store, "probe.w2.output", actual.probe_w2, fp32_tolerance, sharding);
     try support.compare(allocator, io, platform, store, "probe.w3.output", actual.probe_w3, fp32_tolerance, sharding);
+    try zml.testing.expectClose(io, actual.route_outputs, actual.partitioned_route_outputs, .exact_match);
+    try zml.testing.expectClose(io, actual.combined_latent, actual.partitioned_combined_latent, .exact_match);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     // KIMI_K3_TEMP_REMOVE_M20: Gate B compile/execute timing and boundary
     // inventory are removed with the compact selected-expert harness.
     try stdout_file.interface.print(
-        "KIMI_K3_MOE_PASS experts=61 routes=64 matrices=183 boundaries=13 compile_us={} execute_us={}\n",
-        .{ compile_us, execute_us },
+        "KIMI_K3_MOE_PASS experts=61 routes=64 matrices=183 boundaries=13 partition_shards=2 partition_exact=true compile_us={} cold_execute_us={} execute_us={}\n",
+        .{ compile_us, cold_execute_us, execute_us },
     );
     try stdout_file.interface.flush();
 }
