@@ -249,6 +249,62 @@ pub fn forwardPrefix(tokens: zml.Tensor, weights: PrefixWeights, cache: kda.Cach
     };
 }
 
+// KIMI_K3_TEMP_REMOVE_M20: the expanded head result is retained while the
+// multi-layer prefix is compared boundary-by-boundary with Moonshot. Production
+// inference keeps only logits/token outputs after the cleanup milestone.
+pub const DiagnosticHeadResult = struct {
+    output_candidates: zml.Tensor,
+    output_selector_weights: zml.Tensor,
+    output_selected: zml.Tensor,
+    final_norm: zml.Tensor,
+    logits: zml.Tensor,
+    greedy_token: zml.Tensor,
+};
+
+pub fn diagnosticHead(
+    hidden: zml.Tensor,
+    block_residual: zml.Tensor,
+    output_res_norm: zml.Tensor,
+    output_res_projection: zml.Tensor,
+    final_norm_weight: zml.Tensor,
+    lm_head: zml.Tensor,
+) DiagnosticHeadResult {
+    const token_count = hidden.dim(.b) * hidden.dim(.s);
+    const prefix = hidden.merge(.{ .token = .{ .b, .s } });
+    const active = zml.Tensor.scalar(true, .bool).reshape(.{ .source = 1 });
+    const selected = attn_res.select(
+        prefix,
+        block_residual,
+        active,
+        output_res_norm,
+        output_res_projection.squeeze(.one),
+        1e-5,
+    );
+    const output_selected = selected.output.reshape(.{
+        .b = hidden.dim(.b),
+        .s = hidden.dim(.s),
+        .d = hidden.dim(.d),
+    });
+    const final_norm = primitives.rmsNorm(output_selected, final_norm_weight, 1e-5);
+    const logits = final_norm.dot(lm_head, .d);
+    const greedy_token = logits.slice1d(.s, .{
+        .start = logits.dim(.s) - 1,
+        .end = logits.dim(.s),
+    }).squeeze(.s).argMax(.voc).indices.squeeze(.voc).convert(.i64);
+    const output_candidates = zml.Tensor.concatenate(&.{
+        block_residual,
+        prefix.reshape(.{ .token = token_count, .source = 1, .d = hidden.dim(.d) }),
+    }, .source);
+    return .{
+        .output_candidates = output_candidates,
+        .output_selector_weights = selected.probabilities,
+        .output_selected = output_selected,
+        .final_norm = final_norm,
+        .logits = logits,
+        .greedy_token = greedy_token,
+    };
+}
+
 
 pub const MoeLayerWeights = struct {
     attention_res_norm: zml.Tensor,
