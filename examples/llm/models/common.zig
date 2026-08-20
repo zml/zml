@@ -9,6 +9,9 @@ pub const SessionOptions = struct {
 
 pub const GenerationOptions = struct {
     sampling_strategy: zml.nn.SamplingStrategy = .{},
+    /// Explicit bring-up selection for partial Kimi K3 checkpoints. A null
+    /// value preserves the production 93-layer configuration.
+    kimi_k3_layer_limit: ?usize = null,
 };
 
 pub const Phase = enum {

@@ -4,6 +4,8 @@ const zml = @import("zml");
 
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
+const layer_ops = @import("layer.zig");
+const runtime_weights = @import("runtime_weights.zig");
 
 const log = std.log.scoped(.kimi_k3);
 
@@ -323,9 +325,11 @@ pub const Model = struct {
     }
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: buffer loading/compilation deliberately fail until
-// the corresponding inference milestones implement executable operators.
-pub const Buffers = struct {};
+pub const Buffers = struct {
+    head: runtime_weights.HeadWeights,
+    layer0: zml.Bufferized(layer_ops.Layer0Weights),
+    loader: runtime_weights.Loader,
+};
 
 pub const LoadedModel = struct {
     inner: Model,
@@ -344,8 +348,13 @@ pub const LoadedModel = struct {
             .sampling_strategy = generation.sampling_strategy,
             .max_seq_len = parsed.value.text_config.max_position_embeddings,
         };
+        const selection: LayerSelection = .{ .layer_limit = generation.kimi_k3_layer_limit };
+        if (generation.kimi_k3_layer_limit) |limit| {
+            if (limit == 0) return error.InvalidKimiK3LayerLimit;
+            log.warn("Explicit partial Kimi K3 layer selection enabled: {}/93 layers", .{limit});
+        }
         return .{
-            .inner = try .init(allocator, store, parsed.value, options),
+            .inner = try .initSelected(allocator, store, parsed.value, options, selection),
             .parsed_config = parsed,
         };
     }
@@ -364,19 +373,31 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
         shardings: common.Shardings,
     ) !Buffers {
-        _ = self;
-        _ = allocator;
-        _ = io;
-        _ = platform;
-        _ = store;
-        _ = progress;
-        _ = shardings;
-        return error.KimiK3InferenceNotImplemented;
+        if (platform.target != .cuda) return error.NvidiaCudaRequired;
+        if (self.inner.selection.first_layer != 0 or self.inner.layers.len == 0) {
+            return error.UnsupportedKimiK3RuntimeSelection;
+        }
+        var node = progress.start("Loading Kimi K3 resident weights...", 2);
+        defer node.end();
+        const loader: runtime_weights.Loader = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .store = store,
+            .sharding = shardings.model,
+        };
+        var head = try loader.loadHead();
+        errdefer zml.Buffer.deinitAll(runtime_weights.HeadTensors, &head);
+        node.completeOne();
+        const layer0_buffers = try loader.loadLayer0();
+        node.completeOne();
+        return .{ .head = head, .layer0 = layer0_buffers, .loader = loader };
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        _ = buffers;
+        zml.Buffer.deinitAll(runtime_weights.HeadTensors, &buffers.head);
+        zml.Buffer.deinitAll(layer_ops.Layer0Weights, &buffers.layer0);
         _ = allocator;
     }
 
