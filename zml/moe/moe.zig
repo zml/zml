@@ -6,6 +6,10 @@ pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
+// Native A16W4 grouped GEMM, ported byte-for-byte from the immutable
+// Apache-2.0 donor revision b4f0af76e4c464c0f533420b94fdb1fba838c5e3.
+// Kimi-specific routing and SiTU remain outside this generic kernel.
+pub const triton_a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
 
 pub const ActivationMode = enum {
     silu,

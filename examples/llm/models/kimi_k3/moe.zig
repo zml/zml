@@ -1,5 +1,6 @@
 const zml = @import("zml");
 
+const grouped_mxfp4 = @import("grouped_mxfp4.zig");
 const primitives = @import("primitives.zig");
 const router = @import("router.zig");
 
@@ -42,6 +43,18 @@ pub fn bankLinear(input: zml.Tensor, expert_ids: zml.Tensor, bank: Mxfp4Bank) zm
             .d = input.dim(.d),
         }, input.dtype()));
     return route_input.convert(.f32).dotWithPrecision(weight, .d, .highest).convert(input.dtype());
+}
+
+/// Native CUDA grouped MXFP4 bank execution. Keep `bankLinear` only as the
+/// differential oracle until cleanup milestone M20.
+pub fn nativeBankLinear(
+    input: zml.Tensor,
+    expert_ids: zml.Tensor,
+    bank: Mxfp4Bank,
+    comptime output_tag: zml.Shape.Tag,
+) zml.Tensor {
+    return grouped_mxfp4.linear(input, expert_ids, bank.values, bank.scale)
+        .rename(.{ .out = output_tag });
 }
 
 pub fn probeLinear(input: zml.Tensor, bank: Mxfp4Bank) zml.Tensor {

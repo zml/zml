@@ -62,13 +62,14 @@ fn forwardSelected(
     const weights_flat = route_weights.merge(.{ .token = .{ .b, .s } });
     const routed_down = token_hidden.dot(weights.dense.routed_down, .d);
     const expert_input = routed_down.rename(.{ .latent = .d });
-    const gate = moe.bankLinear(expert_input, local_ids, weights.experts.w1);
-    const up = moe.bankLinear(expert_input, local_ids, weights.experts.w3);
+    const gate = moe.nativeBankLinear(expert_input, local_ids, weights.experts.w1, zml.Shape.toTag(.intermediate));
+    const up = moe.nativeBankLinear(expert_input, local_ids, weights.experts.w3, zml.Shape.toTag(.intermediate));
     const activated = primitives.situGlu(gate, up);
-    const route_outputs = moe.bankLinear(
+    const route_outputs = moe.nativeBankLinear(
         activated.rename(.{ .intermediate = .d }),
         local_ids,
         weights.experts.w2,
+        zml.Shape.toTag(.latent),
     );
     const combined_latent = route_outputs.convert(.f32)
         .mul(weights_flat.convert(.f32).broad(route_outputs.shape()))
