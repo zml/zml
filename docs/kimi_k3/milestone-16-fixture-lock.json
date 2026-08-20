@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "milestone": 16,
+  "moonshot_revision": "c5d1dd4c428bd1ce8b88c5044f3b6ccde9e3b721",
+  "tokenizer_reference_sha256": "502f146b4c75900e66c3d2383daa45b181f362ed65159515fe57b20c2aa0ea60",
+  "tokenizer_json_sha256": "540b445a4846a40da8a6624555c2adb52d3ed9900e88227abb0ce314a338ff11",
+  "tokenizer_source": {
+    "encoding_k3.py": "b9cb7ae100fed34b9337f80dacee5abbf7e261fe9b74bc0e76366701d46f5333",
+    "tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+    "tokenization_kimi.py": "f28ea66e2d862a2a5814970b2ce40c2f7d8296ff09aed90a7e7def689b906944",
+    "tokenizer_config.json": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e"
+  },
+  "tokenizer_cases": {
+    "ordinary": 7,
+    "fuzz": 512,
+    "structural": 6,
+    "first_turn": 3,
+    "continuation": 3
+  },
+  "prefix_fixture_sha256": "68678c33d7520b2cbb8da8c7274d4b1e39bd0eafa09943c177acf88a2387c4ec",
+  "prefix_fixture_semantic_sha256": "0cea352c112c7c282fefe69bab70ea155bbc79eb5ab96bfce048d78f5f06c946",
+  "raw_token_ids": [1, 42, 32000, 160000],
+  "official_greedy_token": 95385,
+  "layer_selection": [0, 1, 2, 3],
+  "session_repeats": 2,
+  "cpu_inference_fallback": false,
+  "network_used": false
+}
