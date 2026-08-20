@@ -49,3 +49,8 @@ def test_pattern_is_locked_to_official_k3_contract() -> None:
     assert "[\\p{Han}]+" in conversion.PATTERN
     assert "\\p{N}{1,3}" in conversion.PATTERN
     assert conversion.BASE_VOCAB_SIZE + conversion.RESERVED_SPECIAL_TOKENS == 163840
+    assert "\\p{Han}" not in conversion.IREE_PATTERN
+    assert "\\p{Lu}" not in conversion.IREE_PATTERN
+    assert "&&" not in conversion.IREE_PATTERN
+    assert "\\p{N}{1,3}" in conversion.IREE_PATTERN
+    assert "(?i:'s|'t|'re|'ve|'m|'ll|'d)?" in conversion.IREE_PATTERN

@@ -30,6 +30,23 @@ PATTERN = "|".join(
     ]
 )
 
+# IREE's tokenizer DFA supports general Unicode categories but not Script=Han,
+# Unicode subcategories, or character-class intersection. The K3 vocabulary
+# was trained within the official regex boundaries; this compatible grouping
+# retains the number/punctuation/whitespace boundaries and attaches English
+# contractions to the word branch. Milestone 16 differentially validates this
+# runtime form against the official pattern over the locked and fuzz corpora.
+IREE_PATTERN = "|".join(
+    [
+        r"[^\r\n\p{L}\p{N}]?\p{L}+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        r"\p{N}{1,3}",
+        r" ?[^\s\p{L}\p{N}]+[\r\n]*",
+        r"(?:[ \t]*\r?\n){1,32}",
+        r"\s+(?!\S)",
+        r"\s+",
+    ]
+)
+
 
 class TokenizerConversionError(ValueError):
     pass
@@ -93,7 +110,7 @@ def convert(source_dir: Path, output: Path, manifest_path: Path) -> dict[str, An
 
     converted = TikTokenConverter(
         vocab_file=os.fspath(vocab_path),
-        pattern=PATTERN,
+        pattern=IREE_PATTERN,
         extra_special_tokens=specials,
     ).converted()
     if converted.get_vocab_size(with_added_tokens=True) != BASE_VOCAB_SIZE + RESERVED_SPECIAL_TOKENS:
@@ -124,7 +141,9 @@ def convert(source_dir: Path, output: Path, manifest_path: Path) -> dict[str, An
         "base_vocab_size": BASE_VOCAB_SIZE,
         "reserved_special_tokens": RESERVED_SPECIAL_TOKENS,
         "vocab_size": BASE_VOCAB_SIZE + RESERVED_SPECIAL_TOKENS,
-        "pattern_sha256": hashlib.sha256(PATTERN.encode()).hexdigest(),
+        "official_pattern_sha256": hashlib.sha256(PATTERN.encode()).hexdigest(),
+        "runtime_pattern_sha256": hashlib.sha256(IREE_PATTERN.encode()).hexdigest(),
+        "runtime_pattern": "iree_category_compatible",
         "special_tokens": specials,
         "output": os.fspath(output),
         "output_bytes": output.stat().st_size,
