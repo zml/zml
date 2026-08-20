@@ -144,9 +144,11 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
     llm.exes.logits_results.fill(.{&logit_buffer});
     llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
     llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
-    llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+    var next_rng_buffers: zml.Tensor.Rng.Buffer = undefined;
+    llm.exes.sample_results.fill(.{ &token_buffer, &next_rng_buffers });
     try token_buffer.toSlice(io, token_slice);
     token_buffer.deinit();
+    replaceRngBuffer(&rng_buffers, next_rng_buffers);
     logit_buffer.deinit();
 
     zml_handler.toc(&zml_handler.timers.prefill);
@@ -207,9 +209,10 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
         llm.exes.logits_results.fill(.{&logit_buffer});
         llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
         llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
-        llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+        llm.exes.sample_results.fill(.{ &token_buffer, &next_rng_buffers });
         try token_buffer.toSlice(io, token_slice);
         token_buffer.deinit();
+        replaceRngBuffer(&rng_buffers, next_rng_buffers);
         decode_embed_buffer.deinit();
         logit_buffer.deinit();
     }
@@ -223,4 +226,21 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
     const tokens_per_second = @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s);
     std.log.info("LLM done, generated {d} tokens ({d:.2} token/s)", .{ num_tokens_generated, tokens_per_second });
     return result.toOwnedSlice(allocator);
+}
+
+fn replaceRngBuffer(current: *zml.Tensor.Rng.Buffer, next: zml.Tensor.Rng.Buffer) void {
+    if (!sameBufferHandles(current._state, next._state)) {
+        current._state.deinit();
+    }
+    current.* = next;
+}
+
+fn sameBufferHandles(lhs: zml.Buffer, rhs: zml.Buffer) bool {
+    var lhs_shards = lhs.shards();
+    var rhs_shards = rhs.shards();
+    while (lhs_shards.next()) |lhs_shard| {
+        const rhs_shard = rhs_shards.next() orelse return false;
+        if (lhs_shard._pjrt_buffer != rhs_shard._pjrt_buffer) return false;
+    }
+    return rhs_shards.next() == null;
 }
