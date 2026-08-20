@@ -7,13 +7,18 @@ const log = std.log;
 const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
+const gemma = @import("gemma/gemma.zig");
 const inference = @import("inference.zig");
+const gemma_inference = @import("gemma/inference.zig");
 const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
 const quantization = @import("quantization.zig");
 const productq = @import("productq.zig");
+const attention = @import("attention.zig");
+
+const Gemma_handler = gemma.Gemma_handler;
 
 const Llm_handler = llm_.Llm_handler;
 const LmHeadMatrix = algebra.LmHeadMatrix;
@@ -94,12 +99,23 @@ pub const Zml_handler = struct {
     pub fn tic(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
         target.init = std.Io.Timestamp.now(self.io, .awake);
     }
+    
+    pub fn ticLog(self: *Zml_handler) void {
+        self.timers.timer.init = std.Io.Timestamp.now(self.io, .awake);
+    }
 
     pub fn toc(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
         const end = std.Io.Timestamp.now(self.io, .awake);
         const start: std.Io.Timestamp = target.init;
         const duration = std.Io.Timestamp.durationTo(start, end);
         target.nanoseconds += duration.nanoseconds;
+    }
+
+    pub fn tocLog(self: *Zml_handler, s: []const u8) void {
+        const end = std.Io.Timestamp.now(self.io, .awake);
+        const start: std.Io.Timestamp = self.timers.timer.init;
+        const duration = std.Io.Timestamp.durationTo(start, end);
+        std.log.info("{s}: {d:.3}us", .{s, @as(f64, @floatFromInt(duration.nanoseconds)) / 1e3});
     }
 
     pub fn reset(_: *Zml_handler, target: *Timing_handler.Field_timer) void {
@@ -115,13 +131,17 @@ pub const Zml_handler = struct {
 pub const Uri_handler = struct {
     llama: []const u8,
     qwen: []const u8,
+    gemma: []const u8,
     checkpoint: []const u8,
+    qkv: []const u8,
 
     pub fn init() Uri_handler {
         return .{
             .llama = "file://examples//detokenization//models//llama",
             .qwen = "file://examples//detokenization//models//qwen",
+            .gemma = "file://examples//detokenization//models//gemma",
             .checkpoint = "file://examples//detokenization//checkpoints",
+            .qkv = "file://examples//detokenization//checkpoints//qkv-export",
         };
     }
 };
@@ -147,6 +167,8 @@ pub const Timing_handler = struct {
         nanoseconds: i96 = 0,
         init: std.Io.Timestamp = std.Io.Timestamp.zero,
     };
+
+    timer: Field_timer = .{},
 
     similarity_matrix: Field_timer = .{},
     junk_rows: Field_timer = .{},
@@ -299,9 +321,14 @@ pub fn main(init: std.process.Init) !void {
     //try runTestsSampling(&zml_handler, zml_handler.uris.llama);
     //try runTestsLlm(&zml_handler, zml_handler.uris.llama);
 
-    try runTestsSampling(&zml_handler, zml_handler.uris.qwen);
+    //try runTestsSampling(&zml_handler, zml_handler.uris.qwen);
     //try runTestsLlm(&zml_handler, zml_handler.uris.qwen);
 
+    //try attention.runTests(&zml_handler);
+    //try attention.runBenchs(&zml_handler);
+
+    try runGemma(&zml_handler);
+    
     zml_handler.timers.print();
 }
 
@@ -310,6 +337,22 @@ const bench_qjl = false;
 const bench_int = false;
 const bench_pq = false;
 const bench_misc = false;
+
+pub fn runGemma(zml_handler: *Zml_handler) !void {
+    std.log.info("***** Init Gemma handler", .{});
+    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma);
+    defer llm.deinit(zml_handler.allocator);
+
+    std.log.info("***** Tokenize prompt", .{});
+    const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, "Write a python script that computes the n-th prime number");
+    defer zml_handler.allocator.free(prompt);
+
+    std.log.info("***** Generate text", .{});
+    zml_handler.mem.start(0);
+    const generated_text = try gemma_inference.generateText(zml_handler, &llm, prompt);
+    defer zml_handler.allocator.free(generated_text);
+    zml_handler.mem.check(0);
+}
 
 pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
     const alloc = zml_handler.allocator;

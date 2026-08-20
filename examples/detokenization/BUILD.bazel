@@ -4,7 +4,10 @@ zig_binary(
     name = "detokenization",
     main = "main.zig",
     srcs = [
+        "attention.zig",
         "graph.zig",
+        "gemma/gemma.zig",
+        "gemma/inference.zig",
         "inference.zig",
         "llm.zig",
         "main.zig",

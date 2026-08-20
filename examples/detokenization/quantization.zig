@@ -559,8 +559,7 @@ pub const QuantizationInt4 = struct {
         var best_threshold = observed_max;
         var best_error = std.math.inf(f32);
         for (1..grid_size + 1) |grid_index| {
-            const threshold = observed_max *
-                (@as(f32, @floatFromInt(grid_index)) / @as(f32, @floatFromInt(grid_size)));
+            const threshold = observed_max * (@as(f32, @floatFromInt(grid_index)) / @as(f32, @floatFromInt(grid_size)));
             const step = threshold / quant_max;
             var error_sum: f32 = 0.0;
 
