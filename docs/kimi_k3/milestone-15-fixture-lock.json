@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "milestone": 15,
+  "generator": "tools/kimi_k3/export_prefix4_reference.py",
+  "tensor_file_sha256": "68678c33d7520b2cbb8da8c7274d4b1e39bd0eafa09943c177acf88a2387c4ec",
+  "tensor_semantic_sha256": "0cea352c112c7c282fefe69bab70ea155bbc79eb5ab96bfce048d78f5f06c946",
+  "tensor_count": 104,
+  "layer_selection": [0, 1, 2, 3],
+  "prefill_tokens": 4,
+  "decode_warm_tokens": 3,
+  "decode_tokens": 1,
+  "prefill_greedy_token": 95385,
+  "decode_greedy_token": 95385,
+  "cpu_inference_fallback": false,
+  "layer_family_source_file_sha256": "9e5687de705f823b3b6b765b2af66a4440e77113ef12366852aafd0a694a4e92",
+  "layer_family_source_semantic_sha256": "847fd46368da4107ade6f6528eabfbb765d1de396008ca5ae82db0dce10f3aea"
+}
