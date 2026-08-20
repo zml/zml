@@ -15,5 +15,7 @@ pub const layer = @import("kimi_k3/layer.zig");
 pub const router = @import("kimi_k3/router.zig");
 pub const moe = @import("kimi_k3/moe.zig");
 pub const mla = @import("kimi_k3/mla.zig");
+pub const chat_template = @import("kimi_k3/chat_template.zig");
+pub const tokenizer = @import("kimi_k3/tokenizer.zig");
 pub const session = @import("kimi_k3/session.zig");
 pub const Session = session.Session;

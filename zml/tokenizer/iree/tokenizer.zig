@@ -124,7 +124,18 @@ pub const Tokenizer = struct {
     }
 
     pub fn encoder(self: *const Tokenizer) !Encoder {
-        return Encoder.init(self);
+        return Encoder.init(self, c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
+    }
+
+    /// Creates an encoder that treats added/special token spellings as normal
+    /// text. Kimi K3 requires this for untrusted user/tool content while its
+    /// XTML control markers are appended explicitly by token ID.
+    pub fn encoderWithoutSpecialTokenMatching(self: *const Tokenizer) !Encoder {
+        return Encoder.init(
+            self,
+            c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START |
+                c.IREE_TOKENIZER_ENCODE_FLAG_NO_SPECIAL_TOKEN_MATCHING,
+        );
     }
 
     pub fn decoder(self: *const Tokenizer) !Decoder {
@@ -146,8 +157,9 @@ pub const Tokenizer = struct {
         state_storage: []u8,
         transform_buffer: []u8,
         state: *c.iree_tokenizer_encode_state_t,
+        flags: c.iree_tokenizer_encode_flags_t,
 
-        fn init(tokenizer: *const Tokenizer) !Encoder {
+        fn init(tokenizer: *const Tokenizer, flags: c.iree_tokenizer_encode_flags_t) !Encoder {
             var state_size: usize = undefined;
             try checkOk(c.iree_tokenizer_encode_state_calculate_size(tokenizer.inner, &state_size));
             const state_storage = try tokenizer.allocator.alloc(u8, state_size);
@@ -163,7 +175,7 @@ pub const Tokenizer = struct {
                 byteSpan(state_storage),
                 byteSpan(transform_buffer),
                 c.iree_tokenizer_offset_run_list_empty(),
-                c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START,
+                flags,
                 &state,
             ));
 
@@ -172,6 +184,7 @@ pub const Tokenizer = struct {
                 .state_storage = state_storage,
                 .transform_buffer = transform_buffer,
                 .state = state.?,
+                .flags = flags,
             };
         }
 
@@ -182,7 +195,7 @@ pub const Tokenizer = struct {
         }
 
         pub fn reset(self: *Encoder) void {
-            c.iree_tokenizer_encode_state_reset(self.state, c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
+            c.iree_tokenizer_encode_state_reset(self.state, self.flags);
         }
 
         pub fn encodeAlloc(self: *Encoder, allocator: std.mem.Allocator, text: []const u8) ![]u32 {

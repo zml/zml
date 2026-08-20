@@ -136,6 +136,16 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
+    /// Encode literal text without recognizing configured special-token
+    /// spellings. Backends without added-token matching already have this
+    /// behavior, so only the Hugging Face JSON/IREE backend needs a variant.
+    pub fn encoderWithoutSpecialTokenMatching(self: *const Tokenizer) !Encoder {
+        return switch (self.*) {
+            .iree => |*v| .{ .iree = try v.encoderWithoutSpecialTokenMatching() },
+            inline else => |*v, tag| @unionInit(Encoder, @tagName(tag), try v.*.encoder()),
+        };
+    }
+
     pub fn decoder(self: *const Tokenizer) !Decoder {
         return switch (self.*) {
             inline else => |*v, tag| @unionInit(Decoder, @tagName(tag), try v.*.decoder()),
