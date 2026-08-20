@@ -287,7 +287,7 @@ fn selectSequence(
         block_sources,
         active_blocks,
         norm_weight,
-        projection_weight,
+        projection_weight.squeeze(.one),
         1e-5,
     );
     return .{
@@ -408,7 +408,15 @@ pub fn forwardKdaMoeDecode(
         weights.common.input_norm,
         1e-5,
     );
-    const attention = kda.decodeCompact(input_norm, weights.attention, cache);
+    const step = kda.decodeCompact(input_norm.squeeze(.s), weights.attention, cache);
+    const attention: kda.CompactResult = .{
+        .output = step.output.reshape(.{
+            .b = input.dim(.b),
+            .s = 1,
+            .d = input.dim(.d),
+        }),
+        .cache = step.cache,
+    };
     return finishKdaMoe(
         input,
         block_sources,
