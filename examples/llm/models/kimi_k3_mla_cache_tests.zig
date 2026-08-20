@@ -95,6 +95,32 @@ const Context = struct {
         };
     }
 
+    fn sessionCacheTensors(cache: zml.Bufferized(mla.SessionCache)) mla.SessionCache {
+        return .{
+            .compressed = .fromShape(cache.compressed.shape()),
+            .extra_key = .fromShape(cache.extra_key.shape()),
+        };
+    }
+
+    fn zeroSessionCache(self: *Context, capacity: usize) !zml.Bufferized(mla.SessionCache) {
+        return .{
+            .compressed = try support.zeroBuffer(
+                self.allocator,
+                self.io,
+                self.platform,
+                zml.Shape.init(.{ .b = 1, .k = capacity, .kv_rank = 512 }, .bf16),
+                self.sharding,
+            ),
+            .extra_key = try support.zeroBuffer(
+                self.allocator,
+                self.io,
+                self.platform,
+                zml.Shape.init(.{ .b = 1, .k = capacity, .hd = 64 }, .bf16),
+                self.sharding,
+            ),
+        };
+    }
+
     fn compareExpected(self: *Context, key: []const u8, actual: zml.Buffer, opts: zml.testing.CompareOpts) !void {
         try support.compare(
             self.allocator,
@@ -243,6 +269,89 @@ const Context = struct {
             .{ @divTrunc(compile_ns, 1000), @divTrunc(execute_ns, 1000) },
         );
     }
+
+    fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
+        if (a._shards.len != b._shards.len) return false;
+        for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
+            if (a_shard != b_shard) return false;
+        }
+        return true;
+    }
+
+    fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
+        if (!sameBufferHandle(dst.*, src.*)) dst.deinit();
+        dst.* = src.*;
+    }
+
+    fn runReusableSessionDecode(self: *Context) !void {
+        const capacity: usize = 4;
+        var first_input = try self.loadFrom(self.cases, "decode4.token0.input", .{ .b, .s, .d });
+        defer first_input.deinit();
+        var cache = try self.zeroSessionCache(capacity);
+        defer zml.Buffer.deinitAll(mla.SessionCache, &cache);
+        var token_index = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
+        defer token_index.deinit();
+
+        const compile_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+        const exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            mla.latentSession,
+            .{
+                zml.Tensor.fromShape(first_input.shape()),
+                self.weightTensors(),
+                sessionCacheTensors(cache),
+                zml.Tensor.fromShape(token_index.shape()),
+            },
+            .{ .shardings = &.{self.sharding} },
+        );
+        defer exe.deinit();
+        const compile_ns = std.Io.Clock.now(.real, self.io).toNanoseconds() - compile_started;
+
+        for (0..2) |reset_index| {
+            if (reset_index != 0) {
+                zml.Buffer.deinitAll(mla.SessionCache, &cache);
+                cache = try self.zeroSessionCache(capacity);
+            }
+            const execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+            for (0..capacity) |position| {
+                const prefix = try std.fmt.allocPrint(self.allocator, "decode4.token{}", .{position});
+                defer self.allocator.free(prefix);
+                const input_key = try std.fmt.allocPrint(self.allocator, "{s}.input", .{prefix});
+                defer self.allocator.free(input_key);
+                var input = try self.loadFrom(self.cases, input_key, .{ .b, .s, .d });
+                defer input.deinit();
+                var position_buffer = try zml.Buffer.scalar(
+                    self.io,
+                    self.platform,
+                    @as(u32, @intCast(position)),
+                    .u32,
+                );
+                defer position_buffer.deinit();
+                var actual = try zml.testing.autoCall(
+                    self.allocator,
+                    self.io,
+                    &exe,
+                    mla.latentSession,
+                    .{ input, self.weights, cache, position_buffer },
+                );
+                const output_key = try std.fmt.allocPrint(self.allocator, "{s}.expected.output", .{prefix});
+                defer self.allocator.free(output_key);
+                try self.compareExpected(output_key, actual.output, output_tolerance);
+                Context.deinitNonCache(&actual);
+                replaceBuffer(&cache.compressed, &actual.cache.compressed);
+                replaceBuffer(&cache.extra_key, &actual.cache.extra_key);
+            }
+            try self.compareExpected("decode4.token3.expected.cache.compressed", cache.compressed, cache_tolerance);
+            try self.compareExpected("decode4.token3.expected.cache.extra_key", cache.extra_key, cache_tolerance);
+            const execute_ns = std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started;
+            try self.stdout.print(
+                "KIMI_K3_MLA_SESSION_CACHE_PASS reset={} steps={} compile_us={} execute_us={} capacity={}\n",
+                .{ reset_index, capacity, @divTrunc(compile_ns, 1000), @divTrunc(execute_ns, 1000), capacity },
+            );
+            try self.stdout.flush();
+        }
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -278,6 +387,7 @@ pub fn main(init: std.process.Init) !void {
     for ([_]usize{ 1, 4, 8, 16 }) |length| try context.runFull(length);
     for ([_]usize{ 1, 2, 3 }) |split| try context.runSplit(split);
     try context.runRepeatedDecode();
+    try context.runReusableSessionDecode();
     try stdout_file.interface.writeAll("KIMI_K3_MLA_CACHE_ALL_PASS full=4 splits=3 repeated_decode_steps=4 values_per_token=576 backend=cuda\n");
     try stdout_file.interface.flush();
 }

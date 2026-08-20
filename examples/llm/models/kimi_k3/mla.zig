@@ -27,6 +27,14 @@ pub const LatentCache = struct {
     extra_key: zml.Tensor,
 };
 
+/// Fixed-capacity latent cache used by the reusable session executables.
+/// `token_index` identifies the first slot written by the current input. The
+/// cache tensors retain their allocation shape across prefill and decode.
+pub const SessionCache = struct {
+    compressed: zml.Tensor,
+    extra_key: zml.Tensor,
+};
+
 // KIMI_K3_TEMP_REMOVE_M20: absorbed-query and latent-readout boundaries are
 // returned for cache-algebra differential diagnosis and removed in cleanup.
 pub const LatentResult = struct {
@@ -228,4 +236,71 @@ pub fn latentPrefill(hidden: zml.Tensor, weights: Weights) LatentResult {
 /// Production-shaped latent-cache continuation for decode or split prefill.
 pub fn latentContinue(hidden: zml.Tensor, weights: Weights, cache: LatentCache) LatentResult {
     return latentCore(hidden, weights, cache);
+}
+
+/// Position-indexed latent MLA over fixed-capacity session storage. This has
+/// the same math as `latentCore`, but updates cache slots in place and masks
+/// unused capacity so one compiled decode executable can be reused at every
+/// token position.
+pub fn latentSession(
+    hidden: zml.Tensor,
+    weights: Weights,
+    cache: SessionCache,
+    token_index: zml.Tensor,
+) LatentResult {
+    const heads: i64 = 96;
+    const q_a = linear(hidden, weights.q_a_proj, .d);
+    const q_norm = weightedRmsNorm(q_a, weights.q_a_norm, .rank);
+    const q_b = linear(q_norm, weights.q_b_proj, .rank);
+    const q_heads = q_b.splitAxis(.mix, .{ .h = heads, .hd = 192 })
+        .transpose(.{ .b, .h, .s, .hd }).rename(.{ .s = .q });
+    const q_pass = q_heads.slice1d(.hd, .{ .start = 0, .end = 128 });
+    const q_extra = q_heads.slice1d(.hd, .{ .start = 128, .end = 192 });
+
+    const kv_a = linear(hidden, weights.kv_a_proj, .d);
+    const compressed = kv_a.slice1d(.kv_mix, .{ .start = 0, .end = 512 })
+        .rename(.{ .kv_mix = .kv_rank });
+    const compressed_new = weightedRmsNorm(compressed, weights.kv_a_norm, .kv_rank)
+        .rename(.{ .s = .k });
+    const extra_new = kv_a.slice1d(.kv_mix, .{ .start = 512, .end = 576 })
+        .rename(.{ .kv_mix = .hd, .s = .k });
+    const updated_cache: LatentCache = .{
+        .compressed = cache.compressed
+            .dynamicUpdateSlice(.{ .k = token_index }, compressed_new)
+            .reuseBuffer(cache.compressed),
+        .extra_key = cache.extra_key
+            .dynamicUpdateSlice(.{ .k = token_index }, extra_new)
+            .reuseBuffer(cache.extra_key),
+    };
+
+    const kv_up = weights.kv_b_proj.reshape(.{ .h = heads, .kv_width = 256, .kv_rank = 512 });
+    const key_up = kv_up.slice1d(.kv_width, .{ .start = 0, .end = 128 })
+        .rename(.{ .kv_width = .hd });
+    const value_up = kv_up.slice1d(.kv_width, .{ .start = 128, .end = 256 })
+        .rename(.{ .kv_width = .v });
+    const q_absorbed = q_pass.dot(key_up, .hd);
+    const content_scores = q_absorbed.dot(updated_cache.compressed, .kv_rank);
+    const extra_scores = q_extra.dot(updated_cache.extra_key, .hd);
+    const scores = content_scores.add(extra_scores).scale(1.0 / std.math.sqrt(192.0));
+    const query_index = zml.Tensor.iota(scores.shape(), .q)
+        .add(token_index.convert(.i32).broad(scores.shape().withDtype(.i32)));
+    const key_index = zml.Tensor.iota(scores.shape(), .k);
+    const masked_scores = key_index.cmp(.LE, query_index).select(
+        scores,
+        zml.Tensor.scalar(-std.math.inf(f32), scores.dtype()),
+    );
+    const probabilities = masked_scores.convert(.f32).softmax(.k).convert(q_heads.dtype());
+    const latent_aggregation = probabilities.dot(updated_cache.compressed, .k);
+    const aggregation = latent_aggregation.dot(value_up, .kv_rank);
+    const flattened = aggregation.transpose(.{ .b, .q, .h, .v })
+        .rename(.{ .q = .s }).merge(.{ .out = .{ .h, .v } });
+    const gate = linear(hidden, weights.gate_proj, .d).sigmoid();
+    const output = linear(flattened.mul(gate), weights.output_proj, .out);
+    return .{
+        .output = output,
+        .probabilities = probabilities,
+        .cache = updated_cache,
+        .q_absorbed = q_absorbed,
+        .latent_aggregation = latent_aggregation,
+    };
 }
