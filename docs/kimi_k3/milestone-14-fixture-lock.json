@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "milestone": 14,
+  "generator": "tools/kimi_k3/export_layer_family_reference.py",
+  "tensor_file_sha256": "9e5687de705f823b3b6b765b2af66a4440e77113ef12366852aafd0a694a4e92",
+  "tensor_semantic_sha256": "847fd46368da4107ade6f6528eabfbb765d1de396008ca5ae82db0dce10f3aea",
+  "tensor_count": 240,
+  "layers": {
+    "1": {"attention": "kda", "selected_expert_count": 61},
+    "2": {"attention": "kda", "selected_expert_count": 56},
+    "3": {"attention": "mla", "selected_expert_count": 53}
+  },
+  "prefill_tokens": 4,
+  "decode_warm_tokens": 3,
+  "decode_tokens": 1,
+  "route_top_k": 16,
+  "cpu_inference_fallback": false,
+  "compact_map_scope": "fixture and isolated harness only"
+}
