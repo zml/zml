@@ -262,27 +262,32 @@ pub const Exe = struct {
         }
     };
 
-    /// An executable together with reusable argument and result storage.
-    /// A runner owns all three values and must not be used concurrently.
+    pub fn runner(self: *const Exe, allocator: std.mem.Allocator) !Runner {
+        return .init(self, allocator);
+    }
+
+    /// Reusable argument and result storage for a borrowed executable.
+    /// The executable must outlive the runner, and the runner must not be used concurrently.
     pub const Runner = struct {
-        exe: Exe,
+        exe: *const Exe,
         args: Arguments,
         results: Results,
 
-        /// Takes ownership of the executable and allocates reusable argument and result storage.
-        pub fn init(exe: Exe, allocator: std.mem.Allocator) !Runner {
-            errdefer exe.deinit();
+        pub fn init(exe: *const Exe, allocator: std.mem.Allocator) !Runner {
             var arguments = try exe.args(allocator);
             errdefer arguments.deinit(allocator);
             var results_ = try exe.results(allocator);
             errdefer results_.deinit(allocator);
-            return .{ .exe = exe, .args = arguments, .results = results_ };
+            return .{
+                .exe = exe,
+                .args = arguments,
+                .results = results_,
+            };
         }
 
         pub fn deinit(self: *Runner, allocator: std.mem.Allocator) void {
             self.results.deinit(allocator);
             self.args.deinit(allocator);
-            self.exe.deinit();
         }
 
         pub fn run(self: *Runner, input_values: anytype, output_values: anytype) void {
@@ -375,13 +380,13 @@ pub const Exe = struct {
 
 /// A typed executable whose input and output buffer structures are derived from
 /// the function used to compile it.
-pub fn TypedExe(comptime function_: anytype) type {
+pub fn FnExe(comptime function_: anytype) type {
     const function_info = switch (@typeInfo(@TypeOf(function_))) {
         .@"fn" => |info| info,
-        else => @compileError("TypedExe expects a function, got " ++ @typeName(@TypeOf(function_))),
+        else => @compileError("FnExe expects a function, got " ++ @typeName(@TypeOf(function_))),
     };
     if (function_info.is_var_args or function_info.params.len != 1) {
-        @compileError("TypedExe function must accept exactly one input struct");
+        @compileError("FnExe function must accept exactly one input struct");
     }
 
     const FunctionInput = typedFunctionInput(function_);
@@ -413,13 +418,17 @@ pub fn TypedExe(comptime function_: anytype) type {
             self.raw.deinit();
         }
 
-        /// An executable together with reusable argument and result storage.
-        /// A runner owns all three values and must not be used concurrently.
+        pub fn runner(self: *const Self, allocator: std.mem.Allocator) !Runner(.{}) {
+            return .init(self, allocator, .{});
+        }
+
+        /// Reusable argument and result storage for a borrowed executable.
+        /// The executable must outlive the runner, and the runner must not be used concurrently.
         pub fn Runner(comptime baked_fields: anytype) type {
             const count = countBackedFields(Input, baked_fields);
 
             return struct {
-                exe: Exe,
+                exe: *const Exe,
                 args: Exe.Arguments,
                 results: Exe.Results,
 
@@ -434,7 +443,7 @@ pub fn TypedExe(comptime function_: anytype) type {
                     var results = try exe.raw.results(allocator);
                     errdefer results.deinit(allocator);
                     arguments.bake(baked);
-                    return .{ .exe = exe.raw, .args = arguments, .results = results };
+                    return .{ .exe = &exe.raw, .args = arguments, .results = results };
                 }
 
                 pub fn deinit(self: *RunnerSelf, allocator: std.mem.Allocator) void {
@@ -459,24 +468,24 @@ pub fn TypedExe(comptime function_: anytype) type {
 fn countBackedFields(comptime Input: type, comptime baked_fields: anytype) usize {
     const baked_info = switch (@typeInfo(@TypeOf(baked_fields))) {
         .@"struct" => |info| info,
-        else => @compileError("TypedExe baked fields must be a tuple of enum literals"),
+        else => @compileError("FnExe baked fields must be a tuple of enum literals"),
     };
     if (!baked_info.is_tuple) {
-        @compileError("TypedExe baked fields must be a tuple of enum literals");
+        @compileError("FnExe baked fields must be a tuple of enum literals");
     }
 
     const input_fields = @typeInfo(Input).@"struct".fields;
     if (baked_info.fields.len > input_fields.len) {
-        @compileError("TypedExe baked fields must be a prefix of its bufferized input fields");
+        @compileError("FnExe baked fields must be a prefix of its bufferized input fields");
     }
 
     inline for (baked_info.fields, 0..) |tuple_field, i| {
         const baked_field = @field(baked_fields, tuple_field.name);
         if (@TypeOf(baked_field) != @EnumLiteral()) {
-            @compileError("TypedExe baked fields must be enum literals");
+            @compileError("FnExe baked fields must be enum literals");
         }
         if (!std.mem.eql(u8, @tagName(baked_field), input_fields[i].name)) {
-            @compileError("TypedExe baked fields must be an ordered prefix of its bufferized input fields");
+            @compileError("FnExe baked fields must be an ordered prefix of its bufferized input fields");
         }
     }
     return baked_info.fields.len;
@@ -501,24 +510,24 @@ fn structFieldRange(comptime Struct: type, comptime start: usize, comptime end: 
 
 fn typedFunctionInput(comptime function_: anytype) type {
     const Input = @typeInfo(@TypeOf(function_)).@"fn".params[0].type orelse
-        @compileError("TypedExe function must have a concrete input type");
-    validateTypedExeStruct("input", Input);
+        @compileError("FnExe function must have a concrete input type");
+    validateFnExeStruct("input", Input);
     return Input;
 }
 
 fn typedFunctionOutput(comptime function_: anytype) type {
-    const Output = @typeInfo(@TypeOf(function_)).@"fn".return_type orelse @compileError("TypedExe function must return an output struct");
-    validateTypedExeStruct("output", Output);
+    const Output = @typeInfo(@TypeOf(function_)).@"fn".return_type orelse @compileError("FnExe function must return an output struct");
+    validateFnExeStruct("output", Output);
     return Output;
 }
 
-fn validateTypedExeStruct(comptime role: []const u8, comptime T: type) void {
+fn validateFnExeStruct(comptime role: []const u8, comptime T: type) void {
     const info = switch (@typeInfo(T)) {
         .@"struct" => |info| info,
-        else => @compileError("TypedExe " ++ role ++ " must be a struct, got " ++ @typeName(T)),
+        else => @compileError("FnExe " ++ role ++ " must be a struct, got " ++ @typeName(T)),
     };
     if (info.is_tuple) {
-        @compileError("TypedExe " ++ role ++ " must use named fields");
+        @compileError("FnExe " ++ role ++ " must use named fields");
     }
 }
 
@@ -536,7 +545,7 @@ fn typedOutputDestinations(comptime BufferizedOutput: type) type {
     return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
-test "TypedExe derives baked and runtime calls from a function" {
+test "FnExe derives baked and runtime calls from a function" {
     const Inputs = struct {
         weights: struct {
             tensor: Tensor,
@@ -561,7 +570,7 @@ test "TypedExe derives baked and runtime calls from a function" {
         }
     };
 
-    const Model = TypedExe(Functions.forward);
+    const Model = FnExe(Functions.forward);
     try std.testing.expect(@hasField(Model.Input, "weights"));
     try std.testing.expect(@hasField(Model.Input, "bias"));
     try std.testing.expect(@hasField(Model.Input, "tokens"));

@@ -84,16 +84,11 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
-pub const EmbedExe = zml.TypedExe(model.EmbedTokens.forward);
-pub const FullAttentionExe = zml.TypedExe(model.TransformerLayer.forwardSelfAttn);
-pub const LinearAttentionExe = zml.TypedExe(model.TransformerLayer.forwardLinearAttn);
-pub const SampleExe = zml.TypedExe(model.Sampler.sampleTokens);
-
 pub const KernelExe = struct {
-    embed: EmbedExe,
-    full_attention: FullAttentionExe,
-    linear_attention: LinearAttentionExe,
-    sample: SampleExe,
+    embed: zml.FnExe(model.EmbedTokens.forward),
+    full_attention: zml.FnExe(model.TransformerLayer.forwardSelfAttn),
+    linear_attention: zml.FnExe(model.TransformerLayer.forwardLinearAttn),
+    sample: zml.FnExe(model.Sampler.sampleTokens),
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
@@ -104,8 +99,8 @@ pub const KernelExe = struct {
 };
 
 pub const LayerRunner = union(enum) {
-    full_attention: FullAttentionExe.Runner(.{.layer}),
-    linear_attention: LinearAttentionExe.Runner(.{.layer}),
+    full_attention: zml.FnExe(model.TransformerLayer.forwardSelfAttn).Runner(.{.layer}),
+    linear_attention: zml.FnExe(model.TransformerLayer.forwardLinearAttn).Runner(.{.layer}),
 
     pub fn deinit(self: *LayerRunner, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -115,12 +110,12 @@ pub const LayerRunner = union(enum) {
 };
 
 pub const KernelRunner = struct {
-    embed: EmbedExe.Runner(.{.embedding}),
+    embed: zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}),
     layers: []LayerRunner,
-    sample: SampleExe.Runner(.{.sampler}),
+    sample: zml.FnExe(model.Sampler.sampleTokens).Runner(.{.sampler}),
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
-        var embed = try EmbedExe.Runner(.{.embedding}).init(&exe.embed, allocator, .{
+        var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{
             .embedding = buffers.text_model.embed_tokens,
         });
         errdefer embed.deinit(allocator);
@@ -131,12 +126,12 @@ pub const KernelRunner = struct {
         errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
         for (layers, buffers.text_model.layers) |*layer, layer_buffers| {
             layer.* = switch (layer_buffers.attn) {
-                .self_attn => .{ .full_attention = try FullAttentionExe.Runner(.{.layer}).init(
+                .self_attn => .{ .full_attention = try zml.FnExe(model.TransformerLayer.forwardSelfAttn).Runner(.{.layer}).init(
                     &exe.full_attention,
                     allocator,
                     .{ .layer = layer_buffers },
                 ) },
-                .linear_attn => .{ .linear_attention = try LinearAttentionExe.Runner(.{.layer}).init(
+                .linear_attn => .{ .linear_attention = try zml.FnExe(model.TransformerLayer.forwardLinearAttn).Runner(.{.layer}).init(
                     &exe.linear_attention,
                     allocator,
                     .{ .layer = layer_buffers },
@@ -145,7 +140,7 @@ pub const KernelRunner = struct {
             initialized_layers += 1;
         }
 
-        var sample = try SampleExe.Runner(.{.sampler}).init(&exe.sample, allocator, .{
+        var sample = try zml.FnExe(model.Sampler.sampleTokens).Runner(.{.sampler}).init(&exe.sample, allocator, .{
             .sampler = .{
                 .norm = buffers.text_model.norm,
                 .lm_head = buffers.text_model.lm_head,
@@ -277,14 +272,14 @@ fn compileKernel(
     };
 }
 
-fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !EmbedExe {
+fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.EmbedTokens.forward) {
     return compileExe(allocator, io, platform, model.EmbedTokens.forward, .{.{
         .embedding = mdl.text_model.embed_tokens,
         .tokens = zml.Tensor.init(.{ .b = 1, .s = seqlen }, .u32),
     }}, parameters, progress, phase, "embedding");
 }
 
-fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !FullAttentionExe {
+fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardSelfAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
@@ -300,7 +295,7 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
     }}, parameters, progress, phase, "full-attention layer");
 }
 
-fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !LinearAttentionExe {
+fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
@@ -316,7 +311,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     }}, parameters, progress, phase, "linear-attention layer");
 }
 
-fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !SampleExe {
+fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.Sampler.sampleTokens) {
     return compileExe(allocator, io, platform, model.Sampler.sampleTokens, .{.{
         .sampler = mdl.text_model.sampler(),
         .hidden = hiddenTensor(mdl, seqlen),
@@ -335,7 +330,7 @@ fn compileExe(
     progress: *std.Progress.Node,
     phase: []const u8,
     component: []const u8,
-) !zml.TypedExe(function) {
+) !zml.FnExe(function) {
     progress.increaseEstimatedTotalItems(1);
     const label = try std.fmt.allocPrint(allocator, "Compiling {s} {s}...", .{ phase, component });
     defer allocator.free(label);
@@ -343,7 +338,7 @@ fn compileExe(
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} {s} [{f}]", .{ phase, component, now.untilNow(io, .awake) });
-    return zml.TypedExe(function).compile(allocator, io, platform, .{
+    return zml.FnExe(function).compile(allocator, io, platform, .{
         .shardings = &parameters.shardings.all(),
         .xla_dump_to = parameters.xla_dump_to,
     }, args);

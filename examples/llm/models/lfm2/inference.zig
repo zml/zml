@@ -96,15 +96,11 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
-pub const EmbedExe = zml.TypedExe(model.TokenEmbedding.forward);
-pub const LayerExe = zml.TypedExe(model.DecoderLayer.forward);
-pub const SampleExe = zml.TypedExe(model.LmHead.forward);
-
 pub const KernelExe = struct {
-    embed: EmbedExe,
-    conv: LayerExe,
-    self_attn: LayerExe,
-    sample: SampleExe,
+    embed: zml.FnExe(model.TokenEmbedding.forward),
+    conv: zml.FnExe(model.DecoderLayer.forward),
+    self_attn: zml.FnExe(model.DecoderLayer.forward),
+    sample: zml.FnExe(model.LmHead.forward),
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
@@ -115,28 +111,28 @@ pub const KernelExe = struct {
 };
 
 pub const KernelRunner = struct {
-    embed: EmbedExe.Runner(.{.embedding}),
-    layers: []LayerExe.Runner(.{.layer}),
-    sample: SampleExe.Runner(.{ .lm_head, .embed_tokens }),
+    embed: zml.FnExe(model.TokenEmbedding.forward).Runner(.{.embedding}),
+    layers: []zml.FnExe(model.DecoderLayer.forward).Runner(.{.layer}),
+    sample: zml.FnExe(model.LmHead.forward).Runner(.{ .lm_head, .embed_tokens }),
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
-        var embed = try EmbedExe.Runner(.{.embedding}).init(&exe.embed, allocator, .{ .embedding = buffers.embed_tokens });
+        var embed = try zml.FnExe(model.TokenEmbedding.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{ .embedding = buffers.embed_tokens });
         errdefer embed.deinit(allocator);
 
-        const layers = try allocator.alloc(LayerExe.Runner(.{.layer}), buffers.layers.len);
+        const layers = try allocator.alloc(zml.FnExe(model.DecoderLayer.forward).Runner(.{.layer}), buffers.layers.len);
         errdefer allocator.free(layers);
         var initialized_layers: usize = 0;
         errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
         for (layers, buffers.layers) |*layer, layer_buffers| {
-            const layer_exe: *const LayerExe = switch (layer_buffers.operator) {
+            const layer_exe: *const zml.FnExe(model.DecoderLayer.forward) = switch (layer_buffers.operator) {
                 .conv => &exe.conv,
                 .self_attn => &exe.self_attn,
             };
-            layer.* = try LayerExe.Runner(.{.layer}).init(layer_exe, allocator, .{ .layer = layer_buffers });
+            layer.* = try zml.FnExe(model.DecoderLayer.forward).Runner(.{.layer}).init(layer_exe, allocator, .{ .layer = layer_buffers });
             initialized_layers += 1;
         }
 
-        var sample = try SampleExe.Runner(.{ .lm_head, .embed_tokens }).init(&exe.sample, allocator, .{
+        var sample = try zml.FnExe(model.LmHead.forward).Runner(.{ .lm_head, .embed_tokens }).init(&exe.sample, allocator, .{
             .lm_head = buffers.lm_head,
             .embed_tokens = buffers.embed_tokens,
         });
@@ -231,14 +227,14 @@ fn compileEmbed(
     seqlen: u32,
     phase: Phase,
     progress: *std.Progress.Node,
-) !EmbedExe {
+) !zml.FnExe(model.TokenEmbedding.forward) {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start(phase.startMessage("embed_tokens"), 1);
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "embed_tokens", io, from);
 
-    return EmbedExe.compile(allocator, io, platform, .{
+    return zml.FnExe(model.TokenEmbedding.forward).compile(allocator, io, platform, .{
         .shardings = &opts.shardings.all(),
         .program_name = phase.programName("lfm2", "embed_tokens"),
     }, .{.{
@@ -257,7 +253,7 @@ fn compileLayer(
     comptime kind: model.OperatorKind,
     phase: Phase,
     progress: *std.Progress.Node,
-) !LayerExe {
+) !zml.FnExe(model.DecoderLayer.forward) {
     const label = switch (kind) {
         .conv => "conv layer",
         .full_attention => "attn layer",
@@ -276,7 +272,7 @@ fn compileLayer(
         if (candidate_kind == kind) break candidate;
     } else unreachable;
 
-    return LayerExe.compile(allocator, io, platform, .{
+    return zml.FnExe(model.DecoderLayer.forward).compile(allocator, io, platform, .{
         .shardings = &opts.shardings.all(),
         .program_name = phase.programName("lfm2", if (kind == .conv) "conv_layer" else "attn_layer"),
     }, .{.{
@@ -302,14 +298,14 @@ fn compileSample(
     seqlen: u32,
     phase: Phase,
     progress: *std.Progress.Node,
-) !SampleExe {
+) !zml.FnExe(model.LmHead.forward) {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start(phase.startMessage("lm_head"), 1);
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "lm_head", io, from);
 
-    return SampleExe.compile(allocator, io, platform, .{
+    return zml.FnExe(model.LmHead.forward).compile(allocator, io, platform, .{
         .shardings = &opts.shardings.all(),
         .program_name = phase.programName("lfm2", "lm_head"),
     }, .{.{
