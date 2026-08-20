@@ -58,8 +58,13 @@ def test_summarize_session_report() -> None:
             "layer_selection": [0, 1, 2, 3],
         },
         "1" * 40,
+        "KIMI_K3_SESSION_FULL_COMPILE_PASS layers=93 source_slots=8 "
+        "kda_boundary=true mla_boundary=false compile_us=700 backend=cuda",
+        {"required_shards": 96, "present_shards": 5, "missing_shards": 91},
     )
     assert report["status"] == "PASS"
+    assert report["full_schedule_readiness"]["status"] == "PASS"
+    assert report["full_schedule_readiness"]["runtime_numeric_validation"] == "blocked_by_missing_local_shards"
     assert report["tokenizer"]["exact_corpus_parity"]
     assert report["zml_session"]["reset_deterministic"]
     assert report["zml_session"]["official_final_greedy_exact"]

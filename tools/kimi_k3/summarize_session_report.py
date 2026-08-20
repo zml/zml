@@ -25,6 +25,12 @@ DECODE = re.compile(
     r"KIMI_K3_SESSION_DECODE_PASS streamed=(?P<streamed>\d+)"
     r" next=(?P<next>\d+) history_tokens=(?P<history>\d+) capacity=(?P<capacity>\d+)"
 )
+FULL_COMPILE = re.compile(
+    r"KIMI_K3_SESSION_FULL_COMPILE_PASS layers=(?P<layers>\d+)"
+    r" source_slots=(?P<sources>\d+) kda_boundary=(?P<kda>true|false)"
+    r" mla_boundary=(?P<mla>true|false) compile_us=(?P<compile>\d+)"
+    r" backend=(?P<backend>\w+)"
+)
 
 
 def sha256(path: Path) -> str:
@@ -53,6 +59,8 @@ def summarize(
     prefix_manifest: dict,
     lock: dict,
     implementation_commit: str,
+    full_compile_log: str,
+    weight_inventory: dict,
 ) -> dict:
     if "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked=true" not in prefix_log:
         raise ValueError("missing official-prefix/reset pass marker")
@@ -60,6 +68,26 @@ def summarize(
         raise ValueError("missing streaming decode pass marker")
     if "KIMI_K3_TOKENIZER_ALL_PASS" not in tokenizer_log:
         raise ValueError("missing tokenizer pass marker")
+
+    full_match = FULL_COMPILE.search(full_compile_log)
+    if full_match is None:
+        raise ValueError("missing full-schedule CUDA compile marker")
+    full_compile = {
+        "layers": int(full_match["layers"]),
+        "source_slots": int(full_match["sources"]),
+        "kda_boundary": full_match["kda"] == "true",
+        "mla_boundary": full_match["mla"] == "true",
+        "compile_us": int(full_match["compile"]),
+        "backend": full_match["backend"],
+    }
+    valid_full_schedule = (
+        full_compile["layers"] == 93
+        and full_compile["source_slots"] == 8
+        and full_compile["kda_boundary"]
+        and full_compile["backend"] == "cuda"
+    )
+    if not valid_full_schedule:
+        raise ValueError("full-schedule compilation does not match the official 93-layer/8-source CUDA topology")
 
     official_tokens = prefix_manifest["token_ids"]
     official_greedy = prefix_manifest["prefill_greedy_token"]
@@ -137,8 +165,32 @@ def summarize(
             "tokenizer_reference_sha256": lock["tokenizer_reference_sha256"],
             "tokenizer_json_sha256": lock["tokenizer_json_sha256"],
         },
+        "full_schedule_readiness": {
+            **full_compile,
+            "status": "PASS",
+            "scope": "structural CUDA compilation only; full-model numerical inference is not claimed",
+            "runtime_weights": {
+                **weight_inventory,
+                "complete": weight_inventory["present_shards"] == weight_inventory["required_shards"],
+                "downloads_performed": False,
+            },
+            "runtime_numeric_validation": (
+                "available"
+                if weight_inventory["present_shards"] == weight_inventory["required_shards"]
+                else "blocked_by_missing_local_shards"
+            ),
+        },
         "zml_session": {
-            "compiled_families": ["embedding", "kda_dense", "kda_moe", "mla_moe", "diagnostic_head"],
+            "compiled_families": [
+                "embedding",
+                "kda_dense",
+                "block_update",
+                "kda_moe",
+                "kda_moe_boundary",
+                "mla_moe",
+                "mla_moe_boundary",
+                "diagnostic_head",
+            ],
             "layer_selection": lock["layer_selection"],
             "routing": "normal_global_896_experts",
             "runs": [
@@ -174,6 +226,9 @@ def main() -> None:
     parser.add_argument("--prefix-log", type=Path, required=True)
     parser.add_argument("--decode-log", type=Path, required=True)
     parser.add_argument("--tokenizer-log", type=Path, required=True)
+    parser.add_argument("--full-compile-log", type=Path, required=True)
+    parser.add_argument("--weights-index", type=Path, required=True)
+    parser.add_argument("--weights-dir", type=Path, required=True)
     parser.add_argument("--tokenizer-fixture", type=Path, required=True)
     parser.add_argument("--prefix-manifest", type=Path, required=True)
     parser.add_argument("--lock", type=Path, required=True)
@@ -185,6 +240,14 @@ def main() -> None:
     tokenizer_json = args.tokenizer_fixture.parents[2] / "tokenizers/milestone-16/tokenizer.json"
     if sha256(tokenizer_json) != lock["tokenizer_json_sha256"]:
         raise ValueError("converted tokenizer file hash mismatch")
+    index = json.loads(args.weights_index.read_text())
+    required = sorted(set(index["weight_map"].values()))
+    present = sorted(name for name in required if (args.weights_dir / name).is_file())
+    weight_inventory = {
+        "required_shards": len(required),
+        "present_shards": len(present),
+        "missing_shards": len(required) - len(present),
+    }
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     report = summarize(
         args.prefix_log.read_text(),
@@ -194,6 +257,8 @@ def main() -> None:
         json.loads(args.prefix_manifest.read_text()),
         lock,
         commit,
+        args.full_compile_log.read_text(),
+        weight_inventory,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
