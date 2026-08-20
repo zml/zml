@@ -295,6 +295,10 @@ pub const Loader = struct {
         };
     }
 
+    pub fn zeroBlocks(self: Loader, source_slots: usize) !zml.Buffer {
+        return zeroBuffer(self, zml.Shape.init(.{ .token = 1, .source = source_slots, .d = 7168 }, .bf16));
+    }
+
     fn zeroBuffer(self: Loader, shape: zml.Shape) !zml.Buffer {
         const bytes = try self.allocator.alloc(u8, shape.byteSize());
         defer self.allocator.free(bytes);

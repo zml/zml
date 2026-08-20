@@ -33,9 +33,6 @@ pub const Session = struct {
         buffers: *model.Buffers,
     ) !Session {
         if (platform.target != .cuda) return error.NvidiaCudaRequired;
-        if (compiled.params.source_slots != 1) {
-            return error.KimiK3AttnResBoundarySessionPending;
-        }
         var kda_count: usize = 0;
         var mla_count: usize = 0;
         for (compiled.loaded_model.inner.layers) |planned| switch (planned.kind()) {
@@ -158,13 +155,23 @@ pub const Session = struct {
             .u32,
         );
         defer token_index_buffer.deinit();
-        const yes = [_]u8{1};
+        var first_block_index_buffer = try zml.Buffer.scalar(
+            self.io,
+            self.platform,
+            @as(u32, 0),
+            .u32,
+        );
+        defer first_block_index_buffer.deinit();
+        const active_bytes = try self.allocator.alloc(u8, self.compiled.params.source_slots);
+        defer self.allocator.free(active_bytes);
+        @memset(active_bytes, 0);
+        active_bytes[0] = 1;
         var active_buffer = try zml.Buffer.fromBytes(
             self.io,
             self.platform,
             self.compiled.params.active_blocks.shape(),
             self.compiled.params.shardings.model,
-            &yes,
+            active_bytes,
         );
         defer active_buffer.deinit();
 
@@ -195,11 +202,31 @@ pub const Session = struct {
         replaceBuffer(&self.kda_caches[0].k_conv, &layer0_result.cache.k_conv);
         replaceBuffer(&self.kda_caches[0].v_conv, &layer0_result.cache.v_conv);
         replaceBuffer(&self.kda_caches[0].recurrent_state, &layer0_result.cache.recurrent_state);
-        var blocks = layer0_result.block_residual;
+        var blocks = if (self.compiled.params.source_slots == 1)
+            layer0_result.block_residual
+        else expanded: {
+            var empty = try self.buffers.loader.zeroBlocks(self.compiled.params.source_slots);
+            defer empty.deinit();
+            var block_args = try self.compiled.block_update.args(self.allocator);
+            defer block_args.deinit(self.allocator);
+            var block_results = try self.compiled.block_update.results(self.allocator);
+            defer block_results.deinit(self.allocator);
+            block_args.set(.{ empty, layer0_result.block_residual, first_block_index_buffer });
+            execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+            self.compiled.block_update.callOpts(self.io, block_args, &block_results, .{ .wait = true });
+            execute_us += @divTrunc(
+                std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started,
+                1000,
+            );
+            const expanded_blocks = block_results.get(zml.Buffer);
+            layer0_result.block_residual.deinit();
+            break :expanded expanded_blocks;
+        };
         defer blocks.deinit();
 
         var kda_ordinal: usize = 1;
         var mla_ordinal: usize = 0;
+        const block_size: usize = @intCast(self.compiled.loaded_model.inner.config.text_config.attn_res_block_size);
         for (self.compiled.loaded_model.inner.layers[1..]) |planned| {
             const layer_index = planned.weights().logical_index;
             switch (planned.kind()) {
@@ -209,23 +236,52 @@ pub const Session = struct {
                     var weights = try self.buffers.loader.loadKdaMoe(layer_index);
                     load_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - load_started, 1000);
                     defer zml.Buffer.deinitAll(layer.KdaMoeWeights, &weights);
-                    const exe = self.compiled.kda_moe orelse return error.MissingKdaMoeExecutable;
-                    var args = try exe.args(self.allocator);
-                    defer args.deinit(self.allocator);
-                    var results = try exe.results(self.allocator);
-                    defer results.deinit(self.allocator);
-                    args.set(.{ hidden, blocks, active_buffer, weights, self.kda_caches[kda_ordinal] });
-                    execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
-                    exe.callOpts(self.io, args, &results, .{ .wait = true });
-                    execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
-                    var actual: zml.Bufferized(layer.KdaMoeResult) = undefined;
-                    results.fill(.{&actual});
-                    deinitMoeDiagnostics(&actual);
-                    replaceBuffer(&hidden, &actual.output);
-                    replaceBuffer(&self.kda_caches[kda_ordinal].q_conv, &actual.cache.q_conv);
-                    replaceBuffer(&self.kda_caches[kda_ordinal].k_conv, &actual.cache.k_conv);
-                    replaceBuffer(&self.kda_caches[kda_ordinal].v_conv, &actual.cache.v_conv);
-                    replaceBuffer(&self.kda_caches[kda_ordinal].recurrent_state, &actual.cache.recurrent_state);
+                    if (layer_index % block_size == 0) {
+                        const exe = self.compiled.kda_moe_boundary orelse return error.MissingKdaMoeBoundaryExecutable;
+                        var block_index_buffer = try zml.Buffer.scalar(
+                            self.io,
+                            self.platform,
+                            @as(u32, @intCast(layer_index / block_size)),
+                            .u32,
+                        );
+                        defer block_index_buffer.deinit();
+                        var args = try exe.args(self.allocator);
+                        defer args.deinit(self.allocator);
+                        var results = try exe.results(self.allocator);
+                        defer results.deinit(self.allocator);
+                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights, self.kda_caches[kda_ordinal] });
+                        execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+                        exe.callOpts(self.io, args, &results, .{ .wait = true });
+                        execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
+                        var actual: zml.Bufferized(layer.KdaMoeBoundaryResult) = undefined;
+                        results.fill(.{&actual});
+                        deinitMoeDiagnostics(&actual.layer);
+                        replaceBuffer(&hidden, &actual.layer.output);
+                        replaceBuffer(&blocks, &actual.block_sources);
+                        replaceBuffer(&active_buffer, &actual.active_blocks);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].q_conv, &actual.layer.cache.q_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].k_conv, &actual.layer.cache.k_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].v_conv, &actual.layer.cache.v_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].recurrent_state, &actual.layer.cache.recurrent_state);
+                    } else {
+                        const exe = self.compiled.kda_moe orelse return error.MissingKdaMoeExecutable;
+                        var args = try exe.args(self.allocator);
+                        defer args.deinit(self.allocator);
+                        var results = try exe.results(self.allocator);
+                        defer results.deinit(self.allocator);
+                        args.set(.{ hidden, blocks, active_buffer, weights, self.kda_caches[kda_ordinal] });
+                        execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+                        exe.callOpts(self.io, args, &results, .{ .wait = true });
+                        execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
+                        var actual: zml.Bufferized(layer.KdaMoeResult) = undefined;
+                        results.fill(.{&actual});
+                        deinitMoeDiagnostics(&actual);
+                        replaceBuffer(&hidden, &actual.output);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].q_conv, &actual.cache.q_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].k_conv, &actual.cache.k_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].v_conv, &actual.cache.v_conv);
+                        replaceBuffer(&self.kda_caches[kda_ordinal].recurrent_state, &actual.cache.recurrent_state);
+                    }
                     kda_ordinal += 1;
                 },
                 .mla_moe => {
@@ -233,21 +289,48 @@ pub const Session = struct {
                     var weights = try self.buffers.loader.loadMlaMoe(layer_index);
                     load_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - load_started, 1000);
                     defer zml.Buffer.deinitAll(layer.MlaMoeWeights, &weights);
-                    const exe = self.compiled.mla_moe orelse return error.MissingMlaMoeExecutable;
-                    var args = try exe.args(self.allocator);
-                    defer args.deinit(self.allocator);
-                    var results = try exe.results(self.allocator);
-                    defer results.deinit(self.allocator);
-                    args.set(.{ hidden, blocks, active_buffer, weights, self.mla_caches[mla_ordinal], token_index_buffer });
-                    execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
-                    exe.callOpts(self.io, args, &results, .{ .wait = true });
-                    execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
-                    var actual: zml.Bufferized(layer.MlaMoeResult) = undefined;
-                    results.fill(.{&actual});
-                    deinitMoeDiagnostics(&actual);
-                    replaceBuffer(&hidden, &actual.output);
-                    replaceBuffer(&self.mla_caches[mla_ordinal].compressed, &actual.cache.compressed);
-                    replaceBuffer(&self.mla_caches[mla_ordinal].extra_key, &actual.cache.extra_key);
+                    if (layer_index % block_size == 0) {
+                        const exe = self.compiled.mla_moe_boundary orelse return error.MissingMlaMoeBoundaryExecutable;
+                        var block_index_buffer = try zml.Buffer.scalar(
+                            self.io,
+                            self.platform,
+                            @as(u32, @intCast(layer_index / block_size)),
+                            .u32,
+                        );
+                        defer block_index_buffer.deinit();
+                        var args = try exe.args(self.allocator);
+                        defer args.deinit(self.allocator);
+                        var results = try exe.results(self.allocator);
+                        defer results.deinit(self.allocator);
+                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights, self.mla_caches[mla_ordinal], token_index_buffer });
+                        execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+                        exe.callOpts(self.io, args, &results, .{ .wait = true });
+                        execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
+                        var actual: zml.Bufferized(layer.MlaMoeBoundaryResult) = undefined;
+                        results.fill(.{&actual});
+                        deinitMoeDiagnostics(&actual.layer);
+                        replaceBuffer(&hidden, &actual.layer.output);
+                        replaceBuffer(&blocks, &actual.block_sources);
+                        replaceBuffer(&active_buffer, &actual.active_blocks);
+                        replaceBuffer(&self.mla_caches[mla_ordinal].compressed, &actual.layer.cache.compressed);
+                        replaceBuffer(&self.mla_caches[mla_ordinal].extra_key, &actual.layer.cache.extra_key);
+                    } else {
+                        const exe = self.compiled.mla_moe orelse return error.MissingMlaMoeExecutable;
+                        var args = try exe.args(self.allocator);
+                        defer args.deinit(self.allocator);
+                        var results = try exe.results(self.allocator);
+                        defer results.deinit(self.allocator);
+                        args.set(.{ hidden, blocks, active_buffer, weights, self.mla_caches[mla_ordinal], token_index_buffer });
+                        execute_started = std.Io.Clock.now(.real, self.io).toNanoseconds();
+                        exe.callOpts(self.io, args, &results, .{ .wait = true });
+                        execute_us += @divTrunc(std.Io.Clock.now(.real, self.io).toNanoseconds() - execute_started, 1000);
+                        var actual: zml.Bufferized(layer.MlaMoeResult) = undefined;
+                        results.fill(.{&actual});
+                        deinitMoeDiagnostics(&actual);
+                        replaceBuffer(&hidden, &actual.output);
+                        replaceBuffer(&self.mla_caches[mla_ordinal].compressed, &actual.cache.compressed);
+                        replaceBuffer(&self.mla_caches[mla_ordinal].extra_key, &actual.cache.extra_key);
+                    }
                     mla_ordinal += 1;
                 },
             }
@@ -260,6 +343,7 @@ pub const Session = struct {
         head_args.set(.{
             hidden,
             blocks,
+            active_buffer,
             self.buffers.head.output_res_norm,
             self.buffers.head.output_res_projection,
             self.buffers.head.final_norm,

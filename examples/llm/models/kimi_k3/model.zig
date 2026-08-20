@@ -311,6 +311,41 @@ pub const Model = struct {
         };
     }
 
+    /// Build the complete operator/cache schedule without binding tensors for
+    /// layers that are not present in the current minimum-weight checkpoint.
+    /// This is a compile-readiness gate only; runtime construction continues
+    /// to require every selected tensor through initSelected.
+    pub fn initCompileOnly(
+        allocator: std.mem.Allocator,
+        store: zml.io.TensorStore.View,
+        config: Config,
+        selection: LayerSelection,
+    ) !Model {
+        try config.validate();
+        const last = try selection.end(config);
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const layers = try arena_allocator.alloc(TransformerLayer, last - selection.first_layer);
+        const no_tensors = try arena_allocator.alloc(TensorRequirement, 0);
+        for (layers, selection.first_layer..) |*planned, logical_index| {
+            const weights: LayerWeights = .{ .logical_index = logical_index, .tensors = no_tensors };
+            planned.* = switch (config.text_config.layerKind(logical_index)) {
+                .kda_dense => .{ .kda_dense = weights },
+                .kda_moe => .{ .kda_moe = weights },
+                .mla_moe => .{ .mla_moe = weights },
+            };
+        }
+        return .{
+            .arena = arena,
+            .layers = layers,
+            .config = config,
+            .selection = selection,
+            .runtime_head = runtime_weights.HeadTensors.init(store.root()),
+            .runtime_layer0 = layer_ops.Layer0Weights.init(store.root()),
+        };
+    }
+
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         _ = allocator;
         self.arena.deinit();
@@ -359,6 +394,32 @@ pub const LoadedModel = struct {
         }
         return .{
             .inner = try .initSelected(allocator, store, parsed.value, options, selection),
+            .parsed_config = parsed,
+        };
+    }
+
+    pub fn initCompileOnly(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        layer_limit: usize,
+    ) !LoadedModel {
+        const parsed = try common.parseConfig(Config, allocator, io, repo);
+        errdefer parsed.deinit();
+        const selection: LayerSelection = .{ .layer_limit = layer_limit };
+        if (layer_limit == 0) return error.InvalidKimiK3LayerLimit;
+        log.warn(
+            "Compile-only Kimi K3 schedule enabled: {}/93 layers; nonresident tensors are not validated",
+            .{layer_limit},
+        );
+        return .{
+            .inner = try Model.initCompileOnly(
+                allocator,
+                store,
+                parsed.value,
+                selection,
+            ),
             .parsed_config = parsed,
         };
     }

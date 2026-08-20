@@ -13,6 +13,10 @@ fn embedTokens(tokens: zml.Tensor, embedding: zml.Tensor) zml.Tensor {
     return embedding.gather(.{ .voc = tokens.convert(.u32) }, .{});
 }
 
+fn updateBlockSource(blocks: zml.Tensor, source: zml.Tensor, block_index: zml.Tensor) zml.Tensor {
+    return blocks.dynamicUpdateSlice(.{ .source = block_index }, source);
+}
+
 fn kdaMoeStep(
     input: zml.Tensor,
     blocks: zml.Tensor,
@@ -21,6 +25,17 @@ fn kdaMoeStep(
     cache: kda.Cache,
 ) layer.KdaMoeResult {
     return layer.forwardKdaMoeDecode(input, blocks, active, weights, cache, .{ .top_k = 16 });
+}
+
+fn kdaMoeBoundaryStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: layer.KdaMoeWeights,
+    cache: kda.Cache,
+) layer.KdaMoeBoundaryResult {
+    return layer.forwardKdaMoeBoundary(input, blocks, active, block_index, weights, cache, .{ .top_k = 16 });
 }
 
 fn mlaMoeStep(
@@ -42,12 +57,34 @@ fn mlaMoeStep(
     );
 }
 
+fn mlaMoeBoundaryStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: layer.MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+) layer.MlaMoeBoundaryResult {
+    return layer.forwardMlaMoeBoundary(
+        input,
+        blocks,
+        active,
+        block_index,
+        weights,
+        cache,
+        token_index,
+        .{ .top_k = 16 },
+    );
+}
+
 pub const CompilationParameters = struct {
     decode_tokens: zml.Tensor,
     hidden: zml.Tensor,
     blocks: zml.Tensor,
     active_blocks: zml.Tensor,
     token_index: zml.Tensor,
+    block_index: zml.Tensor,
     kda_cache: kda.Cache,
     mla_cache: mla.SessionCache,
     seqlen: usize,
@@ -64,6 +101,7 @@ pub const CompilationParameters = struct {
             .blocks = .init(.{ .token = 1, .source = source_slots, .d = 7168 }, .bf16),
             .active_blocks = .init(.{ .source = source_slots }, .bool),
             .token_index = .init(.{}, .u32),
+            .block_index = .init(.{}, .u32),
             .kda_cache = runtime_weights.symbolicKdaCache(),
             .mla_cache = runtime_weights.symbolicMlaCache(seqlen),
             .seqlen = seqlen,
@@ -79,8 +117,11 @@ pub const CompiledModel = struct {
     loaded_model: *const model.LoadedModel,
     embedding: zml.Exe,
     layer0: zml.Exe,
+    block_update: zml.Exe,
     kda_moe: ?zml.Exe,
+    kda_moe_boundary: ?zml.Exe,
     mla_moe: ?zml.Exe,
+    mla_moe_boundary: ?zml.Exe,
     head: zml.Exe,
     params: CompilationParameters,
 
@@ -93,7 +134,7 @@ pub const CompiledModel = struct {
         progress: *std.Progress.Node,
     ) !CompiledModel {
         if (platform.target != .cuda) return error.NvidiaCudaRequired;
-        var node = progress.start("Compiling Kimi K3 reusable families...", 5);
+        var node = progress.start("Compiling Kimi K3 reusable families...", 8);
         defer node.end();
         const sharding = &.{params.shardings.model};
         const mdl = loaded_model.inner;
@@ -117,12 +158,31 @@ pub const CompiledModel = struct {
         errdefer layer0_exe.deinit();
         node.completeOne();
 
+        const block_update_exe = try platform.compileFn(
+            allocator,
+            io,
+            updateBlockSource,
+            .{ params.blocks, zml.Tensor.init(.{ .token = 1, .source = 1, .d = 7168 }, .bf16), params.block_index },
+            .{ .shardings = sharding },
+        );
+        errdefer block_update_exe.deinit();
+        node.completeOne();
+
         var has_kda_moe = false;
         var has_mla_moe = false;
+        var has_kda_boundary = false;
+        var has_mla_boundary = false;
+        const block_size: usize = @intCast(mdl.config.text_config.attn_res_block_size);
         for (mdl.layers) |planned| switch (planned.kind()) {
             .kda_dense => {},
-            .kda_moe => has_kda_moe = true,
-            .mla_moe => has_mla_moe = true,
+            .kda_moe => {
+                has_kda_moe = true;
+                if (planned.weights().logical_index % block_size == 0) has_kda_boundary = true;
+            },
+            .mla_moe => {
+                has_mla_moe = true;
+                if (planned.weights().logical_index % block_size == 0) has_mla_boundary = true;
+            },
         };
         const kda_moe_exe = if (has_kda_moe)
             try platform.compileFn(
@@ -136,6 +196,18 @@ pub const CompiledModel = struct {
             null;
         errdefer if (kda_moe_exe) |*exe| exe.deinit();
         node.completeOne();
+        const kda_boundary_exe = if (has_kda_boundary)
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoeBoundaryStep,
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicKdaMoe(), params.kda_cache },
+                .{ .shardings = sharding },
+            )
+        else
+            null;
+        errdefer if (kda_boundary_exe) |*exe| exe.deinit();
+        node.completeOne();
         const mla_moe_exe = if (has_mla_moe)
             try platform.compileFn(
                 allocator,
@@ -148,11 +220,23 @@ pub const CompiledModel = struct {
             null;
         errdefer if (mla_moe_exe) |*exe| exe.deinit();
         node.completeOne();
+        const mla_boundary_exe = if (has_mla_boundary)
+            try platform.compileFn(
+                allocator,
+                io,
+                mlaMoeBoundaryStep,
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicMlaMoe(), params.mla_cache, params.token_index },
+                .{ .shardings = sharding },
+            )
+        else
+            null;
+        errdefer if (mla_boundary_exe) |*exe| exe.deinit();
+        node.completeOne();
         const head_exe = try platform.compileFn(
             allocator,
             io,
-            layer.diagnosticHead,
-            .{ params.hidden, params.blocks, mdl.runtime_head.output_res_norm, mdl.runtime_head.output_res_projection, mdl.runtime_head.final_norm, mdl.runtime_head.lm_head },
+            layer.diagnosticSessionHead,
+            .{ params.hidden, params.blocks, params.active_blocks, mdl.runtime_head.output_res_norm, mdl.runtime_head.output_res_projection, mdl.runtime_head.final_norm, mdl.runtime_head.lm_head },
             .{ .shardings = sharding },
         );
         node.completeOne();
@@ -160,8 +244,11 @@ pub const CompiledModel = struct {
             .loaded_model = loaded_model,
             .embedding = embedding,
             .layer0 = layer0_exe,
+            .block_update = block_update_exe,
             .kda_moe = kda_moe_exe,
+            .kda_moe_boundary = kda_boundary_exe,
             .mla_moe = mla_moe_exe,
+            .mla_moe_boundary = mla_boundary_exe,
             .head = head_exe,
             .params = params,
         };
@@ -170,8 +257,11 @@ pub const CompiledModel = struct {
     pub fn deinit(self: *CompiledModel) void {
         self.embedding.deinit();
         self.layer0.deinit();
+        self.block_update.deinit();
         if (self.kda_moe) |*exe| exe.deinit();
+        if (self.kda_moe_boundary) |*exe| exe.deinit();
         if (self.mla_moe) |*exe| exe.deinit();
+        if (self.mla_moe_boundary) |*exe| exe.deinit();
         self.head.deinit();
     }
 };

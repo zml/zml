@@ -371,6 +371,36 @@ pub const KdaMoeResult = struct {
     cache: kda.Cache,
 };
 
+pub const KdaMoeBoundaryResult = struct {
+    layer: KdaMoeResult,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+};
+
+pub const MlaMoeBoundaryResult = struct {
+    layer: MlaMoeResult,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+};
+
+fn appendBoundarySource(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+) struct { zml.Tensor, zml.Tensor } {
+    const source = input.merge(.{ .token = .{ .b, .s } }).reshape(.{
+        .token = input.dim(.b) * input.dim(.s),
+        .source = 1,
+        .d = input.dim(.d),
+    });
+    const enabled = zml.Tensor.scalar(true, .bool).reshape(.{ .source = 1 });
+    return .{
+        block_sources.dynamicUpdateSlice(.{ .source = block_index }, source),
+        active_blocks.dynamicUpdateSlice(.{ .source = block_index }, enabled),
+    };
+}
+
 fn finishKdaMoe(
     input: zml.Tensor,
     block_sources: zml.Tensor,
@@ -482,6 +512,60 @@ pub fn forwardKdaMoeDecode(
         selected_input,
         input_norm,
     );
+}
+
+/// Official AttnRes block-boundary decode. Attention input selection uses the
+/// old source set; MLP selection uses the source appended at this layer.
+pub fn forwardKdaMoeBoundary(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeBoundaryResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const updated = appendBoundarySource(input, block_sources, active_blocks, block_index);
+    const input_norm = primitives.rmsNorm(selected_input.output, weights.common.input_norm, 1e-5);
+    const step = kda.decodeCompact(input_norm.squeeze(.s), weights.attention, cache);
+    const attention_output = step.output.reshape(.{
+        .b = input.dim(.b),
+        .s = 1,
+        .d = input.dim(.d),
+    });
+    const selected_mlp = selectSequence(
+        attention_output,
+        updated[0],
+        updated[1],
+        weights.common.mlp_res_norm,
+        weights.common.mlp_res_projection,
+    );
+    const moe_input = primitives.rmsNorm(selected_mlp.output, weights.common.post_attention_norm, 1e-5);
+    const moe_result = moe.forward(moe_input, weights.common.moe, route_config);
+    return .{
+        .layer = .{
+            .selected_input = selected_input.output,
+            .input_selector_weights = selected_input.probabilities,
+            .input_norm = input_norm,
+            .attention_output = attention_output,
+            .prefix_after_attention = attention_output,
+            .selected_mlp = selected_mlp.output,
+            .mlp_selector_weights = selected_mlp.probabilities,
+            .moe_input = moe_input,
+            .moe_result = moe_result,
+            .output = attention_output.add(moe_result.output),
+            .cache = step.cache,
+        },
+        .block_sources = updated[0],
+        .active_blocks = updated[1],
+    };
 }
 
 // KIMI_K3_TEMP_REMOVE_M20: composed latent-MLA/MoE boundaries are exposed to
@@ -638,4 +722,97 @@ pub fn forwardMlaMoeSession(
         selected_input,
         input_norm,
     );
+}
+
+/// Fixed-capacity latent-MLA session step at an official AttnRes boundary.
+pub fn forwardMlaMoeBoundary(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+    route_config: router.Config,
+) MlaMoeBoundaryResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const updated = appendBoundarySource(input, block_sources, active_blocks, block_index);
+    const input_norm = primitives.rmsNorm(selected_input.output, weights.common.input_norm, 1e-5);
+    const attention = mla.latentSession(input_norm, weights.attention, cache, token_index);
+    const selected_mlp = selectSequence(
+        attention.output,
+        updated[0],
+        updated[1],
+        weights.common.mlp_res_norm,
+        weights.common.mlp_res_projection,
+    );
+    const moe_input = primitives.rmsNorm(selected_mlp.output, weights.common.post_attention_norm, 1e-5);
+    const moe_result = moe.forward(moe_input, weights.common.moe, route_config);
+    return .{
+        .layer = .{
+            .selected_input = selected_input.output,
+            .input_selector_weights = selected_input.probabilities,
+            .input_norm = input_norm,
+            .attention_output = attention.output,
+            .prefix_after_attention = attention.output,
+            .selected_mlp = selected_mlp.output,
+            .mlp_selector_weights = selected_mlp.probabilities,
+            .moe_input = moe_input,
+            .moe_result = moe_result,
+            .output = attention.output.add(moe_result.output),
+            .cache = attention.cache,
+        },
+        .block_sources = updated[0],
+        .active_blocks = updated[1],
+    };
+}
+
+pub fn diagnosticSessionHead(
+    hidden: zml.Tensor,
+    block_residual: zml.Tensor,
+    active_blocks: zml.Tensor,
+    output_res_norm: zml.Tensor,
+    output_res_projection: zml.Tensor,
+    final_norm_weight: zml.Tensor,
+    lm_head: zml.Tensor,
+) DiagnosticHeadResult {
+    const token_count = hidden.dim(.b) * hidden.dim(.s);
+    const prefix = hidden.merge(.{ .token = .{ .b, .s } });
+    const selected = attn_res.select(
+        prefix,
+        block_residual,
+        active_blocks,
+        output_res_norm,
+        output_res_projection.squeeze(.one),
+        1e-5,
+    );
+    const output_selected = selected.output.reshape(.{
+        .b = hidden.dim(.b),
+        .s = hidden.dim(.s),
+        .d = hidden.dim(.d),
+    });
+    const final_norm = primitives.rmsNorm(output_selected, final_norm_weight, 1e-5);
+    const logits = final_norm.dot(lm_head, .d);
+    const greedy_token = logits.slice1d(.s, .{
+        .start = logits.dim(.s) - 1,
+        .end = logits.dim(.s),
+    }).squeeze(.s).argMax(.voc).indices.squeeze(.voc).convert(.i64);
+    const output_candidates = zml.Tensor.concatenate(&.{
+        block_residual,
+        prefix.reshape(.{ .token = token_count, .source = 1, .d = hidden.dim(.d) }),
+    }, .source);
+    return .{
+        .output_candidates = output_candidates,
+        .output_selector_weights = selected.probabilities,
+        .output_selected = output_selected,
+        .final_norm = final_norm,
+        .logits = logits,
+        .greedy_token = greedy_token,
+    };
 }

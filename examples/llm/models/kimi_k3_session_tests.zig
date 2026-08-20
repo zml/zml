@@ -14,6 +14,8 @@ const Args = struct {
     token_count: usize = 4,
     repeats: usize = 2,
     decode_one: bool = false,
+    layer_limit: usize = 4,
+    compile_only: bool = false,
 
     pub const help =
         \\Use kimi_k3_session_tests --weights=<S4-directory> --tokenizer=<tokenizer.json> [options]
@@ -24,6 +26,8 @@ const Args = struct {
         \\  --token-count=<1..4>  Prefix tokens to execute (default: 4)
         \\  --repeats=<count>     Reset-and-repeat count (default: 2)
         \\  --decode-one          Stream exactly one generated continuation
+        \\  --layer-limit=<count> Selected prefix depth (default: 4)
+        \\  --compile-only        Compile selected families without loading weights
         \\
     ;
 };
@@ -42,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.token_count == 0 or args.token_count > official_prefix.len) return error.InvalidTokenCount;
     if (args.repeats == 0) return error.InvalidRepeatCount;
     if (args.decode_one and args.repeats != 1) return error.DecodeGateRequiresOneRepeat;
+    if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -55,19 +60,22 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var loaded_model = try model.LoadedModel.init(
-        allocator,
-        io,
-        repo,
-        store.view(),
-        .{ .kimi_k3_layer_limit = 4 },
-    );
+    var loaded_model = if (args.compile_only)
+        try model.LoadedModel.initCompileOnly(allocator, io, repo, store.view(), args.layer_limit)
+    else
+        try model.LoadedModel.init(
+            allocator,
+            io,
+            repo,
+            store.view(),
+            .{ .kimi_k3_layer_limit = args.layer_limit },
+        );
     defer loaded_model.deinit(allocator);
     const shardings: common.Shardings = try .init(platform);
     var progress = std.Progress.start(io, .{ .root_name = "Kimi K3 session gate" });
     defer progress.end();
 
-    const seqlen = args.token_count + @intFromBool(args.decode_one);
+    const seqlen = if (args.compile_only) 1 else args.token_count + @intFromBool(args.decode_one);
     const compile_started = std.Io.Clock.now(.real, io).toNanoseconds();
     var compiled: inference.CompiledModel = try loaded_model.compile(
         allocator,
@@ -80,6 +88,27 @@ pub fn main(init: std.process.Init) !void {
     );
     defer compiled.deinit();
     const compile_us = elapsedUs(io, compile_started);
+
+    if (args.compile_only) {
+        const expected_sources = std.math.divCeil(usize, args.layer_limit, 12) catch unreachable;
+        if (compiled.params.source_slots != expected_sources) return error.KimiK3SourceSlotMismatch;
+        if (args.layer_limit > 12 and compiled.kda_moe_boundary == null) {
+            return error.MissingKdaMoeBoundaryExecutable;
+        }
+        var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
+        try stdout_file.interface.print(
+            "KIMI_K3_SESSION_FULL_COMPILE_PASS layers={} source_slots={} " ++ "kda_boundary={} mla_boundary={} compile_us={} backend=cuda\n",
+            .{
+                args.layer_limit,
+                compiled.params.source_slots,
+                compiled.kda_moe_boundary != null,
+                compiled.mla_moe_boundary != null,
+                compile_us,
+            },
+        );
+        try stdout_file.interface.flush();
+        return;
+    }
 
     var buffers = try loaded_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer loaded_model.unloadBuffers(&buffers, allocator);
