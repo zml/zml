@@ -1,6 +1,7 @@
 const zml = @import("zml");
 
 const primitives = @import("primitives.zig");
+const router = @import("router.zig");
 
 pub const Mxfp4Bank = struct {
     values: zml.Tensor,
@@ -77,5 +78,62 @@ pub fn finishRouted(combined: zml.Tensor, weights: DenseWeights) struct {
     return .{
         .normalized = normalized,
         .output = normalized.dot(weights.routed_up, .latent),
+    };
+}
+pub const Weights = struct {
+    gate: router.Weights,
+    experts: ExpertBank,
+    dense: DenseWeights,
+};
+
+// KIMI_K3_TEMP_REMOVE_M20: named router/expert boundaries are returned for
+// composed layer-family parity and reduced to output plus route telemetry in M20.
+pub const Result = struct {
+    route: router.Result,
+    routed_down: zml.Tensor,
+    route_outputs: zml.Tensor,
+    combined_latent: zml.Tensor,
+    routed_norm: zml.Tensor,
+    routed_up: zml.Tensor,
+    shared_output: zml.Tensor,
+    output: zml.Tensor,
+};
+
+/// Production-shaped Stable LatentMoE. Router IDs address the normal global
+/// expert axis directly; compact expert maps and injected routes are forbidden.
+pub fn forward(hidden: zml.Tensor, weights: Weights, config: router.Config) Result {
+    const route = router.forward(hidden, weights.gate, config);
+    const token_hidden = hidden.merge(.{ .token = .{ .b, .s } });
+    const expert_ids = route.topk_ids.merge(.{ .token = .{ .b, .s } });
+    const route_weights = route.topk_weights.merge(.{ .token = .{ .b, .s } });
+    const routed_down = token_hidden.dot(weights.dense.routed_down, .d);
+    const expert_input = routed_down.rename(.{ .latent = .d });
+    const gate = bankLinear(expert_input, expert_ids, weights.experts.w1);
+    const up = bankLinear(expert_input, expert_ids, weights.experts.w3);
+    const activated = primitives.situGlu(gate, up);
+    const route_outputs = bankLinear(
+        activated.rename(.{ .intermediate = .d }),
+        expert_ids,
+        weights.experts.w2,
+    );
+    const combined_latent = route_outputs.convert(.f32)
+        .mul(route_weights.convert(.f32).broad(route_outputs.shape()))
+        .sum(.route).squeeze(.route).convert(hidden.dtype());
+    const routed = finishRouted(combined_latent, weights.dense);
+    const shared = sharedMlp(token_hidden, weights.dense);
+    const output = routed.output.add(shared.output).reshape(.{
+        .b = hidden.dim(.b),
+        .s = hidden.dim(.s),
+        .d = hidden.dim(.d),
+    });
+    return .{
+        .route = route,
+        .routed_down = routed_down,
+        .route_outputs = route_outputs,
+        .combined_latent = combined_latent,
+        .routed_norm = routed.normalized,
+        .routed_up = routed.output,
+        .shared_output = shared.output,
+        .output = output,
     };
 }

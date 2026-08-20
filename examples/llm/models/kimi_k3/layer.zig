@@ -2,7 +2,10 @@ const zml = @import("zml");
 
 const attn_res = @import("attn_res.zig");
 const kda = @import("kda.zig");
+const mla = @import("mla.zig");
+const moe = @import("moe.zig");
 const primitives = @import("primitives.zig");
+const router = @import("router.zig");
 
 pub const DenseMlp = struct {
     gate_weight: zml.Tensor,
@@ -244,4 +247,296 @@ pub fn forwardPrefix(tokens: zml.Tensor, weights: PrefixWeights, cache: kda.Cach
         .greedy_token = greedy_token,
         .cache = result.cache,
     };
+}
+
+
+pub const MoeLayerWeights = struct {
+    attention_res_norm: zml.Tensor,
+    attention_res_projection: zml.Tensor,
+    input_norm: zml.Tensor,
+    mlp_res_norm: zml.Tensor,
+    mlp_res_projection: zml.Tensor,
+    post_attention_norm: zml.Tensor,
+    moe: moe.Weights,
+};
+
+pub const KdaMoeWeights = struct {
+    common: MoeLayerWeights,
+    attention: kda.Weights,
+};
+
+pub const MlaMoeWeights = struct {
+    common: MoeLayerWeights,
+    attention: mla.Weights,
+};
+
+const SelectionResult = struct {
+    output: zml.Tensor,
+    probabilities: zml.Tensor,
+};
+
+fn selectSequence(
+    prefix: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    norm_weight: zml.Tensor,
+    projection_weight: zml.Tensor,
+) SelectionResult {
+    const selected = attn_res.select(
+        prefix.merge(.{ .token = .{ .b, .s } }),
+        block_sources,
+        active_blocks,
+        norm_weight,
+        projection_weight,
+        1e-5,
+    );
+    return .{
+        .output = selected.output.reshape(.{
+            .b = prefix.dim(.b),
+            .s = prefix.dim(.s),
+            .d = prefix.dim(.d),
+        }),
+        .probabilities = selected.probabilities,
+    };
+}
+
+// KIMI_K3_TEMP_REMOVE_M20: composed layer boundaries and selector/router
+// diagnostics are returned for Milestone 14 parity and reduced in cleanup.
+pub const KdaMoeResult = struct {
+    selected_input: zml.Tensor,
+    input_selector_weights: zml.Tensor,
+    input_norm: zml.Tensor,
+    attention_output: zml.Tensor,
+    prefix_after_attention: zml.Tensor,
+    selected_mlp: zml.Tensor,
+    mlp_selector_weights: zml.Tensor,
+    moe_input: zml.Tensor,
+    moe_result: moe.Result,
+    output: zml.Tensor,
+    cache: kda.Cache,
+};
+
+fn finishKdaMoe(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: KdaMoeWeights,
+    attention: kda.CompactResult,
+    route_config: router.Config,
+    selected_input: SelectionResult,
+    input_norm: zml.Tensor,
+) KdaMoeResult {
+    const prefix_after_attention = input.add(attention.output);
+    const selected_mlp = selectSequence(
+        prefix_after_attention,
+        block_sources,
+        active_blocks,
+        weights.common.mlp_res_norm,
+        weights.common.mlp_res_projection,
+    );
+    const moe_input = primitives.rmsNorm(
+        selected_mlp.output,
+        weights.common.post_attention_norm,
+        1e-5,
+    );
+    const moe_result = moe.forward(moe_input, weights.common.moe, route_config);
+    return .{
+        .selected_input = selected_input.output,
+        .input_selector_weights = selected_input.probabilities,
+        .input_norm = input_norm,
+        .attention_output = attention.output,
+        .prefix_after_attention = prefix_after_attention,
+        .selected_mlp = selected_mlp.output,
+        .mlp_selector_weights = selected_mlp.probabilities,
+        .moe_input = moe_input,
+        .moe_result = moe_result,
+        .output = prefix_after_attention.add(moe_result.output),
+        .cache = attention.cache,
+    };
+}
+
+pub fn forwardKdaMoePrefill(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const input_norm = primitives.rmsNorm(
+        selected_input.output,
+        weights.common.input_norm,
+        1e-5,
+    );
+    const attention = kda.prefill(input_norm, weights.attention, cache);
+    return finishKdaMoe(
+        input,
+        block_sources,
+        active_blocks,
+        weights,
+        attention,
+        route_config,
+        selected_input,
+        input_norm,
+    );
+}
+
+pub fn forwardKdaMoeDecode(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const input_norm = primitives.rmsNorm(
+        selected_input.output,
+        weights.common.input_norm,
+        1e-5,
+    );
+    const attention = kda.decodeCompact(input_norm, weights.attention, cache);
+    return finishKdaMoe(
+        input,
+        block_sources,
+        active_blocks,
+        weights,
+        attention,
+        route_config,
+        selected_input,
+        input_norm,
+    );
+}
+
+// KIMI_K3_TEMP_REMOVE_M20: composed latent-MLA/MoE boundaries are exposed to
+// the Milestone 14 harness and reduced to production output/cache in cleanup.
+pub const MlaMoeResult = struct {
+    selected_input: zml.Tensor,
+    input_selector_weights: zml.Tensor,
+    input_norm: zml.Tensor,
+    attention_output: zml.Tensor,
+    prefix_after_attention: zml.Tensor,
+    selected_mlp: zml.Tensor,
+    mlp_selector_weights: zml.Tensor,
+    moe_input: zml.Tensor,
+    moe_result: moe.Result,
+    output: zml.Tensor,
+    cache: mla.LatentCache,
+};
+
+fn finishMlaMoe(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: MlaMoeWeights,
+    attention: mla.LatentResult,
+    route_config: router.Config,
+    selected_input: SelectionResult,
+    input_norm: zml.Tensor,
+) MlaMoeResult {
+    const prefix_after_attention = input.add(attention.output);
+    const selected_mlp = selectSequence(
+        prefix_after_attention,
+        block_sources,
+        active_blocks,
+        weights.common.mlp_res_norm,
+        weights.common.mlp_res_projection,
+    );
+    const moe_input = primitives.rmsNorm(
+        selected_mlp.output,
+        weights.common.post_attention_norm,
+        1e-5,
+    );
+    const moe_result = moe.forward(moe_input, weights.common.moe, route_config);
+    return .{
+        .selected_input = selected_input.output,
+        .input_selector_weights = selected_input.probabilities,
+        .input_norm = input_norm,
+        .attention_output = attention.output,
+        .prefix_after_attention = prefix_after_attention,
+        .selected_mlp = selected_mlp.output,
+        .mlp_selector_weights = selected_mlp.probabilities,
+        .moe_input = moe_input,
+        .moe_result = moe_result,
+        .output = prefix_after_attention.add(moe_result.output),
+        .cache = attention.cache,
+    };
+}
+
+pub fn forwardMlaMoePrefill(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: MlaMoeWeights,
+    route_config: router.Config,
+) MlaMoeResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const input_norm = primitives.rmsNorm(
+        selected_input.output,
+        weights.common.input_norm,
+        1e-5,
+    );
+    const attention = mla.latentPrefill(input_norm, weights.attention);
+    return finishMlaMoe(
+        input,
+        block_sources,
+        active_blocks,
+        weights,
+        attention,
+        route_config,
+        selected_input,
+        input_norm,
+    );
+}
+
+pub fn forwardMlaMoeContinue(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: MlaMoeWeights,
+    cache: mla.LatentCache,
+    route_config: router.Config,
+) MlaMoeResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const input_norm = primitives.rmsNorm(
+        selected_input.output,
+        weights.common.input_norm,
+        1e-5,
+    );
+    const attention = mla.latentContinue(input_norm, weights.attention, cache);
+    return finishMlaMoe(
+        input,
+        block_sources,
+        active_blocks,
+        weights,
+        attention,
+        route_config,
+        selected_input,
+        input_norm,
+    );
 }
