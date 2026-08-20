@@ -807,6 +807,8 @@ pub const Moe = struct {
             null,
             null,
             null,
+            null,
+            null,
             moe_metadata,
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
