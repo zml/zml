@@ -121,13 +121,14 @@ pub fn forward(hidden: zml.Tensor, weights: Weights, config: router.Config) Resu
     const route_weights = route.topk_weights.merge(.{ .token = .{ .b, .s } });
     const routed_down = token_hidden.dot(weights.dense.routed_down, .d);
     const expert_input = routed_down.rename(.{ .latent = .d });
-    const gate = bankLinear(expert_input, expert_ids, weights.experts.w1);
-    const up = bankLinear(expert_input, expert_ids, weights.experts.w3);
+    const gate = nativeBankLinear(expert_input, expert_ids, weights.experts.w1, zml.Shape.toTag(.intermediate));
+    const up = nativeBankLinear(expert_input, expert_ids, weights.experts.w3, zml.Shape.toTag(.intermediate));
     const activated = primitives.situGlu(gate, up);
-    const route_outputs = bankLinear(
+    const route_outputs = nativeBankLinear(
         activated.rename(.{ .intermediate = .d }),
         expert_ids,
         weights.experts.w2,
+        zml.Shape.toTag(.latent),
     );
     const combined_latent = route_outputs.convert(.f32)
         .mul(route_weights.convert(.f32).broad(route_outputs.shape()))
