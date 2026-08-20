@@ -267,6 +267,8 @@ pub const Model = struct {
     layers: []TransformerLayer,
     config: Config,
     selection: LayerSelection,
+    runtime_head: runtime_weights.HeadTensors,
+    runtime_layer0: layer_ops.Layer0Weights,
 
     pub const GenOptions = struct {
         sampling_strategy: zml.nn.SamplingStrategy = .{},
@@ -304,6 +306,8 @@ pub const Model = struct {
             .layers = layers,
             .config = config,
             .selection = selection,
+            .runtime_head = runtime_weights.HeadTensors.init(store.root()),
+            .runtime_layer0 = layer_ops.Layer0Weights.init(store.root()),
         };
     }
 
@@ -411,15 +415,9 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        _ = self;
-        _ = allocator;
-        _ = io;
-        _ = platform;
         _ = backend;
-        _ = shardings;
-        _ = seqlen;
-        _ = progress;
-        return error.KimiK3InferenceNotImplemented;
+        const params = try inference.CompilationParameters.init(self.inner, seqlen, shardings);
+        return inference.CompiledModel.init(allocator, io, platform, self, params, progress);
     }
 };
 

@@ -305,7 +305,6 @@ pub fn diagnosticHead(
     };
 }
 
-
 pub const MoeLayerWeights = struct {
     attention_res_norm: zml.Tensor,
     attention_res_projection: zml.Tensor,
@@ -593,6 +592,42 @@ pub fn forwardMlaMoeContinue(
         1e-5,
     );
     const attention = mla.latentContinue(input_norm, weights.attention, cache);
+    return finishMlaMoe(
+        input,
+        block_sources,
+        active_blocks,
+        weights,
+        attention,
+        route_config,
+        selected_input,
+        input_norm,
+    );
+}
+
+/// Fixed-capacity MLA+MoE session step. The returned cache retains the input
+/// allocation shape so the same executable is valid at every token position.
+pub fn forwardMlaMoeSession(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+    route_config: router.Config,
+) MlaMoeResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const input_norm = primitives.rmsNorm(
+        selected_input.output,
+        weights.common.input_norm,
+        1e-5,
+    );
+    const attention = mla.latentSession(input_norm, weights.attention, cache, token_index);
     return finishMlaMoe(
         input,
         block_sources,

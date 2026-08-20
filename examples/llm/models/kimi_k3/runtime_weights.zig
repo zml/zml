@@ -306,3 +306,96 @@ pub const Loader = struct {
 pub fn tensor(buffer: zml.Buffer) zml.Tensor {
     return .fromShape(buffer.shape());
 }
+
+fn symbolicCommon() layer.MoeLayerWeights {
+    return .{
+        .attention_res_norm = .init(.{ .d = 7168 }, .bf16),
+        .attention_res_projection = .init(.{ .one = 1, .d = 7168 }, .bf16),
+        .input_norm = .init(.{ .d = 7168 }, .bf16),
+        .mlp_res_norm = .init(.{ .d = 7168 }, .bf16),
+        .mlp_res_projection = .init(.{ .one = 1, .d = 7168 }, .bf16),
+        .post_attention_norm = .init(.{ .d = 7168 }, .bf16),
+        .moe = .{
+            .gate = .{
+                .weight = .init(.{ .expert = expert_count, .d = 7168 }, .bf16),
+                .correction_bias = .init(.{ .expert = expert_count }, .f32),
+            },
+            .experts = .{
+                .w1 = .{
+                    .values = .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
+                    .scale = .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+                },
+                .w2 = .{
+                    .values = .init(.{ .expert = expert_count, .latent = 3584, .kw = 1536 }, .u8),
+                    .scale = .init(.{ .expert = expert_count, .latent = 3584, .block = 96 }, .u8),
+                },
+                .w3 = .{
+                    .values = .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
+                    .scale = .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+                },
+            },
+            .dense = .{
+                .routed_down = .init(.{ .latent = 3584, .d = 7168 }, .bf16),
+                .routed_norm = .init(.{ .latent = 3584 }, .bf16),
+                .routed_up = .init(.{ .d = 7168, .latent = 3584 }, .bf16),
+                .shared_gate = .init(.{ .intermediate = 3072, .d = 7168 }, .bf16),
+                .shared_up = .init(.{ .intermediate = 3072, .d = 7168 }, .bf16),
+                .shared_down = .init(.{ .d = 7168, .intermediate = 3072 }, .bf16),
+            },
+        },
+    };
+}
+
+pub fn symbolicKdaMoe() layer.KdaMoeWeights {
+    return .{
+        .common = symbolicCommon(),
+        .attention = .{
+            .q_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .k_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .v_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .q_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
+            .k_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
+            .v_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
+            .decay_a_weight = .init(.{ .out = 128, .d = 7168 }, .bf16),
+            .decay_b_weight = .init(.{ .channel = 12288, .rank = 128 }, .bf16),
+            .a_log = .init(.{ .h = 128 }, .f32),
+            .dt_bias = .init(.{ .h = 96, .k = 128 }, .f32),
+            .beta_weight = .init(.{ .out = 96, .d = 7168 }, .bf16),
+            .gate_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .norm_weight = .init(.{ .v = 128 }, .f32),
+            .output_weight = .init(.{ .d = 7168, .out = 12288 }, .bf16),
+        },
+    };
+}
+
+pub fn symbolicMlaMoe() layer.MlaMoeWeights {
+    return .{
+        .common = symbolicCommon(),
+        .attention = .{
+            .q_a_proj = .init(.{ .rank = 1536, .d = 7168 }, .bf16),
+            .q_a_norm = .init(.{ .rank = 1536 }, .bf16),
+            .q_b_proj = .init(.{ .mix = 18432, .rank = 1536 }, .bf16),
+            .kv_a_proj = .init(.{ .kv_mix = 576, .d = 7168 }, .bf16),
+            .kv_a_norm = .init(.{ .kv_rank = 512 }, .bf16),
+            .kv_b_proj = .init(.{ .kv_mix = 24576, .kv_rank = 512 }, .bf16),
+            .gate_proj = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .output_proj = .init(.{ .d = 7168, .out = 12288 }, .bf16),
+        },
+    };
+}
+
+pub fn symbolicKdaCache() kda.Cache {
+    return .{
+        .q_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
+        .k_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
+        .v_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
+        .recurrent_state = .init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32),
+    };
+}
+
+pub fn symbolicMlaCache(capacity: usize) mla.SessionCache {
+    return .{
+        .compressed = .init(.{ .b = 1, .k = capacity, .kv_rank = 512 }, .bf16),
+        .extra_key = .init(.{ .b = 1, .k = capacity, .hd = 64 }, .bf16),
+    };
+}

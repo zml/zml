@@ -1,12 +1,177 @@
 const std = @import("std");
 
-// KIMI_K3_TEMP_REMOVE_M20: compile-time placeholder keeps model registration
-// honest while inference operators are introduced; replace it before cleanup.
-pub const CompiledModel = struct {
-    pub fn deinit(self: *CompiledModel) void {
-        _ = self;
+const zml = @import("zml");
+
+const common = @import("../common.zig");
+const kda = @import("kda.zig");
+const layer = @import("layer.zig");
+const mla = @import("mla.zig");
+const model = @import("model.zig");
+const runtime_weights = @import("runtime_weights.zig");
+
+fn embedTokens(tokens: zml.Tensor, embedding: zml.Tensor) zml.Tensor {
+    return embedding.gather(.{ .voc = tokens.convert(.u32) }, .{});
+}
+
+fn kdaMoeStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    weights: layer.KdaMoeWeights,
+    cache: kda.Cache,
+) layer.KdaMoeResult {
+    return layer.forwardKdaMoeDecode(input, blocks, active, weights, cache, .{ .top_k = 16 });
+}
+
+fn mlaMoeStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    weights: layer.MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+) layer.MlaMoeResult {
+    return layer.forwardMlaMoeSession(
+        input,
+        blocks,
+        active,
+        weights,
+        cache,
+        token_index,
+        .{ .top_k = 16 },
+    );
+}
+
+pub const CompilationParameters = struct {
+    decode_tokens: zml.Tensor,
+    hidden: zml.Tensor,
+    blocks: zml.Tensor,
+    active_blocks: zml.Tensor,
+    token_index: zml.Tensor,
+    kda_cache: kda.Cache,
+    mla_cache: mla.SessionCache,
+    seqlen: usize,
+    source_slots: usize,
+    shardings: common.Shardings,
+
+    pub fn init(mdl: model.Model, seqlen: usize, shardings: common.Shardings) !CompilationParameters {
+        const end = try mdl.selection.end(mdl.config);
+        const block_size: usize = @intCast(mdl.config.text_config.attn_res_block_size);
+        const source_slots = @max(@as(usize, 1), std.math.divCeil(usize, end, block_size) catch unreachable);
+        return .{
+            .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
+            .hidden = .init(.{ .b = 1, .s = 1, .d = 7168 }, .bf16),
+            .blocks = .init(.{ .token = 1, .source = source_slots, .d = 7168 }, .bf16),
+            .active_blocks = .init(.{ .source = source_slots }, .bool),
+            .token_index = .init(.{}, .u32),
+            .kda_cache = runtime_weights.symbolicKdaCache(),
+            .mla_cache = runtime_weights.symbolicMlaCache(seqlen),
+            .seqlen = seqlen,
+            .source_slots = source_slots,
+            .shardings = shardings,
+        };
     }
 };
 
-pub const CompilationParameters = struct {};
 pub const CompilationOptions = CompilationParameters;
+
+pub const CompiledModel = struct {
+    loaded_model: *const model.LoadedModel,
+    embedding: zml.Exe,
+    layer0: zml.Exe,
+    kda_moe: ?zml.Exe,
+    mla_moe: ?zml.Exe,
+    head: zml.Exe,
+    params: CompilationParameters,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        loaded_model: *const model.LoadedModel,
+        params: CompilationParameters,
+        progress: *std.Progress.Node,
+    ) !CompiledModel {
+        if (platform.target != .cuda) return error.NvidiaCudaRequired;
+        var node = progress.start("Compiling Kimi K3 reusable families...", 5);
+        defer node.end();
+        const sharding = &.{params.shardings.model};
+        const mdl = loaded_model.inner;
+
+        const embedding = try platform.compileFn(
+            allocator,
+            io,
+            embedTokens,
+            .{ params.decode_tokens, mdl.runtime_head.embedding },
+            .{ .shardings = sharding },
+        );
+        errdefer embedding.deinit();
+        node.completeOne();
+        const layer0_exe = try platform.compileFn(
+            allocator,
+            io,
+            layer.forwardLayer0,
+            .{ params.hidden, mdl.runtime_layer0, params.kda_cache },
+            .{ .shardings = sharding },
+        );
+        errdefer layer0_exe.deinit();
+        node.completeOne();
+
+        var has_kda_moe = false;
+        var has_mla_moe = false;
+        for (mdl.layers) |planned| switch (planned.kind()) {
+            .kda_dense => {},
+            .kda_moe => has_kda_moe = true,
+            .mla_moe => has_mla_moe = true,
+        };
+        const kda_moe_exe = if (has_kda_moe)
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoeStep,
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicKdaMoe(), params.kda_cache },
+                .{ .shardings = sharding },
+            )
+        else
+            null;
+        errdefer if (kda_moe_exe) |*exe| exe.deinit();
+        node.completeOne();
+        const mla_moe_exe = if (has_mla_moe)
+            try platform.compileFn(
+                allocator,
+                io,
+                mlaMoeStep,
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicMlaMoe(), params.mla_cache, params.token_index },
+                .{ .shardings = sharding },
+            )
+        else
+            null;
+        errdefer if (mla_moe_exe) |*exe| exe.deinit();
+        node.completeOne();
+        const head_exe = try platform.compileFn(
+            allocator,
+            io,
+            layer.diagnosticHead,
+            .{ params.hidden, params.blocks, mdl.runtime_head.output_res_norm, mdl.runtime_head.output_res_projection, mdl.runtime_head.final_norm, mdl.runtime_head.lm_head },
+            .{ .shardings = sharding },
+        );
+        node.completeOne();
+        return .{
+            .loaded_model = loaded_model,
+            .embedding = embedding,
+            .layer0 = layer0_exe,
+            .kda_moe = kda_moe_exe,
+            .mla_moe = mla_moe_exe,
+            .head = head_exe,
+            .params = params,
+        };
+    }
+
+    pub fn deinit(self: *CompiledModel) void {
+        self.embedding.deinit();
+        self.layer0.deinit();
+        if (self.kda_moe) |*exe| exe.deinit();
+        if (self.mla_moe) |*exe| exe.deinit();
+        self.head.deinit();
+    }
+};
