@@ -43,7 +43,6 @@ fn run(b: *tri.Builder, cfg: Config) tri.FinishError!void {
 
     std.debug.assert(cfg.batch > 0 and cfg.sequence > 0 and cfg.heads > 0);
     std.debug.assert(cfg.value_dim > 0 and cfg.key_dim > 0);
-    std.debug.assert(cfg.block_v >= cfg.value_dim or @mod(cfg.value_dim, cfg.block_v) == 0);
     std.debug.assert(cfg.block_k >= cfg.key_dim);
 
     const value_tiles: i32 = @divTrunc(cfg.value_dim + cfg.block_v - 1, cfg.block_v);

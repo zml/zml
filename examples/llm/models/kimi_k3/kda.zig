@@ -164,12 +164,12 @@ const Scan = struct {
     }
 };
 
-const RecurrentResult = struct {
+pub const RecurrentResult = struct {
     output: zml.Tensor,
     state: zml.Tensor,
 };
 
-fn recurrentNative(
+pub fn recurrentOptimized(
     q: zml.Tensor,
     k: zml.Tensor,
     v: zml.Tensor,
@@ -188,7 +188,7 @@ fn recurrentNative(
     const heads = q.dim(.h);
     const key_dim = q.dim(.k);
     const value_dim = v.dim(.v);
-    const block_v: i64 = 8;
+    const block_v: i64 = 32;
     const block_k: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(key_dim)));
     const value_tiles = std.math.divCeil(i64, value_dim, block_v) catch unreachable;
     const results = recurrent_kernel.Kernel.call(
@@ -224,6 +224,24 @@ fn recurrentNative(
     return .{ .output = results.recurrent_output, .state = results.state_output };
 }
 
+/// Sequential StableHLO recurrence retained as the independent oracle.
+pub fn recurrentReference(
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    alpha: zml.Tensor,
+    beta: zml.Tensor,
+    state: zml.Tensor,
+) RecurrentResult {
+    const initial: Scan.State = .{
+        .recurrent = state.convert(.f32),
+        .outputs = zml.Tensor.zeroes(v.shape().withDtype(.f32)),
+        .step = .scalar(0, .i32),
+    };
+    const final = zml.ops.@"while"(Scan, .{ .q = q, .k = k, .v = v, .alpha = alpha, .beta = beta }, initial);
+    return .{ .output = final.outputs, .state = final.recurrent };
+}
+
 fn prefillImpl(hidden: zml.Tensor, weights: Weights, cache: Cache, comptime optimized: bool) CompactResult {
     const q_proj = linear(hidden, weights.q_weight);
     const k_proj = linear(hidden, weights.k_weight);
@@ -254,7 +272,7 @@ fn prefillImpl(hidden: zml.Tensor, weights: Weights, cache: Cache, comptime opti
         .broad(raw_decay.shape());
     const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
     const beta = linear(hidden, weights.beta_weight).rename(.{ .out = .h }).convert(.f32).sigmoid();
-    const recurrence: RecurrentResult = if (optimized) recurrentNative(q, k, v, alpha, beta, cache.recurrent_state.convert(.f32)) else reference: {
+    const recurrence: RecurrentResult = if (optimized) recurrentOptimized(q, k, v, alpha, beta, cache.recurrent_state.convert(.f32)) else reference: {
         const initial_state: Scan.State = .{
             .recurrent = cache.recurrent_state.convert(.f32),
             .outputs = zml.Tensor.zeroes(v.shape()),
@@ -419,7 +437,7 @@ fn decodeOptimized(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactRe
     const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
     const beta = linear(hidden, weights.beta_weight).rename(.{ .out = .h }).convert(.f32).sigmoid();
 
-    const recurrence = recurrentNative(
+    const recurrence = recurrentOptimized(
         q_norm.reshape(.{ .b = batch, .s = 1, .h = heads, .k = head_dim }),
         k_norm.reshape(.{ .b = batch, .s = 1, .h = heads, .k = head_dim }),
         v.reshape(.{ .b = batch, .s = 1, .h = heads, .v = head_dim }),
