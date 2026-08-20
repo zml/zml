@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 const kda_cache = @import("kda_cache.zig");
 const primitives = @import("primitives.zig");
+const recurrent_kernel = zml.attention.kda_recurrent_kernel;
 
 pub const Cache = kda_cache.Cache;
 
@@ -117,8 +118,7 @@ pub const CompactResult = struct {
 };
 
 pub fn decodeCompact(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
-    const result = decode(hidden, weights, cache);
-    return .{ .output = result.projection_output, .cache = result.cache };
+    return decodeOptimized(hidden, weights, cache);
 }
 
 const Scan = struct {
@@ -164,9 +164,67 @@ const Scan = struct {
     }
 };
 
-/// Sequential graph-level KDA prefill oracle. Milestone 18 replaces this
-/// correctness path with chunked kernels after cache equivalence is proven.
-pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+const RecurrentResult = struct {
+    output: zml.Tensor,
+    state: zml.Tensor,
+};
+
+fn recurrentNative(
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    alpha: zml.Tensor,
+    beta: zml.Tensor,
+    state: zml.Tensor,
+) RecurrentResult {
+    std.debug.assert(q.dtype() == .f32 and k.dtype() == .f32 and v.dtype() == .f32);
+    std.debug.assert(alpha.dtype() == .f32 and beta.dtype() == .f32 and state.dtype() == .f32);
+    std.debug.assert(q.shape().hasTags(.{ .b, .s, .h, .k }));
+    std.debug.assert(v.shape().hasTags(.{ .b, .s, .h, .v }));
+    std.debug.assert(state.shape().hasTags(.{ .b, .h, .v, .k }));
+
+    const batch = q.dim(.b);
+    const sequence = q.dim(.s);
+    const heads = q.dim(.h);
+    const key_dim = q.dim(.k);
+    const value_dim = v.dim(.v);
+    const block_v: i64 = 8;
+    const block_k: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(key_dim)));
+    const value_tiles = std.math.divCeil(i64, value_dim, block_v) catch unreachable;
+    const results = recurrent_kernel.Kernel.call(
+        .{
+            .q_ptr = q,
+            .k_ptr = k,
+            .v_ptr = v,
+            .alpha_ptr = alpha,
+            .beta_ptr = beta,
+            .state_ptr = state,
+        },
+        .{
+            .recurrent_output = v.shape().withDtype(.f32),
+            .state_output = state.shape().withDtype(.f32),
+        },
+        .{
+            .cfg = .{
+                .batch = @intCast(batch),
+                .sequence = @intCast(sequence),
+                .heads = @intCast(heads),
+                .value_dim = @intCast(value_dim),
+                .key_dim = @intCast(key_dim),
+                .block_v = @intCast(block_v),
+                .block_k = @intCast(block_k),
+                .input_dtype = .f32,
+            },
+            .grid = .{ @intCast(batch * heads * value_tiles), 1, 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+            .output_operand_aliases = .{ .state_output = .state_ptr },
+        },
+    );
+    return .{ .output = results.recurrent_output, .state = results.state_output };
+}
+
+fn prefillImpl(hidden: zml.Tensor, weights: Weights, cache: Cache, comptime optimized: bool) CompactResult {
     const q_proj = linear(hidden, weights.q_weight);
     const k_proj = linear(hidden, weights.k_weight);
     const v_proj = linear(hidden, weights.v_weight);
@@ -196,20 +254,23 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult
         .broad(raw_decay.shape());
     const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
     const beta = linear(hidden, weights.beta_weight).rename(.{ .out = .h }).convert(.f32).sigmoid();
-    const initial_state: Scan.State = .{
-        .recurrent = cache.recurrent_state.convert(.f32),
-        .outputs = zml.Tensor.zeroes(v.shape()),
-        .step = .scalar(0, .i32),
+    const recurrence: RecurrentResult = if (optimized) recurrentNative(q, k, v, alpha, beta, cache.recurrent_state.convert(.f32)) else reference: {
+        const initial_state: Scan.State = .{
+            .recurrent = cache.recurrent_state.convert(.f32),
+            .outputs = zml.Tensor.zeroes(v.shape()),
+            .step = .scalar(0, .i32),
+        };
+        const final = zml.ops.@"while"(Scan, .{ .q = q, .k = k, .v = v, .alpha = alpha, .beta = beta }, initial_state);
+        break :reference .{ .output = final.outputs, .state = final.recurrent };
     };
-    const final = zml.ops.@"while"(Scan, .{ .q = q, .k = k, .v = v, .alpha = alpha, .beta = beta }, initial_state);
     const output_gate = linear(hidden, weights.gate_weight)
         .rename(.{ .out = .mix })
         .splitAxis(.mix, .{ .h = heads, .v = head_dim })
         .convert(.f32);
-    const variance = final.outputs.powByConst(2).mean(.v);
-    const norm_gated = final.outputs
-        .mul(variance.addConstant(1e-5).rsqrt().broad(final.outputs.shape()))
-        .mul(weights.norm_weight.convert(.f32).broad(final.outputs.shape()))
+    const variance = recurrence.output.powByConst(2).mean(.v);
+    const norm_gated = recurrence.output
+        .mul(variance.addConstant(1e-5).rsqrt().broad(recurrence.output.shape()))
+        .mul(weights.norm_weight.convert(.f32).broad(recurrence.output.shape()))
         .mul(output_gate.sigmoid());
     const output = norm_gated.merge(.{ .out = .{ .h, .v } })
         .convert(hidden.dtype()).dot(weights.output_weight, .out);
@@ -219,9 +280,19 @@ pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult
             .q_conv = q_conv.cache,
             .k_conv = k_conv.cache,
             .v_conv = v_conv.cache,
-            .recurrent_state = final.recurrent,
+            .recurrent_state = recurrence.state,
         },
     };
+}
+/// Production KDA prefill. CUDA lowers the complete channel-wise recurrent
+/// scan to one fused Triton kernel while retaining the compact FP32 state.
+pub fn prefill(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    return prefillImpl(hidden, weights, cache, true);
+}
+
+/// Sequential StableHLO oracle retained for differential tests.
+pub fn prefillReference(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    return prefillImpl(hidden, weights, cache, false);
 }
 
 /// Readable Kimi K3 fused-recurrent decode equation.
@@ -309,6 +380,74 @@ pub fn decode(hidden: zml.Tensor, weights: Weights, cache: Cache) DecodeResult {
             .k_conv = k_conv.cache,
             .v_conv = v_conv.cache,
             .recurrent_state = recurrent_state,
+        },
+    };
+}
+
+/// Readable single-token oracle retained for differential tests.
+pub fn decodeCompactReference(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    const result = decode(hidden, weights, cache);
+    return .{ .output = result.projection_output, .cache = result.cache };
+}
+
+fn decodeOptimized(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactResult {
+    const q_proj = linear(hidden, weights.q_weight);
+    const k_proj = linear(hidden, weights.k_weight);
+    const v_proj = linear(hidden, weights.v_weight);
+    const q_conv = convStep(q_proj, cache.q_conv, weights.q_conv_weight);
+    const k_conv = convStep(k_proj, cache.k_conv, weights.k_conv_weight);
+    const v_conv = convStep(v_proj, cache.v_conv, weights.v_conv_weight);
+
+    const batch = hidden.dim(.b);
+    const heads = weights.dt_bias.dim(.h);
+    const head_dim = weights.norm_weight.dim(.v);
+    const q = q_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim });
+    const k = k_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .k = head_dim });
+    const v = v_conv.output.rename(.{ .channel = .mix }).splitAxis(.mix, .{ .h = heads, .v = head_dim }).convert(.f32);
+    const q_norm = primitives.normalizeL2(q, 1e-6).convert(.f32);
+    const k_norm = primitives.normalizeL2(k, 1e-6).convert(.f32);
+
+    const decay_rank = linear(hidden, weights.decay_a_weight).rename(.{ .out = .rank });
+    const raw_decay = decay_rank.dot(weights.decay_b_weight, .rank)
+        .rename(.{ .channel = .mix })
+        .splitAxis(.mix, .{ .h = heads, .k = head_dim })
+        .convert(.f32);
+    const decay_input = raw_decay.add(weights.dt_bias.convert(.f32).broad(raw_decay.shape()));
+    const decay_rate = weights.a_log.slice1d(.h, .{ .start = 0, .end = heads }).convert(.f32).exp()
+        .reshape(.{ .b = 1, .h = heads, .k = 1 })
+        .broad(raw_decay.shape());
+    const alpha = decay_rate.mul(decay_input).sigmoid().scale(-5.0).exp();
+    const beta = linear(hidden, weights.beta_weight).rename(.{ .out = .h }).convert(.f32).sigmoid();
+
+    const recurrence = recurrentNative(
+        q_norm.reshape(.{ .b = batch, .s = 1, .h = heads, .k = head_dim }),
+        k_norm.reshape(.{ .b = batch, .s = 1, .h = heads, .k = head_dim }),
+        v.reshape(.{ .b = batch, .s = 1, .h = heads, .v = head_dim }),
+        alpha.reshape(.{ .b = batch, .s = 1, .h = heads, .k = head_dim }),
+        beta.reshape(.{ .b = batch, .s = 1, .h = heads }),
+        cache.recurrent_state.convert(.f32),
+    );
+    const recurrent_output = recurrence.output.squeeze(.s);
+    const output_gate = linear(hidden, weights.gate_weight)
+        .rename(.{ .out = .mix })
+        .splitAxis(.mix, .{ .h = heads, .v = head_dim })
+        .convert(.f32);
+    const variance = recurrent_output.powByConst(2).mean(.v);
+    const normalized = recurrent_output.mul(
+        variance.addConstant(1e-5).rsqrt().broad(recurrent_output.shape()),
+    );
+    const norm_gated = normalized
+        .mul(weights.norm_weight.convert(.f32).broad(normalized.shape()))
+        .mul(output_gate.sigmoid());
+    const output = norm_gated.merge(.{ .out = .{ .h, .v } })
+        .convert(hidden.dtype()).dot(weights.output_weight, .out);
+    return .{
+        .output = output,
+        .cache = .{
+            .q_conv = q_conv.cache,
+            .k_conv = k_conv.cache,
+            .v_conv = v_conv.cache,
+            .recurrent_state = recurrence.state,
         },
     };
 }
