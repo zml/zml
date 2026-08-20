@@ -59,8 +59,8 @@ Moonshot boundary parity and synchronized execution time.
 
 The accepted H100 budget is at least 2x over the slow selected-expert ZML
 oracle under the same 61-expert/64-route/13-boundary scope. The retained
-`split_k=1` configuration measured 12,608 microseconds warm versus 37,909
-microseconds for the immutable slow baseline (3.01x). A donor-style
+`split_k=1` configuration measured 12,652 microseconds warm versus 37,909
+microseconds for the immutable slow baseline (3.00x). A donor-style
 `split_k=4` experiment measured 19,704 microseconds and was rejected.
 
 HBM comparison is exact static temporary-tensor accounting rather than a
