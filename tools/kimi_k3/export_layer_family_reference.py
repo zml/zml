@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import torch
 import torch.nn.functional as torch_functional
 from safetensors import safe_open
 
-from export_layer0_prefix_reference import semantic_sha256
+from export_layer0_prefix_reference import TOKEN_IDS, semantic_sha256
 from export_mla_reference import causal_mask
 from export_moe_reference import dequantize, rms_norm, situ
 from export_reference import (
@@ -24,6 +25,7 @@ from export_reference import (
     deterministic_setup,
     import_official,
     sha256_file,
+    tensor_bytes,
 )
 from export_router_reference import canonical_route, RouteConfig
 
@@ -31,12 +33,60 @@ from export_router_reference import canonical_route, RouteConfig
 ROOT = Path("/ephemeral/kimi-k3")
 OUTPUT = ROOT / "artifacts/fixtures/milestone-14"
 PREFIX_FIXTURE = ROOT / "artifacts/fixtures/milestone-9/s2-layer0-prefix-len4.safetensors"
-PREFIX_SEMANTIC_SHA256 = "6f35e2906880085829d5e411cc4d7fcc1b598397055fe7460ab91865ab05b15d"
 SHARDS = {
     1: ("model-00002-of-000096.safetensors", "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"),
     2: ("model-00003-of-000096.safetensors", "e54af9de4c554956082364010f732443bcd5097390f0121a33fb35e37280b5a9"),
     3: ("model-00004-of-000096.safetensors", "5955fd8feda89b1af8400c25e885e7177d47edff155f54b318beb8dd1cec5c05"),
 }
+
+
+def load_prefix_source(path: Path = PREFIX_FIXTURE) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    """Validate and load the exact Milestone 9 fixture consumed by this export."""
+    manifest_path = path.with_suffix(".json")
+    manifest = json.loads(manifest_path.read_text())
+    if (
+        manifest.get("moonshot_revision") != MOONSHOT_REVISION
+        or manifest.get("token_ids") != list(TOKEN_IDS)
+        or manifest.get("layer_stop") != 1
+        or manifest.get("cpu_inference_fallback")
+    ):
+        raise RuntimeError(f"prefix fixture execution contract mismatch: {manifest_path}")
+    if manifest.get("tensor_file") != path.name:
+        raise RuntimeError(f"prefix fixture manifest points to a different tensor file: {manifest_path}")
+    file_sha256 = sha256_file(path)
+    if file_sha256 != manifest.get("tensor_file_sha256"):
+        raise RuntimeError(f"prefix fixture file hash mismatch: {path}")
+
+    tensors: dict[str, torch.Tensor] = {}
+    with safe_open(path, framework="pt", device="cpu") as values:
+        for name in values.keys():
+            value = values.get_tensor(name).contiguous()
+            record = manifest.get("tensors", {}).get(name)
+            dtype = str(value.dtype).removeprefix("torch.")
+            if record is None or list(value.shape) != record.get("shape") or dtype != record.get("dtype"):
+                raise RuntimeError(f"prefix fixture tensor contract mismatch: {name}")
+            if hashlib.sha256(tensor_bytes(value)).hexdigest() != record.get("sha256"):
+                raise RuntimeError(f"prefix fixture tensor hash mismatch: {name}")
+            if value.is_floating_point() and not torch.isfinite(value).all():
+                raise RuntimeError(f"non-finite prefix fixture tensor: {name}")
+            tensors[name] = value
+    if set(tensors) != set(manifest.get("tensors", {})):
+        raise RuntimeError("prefix fixture tensor inventory mismatch")
+    semantic = semantic_sha256(tensors)
+    if semantic != manifest.get("tensor_semantic_sha256"):
+        raise RuntimeError("prefix fixture aggregate semantic hash mismatch")
+    required = {"prefix.layer0.out", "prefix.layer0.block_residual.out"}
+    if not required.issubset(tensors):
+        raise RuntimeError(f"prefix fixture is missing required tensors: {sorted(required - tensors.keys())}")
+    return tensors, {
+        "fixture": manifest.get("fixture"),
+        "manifest": manifest_path.name,
+        "manifest_sha256": sha256_file(manifest_path),
+        "moonshot_revision": manifest["moonshot_revision"],
+        "tensor_file": path.name,
+        "tensor_file_sha256": file_sha256,
+        "tensor_semantic_sha256": semantic,
+    }
 
 
 def load_layer(
@@ -245,13 +295,17 @@ def run_layer(
     }
 
 
-def build(checkpoint: Path, configuration: Any, modeling: Any) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+def build(
+    checkpoint: Path,
+    configuration: Any,
+    modeling: Any,
+    prefix_tensors: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     config_data = json.loads((checkpoint / "config.json").read_text())["text_config"]
     config = configuration.KimiLinearConfig(**config_data)
     config._attn_implementation = "eager"
-    with safe_open(PREFIX_FIXTURE, framework="pt", device="cpu") as values:
-        hidden = values.get_tensor("prefix.layer0.out").cuda()
-        block_residual = values.get_tensor("prefix.layer0.block_residual.out").cuda()
+    hidden = prefix_tensors["prefix.layer0.out"].cuda()
+    block_residual = prefix_tensors["prefix.layer0.block_residual.out"].cuda()
     tensors: dict[str, torch.Tensor] = {}
     details: dict[str, Any] = {}
     for layer_index in (1, 2, 3):
@@ -275,8 +329,9 @@ def main() -> None:
         raise RuntimeError(f"checkpoint must be the approved local directory: {DEFAULT_CHECKPOINT}")
     deterministic_setup()
     configuration, modeling = import_official(checkpoint)
-    first, first_timing = cuda_timed(lambda: build(checkpoint, configuration, modeling))
-    second, repeat_timing = cuda_timed(lambda: build(checkpoint, configuration, modeling))
+    prefix_tensors, prefix_source = load_prefix_source(PREFIX_FIXTURE)
+    first, first_timing = cuda_timed(lambda: build(checkpoint, configuration, modeling, prefix_tensors))
+    second, repeat_timing = cuda_timed(lambda: build(checkpoint, configuration, modeling, prefix_tensors))
     first_tensors, details = first
     second_tensors, second_details = second
     _assert_stable(first_tensors, second_tensors)
@@ -289,7 +344,8 @@ def main() -> None:
         {
             "mode": "sequential_real_weight_layers_1_2_3_selected_experts",
             "layers": details,
-            "prefix_fixture_semantic_sha256": PREFIX_SEMANTIC_SHA256,
+            "prefix_fixture_semantic_sha256": prefix_source["tensor_semantic_sha256"],
+            "prefix_fixture_source": prefix_source,
             "tensor_semantic_sha256": semantic_sha256(first_tensors),
             "timing": {"cold_or_first": first_timing, "repeat": repeat_timing},
             "checkpoint": {name: digest for name, digest in SHARDS.values()},
@@ -305,6 +361,7 @@ def main() -> None:
         "safetensors": manifest["tensor_file"],
         "sha256": manifest["tensor_file_sha256"],
         "semantic_sha256": manifest["tensor_semantic_sha256"],
+        "prefix_fixture_source": prefix_source,
         "layers": details,
     }
     (args.output_dir.resolve() / "manifest.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

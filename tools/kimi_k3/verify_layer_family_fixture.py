@@ -10,7 +10,7 @@ import torch
 from safetensors import safe_open
 
 from export_layer0_prefix_reference import semantic_sha256
-from export_layer_family_reference import OUTPUT, PREFIX_SEMANTIC_SHA256, SHARDS
+from export_layer_family_reference import OUTPUT, PREFIX_FIXTURE, SHARDS, load_prefix_source
 from export_reference import sha256_file, tensor_bytes
 
 
@@ -19,8 +19,11 @@ def main() -> None:
     path = OUTPUT / manifest["tensor_file"]
     if sha256_file(path) != manifest["tensor_file_sha256"]:
         raise SystemExit("layer-family fixture file hash mismatch")
-    if manifest["prefix_fixture_semantic_sha256"] != PREFIX_SEMANTIC_SHA256:
+    _, prefix_source = load_prefix_source(PREFIX_FIXTURE)
+    if manifest["prefix_fixture_semantic_sha256"] != prefix_source["tensor_semantic_sha256"]:
         raise SystemExit("layer-family prefix source mismatch")
+    if manifest.get("prefix_fixture_source") != prefix_source:
+        raise SystemExit("layer-family prefix provenance record mismatch")
     if manifest["checkpoint"] != {name: digest for name, digest in SHARDS.values()}:
         raise SystemExit("layer-family checkpoint contract mismatch")
     expected = {
