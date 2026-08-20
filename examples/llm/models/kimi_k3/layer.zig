@@ -589,7 +589,7 @@ fn finishMlaMoe(
     block_sources: zml.Tensor,
     active_blocks: zml.Tensor,
     weights: MlaMoeWeights,
-    attention: mla.LatentResult,
+    attention: mla.CompactResult,
     route_config: router.Config,
     selected_input: SelectionResult,
     input_norm: zml.Tensor,
@@ -642,7 +642,7 @@ pub fn forwardMlaMoePrefill(
         weights.common.input_norm,
         1e-5,
     );
-    const attention = mla.latentPrefill(input_norm, weights.attention);
+    const attention = mla.latentPrefillCompact(input_norm, weights.attention);
     return finishMlaMoe(
         input,
         block_sources,
@@ -675,7 +675,7 @@ pub fn forwardMlaMoeContinue(
         weights.common.input_norm,
         1e-5,
     );
-    const attention = mla.latentContinue(input_norm, weights.attention, cache);
+    const attention = mla.latentContinueCompact(input_norm, weights.attention, cache);
     return finishMlaMoe(
         input,
         block_sources,
@@ -711,7 +711,7 @@ pub fn forwardMlaMoeSession(
         weights.common.input_norm,
         1e-5,
     );
-    const attention = mla.latentSession(input_norm, weights.attention, cache, token_index);
+    const attention = mla.latentSessionCompact(input_norm, weights.attention, cache, token_index);
     return finishMlaMoe(
         input,
         block_sources,
@@ -744,7 +744,7 @@ pub fn forwardMlaMoeBoundary(
     );
     const updated = appendBoundarySource(input, block_sources, active_blocks, block_index);
     const input_norm = primitives.rmsNorm(selected_input.output, weights.common.input_norm, 1e-5);
-    const attention = mla.latentSession(input_norm, weights.attention, cache, token_index);
+    const attention = mla.latentSessionCompact(input_norm, weights.attention, cache, token_index);
     const selected_mlp = selectSequence(
         attention.output,
         updated[0],

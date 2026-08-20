@@ -45,6 +45,12 @@ pub const LatentResult = struct {
     latent_aggregation: zml.Tensor,
 };
 
+/// Production MLA result. Diagnostic score/readout tensors stay exclusive to
+/// `LatentResult`, allowing production compilation to end their live ranges.
+pub const CompactResult = struct {
+    output: zml.Tensor,
+    cache: LatentCache,
+};
 // KIMI_K3_TEMP_REMOVE_M20: named MLA boundaries are returned to the isolated
 // differential harness and removed from the production result during cleanup.
 pub const Result = struct {
@@ -83,6 +89,28 @@ fn weightedRmsNorm(input: zml.Tensor, weight: zml.Tensor, axis: anytype) zml.Ten
     return normalized.convert(.f32)
         .mul(weight.convert(.f32).broad(normalized.shape()))
         .convert(input.dtype());
+}
+
+/// StableHLO latent MLA score/softmax/readout stage used by production and
+/// isolated Milestone 18 page-boundary benchmarks. Inputs remain 512+64
+/// compact cache values; no expanded per-head K/V tensor can be constructed.
+pub fn latentAttentionStableHlo(
+    q_absorbed: zml.Tensor,
+    q_extra: zml.Tensor,
+    cache: LatentCache,
+    valid_tokens: zml.Tensor,
+) zml.Tensor {
+    const content_scores = q_absorbed.dot(cache.compressed, .kv_rank);
+    const extra_scores = q_extra.dot(cache.extra_key, .hd);
+    const scores = content_scores.add(extra_scores).scale(1.0 / std.math.sqrt(192.0));
+    const key_index = zml.Tensor.iota(scores.shape(), .k);
+    const valid = key_index.cmp(
+        .LT,
+        valid_tokens.squeeze(.one).convert(.i32).broad(scores.shape().withDtype(.i32)),
+    );
+    const masked = valid.select(scores, zml.Tensor.scalar(-std.math.inf(f32), scores.dtype()));
+    const probabilities = masked.convert(.f32).softmax(.k).convert(q_absorbed.dtype());
+    return probabilities.dot(cache.compressed, .k);
 }
 
 fn core(hidden: zml.Tensor, weights: Weights, past: ?ExpandedCache) Result {
@@ -303,4 +331,27 @@ pub fn latentSession(
         .q_absorbed = q_absorbed,
         .latent_aggregation = latent_aggregation,
     };
+}
+
+/// Compact production prefill over the absorbed latent-cache algebra.
+pub fn latentPrefillCompact(hidden: zml.Tensor, weights: Weights) CompactResult {
+    const result = latentPrefill(hidden, weights);
+    return .{ .output = result.output, .cache = result.cache };
+}
+
+/// Compact production continuation over an exact-length latent cache.
+pub fn latentContinueCompact(hidden: zml.Tensor, weights: Weights, cache: LatentCache) CompactResult {
+    const result = latentContinue(hidden, weights, cache);
+    return .{ .output = result.output, .cache = result.cache };
+}
+
+/// Compact production continuation over reusable fixed-capacity storage.
+pub fn latentSessionCompact(
+    hidden: zml.Tensor,
+    weights: Weights,
+    cache: SessionCache,
+    token_index: zml.Tensor,
+) CompactResult {
+    const result = latentSession(hidden, weights, cache, token_index);
+    return .{ .output = result.output, .cache = result.cache };
 }
