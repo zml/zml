@@ -196,6 +196,8 @@ pub fn forwardMoe(
     bias_down: ?zml.Tensor,
     w1_global_scale: ?zml.Tensor,
     w2_global_scale: ?zml.Tensor,
+    x1_global_scale: ?zml.Tensor,
+    x2_global_scale: ?zml.Tensor,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -204,13 +206,10 @@ pub fn forwardMoe(
             if (comptime !platforms.isEnabled(.cuda)) {
                 return error.UnsupportedPlatform;
             }
-            const flashinfer_metadata = switch (metadata) {
-                .flashinfer_cutlass => |v| v,
+            _ = switch (metadata) {
+                .flashinfer_cutlass => {},
                 else => return error.InvalidMetadata,
             };
-            if (scales_gate_up != null or scales_down != null) {
-                return error.UnsupportedQuantization;
-            }
             if (bias_gate_up != null or bias_down != null) {
                 return error.UnsupportedBias;
             }
@@ -218,9 +217,13 @@ pub fn forwardMoe(
             const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
-            if (flashinfer_metadata.variant == .nvfp4xnvfp4) {
-                const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
-                    return error.MissingNvfp4Scales;
+            if (x1_global_scale != null or x2_global_scale != null) {
+                const fc1_act_global = x1_global_scale orelse return error.MissingNvfp4Scales;
+                const fc1_weight_block = scales_gate_up orelse return error.MissingNvfp4Scales;
+                const fc1_global = w1_global_scale orelse return error.MissingNvfp4Scales;
+                const fc2_act_global = x2_global_scale orelse return error.MissingNvfp4Scales;
+                const fc2_weight_block = scales_down orelse return error.MissingNvfp4Scales;
+                const fc2_global = w2_global_scale orelse return error.MissingNvfp4Scales;
                 if (expert_partition.eql(.init(.experts))) {
                     break :b zml.ops.manualComputation(
                         .{
@@ -229,12 +232,12 @@ pub fn forwardMoe(
                             topk_weights,
                             weights_gate_up,
                             weights_down,
-                            nvfp4.fc1_act_global,
-                            nvfp4.fc1_weight_block,
-                            nvfp4.fc1_global,
-                            nvfp4.fc2_act_global,
-                            nvfp4.fc2_weight_block,
-                            nvfp4.fc2_global,
+                            fc1_act_global,
+                            fc1_weight_block,
+                            fc1_global,
+                            fc2_act_global,
+                            fc2_weight_block,
+                            fc2_global,
                         },
                         input.shape(),
                         .{
@@ -274,14 +277,12 @@ pub fn forwardMoe(
                                     sharded_inputs[4],
                                     local_topk_weights,
                                     local_topk_ids,
-                                    .{
-                                        .fc1_act_global = sharded_inputs[5],
-                                        .fc1_weight_block = sharded_inputs[6],
-                                        .fc1_global = sharded_inputs[7],
-                                        .fc2_act_global = sharded_inputs[8],
-                                        .fc2_weight_block = sharded_inputs[9],
-                                        .fc2_global = sharded_inputs[10],
-                                    },
+                                    sharded_inputs[5],
+                                    sharded_inputs[6],
+                                    sharded_inputs[7],
+                                    sharded_inputs[8],
+                                    sharded_inputs[9],
+                                    sharded_inputs[10],
                                     .{
                                         .workspace_query_device = ctx.workspace_query_device,
                                         .activation = ctx.activation,
@@ -308,14 +309,15 @@ pub fn forwardMoe(
                     weights_down,
                     topk_weights,
                     topk_ids,
-                    nvfp4,
+                    fc1_act_global,
+                    fc1_weight_block,
+                    fc1_global,
+                    fc2_act_global,
+                    fc2_weight_block,
+                    fc2_global,
                     runner_options,
                 );
             }
-            if (flashinfer_metadata.nvfp4_scales != null) {
-                return error.UnexpectedNvfp4Scales;
-            }
-
             if (expert_partition.eql(.init(.experts))) {
                 break :b zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
