@@ -1,0 +1,4 @@
+exports_files([
+    "flashinfer_cutlass_moe.BUILD.bazel",
+    "repo.bzl",
+])

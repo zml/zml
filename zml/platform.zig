@@ -234,11 +234,53 @@ fn sortDevicesById(target: Target, devices: []Device) void {
     }
 }
 
+// State union tagged on target platform to handle related resources
+pub const State = union(Target) {
+    cpu: void,
+    cuda: CudaState,
+    rocm: void,
+    tpu: void,
+    neuron: void,
+    oneapi: void,
+    metal: void,
+
+    pub const CudaState = struct {
+        fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
+
+        fn deinit(self: *CudaState) void {
+            if (self.fi_cutlass_moe_runners) |runners| {
+                runners.deinit();
+                self.fi_cutlass_moe_runners = null;
+            }
+        }
+    };
+
+    pub fn init(target: Target) State {
+        return switch (target) {
+            .cpu => .{ .cpu = {} },
+            .cuda => .{ .cuda = .{} },
+            .rocm => .{ .rocm = {} },
+            .tpu => .{ .tpu = {} },
+            .neuron => .{ .neuron = {} },
+            .oneapi => .{ .oneapi = {} },
+            .metal => .{ .metal = {} },
+        };
+    }
+
+    pub fn deinit(self: *State) void {
+        switch (self.*) {
+            .cuda => |*cuda_state| cuda_state.deinit(),
+            else => {},
+        }
+    }
+};
+
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    state: State,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
@@ -276,6 +318,7 @@ pub const Platform = struct {
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .state = State.init(target),
                 .shardings = .empty,
                 // set below
                 .devices = undefined,
@@ -324,6 +367,16 @@ pub const Platform = struct {
                 zml.attention.flashattn.register(platform) catch {
                     log.warn("Failed to register flashattn custom call", .{});
                 };
+                if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
+                    zml.moe.cutlass_flashinfer.register(platform) catch |err| {
+                        log.warn(
+                            "Failed to register FlashInfer CUTLASS MoE custom calls: {}",
+                            .{err},
+                        );
+                    };
+                } else |err| {
+                    log.warn("Failed to load FlashInfer CUTLASS MoE: {}", .{err});
+                }
             },
             else => {},
         }
@@ -475,6 +528,9 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
+        if (comptime platforms.isEnabled(.cuda)) {
+            self.state.deinit();
+        }
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();

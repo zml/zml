@@ -1,7 +1,9 @@
 const std = @import("std");
 
+const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
+pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
@@ -14,14 +16,26 @@ pub const ActivationMode = enum {
 };
 
 pub const Backend = enum {
-    // Could select a more specific name like "triton_sm90_bf16"
+    flashinfer_cutlass,
     triton,
     mosaic_tpu,
     metal,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi => switch (weights_dtype) {
+            .cuda => switch (weights_dtype) {
+                .bf16 => if (cutlass_flashinfer.isAvailable(platform))
+                    .flashinfer_cutlass
+                else
+                    .triton,
+                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
+                    .flashinfer_cutlass
+                else
+                    return error.UnsupportedDataType,
+                .f16, .f32 => .triton,
+                else => error.UnsupportedDataType,
+            },
+            .rocm, .oneapi => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
@@ -37,18 +51,21 @@ pub const Backend = enum {
         };
     }
 
-    pub fn load(backend: Backend, allocator: std.mem.Allocator) !void {
-        _ = allocator;
+    pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
-            .triton => {},
-            .mosaic_tpu => {},
-            .metal => {},
+            .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
+            .triton => switch (platform.target) {
+                .cuda, .rocm, .oneapi => true,
+                else => false,
+            },
+            .mosaic_tpu => platform.target == .tpu,
+            .metal => platform.target == .metal,
         };
     }
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
-        _ = platform;
         return switch (backend) {
+            .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
@@ -57,17 +74,27 @@ pub const Backend = enum {
 };
 
 pub const Parameters = union(Backend) {
+    flashinfer_cutlass: cutlass_flashinfer.Parameters,
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
     metal: metal.Parameters,
 
     pub const InitOptions = union(Backend) {
+        flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
         metal: metal.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
+                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
+                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .activation = switch (activation) {
+                        .silu => .silu,
+                        .relu => .relu,
+                        .gelu => .gelu,
+                    },
+                } },
                 .triton => .{ .triton = .{
                     .num_experts_per_tok = num_experts_per_tok.?,
                     .activation = switch (activation) {
@@ -98,6 +125,7 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
+            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
             .metal => |v| .{ .metal = metal.Parameters.init(v) },
@@ -106,17 +134,20 @@ pub const Parameters = union(Backend) {
 };
 
 pub const Metadata = union(Backend) {
+    flashinfer_cutlass: cutlass_flashinfer.Metadata,
     triton: triton.Metadata,
     mosaic_tpu: mosaic_tpu.Metadata,
     metal: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
+        flashinfer_cutlass: cutlass_flashinfer.Metadata.InitOptions,
         triton: triton.Metadata.InitOptions,
         mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
         metal: metal.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
+                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{} },
                 .triton => .{ .triton = .{} },
                 .mosaic_tpu => .{ .mosaic_tpu = .{} },
                 .metal => .{ .metal = .{} },
@@ -126,6 +157,7 @@ pub const Metadata = union(Backend) {
 
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
+            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v) },
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
             .metal => |v| .{ .metal = metal.Metadata.init(v) },
@@ -134,6 +166,7 @@ pub const Metadata = union(Backend) {
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
+            .flashinfer_cutlass => |metadata| .{ .flashinfer_cutlass = try metadata.initBuffer(io, platform) },
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
             .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
@@ -142,6 +175,7 @@ pub const Metadata = union(Backend) {
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
+            .flashinfer_cutlass => |*metadata| cutlass_flashinfer.deinitBuffer(metadata),
             .triton => |*metadata| triton.deinitBuffer(metadata),
             .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
             .metal => |*metadata| metal.deinitBuffer(metadata),
@@ -165,6 +199,192 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     return switch (parameters) {
+        .flashinfer_cutlass => b: {
+            if (comptime !platforms.isEnabled(.cuda)) {
+                return error.UnsupportedPlatform;
+            }
+            const flashinfer_metadata = switch (metadata) {
+                .flashinfer_cutlass => |v| v,
+                else => return error.InvalidMetadata,
+            };
+            if (scales_gate_up != null or scales_down != null) {
+                return error.UnsupportedQuantization;
+            }
+            if (bias_gate_up != null or bias_down != null) {
+                return error.UnsupportedBias;
+            }
+
+            const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
+            const expert_partition = weights_gate_up.shape().partition(.expert);
+
+            if (flashinfer_metadata.variant == .nvfp4xnvfp4) {
+                const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
+                    return error.MissingNvfp4Scales;
+                if (expert_partition.eql(.init(.experts))) {
+                    break :b zml.ops.manualComputation(
+                        .{
+                            input,
+                            topk_ids,
+                            topk_weights,
+                            weights_gate_up,
+                            weights_down,
+                            nvfp4.fc1_act_global,
+                            nvfp4.fc1_weight_block,
+                            nvfp4.fc1_global,
+                            nvfp4.fc2_act_global,
+                            nvfp4.fc2_weight_block,
+                            nvfp4.fc2_global,
+                        },
+                        input.shape(),
+                        .{
+                            .activation = runner_options.activation,
+                            .enable_pdl = runner_options.enable_pdl,
+                            .gemm1_tactic = runner_options.gemm1_tactic,
+                            .gemm2_tactic = runner_options.gemm2_tactic,
+                            .workspace_query_device = runner_options.workspace_query_device,
+                        },
+                        (struct {
+                            fn body(
+                                ctx: anytype,
+                                _: std.mem.Allocator,
+                                sharded_inputs: []const zml.Tensor,
+                                _: zml.Shape,
+                            ) zml.Tensor {
+                                const local_num_experts = sharded_inputs[3].dim(.expert);
+                                const partition_id = zml.ops.partitionId().convert(.i32);
+                                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                                const expert_end = expert_start.addConstant(local_num_experts);
+
+                                const local_route_mask = sharded_inputs[1]
+                                    .cmp(.GE, expert_start)
+                                    .logical(.AND, sharded_inputs[1].cmp(.LT, expert_end));
+                                const local_topk_ids = local_route_mask.select(
+                                    sharded_inputs[1].sub(expert_start),
+                                    zml.Tensor.scalar(0, .i32),
+                                );
+                                const local_topk_weights = local_route_mask.select(
+                                    sharded_inputs[2],
+                                    zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
+                                );
+
+                                const local_output = cutlass_flashinfer.fusedExpertsNvfp4(
+                                    sharded_inputs[0],
+                                    sharded_inputs[3],
+                                    sharded_inputs[4],
+                                    local_topk_weights,
+                                    local_topk_ids,
+                                    .{
+                                        .fc1_act_global = sharded_inputs[5],
+                                        .fc1_weight_block = sharded_inputs[6],
+                                        .fc1_global = sharded_inputs[7],
+                                        .fc2_act_global = sharded_inputs[8],
+                                        .fc2_weight_block = sharded_inputs[9],
+                                        .fc2_global = sharded_inputs[10],
+                                    },
+                                    .{
+                                        .workspace_query_device = ctx.workspace_query_device,
+                                        .activation = ctx.activation,
+                                        .enable_pdl = ctx.enable_pdl,
+                                        .gemm1_tactic = ctx.gemm1_tactic,
+                                        .gemm2_tactic = ctx.gemm2_tactic,
+                                    },
+                                ) catch |err| stdx.debug.panic(
+                                    "FlashInfer CUTLASS NVFP4 MoE backend failed: {}",
+                                    .{err},
+                                );
+                                const local_reshaped = local_output
+                                    .reshape(sharded_inputs[0].shape().dims())
+                                    .withTags(.{ .b, .s, .d });
+                                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                            }
+                        }).body,
+                    );
+                }
+
+                break :b try cutlass_flashinfer.fusedExpertsNvfp4(
+                    input,
+                    weights_gate_up,
+                    weights_down,
+                    topk_weights,
+                    topk_ids,
+                    nvfp4,
+                    runner_options,
+                );
+            }
+            if (flashinfer_metadata.nvfp4_scales != null) {
+                return error.UnexpectedNvfp4Scales;
+            }
+
+            if (expert_partition.eql(.init(.experts))) {
+                break :b zml.ops.manualComputation(
+                    .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
+                    input.shape(),
+                    .{
+                        .activation = runner_options.activation,
+                        .enable_pdl = runner_options.enable_pdl,
+                        .gemm1_tactic = runner_options.gemm1_tactic,
+                        .gemm2_tactic = runner_options.gemm2_tactic,
+                        .workspace_query_device = runner_options.workspace_query_device,
+                    },
+                    (struct {
+                        fn body(
+                            ctx: anytype,
+                            _: std.mem.Allocator,
+                            sharded_inputs: []const zml.Tensor,
+                            _: zml.Shape,
+                        ) zml.Tensor {
+                            const local_num_experts = sharded_inputs[3].dim(.expert);
+                            const partition_id = zml.ops.partitionId().convert(.i32);
+                            const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                            const expert_end = expert_start.addConstant(local_num_experts);
+
+                            const local_route_mask = sharded_inputs[1]
+                                .cmp(.GE, expert_start)
+                                .logical(.AND, sharded_inputs[1].cmp(.LT, expert_end));
+                            const local_topk_ids = local_route_mask.select(
+                                sharded_inputs[1].sub(expert_start),
+                                zml.Tensor.scalar(0, .i32),
+                            );
+                            const local_topk_weights = local_route_mask.select(
+                                sharded_inputs[2],
+                                zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
+                            );
+
+                            const local_output = cutlass_flashinfer.fusedExpertsBf16(
+                                sharded_inputs[0],
+                                sharded_inputs[3],
+                                sharded_inputs[4],
+                                local_topk_weights,
+                                local_topk_ids,
+                                .{
+                                    .workspace_query_device = ctx.workspace_query_device,
+                                    .activation = ctx.activation,
+                                    .enable_pdl = ctx.enable_pdl,
+                                    .gemm1_tactic = ctx.gemm1_tactic,
+                                    .gemm2_tactic = ctx.gemm2_tactic,
+                                },
+                            ) catch |err| stdx.debug.panic(
+                                "FlashInfer CUTLASS MoE backend failed: {}",
+                                .{err},
+                            );
+                            const local_reshaped = local_output
+                                .reshape(sharded_inputs[0].shape().dims())
+                                .withTags(.{ .b, .s, .d });
+                            return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                        }
+                    }).body,
+                );
+            }
+
+            break :b try cutlass_flashinfer.fusedExpertsBf16(
+                input,
+                weights_gate_up,
+                weights_down,
+                topk_weights,
+                topk_ids,
+                runner_options,
+            );
+        },
         .triton => b: {
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,
