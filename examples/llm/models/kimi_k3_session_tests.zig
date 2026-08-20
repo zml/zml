@@ -13,6 +13,7 @@ const Args = struct {
     tokenizer: []const u8,
     token_count: usize = 4,
     repeats: usize = 2,
+    decode_one: bool = false,
 
     pub const help =
         \\Use kimi_k3_session_tests --weights=<S4-directory> --tokenizer=<tokenizer.json> [options]
@@ -22,6 +23,7 @@ const Args = struct {
         \\Options:
         \\  --token-count=<1..4>  Prefix tokens to execute (default: 4)
         \\  --repeats=<count>     Reset-and-repeat count (default: 2)
+        \\  --decode-one          Stream exactly one generated continuation
         \\
     ;
 };
@@ -39,6 +41,7 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
     if (args.token_count == 0 or args.token_count > official_prefix.len) return error.InvalidTokenCount;
     if (args.repeats == 0) return error.InvalidRepeatCount;
+    if (args.decode_one and args.repeats != 1) return error.DecodeGateRequiresOneRepeat;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -64,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = "Kimi K3 session gate" });
     defer progress.end();
 
+    const seqlen = args.token_count + @intFromBool(args.decode_one);
     const compile_started = std.Io.Clock.now(.real, io).toNanoseconds();
     var compiled: inference.CompiledModel = try loaded_model.compile(
         allocator,
@@ -71,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
         platform,
         .vanilla,
         shardings,
-        official_prefix.len,
+        seqlen,
         &progress,
     );
     defer compiled.deinit();
@@ -103,6 +107,20 @@ pub fn main(init: std.process.Init) !void {
             .{ repeat, args.token_count, greedy, compile_us, elapsedUs(io, started) },
         );
         try stdout_file.interface.flush();
+        if (args.decode_one) {
+            var history = try std.ArrayList(u32).initCapacity(allocator, seqlen);
+            defer history.deinit(allocator);
+            try history.appendSlice(allocator, official_prefix[0..args.token_count]);
+            try session.runDecode(&history, &stdout_file.interface);
+            if (history.items.len != seqlen or history.items[seqlen - 1] != greedy) {
+                return error.KimiK3DecodeHistoryMismatch;
+            }
+            try stdout_file.interface.print(
+                "\nKIMI_K3_SESSION_DECODE_PASS streamed={} next={} history_tokens={} capacity={}\n",
+                .{ greedy, session.last_generated_token, history.items.len, seqlen },
+            );
+            try stdout_file.interface.flush();
+        }
     }
     try stdout_file.interface.print(
         "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked={}\n",
