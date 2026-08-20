@@ -678,9 +678,11 @@ pub const Gemma = struct {
         }
     };
 
-    pub fn sampleTokens(_: Gemma, logits: zml.Tensor, sampling_strategy: zml.nn.DynamicSamplingStrategy, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const next_token, const new_rng = zml.nn.sampleTokensDynamic(logits, sampling_strategy, rng);
-        return .{ next_token.convert(.u32), new_rng };
+    pub fn sampleTokens(_: Gemma, logits: zml.Tensor, _: zml.nn.DynamicSamplingStrategy, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        // Keep sampling greedy for now: the dynamic sampler lowers top-k
+        // to a full vocabulary sort, whose pipeline overwhelms the Metal compiler.
+        const next_token = logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
+        return .{ next_token, rng };
     }
 };
 

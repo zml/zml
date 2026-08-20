@@ -120,37 +120,31 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
     var logit_buffer: zml.Buffer = undefined;
 
     llm.exes.prefill_embed_args.set(.{ llm.model_buffers, prefill_tokens_buffer });
-    llm.exes.prefill_embed_exe.callOpts(io, llm.exes.prefill_embed_args, &llm.exes.prefill_embed_results, .{ .wait = true });
+    llm.exes.prefill_embed_exe.call(llm.exes.prefill_embed_args, &llm.exes.prefill_embed_results);
     llm.exes.prefill_embed_results.fill(.{&prefill_embed_buffer});
-    std.log.info("prefill embed exe done", .{});
     for (0..llm.config.num_hidden_layers) |i| {
         switch (llm.config.layer_types[i]) {
             .sliding_attention => {
                 llm.exes.prefill_local_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
-                llm.exes.prefill_local_layer_exe.callOpts(io, llm.exes.prefill_local_layer_args, &llm.exes.prefill_local_layer_results, .{ .wait = true });
+                llm.exes.prefill_local_layer_exe.call(llm.exes.prefill_local_layer_args, &llm.exes.prefill_local_layer_results);
                 llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
-                std.log.info("prefill local layer {d} exe done", .{i});
             },
             .full_attention => {
                 llm.exes.prefill_global_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
-                llm.exes.prefill_global_layer_exe.callOpts(io, llm.exes.prefill_global_layer_args, &llm.exes.prefill_global_layer_results, .{ .wait = true });
+                llm.exes.prefill_global_layer_exe.call(llm.exes.prefill_global_layer_args, &llm.exes.prefill_global_layer_results);
                 llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
-                std.log.info("prefill global layer {d} exe done", .{i});
             },
         }
     }
     llm.exes.prefill_select_args.set(.{ llm.model_buffers, prefill_embed_buffer, pred_buffer });
-    llm.exes.prefill_select_exe.callOpts(io, llm.exes.prefill_select_args, &llm.exes.prefill_select_results, .{ .wait = true });
+    llm.exes.prefill_select_exe.call(llm.exes.prefill_select_args, &llm.exes.prefill_select_results);
     llm.exes.prefill_select_results.fill(.{&one_embed_buffer});
-    std.log.info("prefill select exe done", .{});
     llm.exes.logits_args.set(.{ llm.model_buffers, one_embed_buffer });
-    llm.exes.logits_exe.callOpts(io, llm.exes.logits_args, &llm.exes.logits_results, .{ .wait = true });
+    llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
     llm.exes.logits_results.fill(.{&logit_buffer});
-    std.log.info("prefill logits exe done", .{});
     llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
-    llm.exes.sample_exe.callOpts(io, llm.exes.sample_args, &llm.exes.sample_results, .{ .wait = true });
+    llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
     llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
-    std.log.info("prefill sample exe done", .{});
     try token_buffer.toSlice(io, token_slice);
     token_buffer.deinit();
     logit_buffer.deinit();
@@ -192,33 +186,28 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
 
         // call to generate the next token
         llm.exes.decode_embed_args.set(.{ llm.model_buffers, decode_token_buffer });
-        llm.exes.decode_embed_exe.callOpts(io, llm.exes.decode_embed_args, &llm.exes.decode_embed_results, .{ .wait = true });
+        llm.exes.decode_embed_exe.call(llm.exes.decode_embed_args, &llm.exes.decode_embed_results);
         llm.exes.decode_embed_results.fill(.{&decode_embed_buffer});
-        std.log.info("decode step {d} embed exe done", .{i});
         for (0..llm.config.num_hidden_layers) |ii| {
             switch (llm.config.layer_types[ii]) {
                 .sliding_attention => {
                     llm.exes.decode_local_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
-                    llm.exes.decode_local_layer_exe.callOpts(io, llm.exes.decode_local_layer_args, &llm.exes.decode_local_layer_results, .{ .wait = true });
+                    llm.exes.decode_local_layer_exe.call(llm.exes.decode_local_layer_args, &llm.exes.decode_local_layer_results);
                     llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
-                    std.log.info("decode step {d} local layer {d} exe done", .{ i, ii });
                 },
                 .full_attention => {
                     llm.exes.decode_global_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
-                    llm.exes.decode_global_layer_exe.callOpts(io, llm.exes.decode_global_layer_args, &llm.exes.decode_global_layer_results, .{ .wait = true });
+                    llm.exes.decode_global_layer_exe.call(llm.exes.decode_global_layer_args, &llm.exes.decode_global_layer_results);
                     llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
-                    std.log.info("decode step {d} global layer {d} exe done", .{ i, ii });
                 },
             }
         }
         llm.exes.logits_args.set(.{ llm.model_buffers, decode_embed_buffer });
-        llm.exes.logits_exe.callOpts(io, llm.exes.logits_args, &llm.exes.logits_results, .{ .wait = true });
+        llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
         llm.exes.logits_results.fill(.{&logit_buffer});
-        std.log.info("decode step {d} logits exe done", .{i});
         llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
-        llm.exes.sample_exe.callOpts(io, llm.exes.sample_args, &llm.exes.sample_results, .{ .wait = true });
+        llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
         llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
-        std.log.info("decode step {d} sample exe done", .{i});
         try token_buffer.toSlice(io, token_slice);
         token_buffer.deinit();
         decode_embed_buffer.deinit();
