@@ -1109,22 +1109,23 @@ const Triton = struct {
                             ctx.activation_limit,
                         );
 
-                        const fallback_ctx = .{
-                            .input = sharded_inputs[0],
-                            .topk_ids = local_topk_ids,
-                            .topk_weights = local_topk_weights,
-                            .weights_gate_up = sharded_inputs[3],
-                            .scales_gate_up = sharded_inputs[4],
-                            .weights_down = sharded_inputs[5],
-                            .scales_down = sharded_inputs[6],
-                            .activation_limit = ctx.activation_limit,
-                        };
                         const OverflowFallback = struct {
-                            fn cond(overflow: zml.Tensor, _: zml.Tensor, _: anytype) zml.Tensor {
-                                return overflow;
+                            input: zml.Tensor,
+                            topk_ids: zml.Tensor,
+                            topk_weights: zml.Tensor,
+                            weights_gate_up: zml.Tensor,
+                            scales_gate_up: zml.Tensor,
+                            weights_down: zml.Tensor,
+                            scales_down: zml.Tensor,
+                            activation_limit: f32,
+
+                            pub const State = struct { overflow: zml.Tensor, output: zml.Tensor };
+
+                            pub fn cond(_: @This(), state: State) zml.Tensor {
+                                return state.overflow;
                             }
 
-                            fn body(_: zml.Tensor, _: zml.Tensor, fallback: anytype) struct { zml.Tensor, zml.Tensor } {
+                            pub fn body(fallback: @This(), _: State) State {
                                 const dense_output = forwardMoeLocal_fp4(
                                     fallback.input,
                                     fallback.topk_ids,
@@ -1138,16 +1139,24 @@ const Triton = struct {
                                     null,
                                     fallback.activation_limit,
                                 );
-                                return .{ zml.Tensor.scalar(false, .bool), dense_output };
+                                return .{ .overflow = zml.Tensor.scalar(false, .bool), .output = dense_output };
                             }
                         };
                         const loop_state = zml.ops.@"while"(
-                            .{ routes.overflow, compact_output },
-                            OverflowFallback.cond,
-                            OverflowFallback.body,
-                            .{fallback_ctx},
+                            OverflowFallback,
+                            .{
+                                .input = sharded_inputs[0],
+                                .topk_ids = local_topk_ids,
+                                .topk_weights = local_topk_weights,
+                                .weights_gate_up = sharded_inputs[3],
+                                .scales_gate_up = sharded_inputs[4],
+                                .weights_down = sharded_inputs[5],
+                                .scales_down = sharded_inputs[6],
+                                .activation_limit = ctx.activation_limit,
+                            },
+                            .{ .overflow = routes.overflow, .output = compact_output },
                         );
-                        break :blk loop_state[1];
+                        break :blk loop_state.output;
                     } else forwardMoeLocal_fp4(
                         sharded_inputs[0],
                         local_topk_ids,
