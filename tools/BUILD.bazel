@@ -15,6 +15,12 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
+zig_binary(
+    name = "repack_nvfp4",
+    main = "repack_nvfp4.zig",
+    visibility = ["//visibility:public"],
+)
+
 sh_binary(
     name = "nsys",
     srcs = ["nsys.sh"],
