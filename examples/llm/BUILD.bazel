@@ -208,6 +208,17 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "kimi_k3_prefix_cli",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_prefix_cli.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "@linenoise",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
