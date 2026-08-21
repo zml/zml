@@ -92,6 +92,13 @@ fn expectInvalidPlans() !void {
     }
 }
 
+fn awaitCollectiveResult(io: std.Io, result: anytype) !void {
+    try result.all_reduce.await(io);
+    try result.all_gather.await(io);
+    try result.reduce_scatter.await(io);
+    try result.broadcast.await(io);
+}
+
 fn hostItems(allocator: std.mem.Allocator, io: std.Io, buffer: zml.Buffer) !zml.Slice {
     const slice = try buffer.toSliceAlloc(allocator, io);
     if (slice.shape.dtype() != .f32) {
@@ -171,6 +178,17 @@ pub fn main(init: std.process.Init) !void {
         return error.KimiK3InputShardCountMismatch;
     }
 
+    var warm = try zml.testing.autoCall(
+        allocator,
+        io,
+        &exe,
+        collectiveForward,
+        .{ input_buffer, weight_buffer },
+    );
+    defer zml.Buffer.deinitAll(CollectiveResult, &warm);
+    try awaitCollectiveResult(io, warm);
+
+    const collective_started = std.Io.Clock.now(.real, io).toNanoseconds();
     var result = try zml.testing.autoCall(
         allocator,
         io,
@@ -179,6 +197,8 @@ pub fn main(init: std.process.Init) !void {
         .{ input_buffer, weight_buffer },
     );
     defer zml.Buffer.deinitAll(CollectiveResult, &result);
+    try awaitCollectiveResult(io, result);
+    const collective_us = @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - collective_started, 1000);
     if (result.all_reduce.numShards() != args.expected_devices or
         result.all_gather.numShards() != args.expected_devices or
         result.reduce_scatter.numShards() != args.expected_devices or
@@ -210,8 +230,9 @@ pub fn main(init: std.process.Init) !void {
     try stdout_file.interface.print(
         "KIMI_K3_DISTRIBUTED_PASS backend=cuda devices={} partitions={} " ++
             "logical_layouts=tp4_ep1,tp2_ep2,tp1_ep4 physical_layout=tp4_ep1 collectives=all_reduce,all_gather,reduce_scatter,broadcast " ++
-            "expert_ranges=896,448,224\n",
-        .{ platform.devices.len, @as(usize, @intCast(sharding.data.numPartitions())) },
+            "expert_ranges=896,448,224 collective_us={} logical_collective_payload_bytes=132 " ++
+            "estimated_ring_wire_bytes_all_ranks=408 timed_host_transfers=0\n",
+        .{ platform.devices.len, @as(usize, @intCast(sharding.data.numPartitions())), collective_us },
     );
     try stdout_file.interface.flush();
 }
