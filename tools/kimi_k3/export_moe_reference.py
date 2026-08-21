@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import resource
 from typing import Any
@@ -27,7 +28,7 @@ from export_reference import (
 )
 
 
-ROOT = Path("/dev/shm/kimi-k3")
+ROOT = Path(os.environ.get("KIMI_K3_WORKSPACE", Path(__file__).resolve().parents[3]))
 OUTPUT = ROOT / "artifacts/fixtures/milestone-11"
 ROUTER_FIXTURE = ROOT / "artifacts/fixtures/milestone-10/router-reference.safetensors"
 ROUTER_SEMANTIC_SHA256 = "4eb2f2606d40a86f317253d4baba3329693871ce1742144646c8417a0f5da664"
@@ -39,14 +40,17 @@ FP4 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
 
 def dequantize(packed: torch.Tensor, scale: torch.Tensor, device: str = "cuda") -> torch.Tensor:
     packed = packed.to(device=device, dtype=torch.uint8)
-    scale = scale.to(device=device, dtype=torch.uint8)
+    # CUDA 12.8 NVRTC cannot target the GB300's reported compute_103 for the
+    # generated exp2 kernel. E8M0 scale expansion is small and exact in FP32,
+    # so evaluate only those powers of two on the host and copy the factors.
+    scale = scale.to(device="cpu", dtype=torch.uint8)
     low = packed & 0x0F
     high = (packed >> 4) & 0x0F
     nibble = torch.stack((low, high), dim=-1).reshape(*packed.shape[:-1], packed.shape[-1] * 2)
     table = FP4.to(device)
     sign = torch.where((nibble & 0x08) != 0, -1.0, 1.0)
     values = table[(nibble & 0x07).long()] * sign
-    expanded = torch.exp2(scale.float() - 127.0).repeat_interleave(32, dim=-1)
+    expanded = torch.exp2(scale.float() - 127.0).repeat_interleave(32, dim=-1).to(device)
     if values.shape != expanded.shape:
         raise RuntimeError(f"MXFP4 shape mismatch: {values.shape} != {expanded.shape}")
     return values * expanded

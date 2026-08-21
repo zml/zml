@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ from export_reference import (
 from export_router_reference import canonical_route, RouteConfig
 
 
-ROOT = Path("/dev/shm/kimi-k3")
+ROOT = Path(os.environ.get("KIMI_K3_WORKSPACE", Path(__file__).resolve().parents[3]))
 OUTPUT = ROOT / "artifacts/fixtures/milestone-14"
 PREFIX_FIXTURE = ROOT / "artifacts/fixtures/milestone-9/s2-layer0-prefix-len4.safetensors"
 SHARDS = {

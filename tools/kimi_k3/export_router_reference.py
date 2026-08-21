@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +28,7 @@ from export_reference import (
 )
 
 
-ROOT = Path("/dev/shm/kimi-k3")
+ROOT = Path(os.environ.get("KIMI_K3_WORKSPACE", Path(__file__).resolve().parents[3]))
 OUTPUT = ROOT / "artifacts/fixtures/milestone-10"
 LAYER1_SHARD = "model-00002-of-000096.safetensors"
 LAYER1_SHA256 = "26a3284e1d2cb567934ebef002e6a1813551d646739e8bcb1e9e3fe7f878e0f5"
