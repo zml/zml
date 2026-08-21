@@ -134,7 +134,7 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
     var reader = try store.getReader(key, io, &io_buffer);
     defer reader.deinit();
 
-    _ = try reader.interface.readSliceAll(host_bytes);
+    _ = try reader.interface().readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
 }

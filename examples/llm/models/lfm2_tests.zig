@@ -155,10 +155,7 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
-            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = &.{self.sharding} })
-        else
-            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -311,7 +308,7 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml
     var reader = try store.view().getReader(key, io, &io_buffer);
     defer reader.deinit();
 
-    _ = try reader.interface.readSliceAll(host_bytes);
+    _ = try reader.interface().readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
 }
