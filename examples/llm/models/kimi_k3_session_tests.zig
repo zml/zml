@@ -18,6 +18,7 @@ const Args = struct {
     compile_only: bool = false,
     resident: bool = false,
     distributed: bool = false,
+    force_eos_after_prefill: bool = false,
     cache_dump_prefill: []const u8 = "",
     cache_dump_decode: []const u8 = "",
 
@@ -34,6 +35,7 @@ const Args = struct {
         \\  --compile-only        Compile selected families without loading weights
         \\  --resident            Keep selected four-layer weights resident across tokens
         \\  --distributed         Require physical TP4 across four visible GPUs
+        \\  --force-eos-after-prefill  Test-only exercise of the EOS stop branch
         \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
         \\  --cache-dump-decode=<path>   Test-only raw cache output after continuation
         \\
@@ -125,6 +127,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.token_count == 0 or args.token_count > official_prefix.len) return error.InvalidTokenCount;
     if (args.repeats == 0) return error.InvalidRepeatCount;
     if (args.decode_one and args.repeats != 1) return error.DecodeGateRequiresOneRepeat;
+    if (args.force_eos_after_prefill and !args.decode_one) return error.ForceEosRequiresDecodeGate;
     if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
     if (args.resident and (args.compile_only or args.layer_limit != 4)) return error.InvalidResidentSessionMode;
 
@@ -249,8 +252,16 @@ pub fn main(init: std.process.Init) !void {
             var history = try std.ArrayList(u32).initCapacity(allocator, seqlen);
             defer history.deinit(allocator);
             try history.appendSlice(allocator, official_prefix[0..args.token_count]);
+            if (args.force_eos_after_prefill) {
+                session.last_generated_token = session.tokenizer.tokenId("<|end_of_msg|>") orelse return error.KimiK3MissingEosToken;
+            }
+            const streamed = session.last_generated_token;
             try session.runDecode(&history, &stdout_file.interface);
-            if (history.items.len != seqlen or history.items[seqlen - 1] != greedy) {
+            if (args.force_eos_after_prefill) {
+                if (history.items.len != args.token_count or session.last_generated_token != streamed) {
+                    return error.KimiK3ForcedEosStopMismatch;
+                }
+            } else if (history.items.len != seqlen or history.items[seqlen - 1] != greedy) {
                 return error.KimiK3DecodeHistoryMismatch;
             }
             if (args.cache_dump_decode.len != 0) {
@@ -258,13 +269,14 @@ pub fn main(init: std.process.Init) !void {
             }
             try stdout_file.interface.print(
                 "\nKIMI_K3_SESSION_DECODE_PASS streamed={} next={} history_tokens={} capacity={} " ++
-                    "cache_sha256={s}\n",
+                    "cache_sha256={s} forced_eos={}\n",
                 .{
-                    greedy,
+                    streamed,
                     session.last_generated_token,
                     history.items.len,
                     seqlen,
                     &(try sessionCacheDigest(&session)),
+                    args.force_eos_after_prefill,
                 },
             );
             try stdout_file.interface.flush();
