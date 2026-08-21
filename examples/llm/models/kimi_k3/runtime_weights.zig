@@ -121,6 +121,16 @@ pub const HeadTensors = struct {
             .lm_head = root.createTensor("language_model.lm_head.weight", .{ .voc, .d }, .replicated),
         };
     }
+
+    pub fn initSharded(root: zml.io.TensorStore.View) HeadTensors {
+        return .{
+            .embedding = root.createTensor("language_model.model.embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }),
+            .output_res_norm = root.createTensor("language_model.model.output_attn_res_norm.weight", .{.d}, .replicated),
+            .output_res_projection = root.createTensor("language_model.model.output_attn_res_proj.weight", .{ .one, .d }, .replicated),
+            .final_norm = root.createTensor("language_model.model.norm.weight", .{.d}, .replicated),
+            .lm_head = root.createTensor("language_model.lm_head.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }),
+        };
+    }
 };
 
 pub const HeadWeights = zml.Bufferized(HeadTensors);
@@ -222,7 +232,7 @@ pub const Loader = struct {
     }
 
     pub fn loadHead(self: Loader) !HeadWeights {
-        const symbolic = HeadTensors.init(self.rootView());
+        const symbolic = HeadTensors.initSharded(self.rootView());
         var buffers = try zml.mem.bufferize(self.allocator, HeadTensors, &symbolic);
         errdefer zml.Buffer.deinitAll(HeadTensors, &buffers);
         var tensor_loader: zml.io.Loader = try .init(self.allocator, self.platform, .{
@@ -245,7 +255,7 @@ pub const Loader = struct {
     }
 
     pub fn loadLayer0(self: Loader) !zml.Bufferized(layer.Layer0Weights) {
-        const symbolic = layer.Layer0Weights.init(self.rootView());
+        const symbolic = layer.Layer0Weights.initSharded(self.rootView());
         var buffers = try zml.mem.bufferize(self.allocator, layer.Layer0Weights, &symbolic);
         errdefer zml.Buffer.deinitAll(layer.Layer0Weights, &buffers);
         var tensor_loader: zml.io.Loader = try .init(self.allocator, self.platform, .{
@@ -319,33 +329,33 @@ pub const Loader = struct {
         var result: zml.Bufferized(layer.KdaMoeWeights) = undefined;
         result.common = try self.loadCommon(layer_index);
         errdefer zml.Buffer.deinitAll(layer.MoeLayerWeights, &result.common);
-        result.attention.q_weight = try self.loadLayer(layer_index, "self_attn.q_proj.weight", .{ .out, .d });
+        result.attention.q_weight = try self.loadLayerAs(layer_index, "self_attn.q_proj.weight", zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.q_weight.deinit();
-        result.attention.k_weight = try self.loadLayer(layer_index, "self_attn.k_proj.weight", .{ .out, .d });
+        result.attention.k_weight = try self.loadLayerAs(layer_index, "self_attn.k_proj.weight", zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.k_weight.deinit();
-        result.attention.v_weight = try self.loadLayer(layer_index, "self_attn.v_proj.weight", .{ .out, .d });
+        result.attention.v_weight = try self.loadLayerAs(layer_index, "self_attn.v_proj.weight", zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.v_weight.deinit();
-        result.attention.q_conv_weight = try self.loadLayerAs(layer_index, "self_attn.q_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32));
+        result.attention.q_conv_weight = try self.loadLayerAs(layer_index, "self_attn.q_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated }));
         errdefer result.attention.q_conv_weight.deinit();
-        result.attention.k_conv_weight = try self.loadLayerAs(layer_index, "self_attn.k_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32));
+        result.attention.k_conv_weight = try self.loadLayerAs(layer_index, "self_attn.k_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated }));
         errdefer result.attention.k_conv_weight.deinit();
-        result.attention.v_conv_weight = try self.loadLayerAs(layer_index, "self_attn.v_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32));
+        result.attention.v_conv_weight = try self.loadLayerAs(layer_index, "self_attn.v_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated }));
         errdefer result.attention.v_conv_weight.deinit();
         result.attention.decay_a_weight = try self.loadLayer(layer_index, "self_attn.f_a_proj.weight", .{ .out, .d });
         errdefer result.attention.decay_a_weight.deinit();
-        result.attention.decay_b_weight = try self.loadLayer(layer_index, "self_attn.f_b_proj.weight", .{ .channel, .rank });
+        result.attention.decay_b_weight = try self.loadLayerAs(layer_index, "self_attn.f_b_proj.weight", zml.Shape.init(.{ .channel = 12288, .rank = 128 }, .bf16).withPartitioning(.{ .channel = .model, .rank = .replicated }));
         errdefer result.attention.decay_b_weight.deinit();
         result.attention.a_log = try self.loadLayer(layer_index, "self_attn.A_log", .{.h});
         errdefer result.attention.a_log.deinit();
-        result.attention.dt_bias = try self.loadLayerAs(layer_index, "self_attn.dt_bias", zml.Shape.init(.{ .h = 96, .k = 128 }, .f32));
+        result.attention.dt_bias = try self.loadLayerAs(layer_index, "self_attn.dt_bias", zml.Shape.init(.{ .h = 96, .k = 128 }, .f32).withPartitioning(.{ .h = .model, .k = .replicated }));
         errdefer result.attention.dt_bias.deinit();
-        result.attention.beta_weight = try self.loadLayer(layer_index, "self_attn.b_proj.weight", .{ .out, .d });
+        result.attention.beta_weight = try self.loadLayerAs(layer_index, "self_attn.b_proj.weight", zml.Shape.init(.{ .out = 96, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.beta_weight.deinit();
-        result.attention.gate_weight = try self.loadLayer(layer_index, "self_attn.g_proj.weight", .{ .out, .d });
+        result.attention.gate_weight = try self.loadLayerAs(layer_index, "self_attn.g_proj.weight", zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.gate_weight.deinit();
         result.attention.norm_weight = try self.loadLayer(layer_index, "self_attn.o_norm.weight", .{.v});
         errdefer result.attention.norm_weight.deinit();
-        result.attention.output_weight = try self.loadLayer(layer_index, "self_attn.o_proj.weight", .{ .d, .out });
+        result.attention.output_weight = try self.loadLayerAs(layer_index, "self_attn.o_proj.weight", zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16).withPartitioning(.{ .d = .replicated, .out = .model }));
         return result;
     }
 
@@ -358,26 +368,26 @@ pub const Loader = struct {
         errdefer result.attention.q_a_proj.deinit();
         result.attention.q_a_norm = try self.loadLayer(layer_index, "self_attn.q_a_layernorm.weight", .{.rank});
         errdefer result.attention.q_a_norm.deinit();
-        result.attention.q_b_proj = try self.loadLayer(layer_index, "self_attn.q_b_proj.weight", .{ .mix, .rank });
+        result.attention.q_b_proj = try self.loadLayerAs(layer_index, "self_attn.q_b_proj.weight", zml.Shape.init(.{ .mix = 18432, .rank = 1536 }, .bf16).withPartitioning(.{ .mix = .model, .rank = .replicated }));
         errdefer result.attention.q_b_proj.deinit();
         result.attention.kv_a_proj = try self.loadLayer(layer_index, "self_attn.kv_a_proj_with_mqa.weight", .{ .kv_mix, .d });
         errdefer result.attention.kv_a_proj.deinit();
         result.attention.kv_a_norm = try self.loadLayer(layer_index, "self_attn.kv_a_layernorm.weight", .{.kv_rank});
         errdefer result.attention.kv_a_norm.deinit();
-        result.attention.kv_b_proj = try self.loadLayer(layer_index, "self_attn.kv_b_proj.weight", .{ .kv_mix, .kv_rank });
+        result.attention.kv_b_proj = try self.loadLayerAs(layer_index, "self_attn.kv_b_proj.weight", zml.Shape.init(.{ .kv_mix = 24576, .kv_rank = 512 }, .bf16).withPartitioning(.{ .kv_mix = .model, .kv_rank = .replicated }));
         errdefer result.attention.kv_b_proj.deinit();
-        result.attention.gate_proj = try self.loadLayer(layer_index, "self_attn.g_proj.weight", .{ .out, .d });
+        result.attention.gate_proj = try self.loadLayerAs(layer_index, "self_attn.g_proj.weight", zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated }));
         errdefer result.attention.gate_proj.deinit();
-        result.attention.output_proj = try self.loadLayer(layer_index, "self_attn.o_proj.weight", .{ .d, .out });
+        result.attention.output_proj = try self.loadLayerAs(layer_index, "self_attn.o_proj.weight", zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16).withPartitioning(.{ .d = .replicated, .out = .model }));
         return result;
     }
 
     pub fn zeroKdaCache(self: Loader) !zml.Bufferized(kda.Cache) {
         return .{
-            .q_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16)),
-            .k_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16)),
-            .v_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16)),
-            .recurrent_state = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32)),
+            .q_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .k_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .v_conv = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .recurrent_state = try zeroBuffer(self, zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32).withPartitioning(.{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated })),
         };
     }
 
@@ -447,20 +457,20 @@ pub fn symbolicKdaMoe() layer.KdaMoeWeights {
     return .{
         .common = symbolicCommon(),
         .attention = .{
-            .q_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
-            .k_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
-            .v_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
-            .q_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
-            .k_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
-            .v_conv_weight = .init(.{ .channel = 12288, .kernel = 4 }, .f32),
+            .q_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
+            .k_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
+            .v_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
+            .q_conv_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated })),
+            .k_conv_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated })),
+            .v_conv_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32).withPartitioning(.{ .channel = .model, .kernel = .replicated })),
             .decay_a_weight = .init(.{ .out = 128, .d = 7168 }, .bf16),
-            .decay_b_weight = .init(.{ .channel = 12288, .rank = 128 }, .bf16),
+            .decay_b_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .channel = 12288, .rank = 128 }, .bf16).withPartitioning(.{ .channel = .model, .rank = .replicated })),
             .a_log = .init(.{ .h = 128 }, .f32),
-            .dt_bias = .init(.{ .h = 96, .k = 128 }, .f32),
-            .beta_weight = .init(.{ .out = 96, .d = 7168 }, .bf16),
-            .gate_weight = .init(.{ .out = 12288, .d = 7168 }, .bf16),
+            .dt_bias = zml.Tensor.fromShape(zml.Shape.init(.{ .h = 96, .k = 128 }, .f32).withPartitioning(.{ .h = .model, .k = .replicated })),
+            .beta_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 96, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
+            .gate_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
             .norm_weight = .init(.{ .v = 128 }, .f32),
-            .output_weight = .init(.{ .d = 7168, .out = 12288 }, .bf16),
+            .output_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16).withPartitioning(.{ .d = .replicated, .out = .model })),
         },
     };
 }
@@ -471,22 +481,22 @@ pub fn symbolicMlaMoe() layer.MlaMoeWeights {
         .attention = .{
             .q_a_proj = .init(.{ .rank = 1536, .d = 7168 }, .bf16),
             .q_a_norm = .init(.{ .rank = 1536 }, .bf16),
-            .q_b_proj = .init(.{ .mix = 18432, .rank = 1536 }, .bf16),
+            .q_b_proj = zml.Tensor.fromShape(zml.Shape.init(.{ .mix = 18432, .rank = 1536 }, .bf16).withPartitioning(.{ .mix = .model, .rank = .replicated })),
             .kv_a_proj = .init(.{ .kv_mix = 576, .d = 7168 }, .bf16),
             .kv_a_norm = .init(.{ .kv_rank = 512 }, .bf16),
-            .kv_b_proj = .init(.{ .kv_mix = 24576, .kv_rank = 512 }, .bf16),
-            .gate_proj = .init(.{ .out = 12288, .d = 7168 }, .bf16),
-            .output_proj = .init(.{ .d = 7168, .out = 12288 }, .bf16),
+            .kv_b_proj = zml.Tensor.fromShape(zml.Shape.init(.{ .kv_mix = 24576, .kv_rank = 512 }, .bf16).withPartitioning(.{ .kv_mix = .model, .kv_rank = .replicated })),
+            .gate_proj = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
+            .output_proj = zml.Tensor.fromShape(zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16).withPartitioning(.{ .d = .replicated, .out = .model })),
         },
     };
 }
 
 pub fn symbolicKdaCache() kda.Cache {
     return .{
-        .q_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
-        .k_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
-        .v_conv = .init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16),
-        .recurrent_state = .init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32),
+        .q_conv = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+        .k_conv = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+        .v_conv = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16).withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+        .recurrent_state = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32).withPartitioning(.{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated })),
     };
 }
 

@@ -136,7 +136,8 @@ pub const CompiledModel = struct {
         if (platform.target != .cuda) return error.NvidiaCudaRequired;
         var node = progress.start("Compiling Kimi K3 reusable families...", 8);
         defer node.end();
-        const sharding = &.{params.shardings.model};
+        const all_shardings = params.shardings.all();
+        const sharding = &all_shardings;
         const mdl = loaded_model.inner;
 
         const embedding = try platform.compileFn(

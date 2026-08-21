@@ -306,8 +306,8 @@ pub const Model = struct {
             .layers = layers,
             .config = config,
             .selection = selection,
-            .runtime_head = runtime_weights.HeadTensors.init(store.root()),
-            .runtime_layer0 = layer_ops.Layer0Weights.init(store.root()),
+            .runtime_head = runtime_weights.HeadTensors.initSharded(store.root()),
+            .runtime_layer0 = layer_ops.Layer0Weights.initSharded(store.root()),
         };
     }
 
@@ -341,8 +341,8 @@ pub const Model = struct {
             .layers = layers,
             .config = config,
             .selection = selection,
-            .runtime_head = runtime_weights.HeadTensors.init(store.root()),
-            .runtime_layer0 = layer_ops.Layer0Weights.init(store.root()),
+            .runtime_head = runtime_weights.HeadTensors.initSharded(store.root()),
+            .runtime_layer0 = layer_ops.Layer0Weights.initSharded(store.root()),
         };
     }
 

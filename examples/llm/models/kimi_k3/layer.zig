@@ -19,6 +19,14 @@ pub const DenseMlp = struct {
             .down_weight = store.createTensor("down_proj.weight", .{ .d, .intermediate }, .{ .d = .replicated, .intermediate = .replicated }),
         };
     }
+
+    pub fn initSharded(store: zml.io.TensorStore.View) DenseMlp {
+        return .{
+            .gate_weight = store.createTensor("gate_proj.weight", .{ .intermediate, .d }, .{ .intermediate = .model, .d = .replicated }),
+            .up_weight = store.createTensor("up_proj.weight", .{ .intermediate, .d }, .{ .intermediate = .model, .d = .replicated }),
+            .down_weight = store.createTensor("down_proj.weight", .{ .d, .intermediate }, .{ .d = .replicated, .intermediate = .model }),
+        };
+    }
 };
 
 pub const KdaRawWeights = struct {
@@ -71,6 +79,36 @@ pub const Layer0Weights = struct {
             .mlp_res_projection = store.createTensor("mlp_res_proj.weight", .{ .one, .d }, .{ .one = .replicated, .d = .replicated }),
             .post_attention_norm = store.createTensor("post_attention_layernorm.weight", .{.d}, .{ .d = .replicated }),
             .mlp = .init(store.withPrefix("mlp")),
+        };
+    }
+
+    /// Runtime TP weights. The reference constructor above remains fully
+    /// replicated so permanent fixture executables keep their placement.
+    pub fn initSharded(root: zml.io.TensorStore.View) Layer0Weights {
+        const store = root.withPrefix("language_model.model.layers.0");
+        const attention = store.withPrefix("self_attn");
+        return .{
+            .input_norm = store.createTensor("input_layernorm.weight", .{.d}, .{ .d = .replicated }),
+            .kda_weights = .{
+                .q_weight = attention.createTensor("q_proj.weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }),
+                .k_weight = attention.createTensor("k_proj.weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }),
+                .v_weight = attention.createTensor("v_proj.weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }),
+                .q_conv_weight = attention.createTensor("q_conv1d.weight", .{ .channel, .one, .kernel }, .{ .channel = .model, .one = .replicated, .kernel = .replicated }),
+                .k_conv_weight = attention.createTensor("k_conv1d.weight", .{ .channel, .one, .kernel }, .{ .channel = .model, .one = .replicated, .kernel = .replicated }),
+                .v_conv_weight = attention.createTensor("v_conv1d.weight", .{ .channel, .one, .kernel }, .{ .channel = .model, .one = .replicated, .kernel = .replicated }),
+                .decay_a_weight = attention.createTensor("f_a_proj.weight", .{ .out, .d }, .{ .out = .replicated, .d = .replicated }),
+                .decay_b_weight = attention.createTensor("f_b_proj.weight", .{ .channel, .rank }, .{ .channel = .model, .rank = .replicated }),
+                .a_log = attention.createTensor("A_log", .{.h}, .{ .h = .replicated }),
+                .dt_bias = attention.createTensor("dt_bias", .{.mix}, .{ .mix = .model }),
+                .beta_weight = attention.createTensor("b_proj.weight", .{ .h, .d }, .{ .h = .model, .d = .replicated }),
+                .gate_weight = attention.createTensor("g_proj.weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }),
+                .norm_weight = attention.createTensor("o_norm.weight", .{.v}, .{ .v = .replicated }),
+                .output_weight = attention.createTensor("o_proj.weight", .{ .d, .out }, .{ .d = .replicated, .out = .model }),
+            },
+            .mlp_res_norm = store.createTensor("mlp_res_norm.weight", .{.d}, .{ .d = .replicated }),
+            .mlp_res_projection = store.createTensor("mlp_res_proj.weight", .{ .one, .d }, .{ .one = .replicated, .d = .replicated }),
+            .post_attention_norm = store.createTensor("post_attention_layernorm.weight", .{.d}, .{ .d = .replicated }),
+            .mlp = .initSharded(store.withPrefix("mlp")),
         };
     }
 };
