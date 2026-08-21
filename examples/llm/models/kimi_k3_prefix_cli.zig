@@ -113,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
     if (platform.devices.len != 1) return error.KimiK3PrefixCliRequiresOneVisibleGpu;
 
+    const checkpoint_open_started = std.Io.Clock.now(.real, io).toNanoseconds();
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
@@ -120,6 +121,7 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
     var loaded_model = try initPrefixModel(allocator, io, repo, store.view());
     defer loaded_model.deinit(allocator);
+    const checkpoint_open_us = elapsedUs(io, checkpoint_open_started);
     const shardings: common.Shardings = try .init(platform);
     var progress = std.Progress.start(io, .{ .root_name = "Kimi K3 four-layer diagnostic" });
     defer progress.end();
@@ -170,6 +172,7 @@ pub fn main(init: std.process.Init) !void {
     try session.runDecode(&history, &decoded.writer);
     const decode_us = elapsedUs(io, decode_started);
     if (!std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
+    const device_memory = platform.devices[0].memoryStats();
 
     const generated = history.items[prompt_tokens.len..];
     const eos = tokenizer.tokenId("<|end_of_msg|>") orelse return error.KimiK3MissingEosToken;
@@ -187,7 +190,8 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print(
         "KIMI_K3_PREFIX_CLI_PASS backend=cuda device=0 layers=4 scope=diagnostic_prefix deterministic_ops=true " ++
             "prompt_tokens={} generated_tokens={} compile_us={} load_us={} prefill_us={} decode_us={} " ++
-            "resident_layer_loads={} payload_reads={} payload_bytes={} steady_state_reloads=0\n",
+            "resident_layer_loads={} payload_reads={} payload_bytes={} steady_state_reloads=0 " ++
+            "checkpoint_open_us={} device_bytes_in_use={} device_peak_bytes_in_use={} device_bytes_limit={}\n",
         .{
             prompt_tokens.len,
             generated.len,
@@ -198,6 +202,10 @@ pub fn main(init: std.process.Init) !void {
             resident_load_stats.layer_loads,
             resident_load_stats.payload_reads,
             resident_load_stats.payload_bytes,
+            checkpoint_open_us,
+            device_memory.bytes_in_use,
+            device_memory.peak_bytes_in_use orelse 0,
+            device_memory.bytes_limit orelse 0,
         },
     );
     try stdout.flush();
