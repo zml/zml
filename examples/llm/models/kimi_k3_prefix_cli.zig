@@ -21,6 +21,7 @@ const Args = struct {
     prompt: []const u8,
     max_new_tokens: usize = 1,
     context_limit: usize = 512,
+    distributed: bool = false,
 
     pub const help =
         \\Use kimi_k3_prefix_cli --weights=<S4-directory> --tokenizer=<tokenizer.json> --prompt=<text> [options]
@@ -31,6 +32,7 @@ const Args = struct {
         \\Options:
         \\  --max-new-tokens=<1..32>  Maximum generated tokens (default: 1)
         \\  --context-limit=<1..4096>  Prompt plus generation bound (default: 512)
+        \\  --distributed              Require physical TP4 across four visible GPUs
         \\
         \\WARNING: Four layers are a development diagnostic, not reliable full-model answers.
         \\
@@ -111,7 +113,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
-    if (platform.devices.len != 1) return error.KimiK3PrefixCliRequiresOneVisibleGpu;
+    if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedPrefixCliRequiresFourDevices;
+    if (!args.distributed and platform.devices.len != 1) return error.KimiK3PrefixCliRequiresOneVisibleGpu;
+    const layout: []const u8 = if (args.distributed) "tp4_ep1" else "gpu0";
+    const device_scope: []const u8 = if (args.distributed) "0,1,2,3" else "0";
 
     const checkpoint_open_started = std.Io.Clock.now(.real, io).toNanoseconds();
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
@@ -188,11 +193,13 @@ pub fn main(init: std.process.Init) !void {
     try stdout.writeAll(decoded.written());
     try stdout.writeAll("\nKIMI_K3_PREFIX_TEXT_END\n");
     try stdout.print(
-        "KIMI_K3_PREFIX_CLI_PASS backend=cuda device=0 layers=4 scope=diagnostic_prefix deterministic_ops=true " ++
+        "KIMI_K3_PREFIX_CLI_PASS backend=cuda device={s} layers=4 scope=diagnostic_prefix deterministic_ops=true " ++
             "prompt_tokens={} generated_tokens={} compile_us={} load_us={} prefill_us={} decode_us={} " ++
             "resident_layer_loads={} payload_reads={} payload_bytes={} steady_state_reloads=0 " ++
-            "checkpoint_open_us={} device_bytes_in_use={} device_peak_bytes_in_use={} device_bytes_limit={}\n",
+            "checkpoint_open_us={} device_bytes_in_use={} device_peak_bytes_in_use={} device_bytes_limit={} " ++
+            "devices={} layout={s}\n",
         .{
+            device_scope,
             prompt_tokens.len,
             generated.len,
             compile_us,
@@ -206,6 +213,8 @@ pub fn main(init: std.process.Init) !void {
             device_memory.bytes_in_use,
             device_memory.peak_bytes_in_use orelse 0,
             device_memory.bytes_limit orelse 0,
+            platform.devices.len,
+            layout,
         },
     );
     try stdout.flush();
