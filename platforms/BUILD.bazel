@@ -55,11 +55,20 @@ config_setting(
 ]
 
 zig_library(
+    name = "gpu_event",
+    import_name = "platforms/gpu_event",
+    main = "gpu_event.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//pjrt"],
+)
+
+zig_library(
     name = "platforms",
     main = "platforms.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        ":gpu_event",
         "//pjrt",
     ] + [
         "//platforms/{}".format(runtime)

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
+pub const gpu_event = @import("platforms/gpu_event");
 const metal = @import("platforms/metal");
 const neuron = @import("platforms/neuron");
 const pjrt = @import("pjrt");
@@ -40,5 +41,13 @@ pub fn isEnabled(tag: Platform) bool {
         .neuron => neuron.isEnabled(),
         .oneapi => oneapi.isEnabled(),
         .metal => metal.isEnabled(),
+    };
+}
+
+pub fn eventProvider(tag: Platform) ?*const gpu_event.Provider {
+    return switch (tag) {
+        .cuda => cuda.eventProvider(),
+        .rocm => rocm.eventProvider(),
+        else => null,
     };
 }

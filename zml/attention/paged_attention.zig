@@ -144,12 +144,21 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .triton, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+                .batch_size = args.batch_size,
+                .batch_size_prefill = if (args.batch_size_prefill) |count| @intCast(count) else null,
+                .batch_size_decode = if (args.batch_size_decode) |count| @intCast(count) else null,
+                .max_num_pages = args.max_num_pages,
+                .max_seqlen_q = args.max_seqlen_q,
+                .max_seqlen_k = args.seq_len,
+                .is_prefill = args.is_prefill,
+            }),
+            .metal => .{ .metal = .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
                 .is_prefill = args.is_prefill,
-            }),
+            } },
         };
     }
 
@@ -345,6 +354,34 @@ test "Backend.auto selects triton on oneAPI" {
     };
 
     try std.testing.expectEqual(Backend.triton, Backend.auto(&platform));
+}
+
+test "Options.fromBackend propagates the representative Triton workload" {
+    var args: Options.Args = .{
+        .backend = .triton,
+        .is_prefill = true,
+        .batch_size = 3,
+        .batch_size_prefill = 1,
+        .batch_size_decode = 1,
+        .seq_len = 1536,
+        .max_num_pages = 128,
+        .max_token_count = 2,
+        .num_heads = 32,
+        .num_kv_heads = 8,
+        .head_dim = 128,
+        .max_seqlen_q = 1,
+    };
+
+    const triton_options = Options.fromBackend(args);
+    try std.testing.expectEqual(@as(usize, args.seq_len), triton_options.triton.max_seqlen_k);
+    try std.testing.expectEqual(@as(?usize, 1), triton_options.triton.batch_size_prefill);
+    try std.testing.expectEqual(@as(?usize, 1), triton_options.triton.batch_size_decode);
+
+    args.backend = .stablehlo;
+    const stablehlo_options = Options.fromBackend(args);
+    try std.testing.expectEqual(@as(usize, args.seq_len), stablehlo_options.stablehlo.max_seqlen_k);
+    try std.testing.expectEqual(@as(?usize, 1), stablehlo_options.stablehlo.batch_size_prefill);
+    try std.testing.expectEqual(@as(?usize, 1), stablehlo_options.stablehlo.batch_size_decode);
 }
 
 test pagedAttention {

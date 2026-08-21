@@ -88,6 +88,7 @@ zig_library(
         "attention/triton_kernels/unified_attention.zig",
         "attention/triton_kernels/unified_attention_oneapi.zig",
         "attention/triton_kernels/unified_sparse_mla.zig",
+        "autotune.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",

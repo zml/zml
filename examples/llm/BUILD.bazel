@@ -29,9 +29,20 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "triton_attention_autotune",
+    srcs = ["triton_attention_autotune.zig"],
+    main = "triton_attention_autotune.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
-    targets = [":llm"],
+    targets = [
+        ":llm",
+        ":triton_attention_autotune",
+    ],
 )
 
 mtree_spec(

@@ -42,6 +42,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:gpu_event",
     ] + select({
         "//platforms:rocm.enabled": [
             ":libpjrt_rocm",

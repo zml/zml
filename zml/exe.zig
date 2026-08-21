@@ -18,12 +18,18 @@ pub const Exe = struct {
     exe: *pjrt.LoadedExecutable,
 
     context: ?*pjrt.ExecuteContext = null,
+    requires_execution_timer: bool = false,
+    execution_timer_state: ?*anyopaque = null,
+    execution_timer_deinit: ?*const fn (*anyopaque) void = null,
+    execution_timer_begin: ?*const fn (*anyopaque) bool = null,
+    execution_timer_end: ?*const fn (*anyopaque, bool) void = null,
 
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
     input_shardings: []const Sharding,
     output_shardings: []const Sharding,
+    all_input_indices: []const i64,
 
     num_devices: usize,
     num_partitions: i32,
@@ -50,6 +56,8 @@ pub const Exe = struct {
         // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
         const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
         const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
+        const all_input_indices = try arena.allocator().alloc(i64, input_shapes.len);
+        for (all_input_indices, 0..) |*index, i| index.* = @intCast(i);
 
         return .{
             .platform = platform,
@@ -58,6 +66,7 @@ pub const Exe = struct {
             .output_shapes = output_shapes_copy,
             .input_shardings = input_shardings_copy,
             .output_shardings = output_shardings_copy,
+            .all_input_indices = all_input_indices,
             .num_devices = num_devices,
             .num_partitions = num_partitions,
             .arena = arena,
@@ -65,6 +74,9 @@ pub const Exe = struct {
     }
 
     pub fn deinit(self: *const Exe) void {
+        if (self.execution_timer_state) |state| {
+            if (self.execution_timer_deinit) |deinit_timer| deinit_timer(state);
+        }
         if (self.context) |context| context.deinit(self.platform.pjrt_api);
         self.exe.deinit(self.platform.pjrt_api);
         self.arena.deinit();
@@ -198,6 +210,7 @@ pub const Exe = struct {
     pub const Results = struct {
         platform: *const Platform,
         flat_buffers: FlatBuffers,
+        buffers_owned: bool = false,
 
         expected_shapes: []const Shape,
         shardings: []const Sharding,
@@ -218,11 +231,25 @@ pub const Exe = struct {
         }
 
         pub fn deinit(self: *const Results, allocator: std.mem.Allocator) void {
+            if (self.buffers_owned) {
+                for (self.flat_buffers.raw_buffers) |buffer| buffer.deinit(self.platform.pjrt_api);
+            }
             allocator.free(self.expected_shapes);
             self.flat_buffers.deinit(allocator);
         }
 
+        /// Releases output buffers which have not been transferred through
+        /// `get` or `fill`. This is useful for benchmark runs that intentionally
+        /// discard their outputs between repetitions.
+        pub fn releaseBuffers(self: *Results) void {
+            if (!self.buffers_owned) return;
+            for (self.flat_buffers.raw_buffers) |buffer| buffer.deinit(self.platform.pjrt_api);
+            self.buffers_owned = false;
+        }
+
         pub fn get(self: *Results, comptime T: type) T {
+            std.debug.assert(self.buffers_owned);
+            defer self.buffers_owned = false;
             var result: T = undefined;
             const LocalContext = struct {
                 self: *Results,
@@ -243,6 +270,8 @@ pub const Exe = struct {
         }
 
         pub fn fill(self: *Results, v: anytype) void {
+            std.debug.assert(self.buffers_owned);
+            defer self.buffers_owned = false;
             const LocalContext = struct {
                 results: *Results,
                 current_index: usize = 0,
@@ -291,21 +320,52 @@ pub const Exe = struct {
         }
 
         pub fn run(self: *Runner, input_values: anytype, output_values: anytype) void {
+            self.tryRun(input_values, output_values) catch |err| {
+                std.debug.panic("PJRT execution failed with: {}", .{err});
+            };
+        }
+
+        pub fn tryRun(self: *Runner, input_values: anytype, output_values: anytype) pjrt.ApiError!void {
             self.args.set(input_values);
-            self.exe.call(self.args, &self.results);
+            try self.exe.tryCall(self.args, &self.results);
             self.results.fill(output_values);
         }
 
         pub fn runOpts(self: *Runner, io: std.Io, input_values: anytype, output_values: anytype, opts: CallOpts) void {
+            self.tryRunOpts(io, input_values, output_values, opts) catch |err| {
+                std.debug.panic("PJRT execution failed with: {}", .{err});
+            };
+        }
+
+        pub fn tryRunOpts(self: *Runner, io: std.Io, input_values: anytype, output_values: anytype, opts: CallOpts) pjrt.ApiError!void {
             self.args.set(input_values);
-            self.exe.callOpts(io, self.args, &self.results, opts);
+            try self.exe.tryCallOpts(io, self.args, &self.results, opts);
             self.results.fill(output_values);
         }
     };
 
-    pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+    pub fn tryInternalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) pjrt.ApiError!void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
+        stdx.debug.assert(!results_.buffers_owned, "previous executable results must be consumed before another call", .{});
+        var timer_state: ?*anyopaque = null;
+        var timer_execution_succeeded = false;
+        if (self.requires_execution_timer) {
+            if (!opts.wait) return error.FailedPrecondition;
+            const state = self.execution_timer_state orelse return error.FailedPrecondition;
+            const begin = self.execution_timer_begin orelse return error.FailedPrecondition;
+            _ = self.execution_timer_end orelse return error.FailedPrecondition;
+            if (!begin(state)) return error.FailedPrecondition;
+            timer_state = state;
+        }
+        defer if (timer_state) |state| self.execution_timer_end.?(state, timer_execution_succeeded);
+
         var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
+        defer for (&events) |*event| {
+            if (event.*) |ev| {
+                ev.deinit(self.platform.pjrt_api);
+                event.* = null;
+            }
+        };
 
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
@@ -313,7 +373,7 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) partition_events else null,
         };
 
-        self.exe.execute(self.platform.pjrt_api, .{
+        try self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
             .num_args = arguments.expected_shapes.len,
             .results = results_.flat_buffers.buffers,
@@ -321,60 +381,84 @@ pub const Exe = struct {
             // this allows to tell a specific buffer shouldn't be donated,
             // even if it has been marked as "can be donated" during compilation.
             // TODO: expose it ?
-            .non_donatable_input_indices = &.{},
+            .non_donatable_input_indices = if (opts.allow_input_donation) &.{} else self.all_input_indices,
             .context = self.context,
-        }) catch |err| {
-            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
-        };
+        });
+        results_.buffers_owned = true;
 
         switch (self.platform.target) {
             .neuron => {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io.?) catch |err| {
-                                std.debug.panic("PJRT execution failed with: {}", .{err});
-                            };
-                        }
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
+                if (opts.wait) try self.awaitCompletionEvents(events_slice.?, io.?);
             },
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        ev.await(self.platform.pjrt_api, io.?) catch |err| {
-                            std.debug.panic("PJRT execution failed with: {}", .{err});
-                        };
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
+                try self.awaitCompletionEvents(events_slice.?, io.?);
             },
         }
+        timer_execution_succeeded = true;
+    }
+
+    fn awaitCompletionEvents(self: *const Exe, events: []const ?*pjrt.Event, io: std.Io) pjrt.ApiError!void {
+        var first_error: ?pjrt.ApiError = null;
+        for (events) |maybe_event| {
+            const event = maybe_event orelse continue;
+            self.awaitCompletionEvent(event, io) catch |err| {
+                if (first_error == null) first_error = err;
+            };
+        }
+        if (first_error) |err| return err;
+    }
+
+    fn awaitCompletionEvent(self: *const Exe, event: *pjrt.Event, io: std.Io) pjrt.ApiError!void {
+        try event.await(self.platform.pjrt_api, io);
+        if (event.getEventError(self.platform.pjrt_api)) |event_error| {
+            defer event_error.deinit(self.platform.pjrt_api);
+            return event_error.getCode(self.platform.pjrt_api).toApiError();
+        }
+    }
+
+    pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        self.tryInternalCall(io, arguments, results_, opts) catch |err| {
+            std.debug.panic("PJRT execution failed with: {}", .{err});
+        };
     }
 
     pub const CallOpts = struct {
         wait: bool = false,
+        /// PJRT may consume inputs which were compiled with an output alias.
+        /// Benchmark adapters disable donation so arguments remain reusable.
+        allow_input_donation: bool = true,
     };
 
-    pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+    pub fn tryCallOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) pjrt.ApiError!void {
         var span = tracer.span("zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
             .result_count = results_.expected_shapes.len,
         });
         defer span.end();
-        return self.internalCall(io, arguments, results_, opts);
+        return self.tryInternalCall(io, arguments, results_, opts);
     }
 
-    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+    pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        self.tryCallOpts(io, arguments, results_, opts) catch |err| {
+            std.debug.panic("PJRT execution failed with: {}", .{err});
+        };
+    }
+
+    pub fn tryCall(self: *const Exe, arguments: Arguments, results_: *Results) pjrt.ApiError!void {
         var span = tracer.span("zml.exe.call", .{
             .wait = false,
             .arg_count = arguments.expected_shapes.len,
             .result_count = results_.expected_shapes.len,
         });
         defer span.end();
-        return self.internalCall(null, arguments, results_, .{});
+        return self.tryInternalCall(null, arguments, results_, .{});
+    }
+
+    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        self.tryCall(arguments, results_) catch |err| {
+            std.debug.panic("PJRT execution failed with: {}", .{err});
+        };
     }
 };
 
@@ -436,6 +520,11 @@ pub fn FnExe(comptime function_: anytype) type {
 
                 pub const BakedInput = structFieldRange(Input, 0, count);
                 pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".fields.len);
+                pub const Call = struct {
+                    inputs: NonBakedInput,
+                    outputs: Output,
+                    opts: Exe.CallOpts = .{},
+                };
 
                 pub fn init(exe: *const Self, allocator: std.mem.Allocator, baked: BakedInput) !RunnerSelf {
                     var arguments = try exe.raw.args(allocator);
@@ -451,13 +540,15 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
-                pub fn run(self: *RunnerSelf, io: std.Io, call: struct {
-                    inputs: NonBakedInput,
-                    outputs: Output,
-                    opts: Exe.CallOpts = .{},
-                }) void {
+                pub fn run(self: *RunnerSelf, io: std.Io, call: Call) void {
+                    self.tryRun(io, call) catch |err| {
+                        std.debug.panic("PJRT execution failed with: {}", .{err});
+                    };
+                }
+
+                pub fn tryRun(self: *RunnerSelf, io: std.Io, call: Call) pjrt.ApiError!void {
                     self.args.set(call.inputs);
-                    self.exe.callOpts(io, self.args, &self.results, call.opts);
+                    try self.exe.tryCallOpts(io, self.args, &self.results, call.opts);
                     self.results.fill(call.outputs);
                 }
             };

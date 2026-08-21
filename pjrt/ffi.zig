@@ -81,7 +81,7 @@ fn TransmuteMixin(comptime T: type, comptime InnerT: type) type {
 pub const Api = opaque {
     pub const inner = TransmuteMixin(Api, c.XLA_FFI_Api).to;
 
-    pub fn stream(self: *const Api, context: *const ExecutionContext) *pjrt.Stream {
+    pub fn tryStream(self: *const Api, context: *const ExecutionContext) pjrt.ApiError!*pjrt.Stream {
         var ret: pjrt.meta.Struct(c.XLA_FFI_Stream_Get_Args) = .{
             .ctx = @constCast(context.inner()),
         };
@@ -91,11 +91,14 @@ pub const Api = opaque {
             const err = Error.fromInner(ffi_error);
             defer err.destroy(self);
             log.err("[Api.getStream] {s}", .{err.getMessage(self)});
-
-            @panic("failed to get stream");
+            return error.Unknown;
         }
 
         return @ptrCast(ret.stream.?);
+    }
+
+    pub fn stream(self: *const Api, context: *const ExecutionContext) *pjrt.Stream {
+        return self.tryStream(context) catch @panic("failed to get FFI stream");
     }
 
     pub fn allocateDeviceMemory(self: *const Api, context: *const ExecutionContext, size: usize, alignment: usize) pjrt.ApiError!*anyopaque {
@@ -156,7 +159,7 @@ pub const ExecutionContext = opaque {
 
     pub fn getContext(self: *const ExecutionContext, type_id: TypeId, api: *const Api) pjrt.ApiError!*anyopaque {
         var ret: c.XLA_FFI_ExecutionContext_Get_Args = .{
-            .struct_size = pjrt.pjrtStructSize(c.XLA_FFI_ExecutionContext_Get_Args),
+            .struct_size = pjrt.meta.structSize(c.XLA_FFI_ExecutionContext_Get_Args),
             .extension_start = api.inner().extension_start,
             .ctx = @ptrCast(@constCast(self)),
             .type_id = @constCast(&type_id),
@@ -398,6 +401,10 @@ pub const CallFrame = extern struct {
 
     pub fn stream(call_frame: CallFrame) ?*const pjrt.Stream {
         return call_frame.api.stream(call_frame.ctx);
+    }
+
+    pub fn tryStream(call_frame: CallFrame) pjrt.ApiError!*pjrt.Stream {
+        return call_frame.api.tryStream(call_frame.ctx);
     }
 };
 

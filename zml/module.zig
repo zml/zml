@@ -24,6 +24,9 @@ const Tensor = @import("tensor.zig").Tensor;
 const zml_module = @This();
 const log = std.log.scoped(.@"zml/module");
 
+pub const autotuneStartCallTarget = "zml$autotune_start";
+pub const autotuneStopCallTarget = "zml$autotune_stop";
+
 var mlir_global_init_mutex: std.Io.Mutex = .init;
 var mlir_global_registry: ?*mlir.DialectRegistry = null;
 
@@ -46,6 +49,11 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
     return mlir_global_registry.?;
 }
 pub const CompilationOptions = struct {
+    pub const ExecutionTiming = enum {
+        none,
+        device,
+    };
+
     shardings: []const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
@@ -55,6 +63,10 @@ pub const CompilationOptions = struct {
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
+    /// Adds GPU-native start/stop markers around the entry function. The
+    /// resulting executable must be used with an attached ExecutionTimer and
+    /// is intended only for benchmarking, never for production execution.
+    execution_timing: ExecutionTiming = .none,
 };
 
 /// Errors surfaced while lowering and compiling a ZML program.
@@ -63,7 +75,7 @@ pub const CompileError = std.mem.Allocator.Error ||
     mlir.Error ||
     upb.SerializeError ||
     pjrtx.Client.CompileError ||
-    error{MissingDeviceInTile};
+    error{ MissingDeviceInTile, UnsupportedExecutionTiming };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
@@ -279,6 +291,15 @@ pub fn compile(
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
+    if (opts.execution_timing == .device) {
+        try instrumentExecutionTiming(
+            &compilation_context,
+            result.func.region(0).firstBlock().?,
+            result.output_info.values,
+            result.output_info.shapes,
+        );
+    }
+
     try addPartitionerOperations(&compilation_context);
 
     _ = result.func.appendTo(compilation_context.module.body());
@@ -309,7 +330,7 @@ pub fn compile(
     const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compilation_context.module, compilation_context.partitioning, opts);
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    const exe = try Exe.init(
+    var exe = try Exe.init(
         allocator,
         platform,
         loaded_executable,
@@ -321,6 +342,7 @@ pub fn compile(
         result.output_info.shardings,
     );
     errdefer exe.deinit();
+    exe.requires_execution_timer = opts.execution_timing == .device;
 
     return exe;
 }
@@ -604,6 +626,315 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
 }
 
+/// Inserts a dependency chain which brackets all input-dependent entry
+/// function work with side-effecting typed FFI calls. The start call produces
+/// a marker buffer initialized on the FFI stream; routing every argument
+/// through the optimization barrier prevents the program body from moving
+/// before that marker. The stop call consumes every flattened output.
+fn instrumentExecutionTiming(
+    ctx: *CompilationContext,
+    block: *mlir.Block,
+    outputs: []const *const mlir.Value,
+    output_shapes: []const Shape,
+) error{UnsupportedExecutionTiming}!void {
+    if (ctx.platform.target != .cuda and ctx.platform.target != .rocm) {
+        return error.UnsupportedExecutionTiming;
+    }
+    if (block.numArguments() == 0 or outputs.len == 0 or outputs.len != output_shapes.len or outputs.len > dialects.stablehlo.CustomCallOpts.MAX_OPERANDS) {
+        return error.UnsupportedExecutionTiming;
+    }
+
+    const allocator = ctx.arena.allocator();
+    const mlir_ctx = ctx.mlir_ctx;
+    const marker_shape = Shape.scalar(.u8);
+    const marker_type: *const mlir.Type = .rankedTensor(&.{}, .int(mlir_ctx, .u8));
+    const first_op = block.firstOperation().?;
+    const terminator = block.terminator().?;
+
+    const start_marker = switch (ctx.partitioning.partitioner) {
+        .shardy => try insertShardyTimingStart(ctx, marker_shape, marker_type, first_op),
+        .gspmd => try insertGspmdTimingStart(ctx, marker_shape, marker_type, first_op),
+    };
+    _ = insertTimingBarrier(allocator, mlir_ctx, block, first_op, start_marker);
+
+    // Read return operands after rewriting argument uses. This matters for an
+    // identity-like program whose output is itself a function argument.
+    const stop_inputs = allocator.alloc(*const mlir.Value, outputs.len) catch @panic("OOM");
+    defer allocator.free(stop_inputs);
+    for (stop_inputs, 0..) |*input, i| input.* = terminator.operand(i);
+
+    switch (ctx.partitioning.partitioner) {
+        .shardy => _ = try insertShardyTimingStop(ctx, stop_inputs, output_shapes, marker_type, terminator),
+        .gspmd => _ = try insertGspmdTimingStop(ctx, stop_inputs, output_shapes, marker_type, terminator),
+    }
+}
+
+/// XLA does not allow a generic side-effecting custom call to have replicated
+/// or tiled sharding. A Shardy manual computation is lowered as local code in
+/// every partition, which gives the marker access to each partition's local
+/// stream without registering an XLA custom-call partitioner.
+fn insertShardyTimingStart(
+    ctx: *CompilationContext,
+    marker_shape: Shape,
+    marker_type: *const mlir.Type,
+    before: *mlir.Operation,
+) error{UnsupportedExecutionTiming}!*const mlir.Value {
+    const allocator = ctx.arena.allocator();
+    const mlir_ctx = ctx.mlir_ctx;
+    const location = mlir.Location.unknown(mlir_ctx);
+    const empty_per_value = dialects.shardy.TensorShardingPerValueAttribute.init(mlir_ctx, &.{}).asAttr();
+    const out_shardings = ctx.partitioning.sdyPerValueShardingAttr(allocator, mlir_ctx, &.{marker_shape}) catch return error.UnsupportedExecutionTiming;
+    const manual_axes = ctx.partitioning.sdyManualAxesAttr(allocator, mlir_ctx, &.{}, &.{marker_shape}) catch return error.UnsupportedExecutionTiming;
+
+    const manual_block = mlir.Block.init(&.{}, &.{});
+    const start = timingStartCall(mlir_ctx, marker_type, &.{}).appendTo(manual_block);
+    _ = mlir.Operation.make(mlir_ctx, "sdy.return", .{
+        .operands = .{ .flat = &.{start.result(0)} },
+        .verify = false,
+        .location = location,
+    }).appendTo(manual_block);
+
+    const manual = mlir.Operation.make(mlir_ctx, "sdy.manual_computation", .{
+        .results = .{ .flat = &.{marker_type} },
+        .blocks = &.{manual_block},
+        .attributes = &.{
+            .named(mlir_ctx, "in_shardings", empty_per_value),
+            .named(mlir_ctx, "out_shardings", out_shardings),
+            .named(mlir_ctx, "manual_axes", manual_axes),
+        },
+        .verify = true,
+        .location = location,
+    });
+    before.block().?.insertOwnedOperationBefore(before, manual);
+    return manual.result(0);
+}
+
+fn insertShardyTimingStop(
+    ctx: *CompilationContext,
+    inputs: []const *const mlir.Value,
+    input_shapes: []const Shape,
+    marker_type: *const mlir.Type,
+    before: *mlir.Operation,
+) error{UnsupportedExecutionTiming}!*mlir.Operation {
+    const allocator = ctx.arena.allocator();
+    const mlir_ctx = ctx.mlir_ctx;
+    const location = mlir.Location.unknown(mlir_ctx);
+    const in_shardings = ctx.partitioning.sdyPerValueShardingAttr(allocator, mlir_ctx, input_shapes) catch return error.UnsupportedExecutionTiming;
+    const empty_per_value = dialects.shardy.TensorShardingPerValueAttribute.init(mlir_ctx, &.{}).asAttr();
+    const manual_axes = ctx.partitioning.sdyManualAxesAttr(allocator, mlir_ctx, input_shapes, &.{}) catch return error.UnsupportedExecutionTiming;
+
+    const local_types = allocator.alloc(*const mlir.Type, input_shapes.len) catch @panic("OOM");
+    defer allocator.free(local_types);
+    const local_locations = allocator.alloc(*const mlir.Location, input_shapes.len) catch @panic("OOM");
+    defer allocator.free(local_locations);
+    for (input_shapes, local_types, local_locations) |shape, *local_type, *local_location| {
+        const local_shape = ctx.partitioning.localShapeForShape(shape) catch return error.UnsupportedExecutionTiming;
+        local_type.* = mlirx.Type.rankedTensor(mlir_ctx, local_shape);
+        local_location.* = location;
+    }
+
+    const manual_block = mlir.Block.init(local_types, local_locations);
+    const local_inputs = allocator.alloc(*const mlir.Value, inputs.len) catch @panic("OOM");
+    defer allocator.free(local_inputs);
+    for (local_inputs, 0..) |*input, i| input.* = manual_block.argument(i);
+    const stop = timingStopCall(mlir_ctx, local_inputs, marker_type, &.{}).appendTo(manual_block);
+    _ = mlir.Operation.make(mlir_ctx, "sdy.return", .{
+        .verify = false,
+        .location = location,
+    }).appendTo(manual_block);
+
+    const manual = mlir.Operation.make(mlir_ctx, "sdy.manual_computation", .{
+        .operands = .{ .flat = inputs },
+        .blocks = &.{manual_block},
+        .attributes = &.{
+            .named(mlir_ctx, "in_shardings", in_shardings),
+            .named(mlir_ctx, "out_shardings", empty_per_value),
+            .named(mlir_ctx, "manual_axes", manual_axes),
+        },
+        .verify = true,
+        .location = location,
+    });
+    before.block().?.insertOwnedOperationBefore(before, manual);
+    return stop;
+}
+
+fn insertGspmdTimingStart(
+    ctx: *CompilationContext,
+    marker_shape: Shape,
+    marker_type: *const mlir.Type,
+    before: *mlir.Operation,
+) error{UnsupportedExecutionTiming}!*const mlir.Value {
+    const mlir_ctx = ctx.mlir_ctx;
+    const location = mlir.Location.unknown(mlir_ctx);
+    const manual_sharding = mlir.NamedAttribute.named(mlir_ctx, "mhlo.sharding", .string(mlir_ctx, "{manual}"));
+    const start = timingStartCall(mlir_ctx, marker_type, &.{manual_sharding});
+    before.block().?.insertOwnedOperationBefore(before, start);
+
+    const global_sharding = ctx.partitioning.tensorShardingAttr(ctx.arena.allocator(), mlir_ctx, marker_shape, null) catch return error.UnsupportedExecutionTiming;
+    const shard_to_full = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &.{start.result(0)},
+        &.{marker_type},
+        .{
+            .call_target_name = "SPMDShardToFullShape",
+            .has_side_effect = false,
+            .backend_config = .{ .original = "" },
+            .additional_attributes = &.{.named(mlir_ctx, "mhlo.sharding", global_sharding)},
+        },
+        location,
+    );
+    before.block().?.insertOwnedOperationBefore(before, shard_to_full);
+    return shard_to_full.result(0);
+}
+
+fn insertGspmdTimingStop(
+    ctx: *CompilationContext,
+    inputs: []const *const mlir.Value,
+    input_shapes: []const Shape,
+    marker_type: *const mlir.Type,
+    before: *mlir.Operation,
+) error{UnsupportedExecutionTiming}!*mlir.Operation {
+    const allocator = ctx.arena.allocator();
+    const mlir_ctx = ctx.mlir_ctx;
+    const location = mlir.Location.unknown(mlir_ctx);
+    const local_inputs = allocator.alloc(*const mlir.Value, inputs.len) catch @panic("OOM");
+    defer allocator.free(local_inputs);
+
+    for (inputs, input_shapes, local_inputs) |input, shape, *local_input| {
+        const local_shape = ctx.partitioning.localShapeForShape(shape) catch return error.UnsupportedExecutionTiming;
+        const local_type = mlirx.Type.rankedTensor(mlir_ctx, local_shape);
+        const full_to_shard = dialects.stablehlo.custom_call(
+            mlir_ctx,
+            &.{input},
+            &.{local_type},
+            .{
+                .call_target_name = "SPMDFullToShardShape",
+                .has_side_effect = false,
+                .backend_config = .{ .original = "" },
+                .additional_attributes = &.{.named(mlir_ctx, "mhlo.sharding", .string(mlir_ctx, "{manual}"))},
+            },
+            location,
+        );
+        before.block().?.insertOwnedOperationBefore(before, full_to_shard);
+        local_input.* = full_to_shard.result(0);
+    }
+
+    const stop = timingStopCall(
+        mlir_ctx,
+        local_inputs,
+        marker_type,
+        &.{.named(mlir_ctx, "mhlo.sharding", .string(mlir_ctx, "{manual}"))},
+    );
+    before.block().?.insertOwnedOperationBefore(before, stop);
+    return stop;
+}
+
+fn timingStartCall(
+    mlir_ctx: *mlir.Context,
+    marker_type: *const mlir.Type,
+    additional_attributes: []const mlir.NamedAttribute,
+) *mlir.Operation {
+    return dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &.{},
+        &.{marker_type},
+        .{
+            .call_target_name = autotuneStartCallTarget,
+            .has_side_effect = true,
+            .backend_config = .{ .typed_ffi = .dict(mlir_ctx, &.{}) },
+            .additional_attributes = additional_attributes,
+        },
+        .unknown(mlir_ctx),
+    );
+}
+
+fn timingStopCall(
+    mlir_ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    marker_type: *const mlir.Type,
+    additional_attributes: []const mlir.NamedAttribute,
+) *mlir.Operation {
+    return dialects.stablehlo.custom_call(
+        mlir_ctx,
+        inputs,
+        &.{marker_type},
+        .{
+            .call_target_name = autotuneStopCallTarget,
+            .has_side_effect = true,
+            .backend_config = .{ .typed_ffi = .dict(mlir_ctx, &.{}) },
+            .additional_attributes = additional_attributes,
+        },
+        .unknown(mlir_ctx),
+    );
+}
+
+fn insertTimingBarrier(
+    allocator: std.mem.Allocator,
+    mlir_ctx: *mlir.Context,
+    block: *mlir.Block,
+    before: *mlir.Operation,
+    marker: *const mlir.Value,
+) *mlir.Operation {
+    const barrier_len = block.numArguments() + 1;
+    const barrier_inputs = allocator.alloc(*const mlir.Value, barrier_len) catch @panic("OOM");
+    defer allocator.free(barrier_inputs);
+    const barrier_types = allocator.alloc(*const mlir.Type, barrier_len) catch @panic("OOM");
+    defer allocator.free(barrier_types);
+    barrier_inputs[0] = marker;
+    barrier_types[0] = marker.type_();
+    for (1..barrier_len) |i| {
+        const argument = block.argument(i - 1);
+        barrier_inputs[i] = argument;
+        barrier_types[i] = argument.type_();
+    }
+
+    const barrier = dialects.stablehlo.optimizationBarrier(
+        mlir_ctx,
+        barrier_inputs,
+        barrier_types,
+        .unknown(mlir_ctx),
+    );
+    block.insertOwnedOperationBefore(before, barrier);
+
+    // Replacing all uses also rewrites the barrier's own operands. Restore
+    // those operands afterward so the barrier does not become self-referential.
+    for (1..barrier_len) |i| {
+        const argument = block.argument(i - 1);
+        argument.replaceAllUsesWith(barrier.result(i));
+        barrier.setOperand(i, argument);
+    }
+    return barrier;
+}
+
+fn instrumentExecutionTimingBlock(
+    allocator: std.mem.Allocator,
+    mlir_ctx: *mlir.Context,
+    block: *mlir.Block,
+    outputs: []const *const mlir.Value,
+    marker_type: *const mlir.Type,
+    marker_attributes: []const mlir.NamedAttribute,
+) struct { start: *mlir.Operation, barrier: *mlir.Operation, stop: *mlir.Operation } {
+    std.debug.assert(block.numArguments() > 0);
+    std.debug.assert(outputs.len > 0 and outputs.len <= dialects.stablehlo.CustomCallOpts.MAX_OPERANDS);
+
+    const first_op = block.firstOperation().?;
+    const terminator = block.terminator().?;
+    std.debug.assert(terminator.numOperands() == outputs.len);
+    const start = timingStartCall(mlir_ctx, marker_type, marker_attributes);
+    block.insertOwnedOperationBefore(first_op, start);
+    const barrier = insertTimingBarrier(allocator, mlir_ctx, block, first_op, start.result(0));
+
+    // Read the return operands after rewriting argument uses. This matters for
+    // identity-like programs whose output is itself a function argument.
+    const stop_inputs = allocator.alloc(*const mlir.Value, outputs.len) catch @panic("OOM");
+    defer allocator.free(stop_inputs);
+    for (stop_inputs, 0..) |*input, i| input.* = terminator.operand(i);
+
+    const stop = timingStopCall(mlir_ctx, stop_inputs, marker_type, marker_attributes);
+    block.insertOwnedOperationBefore(terminator, stop);
+    return .{ .start = start, .barrier = barrier, .stop = stop };
+}
+
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
     const result = c.upb_Map_Set(
         map,
@@ -743,4 +1074,79 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
+}
+
+test "device timing dependency chain survives canonicalization" {
+    var threaded_io: std.Io.Threaded = .init_single_threaded;
+    defer threaded_io.deinit();
+
+    const registry = mlirRegistry(threaded_io.io());
+    const mlir_ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer mlir_ctx.deinit();
+    mlir_ctx.loadAllAvailableDialects();
+
+    const module_ = mlir.Module.init(.unknown(mlir_ctx));
+    defer module_.deinit();
+    const location = mlir.Location.unknown(mlir_ctx);
+    const tensor_type: *const mlir.Type = .rankedTensor(&.{4}, .float(mlir_ctx, .f32));
+    const block = mlir.Block.init(&.{tensor_type}, &.{location});
+    const body = dialects.stablehlo.add(mlir_ctx, block.argument(0), block.argument(0), location).appendTo(block);
+    _ = dialects.func.returns(mlir_ctx, &.{body.result(0)}, location).appendTo(block);
+    const func = dialects.func.func(mlir_ctx, .{
+        .name = "main",
+        .block = block,
+        .location = location,
+        .verify = false,
+    });
+    _ = func.appendTo(module_.body());
+
+    const marker_type: *const mlir.Type = .rankedTensor(&.{}, .int(mlir_ctx, .u8));
+    const markers = instrumentExecutionTimingBlock(std.testing.allocator, mlir_ctx, block, &.{body.result(0)}, marker_type, &.{});
+
+    const pass_manager = mlir.PassManager.init(mlir_ctx);
+    defer pass_manager.deinit();
+    try pass_manager.asOpPassManager().addPipeline("canonicalize");
+    try pass_manager.runOnOp(module_.operation());
+
+    try std.testing.expectEqualStrings("stablehlo.custom_call", markers.start.name());
+    try std.testing.expectEqualStrings("stablehlo.optimization_barrier", markers.barrier.name());
+    try std.testing.expectEqualStrings("stablehlo.custom_call", markers.stop.name());
+    try std.testing.expect(markers.barrier.operand(0).owner() == markers.start);
+    try std.testing.expect(body.operand(0).owner() == markers.barrier);
+    try std.testing.expect(body.operand(1).owner() == markers.barrier);
+    try std.testing.expect(markers.stop.operand(0).owner() == body);
+}
+
+test "device timing stop consumes rewritten identity output" {
+    var threaded_io: std.Io.Threaded = .init_single_threaded;
+    defer threaded_io.deinit();
+
+    const registry = mlirRegistry(threaded_io.io());
+    const mlir_ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer mlir_ctx.deinit();
+    mlir_ctx.loadAllAvailableDialects();
+
+    const module_ = mlir.Module.init(.unknown(mlir_ctx));
+    defer module_.deinit();
+    const location = mlir.Location.unknown(mlir_ctx);
+    const tensor_type: *const mlir.Type = .rankedTensor(&.{4}, .float(mlir_ctx, .f32));
+    const block = mlir.Block.init(&.{tensor_type}, &.{location});
+    _ = dialects.func.returns(mlir_ctx, &.{block.argument(0)}, location).appendTo(block);
+    const func = dialects.func.func(mlir_ctx, .{
+        .name = "identity",
+        .block = block,
+        .location = location,
+        .verify = false,
+    });
+    _ = func.appendTo(module_.body());
+
+    const marker_type: *const mlir.Type = .rankedTensor(&.{}, .int(mlir_ctx, .u8));
+    const markers = instrumentExecutionTimingBlock(std.testing.allocator, mlir_ctx, block, &.{block.argument(0)}, marker_type, &.{});
+    const pass_manager = mlir.PassManager.init(mlir_ctx);
+    defer pass_manager.deinit();
+    try pass_manager.asOpPassManager().addPipeline("canonicalize");
+    try pass_manager.runOnOp(module_.operation());
+
+    try std.testing.expect(markers.stop.operand(0).owner() == markers.barrier);
+    try std.testing.expect(block.terminator().?.operand(0).owner() == markers.barrier);
 }
