@@ -27,6 +27,7 @@ const Cfg = struct {
     rope_offset: i64 = 512,
     value_rank: i64 = 512,
     tile_size: i64 = 16,
+    num_splits: i64 = 1,
     use_attn_sink: bool = false,
     all_decode: bool = false,
 };
@@ -100,6 +101,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
     kernelUnifiedAttentionSparseMla2d(
         b,
         a.output_ptr,
+        null,
         a.query_ptr,
         a.key_cache_ptr,
         a.value_cache_ptr,
@@ -117,6 +119,99 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         a.query_start_len_ptr,
         num_seqs,
         cfg,
+        false,
+    );
+}
+
+pub const SplitKernel = tri.Kernel(Cfg, .{
+    .name = "_kernel_unified_attention_sparse_mla_split_ptr",
+    .inputs = &.{
+        "query_ptr",
+        "key_cache_ptr",
+        "value_cache_ptr",
+        "attn_sink_ptr",
+        "block_tables_ptr",
+        "topk_indices_ptr",
+        "seq_lens_ptr",
+        "scale_ptr",
+        "block_table_stride_ptr",
+        "query_stride_0_ptr",
+        "query_stride_1_ptr",
+        "output_stride_0_ptr",
+        "output_stride_1_ptr",
+        "stride_k_cache_0_ptr",
+        "stride_k_cache_1_ptr",
+        "stride_k_cache_2_ptr",
+        "stride_v_cache_0_ptr",
+        "stride_v_cache_1_ptr",
+        "stride_v_cache_2_ptr",
+        "query_start_len_ptr",
+        "num_seqs_ptr",
+    },
+    .outputs = &.{ "partial_output", "partial_lse" },
+    .run = runSplit,
+});
+
+fn runSplit(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
+    const a = try b.declareArgs(.{
+        .query_ptr = .{ .ptr = cfg.q_dtype },
+        .key_cache_ptr = .{ .ptr = cfg.kv_dtype },
+        .value_cache_ptr = .{ .ptr = cfg.kv_dtype },
+        .attn_sink_ptr = .{ .ptr = cfg.sink_dtype },
+        .block_tables_ptr = .{ .ptr = .i32 },
+        .topk_indices_ptr = .{ .ptr = .i32 },
+        .seq_lens_ptr = .{ .ptr = .i32 },
+        .scale_ptr = .{ .ptr = .f32 },
+        .block_table_stride_ptr = .{ .ptr = .i64 },
+        .query_stride_0_ptr = .{ .ptr = .i64 },
+        .query_stride_1_ptr = .{ .ptr = .i64 },
+        .output_stride_0_ptr = .{ .ptr = .i64 },
+        .output_stride_1_ptr = .{ .ptr = .i64 },
+        .stride_k_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_k_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_k_cache_2_ptr = .{ .ptr = .i64 },
+        .stride_v_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_v_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_v_cache_2_ptr = .{ .ptr = .i64 },
+        .query_start_len_ptr = .{ .ptr = .i32 },
+        .num_seqs_ptr = .{ .ptr = .i32 },
+        .partial_output_ptr = .{ .ptr = .f32 },
+        .partial_lse_ptr = .{ .ptr = .f32 },
+    });
+
+    const scale = b.load(a.scale_ptr);
+    const query_stride_0 = b.load(a.query_stride_0_ptr);
+    const query_stride_1 = b.load(a.query_stride_1_ptr);
+    const output_stride_0 = b.load(a.output_stride_0_ptr);
+    const output_stride_1 = b.load(a.output_stride_1_ptr);
+    const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
+    const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
+    const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
+    const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
+    const num_seqs = b.load(a.num_seqs_ptr);
+
+    kernelUnifiedAttentionSparseMla2d(
+        b,
+        a.partial_output_ptr,
+        a.partial_lse_ptr,
+        a.query_ptr,
+        a.key_cache_ptr,
+        a.value_cache_ptr,
+        a.attn_sink_ptr,
+        a.topk_indices_ptr,
+        scale,
+        query_stride_0,
+        query_stride_1,
+        output_stride_0,
+        output_stride_1,
+        stride_k_cache_0,
+        stride_k_cache_1,
+        stride_v_cache_0,
+        stride_v_cache_1,
+        a.query_start_len_ptr,
+        num_seqs,
+        cfg,
+        true,
     );
 }
 
@@ -162,6 +257,7 @@ fn findSeqIdx(
 fn kernelUnifiedAttentionSparseMla2d(
     k: *Builder,
     output_ptr: Value,
+    partial_lse_ptr: ?Value,
     query_ptr: Value,
     key_cache_ptr: Value,
     value_cache_ptr: Value,
@@ -179,6 +275,7 @@ fn kernelUnifiedAttentionSparseMla2d(
     query_start_len_ptr: Value,
     num_seqs: Value,
     config: Cfg,
+    comptime split_mode: bool,
 ) void {
     const BLOCK_Q: i64 = 1;
     const BLOCK_M: i64 = config.block_m;
@@ -193,8 +290,13 @@ fn kernelUnifiedAttentionSparseMla2d(
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_HEAD_BLOCKS: i64 = @divTrunc(NUM_QUERY_HEADS, BLOCK_M);
     const NUM_TILES: i64 = @divTrunc(config.topk_count + TILE_SIZE - 1, TILE_SIZE);
+    const NUM_SPLITS: i64 = if (split_mode) config.num_splits else 1;
+    const TILES_PER_SPLIT: i64 = @divTrunc(NUM_TILES + NUM_SPLITS - 1, NUM_SPLITS);
 
     const q_block_global_idx = k.programId(.x);
+    const split_idx = if (split_mode) k.programId(.y) else k.liftAs(0, .i32);
+    const split_tile_start = split_idx.mul(@as(i32, @intCast(NUM_TILES))).div(@as(i32, @intCast(NUM_SPLITS)));
+    const split_tile_end = split_idx.add(1).mul(@as(i32, @intCast(NUM_TILES))).div(@as(i32, @intCast(NUM_SPLITS)));
     const q_ind = q_block_global_idx.div(@as(i32, @intCast(NUM_HEAD_BLOCKS)));
     const head_ind = q_block_global_idx.rem(@as(i32, @intCast(NUM_HEAD_BLOCKS)));
     const seq_idx = findSeqIdx(k, query_start_len_ptr, q_ind, num_seqs, BLOCK_Q, false);
@@ -243,16 +345,18 @@ fn kernelUnifiedAttentionSparseMla2d(
     const l_init = k.full(&.{BLOCK_M}, 0.0, .f32);
     const acc_init = k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32);
 
-    var loop = k.openFor(0, NUM_TILES, 1, .{ m_init, l_init, acc_init });
+    var loop = k.openFor(0, TILES_PER_SPLIT, 1, .{ m_init, l_init, acc_init });
     {
         const t = loop.iv;
         const M = loop.carried[0];
         const L = loop.carried[1];
         const acc = loop.carried[2];
 
-        const tile_start = t.mul(@as(i32, @intCast(TILE_SIZE)));
+        const tile_idx = split_tile_start.add(t);
+        const tile_start = tile_idx.mul(@as(i32, @intCast(TILE_SIZE)));
         const tile_offsets = tile_start.add(offs_t);
-        var valid_t = tile_offsets.lt(@as(i32, @intCast(config.topk_count)));
+        var valid_t = tile_offsets.lt(@as(i32, @intCast(config.topk_count)))
+            .bitAnd(tile_idx.lt(split_tile_end));
 
         const topk_row_ptr = topk_indices_ptr.addPtr(q_ind.mul(@as(i32, @intCast(config.topk_count))));
         const topk_pos = k.loadOpts(topk_row_ptr.addPtr(tile_start).addPtr(offs_t), .{
@@ -330,7 +434,7 @@ fn kernelUnifiedAttentionSparseMla2d(
     var L = loop.results[1];
     var acc = loop.results[2];
 
-    if (config.use_attn_sink) {
+    if (!split_mode and config.use_attn_sink) {
         const sink_mask = query_mask_0.bitAnd(query_mask_1);
         const sink_logits = k.loadOpts(attn_sink_ptr.addPtr(query_offset_1), .{
             .mask = sink_mask,
@@ -349,8 +453,47 @@ fn kernelUnifiedAttentionSparseMla2d(
         L = L.mul(alpha).add(sink_p);
     }
 
-    const one_over_L = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(L.expandDims(1));
-    acc = acc.mul(k.broadcastTo(one_over_L, &.{ BLOCK_M, VALUE_RANK }));
+    const has_value = L.gt(0.0);
+    const safe_l = k.where(has_value, L, k.full(&.{BLOCK_M}, 1.0, .f32));
+    const one_over_l = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(safe_l.expandDims(1));
+    acc = acc.mul(k.broadcastTo(one_over_l, &.{ BLOCK_M, VALUE_RANK }));
+    acc = k.where(
+        has_value.expandDims(1),
+        acc,
+        k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32),
+    );
+
+    if (split_mode) {
+        // Compiler-managed workspace layouts are [query, head, split, value]
+        // and [query, head, split], both in f32.
+        const partial_out_token_stride: i64 = NUM_QUERY_HEADS * NUM_SPLITS * VALUE_RANK;
+        const partial_out_head_stride: i64 = NUM_SPLITS * VALUE_RANK;
+        const partial_out_offset = q_ind.to(.i64).mul(partial_out_token_stride)
+            .add(offs_m.expandDims(1).to(.i64).mul(partial_out_head_stride))
+            .add(split_idx.to(.i64).mul(VALUE_RANK))
+            .add(offs_value.expandDims(0).to(.i64));
+        k.storeOpts(
+            output_ptr.addPtr(partial_out_offset),
+            acc,
+            .{ .mask = q_mask },
+        );
+
+        const partial_lse_token_stride: i64 = NUM_QUERY_HEADS * NUM_SPLITS;
+        const partial_lse_offset = q_ind.to(.i64).mul(partial_lse_token_stride)
+            .add(offs_m.to(.i64).mul(NUM_SPLITS))
+            .add(split_idx.to(.i64));
+        const partial_lse = k.where(
+            has_value,
+            M.add(k.log(safe_l)),
+            k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32),
+        );
+        k.storeOpts(
+            partial_lse_ptr.?.addPtr(partial_lse_offset),
+            partial_lse,
+            .{ .mask = query_mask_0.bitAnd(query_mask_1) },
+        );
+        return;
+    }
 
     const output_offs_lora = query_offset_0.expandDims(1).mul(output_stride_0)
         .add(query_offset_1.expandDims(1).mul(output_stride_1))
@@ -359,5 +502,95 @@ fn kernelUnifiedAttentionSparseMla2d(
         output_ptr.addPtr(output_offs_lora),
         acc.to(config.o_dtype),
         .{ .mask = q_mask },
+    );
+}
+
+const ReduceCfg = struct {
+    sink_dtype: DType = .f32,
+    o_dtype: DType = .bf16,
+    num_query_heads: i64 = 32,
+    value_rank: i64 = 512,
+    num_splits: i64 = 1,
+    use_attn_sink: bool = false,
+};
+
+pub const ReduceKernel = tri.Kernel(ReduceCfg, .{
+    .name = "_kernel_reduce_sparse_mla_splits_ptr",
+    .inputs = &.{
+        "partial_output_ptr",
+        "partial_lse_ptr",
+        "attn_sink_ptr",
+        "output_stride_0_ptr",
+        "output_stride_1_ptr",
+    },
+    .outputs = &.{"output"},
+    .run = runReduce,
+});
+
+fn runReduce(b: *tri.Builder, cfg: ReduceCfg) tri.FinishError!void {
+    const a = try b.declareArgs(.{
+        .partial_output_ptr = .{ .ptr = .f32 },
+        .partial_lse_ptr = .{ .ptr = .f32 },
+        .attn_sink_ptr = .{ .ptr = cfg.sink_dtype },
+        .output_stride_0_ptr = .{ .ptr = .i64 },
+        .output_stride_1_ptr = .{ .ptr = .i64 },
+        .output_ptr = .{ .ptr = cfg.o_dtype },
+    });
+
+    const output_stride_0 = b.load(a.output_stride_0_ptr);
+    const output_stride_1 = b.load(a.output_stride_1_ptr);
+    const query_idx = b.programId(.x);
+    const head_idx = b.programId(.y);
+    const offs_s = b.arange(0, cfg.num_splits, .i32);
+    const offs_d = b.arange(0, cfg.value_rank, .i32);
+
+    const partial_lse_token_stride: i64 = cfg.num_query_heads * cfg.num_splits;
+    const partial_lse_offset = query_idx.to(.i64).mul(partial_lse_token_stride)
+        .add(head_idx.to(.i64).mul(cfg.num_splits))
+        .add(offs_s.to(.i64));
+    const partial_lse = b.load(a.partial_lse_ptr.addPtr(partial_lse_offset));
+
+    const sink_score = if (cfg.use_attn_sink)
+        b.load(a.attn_sink_ptr.addPtr(head_idx)).to(.f32)
+    else
+        b.liftAs(-std.math.inf(f32), .f32);
+    const overall_max = b.max(partial_lse).maximum(sink_score);
+    const has_value = overall_max.gt(-std.math.inf(f32));
+    const safe_max = b.where(has_value, overall_max, b.liftAs(0.0, .f32));
+    const split_weights = b.exp(partial_lse.sub(safe_max));
+    const sink_weight = if (cfg.use_attn_sink)
+        b.exp(sink_score.sub(safe_max))
+    else
+        b.liftAs(0.0, .f32);
+    const denominator = b.sumOpts(split_weights, .{ .axis = 0 }).add(sink_weight);
+
+    const partial_out_token_stride: i64 = cfg.num_query_heads * cfg.num_splits * cfg.value_rank;
+    const partial_out_head_stride: i64 = cfg.num_splits * cfg.value_rank;
+    const partial_out_base = query_idx.to(.i64).mul(partial_out_token_stride)
+        .add(head_idx.to(.i64).mul(partial_out_head_stride));
+    const partial_out_offset = b.broadcastTo(
+        partial_out_base.add(offs_s.expandDims(1).to(.i64).mul(cfg.value_rank)),
+        &.{ cfg.num_splits, cfg.value_rank },
+    ).add(b.broadcastTo(offs_d.expandDims(0).to(.i64), &.{ cfg.num_splits, cfg.value_rank }));
+    const partial_output = b.load(a.partial_output_ptr.addPtr(partial_out_offset));
+    const weighted_output = partial_output.mul(split_weights.expandDims(1));
+    const numerator = b.sumOpts(weighted_output, .{ .axis = 0 });
+    const safe_denominator = b.where(
+        denominator.gt(0.0),
+        denominator,
+        b.liftAs(1.0, .f32),
+    );
+    const output = b.where(
+        has_value,
+        numerator.div(safe_denominator),
+        b.zeros(&.{cfg.value_rank}, .f32),
+    );
+
+    const output_offset = query_idx.to(.i64).mul(output_stride_0)
+        .add(head_idx.to(.i64).mul(output_stride_1))
+        .add(offs_d.to(.i64));
+    b.store(
+        a.output_ptr.addPtr(output_offset),
+        output.to(cfg.o_dtype),
     );
 }
