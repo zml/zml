@@ -116,9 +116,10 @@ and sizes.
 6. Check resident counters: three staged layer loads and zero steady-state
    payload reloads are required.
 7. Reproduce the complete gate from the workspace root with
-   `./scripts/reproduce.sh 26`. If an unrelated workload takes a GPU after an otherwise successful early
-   phase, rerun `scripts/milestones/milestone-26.sh --resume`; it validates the
-   retained evidence before resuming at TP4 reset.
+   `./scripts/reproduce.sh 26`. If an unrelated workload takes a GPU after
+   an otherwise successful early phase, rerun `scripts/milestones/milestone-26.sh --resume`; it validates the
+   retained evidence before resuming at TP4 reset. Add `--wait-for-gpus` to wait
+   for up to two hours without signaling or terminating the occupying process.
 
 ## Full-model boundary
 
