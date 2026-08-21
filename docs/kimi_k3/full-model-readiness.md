@@ -13,8 +13,24 @@ CUDA_VISIBLE_DEVICES=0 python tools/kimi_k3/full_model_preflight.py \
   --quiet
 ```
 
-Add `--verify-present-hashes --require-complete` only for the Milestone 21
-full-checkpoint gate. The preflight never downloads a shard.
+For Milestone 21, first freeze the authoritative Hugging Face download metadata,
+then verify every payload byte against it:
+
+```bash
+python tools/kimi_k3/checkpoint_receipt.py \
+  --model=/path/to/kimi-k3 \
+  --baseline-manifest=/path/to/checkpoint-sha256.json \
+  --output=/path/to/checkpoint-full-sha256.json
+CUDA_VISIBLE_DEVICES=0 python tools/kimi_k3/full_model_preflight.py \
+  --model=/path/to/kimi-k3 \
+  --inventory=/path/to/tensor-name-inventory.jsonl.gz \
+  --hash-manifest=/path/to/checkpoint-full-sha256.json \
+  --verify-present-hashes --require-complete
+```
+
+The receipt requires exactly 96 metadata records from one immutable Hub revision
+and cross-checks the five earlier baseline hashes. The preflight then calculates
+all 96 SHA-256 values in-run. Neither command downloads a shard.
 
 ## Frozen ownership contract
 
@@ -75,7 +91,10 @@ the available layers prove sequential substitution of layers 1 and 2 through
 the same KDA+MoE family shape. Physical multi-device equivalence is deferred by
 the current single-GPU scope; distributed ownership is validated structurally.
 
-The live preflight records the current shard count while user-supplied files may
-still be arriving. Full text validation starts only after all required shards 1
-through 94 are present and hashed locally. Shards 95 and 96 contain the ignored
-projector/vision payload and are optional for the text-only gate.
+All 96 user-supplied shards are now present. Shards 1 through 94 are mandatory
+for the text gate; shards 95 and 96 contain the ignored projector/vision payload
+but are also integrity-checked because they arrived in the same download. The
+one-GPU scope can validate the full registry, compile all 93 layer families, and
+stage bounded early/middle/late layers. Physical distributed equivalence,
+32-token full-model execution, and deployment SLO judgment remain Gate F work
+for a multi-GPU deployment with declared performance targets.

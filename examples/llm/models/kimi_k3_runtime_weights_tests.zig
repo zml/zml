@@ -8,11 +8,20 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const Args = struct {
     weights: []const u8,
+    kda_layer: usize = 1,
+    kda_substitute_layer: usize = 2,
+    mla_layer: usize = 3,
+    mla_substitute_layer: ?usize = null,
 
     pub const help =
         \\Use kimi_k3_runtime_weights_tests --weights=<S4-directory>
         \\
         \\Stage every Kimi K3 runtime weight family sequentially on NVIDIA CUDA.
+        \\Optional layer selectors permit bounded early, middle, or late family staging.
+        \\  --kda-layer=<index>             First KDA+MoE layer (default: 1)
+        \\  --kda-substitute-layer=<index>  Same-family KDA substitution (default: 2)
+        \\  --mla-layer=<index>             First MLA+MoE layer (default: 3)
+        \\  --mla-substitute-layer=<index>  Optional same-family MLA substitution
         \\
     ;
 };
@@ -25,6 +34,12 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
+    if (args.kda_layer >= 93 or args.kda_substitute_layer >= 93 or args.mla_layer >= 93) {
+        return error.InvalidKimiK3LayerIndex;
+    }
+    if (args.mla_substitute_layer) |index| {
+        if (index >= 93) return error.InvalidKimiK3LayerIndex;
+    }
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     });
@@ -62,20 +77,20 @@ pub fn main(init: std.process.Init) !void {
     try stdout_file.interface.flush();
 
     started = std.Io.Clock.now(.real, io).toNanoseconds();
-    var kda_moe = try loader.loadKdaMoe(1);
+    var kda_moe = try loader.loadKdaMoe(args.kda_layer);
     if (kda_moe.common.moe.experts.w1.values.shape().dim(.expert) != runtime_weights.expert_count) {
         return error.InvalidKimiK3KdaExpertBankShape;
     }
     const kda_load_us = elapsedUs(io, started);
     zml.Buffer.deinitAll(layer.KdaMoeWeights, &kda_moe);
     try stdout_file.interface.print(
-        "KIMI_K3_RUNTIME_LOAD_PASS family=kda_moe layer=1 experts={} load_us={}\n",
-        .{ runtime_weights.expert_count, kda_load_us },
+        "KIMI_K3_RUNTIME_LOAD_PASS family=kda_moe layer={} experts={} load_us={}\n",
+        .{ args.kda_layer, runtime_weights.expert_count, kda_load_us },
     );
     try stdout_file.interface.flush();
 
     started = std.Io.Clock.now(.real, io).toNanoseconds();
-    var kda_moe_substitute = try loader.loadKdaMoe(2);
+    var kda_moe_substitute = try loader.loadKdaMoe(args.kda_substitute_layer);
     if (kda_moe_substitute.common.moe.experts.w1.values.shape().dim(.expert) != runtime_weights.expert_count or
         kda_moe_substitute.attention.q_weight.shape().dim(.d) != 7168)
     {
@@ -84,22 +99,37 @@ pub fn main(init: std.process.Init) !void {
     const kda_substitute_load_us = elapsedUs(io, started);
     zml.Buffer.deinitAll(layer.KdaMoeWeights, &kda_moe_substitute);
     try stdout_file.interface.print(
-        "KIMI_K3_RUNTIME_SUBSTITUTION_PASS family=kda_moe layers=1,2 load_us={}\n",
-        .{kda_substitute_load_us},
+        "KIMI_K3_RUNTIME_SUBSTITUTION_PASS family=kda_moe layers={},{} load_us={}\n",
+        .{ args.kda_layer, args.kda_substitute_layer, kda_substitute_load_us },
     );
     try stdout_file.interface.flush();
 
     started = std.Io.Clock.now(.real, io).toNanoseconds();
-    var mla_moe = try loader.loadMlaMoe(3);
+    var mla_moe = try loader.loadMlaMoe(args.mla_layer);
     if (mla_moe.common.moe.experts.w2.values.shape().dim(.expert) != runtime_weights.expert_count) {
         return error.InvalidKimiK3MlaExpertBankShape;
     }
     const mla_load_us = elapsedUs(io, started);
     zml.Buffer.deinitAll(layer.MlaMoeWeights, &mla_moe);
     try stdout_file.interface.print(
-        "KIMI_K3_RUNTIME_LOAD_PASS family=mla_moe layer=3 experts={} load_us={}\n",
-        .{ runtime_weights.expert_count, mla_load_us },
+        "KIMI_K3_RUNTIME_LOAD_PASS family=mla_moe layer={} experts={} load_us={}\n",
+        .{ args.mla_layer, runtime_weights.expert_count, mla_load_us },
     );
+    if (args.mla_substitute_layer) |substitute_layer| {
+        started = std.Io.Clock.now(.real, io).toNanoseconds();
+        var mla_moe_substitute = try loader.loadMlaMoe(substitute_layer);
+        if (mla_moe_substitute.common.moe.experts.w2.values.shape().dim(.expert) != runtime_weights.expert_count or
+            mla_moe_substitute.attention.q_a_proj.shape().dim(.d) != 7168)
+        {
+            return error.KimiK3FamilyBufferSubstitutionMismatch;
+        }
+        const mla_substitute_load_us = elapsedUs(io, started);
+        zml.Buffer.deinitAll(layer.MlaMoeWeights, &mla_moe_substitute);
+        try stdout_file.interface.print(
+            "KIMI_K3_RUNTIME_SUBSTITUTION_PASS family=mla_moe layers={},{} load_us={}\n",
+            .{ args.mla_layer, substitute_layer, mla_substitute_load_us },
+        );
+    }
     try stdout_file.interface.writeAll("KIMI_K3_RUNTIME_LOAD_ALL_PASS backend=cuda resident=head+layer0 staged_banks=2\n");
     try stdout_file.interface.flush();
 }

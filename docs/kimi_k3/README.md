@@ -12,7 +12,7 @@ Rules enforced by the project plan:
 - model weights are never downloaded by project scripts;
 - checkpoint input is read from the workspace-local
   `moonshot/kimi-k3` directory;
-- missing full-checkpoint shards are supplied by the user later;
+- all 96 user-supplied shards are present and Milestone 21 verifies them offline;
 - every important change is committed separately with its validation evidence.
 
 `revisions.lock.json` is self-contained so the external `upstream/` directory
