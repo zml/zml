@@ -164,7 +164,9 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                 }
                 llm.exes.prefill_local_layer_exe.call(llm.exes.prefill_local_layer_args, &llm.exes.prefill_local_layer_results);
                 if (llm.collect_activations) {
-                    llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &llm.activation_cache_buffers.? });
+                    var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
+                    llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                    replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                 } else {
                     llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
                 }
@@ -177,7 +179,9 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                 }
                 llm.exes.prefill_global_layer_exe.call(llm.exes.prefill_global_layer_args, &llm.exes.prefill_global_layer_results);
                 if (llm.collect_activations) {
-                    llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &llm.activation_cache_buffers.? });
+                    var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
+                    llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                    replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                 } else {
                     llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
                 }
@@ -248,7 +252,9 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                     }
                     llm.exes.decode_local_layer_exe.call(llm.exes.decode_local_layer_args, &llm.exes.decode_local_layer_results);
                     if (llm.collect_activations) {
-                        llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &llm.activation_cache_buffers.? });
+                        var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
+                        llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                        replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                     } else {
                         llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
                     }
@@ -261,7 +267,9 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                     }
                     llm.exes.decode_global_layer_exe.call(llm.exes.decode_global_layer_args, &llm.exes.decode_global_layer_results);
                     if (llm.collect_activations) {
-                        llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &llm.activation_cache_buffers.? });
+                        var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
+                        llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                        replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                     } else {
                         llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
                     }
@@ -347,8 +355,12 @@ pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, confi
 
     var data_offset: u64 = 0;
     var first_entry = true;
+    var local_layer_index: i64 = 0;
+    var global_layer_index: i64 = 0;
     for (config.layer_types, 0..) |layer_type, layer_index| {
         const is_global = layer_type == .full_attention;
+        const cache_layer_index = if (is_global) global_layer_index else local_layer_index;
+        if (is_global) global_layer_index += 1 else local_layer_index += 1;
 
         inline for (activation_fields) |activation| {
             const source = activationSlice(&activations.blocks.items[0].slices, is_global, activation.field);
@@ -365,6 +377,7 @@ pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, confi
             }
             try header.writer.print("],\"data_offsets\":[{d},{d}]}}", .{ data_offset, data_offset + byte_len });
             data_offset += byte_len;
+            _ = cache_layer_index;
         }
     }
     try header.writer.writeByte('}');
@@ -387,8 +400,8 @@ pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, confi
     try file.writeStreamingAll(zml_handler.local_io, &header_len_bytes);
     try file.writeStreamingAll(zml_handler.local_io, padded_header);
 
-    var local_layer_index: i64 = 0;
-    var global_layer_index: i64 = 0;
+    local_layer_index = 0;
+    global_layer_index = 0;
     for (config.layer_types) |layer_type| {
         const is_global = layer_type == .full_attention;
         const cache_layer_index = if (is_global) global_layer_index else local_layer_index;
@@ -427,6 +440,18 @@ fn replaceRngBuffer(current: *zml.Tensor.Rng.Buffer, next: zml.Tensor.Rng.Buffer
         current._state.deinit();
     }
     current.* = next;
+}
+
+fn replaceActivationCacheBuffers(current: *zml.Bufferized(gemma.ActivationCache), next: zml.Bufferized(gemma.ActivationCache)) void {
+    @setEvalBranchQuota(10_000);
+    inline for (std.meta.fields(gemma.ActivationCache)) |field| {
+        const current_buffer = &@field(current, field.name);
+        const next_buffer = @field(next, field.name);
+        if (!sameBufferHandles(current_buffer.*, next_buffer)) {
+            current_buffer.deinit();
+        }
+        current_buffer.* = next_buffer;
+    }
 }
 
 fn sameBufferHandles(lhs: zml.Buffer, rhs: zml.Buffer) bool {

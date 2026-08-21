@@ -270,8 +270,15 @@ pub const MemoryChecker = struct {
 };
 
 const Args = struct {
+    export_activations: bool = false,
+    prompt: []const u8 = "Write a python script that computes the n-th prime number",
+
     pub const help =
         \\ Use detokenization [options]
+        \\
+        \\ Options:
+        \\   --export-activations   Collect activations and export them as a safetensors file
+        \\   --prompt=<text>        Prompt to use for generation
         \\
     ;
 };
@@ -340,19 +347,21 @@ const bench_misc = false;
 
 pub fn runGemma(zml_handler: *Zml_handler) !void {
     std.log.info("***** Init Gemma handler", .{});
-    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma, true);
+    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma, zml_handler.args.export_activations);
     defer llm.deinit(zml_handler.allocator);
 
     std.log.info("***** Tokenize prompt", .{});
-    const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, "Write a python script that computes the n-th prime number");
+    const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, zml_handler.args.prompt);
     defer zml_handler.allocator.free(prompt);
 
     std.log.info("***** Generate text", .{});
     zml_handler.mem.start(0);
     var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
     defer generation_result.deinit(zml_handler.allocator);
-    if (generation_result.activations) |*activations| {
-        try gemma_inference.exportActivations(zml_handler, "gemma-activations.safetensors", llm.config, activations);
+    if (zml_handler.args.export_activations) {
+        if (generation_result.activations) |*activations| {
+            try gemma_inference.exportActivations(zml_handler, "gemma-activations.safetensors", llm.config, activations);
+        }
     }
     zml_handler.mem.check(0);
 }
