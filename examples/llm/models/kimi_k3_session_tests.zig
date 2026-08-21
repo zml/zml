@@ -61,6 +61,35 @@ fn initSelectedModel(
     return .{ .inner = inner, .parsed_config = parsed };
 }
 
+fn hashBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    hasher: *std.crypto.hash.sha2.Sha256,
+    buffer: zml.Buffer,
+) !void {
+    var host = try buffer.toSliceAlloc(allocator, io);
+    defer host.free(allocator);
+    hasher.update(host.constData());
+}
+
+fn sessionCacheDigest(session: *const session_impl.Session) ![64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(std.mem.asBytes(&session.position));
+    for (session.kda_caches) |cache| {
+        try hashBuffer(session.allocator, session.io, &hasher, cache.q_conv);
+        try hashBuffer(session.allocator, session.io, &hasher, cache.k_conv);
+        try hashBuffer(session.allocator, session.io, &hasher, cache.v_conv);
+        try hashBuffer(session.allocator, session.io, &hasher, cache.recurrent_state);
+    }
+    for (session.mla_caches) |cache| {
+        try hashBuffer(session.allocator, session.io, &hasher, cache.compressed);
+        try hashBuffer(session.allocator, session.io, &hasher, cache.extra_key);
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -143,12 +172,19 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     var first_greedy: ?u32 = null;
+    var first_cache_digest: ?[64]u8 = null;
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     for (0..args.repeats) |repeat| {
         const started = std.Io.Clock.now(.real, io).toNanoseconds();
         try session.runPrefill(official_prefix[0..args.token_count]);
         if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
         const greedy = session.last_generated_token;
+        const cache_digest = try sessionCacheDigest(&session);
+        if (first_cache_digest) |expected| {
+            if (!std.mem.eql(u8, &expected, &cache_digest)) return error.KimiK3SessionCacheResetMismatch;
+        } else {
+            first_cache_digest = cache_digest;
+        }
         if (first_greedy) |expected| {
             if (greedy != expected) return error.KimiK3SessionResetMismatch;
         } else {
@@ -158,8 +194,17 @@ pub fn main(init: std.process.Init) !void {
             return error.KimiK3OfficialGreedyMismatch;
         }
         try stdout_file.interface.print(
-            "KIMI_K3_SESSION_PASS repeat={} tokens={} greedy={} compile_us={} session_us={} backend=cuda weights={s}\n",
-            .{ repeat, args.token_count, greedy, compile_us, elapsedUs(io, started), if (args.resident) "resident" else "streaming" },
+            "KIMI_K3_SESSION_PASS repeat={} tokens={} greedy={} compile_us={} session_us={} " ++
+                "backend=cuda weights={s} cache_sha256={s}\n",
+            .{
+                repeat,
+                args.token_count,
+                greedy,
+                compile_us,
+                elapsedUs(io, started),
+                if (args.resident) "resident" else "streaming",
+                &cache_digest,
+            },
         );
         try stdout_file.interface.flush();
         if (args.decode_one) {
@@ -171,15 +216,29 @@ pub fn main(init: std.process.Init) !void {
                 return error.KimiK3DecodeHistoryMismatch;
             }
             try stdout_file.interface.print(
-                "\nKIMI_K3_SESSION_DECODE_PASS streamed={} next={} history_tokens={} capacity={}\n",
-                .{ greedy, session.last_generated_token, history.items.len, seqlen },
+                "\nKIMI_K3_SESSION_DECODE_PASS streamed={} next={} history_tokens={} capacity={} " ++
+                    "cache_sha256={s}\n",
+                .{
+                    greedy,
+                    session.last_generated_token,
+                    history.items.len,
+                    seqlen,
+                    &(try sessionCacheDigest(&session)),
+                },
             );
             try stdout_file.interface.flush();
         }
     }
     try stdout_file.interface.print(
-        "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked={}\n",
-        .{args.token_count == official_prefix.len},
+        "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked={} " ++
+            "weights={s} layer_loads={} payload_reads={} payload_bytes={}\n",
+        .{
+            args.token_count == official_prefix.len,
+            if (args.resident) "resident" else "streaming",
+            buffers.load_stats.layer_loads,
+            buffers.load_stats.payload_reads,
+            buffers.load_stats.payload_bytes,
+        },
     );
     try stdout_file.interface.flush();
 }
