@@ -1,19 +1,26 @@
 # Kimi K3 port controls
 
 This directory holds versioned provenance for the NVIDIA-only Kimi K3 port.
-The executable plan and milestone SITREPs remain at `/dev/shm/kimi-k3` as
-requested, while implementation work and focused commits are made in this ZML
-repository.
+The executable plan and milestone SITREPs live at the active workspace root,
+while implementation work and focused commits are made in this ZML repository.
 
 Rules enforced by the project plan:
 
-- inference and performance validation use NVIDIA GPUs only;
+- CUDA compilation, inference, and performance validation currently use only
+  physical GPU 0 through `CUDA_VISIBLE_DEVICES=0`;
 - CPU inference fallback is forbidden;
 - model weights are never downloaded by project scripts;
-- checkpoint input is read from `/dev/shm/kimi-k3/moonshot/kimi-k3`;
+- checkpoint input is read from the workspace-local
+  `moonshot/kimi-k3` directory;
 - missing full-checkpoint shards are supplied by the user later;
 - every important change is committed separately with its validation evidence.
 
 `revisions.lock.json` is self-contained so the external `upstream/` directory
 can be deleted. The ZML donor commits remain available as remote refs in this
 repository, and Moonshot source/checkpoint identity is enforced by SHA-256.
+
+Implementation evidence:
+
+- [Native MXFP4 comparison](native-mxfp4-comparison.md)
+- [Optimized KDA/MLA comparison](optimized-kda-mla-comparison.md)
+- [Full-model and distributed readiness](full-model-readiness.md)

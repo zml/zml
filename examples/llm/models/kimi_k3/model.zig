@@ -449,7 +449,8 @@ pub const LoadedModel = struct {
             .io = io,
             .platform = platform,
             .store = store,
-            .sharding = shardings.model,
+            .model_sharding = shardings.model,
+            .expert_sharding = shardings.experts,
         };
         var head = try loader.loadHead();
         errdefer zml.Buffer.deinitAll(runtime_weights.HeadTensors, &head);

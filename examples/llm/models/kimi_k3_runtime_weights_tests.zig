@@ -40,7 +40,8 @@ pub fn main(init: std.process.Init) !void {
         .io = io,
         .platform = platform,
         .store = &store,
-        .sharding = platform.replicated_sharding,
+        .model_sharding = platform.replicated_sharding,
+        .expert_sharding = platform.replicated_sharding,
     };
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
 
@@ -70,6 +71,21 @@ pub fn main(init: std.process.Init) !void {
     try stdout_file.interface.print(
         "KIMI_K3_RUNTIME_LOAD_PASS family=kda_moe layer=1 experts={} load_us={}\n",
         .{ runtime_weights.expert_count, kda_load_us },
+    );
+    try stdout_file.interface.flush();
+
+    started = std.Io.Clock.now(.real, io).toNanoseconds();
+    var kda_moe_substitute = try loader.loadKdaMoe(2);
+    if (kda_moe_substitute.common.moe.experts.w1.values.shape().dim(.expert) != runtime_weights.expert_count or
+        kda_moe_substitute.attention.q_weight.shape().dim(.d) != 7168)
+    {
+        return error.KimiK3FamilyBufferSubstitutionMismatch;
+    }
+    const kda_substitute_load_us = elapsedUs(io, started);
+    zml.Buffer.deinitAll(layer.KdaMoeWeights, &kda_moe_substitute);
+    try stdout_file.interface.print(
+        "KIMI_K3_RUNTIME_SUBSTITUTION_PASS family=kda_moe layers=1,2 load_us={}\n",
+        .{kda_substitute_load_us},
     );
     try stdout_file.interface.flush();
 

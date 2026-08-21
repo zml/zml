@@ -198,6 +198,14 @@ zig_binary(
 )
 
 zig_binary(
+    name = "kimi_k3_readiness_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_readiness_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
     name = "kimi_k3_tokenizer_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/kimi_k3_tokenizer_tests.zig",

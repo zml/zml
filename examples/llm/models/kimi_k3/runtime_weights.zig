@@ -10,6 +10,88 @@ const log = std.log.scoped(.kimi_k3_weights);
 
 pub const expert_count: usize = 896;
 
+pub const expert_component_bytes = struct {
+    pub const w1_values: u64 = expert_count * 3072 * 1792;
+    pub const w1_scale: u64 = expert_count * 3072 * 112;
+    pub const w2_values: u64 = expert_count * 3584 * 1536;
+    pub const w2_scale: u64 = expert_count * 3584 * 96;
+    pub const w3_values: u64 = expert_count * 3072 * 1792;
+    pub const w3_scale: u64 = expert_count * 3072 * 112;
+    pub const peak_host_staging: u64 = @max(w1_values, w2_values, w3_values);
+    pub const device_bank: u64 = w1_values + w1_scale + w2_values + w2_scale + w3_values + w3_scale;
+};
+
+/// Contiguous global expert ownership for one expert-parallel rank. Uneven
+/// partitions are intentional so any device count can be preflighted without
+/// inventing or dropping an expert.
+pub const ExpertPartition = struct {
+    rank: usize,
+    ranks: usize,
+    first: usize,
+    end: usize,
+
+    pub fn init(rank: usize, ranks: usize) !ExpertPartition {
+        if (ranks == 0 or rank >= ranks) return error.InvalidExpertParallelRank;
+        const base = expert_count / ranks;
+        const remainder = expert_count % ranks;
+        const first = rank * base + @min(rank, remainder);
+        const partition_count = base + @intFromBool(rank < remainder);
+        return .{ .rank = rank, .ranks = ranks, .first = first, .end = first + partition_count };
+    }
+
+    pub fn count(self: ExpertPartition) usize {
+        return self.end - self.first;
+    }
+
+    pub fn contains(self: ExpertPartition, global_expert: usize) bool {
+        return global_expert >= self.first and global_expert < self.end;
+    }
+};
+
+/// Logical tensor/expert-parallel ownership. ZML model and expert shardings
+/// carry these independent channels to compiled executables and buffer
+/// transfers; this plan validates the degrees before any checkpoint is opened.
+pub const DistributedPlan = struct {
+    device_count: usize,
+    tensor_parallel: usize,
+    expert_parallel: usize,
+
+    pub fn init(device_count: usize, tensor_parallel: usize) !DistributedPlan {
+        if (device_count == 0 or tensor_parallel == 0 or device_count % tensor_parallel != 0) {
+            return error.InvalidKimiK3ParallelPlan;
+        }
+        const tensor_parallel_dims = [_]usize{ 7168, 12288, 1536, 512, 128, 96 };
+        for (tensor_parallel_dims) |dim| {
+            if (dim % tensor_parallel != 0) return error.InvalidKimiK3TensorParallelDegree;
+        }
+        return .{
+            .device_count = device_count,
+            .tensor_parallel = tensor_parallel,
+            .expert_parallel = device_count / tensor_parallel,
+        };
+    }
+
+    pub fn expertPartition(self: DistributedPlan, expert_rank: usize) !ExpertPartition {
+        return ExpertPartition.init(expert_rank, self.expert_parallel);
+    }
+};
+
+/// Production loading keeps the head and dense layer 0 resident, then stages
+/// exactly one MoE layer at a time. Expert components are read expert by
+/// expert into one bounded host buffer before transfer through the expert
+/// sharding; no dequantized full-model copy is materialized on the host.
+pub const StreamingLoadPlan = struct {
+    resident_layers: usize = 1,
+    staged_layers: usize = 92,
+    peak_host_staging_bytes: u64 = expert_component_bytes.peak_host_staging,
+    expert_bank_device_bytes: u64 = expert_component_bytes.device_bank,
+
+    pub fn init(layer_count: usize) !StreamingLoadPlan {
+        if (layer_count != 93) return error.InvalidKimiK3StreamingLayerCount;
+        return .{};
+    }
+};
+
 pub const HeadTensors = struct {
     embedding: zml.Tensor,
     output_res_norm: zml.Tensor,
@@ -35,7 +117,8 @@ pub const Loader = struct {
     io: std.Io,
     platform: *const zml.Platform,
     store: *zml.io.TensorStore,
-    sharding: zml.Sharding,
+    model_sharding: zml.Sharding,
+    expert_sharding: zml.Sharding,
 
     fn rootView(self: Loader) zml.io.TensorStore.View {
         return self.store.view();
@@ -64,7 +147,7 @@ pub const Loader = struct {
             self.io,
             self.platform,
             shape.withTags(tags),
-            self.sharding,
+            self.model_sharding,
             bytes,
         );
     }
@@ -86,7 +169,7 @@ pub const Loader = struct {
         var reader = try self.rootView().getReader(key, self.io, &io_buffer);
         defer reader.deinit();
         _ = try reader.interface.readSliceAll(bytes);
-        return zml.Buffer.fromBytes(self.io, self.platform, target, self.sharding, bytes);
+        return zml.Buffer.fromBytes(self.io, self.platform, target, self.model_sharding, bytes);
     }
 
     fn loadExpertComponent(
@@ -127,7 +210,7 @@ pub const Loader = struct {
                 );
             }
         }
-        return zml.Buffer.fromBytes(self.io, self.platform, target, self.sharding, bytes);
+        return zml.Buffer.fromBytes(self.io, self.platform, target, self.expert_sharding, bytes);
     }
 
     pub fn loadHead(self: Loader) !HeadWeights {
@@ -146,7 +229,7 @@ pub const Loader = struct {
             &symbolic,
             &buffers,
             self.store,
-            &.{self.sharding},
+            &.{self.model_sharding},
             .{},
         );
         try tensor_loader.await(self.io);
@@ -169,7 +252,7 @@ pub const Loader = struct {
             &symbolic,
             &buffers,
             self.store,
-            &.{self.sharding},
+            &.{self.model_sharding},
             .{},
         );
         try tensor_loader.await(self.io);
@@ -303,7 +386,7 @@ pub const Loader = struct {
         const bytes = try self.allocator.alloc(u8, shape.byteSize());
         defer self.allocator.free(bytes);
         @memset(bytes, 0);
-        return zml.Buffer.fromBytes(self.io, self.platform, shape, self.sharding, bytes);
+        return zml.Buffer.fromBytes(self.io, self.platform, shape, self.model_sharding, bytes);
     }
 };
 
