@@ -22,17 +22,21 @@ const Args = struct {
     max_new_tokens: usize = 1,
     context_limit: usize = 512,
     distributed: bool = false,
+    validate_only: bool = false,
+    profile_dir: ?[]const u8 = null,
 
     pub const help =
         \\Use kimi_k3_prefix_cli --weights=<S4-directory> --tokenizer=<tokenizer.json> --prompt=<text> [options]
         \\
         \\Run deterministic greedy decoding through the diagnostic four-layer
-        \\Kimi K3 prefix on NVIDIA CUDA GPU 0.
+        \\Kimi K3 prefix on NVIDIA CUDA GPU 0 or physical TP4.
         \\
         \\Options:
         \\  --max-new-tokens=<1..32>  Maximum generated tokens (default: 1)
         \\  --context-limit=<1..4096>  Prompt plus generation bound (default: 512)
         \\  --distributed              Require physical TP4 across four visible GPUs
+        \\  --validate-only             Tokenize and validate bounds without model execution
+        \\  --profile-dir=<path>         Capture one bounded prompt/decode Perfetto trace
         \\
         \\WARNING: Four layers are a development diagnostic, not reliable full-model answers.
         \\
@@ -72,6 +76,9 @@ fn validateArgs(args: Args) !void {
     if (args.context_limit == 0 or args.context_limit > maximum_context) {
         return error.InvalidKimiK3ContextLimit;
     }
+    if (args.profile_dir != null and args.max_new_tokens > 2) {
+        return error.KimiK3ProfileGenerationLimitExceeded;
+    }
 }
 
 fn initPrefixModel(
@@ -106,6 +113,15 @@ pub fn main(init: std.process.Init) !void {
         return error.KimiK3ContextCapacityOverflow;
     };
     if (sequence_capacity > args.context_limit) return error.KimiK3PromptExceedsContextLimit;
+    if (args.validate_only) {
+        var validation_stdout = std.Io.File.stdout().writerStreaming(io, &.{});
+        try validation_stdout.interface.print(
+            "KIMI_K3_PREFIX_VALIDATE_PASS prompt_tokens={} capacity={} context_limit={} max_new_tokens={} inference_executed=false\n",
+            .{ prompt_tokens.len, sequence_capacity, args.context_limit, args.max_new_tokens },
+        );
+        try validation_stdout.interface.flush();
+        return;
+    }
 
     try enableDeterministicCuda(allocator);
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
@@ -156,6 +172,15 @@ pub fn main(init: std.process.Init) !void {
     defer history.deinit(allocator);
     try history.appendSlice(allocator, prompt_tokens);
 
+    var profiler: ?zml.Platform.Profiler = null;
+    defer if (profiler) |*active_profiler| active_profiler.deinit();
+    if (args.profile_dir) |repository_path| {
+        profiler = try platform.profiler(allocator, io, .{
+            .repository_path = repository_path,
+            .session_id = "kimi-k3-prefix",
+        });
+    }
+
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     const stdout = &stdout_file.interface;
     try stdout.writeAll(
@@ -168,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
     );
     try stdout.flush();
 
+    if (profiler) |*active_profiler| try active_profiler.start();
     const prompt_started = std.Io.Clock.now(.real, io).toNanoseconds();
     try session.runPrefill(prompt_tokens);
     const prefill_us = elapsedUs(io, prompt_started);
@@ -176,6 +202,7 @@ pub fn main(init: std.process.Init) !void {
     const decode_started = std.Io.Clock.now(.real, io).toNanoseconds();
     try session.runDecode(&history, &decoded.writer);
     const decode_us = elapsedUs(io, decode_started);
+    const captured_profile = if (profiler) |*active_profiler| try active_profiler.stop() else null;
     if (!std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
     const device_memory = platform.devices[0].memoryStats();
 
@@ -192,6 +219,12 @@ pub fn main(init: std.process.Init) !void {
     try stdout.writeAll("KIMI_K3_PREFIX_TEXT_BEGIN\n");
     try stdout.writeAll(decoded.written());
     try stdout.writeAll("\nKIMI_K3_PREFIX_TEXT_END\n");
+    if (captured_profile) |profile| {
+        try stdout.print(
+            "KIMI_K3_PREFIX_PROFILE protobuf={s} perfetto={s} bounded_prompt=true\n",
+            .{ profile.protobuf_path, profile.perfetto_path },
+        );
+    }
     try stdout.print(
         "KIMI_K3_PREFIX_CLI_PASS backend=cuda device={s} layers=4 scope=diagnostic_prefix deterministic_ops=true " ++
             "prompt_tokens={} generated_tokens={} compile_us={} load_us={} prefill_us={} decode_us={} " ++
