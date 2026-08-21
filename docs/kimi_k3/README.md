@@ -6,8 +6,9 @@ while implementation work and focused commits are made in this ZML repository.
 
 Rules enforced by the project plan:
 
-- CUDA compilation, inference, and performance validation currently use only
-  physical GPU 0 through `CUDA_VISIBLE_DEVICES=0`;
+- full-model compilation, staging, and historical conformance remain pinned to
+  physical GPU 0; Milestones 22–26 additionally allow physical GPUs 0–3 only
+  for the isolated four-layer diagnostic and distributed tests;
 - CPU inference fallback is forbidden;
 - model weights are never downloaded by project scripts;
 - checkpoint input is read from the workspace-local
@@ -25,3 +26,4 @@ Implementation evidence:
 - [Optimized KDA/MLA comparison](optimized-kda-mla-comparison.md)
 - [Full-model and distributed readiness](full-model-readiness.md)
 - [Permanent conformance and operations](permanent-conformance.md)
+- [Four-layer GPU0 and TP4 operations](four-gpu-prefix-operations.md)

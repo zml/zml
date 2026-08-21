@@ -85,16 +85,19 @@ communication bounds.
 
 ## Current execution scope
 
-All CUDA compilation and execution is pinned to physical GPU 0 with
-`CUDA_VISIBLE_DEVICES=0`. The 93-layer family set compiles on that device, and
-the available layers prove sequential substitution of layers 1 and 2 through
-the same KDA+MoE family shape. Physical multi-device equivalence is deferred by
-the current single-GPU scope; distributed ownership is validated structurally.
+Full-model compilation, registry validation, and bounded staging remain pinned
+to physical GPU 0 with `CUDA_VISIBLE_DEVICES=0`. The 93-layer family set compiles
+on that device, and representative layers prove sequential substitution.
+Milestones 22–26 separately validate physical TP4 only for the resident S4
+four-layer diagnostic; TP2 x EP2 and TP1 x EP4 remain logical ownership checks
+on the current one-axis mesh.
 
 All 96 user-supplied shards are now present. Shards 1 through 94 are mandatory
 for the text gate; shards 95 and 96 contain the ignored projector/vision payload
 but are also integrity-checked because they arrived in the same download. The
-one-GPU scope can validate the full registry, compile all 93 layer families, and
-stage bounded early/middle/late layers. Physical distributed equivalence,
-32-token full-model execution, and deployment SLO judgment remain Gate F work
-for a multi-GPU deployment with declared performance targets.
+one-GPU scope can validate the full registry, compile all 93 layer families,
+and stage bounded early/middle/late layers. The four-device node exposes about
+1.192 TB aggregate HBM, below the roughly 1.56 TB checkpoint before runtime
+overhead. Full 93-layer equivalence, 32-token execution, and deployment SLO
+judgment therefore remain Gate F work for an eight-GPU-class deployment with
+declared performance targets.

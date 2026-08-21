@@ -7,7 +7,10 @@ route alignment, and expanded intermediate tensors exist only in dedicated test
 executables.
 
 All commands below are offline with respect to model data. Project scripts never
-download weights. The current execution scope is physical NVIDIA GPU 0:
+download weights. Historical and full-model conformance use physical NVIDIA GPU 0. The
+isolated
+four-layer diagnostic additionally supports physical TP4 as documented in
+`four-gpu-prefix-operations.md`:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
