@@ -32,8 +32,6 @@ const ProbeInputs = struct {
     w2: zml.Tensor,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: the compact expert bank and recorded local routes
-// exist only in this isolated Gate B harness and must be removed in cleanup.
 const Result = struct {
     routed_down: zml.Tensor,
     route_outputs: zml.Tensor,
@@ -52,8 +50,6 @@ const Result = struct {
     partitioned_combined_latent: zml.Tensor,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: two logical expert partitions on the same H100
-// validate global-to-local maps until the permanent distributed suite lands.
 fn partitionedBankLinear(
     input: zml.Tensor,
     expert_ids: zml.Tensor,
@@ -339,8 +335,6 @@ pub fn main(init: std.process.Init) !void {
     try zml.testing.expectClose(io, partition_actual.combined_latent, partition_actual.partitioned_combined_latent, .exact_match);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
-    // KIMI_K3_TEMP_REMOVE_M20: Gate B compile/execute timing and boundary
-    // inventory are removed with the compact selected-expert harness.
     try stdout_file.interface.print(
         "KIMI_K3_MOE_PASS experts=61 routes=64 matrices=183 boundaries=13 partition_shards=2 partition_exact=true compile_us={} cold_execute_us={} execute_us={} partition_compile_us={} partition_execute_us={}\n",
         .{ compile_us, cold_execute_us, execute_us, partition_compile_us, partition_execute_us },

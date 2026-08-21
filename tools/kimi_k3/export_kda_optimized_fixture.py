@@ -99,7 +99,6 @@ def add_case(tensors: dict[str, np.ndarray], name: str, sequence: int, heads: in
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     np.random.seed(SEED)
     tensors: dict[str, np.ndarray] = {}
@@ -126,9 +125,6 @@ def main() -> None:
     }
     manifest_path = args.output / "kda-optimized-cases.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: verbose fixture inventory is bring-up debug output.
-    if args.debug:
-        print(f"[kimi-k3-debug] kda_optimized_cases={len(cases)} tensors={len(tensors)}")
     print(json.dumps({"fixture": str(tensor_path), "cases": len(cases), "semantic_sha256": manifest["tensor_semantic_sha256"]}))
 
 

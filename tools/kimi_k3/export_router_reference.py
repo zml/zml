@@ -299,7 +299,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-root", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     checkpoint = args.checkpoint_root.resolve()
     if checkpoint != DEFAULT_CHECKPOINT.resolve():
@@ -341,12 +340,6 @@ def main() -> None:
     (args.output_dir.resolve() / "manifest.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n"
     )
-    # KIMI_K3_TEMP_REMOVE_M20: router activation inventories and reference
-    # timings are differential diagnostics removed during cleanup.
-    if args.debug:
-        print("[kimi-k3-debug] router timing", json.dumps(manifest["timing"], sort_keys=True))
-        for name, tensor in sorted(first_tensors.items()):
-            print(f"[kimi-k3-debug] {name} shape={tuple(tensor.shape)} dtype={tensor.dtype}")
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

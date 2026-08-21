@@ -270,7 +270,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     deterministic_setup()
@@ -303,11 +302,6 @@ def main() -> None:
     }
     manifest_path = args.output / "primitive-reference.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: verbose activation inventory exists only for
-    # bring-up and must be removed with temporary diagnostics at cleanup.
-    if args.debug:
-        for name, value in sorted(tensors.items()):
-            print(f"[kimi-k3-debug] {name} shape={value.shape} dtype={value.dtype}")
     print(json.dumps({"fixture": str(tensor_path), "checks": checks}, sort_keys=True))
 
 

@@ -24,3 +24,4 @@ Implementation evidence:
 - [Native MXFP4 comparison](native-mxfp4-comparison.md)
 - [Optimized KDA/MLA comparison](optimized-kda-mla-comparison.md)
 - [Full-model and distributed readiness](full-model-readiness.md)
+- [Permanent conformance and operations](permanent-conformance.md)

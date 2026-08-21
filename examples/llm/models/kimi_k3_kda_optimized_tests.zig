@@ -150,9 +150,6 @@ const Context = struct {
 
     fn compare(
         self: *Context,
-        case_name: []const u8,
-        path: []const u8,
-        boundary: []const u8,
         actual: zml.Buffer,
         expected: zml.Buffer,
     ) !void {
@@ -160,22 +157,6 @@ const Context = struct {
         defer actual_host.free(self.allocator);
         var expected_host = try expected.toSliceAlloc(self.allocator, self.io);
         defer expected_host.free(self.allocator);
-        const report = try zml.testing.compareSlices(
-            self.allocator,
-            f32,
-            f32,
-            actual_host.items(f32),
-            expected_host.items(f32),
-            tolerance,
-        );
-        const values = actual_host.items(f32);
-        // KIMI_K3_TEMP_REMOVE_M20: activation samples and detailed errors are
-        // bring-up diagnostics and are removed after permanent tests land.
-        try self.stdout.print(
-            "KIMI_K3_KDA_OPT_ACTIVATION case={s} path={s} boundary={s} first={d:.8} last={d:.8} finite=true\n{f}\n",
-            .{ case_name, path, boundary, values[0], values[values.len - 1], report },
-        );
-        try self.stdout.flush();
         try zml.testing.expectClose(self.io, actual_host, expected_host, tolerance);
     }
 
@@ -201,8 +182,6 @@ const Context = struct {
             if (iteration >= warmups) total += elapsed;
         }
         const mean = @divTrunc(total, repetitions);
-        // KIMI_K3_TEMP_REMOVE_M20: synchronized stage timing is retained only
-        // through bring-up and replaced by the permanent benchmark suite.
         try self.stdout.print(
             "KIMI_K3_KDA_OPT_BENCH case={s} path={s} warmups={} repetitions={} mean_execute_us={}\n",
             .{ case_name, path, warmups, repetitions, mean },
@@ -212,8 +191,6 @@ const Context = struct {
     }
 
     fn runCase(self: *Context, one: Case) !void {
-        // KIMI_K3_TEMP_REMOVE_M20: model-family span is bring-up profiling
-        // instrumentation replaced by permanent inference spans in cleanup.
         var span = zml.tracer.span("kimi_k3.kda.optimized_case", .{});
         defer span.end();
         var optimized_inputs = try self.loadInputs(one.name);
@@ -235,15 +212,15 @@ const Context = struct {
 
         var optimized = try self.execute(kda.recurrentOptimized, &optimized_exe, optimized_inputs);
         defer zml.Buffer.deinitAll(kda.RecurrentResult, &optimized);
-        try self.compare(one.name, "optimized", "output", optimized.output, expected_output);
-        try self.compare(one.name, "optimized", "state", optimized.state, expected_state);
+        try self.compare(optimized.output, expected_output);
+        try self.compare(optimized.state, expected_state);
 
         var reference_inputs = try self.loadInputs(one.name);
         defer zml.Buffer.deinitAll(Inputs, &reference_inputs);
         var reference = try self.execute(kda.recurrentReference, &reference_exe, reference_inputs);
         defer zml.Buffer.deinitAll(kda.RecurrentResult, &reference);
-        try self.compare(one.name, "reference", "output", reference.output, expected_output);
-        try self.compare(one.name, "reference", "state", reference.state, expected_state);
+        try self.compare(reference.output, expected_output);
+        try self.compare(reference.state, expected_state);
 
         var optimized_us: i96 = 0;
         var reference_us: i96 = 0;

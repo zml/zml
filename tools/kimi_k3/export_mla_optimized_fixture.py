@@ -82,7 +82,6 @@ def add_case(tensors: dict[str, torch.Tensor], name: str, capacity: int, valid: 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA CUDA is required; CPU fallback is forbidden")
@@ -117,9 +116,6 @@ def main() -> None:
     }
     manifest_path = args.output / "mla-optimized-cases.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: verbose fixture inventory is bring-up debug output.
-    if args.debug:
-        print(f"[kimi-k3-debug] mla_optimized_cases={len(CASES)} tensors={len(tensors)}")
     print(json.dumps({"fixture": str(tensor_path), "cases": len(CASES), "sha256": manifest["tensor_file_sha256"]}))
 
 

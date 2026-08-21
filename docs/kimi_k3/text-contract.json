@@ -78,7 +78,7 @@
     "missing_tensor_policy": "hard_error_with_exact_names",
     "weight_lookup": "tensor_name_not_shard_number",
     "all_routed_experts_required": true,
-    "route_override_test_only": true,
+    "recorded_route_alignment_scope": "fixtures_only",
     "model_weight_downloads": false,
     "cpu_inference_fallback": false
   }

@@ -97,8 +97,6 @@ fn runCase(
     try compareCase(allocator, io, platform, store, name, actual, sharding);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
-    // KIMI_K3_TEMP_REMOVE_M20: aligned route timing and boundary inventory are
-    // bring-up diagnostics removed from the production route planner in M20.
     try stdout_file.interface.print(
         "KIMI_K3_ROUTER_PASS case={s} boundaries=6 tokens={} experts={} top_k={} elapsed_us={}\n",
         .{ name, hidden.shape().dim(.b) * hidden.shape().dim(.s), weights.weight.shape().dim(.expert), config.top_k, elapsed_us },

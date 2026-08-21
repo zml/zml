@@ -20,7 +20,6 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
-    kimi_k3_layer_limit: ?usize = null,
     profile: bool = false,
 
     pub const help =
@@ -36,7 +35,6 @@ const Args = struct {
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
-        \\   --kimi-k3-layer-limit=<number>  Explicit partial-checkpoint layer count (Kimi K3 diagnostics only)
         \\
     ;
 };
@@ -117,7 +115,6 @@ pub fn main(init: std.process.Init) !void {
         .sampling_strategy = .{
             .topk = args.topk,
         },
-        .kimi_k3_layer_limit = args.kimi_k3_layer_limit,
     };
 
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);

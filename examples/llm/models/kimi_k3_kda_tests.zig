@@ -242,8 +242,6 @@ pub fn main(init: std.process.Init) !void {
         zml.Buffer.deinitAll(kda.Cache, &cache);
         cache = actual.cache;
         deinitDiagnostics(&actual);
-        // KIMI_K3_TEMP_REMOVE_M20: synchronized step time and activation/cache
-        // shapes are bring-up diagnostics and are removed during cleanup.
         try stdout_file.interface.print(
             "KIMI_K3_KDA_STEP_PASS step={} boundaries=26 elapsed_us={} output={f} recurrent_cache={f} conv_cache={f}\n",
             .{ step, elapsed_us, actual.projection_output.shape(), cache.recurrent_state.shape(), cache.q_conv.shape() },

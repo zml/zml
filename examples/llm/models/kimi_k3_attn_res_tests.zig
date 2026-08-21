@@ -93,8 +93,6 @@ const Context = struct {
             std.Io.Clock.now(.real, self.io).toNanoseconds() - started,
             1000,
         );
-        // KIMI_K3_TEMP_REMOVE_M20: selector candidate/probability shapes and
-        // synchronized timing are bring-up diagnostics removed at cleanup.
         try self.stdout.print(
             "KIMI_K3_ATTN_RES_PASS name={s} elapsed_us={} candidates={f} probabilities={f}\n",
             .{ name, elapsed_us, actual.candidates.shape(), actual.probabilities.shape() },

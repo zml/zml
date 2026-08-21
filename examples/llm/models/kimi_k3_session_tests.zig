@@ -39,6 +39,26 @@ fn elapsedUs(io: std.Io, started: i96) i96 {
     return @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - started, 1000);
 }
 
+fn initSelectedModel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    repo: std.Io.Dir,
+    store: zml.io.TensorStore.View,
+    layer_limit: usize,
+    compile_only: bool,
+) !model.LoadedModel {
+    const parsed = try common.parseConfig(model.Config, allocator, io, repo);
+    errdefer parsed.deinit();
+    const selection: model.LayerSelection = .{ .layer_limit = layer_limit };
+    const inner = if (compile_only)
+        try model.Model.initCompileOnly(allocator, store, parsed.value, selection)
+    else
+        try model.Model.initSelected(allocator, store, parsed.value, .{
+            .max_seq_len = parsed.value.text_config.max_position_embeddings,
+        }, selection);
+    return .{ .inner = inner, .parsed_config = parsed };
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -60,16 +80,14 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var loaded_model = if (args.compile_only)
-        try model.LoadedModel.initCompileOnly(allocator, io, repo, store.view(), args.layer_limit)
-    else
-        try model.LoadedModel.init(
-            allocator,
-            io,
-            repo,
-            store.view(),
-            .{ .kimi_k3_layer_limit = args.layer_limit },
-        );
+    var loaded_model = try initSelectedModel(
+        allocator,
+        io,
+        repo,
+        store.view(),
+        args.layer_limit,
+        args.compile_only,
+    );
     defer loaded_model.deinit(allocator);
     const shardings: common.Shardings = try .init(platform);
     var progress = std.Progress.start(io, .{ .root_name = "Kimi K3 session gate" });

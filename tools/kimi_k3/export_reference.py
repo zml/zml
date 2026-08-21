@@ -385,17 +385,11 @@ def run_s0_once(modeling: Any) -> tuple[dict[str, torch.Tensor], dict[str, Any]]
     return tensors, {"comparisons": checks, "timing": {"chunk": chunk_timing, "recurrent": recurrent_timing}}
 
 
-def export_s0(modeling: Any, output: Path, debug: bool) -> dict[str, Any]:
+def export_s0(modeling: Any, output: Path) -> dict[str, Any]:
     first, details = run_s0_once(modeling)
     second, repeat_details = run_s0_once(modeling)
     _assert_stable(first, second)
     details["timing"] = {"cold_or_first": details["timing"], "repeat": repeat_details["timing"]}
-    # KIMI_K3_TEMP_REMOVE_M20: verbose boundary/timing diagnostics are retained
-    # only while the port is being implemented and must be removed at cleanup.
-    if debug:
-        print("[kimi-k3-debug] S0 timing", json.dumps(details["timing"], sort_keys=True))
-        for name, tensor in sorted(first.items()):
-            print(f"[kimi-k3-debug] {name} shape={tuple(tensor.shape)} dtype={tensor.dtype}")
     return _save_fixture(
         output,
         "s0-operators",
@@ -427,11 +421,8 @@ def _load_layer0(checkpoint: Path, configuration: Any, modeling: Any) -> tuple[A
     if len(state) != 23:
         raise ExportError(f"expected 23 isolated layer-0 tensors, found {len(state)}")
 
-    # KIMI_K3_TEMP_REMOVE_M20: pinned config constructs A_log[96], but the
-    # pinned official shard stores padded A_log[128].  The official FLA kernel
-    # indexes one value per 96 value head, so preserving the checkpoint tensor
-    # is behaviorally correct.  Revisit/remove this compatibility assignment at
-    # cleanup after Moonshot resolves or documents the padded parameter.
+    # The pinned checkpoint stores padded A_log[128] while the config reports
+    # 96 value heads; the official kernel indexes only the active 96 entries.
     checkpoint_a_log = state.pop("self_attn.A_log")
     if tuple(checkpoint_a_log.shape) != (128,) or layer.self_attn.num_heads != 96:
         raise ExportError("unexpected A_log compatibility condition")
@@ -461,8 +452,7 @@ class Capture:
         self.handles: list[Any] = []
 
     def add(self, name: str, module: torch.nn.Module) -> None:
-        # KIMI_K3_TEMP_REMOVE_M20: module hooks expose intermediate activations
-        # for differential bring-up and must be removed at the cleanup phase.
+        # Permanent fixture hooks capture named differential boundaries.
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
             value = output[0] if isinstance(output, tuple) else output
             if isinstance(value, torch.Tensor):
@@ -671,7 +661,6 @@ def export_layer0(
     output: Path,
     lengths: list[int],
     include_continuation: bool,
-    debug: bool,
 ) -> list[dict[str, Any]]:
     config, layer, load_metadata = _load_layer0(checkpoint, configuration, modeling)
     manifests = []
@@ -686,17 +675,6 @@ def export_layer0(
             "repeat": repeat_details["timing"],
         }
         details["performance"] = benchmark_layer(config, layer, modeling, length)
-        if debug:
-            # KIMI_K3_TEMP_REMOVE_M20: human-readable activation and inference
-            # timing logs are bring-up diagnostics and must be removed at cleanup.
-            print(
-                f"[kimi-k3-debug] layer=0 length={length} mode={details['fla_mode']} "
-                f"first_gpu_ms={details['timing']['cold_or_first']['gpu_ms']:.3f} "
-                f"repeat_gpu_ms={details['timing']['repeat']['gpu_ms']:.3f} "
-                f"bare_median_gpu_ms={details['performance']['gpu_ms']['median']:.3f}"
-            )
-            for name, tensor in sorted(first.items()):
-                print(f"[kimi-k3-debug] {name} shape={tuple(tensor.shape)} dtype={tensor.dtype}")
         manifests.append(
             _save_fixture(
                 output,
@@ -727,8 +705,6 @@ def export_layer0(
         }
         if not details["cache_handoff_exact"]:
             raise ExportError("prefill/decode cache handoff is not exact")
-        if debug:
-            print("[kimi-k3-debug] continuation timing", json.dumps(details["timing"], sort_keys=True))
         manifests.append(
             _save_fixture(
                 output,
@@ -775,7 +751,6 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--lengths", type=parse_lengths, default=parse_lengths("1,4,8,16"))
     parser.add_argument("--layer-stop", type=int, default=1)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     if args.layer_stop != 1:
         raise ExportError(
@@ -789,7 +764,7 @@ def main() -> None:
     configuration, modeling = import_official(checkpoint)
     manifests: list[dict[str, Any]] = []
     if args.mode in ("s0", "all"):
-        manifests.append(export_s0(modeling, output, args.debug))
+        manifests.append(export_s0(modeling, output))
     if args.mode in ("layer", "prefix", "prefill", "decode", "all"):
         manifests.extend(
             export_layer0(
@@ -799,7 +774,6 @@ def main() -> None:
                 output,
                 args.lengths,
                 include_continuation=args.mode in ("decode", "all"),
-                debug=args.debug,
             )
         )
     summary = {

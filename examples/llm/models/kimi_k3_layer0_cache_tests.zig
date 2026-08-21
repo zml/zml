@@ -231,8 +231,6 @@ pub fn main(init: std.process.Init) !void {
     try compareCache(allocator, io, platform, fixture_store.view(), "decode", decode.cache, "out", sharding);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
-    // KIMI_K3_TEMP_REMOVE_M20: synchronized phase timings are Gate A
-    // diagnostics and must be removed from the production hot path in M20.
     try stdout_file.interface.print(
         "KIMI_K3_LAYER0_CACHE_PASS boundaries=30 prefill_us={} decode_us={}\n",
         .{ prefill_us, decode_us },

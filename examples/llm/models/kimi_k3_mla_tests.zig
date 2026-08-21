@@ -95,8 +95,6 @@ const Context = struct {
         );
     }
 
-    // KIMI_K3_TEMP_REMOVE_M20: twenty-five named boundary copies make the
-    // first divergent MLA equation visible and are removed during cleanup.
     fn compareResult(self: *Context, prefix: []const u8, actual: zml.Bufferized(mla.Result)) !void {
         try self.compare(prefix, "q_a", actual.q_a, projection_tolerance);
         try self.compare(prefix, "q_norm", actual.q_norm, projection_tolerance);

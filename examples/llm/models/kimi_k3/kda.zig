@@ -27,8 +27,6 @@ pub const Weights = struct {
 /// Named decode boundaries returned only by the Milestone 7 differential
 /// executable. Production integration will consume `projection_output` and
 /// `cache` without transferring these diagnostics to the host.
-// KIMI_K3_TEMP_REMOVE_M20: diagnostic result arity exposes intermediate KDA
-// activations for parity debugging and must be removed during cleanup.
 pub const DecodeResult = struct {
     q_proj: zml.Tensor,
     k_proj: zml.Tensor,

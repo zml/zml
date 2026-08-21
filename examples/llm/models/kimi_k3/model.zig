@@ -387,39 +387,8 @@ pub const LoadedModel = struct {
             .sampling_strategy = generation.sampling_strategy,
             .max_seq_len = parsed.value.text_config.max_position_embeddings,
         };
-        const selection: LayerSelection = .{ .layer_limit = generation.kimi_k3_layer_limit };
-        if (generation.kimi_k3_layer_limit) |limit| {
-            if (limit == 0) return error.InvalidKimiK3LayerLimit;
-            log.warn("Explicit partial Kimi K3 layer selection enabled: {}/93 layers", .{limit});
-        }
         return .{
-            .inner = try .initSelected(allocator, store, parsed.value, options, selection),
-            .parsed_config = parsed,
-        };
-    }
-
-    pub fn initCompileOnly(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        repo: std.Io.Dir,
-        store: zml.io.TensorStore.View,
-        layer_limit: usize,
-    ) !LoadedModel {
-        const parsed = try common.parseConfig(Config, allocator, io, repo);
-        errdefer parsed.deinit();
-        const selection: LayerSelection = .{ .layer_limit = layer_limit };
-        if (layer_limit == 0) return error.InvalidKimiK3LayerLimit;
-        log.warn(
-            "Compile-only Kimi K3 schedule enabled: {}/93 layers; nonresident tensors are not validated",
-            .{layer_limit},
-        );
-        return .{
-            .inner = try Model.initCompileOnly(
-                allocator,
-                store,
-                parsed.value,
-                selection,
-            ),
+            .inner = try .init(allocator, store, parsed.value, options),
             .parsed_config = parsed,
         };
     }

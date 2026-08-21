@@ -200,15 +200,6 @@ pub const Loader = struct {
             var reader = try self.rootView().getReader(key, self.io, &io_buffer);
             defer reader.deinit();
             _ = try reader.interface.readSliceAll(bytes[expert * per_expert ..][0..per_expert]);
-            // KIMI_K3_TEMP_REMOVE_M20: detailed staging progress helps diagnose
-            // long correctness-oracle loads and is removed after native grouped
-            // expert loading provides its own production telemetry.
-            if ((expert + 1) % 128 == 0) {
-                log.info(
-                    "staging layer={} projection={s} component={s} experts={}/{} host_bytes={}",
-                    .{ layer_index, projection, component, expert + 1, expert_count, target.byteSize() },
-                );
-            }
         }
         return zml.Buffer.fromBytes(self.io, self.platform, target, self.expert_sharding, bytes);
     }

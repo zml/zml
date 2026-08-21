@@ -134,8 +134,6 @@ pub fn main(init: std.process.Init) !void {
     try comparePrefix(allocator, io, platform, fixture_store.view(), actual, sharding);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
-    // KIMI_K3_TEMP_REMOVE_M20: full-prefix boundary inventory and synchronized
-    // timings are Gate A diagnostics removed from the production hot path.
     try stdout_file.interface.print(
         "KIMI_K3_PREFIX_PASS boundaries=13 load_us={} compile_us={} execute_us={} logits={f}\n",
         .{ load_us, compile_us, execute_us, actual.logits.shape() },

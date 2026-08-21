@@ -228,22 +228,10 @@ const Context = struct {
             .{ first_buffer, second_buffer, third_buffer },
         );
         defer actual.deinit();
-        // KIMI_K3_TEMP_REMOVE_M20: the full native/oracle error distribution
-        // is printed while calibrating the packed kernel and removed in M20.
         var actual_host = try actual.toSliceAlloc(self.allocator, self.io);
         defer actual_host.free(self.allocator);
         var expected_host = try expected.toSliceAlloc(self.allocator, self.io);
         defer expected_host.free(self.allocator);
-        const report = try zml.testing.compareSlices(
-            self.allocator,
-            f32,
-            f32,
-            actual_host.items(f32),
-            expected_host.items(f32),
-            opts,
-        );
-        try self.stdout.print("KIMI_K3_MXFP4_CALIBRATION name={s}\n{f}\n", .{ name, report });
-        try self.stdout.flush();
         try zml.testing.expectClose(self.io, actual_host, expected_host, opts);
         try self.pass(name, started, first.shape());
     }
@@ -264,8 +252,6 @@ const Context = struct {
 
     fn pass(self: *Context, name: []const u8, started_ns: i96, shape: zml.Shape) !void {
         const elapsed_ns = std.Io.Clock.now(.real, self.io).toNanoseconds() - started_ns;
-        // KIMI_K3_TEMP_REMOVE_M20: per-primitive activation shape and end-to-end
-        // execution timing are bring-up diagnostics and must be removed during cleanup.
         try self.stdout.print(
             "KIMI_K3_PRIMITIVE_PASS name={s} elapsed_us={} input_shape={f}\n",
             .{ name, @divTrunc(elapsed_ns, 1000), shape },

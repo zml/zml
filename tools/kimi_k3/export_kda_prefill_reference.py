@@ -261,7 +261,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     deterministic_setup()
     configuration, modeling = import_official(args.checkpoint)
@@ -285,13 +284,6 @@ def main() -> None:
     }
     manifest_path = args.output / "kda-prefill-reference.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: prefill/split inventory is retained for bring-up
-    # and removed during the cleanup milestone.
-    if args.debug:
-        print(
-            f"[kimi-k3-debug] lengths={details['lengths']} split_points={details['split_points']} "
-            f"official_checks={len(details['official_checks'])} tensors={len(tensors)}"
-        )
     print(json.dumps({"fixture": str(tensor_path), "checks": len(details["official_checks"]), "tensors": len(tensors)}))
 
 

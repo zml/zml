@@ -169,8 +169,6 @@ pub fn main(init: std.process.Init) !void {
     try compare(allocator, io, platform, fixture_store.view(), "layers.0.kda.recurrent_state.out", actual.cache.recurrent_state, state_tolerance, sharding);
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
-    // KIMI_K3_TEMP_REMOVE_M20: real-layer boundary inventory and synchronized
-    // load/compile/execute timing are Gate A diagnostics removed in cleanup.
     try stdout_file.interface.print(
         "KIMI_K3_LAYER0_PASS boundaries=13 load_us={} compile_us={} execute_us={} input={f} output={f}\n",
         .{ load_us, compile_us, execute_us, input.shape(), actual.output.shape() },

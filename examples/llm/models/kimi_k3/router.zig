@@ -30,8 +30,6 @@ pub const Config = struct {
     renormalize: bool = true,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: router boundary tensors are returned for aligned
-// score/weight diagnostics and reduced to the production route plan in M20.
 pub const Result = struct {
     logits: zml.Tensor,
     raw_scores: zml.Tensor,

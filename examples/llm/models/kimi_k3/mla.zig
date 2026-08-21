@@ -35,8 +35,6 @@ pub const SessionCache = struct {
     extra_key: zml.Tensor,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: absorbed-query and latent-readout boundaries are
-// returned for cache-algebra differential diagnosis and removed in cleanup.
 pub const LatentResult = struct {
     output: zml.Tensor,
     probabilities: zml.Tensor,
@@ -51,8 +49,6 @@ pub const CompactResult = struct {
     output: zml.Tensor,
     cache: LatentCache,
 };
-// KIMI_K3_TEMP_REMOVE_M20: named MLA boundaries are returned to the isolated
-// differential harness and removed from the production result during cleanup.
 pub const Result = struct {
     q_a: zml.Tensor,
     q_norm: zml.Tensor,

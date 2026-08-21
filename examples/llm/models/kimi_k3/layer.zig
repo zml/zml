@@ -75,8 +75,6 @@ pub const Layer0Weights = struct {
     }
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: major layer boundaries and selector weights are
-// returned for Gate A activation parity and removed from production arity in M20.
 pub const Layer0Result = struct {
     input_norm: zml.Tensor,
     kda_output: zml.Tensor,
@@ -191,8 +189,6 @@ pub const PrefixWeights = struct {
     }
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: end-to-end prefix activations are returned for
-// Gate A differential debugging and removed from production arity in M20.
 pub const PrefixResult = struct {
     embedding: zml.Tensor,
     layer_output: zml.Tensor,
@@ -249,8 +245,6 @@ pub fn forwardPrefix(tokens: zml.Tensor, weights: PrefixWeights, cache: kda.Cach
     };
 }
 
-// KIMI_K3_TEMP_REMOVE_M20: the expanded head result is retained while the
-// multi-layer prefix is compared boundary-by-boundary with Moonshot. Production
 // inference keeps only logits/token outputs after the cleanup milestone.
 pub const DiagnosticHeadResult = struct {
     output_candidates: zml.Tensor,
@@ -355,8 +349,6 @@ fn selectSequence(
     };
 }
 
-// KIMI_K3_TEMP_REMOVE_M20: composed layer boundaries and selector/router
-// diagnostics are returned for Milestone 14 parity and reduced in cleanup.
 pub const KdaMoeResult = struct {
     selected_input: zml.Tensor,
     input_selector_weights: zml.Tensor,
@@ -568,8 +560,6 @@ pub fn forwardKdaMoeBoundary(
     };
 }
 
-// KIMI_K3_TEMP_REMOVE_M20: composed latent-MLA/MoE boundaries are exposed to
-// the Milestone 14 harness and reduced to production output/cache in cleanup.
 pub const MlaMoeResult = struct {
     selected_input: zml.Tensor,
     input_selector_weights: zml.Tensor,
@@ -815,4 +805,129 @@ pub fn diagnosticSessionHead(
         .logits = logits,
         .greedy_token = greedy_token,
     };
+}
+
+// Compact result types are the only layer outputs compiled into production
+// inference executables. Differential harnesses retain the expanded results
+// above as permanent correctness oracles.
+pub const Layer0CompactResult = struct {
+    block_residual: zml.Tensor,
+    output: zml.Tensor,
+    cache: kda.Cache,
+};
+
+pub fn forwardLayer0Compact(input: zml.Tensor, weights: Layer0Weights, cache: kda.Cache) Layer0CompactResult {
+    const result = forwardLayer0(input, weights, cache);
+    return .{
+        .block_residual = result.block_residual,
+        .output = result.output,
+        .cache = result.cache,
+    };
+}
+
+pub const KdaMoeCompactResult = struct {
+    output: zml.Tensor,
+    cache: kda.Cache,
+};
+
+pub const KdaMoeBoundaryCompactResult = struct {
+    layer: KdaMoeCompactResult,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+};
+
+pub fn forwardKdaMoeDecodeCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeCompactResult {
+    const result = forwardKdaMoeDecode(input, block_sources, active_blocks, weights, cache, route_config);
+    return .{ .output = result.output, .cache = result.cache };
+}
+
+pub fn forwardKdaMoeBoundaryCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeBoundaryCompactResult {
+    const result = forwardKdaMoeBoundary(input, block_sources, active_blocks, block_index, weights, cache, route_config);
+    return .{
+        .layer = .{ .output = result.layer.output, .cache = result.layer.cache },
+        .block_sources = result.block_sources,
+        .active_blocks = result.active_blocks,
+    };
+}
+
+pub const MlaMoeCompactResult = struct {
+    output: zml.Tensor,
+    cache: mla.LatentCache,
+};
+
+pub const MlaMoeBoundaryCompactResult = struct {
+    layer: MlaMoeCompactResult,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+};
+
+pub fn forwardMlaMoeSessionCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+    route_config: router.Config,
+) MlaMoeCompactResult {
+    const result = forwardMlaMoeSession(input, block_sources, active_blocks, weights, cache, token_index, route_config);
+    return .{ .output = result.output, .cache = result.cache };
+}
+
+pub fn forwardMlaMoeBoundaryCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: MlaMoeWeights,
+    cache: mla.SessionCache,
+    token_index: zml.Tensor,
+    route_config: router.Config,
+) MlaMoeBoundaryCompactResult {
+    const result = forwardMlaMoeBoundary(input, block_sources, active_blocks, block_index, weights, cache, token_index, route_config);
+    return .{
+        .layer = .{ .output = result.layer.output, .cache = result.layer.cache },
+        .block_sources = result.block_sources,
+        .active_blocks = result.active_blocks,
+    };
+}
+
+pub const SessionHeadResult = struct {
+    greedy_token: zml.Tensor,
+};
+
+pub fn sessionHead(
+    hidden: zml.Tensor,
+    block_residual: zml.Tensor,
+    active_blocks: zml.Tensor,
+    output_res_norm: zml.Tensor,
+    output_res_projection: zml.Tensor,
+    final_norm_weight: zml.Tensor,
+    lm_head: zml.Tensor,
+) SessionHeadResult {
+    const result = diagnosticSessionHead(
+        hidden,
+        block_residual,
+        active_blocks,
+        output_res_norm,
+        output_res_projection,
+        final_norm_weight,
+        lm_head,
+    );
+    return .{ .greedy_token = result.greedy_token };
 }

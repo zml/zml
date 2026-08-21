@@ -153,16 +153,7 @@ const Context = struct {
         var host = try actual.toSliceAlloc(self.allocator, self.io);
         defer host.free(self.allocator);
         const values = host.items(zml.floats.BFloat16);
-        const first = values[0].toF32();
-        const last = values[values.len - 1].toF32();
         for (values) |value| if (!std.math.isFinite(value.toF32())) return error.NonfiniteMlaActivation;
-        // KIMI_K3_TEMP_REMOVE_M20: activation samples are bring-up diagnostics
-        // and are removed after permanent differential coverage lands.
-        try self.stdout.print(
-            "KIMI_K3_MLA_OPT_ACTIVATION case={s} boundary=latent_aggregation first={d:.8} last={d:.8} finite=true\n",
-            .{ case_name, first, last },
-        );
-        try self.stdout.flush();
     }
 
     fn benchmark(self: *Context, case_name: []const u8, exe: *const zml.Exe) !i96 {
@@ -181,8 +172,6 @@ const Context = struct {
             if (iteration >= warmups) total += elapsed;
         }
         const mean = @divTrunc(total, repetitions);
-        // KIMI_K3_TEMP_REMOVE_M20: synchronized stage timing is retained only
-        // through bring-up and replaced by the permanent benchmark suite.
         try self.stdout.print(
             "KIMI_K3_MLA_OPT_BENCH case={s} warmups={} repetitions={} mean_execute_us={}\n",
             .{ case_name, warmups, repetitions, mean },
@@ -192,8 +181,6 @@ const Context = struct {
     }
 
     fn runCase(self: *Context, one: Case) !void {
-        // KIMI_K3_TEMP_REMOVE_M20: model-family span is bring-up profiling
-        // instrumentation replaced by permanent inference spans in cleanup.
         var span = zml.tracer.span("kimi_k3.mla.optimized_case", .{});
         defer span.end();
         var inputs = try self.loadInputs(one.name);

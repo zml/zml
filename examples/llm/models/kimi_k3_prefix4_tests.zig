@@ -85,8 +85,6 @@ const Context = struct {
         return zml.Buffer.fromBytes(self.io, self.platform, target, self.sharding, bytes);
     }
 
-    // KIMI_K3_TEMP_REMOVE_M20: the progress markers explain long, bounded
-    // full-bank staging and are removed when production model loading owns it.
     fn loadExpertComponent(
         self: *Context,
         layer_index: usize,
@@ -112,22 +110,11 @@ const Context = struct {
             var reader = try self.weights.getReader(key, self.io, &io_buffer);
             defer reader.deinit();
             _ = try reader.interface.readSliceAll(bytes[expert * per_expert ..][0..per_expert]);
-            if ((expert + 1) % 128 == 0) {
-                try self.stdout.print(
-                    "KIMI_K3_PREFIX4_LOAD layer={} projection={s} component={s} experts={}/{} host_bytes={}\n",
-                    .{ layer_index, projection, component, expert + 1, expert_count, target.byteSize() },
-                );
-                try self.stdout.flush();
-            }
         }
         return zml.Buffer.fromBytes(self.io, self.platform, target, self.sharding, bytes);
     }
 
     fn compare(self: *Context, store: zml.io.TensorStore.View, key: []const u8, actual: zml.Buffer, opts: zml.testing.CompareOpts) !void {
-        // KIMI_K3_TEMP_REMOVE_M20: boundary markers identify the first divergent
-        // activation and are removed with the differential harness in cleanup.
-        try self.stdout.print("KIMI_K3_PREFIX4_CHECK key={s}\n", .{key});
-        try self.stdout.flush();
         try support.compare(
             self.allocator,
             self.io,
@@ -262,13 +249,20 @@ fn kdaTensors(weights: zml.Bufferized(layer.KdaMoeWeights)) layer.KdaMoeWeights 
     return .{
         .common = commonTensors(weights.common),
         .attention = .{
-            .q_weight = tensor(weights.attention.q_weight), .k_weight = tensor(weights.attention.k_weight),
-            .v_weight = tensor(weights.attention.v_weight), .q_conv_weight = tensor(weights.attention.q_conv_weight),
-            .k_conv_weight = tensor(weights.attention.k_conv_weight), .v_conv_weight = tensor(weights.attention.v_conv_weight),
-            .decay_a_weight = tensor(weights.attention.decay_a_weight), .decay_b_weight = tensor(weights.attention.decay_b_weight),
-            .a_log = tensor(weights.attention.a_log), .dt_bias = tensor(weights.attention.dt_bias),
-            .beta_weight = tensor(weights.attention.beta_weight), .gate_weight = tensor(weights.attention.gate_weight),
-            .norm_weight = tensor(weights.attention.norm_weight), .output_weight = tensor(weights.attention.output_weight),
+            .q_weight = tensor(weights.attention.q_weight),
+            .k_weight = tensor(weights.attention.k_weight),
+            .v_weight = tensor(weights.attention.v_weight),
+            .q_conv_weight = tensor(weights.attention.q_conv_weight),
+            .k_conv_weight = tensor(weights.attention.k_conv_weight),
+            .v_conv_weight = tensor(weights.attention.v_conv_weight),
+            .decay_a_weight = tensor(weights.attention.decay_a_weight),
+            .decay_b_weight = tensor(weights.attention.decay_b_weight),
+            .a_log = tensor(weights.attention.a_log),
+            .dt_bias = tensor(weights.attention.dt_bias),
+            .beta_weight = tensor(weights.attention.beta_weight),
+            .gate_weight = tensor(weights.attention.gate_weight),
+            .norm_weight = tensor(weights.attention.norm_weight),
+            .output_weight = tensor(weights.attention.output_weight),
         },
     };
 }
@@ -277,18 +271,24 @@ fn mlaTensors(weights: zml.Bufferized(layer.MlaMoeWeights)) layer.MlaMoeWeights 
     return .{
         .common = commonTensors(weights.common),
         .attention = .{
-            .q_a_proj = tensor(weights.attention.q_a_proj), .q_a_norm = tensor(weights.attention.q_a_norm),
-            .q_b_proj = tensor(weights.attention.q_b_proj), .kv_a_proj = tensor(weights.attention.kv_a_proj),
-            .kv_a_norm = tensor(weights.attention.kv_a_norm), .kv_b_proj = tensor(weights.attention.kv_b_proj),
-            .gate_proj = tensor(weights.attention.gate_proj), .output_proj = tensor(weights.attention.output_proj),
+            .q_a_proj = tensor(weights.attention.q_a_proj),
+            .q_a_norm = tensor(weights.attention.q_a_norm),
+            .q_b_proj = tensor(weights.attention.q_b_proj),
+            .kv_a_proj = tensor(weights.attention.kv_a_proj),
+            .kv_a_norm = tensor(weights.attention.kv_a_norm),
+            .kv_b_proj = tensor(weights.attention.kv_b_proj),
+            .gate_proj = tensor(weights.attention.gate_proj),
+            .output_proj = tensor(weights.attention.output_proj),
         },
     };
 }
 
 fn kdaCacheTensors(cache: zml.Bufferized(kda.Cache)) kda.Cache {
     return .{
-        .q_conv = tensor(cache.q_conv), .k_conv = tensor(cache.k_conv),
-        .v_conv = tensor(cache.v_conv), .recurrent_state = tensor(cache.recurrent_state),
+        .q_conv = tensor(cache.q_conv),
+        .k_conv = tensor(cache.k_conv),
+        .v_conv = tensor(cache.v_conv),
+        .recurrent_state = tensor(cache.recurrent_state),
     };
 }
 
@@ -306,9 +306,15 @@ fn expandLatent(cache: mla.LatentCache, weights: mla.Weights) ExpandedCache {
     const pass = split.slice1d(.kv_width, .{ .start = 0, .end = 128 }).rename(.{ .kv_width = .hd });
     const value = split.slice1d(.kv_width, .{ .start = 128, .end = 256 }).rename(.{ .kv_width = .v });
     const extra = cache.extra_key.reshape(.{
-        .b = cache.extra_key.dim(.b), .h = 1, .k = cache.extra_key.dim(.k), .hd = 64,
+        .b = cache.extra_key.dim(.b),
+        .h = 1,
+        .k = cache.extra_key.dim(.k),
+        .hd = 64,
     }).broad(zml.Shape.init(.{
-        .b = cache.extra_key.dim(.b), .h = heads, .k = cache.extra_key.dim(.k), .hd = 64,
+        .b = cache.extra_key.dim(.b),
+        .h = heads,
+        .k = cache.extra_key.dim(.k),
+        .hd = 64,
     }, cache.extra_key.dtype()));
     return .{ .key = zml.Tensor.concatenate(&.{ pass, extra }, .hd), .value = value };
 }
@@ -319,31 +325,36 @@ const RouteAlignment = struct {
     aligned_outputs: zml.Tensor,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: top-K ordering is implementation-defined. This
-// diagnostic proves the exact global expert set and aligns weights/outputs by
 // expert ID; production routing and aggregation remain unchanged.
 fn alignRoute(actual_ids_raw: zml.Tensor, actual_weights_raw: zml.Tensor, outputs_raw: zml.Tensor, expected_ids: zml.Tensor) RouteAlignment {
     const actual_ids = actual_ids_raw.rename(.{ .route = .actual_route });
     const actual_weights = actual_weights_raw.rename(.{ .route = .actual_route });
     const match_shape = zml.Shape.init(.{
-        .b = expected_ids.dim(.b), .s = expected_ids.dim(.s),
+        .b = expected_ids.dim(.b),
+        .s = expected_ids.dim(.s),
         .expected_route = expected_ids.dim(.expected_route),
         .actual_route = actual_ids.dim(.actual_route),
     }, .i64);
     const expected_grid = expected_ids.reshape(.{
-        .b = expected_ids.dim(.b), .s = expected_ids.dim(.s),
-        .expected_route = expected_ids.dim(.expected_route), .actual_route = 1,
+        .b = expected_ids.dim(.b),
+        .s = expected_ids.dim(.s),
+        .expected_route = expected_ids.dim(.expected_route),
+        .actual_route = 1,
     }).broad(match_shape);
     const actual_grid = actual_ids.reshape(.{
-        .b = actual_ids.dim(.b), .s = actual_ids.dim(.s),
-        .expected_route = 1, .actual_route = actual_ids.dim(.actual_route),
+        .b = actual_ids.dim(.b),
+        .s = actual_ids.dim(.s),
+        .expected_route = 1,
+        .actual_route = actual_ids.dim(.actual_route),
     }).broad(match_shape);
     const matches = actual_grid.cmp(.EQ, expected_grid);
     const found = matches.convert(.i32).sum(.actual_route).squeeze(.actual_route)
         .cmp(.GT, zml.Tensor.scalar(0, .i32));
     const weight_grid = actual_weights.reshape(.{
-        .b = actual_ids.dim(.b), .s = actual_ids.dim(.s),
-        .expected_route = 1, .actual_route = actual_ids.dim(.actual_route),
+        .b = actual_ids.dim(.b),
+        .s = actual_ids.dim(.s),
+        .expected_route = 1,
+        .actual_route = actual_ids.dim(.actual_route),
     }).broad(match_shape.withDtype(.f32));
     const outputs = outputs_raw.rename(.{ .route = .actual_route });
     const output_shape = zml.Shape.init(.{
@@ -354,14 +365,18 @@ fn alignRoute(actual_ids_raw: zml.Tensor, actual_weights_raw: zml.Tensor, output
         .latent = outputs.dim(.latent),
     }, outputs.dtype());
     const output_grid = outputs.reshape(.{
-        .b = actual_ids.dim(.b), .s = actual_ids.dim(.s),
-        .expected_route = 1, .actual_route = actual_ids.dim(.actual_route),
+        .b = actual_ids.dim(.b),
+        .s = actual_ids.dim(.s),
+        .expected_route = 1,
+        .actual_route = actual_ids.dim(.actual_route),
         .latent = outputs.dim(.latent),
     }).broad(output_shape);
     const output_matches = matches.reshape(.{
-        .b = expected_ids.dim(.b), .s = expected_ids.dim(.s),
+        .b = expected_ids.dim(.b),
+        .s = expected_ids.dim(.s),
         .expected_route = expected_ids.dim(.expected_route),
-        .actual_route = actual_ids.dim(.actual_route), .latent = 1,
+        .actual_route = actual_ids.dim(.actual_route),
+        .latent = 1,
     }).broad(output_shape.withDtype(.bool));
     return .{
         .matched_ids = found.select(expected_ids, zml.Tensor.scalar(-1, .i64).broad(expected_ids.shape())),
@@ -463,16 +478,16 @@ fn measureRouteOverlap(context: *Context, actual: zml.Buffer, expected: zml.Buff
 
 fn compareMoeResult(context: *Context, store: zml.io.TensorStore.View, prefix: []const u8, result: anytype) !void {
     const names = [_][]const u8{
-        "selected_input", "input_norm", "attention_output", "prefix_after_attention",
-        "selected_mlp", "moe_input", "moe.routed_down",
-        "moe.combined_latent", "moe.routed_norm", "moe.routed_up", "moe.shared_output",
-        "moe.output", "output",
+        "selected_input",  "input_norm",    "attention_output",  "prefix_after_attention",
+        "selected_mlp",    "moe_input",     "moe.routed_down",   "moe.combined_latent",
+        "moe.routed_norm", "moe.routed_up", "moe.shared_output", "moe.output",
+        "output",
     };
     const values = .{
-        result.selected_input, result.input_norm, result.attention_output, result.prefix_after_attention,
-        result.selected_mlp, result.moe_input, result.moe_result.routed_down,
-        result.moe_result.combined_latent, result.moe_result.routed_norm, result.moe_result.routed_up,
-        result.moe_result.shared_output, result.moe_result.output, result.output,
+        result.selected_input,         result.input_norm,           result.attention_output,         result.prefix_after_attention,
+        result.selected_mlp,           result.moe_input,            result.moe_result.routed_down,   result.moe_result.combined_latent,
+        result.moe_result.routed_norm, result.moe_result.routed_up, result.moe_result.shared_output, result.moe_result.output,
+        result.output,
     };
     inline for (names, values) |name, value| {
         const key = try std.fmt.allocPrint(context.allocator, "{s}.{s}", .{ prefix, name });
@@ -847,10 +862,15 @@ pub fn main(init: std.process.Init) !void {
     defer prefix4_store.deinit();
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     var context: Context = .{
-        .allocator = allocator, .io = io, .platform = platform,
-        .weights = weight_store.view(), .layer0_fixture = layer0_store.view(),
-        .family_fixture = family_store.view(), .prefix4_fixture = prefix4_store.view(),
-        .sharding = platform.replicated_sharding, .stdout = &stdout_file.interface,
+        .allocator = allocator,
+        .io = io,
+        .platform = platform,
+        .weights = weight_store.view(),
+        .layer0_fixture = layer0_store.view(),
+        .family_fixture = family_store.view(),
+        .prefix4_fixture = prefix4_store.view(),
+        .sharding = platform.replicated_sharding,
+        .stdout = &stdout_file.interface,
     };
 
     const head_load_started = std.Io.Clock.now(.real, io).toNanoseconds();

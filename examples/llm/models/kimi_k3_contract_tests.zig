@@ -21,9 +21,9 @@ const Args = struct {
     expect_missing: bool = false,
 
     pub const help =
-        \\Use kimi_k3_diagnostic --model=<path> [--layer-limit=<count>] [options]
+        \\Use kimi_k3_tests --model=<path> [--layer-limit=<count>] [options]
         \\
-        \\Metadata-only Kimi K3 construction and tensor-contract diagnostic.
+        \\Metadata-only Kimi K3 construction and tensor-contract test.
         \\
         \\Options:
         \\  --first-layer=<index>  First zero-based logical layer (default: 0)
@@ -108,9 +108,7 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // KIMI_K3_TEMP_REMOVE_M20: this construction-only diagnostic exists for
-    // bring-up and must be removed when the production CLI has an equivalent
-    // explain/validation path at the cleanup milestone.
+    // Permanent test-only construction path; production initialization is full-model only.
     var instance = model.Model.initSelected(
         allocator,
         store.view(),

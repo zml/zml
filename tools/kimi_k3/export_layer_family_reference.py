@@ -490,7 +490,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-root", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     checkpoint = args.checkpoint_root.resolve()
     if checkpoint != DEFAULT_CHECKPOINT.resolve():
@@ -533,12 +532,6 @@ def main() -> None:
         "layers": details,
     }
     (args.output_dir.resolve() / "manifest.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: sequential layer activation inventory and
-    # selected-expert maps are bring-up diagnostics removed during cleanup.
-    if args.debug:
-        print("[kimi-k3-debug] layer details", json.dumps(details, sort_keys=True))
-        for name, value in sorted(first_tensors.items()):
-            print(f"[kimi-k3-debug] {name} shape={tuple(value.shape)} dtype={value.dtype}")
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

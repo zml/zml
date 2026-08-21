@@ -103,6 +103,6 @@ checkpoint shards without downloading the other 91, executes all prior and
 new KDA/MLA gates, creates both family Perfetto traces, and writes
 `artifacts/reports/milestone-18-comparisons.json`.
 
-Temporary activation samples, synchronized diagnostic timing, and family
-profiling spans are marked `KIMI_K3_TEMP_REMOVE_M20` in source and are removed
-or replaced by permanent instrumentation during cleanup.
+Milestone 20 removed temporary activation samples and hot-path timing logs.
+The permanent optimized/reference assertions, synchronized regression smoke, and
+standard ZML profiling spans remain available to the conformance suite.

@@ -230,7 +230,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     deterministic_setup()
@@ -254,12 +253,6 @@ def main() -> None:
     }
     manifest_path = args.output / "attn-res-reference.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: verbose selector candidate/weight inventory is
-    # retained for bring-up and removed at the cleanup milestone.
-    if args.debug:
-        for name, value in sorted(tensors.items()):
-            if name.endswith(("expected.candidates", "expected.probabilities", "expected.output")):
-                print(f"[kimi-k3-debug] {name} shape={value.shape} dtype={value.dtype}")
     print(json.dumps({"fixture": str(tensor_path), "locations": len(details["official_vs_numpy"])}))
 
 

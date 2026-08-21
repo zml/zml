@@ -207,7 +207,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-root", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     checkpoint = args.checkpoint_root.resolve()
     if checkpoint != DEFAULT_CHECKPOINT.resolve():
@@ -268,14 +267,6 @@ def main() -> None:
     (args.output_dir.resolve() / "manifest.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n"
     )
-    # KIMI_K3_TEMP_REMOVE_M20: selected-expert inventory, activation shapes,
-    # and oracle timing are Gate B diagnostics removed during cleanup.
-    if args.debug:
-        print("[kimi-k3-debug] selected experts", selected)
-        print("[kimi-k3-debug] peak memory", manifest["peak_memory"])
-        print("[kimi-k3-debug] timing", json.dumps(manifest["timing"], sort_keys=True))
-        for name, value in sorted(first.items()):
-            print(f"[kimi-k3-debug] {name} shape={tuple(value.shape)} dtype={value.dtype}")
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

@@ -118,8 +118,6 @@ const Context = struct {
         return values;
     }
 
-    // KIMI_K3_TEMP_REMOVE_M20: reconstructing the compact global-to-local
-    // expert map from fixture routes is isolated bring-up code removed in M20.
     fn selectedIds(self: *Context, layer_index: usize, count: usize) !zml.Buffer {
         const global = try self.readI64(layer_index, "route.global_ids");
         defer self.allocator.free(global);
@@ -269,39 +267,23 @@ const Context = struct {
 
     fn compareCommon(self: *Context, layer_index: usize, mode: []const u8, result: anytype, global: zml.Bufferized(GlobalAlignment), local: zml.Bufferized(GlobalAlignment), aligned_route_outputs: zml.Buffer) !void {
         const boundaries = [_][]const u8{
-            "selected_input", "input_norm", "attention_output", "prefix_after_attention",
-            "selected_mlp", "moe_input", "moe.routed_down", "moe.route_outputs",
-            "moe.combined_latent", "moe.routed_norm", "moe.routed_up",
-            "moe.shared_output", "moe.output", "output",
+            "selected_input",      "input_norm",      "attention_output", "prefix_after_attention",
+            "selected_mlp",        "moe_input",       "moe.routed_down",  "moe.route_outputs",
+            "moe.combined_latent", "moe.routed_norm", "moe.routed_up",    "moe.shared_output",
+            "moe.output",          "output",
         };
         const values = .{
-            result.selected_input, result.input_norm, result.attention_output, result.prefix_after_attention,
-            result.selected_mlp, result.moe_input, result.moe_result.routed_down, aligned_route_outputs,
-            result.moe_result.combined_latent, result.moe_result.routed_norm, result.moe_result.routed_up,
-            result.moe_result.shared_output, result.moe_result.output, result.output,
+            result.selected_input,             result.input_norm,             result.attention_output,       result.prefix_after_attention,
+            result.selected_mlp,               result.moe_input,              result.moe_result.routed_down, aligned_route_outputs,
+            result.moe_result.combined_latent, result.moe_result.routed_norm, result.moe_result.routed_up,   result.moe_result.shared_output,
+            result.moe_result.output,          result.output,
         };
         inline for (boundaries, values) |boundary, value| {
-            // KIMI_K3_TEMP_REMOVE_M20: boundary progress markers identify the
-            // first divergent composed activation and are removed in cleanup.
-            try self.stdout.print("KIMI_K3_LAYER_FAMILY_CHECK layer={} mode={s} boundary={s}\n", .{
-                layer_index, if (mode.len == 0) "prefill" else mode, boundary,
-            });
-            try self.stdout.flush();
             try self.compare(layer_index, mode, boundary, value, support.bf16_tolerance);
         }
-        // KIMI_K3_TEMP_REMOVE_M20: route progress markers disambiguate the
-        // independent full router from the compact composed-layer router.
-        try self.stdout.print("KIMI_K3_LAYER_FAMILY_CHECK layer={} mode={s} boundary=route.global_ids\n", .{ layer_index, if (mode.len == 0) "prefill" else mode });
-        try self.stdout.flush();
         try self.compare(layer_index, mode, "route.global_ids", global.matched_ids, .{});
-        try self.stdout.print("KIMI_K3_LAYER_FAMILY_CHECK layer={} mode={s} boundary=route.local_ids\n", .{ layer_index, if (mode.len == 0) "prefill" else mode });
-        try self.stdout.flush();
         try self.compare(layer_index, mode, "route.local_ids", local.matched_ids, .{});
-        try self.stdout.print("KIMI_K3_LAYER_FAMILY_CHECK layer={} mode={s} boundary=route.global_weights\n", .{ layer_index, if (mode.len == 0) "prefill" else mode });
-        try self.stdout.flush();
         try self.compare(layer_index, mode, "route.weights", global.aligned_weights, route_weight_tolerance);
-        try self.stdout.print("KIMI_K3_LAYER_FAMILY_CHECK layer={} mode={s} boundary=route.local_weights\n", .{ layer_index, if (mode.len == 0) "prefill" else mode });
-        try self.stdout.flush();
         try self.compare(layer_index, mode, "route.weights", local.aligned_weights, route_weight_tolerance);
     }
 
@@ -405,8 +387,6 @@ fn mlaCacheTensors(cache: zml.Bufferized(mla.LatentCache)) mla.LatentCache {
     };
 }
 
-// KIMI_K3_TEMP_REMOVE_M20: the local router is created only for the compact
-// selected-expert fixture. The independent global router remains authoritative.
 fn localize(weights: layer.MoeLayerWeights, selected: zml.Tensor) layer.MoeLayerWeights {
     var result = weights;
     const indices = selected.convert(.i32);
@@ -422,8 +402,6 @@ const GlobalAlignment = struct {
     aligned_weights: zml.Tensor,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: Top-K ordering is implementation-defined. This
-// diagnostic requires the exact global expert set and aligns weights by ID.
 fn alignGlobal(route: router.Result, expected_ids: zml.Tensor) GlobalAlignment {
     const actual_ids = route.topk_ids.rename(.{ .route = .actual_route });
     const actual_weights = route.topk_weights.rename(.{ .route = .actual_route });
@@ -465,8 +443,6 @@ fn alignGlobal(route: router.Result, expected_ids: zml.Tensor) GlobalAlignment {
     };
 }
 
-// KIMI_K3_TEMP_REMOVE_M20: align route-indexed expert activations by local ID
-// solely for comparison; production aggregation remains order independent.
 fn alignRouteOutputs(values: zml.Tensor, actual_ids_raw: zml.Tensor, expected_ids: zml.Tensor) zml.Tensor {
     const actual_ids = actual_ids_raw.rename(.{ .route = .actual_route });
     const match_shape = zml.Shape.init(.{
@@ -704,8 +680,9 @@ fn runKda(context: *Context, layer_index: usize) !void {
             context.io,
             case[1],
             .{
-                tensor(input), tensor(blocks), tensor(active), symbolic_weights,
-                kdaCacheTensors(cache), tensor(selected), tensor(official_moe_input), tensor(expected_ids), tensor(expected_local_ids),
+                tensor(input),              tensor(blocks),   tensor(active),             symbolic_weights,
+                kdaCacheTensors(cache),     tensor(selected), tensor(official_moe_input), tensor(expected_ids),
+                tensor(expected_local_ids),
             },
             .{ .shardings = &.{context.sharding} },
         );
@@ -820,8 +797,9 @@ fn runMla(context: *Context, layer_index: usize) !void {
         context.io,
         mlaDecode,
         .{
-            tensor(decode_input), tensor(decode_blocks), tensor(active), symbolic_weights,
-            mlaCacheTensors(warm_cache), tensor(selected), tensor(decode_official_moe_input), tensor(decode_expected_ids), tensor(decode_expected_local_ids),
+            tensor(decode_input),              tensor(decode_blocks), tensor(active),                    symbolic_weights,
+            mlaCacheTensors(warm_cache),       tensor(selected),      tensor(decode_official_moe_input), tensor(decode_expected_ids),
+            tensor(decode_expected_local_ids),
         },
         .{ .shardings = &.{context.sharding} },
     );

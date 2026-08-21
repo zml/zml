@@ -23,8 +23,8 @@ fn kdaMoeStep(
     active: zml.Tensor,
     weights: layer.KdaMoeWeights,
     cache: kda.Cache,
-) layer.KdaMoeResult {
-    return layer.forwardKdaMoeDecode(input, blocks, active, weights, cache, .{ .top_k = 16 });
+) layer.KdaMoeCompactResult {
+    return layer.forwardKdaMoeDecodeCompact(input, blocks, active, weights, cache, .{ .top_k = 16 });
 }
 
 fn kdaMoeBoundaryStep(
@@ -34,8 +34,8 @@ fn kdaMoeBoundaryStep(
     block_index: zml.Tensor,
     weights: layer.KdaMoeWeights,
     cache: kda.Cache,
-) layer.KdaMoeBoundaryResult {
-    return layer.forwardKdaMoeBoundary(input, blocks, active, block_index, weights, cache, .{ .top_k = 16 });
+) layer.KdaMoeBoundaryCompactResult {
+    return layer.forwardKdaMoeBoundaryCompact(input, blocks, active, block_index, weights, cache, .{ .top_k = 16 });
 }
 
 fn mlaMoeStep(
@@ -45,8 +45,8 @@ fn mlaMoeStep(
     weights: layer.MlaMoeWeights,
     cache: mla.SessionCache,
     token_index: zml.Tensor,
-) layer.MlaMoeResult {
-    return layer.forwardMlaMoeSession(
+) layer.MlaMoeCompactResult {
+    return layer.forwardMlaMoeSessionCompact(
         input,
         blocks,
         active,
@@ -65,8 +65,8 @@ fn mlaMoeBoundaryStep(
     weights: layer.MlaMoeWeights,
     cache: mla.SessionCache,
     token_index: zml.Tensor,
-) layer.MlaMoeBoundaryResult {
-    return layer.forwardMlaMoeBoundary(
+) layer.MlaMoeBoundaryCompactResult {
+    return layer.forwardMlaMoeBoundaryCompact(
         input,
         blocks,
         active,
@@ -151,7 +151,7 @@ pub const CompiledModel = struct {
         const layer0_exe = try platform.compileFn(
             allocator,
             io,
-            layer.forwardLayer0,
+            layer.forwardLayer0Compact,
             .{ params.hidden, mdl.runtime_layer0, params.kda_cache },
             .{ .shardings = sharding },
         );
@@ -235,7 +235,7 @@ pub const CompiledModel = struct {
         const head_exe = try platform.compileFn(
             allocator,
             io,
-            layer.diagnosticSessionHead,
+            layer.sessionHead,
             .{ params.hidden, params.blocks, params.active_blocks, mdl.runtime_head.output_res_norm, mdl.runtime_head.output_res_projection, mdl.runtime_head.final_norm, mdl.runtime_head.lm_head },
             .{ .shardings = sharding },
         );

@@ -39,7 +39,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, default=SOURCE)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     source_manifest = json.loads((args.source_dir / "expanded-mla-reference.json").read_text())
     if source_manifest["tensor_semantic_sha256"] != SOURCE_SEMANTIC_SHA256:
@@ -94,11 +93,6 @@ def main() -> None:
     (args.output_dir.resolve() / "manifest.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n"
     )
-    # KIMI_K3_TEMP_REMOVE_M20: derived split/decode inventory is a cache
-    # bring-up diagnostic removed when permanent session tests replace it.
-    if args.debug:
-        for name, value in sorted(tensors.items()):
-            print(f"[kimi-k3-debug] {name} shape={tuple(value.shape)} dtype={value.dtype}")
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

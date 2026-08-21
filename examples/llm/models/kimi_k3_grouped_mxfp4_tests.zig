@@ -131,8 +131,6 @@ const tolerance: zml.testing.CompareOpts = .{
 fn compare(
     allocator: std.mem.Allocator,
     io: std.Io,
-    stdout: *std.Io.Writer,
-    name: []const u8,
     actual: zml.Buffer,
     expected: zml.Buffer,
     opts: zml.testing.CompareOpts,
@@ -141,18 +139,6 @@ fn compare(
     defer actual_host.free(allocator);
     var expected_host = try expected.toSliceAlloc(allocator, io);
     defer expected_host.free(allocator);
-    const report = try zml.testing.compareSlices(
-        allocator,
-        f32,
-        f32,
-        actual_host.items(f32),
-        expected_host.items(f32),
-        opts,
-    );
-    // KIMI_K3_TEMP_REMOVE_M20: per-case activation error reports and execution
-    // timing are bring-up diagnostics removed after the permanent suite lands.
-    try stdout.print("KIMI_K3_GROUPED_MXFP4_CASE name={s} shape={f}\n{f}\n", .{ name, actual.shape(), report });
-    try stdout.flush();
     try zml.testing.expectClose(io, actual_host, expected_host, opts);
 }
 
@@ -194,13 +180,13 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     const stdout = &stdout_file.interface;
-    try compare(allocator, io, stdout, "n1_partial_k32", result.n1_native, result.n1_slow, tolerance);
-    try compare(allocator, io, stdout, "n63_partial_k32", result.n63_native, result.n63_slow, tolerance);
-    try compare(allocator, io, stdout, "n64_partial_k32", result.n64_native, result.n64_slow, tolerance);
-    try compare(allocator, io, stdout, "n65_partial_k32", result.n65_native, result.n65_slow, tolerance);
-    try compare(allocator, io, stdout, "route_input", result.route_native, result.route_slow, tolerance);
-    try compare(allocator, io, stdout, "invalid_sentinel_zero", result.invalid_native, result.invalid_expected, .exact_match);
-    try compare(allocator, io, stdout, "weighted_reduction", result.weighted_native, result.weighted_slow, tolerance);
+    try compare(allocator, io, result.n1_native, result.n1_slow, tolerance);
+    try compare(allocator, io, result.n63_native, result.n63_slow, tolerance);
+    try compare(allocator, io, result.n64_native, result.n64_slow, tolerance);
+    try compare(allocator, io, result.n65_native, result.n65_slow, tolerance);
+    try compare(allocator, io, result.route_native, result.route_slow, tolerance);
+    try compare(allocator, io, result.invalid_native, result.invalid_expected, .exact_match);
+    try compare(allocator, io, result.weighted_native, result.weighted_slow, tolerance);
     try stdout.print("KIMI_K3_GROUPED_MXFP4_ALL_PASS cases=7 experts=5 empty_experts=1 duplicate_routes=true backend=cuda compile_us={} execute_us={}\n", .{ compile_us, execute_us });
     try stdout.flush();
 }

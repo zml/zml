@@ -433,7 +433,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     deterministic_setup()
@@ -457,16 +456,6 @@ def main() -> None:
     }
     manifest_path = args.output / "kda-decode-reference.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    # KIMI_K3_TEMP_REMOVE_M20: named per-step activation statistics are retained
-    # for KDA bring-up and removed during the cleanup milestone.
-    if args.debug:
-        for step in range(STEPS):
-            for boundary in ("alpha", "prediction", "error", "recurrent_state", "projection_output"):
-                value = tensors[f"step.{step}.expected.{boundary}"]
-                print(
-                    f"[kimi-k3-debug] step={step} boundary={boundary} shape={value.shape} "
-                    f"min={value.min():.7g} max={value.max():.7g} rms={np.sqrt(np.mean(value * value)):.7g}"
-                )
     print(
         json.dumps(
             {

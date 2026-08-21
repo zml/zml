@@ -99,8 +99,6 @@ pub const Weights = struct {
     dense: DenseWeights,
 };
 
-// KIMI_K3_TEMP_REMOVE_M20: named router/expert boundaries are returned for
-// composed layer-family parity and reduced to output plus route telemetry in M20.
 pub const Result = struct {
     route: router.Result,
     routed_down: zml.Tensor,
