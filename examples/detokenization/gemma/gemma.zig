@@ -15,9 +15,12 @@ pub const Gemma_handler = struct {
     exes: GemmaExes,
     model_buffers: zml.Bufferized(Gemma),
     kv_cache_buffers: zml.Bufferized(KvCache),
+    activation_cache: ?ActivationCache,
+    activation_cache_buffers: ?zml.Bufferized(ActivationCache),
+    collect_activations: bool,
     sampling_strategy_buffers: zml.Bufferized(zml.nn.DynamicSamplingStrategy),
 
-    pub fn init(zml_handler: *main.Zml_handler, path: []const u8) !Gemma_handler {
+    pub fn init(zml_handler: *main.Zml_handler, path: []const u8, collect_activations: bool) !Gemma_handler {
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, path);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
@@ -51,6 +54,7 @@ pub const Gemma_handler = struct {
         const options: Options = .{
             .seq_len = 2048,
             .hidden_size = config.hidden_size,
+            .intermediate_size = config.intermediate_size,
             .voc_size = config.vocab_size,
             .num_hidden_layers = config.num_hidden_layers,
             .num_attention_heads = config.num_attention_heads,
@@ -76,8 +80,9 @@ pub const Gemma_handler = struct {
                 .hd = config.global_head_dim,
             }, .bf16),
         );
+        const activation_cache: ?ActivationCache = if (collect_activations) .init(options) else null;
 
-        const exes = try compileModel(zml_handler, model, options);
+        const exes = try compileModel(zml_handler, model, options, collect_activations);
 
         std.log.info("Gemma load buffers", .{});
         var model_buffers = try model.load(zml_handler, &store);
@@ -86,6 +91,11 @@ pub const Gemma_handler = struct {
 
         var kv_cache_buffers = try kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
         errdefer KvCache.deinitBuffer(&kv_cache_buffers);
+        var activation_cache_buffers: ?zml.Bufferized(ActivationCache) = if (activation_cache) |cache|
+            try cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated)
+        else
+            null;
+        errdefer if (activation_cache_buffers) |*buffers| ActivationCache.deinitBuffer(buffers);
         var sampling_strategy_buffers = try generation_config.samplingStrategyBuffers(zml_handler.io, zml_handler.platform);
         errdefer zml.nn.DynamicSamplingStrategy.deinitBuffers(&sampling_strategy_buffers);
 
@@ -99,6 +109,9 @@ pub const Gemma_handler = struct {
             .exes = exes,
             .model_buffers = model_buffers,
             .kv_cache_buffers = kv_cache_buffers,
+            .activation_cache = activation_cache,
+            .activation_cache_buffers = activation_cache_buffers,
+            .collect_activations = collect_activations,
             .sampling_strategy_buffers = sampling_strategy_buffers,
         };
     }
@@ -124,7 +137,7 @@ pub const Gemma_handler = struct {
         return try .fromBytes(zml_handler.allocator, bytes);
     }
 
-    pub fn compileModel(zml_handler: *main.Zml_handler, model: Gemma, options: Options) !GemmaExes {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: Gemma, options: Options, collect_activations: bool) !GemmaExes {
         const opts: zml.module.CompilationOptions = .{};
         std.log.info("Gemma compile models", .{});
         const global_layer_index = for (model.layers, 0..) |layer, i| {
@@ -154,38 +167,42 @@ pub const Gemma_handler = struct {
         // compile layers
 
         var prefill_local_layer_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, collect_activations_: bool, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .prefill(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
+                const activation_cache_: ?ActivationCache = if (collect_activations_) .init(options_) else null;
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer, activation_cache_, collect_activations_ }, opts_);
             }
-        }.call, .{ zml_handler, model.layers[0], options, opts });
+        }.call, .{ zml_handler, model.layers[0], options, collect_activations, opts });
         var prefill_local_layer_future_awaited = false;
         errdefer if (!prefill_local_layer_future_awaited) if (prefill_local_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var decode_local_layer_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, collect_activations_: bool, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .decode(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
+                const activation_cache_: ?ActivationCache = if (collect_activations_) .init(options_) else null;
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer, activation_cache_, collect_activations_ }, opts_);
             }
-        }.call, .{ zml_handler, model.layers[0], options, opts });
+        }.call, .{ zml_handler, model.layers[0], options, collect_activations, opts });
         var decode_local_layer_future_awaited = false;
         errdefer if (!decode_local_layer_future_awaited) if (decode_local_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var prefill_global_layer_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, collect_activations_: bool, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .prefill(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
+                const activation_cache_: ?ActivationCache = if (collect_activations_) .init(options_) else null;
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer, activation_cache_, collect_activations_ }, opts_);
             }
-        }.call, .{ zml_handler, model.layers[global_layer_index], options, opts });
+        }.call, .{ zml_handler, model.layers[global_layer_index], options, collect_activations, opts });
         var prefill_global_layer_future_awaited = false;
         errdefer if (!prefill_global_layer_future_awaited) if (prefill_global_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var decode_global_layer_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, collect_activations_: bool, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .decode(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
+                const activation_cache_: ?ActivationCache = if (collect_activations_) .init(options_) else null;
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer, activation_cache_, collect_activations_ }, opts_);
             }
-        }.call, .{ zml_handler, model.layers[global_layer_index], options, opts });
+        }.call, .{ zml_handler, model.layers[global_layer_index], options, collect_activations, opts });
         var decode_global_layer_future_awaited = false;
         errdefer if (!decode_global_layer_future_awaited) if (decode_global_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
@@ -281,12 +298,20 @@ pub const Gemma_handler = struct {
     pub fn unloadBuffers(self: *Gemma_handler, allocator: std.mem.Allocator) void {
         Gemma.unloadBuffers(&self.model_buffers, allocator);
         KvCache.deinitBuffer(&self.kv_cache_buffers);
+        if (self.activation_cache_buffers) |*buffers| ActivationCache.deinitBuffer(buffers);
         zml.nn.DynamicSamplingStrategy.deinitBuffers(&self.sampling_strategy_buffers);
     }
 
     pub fn resetKvCache(self: *Gemma_handler, zml_handler: *main.Zml_handler) !void {
         KvCache.deinitBuffer(&self.kv_cache_buffers);
         self.kv_cache_buffers = try self.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
+    }
+
+    pub fn resetActivationCache(self: *Gemma_handler, zml_handler: *main.Zml_handler) !void {
+        const cache = self.activation_cache orelse return;
+        if (self.activation_cache_buffers) |*buffers| ActivationCache.deinitBuffer(buffers);
+        self.activation_cache_buffers = null;
+        self.activation_cache_buffers = try cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
     }
 
     pub fn deinit(self: *Gemma_handler, allocator: std.mem.Allocator) void {
@@ -480,6 +505,7 @@ pub const GenerationConfig = struct {
 pub const Options = struct {
     seq_len: u32,
     hidden_size: u32,
+    intermediate_size: u32,
     voc_size: u32,
     num_hidden_layers: u32,
     num_attention_heads: u32,
@@ -759,12 +785,45 @@ const TransformerLayer = struct {
         }
     };
 
-    pub fn forward(self: TransformerLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) struct { zml.Tensor, KvCache } {
-        const attn, const new_cache = self.att_layer.forward(self.input_norm.forward(x), token_index, kv_cache, layer_index);
-        const x_after_attn = x.add(self.post_att_norm.forward(attn));
-        const mlp = self.mlp_layer.forward(self.pre_ff_norm.forward(x_after_attn));
-        const out = x_after_attn.add(self.post_ff_norm.forward(mlp)).mul(self.layer_scalar.asScalar());
-        return .{ out.reuseBuffer(x), new_cache.reuseBuffer(kv_cache) };
+    pub fn forward(
+        self: TransformerLayer,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        layer_index: zml.Tensor,
+        activation_cache: ?ActivationCache,
+        collect_activations: bool,
+    ) struct { zml.Tensor, KvCache, ?ActivationCache } {
+        const input_norm = self.input_norm.forward(x);
+        const attn = self.att_layer.forward(input_norm, token_index, kv_cache, layer_index);
+        const attention_projection = self.post_att_norm.forward(attn.output);
+        const x_after_attn = x.add(attention_projection);
+        const pre_ff_norm = self.pre_ff_norm.forward(x_after_attn);
+        const mlp = self.mlp_layer.forward(pre_ff_norm);
+        const out = x_after_attn.add(self.post_ff_norm.forward(mlp.output)).mul(self.layer_scalar.asScalar());
+
+        const updated_activation_cache: ?ActivationCache = if (collect_activations) blk: {
+            const cache = activation_cache orelse unreachable;
+            const activation_index = token_index.remainder(zml.Tensor.scalar(ActivationCache.capacity, token_index.dtype()));
+            const updated = cache.update(self.att_layer.is_global, layer_index, activation_index, .{
+                .layer_input = x,
+                .input_norm = input_norm,
+                .q = attn.q,
+                .k = attn.k,
+                .v = attn.v,
+                .attention_context = attn.context,
+                .attention_output = attn.output,
+                .post_attention_residual = x_after_attn,
+                .pre_ff_norm = pre_ff_norm,
+                .gate = mlp.gate,
+                .up = mlp.up,
+                .geglu = mlp.geglu,
+                .post_mlp_residual = out,
+            });
+            break :blk updated.reuseBuffer(cache);
+        } else null;
+
+        return .{ out.reuseBuffer(x), attn.kv_cache.reuseBuffer(kv_cache), updated_activation_cache };
     }
 };
 
@@ -813,7 +872,16 @@ const AttLayer = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) struct { zml.Tensor, KvCache } {
+    const Output = struct {
+        output: zml.Tensor,
+        kv_cache: KvCache,
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        context: zml.Tensor,
+    };
+
+    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) Output {
         const q_projection = self.q_proj.forward(x);
         const k_projection = self.k_proj.forward(x);
         const v_projection = if (self.v_proj) |v_proj| v_proj.forward(x) else k_projection;
@@ -838,6 +906,9 @@ const AttLayer = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
+        const activation_q = q;
+        const activation_k = k;
+        const activation_v = v;
         const dtype = q.dtype();
         const new_kv_cache = kv_cache.update(self.is_global, layer_index, k, v, token_index);
         k = new_kv_cache.keys(self.is_global, layer_index).convert(dtype);
@@ -860,7 +931,14 @@ const AttLayer = struct {
         });
         const attn_output = self.o_proj.forward(attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s })).rename(.{ .d_out = .d });
 
-        return .{ attn_output, new_kv_cache.reuseBuffer(kv_cache) };
+        return .{
+            .output = attn_output,
+            .kv_cache = new_kv_cache.reuseBuffer(kv_cache),
+            .q = activation_q,
+            .k = activation_k,
+            .v = activation_v,
+            .context = attn_heads_output,
+        };
     }
 };
 
@@ -883,12 +961,24 @@ const MlpLayer = struct {
         self.down_proj.deinit();
     }
 
-    pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
+    const Output = struct {
+        output: zml.Tensor,
+        gate: zml.Tensor,
+        up: zml.Tensor,
+        geglu: zml.Tensor,
+    };
+
+    pub fn forward(self: MlpLayer, input: zml.Tensor) Output {
         const up_projection = input.dot(self.up_proj, .d);
         const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.gelu().mul(up_projection);
         const output = activation.dot(self.down_proj, .d_out);
-        return output;
+        return .{
+            .output = output,
+            .gate = gate_projection,
+            .up = up_projection,
+            .geglu = activation,
+        };
     }
 };
 
@@ -1006,5 +1096,198 @@ pub const KvCache = struct {
             .global_k = self.global_k.reuseBuffer(other.global_k),
             .global_v = self.global_v.reuseBuffer(other.global_v),
         };
+    }
+};
+
+pub const ActivationCache = struct {
+    pub const capacity: u32 = 256;
+    pub const Slices = zml.meta.MapRestrict(zml.Tensor, zml.Slice).map(ActivationCache);
+
+    local_layer_input: zml.Tensor,
+    local_input_norm: zml.Tensor,
+    local_q: zml.Tensor,
+    local_k: zml.Tensor,
+    local_v: zml.Tensor,
+    local_attention_context: zml.Tensor,
+    local_attention_output: zml.Tensor,
+    local_post_attention_residual: zml.Tensor,
+    local_pre_ff_norm: zml.Tensor,
+    local_gate: zml.Tensor,
+    local_up: zml.Tensor,
+    local_geglu: zml.Tensor,
+    local_post_mlp_residual: zml.Tensor,
+
+    global_layer_input: zml.Tensor,
+    global_input_norm: zml.Tensor,
+    global_q: zml.Tensor,
+    global_k: zml.Tensor,
+    global_v: zml.Tensor,
+    global_attention_context: zml.Tensor,
+    global_attention_output: zml.Tensor,
+    global_post_attention_residual: zml.Tensor,
+    global_pre_ff_norm: zml.Tensor,
+    global_gate: zml.Tensor,
+    global_up: zml.Tensor,
+    global_geglu: zml.Tensor,
+    global_post_mlp_residual: zml.Tensor,
+
+    const Values = struct {
+        layer_input: zml.Tensor,
+        input_norm: zml.Tensor,
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        attention_context: zml.Tensor,
+        attention_output: zml.Tensor,
+        post_attention_residual: zml.Tensor,
+        pre_ff_norm: zml.Tensor,
+        gate: zml.Tensor,
+        up: zml.Tensor,
+        geglu: zml.Tensor,
+        post_mlp_residual: zml.Tensor,
+    };
+
+    pub fn init(options: Options) ActivationCache {
+        const local_hidden = zml.Shape.init(.{ .layer = options.num_local_layers, .a = capacity, .d = options.hidden_size }, .bf16);
+        const local_q = zml.Shape.init(.{ .layer = options.num_local_layers, .a = capacity, .h = options.num_attention_heads, .hd = options.head_dim }, .bf16);
+        const local_kv = zml.Shape.init(.{ .layer = options.num_local_layers, .a = capacity, .h = options.num_key_value_heads, .hd = options.head_dim }, .bf16);
+        const local_intermediate = zml.Shape.init(.{ .layer = options.num_local_layers, .a = capacity, .i = options.intermediate_size }, .bf16);
+
+        const global_hidden = zml.Shape.init(.{ .layer = options.num_global_layers, .a = capacity, .d = options.hidden_size }, .bf16);
+        const global_q = zml.Shape.init(.{ .layer = options.num_global_layers, .a = capacity, .h = options.num_attention_heads, .hd = options.global_head_dim }, .bf16);
+        const global_kv = zml.Shape.init(.{ .layer = options.num_global_layers, .a = capacity, .h = options.num_global_key_value_heads, .hd = options.global_head_dim }, .bf16);
+        const global_intermediate = zml.Shape.init(.{ .layer = options.num_global_layers, .a = capacity, .i = options.intermediate_size }, .bf16);
+
+        return .{
+            .local_layer_input = .fromShape(local_hidden),
+            .local_input_norm = .fromShape(local_hidden),
+            .local_q = .fromShape(local_q),
+            .local_k = .fromShape(local_kv),
+            .local_v = .fromShape(local_kv),
+            .local_attention_context = .fromShape(local_q),
+            .local_attention_output = .fromShape(local_hidden),
+            .local_post_attention_residual = .fromShape(local_hidden),
+            .local_pre_ff_norm = .fromShape(local_hidden),
+            .local_gate = .fromShape(local_intermediate),
+            .local_up = .fromShape(local_intermediate),
+            .local_geglu = .fromShape(local_intermediate),
+            .local_post_mlp_residual = .fromShape(local_hidden),
+
+            .global_layer_input = .fromShape(global_hidden),
+            .global_input_norm = .fromShape(global_hidden),
+            .global_q = .fromShape(global_q),
+            .global_k = .fromShape(global_kv),
+            .global_v = .fromShape(global_kv),
+            .global_attention_context = .fromShape(global_q),
+            .global_attention_output = .fromShape(global_hidden),
+            .global_post_attention_residual = .fromShape(global_hidden),
+            .global_pre_ff_norm = .fromShape(global_hidden),
+            .global_gate = .fromShape(global_intermediate),
+            .global_up = .fromShape(global_intermediate),
+            .global_geglu = .fromShape(global_intermediate),
+            .global_post_mlp_residual = .fromShape(global_hidden),
+        };
+    }
+
+    pub fn initBuffer(self: ActivationCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(ActivationCache) {
+        @setEvalBranchQuota(10_000);
+        var result: zml.Bufferized(ActivationCache) = undefined;
+        var initialized: usize = 0;
+        errdefer inline for (std.meta.fields(ActivationCache), 0..) |field, i| {
+            if (initialized > i) @field(result, field.name).deinit();
+        };
+        inline for (std.meta.fields(ActivationCache)) |field| {
+            const tensor = @field(self, field.name);
+            @field(result, field.name) = try zml.Buffer.uninitialized(io, platform, tensor.shape(), sharding, .{});
+            initialized += 1;
+        }
+        return result;
+    }
+
+    pub fn deinitBuffer(self: *zml.Bufferized(ActivationCache)) void {
+        @setEvalBranchQuota(10_000);
+        inline for (std.meta.fields(ActivationCache)) |field| {
+            @field(self, field.name).deinit();
+        }
+    }
+
+    pub fn copyToHost(self: ActivationCache, buffers: *const zml.Bufferized(ActivationCache), allocator: std.mem.Allocator, io: std.Io) !Slices {
+        @setEvalBranchQuota(10_000);
+        var result: Slices = undefined;
+        var initialized: usize = 0;
+        errdefer inline for (std.meta.fields(ActivationCache), 0..) |field, i| {
+            if (initialized > i) @field(result, field.name).free(allocator);
+        };
+        inline for (std.meta.fields(ActivationCache)) |field| {
+            const slice = try zml.Slice.alloc(allocator, @field(self, field.name).shape());
+            @field(result, field.name) = slice;
+            initialized += 1;
+            try @field(buffers, field.name).toSlice(io, slice);
+        }
+        return result;
+    }
+
+    pub fn deinitSlices(slices: *Slices, allocator: std.mem.Allocator) void {
+        @setEvalBranchQuota(10_000);
+        inline for (std.meta.fields(ActivationCache)) |field| {
+            @field(slices, field.name).free(allocator);
+        }
+    }
+
+    fn update(self: ActivationCache, is_global: bool, layer_index: zml.Tensor, activation_index: zml.Tensor, values: Values) ActivationCache {
+        var result = self;
+        if (is_global) {
+            result.global_layer_input = updateTensor(self.global_layer_input, values.layer_input.rename(.{ .s = .a }), layer_index, activation_index);
+            result.global_input_norm = updateTensor(self.global_input_norm, values.input_norm.rename(.{ .s = .a }), layer_index, activation_index);
+            result.global_q = updateTensor(self.global_q, values.q.rename(.{ .q = .a }), layer_index, activation_index);
+            result.global_k = updateTensor(self.global_k, values.k.rename(.{ .k = .a }), layer_index, activation_index);
+            result.global_v = updateTensor(self.global_v, values.v.rename(.{ .k = .a }), layer_index, activation_index);
+            result.global_attention_context = updateTensor(self.global_attention_context, values.attention_context.rename(.{ .q = .a }), layer_index, activation_index);
+            result.global_attention_output = updateTensor(self.global_attention_output, values.attention_output.rename(.{ .s = .a }), layer_index, activation_index);
+            result.global_post_attention_residual = updateTensor(self.global_post_attention_residual, values.post_attention_residual.rename(.{ .s = .a }), layer_index, activation_index);
+            result.global_pre_ff_norm = updateTensor(self.global_pre_ff_norm, values.pre_ff_norm.rename(.{ .s = .a }), layer_index, activation_index);
+            result.global_gate = updateTensor(self.global_gate, values.gate.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.global_up = updateTensor(self.global_up, values.up.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.global_geglu = updateTensor(self.global_geglu, values.geglu.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.global_post_mlp_residual = updateTensor(self.global_post_mlp_residual, values.post_mlp_residual.rename(.{ .s = .a }), layer_index, activation_index);
+        } else {
+            result.local_layer_input = updateTensor(self.local_layer_input, values.layer_input.rename(.{ .s = .a }), layer_index, activation_index);
+            result.local_input_norm = updateTensor(self.local_input_norm, values.input_norm.rename(.{ .s = .a }), layer_index, activation_index);
+            result.local_q = updateTensor(self.local_q, values.q.rename(.{ .q = .a }), layer_index, activation_index);
+            result.local_k = updateTensor(self.local_k, values.k.rename(.{ .k = .a }), layer_index, activation_index);
+            result.local_v = updateTensor(self.local_v, values.v.rename(.{ .k = .a }), layer_index, activation_index);
+            result.local_attention_context = updateTensor(self.local_attention_context, values.attention_context.rename(.{ .q = .a }), layer_index, activation_index);
+            result.local_attention_output = updateTensor(self.local_attention_output, values.attention_output.rename(.{ .s = .a }), layer_index, activation_index);
+            result.local_post_attention_residual = updateTensor(self.local_post_attention_residual, values.post_attention_residual.rename(.{ .s = .a }), layer_index, activation_index);
+            result.local_pre_ff_norm = updateTensor(self.local_pre_ff_norm, values.pre_ff_norm.rename(.{ .s = .a }), layer_index, activation_index);
+            result.local_gate = updateTensor(self.local_gate, values.gate.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.local_up = updateTensor(self.local_up, values.up.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.local_geglu = updateTensor(self.local_geglu, values.geglu.rename(.{ .s = .a, .d_out = .i }), layer_index, activation_index);
+            result.local_post_mlp_residual = updateTensor(self.local_post_mlp_residual, values.post_mlp_residual.rename(.{ .s = .a }), layer_index, activation_index);
+        }
+        return result;
+    }
+
+    fn updateTensor(old: zml.Tensor, new_: zml.Tensor, layer_index: zml.Tensor, activation_index: zml.Tensor) zml.Tensor {
+        const new = if (new_.dim(.a) > capacity)
+            new_.slice1d(.a, .{ .start = 0, .end = capacity })
+        else
+            new_;
+        const target_shape = old.shape().drop(.layer);
+        const layer = layer_index.broad(activation_index.shape());
+        return old.scatterSlices(
+            .{ .layer = layer, .a = activation_index },
+            new.convert(old.dtype()).transpose(target_shape),
+            .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+        ).reuseBuffer(old);
+    }
+
+    fn reuseBuffer(self: ActivationCache, other: ActivationCache) ActivationCache {
+        @setEvalBranchQuota(10_000);
+        var result = self;
+        inline for (std.meta.fields(ActivationCache)) |field| {
+            @field(result, field.name) = @field(self, field.name).reuseBuffer(@field(other, field.name));
+        }
+        return result;
     }
 };

@@ -340,7 +340,7 @@ const bench_misc = false;
 
 pub fn runGemma(zml_handler: *Zml_handler) !void {
     std.log.info("***** Init Gemma handler", .{});
-    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma);
+    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma, true);
     defer llm.deinit(zml_handler.allocator);
 
     std.log.info("***** Tokenize prompt", .{});
@@ -349,8 +349,11 @@ pub fn runGemma(zml_handler: *Zml_handler) !void {
 
     std.log.info("***** Generate text", .{});
     zml_handler.mem.start(0);
-    const generated_text = try gemma_inference.generateText(zml_handler, &llm, prompt);
-    defer zml_handler.allocator.free(generated_text);
+    var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
+    defer generation_result.deinit(zml_handler.allocator);
+    if (generation_result.activations) |*activations| {
+        try gemma_inference.exportActivations(zml_handler, "gemma-activations.safetensors", llm.config, activations);
+    }
     zml_handler.mem.check(0);
 }
 
