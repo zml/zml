@@ -19,6 +19,7 @@ Production `llm` initialization remains configuration-driven and full-model-only
 The canonical node has four NVIDIA GB300 GPUs with 284,208 MiB each on a
 complete NV18 fabric. Keep at least 200,000 MiB free on every rank before a
 conformance run so unrelated processes cannot distort memory or latency data.
+The Milestone 26 runner rechecks this threshold before every TP4 workload.
 
 ## Offline build
 
