@@ -10,6 +10,19 @@ const log = std.log.scoped(.kimi_k3_weights);
 
 pub const expert_count: usize = 896;
 
+/// Mutable instrumentation shared by copied Loader values. Payload counters
+/// cover explicit runtime layer reads; head/layer-0 bulk loading is separate.
+pub const LoadStats = struct {
+    layer_loads: usize = 0,
+    payload_reads: u64 = 0,
+    payload_bytes: u64 = 0,
+
+    fn recordPayload(self: *LoadStats, bytes: usize) void {
+        self.payload_reads += 1;
+        self.payload_bytes += bytes;
+    }
+};
+
 pub const expert_component_bytes = struct {
     pub const w1_values: u64 = expert_count * 3072 * 1792;
     pub const w1_scale: u64 = expert_count * 3072 * 112;
@@ -119,6 +132,7 @@ pub const Loader = struct {
     store: *zml.io.TensorStore,
     model_sharding: zml.Sharding,
     expert_sharding: zml.Sharding,
+    stats: ?*LoadStats = null,
 
     fn rootView(self: Loader) zml.io.TensorStore.View {
         return self.store.view();
@@ -143,6 +157,7 @@ pub const Loader = struct {
         var reader = try self.rootView().getReader(key, self.io, &io_buffer);
         defer reader.deinit();
         _ = try reader.interface.readSliceAll(bytes);
+        if (self.stats) |stats| stats.recordPayload(bytes.len);
         return zml.Buffer.fromBytes(
             self.io,
             self.platform,
@@ -169,6 +184,7 @@ pub const Loader = struct {
         var reader = try self.rootView().getReader(key, self.io, &io_buffer);
         defer reader.deinit();
         _ = try reader.interface.readSliceAll(bytes);
+        if (self.stats) |stats| stats.recordPayload(bytes.len);
         return zml.Buffer.fromBytes(self.io, self.platform, target, self.model_sharding, bytes);
     }
 
@@ -200,6 +216,7 @@ pub const Loader = struct {
             var reader = try self.rootView().getReader(key, self.io, &io_buffer);
             defer reader.deinit();
             _ = try reader.interface.readSliceAll(bytes[expert * per_expert ..][0..per_expert]);
+            if (self.stats) |stats| stats.recordPayload(per_expert);
         }
         return zml.Buffer.fromBytes(self.io, self.platform, target, self.expert_sharding, bytes);
     }
@@ -298,6 +315,7 @@ pub const Loader = struct {
     }
 
     pub fn loadKdaMoe(self: Loader, layer_index: usize) !zml.Bufferized(layer.KdaMoeWeights) {
+        if (self.stats) |stats| stats.layer_loads += 1;
         var result: zml.Bufferized(layer.KdaMoeWeights) = undefined;
         result.common = try self.loadCommon(layer_index);
         errdefer zml.Buffer.deinitAll(layer.MoeLayerWeights, &result.common);
@@ -332,6 +350,7 @@ pub const Loader = struct {
     }
 
     pub fn loadMlaMoe(self: Loader, layer_index: usize) !zml.Bufferized(layer.MlaMoeWeights) {
+        if (self.stats) |stats| stats.layer_loads += 1;
         var result: zml.Bufferized(layer.MlaMoeWeights) = undefined;
         result.common = try self.loadCommon(layer_index);
         errdefer zml.Buffer.deinitAll(layer.MoeLayerWeights, &result.common);

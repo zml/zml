@@ -193,8 +193,14 @@ pub const Session = struct {
             switch (planned.kind()) {
                 .kda_dense => return error.UnsupportedSecondDenseKimiK3Layer,
                 .kda_moe => {
-                    var weights = try self.buffers.loader.loadKdaMoe(layer_index);
-                    defer zml.Buffer.deinitAll(layer.KdaMoeWeights, &weights);
+                    var streamed_weights: zml.Bufferized(layer.KdaMoeWeights) = undefined;
+                    var streamed = false;
+                    const weights = self.buffers.residentKdaMoe(layer_index) orelse temporary: {
+                        streamed_weights = try self.buffers.loader.loadKdaMoe(layer_index);
+                        streamed = true;
+                        break :temporary &streamed_weights;
+                    };
+                    defer if (streamed) zml.Buffer.deinitAll(layer.KdaMoeWeights, &streamed_weights);
                     if (layer_index % block_size == 0) {
                         const exe = self.compiled.kda_moe_boundary orelse return error.MissingKdaMoeBoundaryExecutable;
                         var block_index_buffer = try zml.Buffer.scalar(
@@ -208,7 +214,7 @@ pub const Session = struct {
                         defer args.deinit(self.allocator);
                         var results = try exe.results(self.allocator);
                         defer results.deinit(self.allocator);
-                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights, self.kda_caches[kda_ordinal] });
+                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights.*, self.kda_caches[kda_ordinal] });
                         exe.callOpts(self.io, args, &results, .{ .wait = true });
                         var actual: zml.Bufferized(layer.KdaMoeBoundaryCompactResult) = undefined;
                         results.fill(.{&actual});
@@ -225,7 +231,7 @@ pub const Session = struct {
                         defer args.deinit(self.allocator);
                         var results = try exe.results(self.allocator);
                         defer results.deinit(self.allocator);
-                        args.set(.{ hidden, blocks, active_buffer, weights, self.kda_caches[kda_ordinal] });
+                        args.set(.{ hidden, blocks, active_buffer, weights.*, self.kda_caches[kda_ordinal] });
                         exe.callOpts(self.io, args, &results, .{ .wait = true });
                         var actual: zml.Bufferized(layer.KdaMoeCompactResult) = undefined;
                         results.fill(.{&actual});
@@ -238,8 +244,14 @@ pub const Session = struct {
                     kda_ordinal += 1;
                 },
                 .mla_moe => {
-                    var weights = try self.buffers.loader.loadMlaMoe(layer_index);
-                    defer zml.Buffer.deinitAll(layer.MlaMoeWeights, &weights);
+                    var streamed_weights: zml.Bufferized(layer.MlaMoeWeights) = undefined;
+                    var streamed = false;
+                    const weights = self.buffers.residentMlaMoe(layer_index) orelse temporary: {
+                        streamed_weights = try self.buffers.loader.loadMlaMoe(layer_index);
+                        streamed = true;
+                        break :temporary &streamed_weights;
+                    };
+                    defer if (streamed) zml.Buffer.deinitAll(layer.MlaMoeWeights, &streamed_weights);
                     if (layer_index % block_size == 0) {
                         const exe = self.compiled.mla_moe_boundary orelse return error.MissingMlaMoeBoundaryExecutable;
                         var block_index_buffer = try zml.Buffer.scalar(
@@ -253,7 +265,7 @@ pub const Session = struct {
                         defer args.deinit(self.allocator);
                         var results = try exe.results(self.allocator);
                         defer results.deinit(self.allocator);
-                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights, self.mla_caches[mla_ordinal], token_index_buffer });
+                        args.set(.{ hidden, blocks, active_buffer, block_index_buffer, weights.*, self.mla_caches[mla_ordinal], token_index_buffer });
                         exe.callOpts(self.io, args, &results, .{ .wait = true });
                         var actual: zml.Bufferized(layer.MlaMoeBoundaryCompactResult) = undefined;
                         results.fill(.{&actual});
@@ -268,7 +280,7 @@ pub const Session = struct {
                         defer args.deinit(self.allocator);
                         var results = try exe.results(self.allocator);
                         defer results.deinit(self.allocator);
-                        args.set(.{ hidden, blocks, active_buffer, weights, self.mla_caches[mla_ordinal], token_index_buffer });
+                        args.set(.{ hidden, blocks, active_buffer, weights.*, self.mla_caches[mla_ordinal], token_index_buffer });
                         exe.callOpts(self.io, args, &results, .{ .wait = true });
                         var actual: zml.Bufferized(layer.MlaMoeCompactResult) = undefined;
                         results.fill(.{&actual});

@@ -364,10 +364,48 @@ pub const Model = struct {
     }
 };
 
+pub const ResidentMoeLayer = union(enum) {
+    kda_moe: struct {
+        logical_index: usize,
+        weights: zml.Bufferized(layer_ops.KdaMoeWeights),
+    },
+    mla_moe: struct {
+        logical_index: usize,
+        weights: zml.Bufferized(layer_ops.MlaMoeWeights),
+    },
+
+    pub fn deinit(self: *ResidentMoeLayer) void {
+        switch (self.*) {
+            .kda_moe => |*resident| zml.Buffer.deinitAll(layer_ops.KdaMoeWeights, &resident.weights),
+            .mla_moe => |*resident| zml.Buffer.deinitAll(layer_ops.MlaMoeWeights, &resident.weights),
+        }
+    }
+};
+
 pub const Buffers = struct {
     head: runtime_weights.HeadWeights,
     layer0: zml.Bufferized(layer_ops.Layer0Weights),
     loader: runtime_weights.Loader,
+    load_stats: *runtime_weights.LoadStats,
+    resident_layers: ?[]ResidentMoeLayer = null,
+
+    pub fn residentKdaMoe(self: *Buffers, logical_index: usize) ?*zml.Bufferized(layer_ops.KdaMoeWeights) {
+        const residents = self.resident_layers orelse return null;
+        for (residents) |*resident| switch (resident.*) {
+            .kda_moe => |*entry| if (entry.logical_index == logical_index) return &entry.weights,
+            .mla_moe => {},
+        };
+        return null;
+    }
+
+    pub fn residentMlaMoe(self: *Buffers, logical_index: usize) ?*zml.Bufferized(layer_ops.MlaMoeWeights) {
+        const residents = self.resident_layers orelse return null;
+        for (residents) |*resident| switch (resident.*) {
+            .kda_moe => {},
+            .mla_moe => |*entry| if (entry.logical_index == logical_index) return &entry.weights,
+        };
+        return null;
+    }
 };
 
 pub const LoadedModel = struct {
@@ -413,6 +451,9 @@ pub const LoadedModel = struct {
         }
         var node = progress.start("Loading Kimi K3 resident weights...", 2);
         defer node.end();
+        const load_stats = try allocator.create(runtime_weights.LoadStats);
+        load_stats.* = .{};
+        errdefer allocator.destroy(load_stats);
         const loader: runtime_weights.Loader = .{
             .allocator = allocator,
             .io = io,
@@ -420,20 +461,68 @@ pub const LoadedModel = struct {
             .store = store,
             .model_sharding = shardings.model,
             .expert_sharding = shardings.experts,
+            .stats = load_stats,
         };
         var head = try loader.loadHead();
         errdefer zml.Buffer.deinitAll(runtime_weights.HeadTensors, &head);
         node.completeOne();
         const layer0_buffers = try loader.loadLayer0();
         node.completeOne();
-        return .{ .head = head, .layer0 = layer0_buffers, .loader = loader };
+        return .{ .head = head, .layer0 = layer0_buffers, .loader = loader, .load_stats = load_stats };
+    }
+
+    pub fn loadPrefixBuffers(
+        self: *LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        if (self.inner.selection.first_layer != 0 or self.inner.layers.len != 4) {
+            return error.ResidentBuffersRequireKimiK3Prefix4;
+        }
+        var buffers = try self.loadBuffers(allocator, io, platform, store, progress, shardings);
+        errdefer self.unloadBuffers(&buffers, allocator);
+        const residents = try allocator.alloc(ResidentMoeLayer, 3);
+        var initialized: usize = 0;
+        errdefer {
+            for (residents[0..initialized]) |*resident| resident.deinit();
+            allocator.free(residents);
+        }
+        var node = progress.start("Loading Kimi K3 resident prefix layers...", 3);
+        defer node.end();
+        for (self.inner.layers[1..], 0..) |planned, offset| {
+            const logical_index = planned.weights().logical_index;
+            residents[offset] = switch (planned.kind()) {
+                .kda_dense => return error.UnsupportedSecondDenseKimiK3Layer,
+                .kda_moe => .{ .kda_moe = .{
+                    .logical_index = logical_index,
+                    .weights = try buffers.loader.loadKdaMoe(logical_index),
+                } },
+                .mla_moe => .{ .mla_moe = .{
+                    .logical_index = logical_index,
+                    .weights = try buffers.loader.loadMlaMoe(logical_index),
+                } },
+            };
+            initialized += 1;
+            node.completeOne();
+        }
+        buffers.resident_layers = residents;
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
+        if (buffers.resident_layers) |residents| {
+            for (residents) |*resident| resident.deinit();
+            allocator.free(residents);
+            buffers.resident_layers = null;
+        }
         zml.Buffer.deinitAll(runtime_weights.HeadTensors, &buffers.head);
         zml.Buffer.deinitAll(layer_ops.Layer0Weights, &buffers.layer0);
-        _ = allocator;
+        allocator.destroy(buffers.load_stats);
     }
 
     pub fn compile(

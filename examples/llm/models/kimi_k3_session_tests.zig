@@ -16,6 +16,7 @@ const Args = struct {
     decode_one: bool = false,
     layer_limit: usize = 4,
     compile_only: bool = false,
+    resident: bool = false,
 
     pub const help =
         \\Use kimi_k3_session_tests --weights=<S4-directory> --tokenizer=<tokenizer.json> [options]
@@ -28,6 +29,7 @@ const Args = struct {
         \\  --decode-one          Stream exactly one generated continuation
         \\  --layer-limit=<count> Selected prefix depth (default: 4)
         \\  --compile-only        Compile selected families without loading weights
+        \\  --resident            Keep selected four-layer weights resident across tokens
         \\
     ;
 };
@@ -67,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.repeats == 0) return error.InvalidRepeatCount;
     if (args.decode_one and args.repeats != 1) return error.DecodeGateRequiresOneRepeat;
     if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
+    if (args.resident and (args.compile_only or args.layer_limit != 4)) return error.InvalidResidentSessionMode;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -128,11 +131,15 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var buffers = try loaded_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var buffers = if (args.resident)
+        try loaded_model.loadPrefixBuffers(allocator, io, platform, &store, &progress, shardings)
+    else
+        try loaded_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer loaded_model.unloadBuffers(&buffers, allocator);
     var tokenizer = try zml.tokenizer.Tokenizer.fromFile(allocator, io, args.tokenizer);
     defer tokenizer.deinit();
     var session = try session_impl.Session.init(allocator, io, platform, tokenizer, &compiled, &buffers);
+    const resident_load_stats = buffers.load_stats.*;
     defer session.deinit();
 
     var first_greedy: ?u32 = null;
@@ -140,6 +147,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..args.repeats) |repeat| {
         const started = std.Io.Clock.now(.real, io).toNanoseconds();
         try session.runPrefill(official_prefix[0..args.token_count]);
+        if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
         const greedy = session.last_generated_token;
         if (first_greedy) |expected| {
             if (greedy != expected) return error.KimiK3SessionResetMismatch;
@@ -150,8 +158,8 @@ pub fn main(init: std.process.Init) !void {
             return error.KimiK3OfficialGreedyMismatch;
         }
         try stdout_file.interface.print(
-            "KIMI_K3_SESSION_PASS repeat={} tokens={} greedy={} compile_us={} session_us={} backend=cuda\n",
-            .{ repeat, args.token_count, greedy, compile_us, elapsedUs(io, started) },
+            "KIMI_K3_SESSION_PASS repeat={} tokens={} greedy={} compile_us={} session_us={} backend=cuda weights={s}\n",
+            .{ repeat, args.token_count, greedy, compile_us, elapsedUs(io, started), if (args.resident) "resident" else "streaming" },
         );
         try stdout_file.interface.flush();
         if (args.decode_one) {
