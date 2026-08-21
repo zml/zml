@@ -2,15 +2,25 @@ const std = @import("std");
 const zml = @import("zml");
 
 const main = @import("../main.zig");
-const gemma = @import("gemma.zig");
+const gemma = @import("zig");
+const rotated = @import("rotated.zig");
+const base = @import("base.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 const Zml_handler = main.Zml_handler;
-const Gemma_handler = gemma.Gemma_handler;
+const TokenIds = base.TokenIds;
+const LayerType = base.LayerType;
+const RopeParameters = base.RopeParameters;
+const ModelConfig = base.ModelConfig;
+const Config = base.Config;
+const GenerationConfig = base.GenerationConfig;
+const Options = base.Options;
+const KvCache = base.KvCache;
+const ActivationCache = base.ActivationCache;
 
 pub const ActivationBlock = struct {
     token_count: u32,
-    slices: gemma.ActivationCache.Slices,
+    slices: ActivationCache.Slices,
 };
 
 pub const Activations = struct {
@@ -19,7 +29,7 @@ pub const Activations = struct {
 
     pub fn deinit(self: *Activations, allocator: std.mem.Allocator) void {
         for (self.blocks.items) |*block| {
-            gemma.ActivationCache.deinitSlices(&block.slices, allocator);
+            ActivationCache.deinitSlices(&block.slices, allocator);
         }
         self.blocks.deinit(allocator);
     }
@@ -70,7 +80,7 @@ fn appendEncoded(allocator: std.mem.Allocator, encoder: *Tokenizer.Encoder, toke
     try tokens.appendSlice(allocator, encoded);
 }
 
-pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: []const u32) !GenerationResult {
+pub fn generateText(zml_handler: *Zml_handler, llm: anytype, prompt_tok: []const u32) !GenerationResult {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding: zml.Sharding = .replicated;
@@ -84,7 +94,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
 
     if (prompt_tok.len == 0) return error.EmptyPrompt;
     if (prompt_tok.len >= llm.options.seq_len) return error.PromptTooLong;
-    if (llm.collect_activations and prompt_tok.len >= gemma.ActivationCache.capacity) return error.PromptTooLongForActivationCache;
+    if (llm.collect_activations and prompt_tok.len >= ActivationCache.capacity) return error.PromptTooLongForActivationCache;
 
     var activations: ?Activations = if (llm.collect_activations) .{} else null;
     errdefer if (activations) |*collected| collected.deinit(allocator);
@@ -163,13 +173,17 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                     llm.exes.prefill_local_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
                 }
                 llm.exes.prefill_local_layer_exe.call(llm.exes.prefill_local_layer_args, &llm.exes.prefill_local_layer_results);
+                var next_embed_buffer: zml.Buffer = undefined;
+                var next_kv_cache_buffers: zml.Bufferized(KvCache) = undefined;
                 if (llm.collect_activations) {
-                    var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
-                    llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                    var next_activation_cache_buffers: zml.Bufferized(ActivationCache) = undefined;
+                    llm.exes.prefill_local_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers, &next_activation_cache_buffers });
                     replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                 } else {
-                    llm.exes.prefill_local_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
+                    llm.exes.prefill_local_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers });
                 }
+                replaceBuffer(&prefill_embed_buffer, next_embed_buffer);
+                replaceKvCacheBuffers(&llm.kv_cache_buffers, next_kv_cache_buffers);
             },
             .full_attention => {
                 if (llm.collect_activations) {
@@ -178,13 +192,17 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                     llm.exes.prefill_global_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
                 }
                 llm.exes.prefill_global_layer_exe.call(llm.exes.prefill_global_layer_args, &llm.exes.prefill_global_layer_results);
+                var next_embed_buffer: zml.Buffer = undefined;
+                var next_kv_cache_buffers: zml.Bufferized(KvCache) = undefined;
                 if (llm.collect_activations) {
-                    var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
-                    llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                    var next_activation_cache_buffers: zml.Bufferized(ActivationCache) = undefined;
+                    llm.exes.prefill_global_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers, &next_activation_cache_buffers });
                     replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                 } else {
-                    llm.exes.prefill_global_layer_results.fill(.{ &prefill_embed_buffer, &llm.kv_cache_buffers });
+                    llm.exes.prefill_global_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers });
                 }
+                replaceBuffer(&prefill_embed_buffer, next_embed_buffer);
+                replaceKvCacheBuffers(&llm.kv_cache_buffers, next_kv_cache_buffers);
             },
         }
     }
@@ -251,13 +269,17 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                         llm.exes.decode_local_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
                     }
                     llm.exes.decode_local_layer_exe.call(llm.exes.decode_local_layer_args, &llm.exes.decode_local_layer_results);
+                    var next_embed_buffer: zml.Buffer = undefined;
+                    var next_kv_cache_buffers: zml.Bufferized(KvCache) = undefined;
                     if (llm.collect_activations) {
-                        var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
-                        llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                        var next_activation_cache_buffers: zml.Bufferized(ActivationCache) = undefined;
+                        llm.exes.decode_local_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers, &next_activation_cache_buffers });
                         replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                     } else {
-                        llm.exes.decode_local_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
+                        llm.exes.decode_local_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers });
                     }
+                    replaceBuffer(&decode_embed_buffer, next_embed_buffer);
+                    replaceKvCacheBuffers(&llm.kv_cache_buffers, next_kv_cache_buffers);
                 },
                 .full_attention => {
                     if (llm.collect_activations) {
@@ -266,19 +288,23 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
                         llm.exes.decode_global_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
                     }
                     llm.exes.decode_global_layer_exe.call(llm.exes.decode_global_layer_args, &llm.exes.decode_global_layer_results);
+                    var next_embed_buffer: zml.Buffer = undefined;
+                    var next_kv_cache_buffers: zml.Bufferized(KvCache) = undefined;
                     if (llm.collect_activations) {
-                        var next_activation_cache_buffers: zml.Bufferized(gemma.ActivationCache) = undefined;
-                        llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers, &next_activation_cache_buffers });
+                        var next_activation_cache_buffers: zml.Bufferized(ActivationCache) = undefined;
+                        llm.exes.decode_global_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers, &next_activation_cache_buffers });
                         replaceActivationCacheBuffers(&llm.activation_cache_buffers.?, next_activation_cache_buffers);
                     } else {
-                        llm.exes.decode_global_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
+                        llm.exes.decode_global_layer_results.fill(.{ &next_embed_buffer, &next_kv_cache_buffers });
                     }
+                    replaceBuffer(&decode_embed_buffer, next_embed_buffer);
+                    replaceKvCacheBuffers(&llm.kv_cache_buffers, next_kv_cache_buffers);
                 },
             }
         }
         if (activations) |*collected| {
             activation_tokens_in_block += 1;
-            if (activation_tokens_in_block == gemma.ActivationCache.capacity) {
+            if (activation_tokens_in_block == ActivationCache.capacity) {
                 try appendActivationBlock(zml_handler, llm, collected, activation_tokens_in_block);
                 try llm.resetActivationCache(zml_handler);
                 activation_tokens_in_block = 0;
@@ -316,11 +342,11 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *Gemma_handler, prompt_tok: 
     };
 }
 
-fn appendActivationBlock(zml_handler: *Zml_handler, llm: *Gemma_handler, activations: *Activations, token_count: usize) !void {
+fn appendActivationBlock(zml_handler: *Zml_handler, llm: anytype, activations: *Activations, token_count: usize) !void {
     const cache = llm.activation_cache orelse return;
     const buffers = &llm.activation_cache_buffers.?;
     var slices = try cache.copyToHost(buffers, zml_handler.allocator, zml_handler.io);
-    errdefer gemma.ActivationCache.deinitSlices(&slices, zml_handler.allocator);
+    errdefer ActivationCache.deinitSlices(&slices, zml_handler.allocator);
     try activations.blocks.append(zml_handler.allocator, .{
         .token_count = @intCast(token_count),
         .slices = slices,
@@ -345,7 +371,7 @@ const activation_fields = [_]struct { name: []const u8, field: []const u8 }{
     .{ .name = "post_mlp_residual", .field = "post_mlp_residual" },
 };
 
-pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, config: gemma.Config, activations: *const Activations) !void {
+pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, config: Config, activations: *const Activations) !void {
     if (activations.blocks.items.len == 0) return error.NoActivations;
 
     const allocator = zml_handler.allocator;
@@ -425,7 +451,7 @@ pub fn exportActivations(zml_handler: *Zml_handler, file_name: []const u8, confi
     });
 }
 
-fn activationSlice(slices: *const gemma.ActivationCache.Slices, is_global: bool, comptime field: []const u8) zml.Slice {
+fn activationSlice(slices: *const ActivationCache.Slices, is_global: bool, comptime field: []const u8) zml.Slice {
     return if (is_global) @field(slices, "global_" ++ field) else @field(slices, "local_" ++ field);
 }
 
@@ -436,21 +462,24 @@ fn localPathFromFileUri(uri: []const u8) ?[]const u8 {
 }
 
 fn replaceRngBuffer(current: *zml.Tensor.Rng.Buffer, next: zml.Tensor.Rng.Buffer) void {
-    if (!sameBufferHandles(current._state, next._state)) {
-        current._state.deinit();
-    }
+    replaceBuffer(&current._state, next._state);
+}
+
+fn replaceBuffer(current: *zml.Buffer, next: zml.Buffer) void {
+    if (!sameBufferHandles(current.*, next)) current.deinit();
     current.* = next;
 }
 
-fn replaceActivationCacheBuffers(current: *zml.Bufferized(gemma.ActivationCache), next: zml.Bufferized(gemma.ActivationCache)) void {
+fn replaceKvCacheBuffers(current: *zml.Bufferized(KvCache), next: zml.Bufferized(KvCache)) void {
+    inline for (std.meta.fields(KvCache)) |field| {
+        replaceBuffer(&@field(current, field.name), @field(next, field.name));
+    }
+}
+
+fn replaceActivationCacheBuffers(current: *zml.Bufferized(ActivationCache), next: zml.Bufferized(ActivationCache)) void {
     @setEvalBranchQuota(10_000);
-    inline for (std.meta.fields(gemma.ActivationCache)) |field| {
-        const current_buffer = &@field(current, field.name);
-        const next_buffer = @field(next, field.name);
-        if (!sameBufferHandles(current_buffer.*, next_buffer)) {
-            current_buffer.deinit();
-        }
-        current_buffer.* = next_buffer;
+    inline for (std.meta.fields(ActivationCache)) |field| {
+        replaceBuffer(&@field(current, field.name), @field(next, field.name));
     }
 }
 

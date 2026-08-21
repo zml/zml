@@ -8,6 +8,7 @@ const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
 const gemma = @import("gemma/gemma.zig");
+const rotated_gemma = @import("gemma/rotated.zig");
 const inference = @import("inference.zig");
 const gemma_inference = @import("gemma/inference.zig");
 const algebra = @import("algebra.zig");
@@ -19,6 +20,7 @@ const productq = @import("productq.zig");
 const attention = @import("attention.zig");
 
 const Gemma_handler = gemma.Gemma_handler;
+const RotatedGemma_handler = rotated_gemma.RotatedGemma_handler;
 
 const Llm_handler = llm_.Llm_handler;
 const LmHeadMatrix = algebra.LmHeadMatrix;
@@ -132,6 +134,7 @@ pub const Uri_handler = struct {
     llama: []const u8,
     qwen: []const u8,
     gemma: []const u8,
+    rotated_gemma: []const u8,
     checkpoint: []const u8,
     qkv: []const u8,
 
@@ -140,6 +143,7 @@ pub const Uri_handler = struct {
             .llama = "file://examples//detokenization//models//llama",
             .qwen = "file://examples//detokenization//models//qwen",
             .gemma = "file://examples//detokenization//models//gemma",
+            .rotated_gemma = "file://examples//detokenization//models//gemmarotated",
             .checkpoint = "file://examples//detokenization//checkpoints",
             .qkv = "file://examples//detokenization//checkpoints//qkv-export",
         };
@@ -334,6 +338,7 @@ pub fn main(init: std.process.Init) !void {
     //try attention.runTests(&zml_handler);
     //try attention.runBenchs(&zml_handler);
 
+    try runRotatedGemma(&zml_handler);
     try runGemma(&zml_handler);
     
     zml_handler.timers.print();
@@ -348,6 +353,27 @@ const bench_misc = false;
 pub fn runGemma(zml_handler: *Zml_handler) !void {
     std.log.info("***** Init Gemma handler", .{});
     var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma, zml_handler.args.export_activations);
+    defer llm.deinit(zml_handler.allocator);
+
+    std.log.info("***** Tokenize prompt", .{});
+    const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, zml_handler.args.prompt);
+    defer zml_handler.allocator.free(prompt);
+
+    std.log.info("***** Generate text", .{});
+    zml_handler.mem.start(0);
+    var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
+    defer generation_result.deinit(zml_handler.allocator);
+    if (zml_handler.args.export_activations) {
+        if (generation_result.activations) |*activations| {
+            try gemma_inference.exportActivations(zml_handler, "gemma-activations.safetensors", llm.config, activations);
+        }
+    }
+    zml_handler.mem.check(0);
+}
+
+pub fn runRotatedGemma(zml_handler: *Zml_handler) !void {
+    std.log.info("***** Init RotatedGemma handler", .{});
+    var llm = try RotatedGemma_handler.init(zml_handler, zml_handler.uris.rotated_gemma, zml_handler.args.export_activations);
     defer llm.deinit(zml_handler.allocator);
 
     std.log.info("***** Tokenize prompt", .{});

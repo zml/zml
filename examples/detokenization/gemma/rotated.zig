@@ -16,44 +16,44 @@ const Options = base.Options;
 const KvCache = base.KvCache;
 const ActivationCache = base.ActivationCache;
 
-pub const Gemma_handler = struct {
-    model: Gemma,
+pub const RotatedGemma_handler = struct {
+    model: RotatedGemma,
     kv_cache: KvCache,
     config: Config,
     generation_config: GenerationConfig,
     options: Options,
     tokenizer: zml.tokenizer.Tokenizer,
-    exes: GemmaExes,
-    model_buffers: zml.Bufferized(Gemma),
+    exes: RotatedGemmaExes,
+    model_buffers: zml.Bufferized(RotatedGemma),
     kv_cache_buffers: zml.Bufferized(KvCache),
     activation_cache: ?ActivationCache,
     activation_cache_buffers: ?zml.Bufferized(ActivationCache),
     collect_activations: bool,
     sampling_strategy_buffers: zml.Bufferized(zml.nn.DynamicSamplingStrategy),
 
-    pub fn init(zml_handler: *main.Zml_handler, path: []const u8, collect_activations: bool) !Gemma_handler {
+    pub fn init(zml_handler: *main.Zml_handler, path: []const u8, collect_activations: bool) !RotatedGemma_handler {
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, path);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 
         //try main.printSafetensors(registry);
 
-        std.log.info("Gemma parse config and safetensors", .{});
+        std.log.info("RotatedGemma parse config and safetensors", .{});
         const parsed_config = try parseConfig(ModelConfig, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.text_config.dupe(zml_handler.allocator);
         errdefer config.deinit(zml_handler.allocator);
         const generation_config = try GenerationConfig.load(zml_handler.allocator, zml_handler.io, repo, config);
         errdefer generation_config.deinit(zml_handler.allocator);
-        std.log.info("Gemma parsed", .{});
+        std.log.info("RotatedGemma parsed", .{});
 
         const tokenizer = try loadTokenizer(zml_handler, repo);
 
-        std.log.info("Gemma initialize model", .{});
+        std.log.info("RotatedGemma initialize model", .{});
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
         defer store.deinit();
-        const model: Gemma = try .init(zml_handler.allocator, store.view(), config, generation_config);
-        std.log.info("Gemma initialized", .{});
+        const model: RotatedGemma = try .init(zml_handler.allocator, store.view(), config, generation_config);
+        std.log.info("RotatedGemma initialized", .{});
 
         var num_local_layers: u32 = 0;
         var num_global_layers: u32 = 0;
@@ -95,10 +95,10 @@ pub const Gemma_handler = struct {
 
         const exes = try compileModel(zml_handler, model, options, collect_activations);
 
-        std.log.info("Gemma load buffers", .{});
+        std.log.info("RotatedGemma load buffers", .{});
         var model_buffers = try model.load(zml_handler, &store);
-        errdefer Gemma.unloadBuffers(&model_buffers, zml_handler.allocator);
-        std.log.info("Gemma model loaded", .{});
+        errdefer RotatedGemma.unloadBuffers(&model_buffers, zml_handler.allocator);
+        std.log.info("RotatedGemma model loaded", .{});
 
         var kv_cache_buffers = try kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
         errdefer KvCache.deinitBuffer(&kv_cache_buffers);
@@ -148,9 +148,9 @@ pub const Gemma_handler = struct {
         return try .fromBytes(zml_handler.allocator, bytes);
     }
 
-    pub fn compileModel(zml_handler: *main.Zml_handler, model: Gemma, options: Options, collect_activations: bool) !GemmaExes {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: RotatedGemma, options: Options, collect_activations: bool) !RotatedGemmaExes {
         const opts: zml.module.CompilationOptions = .{};
-        std.log.info("Gemma compile models", .{});
+        std.log.info("RotatedGemma compile models", .{});
         const global_layer_index = for (model.layers, 0..) |layer, i| {
             if (layer.att_layer.is_global) break i;
         } else return error.MissingGlobalAttentionLayer;
@@ -158,8 +158,8 @@ pub const Gemma_handler = struct {
         // compile token embeddings
 
         var prefill_embed_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: Gemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
-                const params: Gemma.EmbedTokensParams = .prefill(options_);
+            fn call(zml_handler_: *main.Zml_handler, model_: RotatedGemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: RotatedGemma.EmbedTokensParams = .prefill(options_);
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{params.tokens}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
@@ -167,8 +167,8 @@ pub const Gemma_handler = struct {
         errdefer if (!prefill_embed_future_awaited) if (prefill_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var decode_embed_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: Gemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
-                const params: Gemma.EmbedTokensParams = .decode(options_);
+            fn call(zml_handler_: *main.Zml_handler, model_: RotatedGemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: RotatedGemma.EmbedTokensParams = .decode(options_);
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{params.tokens}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
@@ -220,8 +220,8 @@ pub const Gemma_handler = struct {
         // compile select/logits/sample embedding
 
         var prefill_select_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: Gemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
-                const params: Gemma.SelectEmbedsParams = .prefill(options_);
+            fn call(zml_handler_: *main.Zml_handler, model_: RotatedGemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: RotatedGemma.SelectEmbedsParams = .prefill(options_);
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .selectEmbed, .{ params.embeds, params.pred_index }, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
@@ -229,8 +229,8 @@ pub const Gemma_handler = struct {
         errdefer if (!prefill_select_future_awaited) if (prefill_select_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var logit_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: Gemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
-                const params: Gemma.ComputeLogitsParams = .exec(options_);
+            fn call(zml_handler_: *main.Zml_handler, model_: RotatedGemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: RotatedGemma.ComputeLogitsParams = .exec(options_);
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .computeLogits, .{params.embeds}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
@@ -238,8 +238,8 @@ pub const Gemma_handler = struct {
         errdefer if (!logit_future_awaited) if (logit_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var sample_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: Gemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
-                const params: Gemma.SampleParams = .exec(options_);
+            fn call(zml_handler_: *main.Zml_handler, model_: RotatedGemma, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: RotatedGemma.SampleParams = .exec(options_);
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.sampling_strategy, params.rng }, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
@@ -306,26 +306,26 @@ pub const Gemma_handler = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *Gemma_handler, allocator: std.mem.Allocator) void {
-        Gemma.unloadBuffers(&self.model_buffers, allocator);
+    pub fn unloadBuffers(self: *RotatedGemma_handler, allocator: std.mem.Allocator) void {
+        RotatedGemma.unloadBuffers(&self.model_buffers, allocator);
         KvCache.deinitBuffer(&self.kv_cache_buffers);
         if (self.activation_cache_buffers) |*buffers| ActivationCache.deinitBuffer(buffers);
         zml.nn.DynamicSamplingStrategy.deinitBuffers(&self.sampling_strategy_buffers);
     }
 
-    pub fn resetKvCache(self: *Gemma_handler, zml_handler: *main.Zml_handler) !void {
+    pub fn resetKvCache(self: *RotatedGemma_handler, zml_handler: *main.Zml_handler) !void {
         KvCache.deinitBuffer(&self.kv_cache_buffers);
         self.kv_cache_buffers = try self.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
     }
 
-    pub fn resetActivationCache(self: *Gemma_handler, zml_handler: *main.Zml_handler) !void {
+    pub fn resetActivationCache(self: *RotatedGemma_handler, zml_handler: *main.Zml_handler) !void {
         const cache = self.activation_cache orelse return;
         if (self.activation_cache_buffers) |*buffers| ActivationCache.deinitBuffer(buffers);
         self.activation_cache_buffers = null;
         self.activation_cache_buffers = try cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
     }
 
-    pub fn deinit(self: *Gemma_handler, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *RotatedGemma_handler, allocator: std.mem.Allocator) void {
         self.unloadBuffers(allocator);
         self.model.deinit(allocator);
         self.config.deinit(allocator);
@@ -335,7 +335,7 @@ pub const Gemma_handler = struct {
     }
 };
 
-pub const GemmaExes = struct {
+pub const RotatedGemmaExes = struct {
     prefill_embed_exe: zml.Exe,
     prefill_embed_args: zml.Exe.Arguments,
     prefill_embed_results: zml.Exe.Results,
@@ -372,7 +372,7 @@ pub const GemmaExes = struct {
     sample_args: zml.Exe.Arguments,
     sample_results: zml.Exe.Results,
 
-    pub fn deinit(self: GemmaExes, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: RotatedGemmaExes, allocator: std.mem.Allocator) void {
         self.prefill_embed_exe.deinit();
         self.prefill_embed_args.deinit(allocator);
         self.prefill_embed_results.deinit(allocator);
@@ -403,22 +403,101 @@ pub const GemmaExes = struct {
     }
 };
 
-pub const Gemma = struct {
+const EmbeddingRotation = struct {
+    const q_size: i64 = 15;
+    const hadamard_size: i64 = 256;
+    const hidden_size: u32 = q_size * hadamard_size;
+    const hadamard_stages: usize = 8;
+    const hadamard_scale: f32 = 1.0 / 16.0;
+
+    q: zml.Tensor,
+
+    fn init(store: zml.io.TensorStore.View) !EmbeddingRotation {
+        const q = store.createTensor("Q", .{ .q_out, .q_in }, .replicated);
+        if (q.dim(.q_out) != q_size or q.dim(.q_in) != q_size) return error.InvalidRotationShape;
+        return .{ .q = q };
+    }
+
+    fn unloadBuffers(self: *zml.Bufferized(EmbeddingRotation)) void {
+        self.q.deinit();
+    }
+
+    /// Convert an original-space activation to the rotated residual space.
+    fn forward(self: EmbeddingRotation, input: zml.Tensor) zml.Tensor {
+        return self.forwardF32(input).convert(input.dtype());
+    }
+
+    fn forwardF32(self: EmbeddingRotation, input: zml.Tensor) zml.Tensor {
+        const blocks = splitBlocks(input.convert(.f32));
+        const hadamard = normalizedFwht(blocks).rename(.{ .q_block = .q_in });
+        const q = self.q.withTags(.{ .q_out, .q_in }).convert(.f32);
+        const rotated = q.dot(hadamard, .q_in).transpose(.{ .s, .q_out, .h256 }).rename(.{ .q_out = .q_block });
+        return mergeBlocks(rotated);
+    }
+
+    /// Convert a rotated residual activation back to the original space.
+    fn inverse(self: EmbeddingRotation, input: zml.Tensor) zml.Tensor {
+        return self.inverseF32(input).convert(input.dtype());
+    }
+
+    fn inverseF32(self: EmbeddingRotation, input: zml.Tensor) zml.Tensor {
+        const blocks = splitBlocks(input.convert(.f32)).rename(.{ .q_block = .q_out });
+        const q = self.q.withTags(.{ .q_out, .q_in }).convert(.f32);
+        const q_inverse = q.dot(blocks, .q_out).transpose(.{ .s, .q_in, .h256 }).rename(.{ .q_in = .q_block });
+        return mergeBlocks(normalizedFwht(q_inverse));
+    }
+
+    fn splitBlocks(input: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(input.dim(.d) == hidden_size, "Embedding rotation expects hidden dimension {}, got {}", .{ hidden_size, input.dim(.d) });
+        return input.splitAxis(.d, .{ .q_block = q_size, .h256 = hadamard_size });
+    }
+
+    fn mergeBlocks(blocks: zml.Tensor) zml.Tensor {
+        return blocks.merge(.{ .d = .{ .q_block, .h256 } });
+    }
+
+    fn normalizedFwht(input: zml.Tensor) zml.Tensor {
+        var result = input;
+        inline for (0..hadamard_stages) |stage| {
+            const stride: i64 = @as(i64, 1) << stage;
+            const group_count: i64 = hadamard_size / (2 * stride);
+            const pairs = result.splitAxis(.h256, .{
+                .fwht_group = group_count,
+                .fwht_pair = 2,
+                .fwht_value = stride,
+            });
+            const low = pairs.choose1d(.fwht_pair, 0);
+            const high = pairs.choose1d(.fwht_pair, 1);
+            result = zml.Tensor.stack(
+                &.{ low.add(high), low.sub(high) },
+                .fwht_value,
+                .fwht_pair,
+            ).merge(.{ .h256 = .{ .fwht_group, .fwht_pair, .fwht_value } });
+        }
+        return result.scale(hadamard_scale);
+    }
+};
+
+pub const RotatedGemma = struct {
     embed_tokens: zml.nn.TokenEmbedding,
+    rotation: EmbeddingRotation,
     layers: []TransformerLayer,
     norm: RmsNorm,
     embed_scale: f32,
     final_logit_softcapping: ?f32,
     suppress_tokens: []const u32,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation_config: GenerationConfig) !Gemma {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation_config: GenerationConfig) !RotatedGemma {
+        if (config.hidden_size != EmbeddingRotation.hidden_size) return error.UnsupportedRotatedHiddenSize;
+        const rotation: EmbeddingRotation = try .init(store.root());
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(@intCast(i), store.withPrefix("model.language_model.layers").withLayer(i), config);
+            layer.* = try .init(@intCast(i), store.withPrefix("model.language_model.layers").withLayer(i), config, rotation);
         }
         return .{
             .embed_tokens = .{ .weight = store.createTensor("model.language_model.embed_tokens.weight", .{ .voc, .d }, .replicated) },
+            .rotation = rotation,
             .layers = layers,
             .norm = .init(store.withPrefix("model.language_model.norm"), config),
             .embed_scale = @sqrt(@as(f32, @floatFromInt(config.hidden_size))),
@@ -427,12 +506,12 @@ pub const Gemma = struct {
         };
     }
 
-    pub fn load(self: *const Gemma, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore) !zml.Bufferized(Gemma) {
-        var progress = zml_handler.progress.start("Load Gemma weights", store.registry.tensors.count());
+    pub fn load(self: *const RotatedGemma, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore) !zml.Bufferized(RotatedGemma) {
+        var progress = zml_handler.progress.start("Load RotatedGemma weights", store.registry.tensors.count());
         defer progress.end();
 
-        var buffers = try zml.mem.bufferize(zml_handler.allocator, Gemma, self);
-        errdefer Gemma.unloadBuffers(&buffers, zml_handler.allocator);
+        var buffers = try zml.mem.bufferize(zml_handler.allocator, RotatedGemma, self);
+        errdefer RotatedGemma.unloadBuffers(&buffers, zml_handler.allocator);
 
         var loader: zml.io.Loader = try .init(zml_handler.allocator, zml_handler.platform, .{
             .parallelism = 16,
@@ -441,17 +520,18 @@ pub const Gemma = struct {
         });
         defer loader.deinit();
 
-        loader.load(zml_handler.io, Gemma, self, &buffers, store, &.{}, .{ .progress = &progress });
+        loader.load(zml_handler.io, RotatedGemma, self, &buffers, store, &.{}, .{ .progress = &progress });
         try loader.await(zml_handler.io);
         return buffers;
     }
 
-    pub fn deinit(self: *const Gemma, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *const RotatedGemma, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Gemma), allocator: std.mem.Allocator) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(RotatedGemma), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
+        EmbeddingRotation.unloadBuffers(&self.rotation);
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
@@ -469,8 +549,9 @@ pub const Gemma = struct {
         }
     };
 
-    pub fn embedTokens(self: Gemma, tokens: zml.Tensor) zml.Tensor {
-        return self.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d}).scale(self.embed_scale);
+    pub fn embedTokens(self: RotatedGemma, tokens: zml.Tensor) zml.Tensor {
+        const embeddings = self.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d}).scale(self.embed_scale);
+        return self.rotation.forward(embeddings);
     }
 
     pub const SelectEmbedsParams = struct {
@@ -484,7 +565,7 @@ pub const Gemma = struct {
         }
     };
 
-    pub fn selectEmbed(_: Gemma, embeddings: zml.Tensor, pred_index: zml.Tensor) zml.Tensor {
+    pub fn selectEmbed(_: RotatedGemma, embeddings: zml.Tensor, pred_index: zml.Tensor) zml.Tensor {
         return embeddings.dynamicSlice1d(embeddings.axis(.s), .{ .start = pred_index, .len = 1 });
     }
 
@@ -495,8 +576,10 @@ pub const Gemma = struct {
         }
     };
 
-    pub fn computeLogits(self: Gemma, embed: zml.Tensor) zml.Tensor {
-        const normalized_embed = self.norm.forward(embed);
+    pub fn computeLogits(self: RotatedGemma, embed: zml.Tensor) zml.Tensor {
+        // The residual stream is rotated, but the tied embedding/lm-head matrix
+        // and the learned final RMS coefficients remain in the original basis.
+        const normalized_embed = self.norm.forwardF32(self.rotation.inverseF32(embed)).convert(embed.dtype());
         var logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(normalized_embed, .d).convert(.f32);
         if (self.final_logit_softcapping) |softcap| {
             logits = logits.divByConst(softcap).tanh().scale(softcap);
@@ -522,7 +605,7 @@ pub const Gemma = struct {
         }
     };
 
-    pub fn sampleTokens(_: Gemma, logits: zml.Tensor, _: zml.nn.DynamicSamplingStrategy, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+    pub fn sampleTokens(_: RotatedGemma, logits: zml.Tensor, _: zml.nn.DynamicSamplingStrategy, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         // Keep sampling greedy for now: the dynamic sampler lowers top-k
         // to a full vocabulary sort, whose pipeline overwhelms the Metal compiler.
         const next_token = logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
@@ -538,8 +621,9 @@ const TransformerLayer = struct {
     post_ff_norm: RmsNorm,
     mlp_layer: MlpLayer,
     layer_scalar: zml.Tensor,
+    rotation: EmbeddingRotation,
 
-    pub fn init(id_: u8, store: zml.io.TensorStore.View, config: Config) !TransformerLayer {
+    pub fn init(id_: u8, store: zml.io.TensorStore.View, config: Config, rotation: EmbeddingRotation) !TransformerLayer {
         return .{
             .input_norm = .init(store.withPrefix("input_layernorm"), config),
             .att_layer = try .init(store.withPrefix("self_attn"), id_, config),
@@ -548,6 +632,7 @@ const TransformerLayer = struct {
             .post_ff_norm = .init(store.withPrefix("post_feedforward_layernorm"), config),
             .mlp_layer = try .init(store.withPrefix("mlp")),
             .layer_scalar = store.createTensor("layer_scalar", .{.scalar}, .replicated),
+            .rotation = rotation,
         };
     }
 
@@ -612,13 +697,28 @@ const TransformerLayer = struct {
         activation_cache: ?ActivationCache,
         collect_activations: bool,
     ) struct { zml.Tensor, KvCache, ?ActivationCache } {
-        const input_norm = self.input_norm.forward(x);
+        const rotation = self.rotation;
+        
+        // The residual stream enters and leaves each layer in the rotated
+        // basis. Attention remains entirely in the original embedding basis.
+        const input_norm = self.input_norm.forwardF32(rotation.inverseF32(x)).convert(x.dtype());
         const attn = self.att_layer.forward(input_norm, token_index, kv_cache, layer_index);
-        const attention_projection = self.post_att_norm.forward(attn.output);
+        const attention_projection = rotation.forwardF32(self.post_att_norm.forwardF32(attn.output)).convert(x.dtype());
         const x_after_attn = x.add(attention_projection);
-        const pre_ff_norm = self.pre_ff_norm.forward(x_after_attn);
+
+        // Learned RMS coefficients are defined in the original basis. The MLP
+        // input returns to the rotated basis because Q^-1 has been fused into
+        // the up/gate weights in the reformulated checkpoint.
+        const pre_ff_norm = rotation.forwardF32(self.pre_ff_norm.forwardF32(rotation.inverseF32(x_after_attn))).convert(x.dtype());
         const mlp = self.mlp_layer.forward(pre_ff_norm);
-        const out = x_after_attn.add(self.post_ff_norm.forward(mlp.output)).mul(self.layer_scalar.asScalar());
+
+        // The down projection already produces a rotated-space vector. Apply
+        // the learned post-FF RMS and scalar in the original basis, rotate the
+        // update, then add it to the rotated residual stream.
+        const post_ff_update = rotation.forwardF32(
+            self.post_ff_norm.forwardF32(rotation.inverseF32(mlp.output)).mul(self.layer_scalar.asScalar().convert(.f32)),
+        ).convert(x.dtype());
+        const out = x_after_attn.add(post_ff_update);
 
         const updated_activation_cache: ?ActivationCache = if (collect_activations) blk: {
             const cache = activation_cache orelse unreachable;
@@ -816,10 +916,14 @@ const RmsNorm = struct {
     }
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
+        return self.forwardF32(input).convert(input.dtype());
+    }
+
+    pub fn forwardF32(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const input_f32 = input.convert(.f32);
         const variance = input_f32.powByConst(2).mean(.d);
         const normalized = input_f32.mul(variance.addConstant(self.eps).powByConst(-0.5).broad(input.shape()));
-        return normalized.mul(self.weights.withTags(.{.d}).convert(.f32).broad(input.shape())).convert(input.dtype());
+        return normalized.mul(self.weights.withTags(.{.d}).convert(.f32).broad(input.shape()));
     }
 };
 
