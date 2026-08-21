@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from compare_distributed_caches import SEGMENTS, compare
+from compare_distributed_caches import SEGMENTS, compare, segments
 
 
 def cache_bytes() -> int:
@@ -22,6 +22,21 @@ def test_identical_zero_caches_pass(tmp_path: Path) -> None:
     assert result["exact_byte_match"] is True
     assert result["minimum_close_fraction"] == 1.0
     assert len(result["segments"]) == 14
+
+
+def test_capacity_two_cache_layout_passes(tmp_path: Path) -> None:
+    capacity = 2
+    sized_segments = segments(capacity)
+    raw = bytes(sum(count * (2 if dtype == "bf16" else 4) for _, dtype, count, _, _ in sized_segments))
+    gpu0 = tmp_path / "gpu0-capacity2.bin"
+    tp4 = tmp_path / "tp4-capacity2.bin"
+    gpu0.write_bytes(raw)
+    tp4.write_bytes(raw)
+    result = compare(gpu0, tp4, capacity)
+    assert result["status"] == "pass"
+    assert result["capacity"] == capacity
+    assert result["scope"] == "four_layer_continuation_cache_gpu0_vs_tp4_ep1"
+    assert result["bytes_per_dump"] == cache_bytes() + 2 * (512 + 64)
 
 
 def test_wrong_cache_size_fails_closed(tmp_path: Path) -> None:
