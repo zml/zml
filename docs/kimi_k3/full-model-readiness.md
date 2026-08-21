@@ -75,6 +75,7 @@ the available layers prove sequential substitution of layers 1 and 2 through
 the same KDA+MoE family shape. Physical multi-device equivalence is deferred by
 the current single-GPU scope; distributed ownership is validated structurally.
 
-Only five of 96 checkpoint shards are present. The code is structurally ready
-for all weights, but full numerical validation remains blocked until the other
-91 shards are supplied and hashed locally.
+The live preflight records the current shard count while user-supplied files may
+still be arriving. Full text validation starts only after all required shards 1
+through 94 are present and hashed locally. Shards 95 and 96 contain the ignored
+projector/vision payload and are optional for the text-only gate.

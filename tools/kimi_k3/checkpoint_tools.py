@@ -16,6 +16,7 @@ from typing import Any, BinaryIO
 TIERS = {
     "S1": {"model-00001-of-000096.safetensors"},
     "S2": {"model-00001-of-000096.safetensors", "model-00094-of-000096.safetensors"},
+    "S5_TEXT": {f"model-{number:05d}-of-000096.safetensors" for number in range(1, 95)},
     "S4": {
         "model-00001-of-000096.safetensors",
         "model-00002-of-000096.safetensors",

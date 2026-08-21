@@ -207,6 +207,8 @@ def validate_index(
     layer_shards: dict[int, set[str]] = defaultdict(set)
     head = set()
     vision = set()
+    text_shards = set()
+    vision_shards = set()
     unexpected = []
 
     for name, shard in weight_map.items():
@@ -219,6 +221,7 @@ def validate_index(
             if layer < 0 or layer >= LAYER_COUNT:
                 raise PreflightError(f"out-of-range logical layer: {name}")
             layer_shards[layer].add(shard)
+            text_shards.add(shard)
             expert = EXPERT_RE.fullmatch(suffix)
             if expert:
                 expert_id = int(expert.group(1))
@@ -230,8 +233,10 @@ def validate_index(
                 layer_nonexpert[layer].add(suffix)
         elif name in HEAD_TENSORS:
             head.add(name)
+            text_shards.add(shard)
         elif name.startswith("vision_tower.") or name.startswith("mm_projector."):
             vision.add(name)
+            vision_shards.add(shard)
         else:
             unexpected.append(name)
 
@@ -282,6 +287,18 @@ def validate_index(
         raise PreflightError(
             "full index shard set is incomplete or has unexpected filenames"
         )
+    expected_text_shards = {
+        f"model-{number:05d}-of-000096.safetensors"
+        for number in range(1, 95)
+    }
+    expected_vision_shards = {
+        "model-00095-of-000096.safetensors",
+        "model-00096-of-000096.safetensors",
+    }
+    if text_shards != expected_text_shards or vision_shards != expected_vision_shards:
+        raise PreflightError(
+            "text/vision shard ownership differs from the pinned 94+2 split"
+        )
 
     text_count = len(head) + sum(record["tensor_count"] for record in layer_records)
     if text_count != 497_052:
@@ -294,6 +311,8 @@ def validate_index(
         "family_counts": dict(family_counts),
         "layer_records": layer_records,
         "shards": shards,
+        "text_shards": sorted(text_shards),
+        "vision_shards": sorted(vision_shards),
     }
 
 
@@ -504,6 +523,10 @@ def preflight(
         known_hashes,
         verify_present_hashes,
     )
+    required_text_shards = set(contract["text_shards"])
+    missing_text = [name for name in missing if name in required_text_shards]
+    missing_vision = [name for name in missing if name not in required_text_shards]
+    unverified_text = [name for name in unverified if name in required_text_shards]
     devices = detect_nvidia_devices()
     scenario_counts = [1, 8, 16, 24, 32, *scenario_devices]
     if devices:
@@ -522,8 +545,8 @@ def preflight(
             + 3072 * 112
         )
     )
-    ready_to_load = not missing
-    hashes_complete = ready_to_load and not unverified
+    ready_to_load = not missing_text
+    hashes_complete = ready_to_load and not unverified_text
     full_hbm = sum(device["hbm_bytes"] for device in devices)
     minimum_streaming_hbm = (
         sizes["resident_head_layer0_bytes"]
@@ -548,8 +571,13 @@ def preflight(
             "config_sha256": sha256(config_path),
             "index_sha256": sha256(index_path),
             "referenced_shards": SHARD_COUNT,
+            "required_text_shards": len(contract["text_shards"]),
+            "optional_vision_shards": len(contract["vision_shards"]),
             "present_shards": SHARD_COUNT - len(missing),
+            "missing_text_shards": missing_text,
+            "missing_optional_vision_shards": missing_vision,
             "missing_shards": missing,
+            "unverified_present_text_shards": unverified_text,
             "unverified_present_shards": unverified,
             "shards": shards,
         },
@@ -610,10 +638,10 @@ def preflight(
             "topology_validation": "deferred to ZML platform preflight",
         },
         "blocking_for_full_validation": [
-            *([f"{len(missing)} checkpoint shards are missing"] if missing else []),
+            *([f"{len(missing_text)} required text checkpoint shards are missing"] if missing_text else []),
             *(
-                [f"{len(unverified)} present shards lack an in-run verified hash"]
-                if unverified
+                [f"{len(unverified_text)} present text shards lack an in-run verified hash"]
+                if unverified_text
                 else []
             ),
             *(["insufficient detected NVIDIA HBM for the conservative streaming estimate"] if not hardware_ready else []),
