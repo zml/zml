@@ -288,8 +288,11 @@ fn prefillImpl(hidden: zml.Tensor, weights: Weights, cache: Cache, comptime opti
         .mul(variance.addConstant(1e-5).rsqrt().broad(recurrence.output.shape()))
         .mul(weights.norm_weight.convert(.f32).broad(recurrence.output.shape()))
         .mul(output_gate.sigmoid());
-    const output = norm_gated.merge(.{ .out = .{ .h, .v } })
-        .convert(hidden.dtype()).dot(weights.output_weight, .out);
+    const output = primitives.stableLinear(
+        norm_gated.merge(.{ .out = .{ .h, .v } }).convert(hidden.dtype()),
+        weights.output_weight,
+        .out,
+    );
     return .{
         .output = output,
         .cache = .{
@@ -366,7 +369,7 @@ pub fn decode(hidden: zml.Tensor, weights: Weights, cache: Cache) DecodeResult {
         .mul(weights.norm_weight.convert(.f32).broad(normalized.shape()))
         .mul(output_gate.sigmoid());
     const flattened = norm_gated.merge(.{ .out = .{ .h, .v } }).convert(hidden.dtype());
-    const projection_output = flattened.dot(weights.output_weight, .out);
+    const projection_output = primitives.stableLinear(flattened, weights.output_weight, .out);
 
     return .{
         .q_proj = q_proj,
@@ -455,8 +458,11 @@ fn decodeOptimized(hidden: zml.Tensor, weights: Weights, cache: Cache) CompactRe
     const norm_gated = normalized
         .mul(weights.norm_weight.convert(.f32).broad(normalized.shape()))
         .mul(output_gate.sigmoid());
-    const output = norm_gated.merge(.{ .out = .{ .h, .v } })
-        .convert(hidden.dtype()).dot(weights.output_weight, .out);
+    const output = primitives.stableLinear(
+        norm_gated.merge(.{ .out = .{ .h, .v } }).convert(hidden.dtype()),
+        weights.output_weight,
+        .out,
+    );
     return .{
         .output = output,
         .cache = .{

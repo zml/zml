@@ -11,6 +11,15 @@ pub fn rmsNorm(input: zml.Tensor, weight: zml.Tensor, eps: f32) zml.Tensor {
         .convert(input.dtype());
 }
 
+// Row-parallel projections reduce partial products across the model mesh.
+// Accumulating those products in FP32 before the model-dtype boundary keeps
+// single-rank and tensor-parallel recurrent sessions numerically aligned.
+pub fn stableLinear(input: zml.Tensor, weight: zml.Tensor, axis: anytype) zml.Tensor {
+    return input.convert(.f32)
+        .dotWithPrecision(weight.convert(.f32), axis, .highest)
+        .convert(input.dtype());
+}
+
 /// KDA q/k normalization.  The explicit FP32 conversion is required because
 /// the shared normalizeL2 helper otherwise preserves the caller's reduction
 /// dtype.

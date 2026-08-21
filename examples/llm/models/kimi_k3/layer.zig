@@ -171,7 +171,7 @@ pub fn forwardLayer0(input: zml.Tensor, weights: Layer0Weights, cache: kda.Cache
     const mlp_gate = post_attention_norm.dot(weights.mlp.gate_weight, .d);
     const mlp_up = post_attention_norm.dot(weights.mlp.up_weight, .d);
     const mlp_situ = primitives.situGlu(mlp_gate, mlp_up);
-    const mlp_output = mlp_situ.dot(weights.mlp.down_weight, .intermediate);
+    const mlp_output = primitives.stableLinear(mlp_situ, weights.mlp.down_weight, .intermediate);
     return .{
         .input_norm = input_norm,
         .kda_output = attention.output,
@@ -260,7 +260,7 @@ pub fn forwardPrefix(tokens: zml.Tensor, weights: PrefixWeights, cache: kda.Cach
         .d = embedding.dim(.d),
     });
     const final_norm = primitives.rmsNorm(output_selected, weights.final_norm, 1e-5);
-    const logits = final_norm.dot(weights.lm_head, .d);
+    const logits = primitives.stableLinear(final_norm, weights.lm_head, .d);
     const greedy_token = logits.slice1d(.s, .{
         .start = logits.dim(.s) - 1,
         .end = logits.dim(.s),
@@ -318,7 +318,7 @@ pub fn diagnosticHead(
         .d = hidden.dim(.d),
     });
     const final_norm = primitives.rmsNorm(output_selected, final_norm_weight, 1e-5);
-    const logits = final_norm.dot(lm_head, .d);
+    const logits = primitives.stableLinear(final_norm, lm_head, .d);
     const greedy_token = logits.slice1d(.s, .{
         .start = logits.dim(.s) - 1,
         .end = logits.dim(.s),
@@ -826,7 +826,7 @@ pub fn diagnosticSessionHead(
         .d = hidden.dim(.d),
     });
     const final_norm = primitives.rmsNorm(output_selected, final_norm_weight, 1e-5);
-    const logits = final_norm.dot(lm_head, .d);
+    const logits = primitives.stableLinear(final_norm, lm_head, .d);
     const greedy_token = logits.slice1d(.s, .{
         .start = logits.dim(.s) - 1,
         .end = logits.dim(.s),

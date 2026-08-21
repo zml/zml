@@ -75,7 +75,7 @@ pub fn sharedMlp(input: zml.Tensor, weights: DenseWeights) struct {
         .gate = gate,
         .up = up,
         .activated = activated,
-        .output = activated.dot(weights.shared_down, .intermediate),
+        .output = primitives.stableLinear(activated, weights.shared_down, .intermediate),
     };
 }
 
@@ -90,7 +90,7 @@ pub fn finishRouted(combined: zml.Tensor, weights: DenseWeights) struct {
     ).rename(.{ .d = .latent });
     return .{
         .normalized = normalized,
-        .output = normalized.dot(weights.routed_up, .latent),
+        .output = primitives.stableLinear(normalized, weights.routed_up, .latent),
     };
 }
 pub const Weights = struct {

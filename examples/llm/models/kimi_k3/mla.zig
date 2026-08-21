@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const primitives = @import("primitives.zig");
 
 pub const Weights = struct {
     q_a_proj: zml.Tensor,
@@ -159,7 +160,7 @@ fn core(hidden: zml.Tensor, weights: Weights, past: ?ExpandedCache) Result {
     const gate_logits = linear(hidden, weights.gate_proj, .d);
     const gate = gate_logits.sigmoid();
     const gated = flattened.mul(gate);
-    const output = linear(gated, weights.output_proj, .out);
+    const output = primitives.stableLinear(gated, weights.output_proj, .out);
     return .{
         .q_a = q_a,
         .q_norm = q_norm,
@@ -242,7 +243,7 @@ fn latentCore(hidden: zml.Tensor, weights: Weights, past: ?LatentCache) LatentRe
     const flattened = aggregation.transpose(.{ .b, .q, .h, .v })
         .rename(.{ .q = .s }).merge(.{ .out = .{ .h, .v } });
     const gate = linear(hidden, weights.gate_proj, .d).sigmoid();
-    const output = linear(flattened.mul(gate), weights.output_proj, .out);
+    const output = primitives.stableLinear(flattened.mul(gate), weights.output_proj, .out);
     return .{
         .output = output,
         .probabilities = probabilities,
@@ -319,7 +320,7 @@ pub fn latentSession(
     const flattened = aggregation.transpose(.{ .b, .q, .h, .v })
         .rename(.{ .q = .s }).merge(.{ .out = .{ .h, .v } });
     const gate = linear(hidden, weights.gate_proj, .d).sigmoid();
-    const output = linear(flattened.mul(gate), weights.output_proj, .out);
+    const output = primitives.stableLinear(flattened.mul(gate), weights.output_proj, .out);
     return .{
         .output = output,
         .probabilities = probabilities,

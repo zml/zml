@@ -39,6 +39,10 @@ const Forward = struct {
         return primitives.situGlu(gate, up);
     }
 
+    fn stableLinear(input: zml.Tensor, weight: zml.Tensor) zml.Tensor {
+        return primitives.stableLinear(input, weight, .d);
+    }
+
     fn slowMxfp4Bf16(input: zml.Tensor, packed_values: zml.Tensor, scale: zml.Tensor) zml.Tensor {
         return primitives.slowMxfp4Linear(input.convert(.bf16), packed_values, scale).convert(.f32);
     }
@@ -292,6 +296,7 @@ pub fn main(init: std.process.Init) !void {
     try ctx.compareBinary("rms_real_slice", Forward.rms, "rms_real.input", "rms_real.weight", "rms_real.expected", .{ .batch, .d }, .{.d}, strict);
     try ctx.compareUnary("l2", Forward.l2, "l2.input", "l2.expected", .{ .batch, .d }, strict);
     try ctx.compareBinary("situ_glu", Forward.situ, "situ.gate", "situ.up", "situ.expected", .{ .batch, .d }, .{ .batch, .d }, strict);
+    try ctx.compareBinary("stable_linear", Forward.stableLinear, "mxfp4.linear_input", "mxfp4.expected_weight", "mxfp4.expected_linear", .{ .token, .d }, .{ .out, .d }, strict);
     try ctx.compareUnary("sigmoid", primitives.sigmoid, "sigmoid.input", "sigmoid.expected", .{ .batch, .d }, strict);
     try ctx.compareUnary("softmax", primitives.softmax, "softmax.input", "softmax.expected", .{ .batch, .d }, strict);
     try ctx.compareUnary("topk_values", primitives.topKValues, "topk.input", "topk.expected_values", .{ .batch, .d }, zml.testing.CompareOpts.exact_match);
@@ -311,6 +316,6 @@ pub fn main(init: std.process.Init) !void {
     try ctx.compareMxfp4Linear("mxfp4_real_slow_linear", primitives.slowMxfp4Linear, "mxfp4_real.linear_input", "mxfp4_real.packed", "mxfp4_real.scale_e8m0", "mxfp4_real.expected_linear", strict);
     try ctx.compareNativeMxfp4Linear("mxfp4_real_native_linear", "mxfp4_real.linear_input", "mxfp4_real.packed", "mxfp4_real.scale_e8m0", .{});
 
-    try stdout_file.interface.writeAll("KIMI_K3_PRIMITIVES_ALL_PASS count=22 backend=cuda\n");
+    try stdout_file.interface.writeAll("KIMI_K3_PRIMITIVES_ALL_PASS count=23 backend=cuda\n");
     try stdout_file.interface.flush();
 }
