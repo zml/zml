@@ -854,12 +854,21 @@ pub const Layer0CompactResult = struct {
     cache: kda.Cache,
 };
 
+fn partitionRuntimeKdaCache(cache: kda.Cache) kda.Cache {
+    return .{
+        .q_conv = cache.q_conv.withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated }),
+        .k_conv = cache.k_conv.withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated }),
+        .v_conv = cache.v_conv.withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated }),
+        .recurrent_state = cache.recurrent_state.withPartitioning(.{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated }),
+    };
+}
+
 pub fn forwardLayer0Compact(input: zml.Tensor, weights: Layer0Weights, cache: kda.Cache) Layer0CompactResult {
     const result = forwardLayer0(input, weights, cache);
     return .{
         .block_residual = result.block_residual,
         .output = result.output,
-        .cache = result.cache,
+        .cache = partitionRuntimeKdaCache(result.cache),
     };
 }
 
@@ -883,7 +892,7 @@ pub fn forwardKdaMoeDecodeCompact(
     route_config: router.Config,
 ) KdaMoeCompactResult {
     const result = forwardKdaMoeDecode(input, block_sources, active_blocks, weights, cache, route_config);
-    return .{ .output = result.output, .cache = result.cache };
+    return .{ .output = result.output, .cache = partitionRuntimeKdaCache(result.cache) };
 }
 
 pub fn forwardKdaMoeBoundaryCompact(
@@ -897,7 +906,7 @@ pub fn forwardKdaMoeBoundaryCompact(
 ) KdaMoeBoundaryCompactResult {
     const result = forwardKdaMoeBoundary(input, block_sources, active_blocks, block_index, weights, cache, route_config);
     return .{
-        .layer = .{ .output = result.layer.output, .cache = result.layer.cache },
+        .layer = .{ .output = result.layer.output, .cache = partitionRuntimeKdaCache(result.layer.cache) },
         .block_sources = result.block_sources,
         .active_blocks = result.active_blocks,
     };
