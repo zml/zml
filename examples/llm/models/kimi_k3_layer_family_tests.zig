@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const common = @import("common.zig");
 const kda = @import("kimi_k3/kda.zig");
 const layer = @import("kimi_k3/layer.zig");
 const mla = @import("kimi_k3/mla.zig");
@@ -15,11 +16,13 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 const Args = struct {
     fixture: []const u8,
+    distributed: bool = false,
 
     pub const help =
         \\Use kimi_k3_layer_family_tests --fixture=<layer-family-reference.safetensors>
         \\
         \\Run real-weight KDA+MoE and MLA+MoE prefill/decode parity on NVIDIA CUDA.
+        \\  --distributed  Require and use physical TP4 across four visible GPUs
         \\
     ;
 };
@@ -39,7 +42,13 @@ const Context = struct {
     platform: *zml.Platform,
     store: zml.io.TensorStore.View,
     sharding: zml.Sharding,
+    compile_shardings: []const zml.Sharding,
+    distributed: bool,
     stdout: *std.Io.Writer,
+
+    fn partitioned(self: *Context, shape: zml.Shape, partitioning: anytype) zml.Shape {
+        return if (self.distributed) shape.withPartitioning(partitioning) else shape;
+    }
 
     fn key(self: *Context, layer_index: usize, suffix: []const u8) ![]u8 {
         return std.fmt.allocPrint(self.allocator, "layer{}.{s}", .{ layer_index, suffix });
@@ -201,20 +210,20 @@ const Context = struct {
         return .{
             .common = try self.loadCommon(layer_index),
             .attention = .{
-                .q_weight = try self.load(layer_index, "weights.layer.self_attn.q_proj.weight", .{ .out, .d }),
-                .k_weight = try self.load(layer_index, "weights.layer.self_attn.k_proj.weight", .{ .out, .d }),
-                .v_weight = try self.load(layer_index, "weights.layer.self_attn.v_proj.weight", .{ .out, .d }),
-                .q_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.q_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32)),
-                .k_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.k_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32)),
-                .v_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.v_conv1d.weight", zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32)),
+                .q_weight = try self.loadAs(layer_index, "weights.layer.self_attn.q_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
+                .k_weight = try self.loadAs(layer_index, "weights.layer.self_attn.k_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
+                .v_weight = try self.loadAs(layer_index, "weights.layer.self_attn.v_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
+                .q_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.q_conv1d.weight", self.partitioned(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32), .{ .channel = .model, .kernel = .replicated })),
+                .k_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.k_conv1d.weight", self.partitioned(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32), .{ .channel = .model, .kernel = .replicated })),
+                .v_conv_weight = try self.loadAs(layer_index, "weights.layer.self_attn.v_conv1d.weight", self.partitioned(zml.Shape.init(.{ .channel = 12288, .kernel = 4 }, .f32), .{ .channel = .model, .kernel = .replicated })),
                 .decay_a_weight = try self.load(layer_index, "weights.layer.self_attn.f_a_proj.weight", .{ .out, .d }),
-                .decay_b_weight = try self.load(layer_index, "weights.layer.self_attn.f_b_proj.weight", .{ .channel, .rank }),
+                .decay_b_weight = try self.loadAs(layer_index, "weights.layer.self_attn.f_b_proj.weight", self.partitioned(zml.Shape.init(.{ .channel = 12288, .rank = 128 }, .bf16), .{ .channel = .model, .rank = .replicated })),
                 .a_log = try self.load(layer_index, "weights.layer.self_attn.A_log", .{.h}),
-                .dt_bias = try self.loadAs(layer_index, "weights.layer.self_attn.dt_bias", zml.Shape.init(.{ .h = 96, .k = 128 }, .f32)),
-                .beta_weight = try self.load(layer_index, "weights.layer.self_attn.b_proj.weight", .{ .out, .d }),
-                .gate_weight = try self.load(layer_index, "weights.layer.self_attn.g_proj.weight", .{ .out, .d }),
+                .dt_bias = try self.loadAs(layer_index, "weights.layer.self_attn.dt_bias", self.partitioned(zml.Shape.init(.{ .h = 96, .k = 128 }, .f32), .{ .h = .model, .k = .replicated })),
+                .beta_weight = try self.loadAs(layer_index, "weights.layer.self_attn.b_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 96, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
+                .gate_weight = try self.loadAs(layer_index, "weights.layer.self_attn.g_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
                 .norm_weight = try self.load(layer_index, "weights.layer.self_attn.o_norm.weight", .{.v}),
-                .output_weight = try self.load(layer_index, "weights.layer.self_attn.o_proj.weight", .{ .d, .out }),
+                .output_weight = try self.loadAs(layer_index, "weights.layer.self_attn.o_proj.weight", self.partitioned(zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16), .{ .d = .replicated, .out = .model })),
             },
         };
     }
@@ -225,22 +234,22 @@ const Context = struct {
             .attention = .{
                 .q_a_proj = try self.load(layer_index, "weights.layer.self_attn.q_a_proj.weight", .{ .rank, .d }),
                 .q_a_norm = try self.load(layer_index, "weights.layer.self_attn.q_a_layernorm.weight", .{.rank}),
-                .q_b_proj = try self.load(layer_index, "weights.layer.self_attn.q_b_proj.weight", .{ .mix, .rank }),
+                .q_b_proj = try self.loadAs(layer_index, "weights.layer.self_attn.q_b_proj.weight", self.partitioned(zml.Shape.init(.{ .mix = 18432, .rank = 1536 }, .bf16), .{ .mix = .model, .rank = .replicated })),
                 .kv_a_proj = try self.load(layer_index, "weights.layer.self_attn.kv_a_proj_with_mqa.weight", .{ .kv_mix, .d }),
                 .kv_a_norm = try self.load(layer_index, "weights.layer.self_attn.kv_a_layernorm.weight", .{.kv_rank}),
-                .kv_b_proj = try self.load(layer_index, "weights.layer.self_attn.kv_b_proj.weight", .{ .kv_mix, .kv_rank }),
-                .gate_proj = try self.load(layer_index, "weights.layer.self_attn.g_proj.weight", .{ .out, .d }),
-                .output_proj = try self.load(layer_index, "weights.layer.self_attn.o_proj.weight", .{ .d, .out }),
+                .kv_b_proj = try self.loadAs(layer_index, "weights.layer.self_attn.kv_b_proj.weight", self.partitioned(zml.Shape.init(.{ .kv_mix = 24576, .kv_rank = 512 }, .bf16), .{ .kv_mix = .model, .kv_rank = .replicated })),
+                .gate_proj = try self.loadAs(layer_index, "weights.layer.self_attn.g_proj.weight", self.partitioned(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16), .{ .out = .model, .d = .replicated })),
+                .output_proj = try self.loadAs(layer_index, "weights.layer.self_attn.o_proj.weight", self.partitioned(zml.Shape.init(.{ .d = 7168, .out = 12288 }, .bf16), .{ .d = .replicated, .out = .model })),
             },
         };
     }
 
     fn zeroKdaCache(self: *Context) !zml.Bufferized(kda.Cache) {
         return .{
-            .q_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), self.sharding),
-            .k_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), self.sharding),
-            .v_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), self.sharding),
-            .recurrent_state = try support.zeroBuffer(self.allocator, self.io, self.platform, zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32), self.sharding),
+            .q_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated }), self.sharding),
+            .k_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated }), self.sharding),
+            .v_conv = try support.zeroBuffer(self.allocator, self.io, self.platform, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated }), self.sharding),
+            .recurrent_state = try support.zeroBuffer(self.allocator, self.io, self.platform, self.partitioned(zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32), .{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated }), self.sharding),
         };
     }
 
@@ -258,10 +267,10 @@ const Context = struct {
         );
         defer self.allocator.free(recurrent_suffix);
         return .{
-            .q_conv = try self.load(layer_index, q_suffix, .{ .b, .channel, .kernel }),
-            .k_conv = try self.load(layer_index, k_suffix, .{ .b, .channel, .kernel }),
-            .v_conv = try self.load(layer_index, v_suffix, .{ .b, .channel, .kernel }),
-            .recurrent_state = try self.load(layer_index, recurrent_suffix, .{ .b, .h, .v, .k }),
+            .q_conv = try self.loadAs(layer_index, q_suffix, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .k_conv = try self.loadAs(layer_index, k_suffix, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .v_conv = try self.loadAs(layer_index, v_suffix, self.partitioned(zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16), .{ .b = .replicated, .channel = .model, .kernel = .replicated })),
+            .recurrent_state = try self.loadAs(layer_index, recurrent_suffix, self.partitioned(zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32), .{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated })),
         };
     }
 
@@ -684,7 +693,7 @@ fn runKda(context: *Context, layer_index: usize) !void {
                 kdaCacheTensors(cache),     tensor(selected), tensor(official_moe_input), tensor(expected_ids),
                 tensor(expected_local_ids),
             },
-            .{ .shardings = &.{context.sharding} },
+            .{ .shardings = context.compile_shardings },
         );
         defer exe.deinit();
         const compile_us = @divTrunc(std.Io.Clock.now(.real, context.io).toNanoseconds() - compile_started, 1000);
@@ -737,7 +746,7 @@ fn runMla(context: *Context, layer_index: usize) !void {
         context.io,
         mlaPrefill,
         .{ tensor(full_input), tensor(full_blocks), tensor(active), symbolic_weights, tensor(selected), tensor(prefill_official_moe_input), tensor(prefill_expected_ids), tensor(prefill_expected_local_ids) },
-        .{ .shardings = &.{context.sharding} },
+        .{ .shardings = context.compile_shardings },
     );
     defer prefill_exe.deinit();
     const prefill_compile_us = @divTrunc(std.Io.Clock.now(.real, context.io).toNanoseconds() - prefill_compile_started, 1000);
@@ -766,7 +775,7 @@ fn runMla(context: *Context, layer_index: usize) !void {
         context.io,
         mlaWarm,
         .{ tensor(full_input), tensor(full_blocks), tensor(active), symbolic_weights },
-        .{ .shardings = &.{context.sharding} },
+        .{ .shardings = context.compile_shardings },
     );
     defer warm_exe.deinit();
     const warm_compile_us = @divTrunc(std.Io.Clock.now(.real, context.io).toNanoseconds() - warm_compile_started, 1000);
@@ -801,7 +810,7 @@ fn runMla(context: *Context, layer_index: usize) !void {
             mlaCacheTensors(warm_cache),       tensor(selected),      tensor(decode_official_moe_input), tensor(decode_expected_ids),
             tensor(decode_expected_local_ids),
         },
-        .{ .shardings = &.{context.sharding} },
+        .{ .shardings = context.compile_shardings },
     );
     defer decode_exe.deinit();
     const decode_compile_us = @divTrunc(std.Io.Clock.now(.real, context.io).toNanoseconds() - decode_compile_started, 1000);
@@ -834,6 +843,11 @@ pub fn main(init: std.process.Init) !void {
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
+    if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedLayerFamilyRequiresFourDevices;
+    const runtime_shardings: common.Shardings = try .init(platform);
+    const all_shardings = runtime_shardings.all();
+    const sharding = if (args.distributed) runtime_shardings.model else platform.replicated_sharding;
+    const compile_shardings: []const zml.Sharding = if (args.distributed) &all_shardings else &.{sharding};
 
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.fixture);
     defer registry.deinit();
@@ -845,7 +859,9 @@ pub fn main(init: std.process.Init) !void {
         .io = io,
         .platform = platform,
         .store = store.view(),
-        .sharding = platform.replicated_sharding,
+        .sharding = sharding,
+        .compile_shardings = compile_shardings,
+        .distributed = args.distributed,
         .stdout = &stdout_file.interface,
     };
 
@@ -853,8 +869,9 @@ pub fn main(init: std.process.Init) !void {
     try runKda(&context, 1);
     try runKda(&context, 2);
     try runMla(&context, 3);
-    try stdout_file.interface.writeAll(
-        "KIMI_K3_LAYER_FAMILY_ALL_PASS layers=1,2,3 prefill=3 decode=3 backend=cuda global_routes=exact\n",
+    try stdout_file.interface.print(
+        "KIMI_K3_LAYER_FAMILY_ALL_PASS layers=1,2,3 prefill=3 decode=3 backend=cuda global_routes=exact devices={} layout={s}\n",
+        .{ platform.devices.len, if (args.distributed) "tp4_ep1" else "gpu0" },
     );
     try stdout_file.interface.flush();
 }

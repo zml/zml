@@ -17,6 +17,9 @@ const Args = struct {
     layer_limit: usize = 4,
     compile_only: bool = false,
     resident: bool = false,
+    distributed: bool = false,
+    cache_dump_prefill: []const u8 = "",
+    cache_dump_decode: []const u8 = "",
 
     pub const help =
         \\Use kimi_k3_session_tests --weights=<S4-directory> --tokenizer=<tokenizer.json> [options]
@@ -30,6 +33,9 @@ const Args = struct {
         \\  --layer-limit=<count> Selected prefix depth (default: 4)
         \\  --compile-only        Compile selected families without loading weights
         \\  --resident            Keep selected four-layer weights resident across tokens
+        \\  --distributed         Require physical TP4 across four visible GPUs
+        \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
+        \\  --cache-dump-decode=<path>   Test-only raw cache output after continuation
         \\
     ;
 };
@@ -90,6 +96,28 @@ fn sessionCacheDigest(session: *const session_impl.Session) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+fn dumpSessionCache(session: *const session_impl.Session, path: []const u8) !void {
+    const file = try std.Io.Dir.createFile(.cwd(), session.io, path, .{});
+    defer file.close(session.io);
+    var write_buffer: [64 * 1024]u8 = undefined;
+    var writer = file.writer(session.io, &write_buffer);
+    for (session.kda_caches) |cache| {
+        inline for (.{ cache.q_conv, cache.k_conv, cache.v_conv, cache.recurrent_state }) |buffer| {
+            var host = try buffer.toSliceAlloc(session.allocator, session.io);
+            defer host.free(session.allocator);
+            try writer.interface.writeAll(host.bytes);
+        }
+    }
+    for (session.mla_caches) |cache| {
+        inline for (.{ cache.compressed, cache.extra_key }) |buffer| {
+            var host = try buffer.toSliceAlloc(session.allocator, session.io);
+            defer host.free(session.allocator);
+            try writer.interface.writeAll(host.bytes);
+        }
+    }
+    try writer.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -105,6 +133,9 @@ pub fn main(init: std.process.Init) !void {
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
+    if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedSessionRequiresFourDevices;
+    if (!args.distributed and platform.devices.len != 1) return error.KimiK3Gpu0SessionRequiresOneDevice;
+    const layout: []const u8 = if (args.distributed) "tp4_ep1" else "gpu0";
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -147,13 +178,15 @@ pub fn main(init: std.process.Init) !void {
         }
         var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
         try stdout_file.interface.print(
-            "KIMI_K3_SESSION_FULL_COMPILE_PASS layers={} source_slots={} " ++ "kda_boundary={} mla_boundary={} compile_us={} backend=cuda\n",
+            "KIMI_K3_SESSION_FULL_COMPILE_PASS layers={} source_slots={} " ++ "kda_boundary={} mla_boundary={} compile_us={} backend=cuda devices={} layout={s}\n",
             .{
                 args.layer_limit,
                 compiled.params.source_slots,
                 compiled.kda_moe_boundary != null,
                 compiled.mla_moe_boundary != null,
                 compile_us,
+                platform.devices.len,
+                layout,
             },
         );
         try stdout_file.interface.flush();
@@ -180,6 +213,9 @@ pub fn main(init: std.process.Init) !void {
         if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
         const greedy = session.last_generated_token;
         const cache_digest = try sessionCacheDigest(&session);
+        if (repeat == 0 and args.cache_dump_prefill.len != 0) {
+            try dumpSessionCache(&session, args.cache_dump_prefill);
+        }
         if (first_cache_digest) |expected| {
             if (!std.mem.eql(u8, &expected, &cache_digest)) return error.KimiK3SessionCacheResetMismatch;
         } else {
@@ -195,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         }
         try stdout_file.interface.print(
             "KIMI_K3_SESSION_PASS repeat={} tokens={} greedy={} compile_us={} session_us={} " ++
-                "backend=cuda weights={s} cache_sha256={s}\n",
+                "backend=cuda weights={s} cache_sha256={s} devices={} layout={s}\n",
             .{
                 repeat,
                 args.token_count,
@@ -204,6 +240,8 @@ pub fn main(init: std.process.Init) !void {
                 elapsedUs(io, started),
                 if (args.resident) "resident" else "streaming",
                 &cache_digest,
+                platform.devices.len,
+                layout,
             },
         );
         try stdout_file.interface.flush();
@@ -214,6 +252,9 @@ pub fn main(init: std.process.Init) !void {
             try session.runDecode(&history, &stdout_file.interface);
             if (history.items.len != seqlen or history.items[seqlen - 1] != greedy) {
                 return error.KimiK3DecodeHistoryMismatch;
+            }
+            if (args.cache_dump_decode.len != 0) {
+                try dumpSessionCache(&session, args.cache_dump_decode);
             }
             try stdout_file.interface.print(
                 "\nKIMI_K3_SESSION_DECODE_PASS streamed={} next={} history_tokens={} capacity={} " ++
@@ -231,13 +272,15 @@ pub fn main(init: std.process.Init) !void {
     }
     try stdout_file.interface.print(
         "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked={} " ++
-            "weights={s} layer_loads={} payload_reads={} payload_bytes={}\n",
+            "weights={s} layer_loads={} payload_reads={} payload_bytes={} devices={} layout={s}\n",
         .{
             args.token_count == official_prefix.len,
             if (args.resident) "resident" else "streaming",
             buffers.load_stats.layer_loads,
             buffers.load_stats.payload_reads,
             buffers.load_stats.payload_bytes,
+            platform.devices.len,
+            layout,
         },
     );
     try stdout_file.interface.flush();

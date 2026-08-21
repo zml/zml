@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const common = @import("common.zig");
 const kda = @import("kimi_k3/kda.zig");
 const layer = @import("kimi_k3/layer.zig");
 
@@ -13,11 +14,13 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const Args = struct {
     weights: []const u8,
     fixture: []const u8,
+    distributed: bool = false,
 
     pub const help =
         \\Use kimi_k3_layer0_tests --weights=<shard-1.safetensors> --fixture=<s1-layer0-lenN.safetensors>
         \\
         \\Run real-weight Kimi K3 layer-0 parity on NVIDIA CUDA only.
+        \\  --distributed  Require and use physical TP4 across four visible GPUs
         \\
     ;
 };
@@ -91,13 +94,20 @@ pub fn main(init: std.process.Init) !void {
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
-    const sharding = platform.replicated_sharding;
+    if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedLayer0RequiresFourDevices;
+    const runtime_shardings: common.Shardings = try .init(platform);
+    const all_shardings = runtime_shardings.all();
+    const sharding = if (args.distributed) runtime_shardings.model else platform.replicated_sharding;
+    const compile_shardings: []const zml.Sharding = if (args.distributed) &all_shardings else &.{sharding};
 
     var weight_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.weights);
     defer weight_registry.deinit();
     var weight_store: zml.io.TensorStore = .fromRegistry(allocator, &weight_registry);
     defer weight_store.deinit();
-    const weights = layer.Layer0Weights.init(weight_store.view());
+    const weights = if (args.distributed)
+        layer.Layer0Weights.initSharded(weight_store.view())
+    else
+        layer.Layer0Weights.init(weight_store.view());
     var weight_buffers = try zml.mem.bufferize(allocator, layer.Layer0Weights, &weights);
     defer zml.Buffer.deinitAll(layer.Layer0Weights, &weight_buffers);
     var loader: zml.io.Loader = try .init(allocator, platform, .{
@@ -118,8 +128,10 @@ pub fn main(init: std.process.Init) !void {
     var input = try loadBuffer(allocator, io, platform, fixture_store.view(), "layers.0.input", .{ .b, .s, .d }, sharding);
     defer input.deinit();
     const input_tensor = zml.Tensor.fromShape(input.shape());
-    const conv_shape = zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16);
-    const state_shape = zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32);
+    const conv_base = zml.Shape.init(.{ .b = 1, .channel = 12288, .kernel = 4 }, .bf16);
+    const state_base = zml.Shape.init(.{ .b = 1, .h = 96, .v = 128, .k = 128 }, .f32);
+    const conv_shape = if (args.distributed) conv_base.withPartitioning(.{ .b = .replicated, .channel = .model, .kernel = .replicated }) else conv_base;
+    const state_shape = if (args.distributed) state_base.withPartitioning(.{ .b = .replicated, .h = .model, .v = .replicated, .k = .replicated }) else state_base;
     var cache: zml.Bufferized(kda.Cache) = .{
         .q_conv = try zeroBuffer(allocator, io, platform, conv_shape, sharding),
         .k_conv = try zeroBuffer(allocator, io, platform, conv_shape, sharding),
@@ -139,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         layer.forwardLayer0,
         .{ input_tensor, weights, cache_tensors },
-        .{ .shardings = &.{sharding} },
+        .{ .shardings = compile_shardings },
     );
     defer exe.deinit();
     const compile_us = @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - compile_started, 1000);
@@ -170,8 +182,8 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
     try stdout_file.interface.print(
-        "KIMI_K3_LAYER0_PASS boundaries=13 load_us={} compile_us={} execute_us={} input={f} output={f}\n",
-        .{ load_us, compile_us, execute_us, input.shape(), actual.output.shape() },
+        "KIMI_K3_LAYER0_PASS boundaries=13 load_us={} compile_us={} execute_us={} input={f} output={f} devices={} layout={s}\n",
+        .{ load_us, compile_us, execute_us, input.shape(), actual.output.shape(), platform.devices.len, if (args.distributed) "tp4_ep1" else "gpu0" },
     );
     try stdout_file.interface.flush();
 }
