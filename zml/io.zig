@@ -14,8 +14,8 @@ const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
-const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
+const weights = @import("weights.zig");
 const Sharding = @import("Sharding.zig");
 const Placement = Sharding.Placement;
 const Slice = @import("slice.zig").Slice;
@@ -23,13 +23,18 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
+pub const Weight = weights.Weight;
+pub const Registry = weights.Registry;
+pub const WeightReader = weights.WeightReader;
+pub const ReaderOpts = weights.ReaderOpts;
+
 pub const TensorStore = struct {
-    registry: *safetensors.TensorRegistry,
-    id_to_sources: std.AutoHashMapUnmanaged(usize, []*safetensors.Tensor),
+    registry: *Registry,
+    id_to_sources: std.AutoHashMapUnmanaged(usize, []*Weight),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
+    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *Registry) TensorStore {
         const arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
@@ -44,7 +49,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
-    fn putSourcesNoClobber(self: *TensorStore, id: usize, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
+    fn putSourcesNoClobber(self: *TensorStore, id: usize, sources: []*Weight) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
@@ -54,38 +59,29 @@ pub const TensorStore = struct {
         gop.value_ptr.* = sources;
     }
 
-    fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
+    fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*Weight {
         const tensor_desc_ptr = self.registry.tensors.getPtr(key) orelse return null;
         return tensor_desc_ptr;
     }
 
-    fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
-        const entry = self.getPtrFromKey(key) orelse return null;
-
-        const copy = self.arena.allocator().create(safetensors.Tensor) catch @panic("OOM");
-        copy.* = entry.*;
-
-        return copy;
-    }
-
-    fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
+    fn getPtrFromId(self: *const TensorStore, id: usize) ?*Weight {
         const sources = self.id_to_sources.get(id) orelse return null;
         stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
         return sources[0];
     }
 
-    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !WeightReader {
         return self.registry.reader(io, key, buffer);
     }
 
-    pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !WeightReader {
         const sources = self.id_to_sources.get(id) orelse return error.NotFound;
         stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
 
         return sources[0].reader(io, buffer, .{});
     }
 
-    pub fn getSourcesById(self: *const TensorStore, id: usize) ?[]*safetensors.Tensor {
+    pub fn getSourcesById(self: *const TensorStore, id: usize) ?[]*Weight {
         return self.id_to_sources.get(id);
     }
 
@@ -144,7 +140,7 @@ pub const TensorStore = struct {
             };
         }
 
-        pub fn prefix(self: *const View) ?[]const u8 {
+        fn prefix(self: *const View) ?[]const u8 {
             return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
         }
 
@@ -159,9 +155,9 @@ pub const TensorStore = struct {
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const source = self.store.dupeSource(key) orelse return null;
+            const source = self.store.getPtrFromKey(key) orelse return null;
 
-            const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            const sources = self.store.arena.allocator().alloc(*Weight, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
             errdefer self.store.arena.allocator().free(sources);
             sources[0] = source;
 
@@ -176,8 +172,7 @@ pub const TensorStore = struct {
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
         }
 
         fn applyTags(shape_: Shape, tagz: anytype) Shape {
@@ -215,13 +210,13 @@ pub const TensorStore = struct {
         pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
             const arena = self.store.arena.allocator();
 
-            var tensor_list = std.ArrayList(*safetensors.Tensor).initCapacity(arena, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            var tensor_list = std.ArrayList(*Weight).initCapacity(arena, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
             defer tensor_list.deinit(arena);
 
             var buffer: [256]u8 = undefined;
             for (sources) |subkey| {
                 const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                const tensor = self.store.dupeSource(key) orelse return null;
+                const tensor = self.store.getPtrFromKey(key) orelse return null;
                 tensor_list.appendAssumeCapacity(tensor);
             }
 
@@ -250,7 +245,7 @@ pub const TensorStore = struct {
             return self.store.getShape(key);
         }
 
-        pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+        pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !WeightReader {
             var key_buffer: [256]u8 = undefined;
             const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             return self.store.getReader(key, io, buffer);
@@ -393,7 +388,7 @@ pub const Loader = struct {
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
+    fn loadSingle(self: *Loader, io: std.Io, source: *Weight, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
         self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
@@ -401,12 +396,12 @@ pub const Loader = struct {
         loaded.* = true;
     }
 
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
+    fn loadSingleInner(self: *Loader, io: std.Io, source: *Weight, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
         const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.name, shape });
             break :blk self.platform.replicated_sharding;
         };
 
@@ -426,16 +421,16 @@ pub const Loader = struct {
         const scale = 1024;
 
         if (opts.progress) |progress| {
-            var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+            var node = progress.start(reader.name, reader.shape.byteSize() / scale);
             defer node.end();
             writer.setProgress(&node);
             defer writer.setProgress(null);
             var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-            const total = try reader.interface.streamRemaining(&progress_writer.interface);
+            const total = try reader.interface().streamRemaining(&progress_writer.interface);
             try progress_writer.interface.flush();
             _ = self.bytes_loaded.fetchAdd(total, .monotonic);
         } else {
-            const total = try reader.interface.streamRemaining(writer.interface());
+            const total = try reader.interface().streamRemaining(writer.interface());
             try writer.interface().flush();
             _ = self.bytes_loaded.fetchAdd(total, .monotonic);
         }
@@ -581,7 +576,7 @@ pub const MemoryWriter = union(enum) {
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .rocm, .tpu, .neuron, .cpu, .cora, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
