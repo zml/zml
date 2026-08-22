@@ -59,6 +59,7 @@ pub const Type = struct {
             .{ .f8e5m2, mlir.Type.float(ctx, .f8e5m2) },
             .{ .f8e5m2fnuz, mlir.Type.float(ctx, .f8e5m2fnuz) },
             .{ .f4e2m1, mlir.Type.float(ctx, .f4e2m1fn) },
+            .{ .f8e8m0, mlir.Type.float(ctx, .f8e8m0fnu) },
             .{ .bf16, mlir.Type.float(ctx, .bf16) },
             .{ .f16, mlir.Type.float(ctx, .f16) },
             .{ .f32, mlir.Type.float(ctx, .f32) },
