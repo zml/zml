@@ -44,13 +44,21 @@ The dependency-free policy audit is:
 .venv/bin/python tools/kimi_k3/cleanup_audit.py
 ```
 
-## Fixed 17-layer example
+## Fixed 47-layer example
 
-The normal Kimi `//examples/llm` command executes layers 0-16 and keeps every
+The normal Kimi `//examples/llm` command executes layers 0-46 and keeps every
 selected weight resident while generating tokens. It requires exactly four CUDA
-devices and targets four NVIDIA GB300 GPUs with the current TP4 x EP1 layout.
-Expert banks remain replicated, with an expected resident weight footprint of
-approximately 258-261 GB per rank.
+devices and targets four NVIDIA GB300 GPUs. Ordinary tensors retain TP4 while
+the same physical ranks each own a contiguous 224-expert shard of the six
+routed-expert value/scale banks. This is shared-axis TP4+EP4, not a 16-rank
+Cartesian topology. Routed-expert HBM is exactly 180,807,008,256 bytes per rank
+for the 46 resident MoE layers; expected total allocator use is approximately
+200-210 GB per rank.
+
+The fixed selection performs 46 resident MoE loads, 248,518 checkpoint payload
+reads, and 776,886,773,760 source payload bytes. The read total is the measured
+family sum `35*5,404 + 11*5,398`; it corrects the earlier 248,492 estimate
+without changing the source-byte accounting.
 
 Create the model-local tokenizer link once:
 
@@ -80,7 +88,7 @@ bazel run \
   --seqlen=128
 ```
 
-The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=17 full_model=false
+The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=47 full_model=false
 reliable_answer=false`. Output is deliberately truncated-model diagnostic text;
 it must not be presented as a factual response or as full Kimi K3 inference.
 
@@ -93,7 +101,7 @@ it must not be presented as a factual response or as full Kimi K3 inference.
 | Primitives and AttnRes | `kimi_k3_primitives_tests`, `kimi_k3_attn_res_tests` |
 | KDA | `kimi_k3_kda_tests`, `kimi_k3_kda_prefill_tests`, `kimi_k3_kda_optimized_tests`, layer-0 cache tests |
 | MLA | `kimi_k3_mla_tests`, `kimi_k3_mla_cache_tests`, `kimi_k3_mla_optimized_tests` |
-| Router and experts | `kimi_k3_router_tests`, `kimi_k3_grouped_mxfp4_tests`, `kimi_k3_moe_tests` |
+| Router and experts | `kimi_k3_router_tests`, `kimi_k3_grouped_mxfp4_tests`, `kimi_k3_moe_tests`, `kimi_k3_expert_parallel_tests` |
 | Integrated layers | `kimi_k3_layer0_tests`, `kimi_k3_prefix_tests`, `kimi_k3_layer_family_tests`, `kimi_k3_prefix4_tests` |
 | Session/readiness | `kimi_k3_runtime_weights_tests`, `kimi_k3_session_tests`, `kimi_k3_readiness_tests` |
 
@@ -125,7 +133,7 @@ CUDA_VISIBLE_DEVICES=0 bazel-bin/examples/llm/kimi_k3_session_tests \
 
 `--layer-limit` belongs to this test executable only. The normal `llm` command
 has no configurable partial-model option; Kimi uses the fixed internal
-17-layer diagnostic selection described above.
+47-layer diagnostic selection described above.
 
 ## Fixture regeneration
 

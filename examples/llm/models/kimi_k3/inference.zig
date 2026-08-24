@@ -190,7 +190,7 @@ pub const CompiledModel = struct {
                 allocator,
                 io,
                 kdaMoeStep,
-                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicKdaMoe(), params.kda_cache },
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
                 .{ .shardings = sharding },
             )
         else
@@ -202,7 +202,7 @@ pub const CompiledModel = struct {
                 allocator,
                 io,
                 kdaMoeBoundaryStep,
-                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicKdaMoe(), params.kda_cache },
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
                 .{ .shardings = sharding },
             )
         else
@@ -214,7 +214,7 @@ pub const CompiledModel = struct {
                 allocator,
                 io,
                 mlaMoeStep,
-                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicMlaMoe(), params.mla_cache, params.token_index },
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicMlaMoe(loaded_model.expert_placement), params.mla_cache, params.token_index },
                 .{ .shardings = sharding },
             )
         else
@@ -226,7 +226,7 @@ pub const CompiledModel = struct {
                 allocator,
                 io,
                 mlaMoeBoundaryStep,
-                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicMlaMoe(), params.mla_cache, params.token_index },
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicMlaMoe(loaded_model.expert_placement), params.mla_cache, params.token_index },
                 .{ .shardings = sharding },
             )
         else

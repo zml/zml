@@ -10,6 +10,33 @@ const log = std.log.scoped(.kimi_k3_weights);
 
 pub const expert_count: usize = 896;
 
+/// Placement of the six routed-expert MXFP4 value/scale tensors. The
+/// shared-axis mode uses the existing four physical ranks for both TP4 and EP4.
+pub const ExpertPlacement = enum {
+    replicated,
+    shared_axis_four_way,
+
+    pub const shared_axis_ranks: usize = 4;
+    pub const shared_axis_local_experts: usize = expert_count / shared_axis_ranks;
+
+    pub fn validate(self: ExpertPlacement, device_count: usize) !void {
+        if (self == .replicated) return;
+        if (device_count != shared_axis_ranks) return error.KimiK3SharedAxisExpertPartitionRequiresFourCudaDevices;
+        if (expert_count % shared_axis_ranks != 0) return error.KimiK3ExpertCountNotDivisibleByFour;
+    }
+
+    pub fn partitionShape(self: ExpertPlacement, shape: zml.Shape, device_count: usize) !zml.Shape {
+        try self.validate(device_count);
+        if (shape.hasTag(.expert) == null or shape.dim(.expert) != expert_count) {
+            return error.InvalidKimiK3ExpertPartitionShape;
+        }
+        return switch (self) {
+            .replicated => shape,
+            .shared_axis_four_way => shape.withPartitioning(.{ .expert = .experts }),
+        };
+    }
+};
+
 /// Mutable instrumentation shared by copied Loader values. Payload counters
 /// cover explicit runtime layer reads; head/layer-0 bulk loading is separate.
 pub const LoadStats = struct {
@@ -142,6 +169,7 @@ pub const Loader = struct {
     store: *zml.io.TensorStore,
     model_sharding: zml.Sharding,
     expert_sharding: zml.Sharding,
+    expert_placement: ExpertPlacement = .replicated,
     stats: ?*LoadStats = null,
 
     fn rootView(self: Loader) zml.io.TensorStore.View {
@@ -205,7 +233,8 @@ pub const Loader = struct {
         component: []const u8,
         target: zml.Shape,
     ) !zml.Buffer {
-        const per_expert = @divExact(target.byteSize(), expert_count);
+        const partitioned_target = try self.expert_placement.partitionShape(target, self.platform.devices.len);
+        const per_expert = @divExact(partitioned_target.byteSize(), expert_count);
         const bytes = try self.allocator.alloc(u8, target.byteSize());
         defer self.allocator.free(bytes);
         var io_buffer: [8 * 1024]u8 = undefined;
@@ -228,7 +257,7 @@ pub const Loader = struct {
             _ = try reader.interface.readSliceAll(bytes[expert * per_expert ..][0..per_expert]);
             if (self.stats) |stats| stats.recordPayload(per_expert);
         }
-        return zml.Buffer.fromBytes(self.io, self.platform, target, self.expert_sharding, bytes);
+        return zml.Buffer.fromBytes(self.io, self.platform, partitioned_target, self.expert_sharding, bytes);
     }
 
     pub fn loadHead(self: Loader) !HeadWeights {
@@ -414,7 +443,11 @@ pub fn tensor(buffer: zml.Buffer) zml.Tensor {
     return .fromShape(buffer.shape());
 }
 
-fn symbolicCommon() layer.MoeLayerWeights {
+fn symbolicExpert(expert_placement: ExpertPlacement, shape: zml.Shape) zml.Tensor {
+    return .fromShape(expert_placement.partitionShape(shape, ExpertPlacement.shared_axis_ranks) catch unreachable);
+}
+
+fn symbolicCommon(expert_placement: ExpertPlacement) layer.MoeLayerWeights {
     return .{
         .attention_res_norm = .init(.{ .d = 7168 }, .bf16),
         .attention_res_projection = .init(.{ .one = 1, .d = 7168 }, .bf16),
@@ -429,16 +462,16 @@ fn symbolicCommon() layer.MoeLayerWeights {
             },
             .experts = .{
                 .w1 = .{
-                    .values = .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
-                    .scale = .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+                    .values = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8)),
+                    .scale = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8)),
                 },
                 .w2 = .{
-                    .values = .init(.{ .expert = expert_count, .latent = 3584, .kw = 1536 }, .u8),
-                    .scale = .init(.{ .expert = expert_count, .latent = 3584, .block = 96 }, .u8),
+                    .values = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .latent = 3584, .kw = 1536 }, .u8)),
+                    .scale = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .latent = 3584, .block = 96 }, .u8)),
                 },
                 .w3 = .{
-                    .values = .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
-                    .scale = .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+                    .values = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8)),
+                    .scale = symbolicExpert(expert_placement, .init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8)),
                 },
             },
             .dense = .{
@@ -453,9 +486,9 @@ fn symbolicCommon() layer.MoeLayerWeights {
     };
 }
 
-pub fn symbolicKdaMoe() layer.KdaMoeWeights {
+pub fn symbolicKdaMoe(expert_placement: ExpertPlacement) layer.KdaMoeWeights {
     return .{
-        .common = symbolicCommon(),
+        .common = symbolicCommon(expert_placement),
         .attention = .{
             .q_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
             .k_weight = zml.Tensor.fromShape(zml.Shape.init(.{ .out = 12288, .d = 7168 }, .bf16).withPartitioning(.{ .out = .model, .d = .replicated })),
@@ -475,9 +508,9 @@ pub fn symbolicKdaMoe() layer.KdaMoeWeights {
     };
 }
 
-pub fn symbolicMlaMoe() layer.MlaMoeWeights {
+pub fn symbolicMlaMoe(expert_placement: ExpertPlacement) layer.MlaMoeWeights {
     return .{
-        .common = symbolicCommon(),
+        .common = symbolicCommon(expert_placement),
         .attention = .{
             .q_a_proj = .init(.{ .rank = 1536, .d = 7168 }, .bf16),
             .q_a_norm = .init(.{ .rank = 1536 }, .bf16),

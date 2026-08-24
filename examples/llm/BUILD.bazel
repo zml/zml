@@ -137,6 +137,14 @@ zig_binary(
 )
 
 zig_binary(
+    name = "kimi_k3_expert_parallel_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/kimi_k3_expert_parallel_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
     name = "kimi_k3_mla_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/kimi_k3_mla_tests.zig",

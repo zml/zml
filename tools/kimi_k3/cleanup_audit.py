@@ -52,8 +52,8 @@ def audit(root: Path) -> dict[str, Any]:
         r"pub const example_resident_layer_count: usize = (\d+);",
         production["model"],
     )
-    if fixed_layer_match is None or int(fixed_layer_match.group(1)) != 17:
-        issues.append("normal Kimi example is not fixed to 17 resident layers")
+    if fixed_layer_match is None or int(fixed_layer_match.group(1)) != 47:
+        issues.append("normal Kimi example is not fixed to 47 resident layers")
     for required_fixed_example in (
         "fixed_example_prefix = true",
         "KimiK3FixedResidentExampleRequiresFourCudaDevices",
@@ -62,6 +62,14 @@ def audit(root: Path) -> dict[str, Any]:
     ):
         if required_fixed_example not in production["model"]:
             issues.append(f"missing fixed Kimi example invariant: {required_fixed_example}")
+    for required_expert_partition in (
+        "shared_axis_four_way",
+        "withPartitioning(.{ .expert = .experts })",
+        "KimiK3SharedAxisExpertPartitionRequiresFourCudaDevices",
+    ):
+        if required_expert_partition not in production["runtime_weights"] and required_expert_partition not in production["model"]:
+            issues.append(f"missing Kimi shared-axis expert invariant: {required_expert_partition}")
+
 
     for name in ("session", "runtime_weights"):
         if "std.Io.Clock.now" in production[name] or "log.info(" in production[name]:
@@ -97,7 +105,7 @@ def audit(root: Path) -> dict[str, Any]:
         "scanned_files": scanned,
         "production_layer_limit": False,
         "public_configurable_layer_limit": False,
-        "normal_example_fixed_resident_layers": 17,
+        "normal_example_fixed_resident_layers": 47,
         "production_hot_path_debug": False,
         "production_results": "compact",
         "diagnostic_target_removed": True,

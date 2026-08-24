@@ -4,6 +4,7 @@ const zml = @import("zml");
 const common = @import("common.zig");
 const inference = @import("kimi_k3/inference.zig");
 const model = @import("kimi_k3/model.zig");
+const runtime_weights = @import("kimi_k3/runtime_weights.zig");
 const session_impl = @import("kimi_k3/session.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
@@ -18,6 +19,7 @@ const Args = struct {
     compile_only: bool = false,
     resident: bool = false,
     distributed: bool = false,
+    partition_experts: bool = false,
     force_eos_after_prefill: bool = false,
     cache_dump_prefill: []const u8 = "",
     cache_dump_decode: []const u8 = "",
@@ -35,6 +37,7 @@ const Args = struct {
         \\  --compile-only        Compile selected families without loading weights
         \\  --resident            Keep every selected prefix layer resident across tokens
         \\  --distributed         Require physical TP4 across four visible GPUs
+        \\  --partition-experts   Test-only shared-axis TP4+EP4 expert placement
         \\  --force-eos-after-prefill  Test-only exercise of the EOS stop branch
         \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
         \\  --cache-dump-decode=<path>   Test-only raw cache output after continuation
@@ -44,9 +47,11 @@ const Args = struct {
 
 const official_prefix = [_]u32{ 1, 42, 32000, 160000 };
 const official_prefix4_greedy: u32 = 95385;
-const example_resident_layer_loads: usize = 16;
-const example_resident_payload_reads: u64 = 86_440;
-const example_resident_payload_bytes: u64 = 270_147_850_240;
+const example_resident_layer_loads: usize = 46;
+// 35 KDA+MoE layers x 5,404 reads plus 11 MLA+MoE layers x 5,398 reads.
+const example_resident_payload_reads: u64 = 248_518;
+const example_resident_payload_bytes: u64 = 776_886_773_760;
+const example_expert_hbm_per_rank: u64 = 180_807_008_256;
 
 fn elapsedUs(io: std.Io, started: i96) i96 {
     return @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - started, 1000);
@@ -59,6 +64,7 @@ fn initSelectedModel(
     store: zml.io.TensorStore.View,
     layer_limit: usize,
     compile_only: bool,
+    expert_placement: model.ExpertPlacement,
 ) !model.LoadedModel {
     const parsed = try common.parseConfig(model.Config, allocator, io, repo);
     errdefer parsed.deinit();
@@ -69,7 +75,7 @@ fn initSelectedModel(
         try model.Model.initSelected(allocator, store, parsed.value, .{
             .max_seq_len = parsed.value.text_config.max_position_embeddings,
         }, selection);
-    return .{ .inner = inner, .parsed_config = parsed };
+    return .{ .inner = inner, .parsed_config = parsed, .expert_placement = expert_placement };
 }
 
 fn hashBuffer(
@@ -134,6 +140,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
     if (args.resident and args.compile_only) return error.InvalidResidentSessionMode;
     if (args.resident and args.layer_limit > 4 and !args.distributed) return error.ExtendedResidentSessionRequiresFourDevices;
+    if (args.partition_experts and !args.distributed) return error.PartitionedExpertsRequireFourDevices;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -142,7 +149,9 @@ pub fn main(init: std.process.Init) !void {
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
     if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedSessionRequiresFourDevices;
     if (!args.distributed and platform.devices.len != 1) return error.KimiK3Gpu0SessionRequiresOneDevice;
-    const layout: []const u8 = if (args.distributed) "tp4_ep1" else "gpu0";
+    const layout: []const u8 = if (args.partition_experts)
+        "tp4_ep4_shared_axis"
+    else if (args.distributed) "tp4_ep1" else "gpu0";
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -157,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
         store.view(),
         args.layer_limit,
         args.compile_only,
+        if (args.partition_experts) .shared_axis_four_way else .replicated,
     );
     defer loaded_model.deinit(allocator);
     const shardings: common.Shardings = try .init(platform);
@@ -209,7 +219,13 @@ pub fn main(init: std.process.Init) !void {
     defer tokenizer.deinit();
     var session = try session_impl.Session.init(allocator, io, platform, tokenizer, &compiled, &buffers);
     const resident_load_stats = buffers.load_stats.*;
-    if (args.resident and args.layer_limit == model.example_resident_layer_count) {
+    defer session.deinit();
+    if (args.resident and args.partition_experts and args.layer_limit == model.example_resident_layer_count) {
+        if (@divExact(runtime_weights.expert_component_bytes.device_bank, 4) * example_resident_layer_loads !=
+            example_expert_hbm_per_rank)
+        {
+            return error.KimiK3ExampleResidentExpertHbmAccountingMismatch;
+        }
         if (resident_load_stats.layer_loads != example_resident_layer_loads or
             resident_load_stats.payload_reads != example_resident_payload_reads or
             resident_load_stats.payload_bytes != example_resident_payload_bytes)
@@ -223,7 +239,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    defer session.deinit();
 
     var first_greedy: ?u32 = null;
     var first_cache_digest: ?[64]u8 = null;

@@ -6,6 +6,7 @@ const stdx = zml.stdx;
 const common = @import("common.zig");
 const kimi_k3 = @import("kimi_k3.zig");
 const model = kimi_k3.model;
+const runtime_weights = kimi_k3.runtime_weights;
 const models = @import("../models.zig");
 
 pub const std_options: std.Options = .{
@@ -53,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var model_plan = try model.ModelPlan.init(allocator, parsed.value, selection);
     defer model_plan.deinit(allocator);
     if (model_plan.layers.len != selected_count) return error.ModelPlanCountMismatch;
-    if (model.example_resident_layer_count != 17) return error.KimiK3ExampleResidentLayerCountMismatch;
+    if (model.example_resident_layer_count != 47) return error.KimiK3ExampleResidentLayerCountMismatch;
     var example_plan = try model.ModelPlan.init(
         allocator,
         parsed.value,
@@ -68,11 +69,55 @@ pub fn main(init: std.process.Init) !void {
         .kda_moe => example_kda_moe += 1,
         .mla_moe => example_mla_moe += 1,
     };
-    if (example_dense != 1 or example_kda_moe != 12 or example_mla_moe != 4) {
+    if (example_dense != 1 or example_kda_moe != 35 or example_mla_moe != 11) {
         return error.KimiK3ExampleResidentFamilyCountMismatch;
     }
     const example_source_slots = std.math.divCeil(usize, example_plan.layers.len, 12) catch unreachable;
-    if (example_source_slots != 2) return error.KimiK3ExampleResidentSourceSlotMismatch;
+    if (example_source_slots != 4) return error.KimiK3ExampleResidentSourceSlotMismatch;
+    if (runtime_weights.ExpertPlacement.shared_axis_ranks != 4 or
+        runtime_weights.ExpertPlacement.shared_axis_local_experts != 224)
+    {
+        return error.KimiK3SharedAxisExpertWidthMismatch;
+    }
+    const expected_first = [_]usize{ 0, 224, 448, 672 };
+    const expected_end = [_]usize{ 224, 448, 672, 896 };
+    var next_expert: usize = 0;
+    for (0..runtime_weights.ExpertPlacement.shared_axis_ranks) |rank| {
+        const partition = try runtime_weights.ExpertPartition.init(rank, 4);
+        if (partition.first != expected_first[rank] or
+            partition.end != expected_end[rank] or
+            partition.count() != 224 or
+            partition.first != next_expert)
+        {
+            return error.KimiK3SharedAxisExpertCoverageMismatch;
+        }
+        next_expert = partition.end;
+    }
+    if (next_expert != runtime_weights.expert_count) return error.KimiK3SharedAxisExpertCoverageMismatch;
+    const boundary_ids = [_]usize{ 223, 224, 447, 448, 671, 672, 895 };
+    const boundary_owners = [_]usize{ 0, 1, 1, 2, 2, 3, 3 };
+    for (boundary_ids, boundary_owners) |global_id, owner| {
+        for (0..4) |rank| {
+            const partition = try runtime_weights.ExpertPartition.init(rank, 4);
+            if (partition.contains(global_id) != (rank == owner)) return error.KimiK3SharedAxisBoundaryOwnershipMismatch;
+        }
+    }
+    const symbolic_ep4 = runtime_weights.symbolicKdaMoe(.shared_axis_four_way);
+    inline for (.{
+        symbolic_ep4.common.moe.experts.w1.values,
+        symbolic_ep4.common.moe.experts.w1.scale,
+        symbolic_ep4.common.moe.experts.w2.values,
+        symbolic_ep4.common.moe.experts.w2.scale,
+        symbolic_ep4.common.moe.experts.w3.values,
+        symbolic_ep4.common.moe.experts.w3.scale,
+    }) |expert_tensor| {
+        if (!expert_tensor.shape().partition(.expert).eql(.init(.experts))) return error.KimiK3ExpertTensorWasNotPartitioned;
+    }
+    if (symbolic_ep4.common.moe.gate.weight.shape().partition(.expert).eql(.init(.experts)) or
+        symbolic_ep4.common.moe.gate.weight.dim(.expert) != runtime_weights.expert_count)
+    {
+        return error.KimiK3GlobalRouterIdsWerePartitioned;
+    }
     var cache_plan = try model.CachePlan.init(allocator, parsed.value, selection);
     defer cache_plan.deinit(allocator);
     if (cache_plan.layers.len != selected_count) return error.CachePlanCountMismatch;
@@ -128,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // Explicit selected construction remains the conformance path; the normal example uses the fixed 17-layer diagnostic selection.
+    // Explicit selected construction remains replicated conformance; the normal example uses the fixed 47-layer shared-axis diagnostic selection.
     var instance = model.Model.initSelected(
         allocator,
         store.view(),
