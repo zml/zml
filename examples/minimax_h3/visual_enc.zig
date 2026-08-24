@@ -337,9 +337,10 @@ pub const LoadedModel = struct {
             .parallelism = 16,
         });
         defer loader.deinit();
+        const now: std.Io.Timestamp = .now(io, .awake);
         loader.load(io, Model, &self.inner, &buffers, store, shardings, .{ .progress = progress });
         try loader.await(io);
-        log.info("Loaded visual VAE encoder", .{});
+        log.info("loaded visual VAE encoder [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }
 };

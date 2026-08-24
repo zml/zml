@@ -628,6 +628,12 @@ pub const LoadedModel = struct {
         const parsed = try config_mod.parseConfig(allocator, io, repo);
         errdefer parsed.deinit();
         const cfg = parsed.value.resolve();
+        log.info("dit: {d} layers hidden={d} heads={d} text_dim={d}", .{
+            cfg.num_layers,
+            cfg.hidden_size,
+            cfg.num_attention_heads,
+            cfg.text_dim,
+        });
         return .{
             .inner = try .init(allocator, store, cfg),
             .parsed_config = parsed,

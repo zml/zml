@@ -475,6 +475,11 @@ pub const LoadedModel = struct {
         const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch
             config_mod.parseJson(FileConfig, allocator, io, repo, "source/config.json") catch null;
         const cfg = if (parsed) |p| p.value.resolve() else Config.official();
+        log.info("visual vae: {d} layers latent_c={d} tile={d}", .{
+            cfg.decoder_num_layers,
+            cfg.latent_channels,
+            cfg.spec().tile_px,
+        });
         return .{
             .inner = try .init(allocator, store, cfg),
             .parsed = parsed,

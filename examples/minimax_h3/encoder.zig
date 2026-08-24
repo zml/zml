@@ -243,6 +243,11 @@ pub const LoadedModel = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         const parsed: ?std.json.Parsed(config_mod.EncoderFileConfig) = config_mod.parseJson(config_mod.EncoderFileConfig, allocator, io, repo, "config.json") catch null;
         const cfg = if (parsed) |p| p.value.resolve() else Config{};
+        log.info("encoder: {d} layers hidden={d} heads={d}", .{
+            cfg.used_hidden_layers,
+            cfg.hidden_size,
+            cfg.num_attention_heads,
+        });
         return .{
             .inner = try .init(allocator, store, cfg),
             .parsed_config = parsed,

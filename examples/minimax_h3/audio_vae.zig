@@ -808,9 +808,10 @@ pub const LoadedEncoder = struct {
             .parallelism = 16,
         });
         defer loader.deinit();
+        const now: std.Io.Timestamp = .now(io, .awake);
         loader.load(io, EncoderModel, &self.inner, &buffers, store, shardings, .{ .progress = progress });
         try loader.await(io);
-        log.info("Loaded audio VAE encoder", .{});
+        log.info("loaded audio VAE encoder [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }
 };
@@ -823,6 +824,7 @@ pub const LoadedModel = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
         const cfg = if (parsed) |p| p.value.resolve() else Config.official();
+        log.info("audio vae: hop={d} latent_c={d}", .{ cfg.hop, cfg.latent_channels });
         return .{
             .inner = try .init(allocator, store, cfg),
             .parsed = parsed,
@@ -852,9 +854,10 @@ pub const LoadedModel = struct {
             .parallelism = 16,
         });
         defer loader.deinit();
+        const now: std.Io.Timestamp = .now(io, .awake);
         loader.load(io, Model, &self.inner, &buffers, store, shardings, .{ .progress = progress });
         try loader.await(io);
-        log.info("Loaded audio VAE", .{});
+        log.info("loaded audio VAE [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }
 };

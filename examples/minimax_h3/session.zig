@@ -214,7 +214,9 @@ pub fn encodeText(
     const token_shape = zml.Shape.init(.{ .b = 1, .s = tokens.len }, .u32);
     var token_buf = try bufferFromItems(io, platform, token_shape, tokens);
     defer token_buf.deinit();
-    log.info("encoder embed: load", .{});
+    const encode_start: std.Io.Timestamp = .now(io, .awake);
+    log.info("encoder: start tokens={d} layers={d}", .{ tokens.len, loaded.inner.layers.len });
+    log.debug("encoder embed: load", .{});
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
     var embed_runner = try zml.FnExe(encoder.EmbedTokens.forward).Runner(.{.embedding}).init(&compiled.encode_embed, allocator, .{
@@ -222,18 +224,18 @@ pub fn encodeText(
     });
     defer embed_runner.deinit(allocator);
     var hidden: zml.Buffer = undefined;
-    log.info("encoder embed: run tokens={d}", .{tokens.len});
+    log.debug("encoder embed: run tokens={d}", .{tokens.len});
     embed_runner.run(io, .{
         .inputs = .{ .tokens = token_buf },
         .outputs = .{ .hidden = &hidden },
         .opts = .{ .wait = true },
     });
-    log.info("encoder embed: ok {f}", .{hidden.shape()});
+    log.debug("encoder embed: ok {f}", .{hidden.shape()});
     errdefer hidden.deinit();
 
     if (extras.vision_merged) |merged| {
         try scatterVisionHidden(allocator, io, platform, &hidden, merged, extras.vision_spans, hidden_dim);
-        log.info("encoder embed: scattered vision tokens={d}", .{extras.vision_spans.len});
+        log.info("encoder: scattered vision spans={d}", .{extras.vision_spans.len});
     }
 
     const pos = try allocator.alloc(f32, seq * 3);
@@ -295,7 +297,7 @@ pub fn encodeText(
             break :blk zero_delta;
         } else zero_delta;
         var next: zml.Buffer = undefined;
-        log.info("encoder layer {d}/{d}: run", .{ layer_i + 1, n_layers });
+        log.debug("encoder layer {d}/{d}: run", .{ layer_i + 1, n_layers });
         layer_runner.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf, .visual_delta = delta },
             .outputs = .{ .hidden = &next },
@@ -303,8 +305,8 @@ pub fn encodeText(
         });
         hidden.deinit();
         hidden = next;
-        log.info("encoder layer {d}/{d}: ok", .{ layer_i + 1, n_layers });
     }
+    log.info("encoder: ok tokens={d} layers={d} [{f}]", .{ tokens.len, n_layers, encode_start.untilNow(io, .awake) });
     return hidden;
 }
 
@@ -388,8 +390,14 @@ pub fn denoise(
 
     const steps = schedules.video.stepCount();
     const n_blocks = loaded.inner.blocks.len;
+    const denoise_start: std.Io.Timestamp = .now(io, .awake);
+    log.info(
+        "denoise: start steps={d} blocks={d} video_tokens={d} audio_tokens={d} seed={d}",
+        .{ steps, n_blocks, geo.video_tokens, geo.audio_tokens, seed },
+    );
     var step_i: usize = 0;
     while (step_i < steps) : (step_i += 1) {
+        const step_start: std.Io.Timestamp = .now(io, .awake);
         const video_t = schedules.video.timesteps[step_i];
         const video_sigma = 1.0 - video_t;
         const audio_sigma = scheduler_mod.timeShiftSigma(video_sigma, opts.video_shift, opts.audio_shift);
@@ -491,8 +499,15 @@ pub fn denoise(
         schedules.audio.step(step_i, audio, audio_vel);
         if (cond.video_patches.len != 0) @memcpy(video[0..cond.video_patches.len], cond.video_patches);
         if (cond.audio_patches.len != 0) @memcpy(audio[0..cond.audio_patches.len], cond.audio_patches);
-        log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4}", .{ step_i + 1, steps, video_t, audio_t });
+        log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
+            step_i + 1,
+            steps,
+            video_t,
+            audio_t,
+            step_start.untilNow(io, .awake),
+        });
     }
+    log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
 
     if (cond.video_patches.len == 0 and cond.audio_patches.len == 0) {
         return .{ .video = video, .audio = audio };
@@ -533,7 +548,7 @@ fn loadEncoderLayer(
     index: usize,
     progress: *std.Progress.Node,
 ) !zml.Bufferized(encoder.TransformerLayer) {
-    log.info("encoder layer {d}: load", .{index + 1});
+    log.debug("encoder layer {d}: load", .{index + 1});
     return loaded.loadLayer(allocator, io, platform, store, shardings, index, progress);
 }
 

@@ -223,7 +223,7 @@ pub fn encodeKeyframe(
     defer allocator.free(moments);
     const lh = height / 16;
     const lw = width / 16;
-    log.info("visual encode keyframe {d}x{d} -> 1x{d}x{d}", .{ width, height, lh, lw });
+    log.info("visual encode keyframe {d}x{d} -> latent 1x{d}x{d}", .{ width, height, lh, lw });
     return .{
         .thwc = try momentsToLatentThwc(allocator, moments, 1, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
         .latent_t = 1,
@@ -262,6 +262,7 @@ pub fn encodeVideo(
         }
     }
 
+    const encode_start: std.Io.Timestamp = .now(io, .awake);
     const clips = padded_t / spec.clip_length;
     const chunk = spec.tokensChunkSize();
     const lh = height / spec.spatial;
@@ -290,6 +291,15 @@ pub fn encodeVideo(
 
     const keep_t = if (spec.token_drop < acc_t) acc_t - spec.token_drop else acc_t;
     const kept = all[0 .. 48 * keep_t * lh * lw];
+    log.info("visual encode video {d}x{d}x{d} -> {d}x{d}x{d} [{f}]", .{
+        frames,
+        height,
+        width,
+        keep_t,
+        lh,
+        lw,
+        encode_start.untilNow(io, .awake),
+    });
     return .{
         .thwc = try momentsToLatentThwc(allocator, kept, keep_t, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
         .latent_t = keep_t,
@@ -357,7 +367,7 @@ pub fn encodeAudio(
     const packed_latents = try vae.packStereo(allocator, host[0 .. channels * latent_t], host[channels * latent_t ..], @intCast(channels));
     allocator.free(host);
     vae.applyLatentNorm(packed_latents, @intCast(channels), &loaded.cfg.latents_mean, &loaded.cfg.latents_std, false);
-    log.info("audio encode samples={d} latent_t={d}", .{ samples, latent_t });
+    log.info("audio encode samples={d} latent_t={d} channels={d}", .{ samples, latent_t, channels });
     return .{ .values = packed_latents, .latent_t = latent_t };
 }
 
