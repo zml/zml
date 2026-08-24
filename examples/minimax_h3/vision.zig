@@ -664,6 +664,16 @@ fn runPatches(
 ) !EncodedVisual {
     if (seq != compiled.seq) return error.VisionSeqMismatch;
 
+    const n_blocks = loaded.inner.blocks.len;
+    const vision_start: std.Io.Timestamp = .now(io, .awake);
+    log.info("vision: start seq={d} grid={d}x{d} blocks={d} temporal={d}", .{
+        seq,
+        grid.h,
+        grid.w,
+        n_blocks,
+        temporal,
+    });
+
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer EmbedModel.unloadBuffers(&embed_bufs);
     var pos_table = try loaded.loadPosEmbed(allocator, io, platform, store, shardings, progress);
@@ -707,7 +717,6 @@ fn runPatches(
         for (deepstack) |d| if (d.len != 0) allocator.free(d);
     }
     var ds_i: usize = 0;
-    const n_blocks = loaded.inner.blocks.len;
     const VisFut = @TypeOf(try io.concurrent(loadVisionBlock, .{
         allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
     }));
@@ -751,7 +760,7 @@ fn runPatches(
             ds_i += 1;
         }
     }
-    log.info("vision blocks {d}", .{n_blocks});
+    log.debug("vision blocks {d}", .{n_blocks});
 
     var merge_bufs = try loaded.loadMerger(allocator, io, platform, store, shardings, progress);
     defer Merger.unloadBuffers(&merge_bufs);
@@ -761,6 +770,7 @@ fn runPatches(
     merge_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &merged_buf }, .opts = .{ .wait = true } });
     defer merged_buf.deinit();
     const merged = try bufferToF32(allocator, io, merged_buf);
+    log.info("vision: ok merged={d} [{f}]", .{ merged.len, vision_start.untilNow(io, .awake) });
     return .{
         .merged = merged,
         .deepstack = deepstack,

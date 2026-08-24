@@ -120,7 +120,7 @@ fn loadVisualBlock(
 ) !zml.Bufferized(visual_vae.TransformerBlock) {
     const now: std.Io.Timestamp = .now(io, .awake);
     const bufs = try loaded.loadBlock(allocator, io, platform, store, shardings, index, progress);
-    log.info("visual block {d}: loaded [{f}]", .{ index + 1, now.untilNow(io, .awake) });
+    log.debug("visual block {d}: loaded [{f}]", .{ index + 1, now.untilNow(io, .awake) });
     return bufs;
 }
 
@@ -232,7 +232,7 @@ fn runVisualTile(
     var cos: zml.Buffer = undefined;
     var sin: zml.Buffer = undefined;
     var t: std.Io.Timestamp = .now(io, .awake);
-    log.info("visual embed: run", .{});
+    log.debug("visual embed: run", .{});
     embed_runner.run(io, .{
         .inputs = .{ .latents = latent_buf, .position_ids = pos_buf },
         .outputs = .{ .hidden = &hidden, .cos = &cos, .sin = &sin },
@@ -241,7 +241,7 @@ fn runVisualTile(
     defer hidden.deinit();
     defer cos.deinit();
     defer sin.deinit();
-    done(io, t, "visual embed: ran {f}", .{hidden.shape()});
+    log.debug("visual embed: ran {f} [{f}]", .{ hidden.shape(), t.untilNow(io, .awake) });
 
     const n_blocks = limits.blockCap(cache.blocks.len);
     var i: usize = 0;
@@ -252,7 +252,7 @@ fn runVisualTile(
         defer block_runner.deinit(allocator);
         var next: zml.Buffer = undefined;
         t = .now(io, .awake);
-        log.info("visual block {d}/{d}: run", .{ i + 1, n_blocks });
+        log.debug("visual block {d}/{d}: run", .{ i + 1, n_blocks });
         block_runner.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin },
             .outputs = .{ .hidden = &next },
@@ -260,7 +260,7 @@ fn runVisualTile(
         });
         hidden.deinit();
         hidden = next;
-        done(io, t, "visual block {d}/{d}: ran", .{ i + 1, n_blocks });
+        log.debug("visual block {d}/{d}: ran [{f}]", .{ i + 1, n_blocks, t.untilNow(io, .awake) });
     }
 
     var finish_runner = try zml.FnExe(visual_vae.finish).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = cache.finish });
@@ -268,20 +268,20 @@ fn runVisualTile(
 
     var patches: zml.Buffer = undefined;
     t = .now(io, .awake);
-    log.info("visual finish: run", .{});
+    log.debug("visual finish: run", .{});
     finish_runner.run(io, .{
         .inputs = .{ .hidden = hidden },
         .outputs = .{ .patches = &patches },
         .opts = .{ .wait = true },
     });
     defer patches.deinit();
-    done(io, t, "visual finish: ran {f}", .{patches.shape()});
+    log.debug("visual finish: ran {f} [{f}]", .{ patches.shape(), t.untilNow(io, .awake) });
 
     const patch_dim: usize = @intCast(loaded.cfg.out_channels * 4 * 16 * 16);
     const host = try allocator.alloc(f32, tile.tokens() * patch_dim);
     errdefer allocator.free(host);
     t = .now(io, .awake);
-    log.info("visual finish: toSlice tokens={d} patch_dim={d}", .{ tile.tokens(), patch_dim });
+    log.debug("visual finish: toSlice tokens={d} patch_dim={d}", .{ tile.tokens(), patch_dim });
     try patches.toSlice(io, .init(zml.Shape.init(.{ .b = 1, .s = tile.tokens(), .d = @as(i64, @intCast(patch_dim)) }, .f32), std.mem.sliceAsBytes(host)));
     done(io, t, "visual finish: toSlice ok", .{});
     return host;
@@ -300,9 +300,18 @@ pub fn decodeVideo(
     limits: Limits,
     progress: *std.Progress.Node,
 ) ![]f32 {
+    const decode_start: std.Io.Timestamp = .now(io, .awake);
     const cfg = loaded.cfg;
     const spec = cfg.spec();
     vae.applyLatentNorm(video_thwc, @intCast(cfg.latent_channels), &cfg.latents_mean, &cfg.latents_std, true);
+    log.info("visual decode: start {d}x{d} frames={d} latents {d}x{d}x{d}", .{
+        geo.pixel_w,
+        geo.pixel_h,
+        geo.frames,
+        geo.latent_t,
+        geo.latent_h,
+        geo.latent_w,
+    });
 
     const channels: u32 = @intCast(cfg.latent_channels);
     const tile = compiled.tile;
@@ -414,6 +423,7 @@ pub fn decodeVideo(
     }
 
     vae.denormImagenetRgb(out);
+    log.info("visual decode: ok frames={d} [{f}]", .{ out_frames, decode_start.untilNow(io, .awake) });
     return out;
 }
 
@@ -547,9 +557,18 @@ pub fn writeOutputs(
     defer allocator.free(pcm);
     try media.writeWavS16(io, dir, "audio.wav", configSampleRate(), 2, pcm);
     if (try media.muxMp4(allocator, io, out_path, geo.frames)) {
-        log.info("Wrote output.mp4", .{});
+        log.info("wrote {d}x{d} {d} frames + audio.wav + output.mp4 out={s}", .{
+            geo.pixel_w,
+            geo.pixel_h,
+            geo.frames,
+            out_path,
+        });
     } else {
-        log.info("Wrote frame_*.ppm and audio.wav (ffmpeg not available)", .{});
+        log.info("wrote {d}x{d} frame_*.ppm + audio.wav out={s} (ffmpeg missing)", .{
+            geo.pixel_w,
+            geo.pixel_h,
+            out_path,
+        });
     }
 }
 

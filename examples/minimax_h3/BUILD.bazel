@@ -1,9 +1,31 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
+H3_SRCS = [
+    "audio_vae.zig",
+    "conditions.zig",
+    "config.zig",
+    "decode.zig",
+    "dit.zig",
+    "encode.zig",
+    "encoder.zig",
+    "ir.zig",
+    "main.zig",
+    "media.zig",
+    "packing.zig",
+    "pipeline.zig",
+    "scheduler.zig",
+    "session.zig",
+    "sharding.zig",
+    "vae.zig",
+    "vision.zig",
+    "visual_enc.zig",
+    "visual_vae.zig",
+]
+
 zig_binary(
     name = "minimax_h3",
-    srcs = glob(["**/*.zig"]),
+    srcs = H3_SRCS,
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -11,7 +33,7 @@ zig_binary(
 
 zig_binary(
     name = "h3_tests",
-    srcs = glob(["**/*.zig"]),
+    srcs = H3_SRCS + ["tests.zig"],
     main = "tests.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],

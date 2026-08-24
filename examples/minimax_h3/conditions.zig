@@ -15,6 +15,8 @@ const vision = @import("vision.zig");
 const visual_enc = @import("visual_enc.zig");
 const visual_vae = @import("visual_vae.zig");
 
+const log = std.log.scoped(.minimax_h3_conditions);
+
 pub const Prepared = struct {
     tokens: []u32,
     tags: []u8,
@@ -99,6 +101,16 @@ pub fn prepare(
     text_hidden: i64,
     compile_only: bool,
 ) !Prepared {
+    log.info(
+        "conditions: {s} first={s} last={s} refs={d} compile_only={}",
+        .{
+            @tagName(variant),
+            if (first_image.len == 0) "-" else first_image,
+            if (last_image.len == 0) "-" else last_image,
+            ref_paths.len,
+            compile_only,
+        },
+    );
     const VisualItem = struct {
         kind: packing.ReferenceKind,
         path: []const u8,
@@ -472,13 +484,18 @@ pub fn prepare(
     errdefer allocator.free(tags_out);
     const merged_out: ?[]f32 = if (merged_all.items.len == 0) null else try merged_all.toOwnedSlice(allocator);
     errdefer if (merged_out) |m| allocator.free(m);
+    const vision_spans = try spans.toOwnedSlice(allocator);
+    log.info(
+        "conditions: ok tokens={d} vision_spans={d} video_conds={d} audio_conds={d} refs={d}",
+        .{ tokens_out.len, vision_spans.len, conds.videos.len, conds.audios.len, conds.references.len },
+    );
     return .{
         .tokens = tokens_out,
         .tags = tags_out,
         .positions = positions,
         .deepstack = .{ ds_host[0], ds_host[1], ds_host[2] },
         .vision_merged = merged_out,
-        .vision_spans = try spans.toOwnedSlice(allocator),
+        .vision_spans = vision_spans,
         .conds = conds,
     };
 }

@@ -131,22 +131,29 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const logged_backend = args.backend orelse config_mod.attentionBackend(platform);
-    log.info("Platform target={} attention_backend={} (DiT uses bidirectional sdpa on all targets)", .{
-        platform.target,
-        logged_backend,
-    });
-
     const canvas = config_mod.canvasForTarget(platform.target, args.full, args.preview, args.tiny);
     const short_side = if (args.short_side == 0) canvas.short_side else args.short_side;
     const steps = if (args.steps == 0) canvas.steps else args.steps;
 
     const shardings: sharding_mod.Shardings = try .init(platform);
-    log.info("Hardware: shard `.model` degree={d} target={s} platform_devices={d}", .{
-        shardings.model.numPartitionsForLogicalAxis(.model),
-        @tagName(platform.target),
-        platform.devices.len,
-    });
+    const px = config_mod.pixelSize(aspect, short_side);
+    log.info(
+        "run model={s} variant={s} ir={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} backend={}",
+        .{
+            args.model,
+            @tagName(variant),
+            @tagName(ir_mode),
+            px.w,
+            px.h,
+            config_mod.frameCount(args.duration),
+            steps,
+            args.seed,
+            @tagName(platform.target),
+            shardings.model.numPartitionsForLogicalAxis(.model),
+            platform.devices.len,
+            args.backend orelse config_mod.attentionBackend(platform),
+        },
+    );
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     const task = try config_mod.openTaskDir(io, repo, variant);
     var task_dir = task.dir;
@@ -226,9 +233,12 @@ pub fn main(init: std.process.Init) !void {
         if (visual_vae.ready(vview) and audio_vae.decodeReady(aview)) {
             loaded_visual = try visual_vae.LoadedModel.init(allocator, io, visual_dir.?, vview);
             loaded_audio = try audio_vae.LoadedModel.init(allocator, io, audio_dir.?, aview);
+            log.info("vae: video+audio graphs ready", .{});
         } else {
-            log.info("VAE weight names not recognized; decode skipped", .{});
+            log.warn("vae: weight names not recognized; decode skipped", .{});
         }
+    } else {
+        log.info("vae: video_vae or audio_vae dir missing; latents-only", .{});
     }
 
     const geo = pipeline.Geometry.init(opts, dit_cfg);
@@ -241,7 +251,6 @@ pub fn main(init: std.process.Init) !void {
         .llm_url = init.environ_map.get("H3IR_LLM_URL"),
     });
     defer brief.deinit(allocator);
-    log.info("Context-IR source={s} chars={d}", .{ @tagName(brief.source), brief.text.len });
 
     var tokenizer = try loadTokenizer(allocator, io, task_dir, repo, &progress);
     defer tokenizer.deinit();
@@ -329,7 +338,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const text_len: u32 = @intCast(tokens.len);
-    log.info("Prompt tokens={d}", .{text_len});
+    log.info("prompt tokens={d} refs={d} cond_video={d} cond_audio={d}", .{
+        text_len,
+        cond_set.references.len,
+        cond_set.videos.len,
+        cond_set.audios.len,
+    });
 
     const schedules = try scheduler_mod.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
     defer schedules.deinit(allocator);
@@ -434,9 +448,11 @@ pub fn main(init: std.process.Init) !void {
 
     const video_n = geo.video_tokens * geo.video_patch_dim;
     const audio_n = geo.audio_tokens * geo.audio_dim;
-    var latents: session_mod.Latents = if (args.decode_only) .{
-        .video = try session_mod.readF32File(allocator, io, out_dir, "video_latents.f32", video_n),
-        .audio = try session_mod.readF32File(allocator, io, out_dir, "audio_latents.f32", audio_n),
+    var latents: session_mod.Latents = if (args.decode_only) blk: {
+        const video = try session_mod.readF32File(allocator, io, out_dir, "video_latents.f32", video_n);
+        const audio = try session_mod.readF32File(allocator, io, out_dir, "audio_latents.f32", audio_n);
+        log.info("decode-only: loaded video_latents.f32 ({d}) audio_latents.f32 ({d})", .{ video.len, audio.len });
+        break :blk .{ .video = video, .audio = audio };
     } else blk: {
         var text = try session_mod.encodeText(allocator, io, platform, &compiled.?, &loaded_enc, &enc_store, &all, tokens, text_extras, &progress);
         defer text.deinit();
@@ -467,6 +483,11 @@ pub fn main(init: std.process.Init) !void {
         );
         try session_mod.writeF32File(io, out_dir, "video_latents.f32", denoised.video);
         try session_mod.writeF32File(io, out_dir, "audio_latents.f32", denoised.audio);
+        log.info("wrote video_latents.f32 ({d}) audio_latents.f32 ({d}) out={s}", .{
+            denoised.video.len,
+            denoised.audio.len,
+            args.out,
+        });
         break :blk denoised;
     };
     defer latents.deinit(allocator);
@@ -520,6 +541,7 @@ fn loadTokenizer(
         else => return err,
     };
     defer allocator.free(bytes);
+    log.info("tokenizer: {d} bytes", .{bytes.len});
     return try .fromBytes(allocator, bytes);
 }
 

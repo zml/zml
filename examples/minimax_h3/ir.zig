@@ -2,6 +2,8 @@ const std = @import("std");
 
 const config = @import("config.zig");
 
+const log = std.log.scoped(.minimax_h3_ir);
+
 /// How the text that reaches the H3 encoder is produced.
 /// Official MiniMax rec: hosted Context-IR, or the Prompting Guidance fields.
 /// Community rec: OpenH3-IR (`h3ir`) against a local OpenAI-compatible model.
@@ -90,11 +92,16 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, req: Request) !Brief {
         .auto => if (h3irAvailable(allocator, io, req.llm_url)) Mode.h3ir else Mode.prompt,
         else => req.mode,
     };
-    return switch (mode) {
+    if (req.mode == .auto and mode != .h3ir) {
+        log.info("ir auto: OpenH3-IR unavailable, using prompting guidance", .{});
+    }
+    const brief: Brief = switch (mode) {
         .off => .{ .text = try allocator.dupe(u8, req.prompt), .source = .raw },
         .prompt, .auto => .{ .text = try promptingGuidance(allocator, req), .source = .prompting_guidance },
         .h3ir => .{ .text = try compileH3ir(allocator, io, req), .source = .openh3_ir },
     };
+    log.info("ir source={s} chars={d} variant={s}", .{ @tagName(brief.source), brief.text.len, @tagName(req.variant) });
+    return brief;
 }
 
 fn h3irAvailable(allocator: std.mem.Allocator, io: std.Io, llm_url: ?[]const u8) bool {

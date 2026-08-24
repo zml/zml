@@ -195,6 +195,12 @@ pub fn compile(
     var node = progress.start("Compiling MiniMax-H3", 5);
     defer node.end();
 
+    log.info("compile DiT+encoder: start seq={d} text={d} video_tokens={d} audio_tokens={d}", .{
+        seq_len,
+        text_len,
+        geo.video_tokens,
+        geo.audio_tokens,
+    });
     const now: std.Io.Timestamp = .now(io, .awake);
     var embed_f = try io.concurrent(compileDitEmbed, .{ ctx, dit_model, enc_model.embed_tokens.weight.dtype(), geo, text_len, seq_len, num_timesteps });
     errdefer if (embed_f.cancel(io)) |exe| exe.deinit() else |_| {};
@@ -305,6 +311,12 @@ pub fn compileVae(
     var node = progress.start("Compiling MiniMax-H3 VAE", 4);
     defer node.end();
 
+    log.info("compile VAE: start tile={d}x{d}x{d} audio_t={d}", .{
+        tile.latent_t,
+        tile.latent_h,
+        tile.latent_w,
+        geo.audio_t,
+    });
     const now: std.Io.Timestamp = .now(io, .awake);
     var embed_f = try io.concurrent(compileVaeEmbed, .{ ctx, visual, tile, seq });
     errdefer if (embed_f.cancel(io)) |exe| exe.deinit() else |_| {};
@@ -494,7 +506,7 @@ pub fn compileVision(
 
 pub fn describe(opts: Options, geo: Geometry, layout: packing.Layout) void {
     log.info(
-        "H3 {s} {d}x{d} {d} frames ({d:.1}s) latents {d}x{d}x{d} audio_t={d} seq={d} steps={d}",
+        "layout {s} {d}x{d} {d} frames ({d:.1}s) latents {d}x{d}x{d} audio_t={d} seq={d} steps={d} seed={d}",
         .{
             @tagName(opts.variant),
             geo.pixel_w,
@@ -507,6 +519,7 @@ pub fn describe(opts: Options, geo: Geometry, layout: packing.Layout) void {
             geo.audio_t,
             layout.seqLen(),
             opts.steps,
+            opts.seed,
         },
     );
 }
