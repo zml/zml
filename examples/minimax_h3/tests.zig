@@ -1,0 +1,574 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+const audio_vae = @import("audio_vae.zig");
+const conditions = @import("conditions.zig");
+const config = @import("config.zig");
+const ir = @import("ir.zig");
+const sharding_mod = @import("sharding.zig");
+const packing = @import("packing.zig");
+const scheduler = @import("scheduler.zig");
+const vae = @import("vae.zig");
+const vision = @import("vision.zig");
+const visual_vae = @import("visual_vae.zig");
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    try testConfig();
+    try testHardwareBackends();
+    try testSharding(allocator);
+    try testSplitComma(allocator);
+    try testScheduler(allocator);
+    try testTimestepEmbedding();
+    try testPackingT2va(allocator);
+    try testPackingTimestepSlots(allocator);
+    try testPackingFl2va(allocator);
+    try testPackingRef2va(allocator);
+    try testEncodeVideoLatentT();
+    try testVisionSpatial();
+    try testPatchify(allocator);
+    try testCanvas();
+    try testVaeGeometry();
+    try testMmRopeHost();
+    try testOfficialSpatialGrid();
+    try testOfficialRotateHalf();
+    try testOfficialAdaLnIndex();
+    try testPromptingGuidance(allocator);
+    try testCanvasPresets();
+    try testVaeTiling(allocator);
+    try testVitCoords();
+    try testImagenet();
+    try testSnake();
+    try testTokenDrop();
+
+    std.debug.print("minimax_h3 tests: all passed\n", .{});
+}
+
+fn testConfig() !void {
+    const cfg = config.Config.official();
+    try std.testing.expectEqual(@as(i64, 5376), cfg.hidden_size);
+    try std.testing.expectEqual(@as(i64, 50), cfg.num_layers);
+    try std.testing.expectEqual(@as(i64, 56), cfg.num_attention_heads);
+    try std.testing.expectEqual(@as(i64, 128), cfg.attention_head_dim);
+    try std.testing.expectEqual(@as(i64, 7168), cfg.innerDim());
+    try std.testing.expectEqual(@as(i64, 96), cfg.rotaryDim());
+    try std.testing.expectEqual(@as(i64, 24 * 1 * 2 * 2), cfg.videoPatchDim());
+    try std.testing.expectEqual(@as(i64, 96768), cfg.adalnOutFeatures());
+    try std.testing.expectEqual(@as(i64, 10752), cfg.finalAdalnOutFeatures());
+
+    var aliased: config.Config = .{
+        .token_refiner_num_layers = 2,
+        .ffn_hidden_size = 14336,
+        .latents_dim = 24,
+        .audio_latents_dim = 32,
+        .timestep_input_dim = 256,
+        .time_embed_hidden_size = 5376,
+        .rope_inv_freq_len = 16,
+    };
+    aliased = aliased.resolve();
+    try std.testing.expectEqual(@as(i64, 2), aliased.num_refiner_layers);
+    try std.testing.expectEqual(@as(i64, 24), aliased.in_channels);
+    try std.testing.expectEqual(@as(i64, 16), aliased.rope_freq_dim);
+}
+
+fn testSharding(allocator: std.mem.Allocator) !void {
+    try std.testing.expectEqual(@as(usize, 0), sharding_mod.tensorParallelDegree(0));
+    try std.testing.expectEqual(@as(usize, 1), sharding_mod.tensorParallelDegree(1));
+    try std.testing.expectEqual(@as(usize, 2), sharding_mod.tensorParallelDegree(2));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(4));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(8));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(16));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(32));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(64));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(5));
+    try std.testing.expect(sharding_mod.officialHeadsOk(1));
+    try std.testing.expect(sharding_mod.officialHeadsOk(2));
+    try std.testing.expect(sharding_mod.officialHeadsOk(4));
+    try std.testing.expect(sharding_mod.officialHeadsOk(8));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(16));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(7));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(0));
+    try std.testing.expect(!sharding_mod.tensorParallelHeadsOk(8, 56, 64, 7));
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    inline for (std.meta.tags(zml.Target)) |target| {
+        const primary = sharding_mod.tensorParallelPrimaryAxis(target);
+        var mesh = try testMesh(arena, target, &.{primary}, &.{2});
+        const axes = sharding_mod.presentShardableAxes(&mesh);
+        try std.testing.expectEqual(primary, axes.get(0));
+        const strategy = try sharding_mod.tensorParallelStrategy(&mesh);
+        try std.testing.expectEqual(@as(usize, 1), strategy.bindings.len);
+        try std.testing.expectEqual(primary, strategy.bindings.get(0).physical.get(0));
+        try std.testing.expectEqual(@as(usize, 0), strategy.folding.len);
+        const data = try zml.Sharding.Data.init("model", &mesh, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 2), data.numPartitionsForLogicalAxis(.model));
+        try std.testing.expect(sharding_mod.officialHeadsOk(data.numPartitionsForLogicalAxis(.model)));
+    }
+
+    {
+        var tpu = try testMesh(arena, .tpu, &.{ .link_x, .link_y }, &.{ 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&tpu);
+        try std.testing.expectEqual(@as(usize, 1), strategy.folding.len);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link_x, .link_y },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &tpu, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 4), data.numPartitionsForLogicalAxis(.model));
+    }
+
+    {
+        var tpu = try testMesh(arena, .tpu, &.{ .link_x, .link_y, .link_z }, &.{ 2, 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&tpu);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link_x, .link_y, .link_z },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &tpu, .mesh(.{ .model = .high_bandwidth }), strategy);
+        const degree = data.numPartitionsForLogicalAxis(.model);
+        try std.testing.expectEqual(@as(i64, 8), degree);
+        const mesh_shard: zml.Sharding = .{ .data = &data };
+        const q = zml.Shape.init(.{ .dout = 7168, .d = 5376 }, .bf16).withPartitioning(.{ .dout = .model, .d = .replicated });
+        const q_pl = try mesh_shard.placement(q);
+        try std.testing.expectEqual(@as(i64, 896), q_pl.shape.dim(.dout));
+        const heads = zml.Shape.init(.{ .h = 56, .hd = 128 }, .bf16).withPartitioning(.{ .h = .model });
+        const h_pl = try mesh_shard.placement(heads);
+        try std.testing.expectEqual(@as(i64, 7), h_pl.shape.dim(.h));
+        const kv = zml.Shape.init(.{ .h = 8, .hd = 128 }, .bf16).withPartitioning(.{ .h = .model });
+        const kv_pl = try mesh_shard.placement(kv);
+        try std.testing.expectEqual(@as(i64, 1), kv_pl.shape.dim(.h));
+    }
+
+    {
+        var neuron = try testMesh(arena, .neuron, &.{ .link, .link_x, .link_y, .link_z }, &.{ 2, 2, 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&neuron);
+        try std.testing.expectEqual(sharding_mod.tensorParallelPrimaryAxis(.neuron), strategy.bindings.get(0).physical.get(0));
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link, .link_x, .link_y, .link_z },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &neuron, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 16), data.numPartitionsForLogicalAxis(.model));
+        try std.testing.expect(!sharding_mod.officialHeadsOk(16));
+    }
+
+    {
+        var oneapi = try testMesh(arena, .oneapi, &.{ .link, .bus }, &.{ 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&oneapi);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link, .bus },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &oneapi, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 4), data.numPartitionsForLogicalAxis(.model));
+    }
+
+    {
+        var cuda16 = try testMesh(arena, .cuda, &.{.link}, &.{16});
+        const strategy = try sharding_mod.tensorParallelStrategy(&cuda16);
+        const data = try zml.Sharding.Data.init("model", &cuda16, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 16), data.numPartitionsForLogicalAxis(.model));
+        const mesh_shard: zml.Sharding = .{ .data = &data };
+        const heads = zml.Shape.init(.{ .h = 56 }, .bf16).withPartitioning(.{ .h = .model });
+        try std.testing.expectError(error.IncompatibleSharding, mesh_shard.placement(heads));
+        const q = zml.Shape.init(.{ .dout = 7168 }, .bf16).withPartitioning(.{ .dout = .model });
+        const q_pl = try mesh_shard.placement(q);
+        try std.testing.expectEqual(@as(i64, 448), q_pl.shape.dim(.dout));
+    }
+}
+
+fn testMesh(
+    allocator: std.mem.Allocator,
+    target: zml.Target,
+    tags: []const zml.Sharding.PhysicalAxisTag,
+    sizes: []const usize,
+) !zml.Sharding.PhysicalMesh {
+    var next_id: u32 = 0;
+    const root = try testMeshNode(allocator, tags, sizes, 0, &next_id);
+    return zml.Sharding.PhysicalMesh.fromTree(allocator, target, root);
+}
+
+fn testMeshNode(
+    allocator: std.mem.Allocator,
+    tags: []const zml.Sharding.PhysicalAxisTag,
+    sizes: []const usize,
+    depth: usize,
+    next_id: *u32,
+) !zml.Sharding.PhysicalNode {
+    if (depth == tags.len) {
+        const id = next_id.*;
+        next_id.* += 1;
+        return .{ .leaf = .{ .id = id, .coords = @splat(0xff) } };
+    }
+    const children = try allocator.alloc(zml.Sharding.PhysicalNode, sizes[depth]);
+    for (children) |*child| {
+        child.* = try testMeshNode(allocator, tags, sizes, depth + 1, next_id);
+    }
+    return .{
+        .branch = .{
+            .tag = tags[depth],
+            .geometry = switch (targetGeometry(tags[depth])) {
+                .torus => .{ .mesh = .torus },
+                .p2p => .point_to_point,
+                .tree => .tree,
+            },
+            .children = children,
+        },
+    };
+}
+
+fn targetGeometry(tag: zml.Sharding.PhysicalAxisTag) enum { torus, p2p, tree } {
+    return switch (tag) {
+        .link_x, .link_y, .link_z => .torus,
+        .link => .p2p,
+        .bus => .tree,
+    };
+}
+
+fn testSplitComma(allocator: std.mem.Allocator) !void {
+    const empty = try conditions.splitComma(allocator, "");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+
+    const parts = try conditions.splitComma(allocator, "a.png, b.mp4,,bed.wav");
+    defer allocator.free(parts);
+    try std.testing.expectEqual(@as(usize, 3), parts.len);
+    try std.testing.expectEqualStrings("a.png", parts[0]);
+    try std.testing.expectEqualStrings("b.mp4", parts[1]);
+    try std.testing.expectEqualStrings("bed.wav", parts[2]);
+
+    const blanks = try conditions.splitComma(allocator, ",, ,");
+    defer allocator.free(blanks);
+    try std.testing.expectEqual(@as(usize, 0), blanks.len);
+}
+
+fn testHardwareBackends() !void {
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.cpu));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.rocm));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.tpu));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.oneapi));
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, config.attentionBackendForTarget(.cuda));
+    try std.testing.expectEqual(zml.attention.Backend.nki, config.attentionBackendForTarget(.neuron));
+    try std.testing.expectEqual(zml.attention.Backend.metal_fa, config.attentionBackendForTarget(.metal));
+
+    inline for (std.meta.tags(zml.Target)) |target| {
+        const backend = config.attentionBackendForTarget(target);
+        _ = backend;
+    }
+}
+
+fn testScheduler(allocator: std.mem.Allocator) !void {
+    const sched = try scheduler.Schedule.init(allocator, 12.0, 8);
+    defer sched.deinit(allocator);
+    try std.testing.expect(sched.sigmas[0] > sched.sigmas[sched.sigmas.len - 1]);
+    try std.testing.expectEqual(@as(f32, 0.0), sched.sigmas[sched.sigmas.len - 1]);
+    try std.testing.expectEqual(sched.timesteps.len + 1, sched.sigmas.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), sched.timesteps[0] + sched.sigmas[0], 1e-6);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), scheduler.shiftSigma(1.0, 12.0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 12.0 / 13.0), scheduler.shiftSigma(0.5, 12.0), 1e-6);
+    try std.testing.expectEqual(@as(f32, 0.0), scheduler.shiftSigma(0.0, 12.0));
+
+    const audio = scheduler.timeShiftSigma(0.5, 12.0, 3.0);
+    try std.testing.expect(audio > 0.0 and audio < 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), scheduler.Schedule.scaleNoise(0.5, 1.0, 0.0), 1e-6);
+
+    var sample = [_]f32{ 1.0, -1.0 };
+    const velocity = [_]f32{ 0.0, 0.0 };
+    sched.step(0, &sample, &velocity);
+    try std.testing.expect(std.math.isFinite(sample[0]));
+
+    const dual = try scheduler.DualSchedule.initOfficial(allocator, 10);
+    defer dual.deinit(allocator);
+    try std.testing.expectEqual(@as(f32, 12.0), dual.video.shift);
+    try std.testing.expectEqual(@as(f32, 3.0), dual.audio.shift);
+}
+
+fn testTimestepEmbedding() !void {
+    const t = [_]f32{ 0.0, 1.0 };
+    var out: [512]f32 = undefined;
+    scheduler.timestepEmbedding(&t, 256, true, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[128], 1e-5);
+}
+
+fn testPackingT2va(allocator: std.mem.Allocator) !void {
+    const layout = try packing.buildT2va(allocator, 4, 2, 4, 4, 3, 0.25, 0.6);
+    defer layout.deinit(allocator);
+
+    const video_tokens = config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 });
+    const audio_tokens: u32 = 3 * 2;
+    try std.testing.expectEqual(4 + audio_tokens + video_tokens, layout.seqLen());
+    try std.testing.expectEqual(@as(usize, 4), layout.text_indices.len);
+    try std.testing.expectEqual(@as(usize, video_tokens), layout.video_indices.len);
+    try std.testing.expectEqual(@as(usize, audio_tokens), layout.audio_indices.len);
+    try std.testing.expectEqual(@as(u8, 1), layout.token_tags[0]);
+    try std.testing.expectEqual(@as(u8, 2), layout.token_tags[layout.target_audio_start]);
+    try std.testing.expectEqual(@as(u8, 0), layout.token_tags[layout.target_video_start]);
+
+    const first_video = layout.adalnIndex(layout.target_video_start);
+    try std.testing.expectEqual(first_video % 3, 0);
+    const first_text = layout.adalnIndex(0);
+    try std.testing.expectEqual(first_text % 3, 1);
+    const first_audio = layout.adalnIndex(layout.target_audio_start);
+    try std.testing.expectEqual(first_audio % 3, 2);
+    try std.testing.expectEqual(packing.timestep_slot_count, @as(u32, @intCast(layout.timesteps.len)));
+    try std.testing.expectEqual(@as(u32, 0), layout.timestep_indices[layout.target_video_start]);
+    try std.testing.expectEqual(@as(u32, 1), layout.timestep_indices[layout.target_audio_start]);
+}
+
+fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
+    const early = packing.timestepValues(0.99, 0.8);
+    const late = packing.timestepValues(0.1, 0.2);
+    try std.testing.expectEqual(@as(usize, 4), early.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.99), early[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.999), early[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), late[3], 1e-6);
+
+    const a = try packing.buildT2va(allocator, 3, 2, 4, 4, 2, 0.99, 0.8);
+    defer a.deinit(allocator);
+    const b = try packing.buildT2va(allocator, 3, 2, 4, 4, 2, 0.1, 0.2);
+    defer b.deinit(allocator);
+    try std.testing.expectEqualSlices(u32, a.timestep_indices, b.timestep_indices);
+    try std.testing.expectEqualSlices(u32, a.video_indices, b.video_indices);
+    var buf: [4]f32 = undefined;
+    packing.writeTimesteps(&buf, 0.1, 0.2);
+    try std.testing.expectEqualSlices(f32, &late, &buf);
+}
+
+fn testPackingFl2va(allocator: std.mem.Allocator) !void {
+    const cond = [_]packing.ConditionVideo{.{
+        .latent_t = 1,
+        .latent_h = 4,
+        .latent_w = 4,
+        .keyframe_index = 0,
+    }};
+    const layout = try packing.build(allocator, .{
+        .text_len = 2,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.2,
+        .audio_t_noise = 0.4,
+        .condition_videos = &cond,
+    });
+    defer layout.deinit(allocator);
+    try std.testing.expect(layout.seqLen() > 2 + 4 + 8);
+    try std.testing.expect(layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
+}
+
+fn testPackingRef2va(allocator: std.mem.Allocator) !void {
+    const videos = [_]packing.ConditionVideo{.{
+        .latent_t = 1,
+        .latent_h = 4,
+        .latent_w = 4,
+    }};
+    const refs = [_]packing.ReferenceBlock{.{
+        .kind = .image,
+        .video_index = 0,
+    }};
+    const layout = try packing.build(allocator, .{
+        .text_len = 3,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.3,
+        .audio_t_noise = 0.5,
+        .condition_videos = &videos,
+        .references = &refs,
+    });
+    defer layout.deinit(allocator);
+    try std.testing.expect(layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
+    try std.testing.expect(layout.seqLen() > 3);
+}
+
+fn testEncodeVideoLatentT() !void {
+    try std.testing.expectEqual(@as(u32, 2), vae.encodeVideoLatentT(vae.official_visual, 5));
+    try std.testing.expectEqual(@as(u32, 2), vae.encodeVideoLatentT(vae.official_visual, 17));
+    try std.testing.expectEqual(@as(u32, 7), vae.encodeVideoLatentT(vae.official_visual, 34));
+}
+
+fn testVisionSpatial() !void {
+    var cfg = vision.Config{};
+    cfg.out_hidden_size = 5120;
+    const spec = vision.spatialTokens(cfg, 256, 256, false);
+    try std.testing.expectEqual(@as(u32, 0), spec.seq % 4);
+    try std.testing.expectEqual(spec.seq / 4, spec.merged);
+    var cursor: f32 = 0;
+    var pos: [12]f32 = undefined;
+    vision.applyVisionPositions(&pos, 0, 4, 4, 4, 1, &cursor);
+    try std.testing.expect(cursor > 0);
+}
+
+fn testPatchify(allocator: std.mem.Allocator) !void {
+    const t: u32 = 2;
+    const h: u32 = 4;
+    const w: u32 = 4;
+    const c: u32 = 2;
+    const src = try allocator.alloc(f32, t * h * w * c);
+    defer allocator.free(src);
+    for (src, 0..) |*v, i| v.* = @floatFromInt(i);
+
+    const rows = try packing.patchify(allocator, src, t, h, w, c, .{ 1, 2, 2 });
+    defer allocator.free(rows);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 2 * (2 * 1 * 2 * 2)), rows.len);
+
+    const back = try packing.unpatchify(allocator, rows, t, h, w, c, .{ 1, 2, 2 });
+    defer allocator.free(back);
+    try std.testing.expectEqualSlices(f32, src, back);
+}
+
+fn testCanvas() !void {
+    const p = config.pixelSize(.@"16:9", 768);
+    try std.testing.expectEqual(@as(u32, 768), p.h);
+    try std.testing.expectEqual(@as(u32, 0), p.w % 32);
+    try std.testing.expectEqual(@as(u32, 0), p.h % 32);
+    try std.testing.expect(p.w > p.h);
+
+    const square = config.pixelSize(.@"1:1", 768);
+    try std.testing.expectEqual(square.w, square.h);
+
+    const portrait = config.pixelSize(.@"9:16", 768);
+    try std.testing.expect(portrait.h > portrait.w);
+    try std.testing.expectEqual(@as(u32, 120), config.frameCount(5.0));
+}
+
+fn testVaeGeometry() !void {
+    const lat = vae.official_visual.latentFromPixels(768, 1376, 120);
+    try std.testing.expectEqual(@as(u32, 30), lat.t);
+    try std.testing.expectEqual(@as(u32, 48), lat.h);
+    try std.testing.expectEqual(@as(u32, 86), lat.w);
+    try std.testing.expectEqual(@as(u32, 96), vae.official_visual.patchDim());
+    try std.testing.expectEqual(@as(u32, 200), vae.official_audio.tokenCount(100));
+}
+
+fn testMmRopeHost() !void {
+    const cfg = config.Config.official();
+    const theta: f32 = cfg.rope_theta;
+    const freq: f32 = @floatFromInt(cfg.rope_freq_dim);
+    var inv: [16]f32 = undefined;
+    for (&inv, 0..) |*f, i| {
+        f.* = 1.0 / std.math.pow(f32, theta, @as(f32, @floatFromInt(i)) / freq);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), inv[0], 1e-6);
+    try std.testing.expect(inv[15] < inv[0]);
+    try std.testing.expectEqual(@as(i64, 96), cfg.rotaryDim());
+    try std.testing.expect(cfg.rotaryDim() < cfg.attention_head_dim);
+}
+
+fn testOfficialSpatialGrid() !void {
+    var buf: [8]f32 = undefined;
+    const axis = packing.spatialAxis(8, 8, &buf);
+    try std.testing.expectEqual(@as(usize, 4), axis.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), axis[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), axis[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), axis[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 24.0), axis[3], 1e-6);
+}
+
+fn testOfficialRotateHalf() !void {
+    const x = [_]f32{ 1, 2, 3, 4 };
+    const rotated = [_]f32{ -3, -4, 1, 2 };
+    var out: [4]f32 = undefined;
+    const half = x.len / 2;
+    for (0..half) |i| {
+        out[i] = -x[half + i];
+        out[half + i] = x[i];
+    }
+    try std.testing.expectEqualSlices(f32, &rotated, &out);
+}
+
+fn testOfficialAdaLnIndex() !void {
+    try std.testing.expectEqual(@as(u32, 0 * 3 + 0), @as(u32, 0));
+    try std.testing.expectEqual(@as(u32, 1 * 3 + 1), @as(u32, 4));
+    try std.testing.expectEqual(@as(u32, 2 * 3 + 2), @as(u32, 8));
+}
+
+fn testPromptingGuidance(allocator: std.mem.Allocator) !void {
+    const brief = try ir.promptingGuidance(allocator, .{
+        .prompt = "a lighthouse keeper lights the lamp",
+        .variant = .t2va,
+        .duration_s = 5,
+    });
+    defer allocator.free(brief);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "integrated_multimodal_description:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "overall_soundscape:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "non_diegetic_music:") != null);
+    try std.testing.expect(ir.alreadyCompiled(brief));
+
+    const passthrough = try ir.promptingGuidance(allocator, .{
+        .prompt = brief,
+        .variant = .t2va,
+    });
+    defer allocator.free(passthrough);
+    try std.testing.expectEqualStrings(brief, passthrough);
+}
+
+fn testCanvasPresets() !void {
+    const cpu = config.canvasForTarget(.cpu, false, false, false);
+    try std.testing.expectEqual(config.preview_short_side, cpu.short_side);
+    const full = config.canvasForTarget(.cpu, true, false, false);
+    try std.testing.expectEqual(config.default_short_side, full.short_side);
+    const tiny = config.canvasForTarget(.cuda, false, false, true);
+    try std.testing.expectEqual(config.tiny_short_side, tiny.short_side);
+    const cuda = config.canvasForTarget(.cuda, false, false, false);
+    try std.testing.expectEqual(config.default_short_side, cuda.short_side);
+}
+
+fn testVaeTiling(allocator: std.mem.Allocator) !void {
+    const one = try vae.splitTiles(allocator, 128, 256, 64, 16);
+    defer one.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), one.count());
+    try std.testing.expectEqual(@as(u32, 128), one.lengths[0]);
+
+    const many = try vae.splitTiles(allocator, 640, 256, 64, 16);
+    defer many.deinit(allocator);
+    try std.testing.expect(many.count() >= 3);
+    try std.testing.expectEqual(@as(u32, 0), many.starts[0]);
+}
+
+fn testVitCoords() !void {
+    var buf: [4]f32 = undefined;
+    const axis = vae.vitCoords(4, &buf);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.75), axis[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.25), axis[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), axis[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), axis[3], 1e-6);
+}
+
+fn testImagenet() !void {
+    var px = [_]f32{ 0.0, 0.0, 0.0 };
+    vae.denormImagenetRgb(&px);
+    try std.testing.expectApproxEqAbs(vae.imagenet_mean[0], px[0], 1e-5);
+}
+
+fn testSnake() !void {
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), audio_vae.snake(0, 1), 1e-6);
+    const y = audio_vae.snake(1.0, 1.0);
+    try std.testing.expect(y > 1.0);
+    _ = visual_vae.Config.official().rotaryDim();
+}
+
+fn testTokenDrop() !void {
+    const spec = vae.official_visual;
+    try std.testing.expectEqual(@as(u32, 5), spec.tokensChunkSize());
+    try std.testing.expectEqual(@as(u32, 2), spec.tokenOverlap());
+    try std.testing.expectEqual(@as(u32, 3), spec.framePrePadding());
+    try std.testing.expectEqual(@as(u32, 5), spec.frameOverlap());
+}
