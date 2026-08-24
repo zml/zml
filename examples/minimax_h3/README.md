@@ -83,7 +83,6 @@ Layout: `config.zig` hyperparams, `sharding.zig` device mesh, `conditions.zig` F
 ```bash
 bazel run //examples/minimax_h3:h3_tests
 bazel test //examples/minimax_h3:test
-python3 examples/minimax_h3/compare_layers.py
 ```
 
 End-to-end generation needs the official checkpoint on disk (Hugging Face VFS downloads shards as each layer is read). Peak device memory is one layer plus activations, not the full 33B+32B stack.
