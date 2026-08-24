@@ -644,22 +644,23 @@ const Triton = struct {
                             ctx.activation_limit,
                         );
 
-                        const fallback_ctx = .{
-                            .input = sharded_inputs[0],
-                            .topk_ids = local_topk_ids,
-                            .topk_weights = local_topk_weights,
-                            .weights_gate_up = sharded_inputs[3],
-                            .scales_gate_up = sharded_inputs[4],
-                            .weights_down = sharded_inputs[5],
-                            .scales_down = sharded_inputs[6],
-                            .activation_limit = ctx.activation_limit,
-                        };
                         const OverflowFallback = struct {
-                            fn cond(overflow: zml.Tensor, _: zml.Tensor, _: anytype) zml.Tensor {
-                                return overflow;
+                            input: zml.Tensor,
+                            topk_ids: zml.Tensor,
+                            topk_weights: zml.Tensor,
+                            weights_gate_up: zml.Tensor,
+                            scales_gate_up: zml.Tensor,
+                            weights_down: zml.Tensor,
+                            scales_down: zml.Tensor,
+                            activation_limit: f32,
+
+                            pub const State = struct { overflow: zml.Tensor, output: zml.Tensor };
+
+                            pub fn cond(_: @This(), state: State) zml.Tensor {
+                                return state.overflow;
                             }
 
-                            fn body(_: zml.Tensor, _: zml.Tensor, fallback: anytype) struct { zml.Tensor, zml.Tensor } {
+                            pub fn body(fallback: @This(), _: State) State {
                                 const dense_output = forwardMoeLocal_fp4(
                                     fallback.input,
                                     fallback.topk_ids,
@@ -673,16 +674,24 @@ const Triton = struct {
                                     null,
                                     fallback.activation_limit,
                                 );
-                                return .{ zml.Tensor.scalar(false, .bool), dense_output };
+                                return .{ .overflow = zml.Tensor.scalar(false, .bool), .output = dense_output };
                             }
                         };
                         const loop_state = zml.ops.@"while"(
-                            .{ routes.overflow, compact_output },
-                            OverflowFallback.cond,
-                            OverflowFallback.body,
-                            .{fallback_ctx},
+                            OverflowFallback,
+                            .{
+                                .input = sharded_inputs[0],
+                                .topk_ids = local_topk_ids,
+                                .topk_weights = local_topk_weights,
+                                .weights_gate_up = sharded_inputs[3],
+                                .scales_gate_up = sharded_inputs[4],
+                                .weights_down = sharded_inputs[5],
+                                .scales_down = sharded_inputs[6],
+                                .activation_limit = ctx.activation_limit,
+                            },
+                            .{ .overflow = routes.overflow, .output = compact_output },
                         );
-                        break :blk loop_state[1];
+                        break :blk loop_state.output;
                     } else forwardMoeLocal_fp4(
                         sharded_inputs[0],
                         local_topk_ids,
@@ -1283,6 +1292,278 @@ const Vanilla = struct {
         return y;
     }
 };
+
+const Routing = struct {
+    num_tokens: i64,
+    num_routes: i64,
+    topk: i64,
+    gather_divisor: i64,
+    grid_m: i64,
+    sorted_route_ids: zml.Tensor,
+    sorted_weights: zml.Tensor,
+    active_routes: zml.Tensor,
+    hist: zml.Tensor,
+    offsets: zml.Tensor,
+    expt_data: zml.Tensor,
+};
+
+const CompactLocalRoutes = struct {
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    token_ids: zml.Tensor,
+    overflow: zml.Tensor,
+};
+
+const GemmOpts = struct {
+    routing: Routing,
+    weight_contract_tag: zml.Shape.Tag,
+    weight_output_tag: zml.Shape.Tag,
+    output_shape: zml.Shape,
+    gather: ?zml.Tensor = null,
+    gammas: ?zml.Tensor = null,
+    bias: ?zml.Tensor = null,
+    apply_swiglu: bool = false,
+    activation_limit: f32 = 1.0,
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    split_k: u32,
+    num_warps: u32,
+    num_stages: u32,
+};
+const KernelConf = struct {
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    split_k: u32 = 1,
+    num_warps: u32,
+    num_stages: u32,
+};
+
+const kernel_config_token_buckets = [_]u32{
+    1,  2,   4,   8,   16,   24,   32,   48,   64,
+    96, 128, 256, 512, 1024, 1536, 2048, 3072, 4096,
+};
+
+fn configForTokenBucket(num_tokens: u32) KernelConf {
+    return switch (num_tokens) {
+        1 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        2 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        4 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        8 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        16 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 64,
+            .group_m = 64,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 5,
+        },
+        24 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        32 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        48 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 64,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        64 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        96 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        128 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        256 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .split_k = 4,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        512 => .{
+            .block_m = 32,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        1024 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        1536 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        2048 => .{
+            .block_m = 128,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        3072 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        4096 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        else => unreachable,
+    };
+}
+fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
+    const num_routes = std.math.mul(u32, num_tokens, topk) catch std.math.maxInt(u32);
+    var config = getBestTokenBucketConfig(num_routes);
+
+    if (num_routes <= 256 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 256;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.split_k = 4;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    } else if (num_routes <= 512 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 128;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.split_k = 4;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    }
+
+    return config;
+}
+
+fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
+    var best_num_tokens = kernel_config_token_buckets[0];
+    var best_distance = tokenDistance(num_tokens, best_num_tokens);
+
+    for (kernel_config_token_buckets[1..]) |candidate| {
+        const distance = tokenDistance(num_tokens, candidate);
+        if (distance < best_distance or (distance == best_distance and candidate < best_num_tokens)) {
+            best_num_tokens = candidate;
+            best_distance = distance;
+        }
+    }
+
+    return configForTokenBucket(best_num_tokens);
+}
+
+fn tokenDistance(a: u32, b: u32) u32 {
+    return if (a >= b) a - b else b - a;
+}
+
+fn compactLocalRouteCapacity(num_tokens: i64, topk: i64, global_num_experts: i64, local_num_experts: i64, block_m: i64) i64 {
+    const num_routes = num_tokens * topk;
+    if (num_routes > 512 or global_num_experts <= local_num_experts) return num_routes;
+
+    // Decode-time EP routing is expected to be close to balanced; keep slack so
+    // normal skew still fits while shrinking the local GEMM launch grid.
+    const expected_local_routes = std.math.divCeil(i64, num_routes * local_num_experts, global_num_experts) catch unreachable;
+    const slack = @max(expected_local_routes, 2 * block_m);
+    const unrounded_capacity = expected_local_routes + slack;
+    const rounded_capacity = (std.math.divCeil(i64, unrounded_capacity, block_m) catch unreachable) * block_m;
+    return @min(num_routes, rounded_capacity);
+}
 
 pub fn forwardMoe_fp4(
     input: zml.Tensor,
