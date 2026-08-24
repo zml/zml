@@ -74,7 +74,9 @@
     "92": "mla_moe"
   },
   "production_invariants": {
-    "layer_limit_test_only": true,
+    "configurable_layer_limit_test_only": true,
+    "normal_example_fixed_resident_layers": 17,
+    "normal_example_scope": "diagnostic_prefix_not_full_model",
     "missing_tensor_policy": "hard_error_with_exact_names",
     "weight_lookup": "tensor_name_not_shard_number",
     "all_routed_experts_required": true,

@@ -9,6 +9,14 @@ const runtime_weights = @import("runtime_weights.zig");
 
 const log = std.log.scoped(.kimi_k3);
 
+/// Fixed resident prefix used by the normal `//examples/llm` Kimi K3 path.
+/// It executes logical layers 0–16 on exactly four NVIDIA GB300 GPUs using the
+/// current TP4×EP1 behavior. Expert banks remain replicated, so expected
+/// per-rank resident weight use is approximately 258–261 GB. This is a
+/// diagnostic truncated model, not equivalent to the complete
+/// 93-layer Kimi K3 model, and its decoded output is not a reliable answer.
+pub const example_resident_layer_count: usize = 17;
+
 pub const Config = struct {
     model_type: []const u8,
     text_config: TextConfig,
@@ -411,6 +419,7 @@ pub const Buffers = struct {
 pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
+    fixed_example_prefix: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -426,8 +435,15 @@ pub const LoadedModel = struct {
             .max_seq_len = parsed.value.text_config.max_position_embeddings,
         };
         return .{
-            .inner = try .init(allocator, store, parsed.value, options),
+            .inner = try .initSelected(
+                allocator,
+                store,
+                parsed.value,
+                options,
+                .{ .layer_limit = example_resident_layer_count },
+            ),
             .parsed_config = parsed,
+            .fixed_example_prefix = true,
         };
     }
 
@@ -435,8 +451,40 @@ pub const LoadedModel = struct {
         self.inner.deinit(allocator);
         self.parsed_config.deinit();
     }
+    fn validateFixedExamplePlatform(self: *const LoadedModel, platform: *const zml.Platform) !void {
+        if (!self.fixed_example_prefix) return;
+        if (platform.target != .cuda) return error.NvidiaCudaRequired;
+        if (platform.devices.len != 4) return error.KimiK3FixedResidentExampleRequiresFourCudaDevices;
+        if (self.inner.selection.first_layer != 0 or
+            self.inner.layers.len != example_resident_layer_count)
+        {
+            return error.InvalidKimiK3FixedResidentExampleSelection;
+        }
+    }
 
     pub fn loadBuffers(
+        self: *LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        if (self.fixed_example_prefix) {
+            try self.validateFixedExamplePlatform(platform);
+            log.warn(
+                "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model=false reliable_answer=false",
+                .{example_resident_layer_count},
+            );
+            return self.loadResidentBuffers(allocator, io, platform, store, progress, shardings);
+        }
+        return self.loadStreamingBuffers(allocator, io, platform, store, progress, shardings);
+    }
+
+    /// Load only the head and dense layer 0. Selected MoE layers are staged by
+    /// the session one at a time; this remains the permanent conformance oracle.
+    pub fn loadStreamingBuffers(
         self: *LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -471,7 +519,7 @@ pub const LoadedModel = struct {
         return .{ .head = head, .layer0 = layer0_buffers, .loader = loader, .load_stats = load_stats };
     }
 
-    pub fn loadPrefixBuffers(
+    pub fn loadResidentBuffers(
         self: *LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -480,18 +528,18 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
         shardings: common.Shardings,
     ) !Buffers {
-        if (self.inner.selection.first_layer != 0 or self.inner.layers.len != 4) {
-            return error.ResidentBuffersRequireKimiK3Prefix4;
+        if (self.inner.selection.first_layer != 0 or self.inner.layers.len == 0) {
+            return error.UnsupportedKimiK3ResidentSelection;
         }
-        var buffers = try self.loadBuffers(allocator, io, platform, store, progress, shardings);
+        var buffers = try self.loadStreamingBuffers(allocator, io, platform, store, progress, shardings);
         errdefer self.unloadBuffers(&buffers, allocator);
-        const residents = try allocator.alloc(ResidentMoeLayer, 3);
+        const residents = try allocator.alloc(ResidentMoeLayer, self.inner.layers.len - 1);
         var initialized: usize = 0;
         errdefer {
             for (residents[0..initialized]) |*resident| resident.deinit();
             allocator.free(residents);
         }
-        var node = progress.start("Loading Kimi K3 resident prefix layers...", 3);
+        var node = progress.start("Loading Kimi K3 resident prefix layers...", self.inner.layers.len - 1);
         defer node.end();
         for (self.inner.layers[1..], 0..) |planned, offset| {
             const logical_index = planned.weights().logical_index;
@@ -511,6 +559,21 @@ pub const LoadedModel = struct {
         }
         buffers.resident_layers = residents;
         return buffers;
+    }
+
+    pub fn loadPrefixBuffers(
+        self: *LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        if (self.inner.selection.first_layer != 0 or self.inner.layers.len != 4) {
+            return error.ResidentBuffersRequireKimiK3Prefix4;
+        }
+        return self.loadResidentBuffers(allocator, io, platform, store, progress, shardings);
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
@@ -536,6 +599,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
+        try self.validateFixedExamplePlatform(platform);
         const params = try inference.CompilationParameters.init(self.inner, seqlen, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, params, progress);
     }

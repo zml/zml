@@ -1,10 +1,14 @@
 # Kimi K3 permanent conformance and operations
 
-Milestone 20 freezes the boundary between production inference and differential
-validation. Production initialization is always configuration-driven and binds
-all 93 text layers. Partial layer selection, compact expert fixtures, recorded
-route alignment, and expanded intermediate tensors exist only in dedicated test
-executables.
+Milestone 20 froze the historical boundary between full-model readiness and
+differential validation. The full-model readiness path remains configuration-driven
+and binds all 93 text layers. Partial layer selection, compact expert fixtures,
+recorded route alignment, and expanded intermediate tensors remain isolated in
+dedicated conformance executables.
+
+The normal Kimi `//examples/llm` path is now a separate fixed diagnostic: it
+selects layers 0-16 and keeps them resident on exactly four CUDA devices. It is
+not full-model initialization and its decoded text is not a reliable answer.
 
 All commands below are offline with respect to model data. Project scripts never
 download weights. Historical and full-model conformance use physical NVIDIA GPU 0. The
@@ -39,6 +43,46 @@ The dependency-free policy audit is:
 .venv/bin/python tools/kimi_k3/test_cleanup_audit.py
 .venv/bin/python tools/kimi_k3/cleanup_audit.py
 ```
+
+## Fixed 17-layer example
+
+The normal Kimi `//examples/llm` command executes layers 0-16 and keeps every
+selected weight resident while generating tokens. It requires exactly four CUDA
+devices and targets four NVIDIA GB300 GPUs with the current TP4 x EP1 layout.
+Expert banks remain replicated, with an expected resident weight footprint of
+approximately 258-261 GB per rank.
+
+Create the model-local tokenizer link once:
+
+```bash
+cd /home/kevin/kimi-k3
+ln -s ../../artifacts/tokenizers/milestone-16/tokenizer.json \
+  moonshot/kimi-k3/tokenizer.json
+```
+
+Invoke Bazel with platform options before the target and allow enough total
+prompt-plus-generation capacity. The formatted France prompt is approximately
+95 tokens, so `--seqlen=10` is expected to fail as too small.
+
+```bash
+cd /home/kevin/kimi-k3/zml
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+XLA_FLAGS=--xla_gpu_deterministic_ops=true \
+TF_DETERMINISTIC_OPS=1 \
+bazel run \
+  --@zml//platforms:cuda=true \
+  --@zml//platforms:cpu=false \
+  //examples/llm -- \
+  --model=/home/kevin/kimi-k3/moonshot/kimi-k3 \
+  --prompt="What is the capital of France?" \
+  --seqlen=128
+```
+
+The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=17 full_model=false
+reliable_answer=false`. Output is deliberately truncated-model diagnostic text;
+it must not be presented as a factual response or as full Kimi K3 inference.
 
 ## Conformance groups
 
@@ -79,8 +123,9 @@ CUDA_VISIBLE_DEVICES=0 bazel-bin/examples/llm/kimi_k3_session_tests \
   --layer-limit=4 --token-count=4 --repeats=2
 ```
 
-`--layer-limit` belongs to this test executable only; the production `llm`
-command has no partial-model option.
+`--layer-limit` belongs to this test executable only. The normal `llm` command
+has no configurable partial-model option; Kimi uses the fixed internal
+17-layer diagnostic selection described above.
 
 ## Fixture regeneration
 

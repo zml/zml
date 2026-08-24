@@ -53,6 +53,26 @@ pub fn main(init: std.process.Init) !void {
     var model_plan = try model.ModelPlan.init(allocator, parsed.value, selection);
     defer model_plan.deinit(allocator);
     if (model_plan.layers.len != selected_count) return error.ModelPlanCountMismatch;
+    if (model.example_resident_layer_count != 17) return error.KimiK3ExampleResidentLayerCountMismatch;
+    var example_plan = try model.ModelPlan.init(
+        allocator,
+        parsed.value,
+        .{ .layer_limit = model.example_resident_layer_count },
+    );
+    defer example_plan.deinit(allocator);
+    var example_dense: usize = 0;
+    var example_kda_moe: usize = 0;
+    var example_mla_moe: usize = 0;
+    for (example_plan.layers) |kind| switch (kind) {
+        .kda_dense => example_dense += 1,
+        .kda_moe => example_kda_moe += 1,
+        .mla_moe => example_mla_moe += 1,
+    };
+    if (example_dense != 1 or example_kda_moe != 12 or example_mla_moe != 4) {
+        return error.KimiK3ExampleResidentFamilyCountMismatch;
+    }
+    const example_source_slots = std.math.divCeil(usize, example_plan.layers.len, 12) catch unreachable;
+    if (example_source_slots != 2) return error.KimiK3ExampleResidentSourceSlotMismatch;
     var cache_plan = try model.CachePlan.init(allocator, parsed.value, selection);
     defer cache_plan.deinit(allocator);
     if (cache_plan.layers.len != selected_count) return error.CachePlanCountMismatch;
@@ -108,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // Permanent test-only construction path; production initialization is full-model only.
+    // Explicit selected construction remains the conformance path; the normal example uses the fixed 17-layer diagnostic selection.
     var instance = model.Model.initSelected(
         allocator,
         store.view(),

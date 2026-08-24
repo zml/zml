@@ -7,8 +7,11 @@ while implementation work and focused commits are made in this ZML repository.
 Rules enforced by the project plan:
 
 - full-model compilation, staging, and historical conformance remain pinned to
-  physical GPU 0; Milestones 22–26 additionally allow physical GPUs 0–3 only
-  for the isolated four-layer diagnostic and distributed tests;
+  physical GPU 0; Milestones 22–26 additionally allow physical GPUs 0–3 for
+  their isolated four-layer diagnostic and distributed tests;
+- the normal Kimi `//examples/llm` command is a distinct fixed 17-layer
+  resident diagnostic on exactly four CUDA devices, not complete 93-layer
+  inference;
 - CPU inference fallback is forbidden;
 - model weights are never downloaded by project scripts;
 - checkpoint input is read from the workspace-local

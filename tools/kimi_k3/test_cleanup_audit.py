@@ -13,6 +13,8 @@ class CleanupAuditTests(unittest.TestCase):
         report = cleanup_audit.audit(Path(__file__).resolve().parents[2])
         self.assertEqual(report["status"], "pass", report["issues"])
         self.assertEqual(report["production_results"], "compact")
+        self.assertFalse(report["public_configurable_layer_limit"])
+        self.assertEqual(report["normal_example_fixed_resident_layers"], 17)
 
     def test_temporary_marker_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

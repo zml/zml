@@ -48,6 +48,21 @@ def audit(root: Path) -> dict[str, Any]:
     for name in ("main", "common", "model"):
         if "kimi_k3_layer_limit" in production[name]:
             issues.append(f"public partial-layer hook remains in {name}")
+    fixed_layer_match = re.search(
+        r"pub const example_resident_layer_count: usize = (\d+);",
+        production["model"],
+    )
+    if fixed_layer_match is None or int(fixed_layer_match.group(1)) != 17:
+        issues.append("normal Kimi example is not fixed to 17 resident layers")
+    for required_fixed_example in (
+        "fixed_example_prefix = true",
+        "KimiK3FixedResidentExampleRequiresFourCudaDevices",
+        "return self.loadResidentBuffers(",
+        "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model=false reliable_answer=false",
+    ):
+        if required_fixed_example not in production["model"]:
+            issues.append(f"missing fixed Kimi example invariant: {required_fixed_example}")
+
     for name in ("session", "runtime_weights"):
         if "std.Io.Clock.now" in production[name] or "log.info(" in production[name]:
             issues.append(f"hot-path timing/logging remains in {name}")
@@ -81,6 +96,8 @@ def audit(root: Path) -> dict[str, Any]:
         "status": "pass" if not issues else "fail",
         "scanned_files": scanned,
         "production_layer_limit": False,
+        "public_configurable_layer_limit": False,
+        "normal_example_fixed_resident_layers": 17,
         "production_hot_path_debug": False,
         "production_results": "compact",
         "diagnostic_target_removed": True,

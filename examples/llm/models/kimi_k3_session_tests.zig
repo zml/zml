@@ -33,7 +33,7 @@ const Args = struct {
         \\  --decode-one          Stream exactly one generated continuation
         \\  --layer-limit=<count> Selected prefix depth (default: 4)
         \\  --compile-only        Compile selected families without loading weights
-        \\  --resident            Keep selected four-layer weights resident across tokens
+        \\  --resident            Keep every selected prefix layer resident across tokens
         \\  --distributed         Require physical TP4 across four visible GPUs
         \\  --force-eos-after-prefill  Test-only exercise of the EOS stop branch
         \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
@@ -44,6 +44,9 @@ const Args = struct {
 
 const official_prefix = [_]u32{ 1, 42, 32000, 160000 };
 const official_prefix4_greedy: u32 = 95385;
+const example_resident_layer_loads: usize = 16;
+const example_resident_payload_reads: u64 = 86_440;
+const example_resident_payload_bytes: u64 = 270_147_850_240;
 
 fn elapsedUs(io: std.Io, started: i96) i96 {
     return @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - started, 1000);
@@ -129,7 +132,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.decode_one and args.repeats != 1) return error.DecodeGateRequiresOneRepeat;
     if (args.force_eos_after_prefill and !args.decode_one) return error.ForceEosRequiresDecodeGate;
     if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
-    if (args.resident and (args.compile_only or args.layer_limit != 4)) return error.InvalidResidentSessionMode;
+    if (args.resident and args.compile_only) return error.InvalidResidentSessionMode;
+    if (args.resident and args.layer_limit > 4 and !args.distributed) return error.ExtendedResidentSessionRequiresFourDevices;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -197,14 +201,28 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var buffers = if (args.resident)
-        try loaded_model.loadPrefixBuffers(allocator, io, platform, &store, &progress, shardings)
+        try loaded_model.loadResidentBuffers(allocator, io, platform, &store, &progress, shardings)
     else
-        try loaded_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+        try loaded_model.loadStreamingBuffers(allocator, io, platform, &store, &progress, shardings);
     defer loaded_model.unloadBuffers(&buffers, allocator);
     var tokenizer = try zml.tokenizer.Tokenizer.fromFile(allocator, io, args.tokenizer);
     defer tokenizer.deinit();
     var session = try session_impl.Session.init(allocator, io, platform, tokenizer, &compiled, &buffers);
     const resident_load_stats = buffers.load_stats.*;
+    if (args.resident and args.layer_limit == model.example_resident_layer_count) {
+        if (resident_load_stats.layer_loads != example_resident_layer_loads or
+            resident_load_stats.payload_reads != example_resident_payload_reads or
+            resident_load_stats.payload_bytes != example_resident_payload_bytes)
+        {
+            return error.KimiK3ExampleResidentLoadAccountingMismatch;
+        }
+        for (platform.devices) |device| {
+            const memory = device.memoryStats();
+            if (memory.bytes_limit) |limit| {
+                if (memory.bytes_in_use >= limit) return error.KimiK3ExampleResidentAllocatorLimitExceeded;
+            }
+        }
+    }
     defer session.deinit();
 
     var first_greedy: ?u32 = null;
@@ -229,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
         } else {
             first_greedy = greedy;
         }
-        if (args.token_count == official_prefix.len and greedy != official_prefix4_greedy) {
+        if (args.layer_limit == 4 and args.token_count == official_prefix.len and greedy != official_prefix4_greedy) {
             return error.KimiK3OfficialGreedyMismatch;
         }
         try stdout_file.interface.print(
@@ -257,6 +275,7 @@ pub fn main(init: std.process.Init) !void {
             }
             const streamed = session.last_generated_token;
             try session.runDecode(&history, &stdout_file.interface);
+            if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
             if (args.force_eos_after_prefill) {
                 if (history.items.len != args.token_count or session.last_generated_token != streamed) {
                     return error.KimiK3ForcedEosStopMismatch;
@@ -282,17 +301,34 @@ pub fn main(init: std.process.Init) !void {
             try stdout_file.interface.flush();
         }
     }
+    for (platform.devices, 0..) |device, rank| {
+        const memory = device.memoryStats();
+        try stdout_file.interface.print(
+            "KIMI_K3_SESSION_MEMORY rank={} bytes_in_use={} peak_bytes_in_use={} bytes_limit={}\n",
+            .{
+                rank,
+                memory.bytes_in_use,
+                memory.peak_bytes_in_use orelse 0,
+                memory.bytes_limit orelse 0,
+            },
+        );
+    }
+    const device_memory = platform.devices[0].memoryStats();
     try stdout_file.interface.print(
         "KIMI_K3_SESSION_ALL_PASS reset_deterministic=true official_prefix_checked={} " ++
-            "weights={s} layer_loads={} payload_reads={} payload_bytes={} devices={} layout={s}\n",
+            "weights={s} layer_loads={} payload_reads={} payload_bytes={} devices={} layout={s} " ++
+            "device_bytes_in_use={} device_peak_bytes_in_use={} device_bytes_limit={}\n",
         .{
-            args.token_count == official_prefix.len,
+            args.layer_limit == 4 and args.token_count == official_prefix.len,
             if (args.resident) "resident" else "streaming",
             buffers.load_stats.layer_loads,
             buffers.load_stats.payload_reads,
             buffers.load_stats.payload_bytes,
             platform.devices.len,
             layout,
+            device_memory.bytes_in_use,
+            device_memory.peak_bytes_in_use orelse 0,
+            device_memory.bytes_limit orelse 0,
         },
     );
     try stdout_file.interface.flush();
