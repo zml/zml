@@ -6,7 +6,8 @@ const zml = @import("../zml.zig");
 const triton = zml.kernel.triton;
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const MlaOptions = @import("paged_attention.zig").Mla.Options;
-const kernels = @import("triton_kernels/unified_attention.zig");
+const mha_kernels = @import("triton_kernels/mha.zig");
+const unified_kernels = @import("triton_kernels/unified_attention.zig");
 const kernels_oneapi = @import("triton_kernels/unified_attention_oneapi.zig");
 const mla_kernels = @import("triton_kernels/unified_sparse_mla.zig");
 
@@ -297,7 +298,7 @@ pub const paged = struct {
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select2dConfig(paged_attention_opts);
 
-        const kernel_config: kernels.KernelUnifiedAttention2dPtr.Config = .{
+        const kernel_config: unified_kernels.KernelUnifiedAttention2dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
             .o_dtype = triton.from(q.dtype()),
@@ -331,7 +332,7 @@ pub const paged = struct {
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
 
-        const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
+        const output = unified_kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
@@ -376,7 +377,7 @@ pub const paged = struct {
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
-        const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
+        const attn_kernel_config: unified_kernels.KernelUnifiedAttention3dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
@@ -398,7 +399,7 @@ pub const paged = struct {
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
-        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
+        const reduce_kernel_config: unified_kernels.ReduceSegmentsPtr.Config = .{
             .o_dtype = triton.from(q.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .tile_size = @intCast(config.reduce.tile_size),
@@ -426,7 +427,7 @@ pub const paged = struct {
             @intCast(paged_attention_opts.num_kv_heads),
             @intCast(config.attention.num_segments_per_seq),
         };
-        const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
+        const attn_output = unified_kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
@@ -466,7 +467,7 @@ pub const paged = struct {
             },
         );
 
-        const output = kernels.ReduceSegmentsPtr.Kernel.call(
+        const output = unified_kernels.ReduceSegmentsPtr.Kernel.call(
             .{
                 .segm_output_ptr = attn_output.segm_output,
                 .segm_max_ptr = attn_output.segm_max,
@@ -538,7 +539,7 @@ pub const paged = struct {
         };
         log.debug("pagedAttention3dOneapi attention config: {any}", .{attn_kernel_config});
 
-        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
+        const reduce_kernel_config: unified_kernels.ReduceSegmentsPtr.Config = .{
             .o_dtype = triton.from(q.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .tile_size = @intCast(config.reduce.tile_size),
@@ -600,7 +601,7 @@ pub const paged = struct {
             },
         );
 
-        const output = kernels.ReduceSegmentsPtr.Kernel.call(
+        const output = unified_kernels.ReduceSegmentsPtr.Kernel.call(
             .{
                 .segm_output_ptr = attn_output.segm_output,
                 .segm_max_ptr = attn_output.segm_max,
@@ -914,10 +915,10 @@ pub const flashattn = struct {
 
                     const sm_scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(head_dim))));
                     const sm_scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(sm_scale));
-                    const kernel_config: kernels.MhaFwd.Config = .{
-                        .q_dtype = toDType(q_.dtype()),
-                        .kv_dtype = toDType(k_.dtype()),
-                        .out_dtype = toDType(q_.dtype()),
+                    const kernel_config: mha_kernels.MhaFwd.Config = .{
+                        .q_dtype = triton.from(q_.dtype()),
+                        .kv_dtype = triton.from(k_.dtype()),
+                        .out_dtype = triton.from(q_.dtype()),
                         .SEQLEN_Q = seqlen_q,
                         .SEQLEN_K = seqlen_k,
                         .IS_CAUSAL = true,
@@ -940,7 +941,7 @@ pub const flashattn = struct {
                     };
                     log.debug("flashattn config: {any}", .{kernel_config});
 
-                    const output = kernels.MhaFwd.Kernel.call(
+                    const output = mha_kernels.MhaFwd.Kernel.call(
                         .{
                             .q_ptr = q_,
                             .k_ptr = k_,
