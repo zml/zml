@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const platforms = @import("platforms");
+
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
@@ -189,25 +190,28 @@ pub const Metadata = union(Backend) {
 
 pub const Options = struct {
     activation_threshold: ?f32 = null,
-    quant_scheme: ?zml.nn.QuantScheme = null,
 };
 
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
     topk_weights: zml.Tensor,
-    weights_gate_up: zml.Tensor,
-    scales_gate_up: ?zml.Tensor,
-    bias_gate_up: ?zml.Tensor,
-    weights_down: zml.Tensor,
-    scales_down: ?zml.Tensor,
-    bias_down: ?zml.Tensor,
-    w1_global_scale: ?zml.Tensor,
-    w2_global_scale: ?zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
     opts: Options,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
+    const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
+    const down_scheme: ?zml.Quantization.Scheme = if (down.quantization) |q| q.scheme else null;
+    if (gate_up_scheme != down_scheme) return error.UnsupportedQuantization;
+
+    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
+    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
+    const gate_up_global_scale: ?zml.Tensor = if (gate_up.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+    const down_global_scale: ?zml.Tensor = if (down.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+    const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
+
     return switch (parameters) {
         .flashinfer_cutlass => b: {
             if (comptime !platforms.isEnabled(.cuda)) {
@@ -217,17 +221,16 @@ pub fn forwardMoe(
                 .flashinfer_cutlass => |v| v,
                 else => return error.InvalidMetadata,
             };
-            if (scales_gate_up != null or scales_down != null) {
-                return error.UnsupportedQuantization;
-            }
-            if (bias_gate_up != null or bias_down != null) {
+            if (gate_up.bias != null or down.bias != null) {
                 return error.UnsupportedBias;
             }
 
             const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
-            const expert_partition = weights_gate_up.shape().partition(.expert);
+            const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (flashinfer_metadata.variant == .nvfp4xnvfp4) {
+                const gate_up_weight_unpacked = unpackedWeight(gate_up);
+                const down_weight_unpacked = unpackedWeight(down);
                 const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
                     return error.MissingNvfp4Scales;
                 if (expert_partition.eql(.init(.experts))) {
@@ -236,8 +239,8 @@ pub fn forwardMoe(
                             input,
                             topk_ids,
                             topk_weights,
-                            weights_gate_up,
-                            weights_down,
+                            gate_up_weight_unpacked,
+                            down_weight_unpacked,
                             nvfp4.fc1_act_global,
                             nvfp4.fc1_weight_block,
                             nvfp4.fc1_global,
@@ -313,8 +316,8 @@ pub fn forwardMoe(
 
                 break :b try cutlass_flashinfer.fusedExpertsNvfp4(
                     input,
-                    weights_gate_up,
-                    weights_down,
+                    gate_up_weight_unpacked,
+                    down_weight_unpacked,
                     topk_weights,
                     topk_ids,
                     nvfp4,
@@ -327,7 +330,7 @@ pub fn forwardMoe(
 
             if (expert_partition.eql(.init(.experts))) {
                 break :b zml.ops.manualComputation(
-                    .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
+                    .{ input, topk_ids, topk_weights, gate_up.weight, down.weight },
                     input.shape(),
                     .{
                         .activation = runner_options.activation,
@@ -388,8 +391,8 @@ pub fn forwardMoe(
 
             break :b try cutlass_flashinfer.fusedExpertsBf16(
                 input,
-                weights_gate_up,
-                weights_down,
+                gate_up.weight,
+                down.weight,
                 topk_weights,
                 topk_ids,
                 runner_options,
@@ -401,25 +404,25 @@ pub fn forwardMoe(
                 else => return error.InvalidMetadata,
             };
 
-            const global_num_experts = weights_gate_up.dim(.expert);
-            const expert_partition = weights_gate_up.shape().partition(.expert);
+            const global_num_experts = gate_up.weight.dim(.expert);
+            const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (!expert_partition.eql(.init(.experts))) {
                 break :b try triton.fusedExpertsImpl(
                     input,
-                    weights_gate_up,
-                    weights_down,
+                    gate_up.weight,
+                    down.weight,
                     topk_weights,
                     topk_ids,
                     triton_metadata,
                     .{
                         .activation = parameters.triton.activation,
                         .global_num_experts = global_num_experts,
-                        .w1_scale = scales_gate_up,
-                        .w2_scale = scales_down,
-                        .w1_bias = bias_gate_up,
-                        .w2_bias = bias_down,
-                        .quant_scheme = opts.quant_scheme,
+                        .w1_scale = gate_up_scales,
+                        .w2_scale = down_scales,
+                        .w1_bias = gate_up.bias,
+                        .w2_bias = down.bias,
+                        .quant_scheme = quant_scheme,
                         .activation_threshold = opts.activation_threshold,
                     },
                 );
@@ -430,19 +433,19 @@ pub fn forwardMoe(
                     input,
                     topk_ids,
                     topk_weights,
-                    weights_gate_up,
-                    weights_down,
+                    gate_up.weight,
+                    down.weight,
                 },
                 input.shape(),
                 .{
                     .activation = parameters.triton.activation,
                     .global_num_experts = global_num_experts,
-                    .bias_gate_up = bias_gate_up,
-                    .bias_down = bias_down,
-                    .quant_scheme = opts.quant_scheme,
+                    .bias_gate_up = gate_up.bias,
+                    .bias_down = down.bias,
+                    .quant_scheme = quant_scheme,
                     .activation_threshold = opts.activation_threshold,
-                    .scales_gate_up = scales_gate_up,
-                    .scales_down = scales_down,
+                    .scales_gate_up = gate_up_scales,
+                    .scales_down = down_scales,
                 },
                 (struct {
                     fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -491,20 +494,20 @@ pub fn forwardMoe(
                 else => return error.InvalidMetadata,
             };
 
-            const expert_partition = weights_gate_up.shape().partition(.expert);
+            const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
-                const global_num_experts = weights_down.dim(.expert);
+                const global_num_experts = down.weight.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
-                    .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
+                    .{ input, topk_ids, topk_weights, gate_up.weight, down.weight },
                     input.shape(),
                     .{
                         .activation = parameters.mosaic_tpu.activation,
                         .global_num_experts = global_num_experts,
-                        .scales_gate_up = scales_gate_up,
-                        .bias_gate_up = bias_gate_up,
-                        .scales_down = scales_down,
-                        .bias_down = bias_down,
+                        .gate_up_scales = gate_up_scales,
+                        .bias_gate_up = gate_up.bias,
+                        .down_scales = down_scales,
+                        .bias_down = down.bias,
                     },
                     (struct {
                         fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -530,8 +533,8 @@ pub fn forwardMoe(
                                     .activation = ctx.activation,
                                     .global_num_experts = ctx.global_num_experts,
                                     .expert_map = expert_map,
-                                    .w1_scale = ctx.scales_gate_up,
-                                    .w2_scale = ctx.scales_down,
+                                    .w1_scale = ctx.gate_up_scales,
+                                    .w2_scale = ctx.down_scales,
                                     .w1_bias = ctx.bias_gate_up,
                                     .w2_bias = ctx.bias_down,
                                 },
@@ -545,22 +548,24 @@ pub fn forwardMoe(
 
             break :b try mosaic_tpu.fusedExpertsImpl(
                 input,
-                weights_gate_up,
-                weights_down,
+                gate_up.weight,
+                down.weight,
                 topk_weights,
                 topk_ids,
                 tpu_metadata,
                 .{
                     .activation = parameters.mosaic_tpu.activation,
-                    .global_num_experts = weights_gate_up.dim(.expert),
-                    .w1_scale = scales_gate_up,
-                    .w2_scale = scales_down,
-                    .w1_bias = bias_gate_up,
-                    .w2_bias = bias_down,
+                    .global_num_experts = gate_up.weight.dim(.expert),
+                    .w1_scale = gate_up_scales,
+                    .w2_scale = down_scales,
+                    .w1_bias = gate_up.bias,
+                    .w2_bias = down.bias,
                 },
             );
         },
         .metal => b: {
+            const gate_up_weight_unpacked = unpackedWeight(gate_up);
+            const down_weight_unpacked = unpackedWeight(down);
             const metal_metadata = switch (metadata) {
                 .metal => |v| v,
                 else => return error.InvalidMetadata,
@@ -568,22 +573,30 @@ pub fn forwardMoe(
 
             break :b try metal.fusedExpertsImpl(
                 input,
-                weights_gate_up,
-                weights_down,
+                gate_up_weight_unpacked,
+                down_weight_unpacked,
                 topk_weights,
                 topk_ids,
                 metal_metadata,
                 .{
                     .activation = parameters.metal.activation,
-                    .global_num_experts = weights_gate_up.dim(.expert),
-                    .w1_scale = scales_gate_up,
-                    .w2_scale = scales_down,
-                    .w1_global_scale = w1_global_scale,
-                    .w2_global_scale = w2_global_scale,
-                    .w1_bias = bias_gate_up,
-                    .w2_bias = bias_down,
+                    .global_num_experts = gate_up_weight_unpacked.dim(.expert),
+                    .w1_scale = gate_up_scales,
+                    .w2_scale = down_scales,
+                    .w1_global_scale = gate_up_global_scale,
+                    .w2_global_scale = down_global_scale,
+                    .w1_bias = gate_up.bias,
+                    .w2_bias = down.bias,
                 },
             );
         },
     };
+}
+
+fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {
+    const quantization = linear.quantization orelse return linear.weight;
+    return if (zml.nn.isPackedFp4(quantization.scheme, linear.weight.dtype()))
+        zml.nn.unpackFp4(linear.weight, linear.tag)
+    else
+        linear.weight;
 }

@@ -114,6 +114,7 @@ zig_library(
         "platform.zig",
         "profiling/profiler.zig",
         "profiling/tracer.zig",
+        "quantization.zig",
         "safetensors.zig",
         "shape.zig",
         "slice.zig",

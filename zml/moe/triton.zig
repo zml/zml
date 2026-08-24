@@ -28,7 +28,7 @@ pub const Options = struct {
     inplace: bool = false,
     activation: Parameters.ActivationMode = .silu,
     apply_router_weight_on_input: bool = false,
-    quant_scheme: ?zml.nn.QuantScheme = null,
+    quant_scheme: ?zml.Quantization.Scheme = null,
     global_num_experts: i64 = -1,
     expert_map: ?Tensor = null,
     w1_scale: ?Tensor = null,
@@ -125,7 +125,7 @@ fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
 // Top-level entry point
 // =============================================================================
 
-fn isMxFp8(quant_scheme: ?zml.nn.QuantScheme) bool {
+fn isMxFp8(quant_scheme: ?zml.Quantization.Scheme) bool {
     return quant_scheme != null and quant_scheme.? == .mxfp8;
 }
 
