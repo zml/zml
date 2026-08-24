@@ -137,10 +137,10 @@ pub fn apiForDevice(device: i32) !*Api {
 
 test "select host and GPU architecture-specific FlashInfer CUTLASS MoE library" {
     var buffer: [160]u8 = undefined;
-    const path = try libraryRunfile(120, &buffer);
+    const path = try libraryRunfile(103, &buffer);
     const expected = switch (builtin.cpu.arch) {
-        .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm120.so",
-        .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm120.so",
+        .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm103.so",
+        .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm103.so",
         else => return,
     };
     try std.testing.expectEqualStrings(expected, path);

@@ -365,6 +365,7 @@ fn computeCapability(platform: *const zml.Platform) !u16 {
 
     if (std.mem.eql(u8, compute_capability, "9.0")) return 90;
     if (std.mem.eql(u8, compute_capability, "10.0")) return 100;
+    if (std.mem.eql(u8, compute_capability, "10.3")) return 103;
     if (std.mem.eql(u8, compute_capability, "12.0")) return 120;
     return error.UnsupportedArchitecture;
 }
@@ -404,7 +405,8 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
     if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
-    return compute_capability == 100 or compute_capability == 120;
+    log.info("FlashInfer CUTLASS MoE NVFP4 support: compute capability {d}", .{compute_capability});
+    return compute_capability == 100 or compute_capability == 103 or compute_capability == 120;
 }
 
 pub fn tacticCounts(
