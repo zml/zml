@@ -227,43 +227,30 @@ pub const KvCache = union(enum) {
     ) KvCache {
         const page_index, const offset = getPageAndOffsetFromSlotMapping(slot_mapping, chunk_size);
 
-        const kv: KvCache = blk: switch (self) {
-            .split => |split| {
-                var kv_: KvCache = switch (backend) {
-                    .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal, .stablehlo => .{
-                        .split = .{
-                            .k = split.k.scatterSlices(
-                                .{ .page = page_index, .k_chunk = offset },
-                                new_k,
-                                .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                            ),
-                            .v = split.v.scatterSlices(
-                                .{ .page = page_index, .k_chunk = offset },
-                                new_v,
-                                .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                            ),
-                        },
+        const kv: KvCache = switch (self) {
+            .split => |split| switch (backend) {
+                .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal, .stablehlo => .{
+                    .split = .{
+                        .k = split.k.scatterSlices(
+                            .{ .page = page_index, .k_chunk = offset },
+                            new_k,
+                            .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
+                        ).reuseBuffer(self.split.k),
+                        .v = split.v.scatterSlices(
+                            .{ .page = page_index, .k_chunk = offset },
+                            new_v,
+                            .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
+                        ).reuseBuffer(self.split.v),
                     },
-                };
-
-                kv_.split.k = kv_.split.k.reuseBuffer(self.split.k);
-                kv_.split.v = kv_.split.v.reuseBuffer(self.split.v);
-
-                break :blk kv_;
+                },
             },
             .dense => @panic("TODO"),
-            .latent => |latent_kv| {
-                var kv_: KvCache = .{
-                    .latent = latent_kv.scatterSlices(.{
-                        .{ .page = page_index, .k_chunk = offset },
-                        new_k,
-                        .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                    }),
-                };
-
-                kv_.latent = kv_.latent.reuseBuffer(self.latent);
-
-                break :blk kv_;
+            .latent => |latent_kv| .{
+                .latent = latent_kv.scatterSlices(.{
+                    .{ .page = page_index, .k_chunk = offset },
+                    new_k,
+                    .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
+                }).reuseBuffer(self.latent),
             },
         };
 
