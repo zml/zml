@@ -213,7 +213,7 @@ pub const KvCache = union(enum) {
         k: zml.Tensor,
         v: zml.Tensor,
     },
-    // NOTE: figure out what dense is and/or combined/fused is more appropriate.
+    // TODO: rename `dense` to `fused`.
     dense: zml.Tensor,
     latent: zml.Tensor,
 
