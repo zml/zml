@@ -426,7 +426,7 @@ pub fn testLayer(
             const shape = store_output.getShape(subkey).?;
             const expected_slice: zml.Slice = try .alloc(allocator, shape);
             errdefer expected_slice.free(allocator);
-            try reader.interface.readSliceAll(expected_slice.data());
+            try reader.interface().readSliceAll(expected_slice.data());
             break :b expected_slice;
         };
         defer expected_slice.free(allocator);

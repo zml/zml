@@ -96,7 +96,6 @@ zig_library(
         "attention/triton_attention.zig",
         "attention/triton_kernels/unified_attention.zig",
         "attention/triton_kernels/unified_attention_oneapi.zig",
-        "moe/cutlass_flashinfer.zig",
         "moe/metal.zig",
         "moe/moe.zig",
         "moe/mosaic_tpu.zig",
@@ -123,6 +122,7 @@ zig_library(
         "profiling/profiler.zig",
         "profiling/tracer.zig",
         "safetensors.zig",
+        "weights.zig",
         "shape.zig",
         "slice.zig",
         "tensor.zig",
@@ -166,7 +166,6 @@ zig_library(
     }) + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",
-            "//platforms/cuda/flashinfer_cutlass_moe",
         ],
         "//conditions:default": [],
     }),

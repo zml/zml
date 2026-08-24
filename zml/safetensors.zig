@@ -3,10 +3,13 @@ const std = @import("std");
 const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Dims = Shape.DimsArray;
+const weights = @import("weights.zig");
 
 const StringBuilder = std.ArrayListUnmanaged(u8);
 
-pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
+pub const Tensor = weights.Weight;
+pub const TensorRegistry = weights.Registry;
+pub const Tensors = weights.Weights;
 pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
 const log = std.log.scoped(.@"zml/safetensors");
@@ -59,12 +62,13 @@ pub fn fetchRegistry(
 
             break :blk registry;
         },
-        else => return error.InvalidPath,
+        else => return error.UnsupportedCheckpoint,
     };
 }
 
 pub const TensorReader = struct {
-    tensor: Tensor,
+    name: []const u8,
+    shape: Shape,
     file: std.Io.File,
     file_reader: std.Io.File.Reader,
     alignment: ?std.mem.Alignment,
@@ -74,35 +78,37 @@ pub const TensorReader = struct {
     io: std.Io,
     interface: std.Io.Reader,
 
-    pub const InitOpts = struct {
-        alignment: ?std.mem.Alignment = null,
-    };
+    pub const InitOpts = weights.ReaderOpts;
 
     pub fn init(
         io: std.Io,
-        tensor: Tensor,
+        name: []const u8,
+        shape: Shape,
+        file_uri: []const u8,
+        file_offset: u64,
         buffer: []u8,
         opts: InitOpts,
     ) !TensorReader {
-        const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
+        const file = try std.Io.Dir.openFile(.cwd(), io, file_uri, .{ .mode = .read_only });
         errdefer file.close(io);
 
         const offset, const padding_remaining = if (opts.alignment) |alignment| blk: {
-            const aligned_offset = std.mem.alignBackward(u64, tensor.offset, alignment.toByteUnits());
-            break :blk .{ aligned_offset, tensor.offset - aligned_offset };
+            const aligned_offset = std.mem.alignBackward(u64, file_offset, alignment.toByteUnits());
+            break :blk .{ aligned_offset, file_offset - aligned_offset };
         } else blk: {
-            break :blk .{ tensor.offset, 0 };
+            break :blk .{ file_offset, 0 };
         };
 
         var file_reader = file.reader(io, buffer);
         try file_reader.seekTo(offset);
 
         return .{
-            .tensor = tensor,
+            .name = name,
+            .shape = shape,
             .file = file,
             .file_reader = file_reader,
             .alignment = opts.alignment,
-            .remaining = tensor.byteSize(),
+            .remaining = shape.byteSize(),
             .padding_remaining = padding_remaining,
             .io = io,
             .interface = .{
@@ -223,168 +229,6 @@ pub const TensorReader = struct {
     }
 };
 
-pub const Tensor = struct {
-    file_uri: []const u8,
-    name: []const u8,
-    shape: Shape,
-    offset: u64,
-
-    pub fn byteSize(self: Tensor) u64 {
-        return self.shape.byteSize();
-    }
-
-    pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
-        return TensorReader.init(io, self, buffer, opts);
-    }
-
-    pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
-        try writer.print("Tensor(name={s} shape={f} size={d}, offset={d}, file_uri={s})", .{
-            self.name,
-            self.shape,
-            self.byteSize(),
-            self.offset,
-            self.file_uri,
-        });
-    }
-};
-
-pub const TensorRegistry = struct {
-    arena: std.heap.ArenaAllocator,
-
-    tensors: Tensors,
-    metadata: Metadatas,
-
-    mutex: std.Io.Mutex = .init,
-
-    pub fn init(allocator: std.mem.Allocator) TensorRegistry {
-        return .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .tensors = .{},
-            .metadata = .{},
-        };
-    }
-
-    pub fn initWithMetadata(
-        allocator: std.mem.Allocator,
-        metadata: Metadatas,
-    ) !TensorRegistry {
-        var self: TensorRegistry = .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .tensors = .{},
-            .metadata = .empty,
-        };
-
-        try self.mergeMetadata(metadata);
-
-        return self;
-    }
-
-    pub fn fromRepo(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        repo: std.Io.Dir,
-    ) !TensorRegistry {
-        const entrypoint = try resolveModelEntrypoint(io, repo);
-        return try fetchRegistry(allocator, io, repo, entrypoint);
-    }
-
-    pub fn fromPath(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        path: []const u8,
-    ) !TensorRegistry {
-        var repo = try resolveModelRepo(io, path);
-
-        if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
-            std.mem.endsWith(u8, path, ".safetensors"))
-        {
-            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, path, .{ .mode = .read_only }));
-        } else {
-            const entrypoint = try resolveModelEntrypoint(io, repo);
-            return try fetchRegistry(allocator, io, repo, entrypoint);
-        }
-    }
-
-    pub fn deinit(self: *TensorRegistry) void {
-        const allocator = self.arena.allocator();
-        self.tensors.deinit(allocator);
-        self.metadata.deinit(allocator);
-        self.arena.deinit();
-    }
-
-    pub fn mergeMetadata(
-        self: *TensorRegistry,
-        other: Metadatas,
-    ) !void {
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
-
-        const allocator = self.arena.allocator();
-
-        var it = other.iterator();
-        while (it.next()) |entry| {
-            const key = try allocator.dupe(u8, entry.key_ptr.*);
-            const value = try entry.value_ptr.*.clone(allocator);
-
-            const gop = try self.metadata.getOrPut(allocator, key);
-            if (gop.found_existing) {
-                gop.value_ptr.*.deinit(allocator);
-                gop.value_ptr.* = value;
-                log.debug("Overwrote existing metadata key={s} with value={f}", .{ key, value });
-            } else {
-                gop.value_ptr.* = value;
-                log.debug("Added new metadata key={s} with value={f}", .{ key, value });
-            }
-        }
-    }
-
-    pub fn registerTensor(
-        self: *TensorRegistry,
-        tensor: Tensor,
-    ) !void {
-        const allocator = self.arena.allocator();
-
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
-
-        var tensor_copy = tensor;
-
-        tensor_copy.name = try allocator.dupe(u8, tensor.name);
-        tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
-
-        try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
-    }
-
-    pub fn reader(
-        self: *TensorRegistry,
-        io: std.Io,
-        tensor_name: []const u8,
-        buffer: []u8,
-    ) !TensorReader {
-        const tensor = self.tensors.get(tensor_name) orelse {
-            log.err("Tensor {s} not found in registry", .{tensor_name});
-            return error.TensorNotFound;
-        };
-
-        return try .init(io, tensor, buffer, .{});
-    }
-
-    pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
-        return self.tensors.iterator();
-    }
-
-    pub fn totalBytes(self: *TensorRegistry) u64 {
-        var total: u64 = 0;
-
-        var it = self.tensors.iterator();
-        while (it.next()) |entry| {
-            total += entry.value_ptr.byteSize();
-        }
-
-        return total;
-    }
-};
-
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -449,14 +293,14 @@ pub fn parseSafetensors(
             dims.appendAssumeCapacity(d.integer);
         }
 
-        const tensor: Tensor = .{
-            .file_uri = file_uri,
+        try registry.register(.{
             .name = key,
             .shape = .init(dims.slice(), dtype),
-            .offset = data_start_offset + start,
-        };
-
-        try registry.registerTensor(tensor);
+            .backend = .{ .safetensors = .{
+                .file_uri = file_uri,
+                .offset = data_start_offset + start,
+            } },
+        });
     }
 }
 
@@ -613,7 +457,7 @@ pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionE
     return ModelPathResolutionError.FileNotFound;
 }
 
-const Metadata = union(enum) {
+pub const Metadata = union(enum) {
     null: void,
     int: i64,
     float: f64,
@@ -758,7 +602,6 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         .{ "BF16", .bf16 },
         .{ "F8_E8M0", .f8e8m0 },
         .{ "F8_E4M3", .f8e4m3fn },
-        .{ "F4_E2M1", .f4e2m1 },
         .{ "I64", .i64 },
         .{ "I32", .i32 },
         .{ "I16", .i16 },
