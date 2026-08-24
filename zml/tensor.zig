@@ -1152,9 +1152,19 @@ pub const Tensor = struct {
         return binaryOp("remainder", dialects.stablehlo.remainder)(self, other);
     }
 
+    /// Returns a Tensor containing the element-wise substraction of the input Tensor with a constant.
+    pub fn remainderConst(self: Tensor, b: anytype) Tensor {
+        return self.remainder(.scalar(b, self.dtype()));
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
     pub fn addConstant(self: Tensor, b: anytype) Tensor {
         return self.add(.scalar(b, self.dtype()));
+    }
+
+    /// Returns a Tensor containing the element-wise substraction of the input Tensor with a constant.
+    pub fn subConstant(self: Tensor, b: anytype) Tensor {
+        return self.sub(.scalar(b, self.dtype()));
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensor by a constant.
