@@ -801,6 +801,8 @@ pub const Mla = struct {
     pub const Options = struct {
         rope_rank: i64,
         scale: ?f32 = null,
+        /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 16.
+        num_kv_splits: ?u8 = null,
     };
 
     fn stablehlo_pagedSparseAttention(q: zml.Tensor, kv: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, opts: Mla.Options) zml.Tensor {
@@ -881,7 +883,7 @@ test "use mla kernel" {
     const q_shape = zml.Shape.init(.{ .q = 1, .h = 16, .hd = 128 }, .f32);
     const kv_shape = zml.Shape.init(.{ .page = 2, .k_chunk = 16, .hkv = 1, .hd = 128 }, .f32);
     const sink_shape = zml.Shape.init(.{ .h = 16 }, .f32);
-    const topk_shape = zml.Shape.init(.{ .q = 1, .topk = 2 }, .i32);
+    const topk_shape = zml.Shape.init(.{ .q = 1, .topk = 32 }, .i32);
     const tokens_pos_shape = zml.Shape.init(.{ .q = 1 }, .i32);
 
     var q_data: [1][16][128]f32 = undefined;
@@ -892,7 +894,10 @@ test "use mla kernel" {
     for (&kv_data[1][1][0]) |*value| value.* = 11;
     var sink_data: [16]f32 = undefined;
     for (&sink_data) |*value| value.* = -std.math.inf(f32);
-    const topk_data: [1][2]i32 = .{.{ 0, 1 }};
+    var topk_data: [1][32]i32 = undefined;
+    @memset(&topk_data[0], -1);
+    topk_data[0][0] = 0;
+    topk_data[0][1] = 1;
     const tokens_pos_data: [1]i32 = .{31};
     const block_table: [1][2]i32 = .{.{ 1, 0 }};
     const seq_lens: [1]i32 = .{32};
@@ -925,7 +930,7 @@ test "use mla kernel" {
         std.testing.allocator,
         std.testing.io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64 } },
+        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64, .num_kv_splits = 2 } },
         .{},
     );
     defer exe.deinit();
