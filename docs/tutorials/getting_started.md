@@ -91,6 +91,15 @@ bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.2-1
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
+### MiniMax-H3
+
+Omni video+audio generation (33B DiT + Qwen3-VL-32B encoder). Not an LLM; use `//examples/minimax_h3`. Needs the official checkpoint and a lot of device memory. Host tests do not.
+
+```
+bazel run //examples/minimax_h3:h3_tests
+bazel run --config=release //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3 --variant=t2va --prompt="A cinematic wide shot of waves at dusk."
+```
+
 
 ## Run Tests
 
