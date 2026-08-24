@@ -868,9 +868,6 @@ pub const flashattn = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "triton.flashattn expects q to have tags .q, .h, .hd, got {f}", .{q.shape()});
         stdx.debug.assert(k.shape().hasTags(.{ .k, .h, .hd }), "triton.flashattn expects k to have tags .k, .h, .hd, got {f}", .{k.shape()});
         stdx.debug.assert(v.shape().hasTags(.{ .k, .h, .hd }), "triton.flashattn expects v to have tags .k, .h, .hd, got {f}", .{v.shape()});
-        stdx.debug.assert(q.shape().hasTag(.b) == null or q.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{q.shape()});
-        stdx.debug.assert(k.shape().hasTag(.b) == null or k.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{k.shape()});
-        stdx.debug.assert(v.shape().hasTag(.b) == null or v.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{v.shape()});
 
         const q_sharded = q.withPartitioning(.{ .h = .model });
         const k_sharded = k.withPartitioning(.{ .h = .model });
@@ -887,8 +884,8 @@ pub const flashattn = struct {
                     const q_ = sharded_inputs[0];
                     const k_ = sharded_inputs[1];
                     const v_ = sharded_inputs[2];
-                    const token_index_ = sharded_inputs[3];
 
+                    const bs: i64 = if (q_.shape().hasTag(.b)) |_| q_.dim(.b) else 1;
                     const seqlen_q = q_.dim(.q);
                     const seqlen_k = k_.dim(.k);
                     const num_q_heads = q_.dim(.h);
@@ -899,12 +896,10 @@ pub const flashattn = struct {
                     const block_n: i64 = 64;
                     const num_m_blocks = std.math.divCeil(i64, seqlen_q, block_m) catch unreachable;
 
-                    const seqused_k = token_index_.addConstant(seqlen_q).reshape(.{1});
-                    const zero = zml.Tensor.constant(token_index_.dtype().zero()).reshape(.{1});
-                    const cu_seqlens_k = zml.Tensor.concatenate(&.{ zero, seqused_k }, 0)
-                        .convert(.i32);
-
-                    const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, @intCast(seqlen_q) }));
+                    // We still have a rectangle layout, q and k haven't been compacted.
+                    // So each sequence have the same number of queries, keys
+                    const cu_seqlens_q: zml.Tensor = .arange(.{ .end = seqlen_q * (bs + 1), .step = seqlen_q }, .i32);
+                    const cu_seqlens_k: zml.Tensor = .arange(.{ .end = seqlen_k * (bs + 1), .step = seqlen_k }, .i32);
 
                     const softmax_lse = zml.Tensor.uninitialized(zml.Shape.init(.{
                         .h = num_q_heads,
