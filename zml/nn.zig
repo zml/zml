@@ -69,7 +69,11 @@ pub const Linear = struct {
         const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
         const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
 
-        const weight = if (isPackedNvfp4(q.scheme, self.weight.dtype())) unpackNvfp4(self.weight, self.tag) else self.weight;
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag) else self.weight;
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
+            q.scales.bitCast(.f8e8m0)
+        else
+            q.scales;
 
         var lhs = x.convert(.bf16);
         var lhs_scale: ?Tensor = null;
@@ -85,17 +89,23 @@ pub const Linear = struct {
             }
         }
 
-        const acc = scaledDot(lhs, weight, lhs_scale, q.scales, self.tag);
+        const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
         return applyGlobalScale(acc, undo, wgs).convert(x.dtype());
     }
 };
 
 pub const nvfp4_block_size = 16;
+pub const mx_block_size = 32;
 
 pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
     /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
     nvfp4,
+    /// f8e4m3fn values, one e8m0 (power-of-two) scale per 32 contracted values
+    mxfp8,
+    /// f4e2m1 values (`u8`-packed or native), e8m0 scale per 32 contracted values.
+    // GPT-OSS like
+    mxfp4,
     /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
     /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
     fp8_per_channel,
@@ -110,12 +120,17 @@ pub const QuantScheme = enum {
         if (weight.rank() != 2) return false;
 
         const n = weight.dim(0);
-        const k = if (isPackedNvfp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+        const k = if (isPackedFp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
 
         return switch (self) {
             .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
                 scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
+            .mxfp8 => weight.dtype() == .f8e4m3fn and isMxScale(scale) and
+                scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
+            .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
+                isMxScale(scale) and
+                scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
             .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
             .fp8_per_channel => weight.dtype() == .f8e4m3fn and
                 (scale.dtype() == .bf16 or scale.dtype() == .f32) and
@@ -139,8 +154,12 @@ pub const QuantScheme = enum {
     pub fn activationQuant(self: QuantScheme) ?ActivationQuant {
         return switch (self) {
             .nvfp4 => .nvfp4,
-            .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+            .mxfp8, .mxfp4, .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
         };
+    }
+
+    pub fn isMx(self: QuantScheme) bool {
+        return self == .mxfp8 or self == .mxfp4;
     }
 };
 
@@ -160,11 +179,16 @@ pub const ActivationQuant = enum {
     }
 };
 
-pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
-    return scheme == .nvfp4 and weight_dtype == .u8;
+pub fn isPackedFp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
+    return (scheme == .nvfp4 or scheme == .mxfp4) and weight_dtype == .u8;
 }
 
-// Note: This test will evolve as we support more (for example, MXFP4/8 will be added)
+fn isMxScale(scale: Shape) bool {
+    return scale.rank() == 2 and (scale.dtype() == .f8e8m0 or scale.dtype() == .u8);
+}
+
+// Note: this test will evolve as we support more (INT4/8 and FP8 block-128 as a
+// scaled-dot are still open; see the scaledDot doc comment).
 test "QuantScheme.classify" {
     const expect = std.testing.expectEqual;
 
@@ -203,13 +227,53 @@ test "QuantScheme.classify" {
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
 
+    // RadixArk/Muse-Glimmer-NVFP4: ModelOpt's MIXED_PRECISION recipe, whose MXFP8 half
+    // lands on down_proj and lm_head. safetensors has no e8m0 dtype, so the scale arrives
+    // as u8 under `weight_scale_inv` -- the shape below is verbatim from the checkpoint.
+    try expect(@as(?QuantScheme, .mxfp8), QuantScheme.classify(
+        .init(.{ .dout = 6656, .d = 19968 }, .f8e4m3fn),
+        .init(.{ .dout = 6656, .sc = 624 }, .u8),
+    ));
+    try expect(@as(?QuantScheme, .mxfp8), QuantScheme.classify(
+        .init(.{ .dout = 202048, .d = 6656 }, .f8e4m3fn),
+        .init(.{ .dout = 202048, .sc = 208 }, .u8),
+    ));
+    // The same tensor from a store that types the scale natively.
+    try expect(@as(?QuantScheme, .mxfp8), QuantScheme.classify(
+        .init(.{ .dout = 6656, .d = 19968 }, .f8e4m3fn),
+        .init(.{ .dout = 6656, .sc = 624 }, .f8e8m0),
+    ));
+    // MXFP8 rejects any group but 32: 19968 / 16 = 1248, / 64 = 312.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .dout = 6656, .d = 19968 }, .f8e4m3fn),
+        .init(.{ .dout = 6656, .sc = 1248 }, .u8),
+    ));
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .dout = 6656, .d = 19968 }, .f8e4m3fn),
+        .init(.{ .dout = 6656, .sc = 312 }, .u8),
+    ));
+
+    // MXFP4: the same u8 packing as NVFP4 (two nibbles per byte, K halved on disk), with
+    // an e8m0 scale per 32 -- so K = 2 * 2560 = 5120 and 5120 / 32 = 160.
+    try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .u8)));
+    try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0)));
+    // Native (unpacked) f4e2m1, K no longer halved.
+    try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
+        .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0),
+    ));
+    // An e8m0 scale never turns a non-fp4/fp8 weight into MX.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .bf16),
+        .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0),
+    ));
+
     // Rejected: everything no backend here can express.
     const fp8: Shape = .init(.{ .dout = 10240, .d = 5120 }, .f8e4m3fn);
-    // Group 32 (MXFP4) rather than 16.
+    // Group 32 with an e4m3 scale: neither NVFP4 (wrong group) nor MX (wrong scale type).
     try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e4m3fn)));
-    // e8m0 scales: valid MX, nothing here fuses or expands it.
+    // Group 16 with an e8m0 scale: the mirror image, and equally unclaimed.
     try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e8m0)));
-    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 160 }, .f8e8m0)));
     // Per-channel in f32: what fusing per-tensor projections produces. The Metal
     // per-channel kernels have f32 entries, so this is a real scheme, not a decline.
     try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
@@ -221,6 +285,14 @@ test "QuantScheme.classify" {
         .init(.{ .expert = 128, .dout = 1408, .sc = 176 }, .f8e4m3fn),
     ));
 
+    // `fp8_per_tensor` never checks the scale dtype, so a [1, 1] u8 scale on a [1, 32]
+    // weight satisfies it as well as `mxfp8`. Declaration order is what decides, and
+    // `mxfp8` is declared first
+    try expect(@as(?QuantScheme, .mxfp8), QuantScheme.classify(
+        .init(.{ .dout = 1, .d = 32 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .u8),
+    ));
+
     // A one-tile block grid is indistinguishable from a per-tensor scale by shape alone; the
     // `count() > 1` guard on the grids is what makes per-tensor win.
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(
@@ -230,9 +302,10 @@ test "QuantScheme.classify" {
 }
 
 /// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
-/// which is merged with the unpacked pair and renamed to `k_tag`.
-pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
-    stdx.debug.assert(w.dtype() == .u8, "unpackNvfp4 expects packed u8 weights, got {}", .{w.dtype()});
+/// which is merged with the unpacked pair and renamed to `k_tag`. Group-size agnostic:
+/// NVFP4 (16) and MXFP4 (32) share this packing.
+pub fn unpackFp4(w: Tensor, k_tag: anytype) Tensor {
+    stdx.debug.assert(w.dtype() == .u8, "unpackFp4 expects packed u8 weights, got {}", .{w.dtype()});
     return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ .kw, .bitcast } })
         .renameTag(.kb, Shape.toTag(k_tag));
