@@ -1,0 +1,11 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "csv",
+    import_name = "zml-smi/csv",
+    main = "csv.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/info",
+    ],
+)

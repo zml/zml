@@ -1,0 +1,33 @@
+diff --git a/src/config.zig b/src/config.zig
+index 2cadab4..aa46c5d 100644
+--- a/src/config.zig
++++ b/src/config.zig
+@@ -1,5 +1,5 @@
+ const std = @import("std");
+-const storage = @import("storage.zig");
++pub const storage = @import("storage.zig");
+ const multi_slice = @import("multi_slice.zig");
+ pub const quirks = @import("quirks.zig");
+ pub const components = @import("components.zig");
+diff --git a/src/generate.zig b/src/generate.zig
+index 6f4dcf5..8ef1d83 100644
+--- a/src/generate.zig
++++ b/src/generate.zig
+@@ -1,7 +1,7 @@
+ const std = @import("std");
+-const storage = @import("storage.zig");
+ const config = @import("config.zig");
+ const build_config = @import("build_config");
++const storage = config.storage;
+ const inlineAssert = config.quirks.inlineAssert;
+ 
+ pub const std_options: std.Options = .{
+@@ -339,7 +339,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
+         \\const std = @import("std");
+         \\const config = @import("config.zig");
+         \\const types = config.types;
+-        \\const storage = @import("storage.zig");
++        \\const storage = config.storage;
+         \\const build_config = @import("build_config");
+         \\
+         \\pub const get_components = build_config.get_components;

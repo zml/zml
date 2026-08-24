@@ -1,0 +1,2361 @@
+//! Common layer definition and functions for Neural Networks (NN)
+const std = @import("std");
+
+const mlir = @import("mlir");
+const stdx = @import("stdx");
+
+const constants = @import("constants.zig");
+const DataType = @import("dtype.zig").DataType;
+const meta = @import("meta.zig");
+const ops = @import("ops.zig");
+const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
+const Tensor = @import("tensor.zig").Tensor;
+const zml = @import("zml.zig");
+
+const log = std.log.scoped(.@"zml/nn");
+
+pub const Linear = struct {
+    weight: Tensor,
+    bias: ?Tensor = null,
+    tag: Shape.Tag,
+    quant: ?Quant = null,
+
+    pub const Quant = struct {
+        scheme: QuantScheme, // decided when the checkpoint is read
+        scales: Tensor,
+        weight_scale: ?TensorScale = null,
+        input_scale: ?TensorScale = null,
+    };
+
+    /// A per-tensor scale and the polarity its producer wrote it in
+    pub const TensorScale = struct {
+        value: Tensor,
+        direction: Direction,
+
+        pub const Direction = enum { multiplier, divisor };
+
+        pub fn asMultiplier(self: TensorScale) Tensor {
+            const s = self.value.convert(.f32);
+            const flat = if (s.shape().count() == 1) s.asScalar() else s; // essentially normalization
+
+            return switch (self.direction) {
+                .multiplier => flat,
+                .divisor => Tensor.scalar(1.0, .f32).broad(flat.shape()).div(flat),
+            };
+        }
+    };
+
+    pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
+        return .{
+            .weight = weight,
+            .bias = bias,
+            .tag = zml.Shape.toTag(tag),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
+        zml.Buffer.deinitAll(Linear, self);
+    }
+
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        const y = self.forwardWeight(x);
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+
+    fn forwardWeight(self: Linear, x: Tensor) Tensor {
+        const q = self.quant orelse return x.dot(self.weight, self.tag);
+
+        const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
+        const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
+
+        const weight = if (isPackedNvfp4(q.scheme, self.weight.dtype())) unpackNvfp4(self.weight, self.tag) else self.weight;
+
+        var lhs = x.convert(.bf16);
+        var lhs_scale: ?Tensor = null;
+        var undo: ?Tensor = null;
+
+        const platform = zml.module.CompilationContext.current().platform;
+        if (q.scheme.activationQuant()) |aq| {
+            if (aq.supportedOn(platform)) {
+                const quantized = aq.apply(lhs, igs, self.tag);
+                lhs = quantized.values;
+                lhs_scale = quantized.scales;
+                undo = igs;
+            }
+        }
+
+        const acc = scaledDot(lhs, weight, lhs_scale, q.scales, self.tag);
+        return applyGlobalScale(acc, undo, wgs).convert(x.dtype());
+    }
+};
+
+pub const nvfp4_block_size = 16;
+
+pub const QuantScheme = enum {
+    /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
+    /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
+    nvfp4,
+    /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
+    /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
+    fp8_per_channel,
+    /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+    /// vendors publish themselves, under `weight_scale_inv`.
+    fp8_block128,
+    /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
+    /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
+    fp8_per_tensor,
+
+    pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {
+        if (weight.rank() != 2) return false;
+
+        const n = weight.dim(0);
+        const k = if (isPackedNvfp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+
+        return switch (self) {
+            .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
+                scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
+                scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
+            .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
+            .fp8_per_channel => weight.dtype() == .f8e4m3fn and
+                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
+                scale.count() > 1 and scale.rank() == 2 and
+                scale.dim(0) == n and scale.dim(1) == 1,
+            .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+                scale.count() > 1 and scale.rank() == 2 and
+                @rem(n, 128) == 0 and @rem(k, 128) == 0 and
+                scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+        };
+    }
+
+    pub fn classify(weight: Shape, scale: Shape) ?QuantScheme {
+        for (std.enums.values(QuantScheme)) |scheme| {
+            if (scheme.accepts(weight, scale)) return scheme;
+        }
+
+        return null;
+    }
+
+    pub fn activationQuant(self: QuantScheme) ?ActivationQuant {
+        return switch (self) {
+            .nvfp4 => .nvfp4,
+            .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+        };
+    }
+};
+
+pub const ActivationQuant = enum {
+    nvfp4,
+
+    fn supportedOn(self: ActivationQuant, platform: *const zml.Platform) bool {
+        return switch (self) {
+            .nvfp4 => supportsNvfp4ActivationQuant(platform),
+        };
+    }
+
+    fn apply(self: ActivationQuant, x: Tensor, global_scale: ?Tensor, axis: Shape.Tag) QuantizedActivations {
+        return switch (self) {
+            .nvfp4 => quantizeNvfp4(x, global_scale, axis),
+        };
+    }
+};
+
+pub fn isPackedNvfp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
+    return scheme == .nvfp4 and weight_dtype == .u8;
+}
+
+// Note: This test will evolve as we support more (for example, MXFP4/8 will be added)
+test "QuantScheme.classify" {
+    const expect = std.testing.expectEqual;
+
+    // unsloth/Qwen3.6-27B-NVFP4: compressed-tensors, carrying both of its schemes under
+    // `weight_scale` -- NVFP4 on the MLPs of layers 0-55, FP8 per-channel everywhere else.
+    const nvfp4_packed: Shape = .init(.{ .dout = 17408, .kw = 2560 }, .u8);
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn)));
+    try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f8e4m3fn),
+        .init(.{ .dout = 17408, .sc = 1 }, .bf16),
+    ));
+
+    // nvidia/Gemma-4-31B-IT-NVFP4: ModelOpt, packed values under the plain `weight` name.
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(
+        .init(.{ .dout = 21504, .kw = 2688 }, .u8),
+        .init(.{ .dout = 21504, .sc = 336 }, .f8e4m3fn),
+    ));
+
+    // Native (unpacked) f4e2m1, with K no longer doubled.
+    try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
+        .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn),
+    ));
+
+    // Qwen/Qwen3.6-27B-FP8: block 128, spelled `weight_scale_inv`.
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 17408, .d = 5120 }, .f8e4m3fn),
+        .init(.{ .dout = 136, .sc = 40 }, .bf16),
+    ));
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 5120, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 40, .sc = 48 }, .bf16),
+    ));
+
+    // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
+
+    // Rejected: everything no backend here can express.
+    const fp8: Shape = .init(.{ .dout = 10240, .d = 5120 }, .f8e4m3fn);
+    // Group 32 (MXFP4) rather than 16.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e4m3fn)));
+    // e8m0 scales: valid MX, nothing here fuses or expands it.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e8m0)));
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 160 }, .f8e8m0)));
+    // Per-channel in f32: what fusing per-tensor projections produces. The Metal
+    // per-channel kernels have f32 entries, so this is a real scheme, not a decline.
+    try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(fp8, .init(.{ .dout = 10240, .sc = 1 }, .f32)));
+    // A block grid that is neither per-channel nor 128x128.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(fp8, .init(.{ .dout = 160, .sc = 80 }, .bf16)));
+    // Stacked MoE weights are rank 3 and go through the MoE path, not this one.
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .expert = 128, .dout = 1408, .kw = 1408 }, .u8),
+        .init(.{ .expert = 128, .dout = 1408, .sc = 176 }, .f8e4m3fn),
+    ));
+
+    // A one-tile block grid is indistinguishable from a per-tensor scale by shape alone; the
+    // `count() > 1` guard on the grids is what makes per-tensor win.
+    try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(
+        .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .bf16),
+    ));
+}
+
+/// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
+/// which is merged with the unpacked pair and renamed to `k_tag`.
+pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
+    stdx.debug.assert(w.dtype() == .u8, "unpackNvfp4 expects packed u8 weights, got {}", .{w.dtype()});
+    return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
+        .merge(.{ .kb = .{ .kw, .bitcast } })
+        .renameTag(.kb, Shape.toTag(k_tag));
+}
+
+pub const QuantizedActivations = struct {
+    values: Tensor,
+    scales: Tensor,
+};
+
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) QuantizedActivations {
+    const block_size = nvfp4_block_size;
+    const value_max = 6.0;
+    const scale_min_normal = 0x1p-6;
+    const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
+
+    stdx.debug.assert(x.shape().hasTag(axis) != null, "quantizeNvfp4 expects x to have {any} tag, got {f}", .{ axis, x.shape() });
+    stdx.debug.assert(@rem(x.dim(axis), block_size) == 0, "quantizeNvfp4 expects {any} to be a multiple of {}, got {f}", .{ axis, block_size, x.shape() });
+
+    const dt = x.dtype();
+    const scaled = if (input_global_scale) |igs|
+        x.div(igs.convert(dt).broad(x.shape()))
+    else
+        x;
+    const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = block_size });
+    const amax = grouped.abs().max(.blk);
+
+    const scales = amax.scale(1.0 / value_max)
+        .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
+        .convert(.f8e4m3fn);
+
+    const divisor = scales.convert(dt)
+        .maximum(.scalar(scale_min_normal, dt))
+        .broad(grouped.shape());
+
+    const values = grouped.div(divisor)
+        .convert(.f4e2m1)
+        .reshape(x.shape().withDtype(.f4e2m1));
+
+    return .{
+        .values = values,
+        .scales = scales.squeeze(.blk),
+    };
+}
+
+/// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
+///
+/// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
+/// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
+/// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
+/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+///
+/// Backends:
+/// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
+/// 2. Triton otherwise
+/// 3. Unsupported combos fall back to dequant + Dot
+///
+/// CPU has no specialized path.
+pub fn scaledDot(
+    lhs: Tensor,
+    rhs: Tensor,
+    lhs_scale: ?Tensor,
+    rhs_scale: Tensor,
+    args: anytype,
+) Tensor {
+    const dot_axes = lhs.dotAxes(rhs, args);
+
+    const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
+
+    const result_dtype: DataType = switch (lhs.dtype()) {
+        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz => .bf16,
+        else => lhs.dtype(),
+    };
+    var res_shape: Shape = .{ ._dtype = result_dtype };
+    var lhs_batching_axes: Axes = .empty;
+    var rhs_batching_axes: Axes = .empty;
+    for (dot_axes.batching.constSlice()) |b_axes| {
+        const l, const r = b_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        var t = lhs._shape.tag(l);
+        if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    var lhs_contracting_axes: Axes = .empty;
+    var rhs_contracting_axes: Axes = .empty;
+    for (dot_axes.contracting.constSlice()) |c_axes| {
+        const l, const r = c_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    for (0..lhs.rank()) |l| {
+        if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+    }
+    for (0..rhs.rank()) |r| {
+        if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+    }
+
+    const lhs_scale_operand = lhs_scale orelse blk: {
+        break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
+    };
+
+    const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
+        rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
+    else
+        rhs_scale;
+
+    const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
+    const dnums = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+        }),
+    });
+
+    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
+
+    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+    });
+
+    return outs[0];
+}
+
+/// `shape` with every dimension collapsed to 1
+fn onesGrid(shape: Shape, dt: DataType) Shape {
+    var res = shape.withDtype(dt);
+    for (0..res.rank()) |i| {
+        res = res.setDim(i, 1);
+    }
+
+    return res;
+}
+
+fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
+    return ops.customCall(
+        "zml$scaled_dot_unmatched",
+        .{ in[0], in[1], in[2], in[3] },
+        out_shape,
+        {},
+        .{ .has_side_effect = false },
+    );
+}
+
+fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
+    if (platform.target != .cuda) {
+        return false;
+    }
+
+    const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+    const capability = zml.platform.cuda.tryGetComputeCapabilities(platform, device) orelse return false;
+    const major = std.fmt.parseInt(u8, std.mem.sliceTo(capability, '.'), 10) catch return false;
+
+    return major >= 10;
+}
+
+fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
+    if (igs == null and wgs == null) {
+        return acc;
+    }
+
+    var res = acc.convert(.f32);
+    if (wgs) |w| {
+        res = res.mul(w.convert(.f32).broad(res.shape()));
+    }
+
+    if (igs) |i| {
+        res = res.mul(i.convert(.f32).broad(res.shape()));
+    }
+
+    return res.convert(acc.dtype());
+}
+
+pub const TokenEmbedding = struct {
+    weight: Tensor,
+
+    pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
+        stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
+        stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
+        return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
+    }
+};
+
+pub const Activation = union(enum) {
+    sigmoid,
+    tanh,
+    relu,
+    leakyReLU: f32,
+    elu: f32,
+    silu,
+    gelu,
+    quick_gelu,
+
+    pub fn forward(self: Activation, x: Tensor) Tensor {
+        return switch (self) {
+            .sigmoid => x.sigmoid(),
+            .tanh => x.tanh(),
+            .relu => x.relu(),
+            .silu => x.silu(),
+            .gelu => x.gelu(),
+            .elu => |alpha| elu(x, alpha),
+            .quick_gelu => x.quickGelu(),
+            .leakyReLU => |slope| x.leakyReLU(slope),
+        };
+    }
+};
+
+pub fn elu(x: Tensor, alpha: f32) Tensor {
+    return x.cmp(.GE, Tensor.scalar(0, x.dtype())).select(
+        x,
+        x.exp().addConstant(-1).scale(alpha),
+    );
+}
+
+/// Layer Normalization
+pub const LayerNorm = struct {
+    weight: Tensor,
+    bias: ?Tensor = null,
+    eps: f32 = 1e-5,
+
+    pub fn forward(self: LayerNorm, x: Tensor) Tensor {
+        const normed = normalizeVariance(x, self.eps);
+        const ax = x.axis(-1);
+        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
+        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
+
+        return out;
+    }
+};
+
+pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
+    const ax = x_.axis(axis);
+    // upcast to improve precision
+    var x = x_.convert(.f32);
+    const variance = x.powByConst(2).mean(ax);
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
+    return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
+}
+
+/// Center and scale by the variance.
+/// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
+/// Work on the last axis.
+pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
+    const N: f32 = @floatFromInt(x.dim(-1));
+
+    // Upcast to improve precision
+    const xf32 = x.convert(.f32);
+    const mean = xf32.sum(-1).scale(1.0 / N);
+    const mean_dev = xf32.sub(mean);
+    const variance = mean_dev.mul(mean_dev).sum(-1).divByConst(N);
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
+
+    return mean_dev.mul(rsqrt).convert(x.dtype());
+}
+
+// ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html
+// Implementation equivalent to `nn.functional.normalize(tensor, dim=-1)` call
+pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
+    const inv_norm = input.powByConst(2).sum(-1).addConstant(eps).rsqrt();
+    return input.mul(inv_norm);
+}
+
+test normalizeL2 {
+    const platform = zml.testing.env();
+
+    const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{});
+    defer exe.deinit();
+
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
+    defer input_buffer.deinit();
+
+    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
+    defer res.deinit();
+
+    const expectation: Slice = .init(input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 }));
+    try zml.testing.expectClose(std.testing.io, expectation, res, .{});
+}
+
+pub const RopeOpts = struct {
+    layout: Layout = .real_im_pass,
+    scaling: Scaling = .{ .default = .{} },
+
+    /// There are 3 layouts corresponding to how to split `x` in real/imag/passthrough parts.
+    /// The hard part is that HF models don't specify the layout they use.
+    /// But HF models don't use the `interleaved` format,
+    /// and most models don't have a Rope passthrough, so real_im_pass and real_pass_im_pass are the same.
+    ///
+    /// * real_im_pass: [x_re0, x_re1, ..., x_im0, x_im1, ..., p_re0, p_re1, ..., p_im0, p_im1, ...]
+    /// * real_pass_im_pass: [x_re0, x_re1, ..., p_re0, p_re1, ..., x_im0, x_im1, ..., p_im0, p_im1, ...]
+    /// * interleaved: : [x_re0, x_im0, x_re1, x_im1, ..., p_re0, p_im0, p_re1, p_im1, ...]
+    pub const Layout = enum { real_im_pass, real_pass_im_pass, interleaved };
+
+    /// There are several ways to init the scaling aka "inv_freq"
+    pub const Scaling = union(enum) {
+        default: Default,
+        llama3: Llama3,
+        yarn: Yarn,
+        linear: Scaling.Linear,
+        proportional: Scaling.Proportional,
+
+        pub const Default = struct {
+            rope_theta: f32 = 10000,
+        };
+
+        pub const Llama3 = struct {
+            factor: f32,
+            high_freq_factor: f32,
+            low_freq_factor: f32,
+            original_max_position_embeddings: u32,
+            truncate: bool = true,
+            rope_theta: f32 = 10000,
+        };
+
+        pub const Yarn = struct {
+            beta_fast: f32 = 32.0,
+            beta_slow: f32 = 1.0,
+            factor: ?f32 = null,
+            mscale: ?f32 = null,
+            mscale_all_dim: ?f32 = null,
+            truncate: bool = true,
+            original_max_position_embeddings: u32,
+            rope_theta: f32 = 10000,
+            llama_4_scaling_beta: ?f32 = null,
+            attention_factor: ?f32 = null,
+            partial_rotary_factor: f32 = 1.0,
+        };
+
+        pub const Linear = struct {
+            factor: f32,
+            rope_theta: f32 = 10000,
+        };
+
+        pub const Proportional = struct {
+            partial_rotary_factor: f32 = 1.0,
+            rope_theta: f32 = 10000,
+        };
+
+        /// Read a Rope scaling config from HF config.json format.
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
+            return jsonParseFromValue(
+                allocator,
+                try std.json.innerParse(std.json.Value, allocator, source, options),
+                options,
+            );
+        }
+
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
+            _ = allocator;
+            _ = options;
+            if (source == .null) return .{ .default = .{} };
+
+            if (source != .object) return error.InvalidEnumTag;
+
+            const obj = source.object;
+            const impl = obj.get("rope_type") orelse return error.MissingField;
+            if (impl != .string) return error.InvalidEnumTag;
+            if (std.mem.eql(u8, impl.string, "llama3")) {
+                // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
+                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "default")) {
+                return .{ .default = try std.json.parseFromValueLeaky(Default, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "yarn")) {
+                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "linear")) {
+                return .{ .linear = try std.json.parseFromValueLeaky(Scaling.Linear, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "proportional")) {
+                return .{ .proportional = try std.json.parseFromValueLeaky(Scaling.Proportional, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else {
+                log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
+                return .{ .default = .{} };
+            }
+        }
+
+        fn getMScale(factor: f32, mscale: f32) f32 {
+            if (mscale < 1.0) {
+                return 1.0;
+            }
+            return 0.1 * mscale * @log(factor) + 1.0;
+        }
+
+        pub fn attentionScaling(scaling: Scaling) f32 {
+            return switch (scaling) {
+                .yarn => |yarn| yarn_scaling: {
+                    const attention_factor = if (yarn.attention_factor) |af| af else b: {
+                        break :b if (yarn.mscale != null and yarn.mscale_all_dim != null)
+                            getMScale(yarn.factor.?, yarn.mscale.?) / getMScale(yarn.factor.?, yarn.mscale_all_dim.?)
+                        else
+                            getMScale(yarn.factor.?, 1.0);
+                    };
+                    break :yarn_scaling attention_factor;
+                },
+                else => 1.0,
+            };
+        }
+
+        pub fn setRopeTheta(self: *Scaling, rope_theta: f32) void {
+            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
+            return switch (self.*) {
+                inline else => |*s| s.rope_theta = rope_theta,
+            };
+        }
+
+        pub fn getRopeTheta(self: *const Scaling) f32 {
+            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
+            return switch (self.*) {
+                inline else => |s| s.rope_theta,
+            };
+        }
+
+        pub fn partialRotaryDim(self: *const Scaling, head_dim: i64) u32 {
+            return switch (self.*) {
+                inline .yarn, .proportional => |s| @intFromFloat(@floor(
+                    @as(f32, @floatFromInt(head_dim)) * std.math.clamp(s.partial_rotary_factor, 0.0, 1.0),
+                )),
+                .default, .llama3, .linear => @intCast(head_dim),
+            };
+        }
+    };
+};
+
+/// Rotary position embedding modify queries and keys tensor before compute Q * K in self attention.
+/// This biases a token to look at token near him.
+/// The nice thing with rope is that you can cache the modified queries and keys directly.
+/// See: https://paperswithcode.com/method/rope
+///
+/// Expected shapes of tensor:
+/// - x: .{ .s, .hd } where .s is the sequence length and .hd the head dimension
+/// - pos_idx: optional tensor which indicates which positions are needed.
+///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
+pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
+    const head_dim = x.dim(.hd);
+    stdx.debug.assert(@mod(head_dim, 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
+
+    const idx = if (pos_idx) |idx| blk: {
+        stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={f}, idx={f})", .{ x, idx });
+        break :blk idx;
+    } else blk: {
+        stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
+        break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
+    };
+
+    const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
+    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
+
+    const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
+    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
+
+    // compute sin and cos in f32 before downcasting to x type.
+    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
+    const scaling = opts.scaling.attentionScaling();
+    const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
+    const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
+
+    // apply rotation
+    const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
+    const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
+
+    return zml.nn.mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
+}
+
+pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
+    const n = x.dim(-1);
+
+    return switch (layout) {
+        .real_im_pass, .real_pass_im_pass => .{
+            x.slice1d(-1, .{ .end = @divExact(n, 2) }),
+            x.slice1d(-1, .{ .start = @divExact(n, 2), .end = n }),
+        },
+        .interleaved => .{
+            x.slice1d(-1, .{ .start = 0, .step = 2 }),
+            x.slice1d(-1, .{ .start = 1, .step = 2 }),
+        },
+    };
+}
+
+const Pass = union(RopeOpts.Layout) {
+    real_im_pass: Tensor,
+    real_pass_im_pass: [2]Tensor,
+    interleaved: Tensor,
+};
+
+pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) struct { Tensor, Tensor, ?Pass } {
+    const ax = x.axis(.hd);
+    const hd = x.dim(ax);
+    if (rotary_dim == hd) {
+        const real, const img = splitRealImg(x, layout);
+        return .{ real, img, null };
+    }
+
+    const half = @divExact(x.dim(ax), 2);
+    const half_rotary = @divExact(rotary_dim, 2);
+    return switch (layout) {
+        .real_im_pass => .{
+            x.slice1d(ax, .{ .end = half_rotary }),
+            x.slice1d(ax, .{ .start = half_rotary, .end = rotary_dim }),
+            .{ .real_im_pass = x.slice1d(ax, .{ .start = rotary_dim }) },
+        },
+        .real_pass_im_pass => .{
+            x.slice1d(ax, .{ .end = half_rotary }),
+            x.slice1d(ax, .{ .start = half, .end = half + half_rotary }),
+            .{ .real_pass_im_pass = .{
+                x.slice1d(ax, .{ .start = half_rotary, .end = half }),
+                x.slice1d(ax, .{ .start = half + half_rotary }),
+            } },
+        },
+        .interleaved => .{
+            x.slice1d(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
+            x.slice1d(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
+            .{ .interleaved = x.slice1d(ax, .{ .start = rotary_dim }) },
+        },
+    };
+}
+
+pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Tensor {
+    return switch (layout) {
+        .real_im_pass, .real_pass_im_pass => .concatenate(&.{ x_real, x_imag }, -1),
+        .interleaved => Tensor.stack(&.{ x_real, x_imag }, .last, .interleaved_real_img)
+            .merge(.{ .hd = .{ .hd, .interleaved_real_img } }),
+    };
+}
+
+pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: RopeOpts.Layout) Tensor {
+    if (x_pass == null) return mergeRealImg(x_real, x_imag, layout);
+
+    return switch (x_pass.?) {
+        .real_im_pass => |pass| .concatenate(&.{ x_real, x_imag, pass }, .hd),
+        .real_pass_im_pass => |pass| .concatenate(&.{ x_real, pass[0], x_imag, pass[1] }, .hd),
+        .interleaved => |pass| .concatenate(
+            &.{
+                Tensor.stack(&.{ x_real, x_imag }, .last, .interleaved_real_img)
+                    .merge(.{ .hd = .{ .hd, .interleaved_real_img } }),
+                pass,
+            },
+            .hd,
+        ),
+    };
+}
+
+/// {exp( - n * ln(10_000) / N ) | n in [0..N] }
+pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
+    const allocator = zml.module.CompilationContext.current().allocator;
+    const N_half: u32 = @intCast(@divExact(N, 2));
+    const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
+
+    const inv_freq = allocator.alloc(f32, num_freqs) catch @panic("OOM");
+    defer allocator.free(inv_freq);
+
+    _invFreq(opts, inv_freq, N_half);
+    return .constantTensor(.init(.{num_freqs}, .f32), @ptrCast(inv_freq));
+}
+
+fn _invFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
+    const N: u32 = @intCast(inv_freq.len);
+    // Default frequencies
+    for (0.., inv_freq) |n, *f| {
+        f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
+    }
+
+    switch (opts.scaling) {
+        .default => {},
+        .proportional => {
+            // proportional uses the original number of dimensions,
+            // instead of the actual number of rotated dims.
+            for (0.., inv_freq[0..]) |n, *f| {
+                f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, half_head_dim));
+            }
+        },
+        .linear => |l| {
+            for (inv_freq) |*f| f.* /= l.factor;
+        },
+        .llama3 => |s| {
+            // https://arxiv.org/pdf/2309.16039
+            // After Llama2 they observed that the rope frequencies where too sharp and hurting long distance attention.
+            // In Llama3 they used a higher base freq and also downscaled low frequencies.
+            std.debug.assert(s.low_freq_factor < s.high_freq_factor);
+            const M: f64 = @floatFromInt(s.original_max_position_embeddings);
+            const f_high = s.high_freq_factor * (2 * std.math.pi) / M;
+            const f_low = s.low_freq_factor * (2 * std.math.pi) / M;
+            const downscaling = 1.0 / s.factor;
+
+            for (0..N, inv_freq) |n, f| {
+                if (f > f_high) {
+                    // High freq match default implem
+                } else if (f < f_low) {
+                    // Downscaling for low freq
+                    inv_freq[n] *= downscaling;
+                } else {
+                    // Linear interpolation for middle freq
+                    const lerp: f64 = (inv_freq[n] - f_low) / (f_high - f_low);
+                    inv_freq[n] *= @floatCast(lerp + (1 - lerp) * downscaling);
+                }
+            }
+        },
+        .yarn => |s| {
+            const N_f: f64 = @floatFromInt(N);
+            const M: f64 = @floatFromInt(s.original_max_position_embeddings);
+            const f_high = s.beta_fast * (2 * std.math.pi) / M;
+            const f_low = s.beta_slow * (2 * std.math.pi) / M;
+            const downscaling = 1.0 / s.factor.?;
+
+            // This isn't a typo: low n have a high frequency, high n have a low frequency.
+            var n_low: f64 = -@log(f_high) / @log(opts.scaling.getRopeTheta()) * N_f;
+            var n_high: f64 = -@log(f_low) / @log(opts.scaling.getRopeTheta()) * N_f;
+            if (s.truncate) {
+                n_high = std.math.ceil(n_high);
+                n_low = std.math.floor(n_low);
+            }
+            std.debug.assert(n_high > n_low);
+            for (0..N, inv_freq) |n, f| {
+                if (f > f_high) {
+                    // High freq match default implem
+                } else if (f < f_low) {
+                    // Downscaling for low freq
+                    inv_freq[n] *= downscaling;
+                } else {
+                    // Yarn use lerp too but not in the frequency space, in the time space.
+                    const lerp: f64 = (n_high - @as(f64, @floatFromInt(n))) / (n_high - n_low);
+                    inv_freq[n] *= @floatCast(lerp + (1 - lerp) * downscaling);
+                }
+            }
+        },
+    }
+}
+
+test "invFreq Llama3" {
+    // Llama 3.2-1B config
+    const llama_conf: RopeOpts = .{
+        .scaling = .{ .llama3 = .{
+            .factor = 32,
+            .high_freq_factor = 4,
+            .low_freq_factor = 1,
+            .original_max_position_embeddings = 8192,
+            .rope_theta = 500_000,
+        } },
+    };
+    const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
+
+    var inv_freq: @TypeOf(llama_freq) = undefined;
+    _invFreq(llama_conf, &inv_freq, 32);
+    for (llama_freq, inv_freq, 0..) |expected, actual, i| {
+        errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
+        try std.testing.expectApproxEqRel(expected, actual, 1e-5);
+    }
+}
+
+test "invFreq Yarn" {
+    const yarn_conf: RopeOpts = .{
+        .scaling = .{ .yarn = .{
+            .factor = 32.0,
+            .beta_fast = 32.0,
+            .beta_slow = 1.0,
+            .original_max_position_embeddings = 4096,
+            .truncate = true,
+            .rope_theta = 150_000,
+        } },
+    };
+    const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
+
+    var inv_freq: @TypeOf(yarn_freq) = undefined;
+    _invFreq(yarn_conf, &inv_freq, 32);
+    for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
+        errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(&yarn_freq), stdx.fmt.slice(&inv_freq) });
+        try std.testing.expectApproxEqRel(expected, actual, 1e-5);
+    }
+    try std.testing.expectApproxEqRel(1.3465735902799727, yarn_conf.scaling.attentionScaling(), 1e-5);
+}
+
+test "RopeOpts.Scaling parses proportional" {
+    const json =
+        \\{
+        \\  "rope_type": "proportional",
+        \\  "partial_rotary_factor": 0.25,
+        \\  "rope_theta": 1000000
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .proportional => |p| {
+            try std.testing.expectApproxEqRel(0.25, p.partial_rotary_factor, 1e-6);
+            try std.testing.expectApproxEqRel(1_000_000, p.rope_theta, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "RopeOpts.Scaling parses yarn partial rotary factor" {
+    const json =
+        \\{
+        \\  "rope_type": "yarn",
+        \\  "factor": 32.0,
+        \\  "original_max_position_embeddings": 4096,
+        \\  "partial_rotary_factor": 0.5
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .yarn => |y| {
+            try std.testing.expectApproxEqRel(0.5, y.partial_rotary_factor, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "RopeOpts.Scaling parses default rope type" {
+    const json =
+        \\{
+        \\  "rope_type": "default",
+        \\  "rope_theta": 10000
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .default => |d| {
+            try std.testing.expectApproxEqRel(10_000, d.rope_theta, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "real/img" {
+    const platform = zml.testing.env();
+
+    const Fns = struct {
+        fn testSplitMergeIsId(layout: RopeOpts.Layout) Tensor {
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ .n = 5, .hd = 4 });
+            const real, const imag = splitRealImg(x, layout);
+            const y = mergeRealImg(real, imag, layout);
+            const real2, const imag2 = splitRealImg(y, layout);
+            return real.cmp(.EQ, real2).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, imag2).flatten().convert(.i32).sum(-1),
+            );
+        }
+
+        fn testSplitSeqVoid(_: void) Tensor {
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ .n = 5, .hd = 4 });
+            const real, const imag = splitRealImg(x, .real_im_pass);
+            const x_real = Tensor.concatenate(&.{
+                Tensor.arange(.{ .start = 0, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+                Tensor.arange(.{ .start = 1, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+            }, 1);
+            const x_imag = Tensor.concatenate(&.{
+                Tensor.arange(.{ .start = 2, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+                Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+            }, 1);
+
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
+            );
+        }
+
+        fn testSplitSeq() Tensor {
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
+            const real, const imag = splitRealImg(x, .real_im_pass);
+            const x_real = Tensor.concatenate(&.{
+                Tensor.arange(.{ .start = 0, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+                Tensor.arange(.{ .start = 1, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+            }, 1);
+            const x_imag = Tensor.concatenate(&.{
+                Tensor.arange(.{ .start = 2, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+                Tensor.arange(.{ .start = 3, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
+            }, 1);
+
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
+            );
+        }
+
+        fn testSplitInterleaved() Tensor {
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
+            const real, const imag = splitRealImg(x, .interleaved);
+            const x_real = Tensor.arange(.{ .start = 0, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
+            const x_imag = Tensor.arange(.{ .start = 1, .end = 20, .step = 2 }, .f32).reshape(.{ 5, 2 });
+
+            return real.cmp(.EQ, x_real).flatten().convert(.i32).sum(-1).add(
+                imag.cmp(.EQ, x_imag).flatten().convert(.i32).sum(-1),
+            );
+        }
+    };
+    {
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{});
+        defer exe.deinit();
+
+        var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
+        defer d_interleaved.deinit();
+        try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
+    }
+    {
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, platform, .{});
+        defer exe.deinit();
+
+        var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
+        defer d_sequential.deinit();
+        try std.testing.expectEqual(20, try d_sequential.getValue(i32, std.testing.io));
+    }
+
+    // test the function that accepts 1 void argument
+    {
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{});
+        defer exe.deinit();
+
+        var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
+        defer d_split_seq_void.deinit();
+        try std.testing.expectEqual(20, try d_split_seq_void.getValue(i32, std.testing.io));
+    }
+
+    // test the function that takes NO arguments
+    {
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{});
+        defer exe.deinit();
+
+        var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
+        defer d_split_seq.deinit();
+        try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
+    }
+
+    {
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{});
+        defer exe.deinit();
+
+        var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
+        defer d_split_seq.deinit();
+        try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
+    }
+}
+
+test rope {
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        fn _fwd(x: Tensor, opts: RopeOpts) Tensor {
+            var input = x;
+            {
+                // Convert input to the requested format
+                const real, const imag = splitRealImg(input, .real_im_pass);
+                input = mergeRealImg(real, imag, opts.layout);
+            }
+            var res = rope(input, null, opts).squeeze(0);
+
+            {
+                // Convert back to sequential
+                const real, const imag = splitRealImg(res, opts.layout);
+                res = mergeRealImg(real, imag, .real_im_pass);
+            }
+            return res;
+        }
+    };
+
+    // x is made such as the interleaved and sequential reps are the same.
+    // So the two implementations should give the same results.
+    const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
+    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{});
+    defer exe_interleaved.deinit();
+
+    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
+    defer exe_sequential.deinit();
+
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    defer x_buffer.deinit();
+
+    var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
+    defer res1.deinit();
+    var res2 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_sequential, Local._fwd, .{x_buffer});
+    defer res2.deinit();
+
+    try zml.testing.expectClose(std.testing.io, res1, res2, .{});
+}
+
+test "rope: Proportional" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
+    var exe = try zml.module.compile(
+        allocator,
+        io,
+        rope,
+        .{
+            x,
+            null,
+            .{
+                .layout = .real_pass_im_pass,
+                .scaling = .{ .proportional = .{ .partial_rotary_factor = 0.25 } },
+            },
+        },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    defer x_buffer.deinit();
+
+    const expected_h: [5][16]f32 = .{
+        .{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ 0.667, -0.449, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.468, 0.904, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.0328, -0.708, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.814, 0.719, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.703, -0.897, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.412, 0.464, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.727, -0.997, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.369, 0.162, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+    };
+    const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    defer res.deinit();
+    const res_h = try res.toSliceAlloc(allocator, io);
+    defer res_h.free(allocator);
+
+    errdefer std.log.warn("{d:20}", .{res_h});
+    try zml.testing.expectClose(io, expected, res, .{});
+}
+
+test "rope: Yarn with partial_rotary_factor" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
+    var exe = try zml.module.compile(
+        allocator,
+        io,
+        rope,
+        .{
+            x,
+            null,
+            RopeOpts{
+                .layout = .real_im_pass,
+                .scaling = .{ .yarn = .{
+                    .factor = 32.0,
+                    .beta_fast = 32.0,
+                    .beta_slow = 1.0,
+                    .original_max_position_embeddings = 4096,
+                    .truncate = true,
+                    .rope_theta = 150_000,
+                    .partial_rotary_factor = 0.25,
+                } },
+            },
+        },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    defer x_buffer.deinit();
+
+    const expected_h: [5][16]f32 = .{
+        .{ 1.02, -0.197, 0.00597, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ 0.544, -0.195, 0.858, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.428, -0.193, 0.921, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -1.01, -0.191, 0.137, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.659, -0.19, -0.772, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+    };
+    const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    defer res.deinit();
+    const res_h = try res.toSliceAlloc(allocator, io);
+    defer res_h.free(allocator);
+
+    errdefer std.log.warn("{d:20}", .{res_h});
+    try zml.testing.expectClose(io, expected, res, .{});
+}
+
+pub const UpsampleMode = enum {
+    nearest,
+    // TODO: Linear,
+    // TODO: Bilinear,
+    // TODO: Bicubic,
+    // TODO: Trilinear,
+};
+
+/// Upsample
+pub fn upsample(
+    input: Tensor,
+    opts: struct { mode: UpsampleMode, scale_factor: []const f64 },
+) Tensor {
+    // TODO(james): make `nearest` compatible with resizeBilinear and resizeBicubic, and wrap them here.
+    // resize* have API which are more explicit, this assume you want to scale the N-2 last axes.
+    stdx.debug.assert(3 <= input.rank() and input.rank() <= 5, "upsample is only implemented for (3,4,5)-D tensors, received {f}", .{input});
+    stdx.debug.assert(opts.scale_factor.len == 1 or opts.scale_factor.len == input.rank() - 2, "scale factors", .{});
+    return switch (opts.mode) {
+        .nearest => {
+            var scale_factors: [3]f64 = undefined;
+            switch (opts.scale_factor.len) {
+                1 => {
+                    for (0..input.rank() - 2) |i| scale_factors[i] = opts.scale_factor[0];
+                },
+                else => @memcpy(scale_factors[0..opts.scale_factor.len], opts.scale_factor),
+            }
+            return nearest(input, scale_factors[0 .. input.rank() - 2]);
+        },
+    };
+}
+
+pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
+    var out_shape = input.shape();
+    for (scale_factor, 0..) |sf, i| {
+        out_shape._dims.set(i + 2, @intFromFloat(@floor(@as(f64, @floatFromInt(out_shape.dim(i + 2))) * sf)));
+    }
+    // TODO(james): remove this implicit two batching dims
+    var sd: [3]u3 = undefined;
+    var len_sd: usize = 0;
+    for (2..input.rank()) |i| {
+        if (input.dim(i) != out_shape.dim(i)) {
+            sd[len_sd] = @intCast(i);
+            len_sd += 1;
+        }
+    }
+    const spatial_axes = sd[0..len_sd];
+    var res = input;
+    for (spatial_axes) |ax| {
+        const n = out_shape.dim(ax);
+        const ratio = stdx.math.divFloat(f32, input.dim(ax), n);
+        const offsets = Tensor.arange(.{ .end = n }, .f32).addConstant(0.5).scale(ratio).floor().convert(.i32);
+        res = ops.gather(res, &.{ax}, &.{offsets}, .{ .indices_are_sorted = true });
+    }
+    return res;
+}
+
+test nearest {
+    const platform = zml.testing.env();
+
+    // 3D Tensor (basic)
+    {
+        const input_3d_basic: zml.Tensor = .init(.{ 1, 1, 2 }, .i32);
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            upsample,
+            .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_3d_basic_buffer: zml.Buffer = try .fromBytes(
+            std.testing.io,
+            platform,
+            input_3d_basic.shape(),
+            .replicated,
+            std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}),
+        );
+        defer input_3d_basic_buffer.deinit();
+
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_basic_buffer});
+        defer result.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.shape().dims());
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6]i32{.{.{ 1, 1, 1, 2, 2, 2 }}}));
+        try zml.testing.expectClose(std.testing.io, expected, result, .{});
+    }
+
+    // 3D Tensor (advanced)
+    {
+        const input_3d_advanced: zml.Tensor = .init(.{ 2, 3, 4 }, .i32);
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            upsample,
+            .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][3][4]i32{
+            .{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 } },
+            .{ .{ 13, 14, 15, 16 }, .{ 17, 18, 19, 20 }, .{ 21, 22, 23, 24 } },
+        }));
+        defer input_3d_advanced_buffer.deinit();
+
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_advanced_buffer});
+        defer result.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 2, 3, 8 }, result.shape().dims());
+        const expected: Slice = .init(Shape.init(.{ 2, 3, 8 }, .i32), std.mem.sliceAsBytes(&[2][3][8]i32{
+            .{
+                .{ 1, 1, 2, 2, 3, 3, 4, 4 },
+                .{ 5, 5, 6, 6, 7, 7, 8, 8 },
+                .{ 9, 9, 10, 10, 11, 11, 12, 12 },
+            },
+            .{
+                .{ 13, 13, 14, 14, 15, 15, 16, 16 },
+                .{ 17, 17, 18, 18, 19, 19, 20, 20 },
+                .{ 21, 21, 22, 22, 23, 23, 24, 24 },
+            },
+        }));
+        try zml.testing.expectClose(std.testing.io, expected, result, .{});
+    }
+
+    // 4D Tensor (basic)
+    {
+        const input_4d_basic: zml.Tensor = .init(.{ 1, 1, 2, 2 }, .i32);
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            upsample,
+            .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        defer input_4d_basic_buffer.deinit();
+
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
+        defer result.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6, 6 }, result.shape().dims());
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 6, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6][6]i32{.{.{
+            .{ 1, 1, 1, 2, 2, 2 },
+            .{ 1, 1, 1, 2, 2, 2 },
+            .{ 1, 1, 1, 2, 2, 2 },
+            .{ 3, 3, 3, 4, 4, 4 },
+            .{ 3, 3, 3, 4, 4, 4 },
+            .{ 3, 3, 3, 4, 4, 4 },
+        }}}));
+        try zml.testing.expectClose(std.testing.io, expected, result, .{});
+    }
+    // 4D Tensor (advanced)
+    {
+        const input_4d_advanced: zml.Tensor = .init(.{ 2, 2, 2, 2 }, .i32);
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            upsample,
+            .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
+            .{ .{ 1, 2 }, .{ 3, 4 } },
+            .{ .{ 5, 6 }, .{ 7, 8 } },
+        }, .{
+            .{ .{ 9, 10 }, .{ 11, 12 } },
+            .{ .{ 13, 14 }, .{ 15, 16 } },
+        } }));
+        defer input_4d_advanced_buffer.deinit();
+
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_advanced_buffer});
+        defer result.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 2, 2, 4, 4 }, result.shape().dims());
+        const expected: Slice = .init(Shape.init(.{ 2, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[2][2][4][4]i32{
+            .{
+                .{
+                    .{ 1, 1, 2, 2 },
+                    .{ 1, 1, 2, 2 },
+                    .{ 3, 3, 4, 4 },
+                    .{ 3, 3, 4, 4 },
+                },
+                .{
+                    .{ 5, 5, 6, 6 },
+                    .{ 5, 5, 6, 6 },
+                    .{ 7, 7, 8, 8 },
+                    .{ 7, 7, 8, 8 },
+                },
+            },
+            .{
+                .{
+                    .{ 9, 9, 10, 10 },
+                    .{ 9, 9, 10, 10 },
+                    .{ 11, 11, 12, 12 },
+                    .{ 11, 11, 12, 12 },
+                },
+                .{
+                    .{ 13, 13, 14, 14 },
+                    .{ 13, 13, 14, 14 },
+                    .{ 15, 15, 16, 16 },
+                    .{ 15, 15, 16, 16 },
+                },
+            },
+        }));
+        try zml.testing.expectClose(std.testing.io, expected, result, .{});
+    }
+    // 5D Tensor (basic)
+    {
+        const input_5d: zml.Tensor = .init(.{ 1, 1, 1, 2, 2 }, .i32);
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            upsample,
+            .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        defer input_5d_buffer.deinit();
+
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
+        defer result.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 1, 1, 2, 4, 4 }, result.shape().dims());
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[1][1][2][4][4]i32{
+            .{
+                .{
+                    .{
+                        .{ 1, 1, 2, 2 },
+                        .{ 1, 1, 2, 2 },
+                        .{ 3, 3, 4, 4 },
+                        .{ 3, 3, 4, 4 },
+                    },
+                    .{
+                        .{ 1, 1, 2, 2 },
+                        .{ 1, 1, 2, 2 },
+                        .{ 3, 3, 4, 4 },
+                        .{ 3, 3, 4, 4 },
+                    },
+                },
+            },
+        }));
+        try zml.testing.expectClose(std.testing.io, expected, result, .{});
+    }
+}
+
+pub const ResizeOpts = struct {
+    /// scalar tensor containing the original dimension of the image.
+    /// It can be different from the image shape,
+    /// if the image has been padded.
+    /// This allows to compile one module that handle different input image sizes.
+    original_len: ?Tensor = null,
+
+    /// Internal precision to do the interpolation.
+    /// Result will always use the same dtype than the original.
+    /// If not set, will use the image dtype, unless it's an integer type, in which case f32 will be used.
+    precision: ?zml.DataType = null,
+};
+
+pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tensor {
+    const new_size, const tags_ = Shape.parseStruct(u63, resized_axes);
+    var out = image;
+    for (new_size.constSlice(), tags_.constSlice()) |d, t| {
+        const ax = image.shape().axis(t);
+        const child_opt: ResizeOpts = .{
+            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+        };
+        out = resizeLinear1d(out, ax, d, child_opt);
+    }
+    return out;
+}
+
+test resizeBilinear {
+    const platform = zml.testing.env();
+
+    // Only test shapes
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    const block = @import("mlir").Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
+
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+        const y = resizeBilinear(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
+
+pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
+    const ax = image.axis(axis);
+    const res_shape = image.shape().set(ax, new_len);
+
+    const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(ax), dtype);
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
+    const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
+    const left = scaled.floor();
+    const right = left.addConstant(1);
+
+    // TODO: check that two gather isn't too bad perf wise.
+    // Normally we should use gatherSlices to collect the values 2 by 2,
+    // but gatherSlices messes up with the order of axes.
+    const left_val = ops.gather(image, &.{ax}, &.{left.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
+    const right_val = ops.gather(image, &.{ax}, &.{right.convert(.i32)}, .{ .indices_are_sorted = true }).convert(dtype);
+
+    const left_weight = right.sub(scaled).broadcast(res_shape, &.{ax});
+    const right_weight = scaled.sub(left).broadcast(res_shape, &.{ax});
+
+    const res = left_val.mul(left_weight).add(right_val.mul(right_weight));
+    return res.convert(image.dtype()).withTags(image.shape().tags());
+}
+
+/// Bicubic interpolation of the given image.
+/// Warning as of May 2024 the cpu backend don't optimize this very well
+/// and is not able to merge the weighting with the gather,
+/// leading to 20x slow down compared to STB implementation.
+pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tensor {
+    const new_size, const tags_ = Shape.parseStruct(u63, resized_axes);
+    var out = image;
+    for (new_size.constSlice(), tags_.constSlice()) |d, t| {
+        const ax = image.shape().axis(t);
+        const child_opt: ResizeOpts = .{
+            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+        };
+        out = resizeCubic1d(out, ax, d, child_opt);
+    }
+    return out;
+}
+
+test resizeBicubic {
+    const platform = zml.testing.env();
+
+    // Only test shapes
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    const block = @import("mlir").Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
+
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+        const y = resizeBicubic(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
+
+pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
+    // Extract neighboring pixels from the image.
+    const dtype = opt.precision orelse if (image.dtype().class() == .integer) .f32 else image.dtype();
+    const og_len = opt.original_len orelse Tensor.scalar(image.dim(axis), dtype);
+
+    const ratio = og_len.convert(dtype).scale(stdx.math.divFloat(f32, 1, new_len));
+    const scaled = Tensor.arange(.{ .end = new_len }, dtype).mul(ratio);
+    const t = scaled.sub(scaled.floor());
+    const pos = Tensor.stack(&.{
+        Tensor.constant(dtype.one()).broad(t.shape()),
+        t,
+        t.mul(t),
+        t.powByConst(3),
+    }, .last, ._interpolated);
+
+    std.debug.assert(pos.dim(0) == new_len);
+    std.debug.assert(pos.dim(1) == 4);
+
+    const neighbors = scaled.floor().addConstant(-1).convert(.i32).maximum(Tensor.scalar(0, .i32));
+
+    const values = image.renameAxis(axis, ._neighbors).gatherSlices(
+        Shape.init(.{ ._neighbors = 4 }, image.dtype()),
+        neighbors.appendAxes(.{.coord}),
+        .{ .indices_are_sorted = true },
+    ).convert(dtype);
+
+    const weights_: [4][4]f32 = .{
+        .{ 0, 1, 0, 0 },
+        .{ -0.5, 0, 0.5, 0 },
+        .{ 1, -2.5, 2, -0.5 },
+        .{ -0.5, 1.5, -1.5, 0.5 },
+    };
+    const weights = zml.Tensor.constantTensor(Shape.init(.{ 4, 4 }, .f32), std.mem.sliceAsBytes(&weights_)).convert(dtype).withTags(.{ ._interpolated, ._neighbors });
+
+    // actually do the interpolation.
+    // Note: ideally this matmul should be inlined with the gather, but that's currently not the case.
+    // TODO: not being able to use dot here is a bit annoying.
+    var res = values.dotGeneral(weights, &.{.{ values.axis(._neighbors), weights.axis(._neighbors) }}, &.{});
+    res = pos.dotGeneral(res, &.{.{ pos.axis(._interpolated), res.axis(._interpolated) }}, &.{.{ 0, 0 }});
+
+    // the current axis is outputted in first position because it's a batching dim, put it back in place.
+    if (axis != 0) {
+        res = res.swapAxes(0, axis);
+    }
+
+    // verify the shape
+    const res_shape = image.shape().set(axis, new_len);
+    // log.debug("resizeCubic1d: ({}, {}, {}, {}) -> {}", .{ image, axis, new_len, opt, res });
+    std.debug.assert(std.mem.eql(i64, res_shape.dims(), res.dims()));
+    return res.convert(image.dtype()).withTags(image.shape());
+}
+
+/// Return causal attention masks for the given shape.
+/// The last dimensions are
+pub fn causalAttnMask(
+    attn_shape_: anytype,
+    dtype: DataType,
+    attn_window_len: ?u32,
+) Tensor {
+    const attn_shape = Shape.init(attn_shape_, dtype);
+    stdx.debug.assert(attn_shape.rank() == 2, "causalAttnMask({f}) shape need to be exactly 2 axes", .{attn_shape});
+    const qlen = attn_shape.dim(-2);
+    const q_idx = Tensor.iota(attn_shape, -2);
+    const klen = attn_shape.dim(-1);
+    const k_idx = Tensor.iota(attn_shape, -1);
+
+    // all elements > main diagonal must be 0
+    // (q_idx - window_len < k_idx <= q_idx)
+    var mask = k_idx.cmp(.LE, q_idx);
+    if (attn_window_len) |window_len| {
+        if (qlen >= window_len or klen >= window_len) {
+            const window_mask = q_idx.cmp(.LT, k_idx.addConstant(window_len));
+            mask = mask.logical(.AND, window_mask);
+        }
+    }
+
+    if (dtype.isFloat()) {
+        mask = Tensor.select(mask, .scalar(0, dtype), .scalar(-std.math.inf(f32), dtype));
+    } else {
+        mask = mask.convert(dtype);
+    }
+
+    return mask;
+}
+
+pub const SdpaOpts = struct {
+    attn_mask: ?Tensor = null,
+    scale: ?Tensor = null,
+    softmax_bias: ?Tensor = null,
+};
+
+/// Scaled dot product attention.
+///
+/// **Shapes**:
+///   - q, result: .{ .h, .q, .hd }
+///   - k, v:      .{ .h, .k, .hd }
+///
+/// Where:
+///   - .h is the number of head
+///   - .q is the number of queries
+///   - .k is the number of keys
+///   - .hd is the head dimension
+///
+/// .h is allowed to differ from queries and keys as long as the key heads
+/// can be repeated to match query heads.
+pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
+    var q, var k, var v = .{ q_, k_, v_ };
+
+    const err_template = "sdpa(q: {f}, k: {f}, v: {f}, attn: {?f}) is invalid ! ";
+    const err_args = .{ q, k, v, opts.attn_mask };
+    stdx.debug.assert(q.shape().hasTags(.{ .h, .q, .hd }), err_template ++ "q is missing tags {{.h, .q, .hd}}", err_args);
+    stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
+    stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
+
+    // Handle different numbers of head by splitting q heads.
+    // This is a bit error prone in the sense that it depends of the layout of q heads.
+    // This is the Llama convention though.
+    q = q.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
+    const attn_mask = if (opts.attn_mask) |m| m else null;
+
+    const dims = collectDims(.{ .h, .q, .k, .hd }, &.{ q, k, v, attn_mask }, .strict) catch {
+        stdx.debug.panic(err_template ++ "Inputs have incompatible shapes.", err_args);
+    };
+    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling.convert(k.dtype()));
+
+    var attn_weights = q.dot(k, .hd);
+    if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
+    attn_weights = attn_weights.convert(.f32);
+    attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
+        // The split is needed because we also split q ourselves.
+        // TODO: consider letting the user do that.
+        const bias = softmax_bias.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
+        break :attn attn_weights.convert(.f32).softmaxBiased(.k, bias).convert(q.dtype());
+    } else attn_weights.convert(.f32).softmax(.k).convert(q.dtype());
+
+    var attn = attn_weights.dot(v, .k);
+    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
+}
+
+pub const GatedDeltaNet = struct {
+    /// Query tensor .{ .s, .h, .k }.
+    queries: Tensor,
+    /// Key tensor .{ .s, .h, .k }.
+    keys: Tensor,
+    /// Value tensor .{ .s, .h, .v }.
+    values: Tensor,
+    /// Forget gate .{ .s, .h }.
+    alphas: Tensor,
+    /// Delta gate .{ .s, .h }.
+    betas: Tensor,
+
+    pub const State = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        s: Tensor,
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+
+        /// Current step, scalar
+        step: Tensor,
+    };
+
+    pub const Input = struct {
+        s: Tensor,
+    };
+
+    pub const Output = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        state: Input,
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+    };
+
+    pub fn cond(gdn: GatedDeltaNet, state: State) Tensor {
+        return state.step.cmp(.LT, .scalar(gdn.queries.dim(.s), .i32));
+    }
+
+    /// Single-step recurrent update for Gated Delta Net.
+    pub fn body(gdn: GatedDeltaNet, state: State) State {
+        // q, k: .{ .h, .k }
+        const q = sliceStep(gdn.queries, state.step);
+        const k = sliceStep(gdn.keys, state.step);
+        //  v: .{ .h, .v }
+        const v = sliceStep(gdn.values, state.step);
+        // alpha, beta: .{ .h }
+        const alpha = sliceStep(gdn.alphas, state.step);
+        const beta = sliceStep(gdn.betas, state.step);
+
+        const hvk = state.s.shape();
+        const hv = hvk.drop(.k);
+
+        const v_hat = state.s.dot(k, .k).mul(alpha.broad(hv));
+        const delta = v.sub(v_hat).mul(beta.broad(hv));
+        const delta_k = delta.broad(hvk).mul(k.broad(hvk));
+        const s_new = state.s.mul(alpha.broad(hvk)).add(delta_k);
+        const y = s_new.dot(q, .k);
+
+        return .{
+            .s = s_new,
+            .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, y),
+            .step = state.step.addConstant(1),
+        };
+    }
+
+    fn sliceStep(input: Tensor, step_: Tensor) Tensor {
+        return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
+    }
+
+    fn validateInitialState(gdn: GatedDeltaNet, state: State) void {
+        const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
+        const err_args = .{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas };
+
+        stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
+        stdx.debug.assert(gdn.queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
+        stdx.debug.assert(gdn.alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tag {{.h}}", err_args);
+
+        _ = collectDims(.{.h}, &.{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas }, .strict) catch {
+            stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ state.s, gdn.queries, gdn.keys }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ state.s, gdn.values }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
+        };
+    }
+
+    /// Processes a sequence with Gated Delta Net recurrence using `stablehlo.while`.
+    ///
+    /// Shapes:
+    /// - `queries`, `keys`: .{ .s, .h, .k }
+    /// - `values`, `outputs`: .{ .s, .h, .v }
+    /// - `alphas`, `betas`: .{ .s, .h }
+    /// - `initial_state.s`: .{ .h, .v, .k }
+    pub fn forward(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        alphas: Tensor,
+        betas: Tensor,
+        initial_state: Input,
+    ) Output {
+        const gdn: GatedDeltaNet = .{
+            .queries = queries,
+            .keys = keys,
+            .values = values,
+            .alphas = alphas,
+            .betas = betas,
+        };
+        const state: GatedDeltaNet.State = .{
+            .step = .scalar(0, .i32),
+            .s = initial_state.s,
+            .outputs = .zeroes(values.shape()),
+        };
+        validateInitialState(gdn, state);
+        const final_state = ops.@"while"(GatedDeltaNet, gdn, state);
+
+        return .{
+            .outputs = final_state.outputs,
+            .state = .{ .s = final_state.s },
+        };
+    }
+};
+
+test "gated delta net" {
+    const platform = zml.testing.env();
+
+    const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const values: zml.Tensor = .init(.{ .s = 2, .h = 2, .v = 2 }, .f32);
+    const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+
+    var exe = try zml.module.compile(
+        std.testing.allocator,
+        std.testing.io,
+        GatedDeltaNet.forward,
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    var queries_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        queries.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
+        }),
+    );
+    defer queries_buffer.deinit();
+    var keys_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        keys.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer keys_buffer.deinit();
+    var values_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        values.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
+            .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
+        }),
+    );
+    defer values_buffer.deinit();
+    var alphas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        alphas.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 0.5, 0.25 },
+            .{ 0.8, 0.6 },
+        }),
+    );
+    defer alphas_buffer.deinit();
+    var betas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        betas.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 1.0, 0.5 },
+            .{ 0.75, 1.0 },
+        }),
+    );
+    defer betas_buffer.deinit();
+    var initial_s_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        initial_s.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer initial_s_buffer.deinit();
+
+    var result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        GatedDeltaNet.forward,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+    );
+    defer result.outputs.deinit();
+    defer result.state.s.deinit();
+
+    const expected_outputs: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
+            .{ .{ -11.15, 10.75 }, .{ 2.325, -1.2 } },
+        }),
+    );
+    const expected_final_s: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ -9.3, -1.85 }, .{ 6.9, 3.85 } },
+            .{ .{ 3.0, 0.675 }, .{ 0.0, 1.2 } },
+        }),
+    );
+
+    try zml.testing.expectClose(std.testing.io, expected_outputs, result.outputs, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+}
+
+/// Options controlling generation. The default values correspond to greedy decoding.
+pub const SamplingStrategy = struct {
+    topk: u32 = 1,
+    temperature: f32 = 1.0,
+};
+
+/// Given the output of the last layer of a LM with a `.voc` axis,
+/// Compute indices for the next tokens, following the given sampling strategy.
+/// Returns an integer tensor with a shape similar to the input, but without the .voc axis.
+pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
+    if (opts.topk <= 1) {
+        const next_tokens = activations.argMax(.voc).indices.squeeze(.voc);
+        return .{ next_tokens, rng };
+    }
+
+    const topk = activations.topK(.{ .topk = .voc }, opts.topk, .{});
+    // After the topk, we don't have .voc values, anymore, only .topk.
+    var x = topk.values;
+    if (opts.temperature != 1.0) {
+        x = x.scale(1 / opts.temperature);
+    }
+
+    // Gumbel reparametrization trick:
+    // Adding gumbel noise and taking the argmax is equivalent
+    // to sampling from the categorical distribution produced by the softmax.
+    // https://en.wikipedia.org/wiki/Gumbel_distribution#Gumbel_reparametrization_tricks
+    const next_rng, const gumbel_noise = rng.gumbel(x.shape());
+    x = x.add(gumbel_noise);
+    const topk_idx = x.argMax(.topk).indices;
+
+    // topk_idx is indices into topk.values ! so in the range [0, topk]
+    // Convert for the original indices from the full [0, voc] range.
+    const next_tokens = topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
+    // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
+    return .{ next_tokens, next_rng };
+}
+
+test sampleTokens {
+    const platform = zml.testing.env();
+
+    const rng: zml.Tensor.Rng = .init();
+    const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{});
+    defer exe.deinit();
+
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, .replicated, 0xdeadbeef);
+    defer rng_buffer._state.deinit();
+
+    const inf = std.math.inf(f32);
+
+    inline for (.{
+        .{ [_]f32{ inf, 3.0, 2.0, 1.0 }, 0 },
+        .{ [_]f32{ -inf, 3.0, -inf, -inf }, 1 },
+        .{ [_]f32{ 3.0, 2, inf, inf }, 2 },
+    }) |logits_expected| {
+        const logits, const expected: i32 = logits_expected;
+
+        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), .replicated, std.mem.sliceAsBytes(&logits));
+        defer activations_buffer.deinit();
+
+        var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
+        defer sampled.deinit();
+
+        try zml.testing.expectEqual(expected, try sampled.getValue(i32, std.testing.io));
+    }
+}
+
+pub const DynamicSamplingStrategy = struct {
+    max_top_k: u32,
+    top_k: Tensor,
+    temperature: Tensor,
+    top_p: Tensor,
+    min_p: Tensor,
+
+    pub const Opts = struct {
+        top_k: u32,
+        temperature: f32 = 1.0,
+        top_p: f32 = 1.0,
+        min_p: f32 = 0.0,
+    };
+
+    pub fn init(dtype: DataType, max_top_k: u32) DynamicSamplingStrategy {
+        const scalar_float_shape = Shape.init(.{}, dtype);
+        const scalar_i32_shape = Shape.init(.{}, .i32);
+        return .{
+            .max_top_k = max_top_k,
+            .top_k = .fromShape(scalar_i32_shape),
+            .temperature = .fromShape(scalar_float_shape),
+            .top_p = .fromShape(scalar_float_shape),
+            .min_p = .fromShape(scalar_float_shape),
+        };
+    }
+
+    pub fn makeBuffers(
+        io: std.Io,
+        platform: *const zml.Platform,
+        dtype: zml.DataType,
+        opts: Opts,
+    ) !zml.Bufferized(DynamicSamplingStrategy) {
+        return .{
+            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32),
+            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype),
+            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype),
+            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype),
+        };
+    }
+
+    pub fn deinitBuffers(self: *zml.Bufferized(DynamicSamplingStrategy)) void {
+        self.top_k.deinit();
+        self.temperature.deinit();
+        self.top_p.deinit();
+        self.min_p.deinit();
+    }
+};
+
+/// Given the output of the last layer of a LM with a `.voc` axis,
+/// Compute indices for the next tokens, following the given sampling strategy.
+/// The dynamic sampling strategy is more expressive but top_p requires computing the softmax.
+///
+/// Options are:
+///
+/// * top_k: only sample among the k top scoring tokens,
+/// * max_top_k: limit a compilation time what is the max possible runtime value for top_k, saving memory and compute by not having to fully sort the tokens.
+/// * top_p: only sample among top scoring tokens whose probabilities sum up to top_p
+/// * min_p: drop tokens whose probabilities are lower than a ratio of the most likely token
+pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
+    var x, const topk_indices = fixupLogits(logits, opts);
+
+    // the rest is similar to sampleTokens
+    const next_rng, const gumbel_noise = rng.gumbel(x.shape());
+    x = x.add(gumbel_noise);
+
+    const topk_idx = x.argMax(.topk).indices;
+    const next_tokens = topk_indices.gather(.{ .voc = topk_idx.squeeze(.topk) }, .{});
+    return .{ next_tokens, next_rng };
+}
+
+fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
+    const min_inf = Tensor.constant(logits.dtype().minValue());
+
+    // First reduce the vocab size to a reasonable sub set of candidate.
+    const full_topk = if (opts.max_top_k > 0)
+        logits.topK(.{ .voc = .voc }, opts.max_top_k, .{ .descending = true })
+    else
+        logits.sort(.voc, .{ .descending = true });
+
+    // After the topk, we don't have .voc indices, anymore, only topk.
+    var x = full_topk.values.rename(.{ .voc = .topk });
+    // mask values above the dynamic top_k
+    const top_k = opts.top_k.broad(x.shape());
+    x = Tensor.iota(x.shape(), .topk).cmp(.GE, top_k).select(min_inf, x);
+    const temperature = opts.temperature.convert(x.dtype()).broad(x.shape());
+    x = x.div(temperature);
+
+    // if there are high values in x, softmax can overflow and will create nans in full probs
+    // this propagate to probs_sum and probs_max.
+    const probs = x.softmax(.topk);
+    const probs_sum = probs.cumulativeSum(.topk);
+    const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
+
+    const top_p = opts.top_p.convert(x.dtype()).broad(x.shape());
+    const min_p = opts.min_p.convert(x.dtype()).broad(probs_max.shape()).mul(probs_max).broad(x.shape());
+
+    // * if first candidate has very high prob, then probs_sum is always greater than top_p and candidate is full false
+    // * if first candidate score is even bigger, the probs become Nan because of the softmax,
+    // then cmp is is full false, and candidate is full false too.
+    const candidate = probs_sum.cmp(.LE, top_p).logical(.AND, probs.cmp(.GE, min_p));
+    // * so we explicitly always accept first candidate.
+    const first_token = Tensor.iota(x.shape(), .topk).cmp(.EQ, Tensor.scalar(0, .i32));
+    x = candidate.logical(.OR, first_token).select(x, min_inf);
+
+    return .{ x, full_topk.indices };
+}
+
+test sampleTokensDynamic {
+    const platform = zml.testing.env();
+
+    const ___ = -std.math.inf(f32);
+    const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
+    const top_k_indices = [_]i32{ 2, 3, 0, 1 };
+
+    const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
+    const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{});
+    defer exe.deinit();
+
+    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), .replicated, std.mem.sliceAsBytes(&logits_data));
+    defer logits_buffer.deinit();
+
+    const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
+    inline for ([_]Args{
+        // top_k == logits.len -> just sort the input
+        .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
+        .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) / 0.1, @log(3.0) / 0.1, ___, ___ } },
+        // top_k == logits.len and small top_p  -> make sure at least one is returned
+        .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.901 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), ___ } },
+        // Here top_p is computed on the top 3 items, so 0.701 isn't enougth anymore to allow @log(3.0)
+        .{ .{ .top_k = 3, .top_p = 0.701 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        // Here top_p allows the first 3 results, but min_p only accepts the first two.
+        .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+    }) |args_expected| {
+        const args, const expected = args_expected;
+        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .f32, args);
+        defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
+        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
+        defer new_logits.deinit();
+        defer indices.deinit();
+        try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices), std.testing.io));
+        try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected), std.testing.io));
+    }
+
+    {
+        // Similar but use bf16, and uses infinity to trigger nans after the softmax.
+        const bf16 = zml.floats.BFloat16;
+
+        const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
+        const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
+        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{});
+        defer exe_bf16.deinit();
+
+        const boost = bf16.inf;
+        const nerf = bf16.minus_inf;
+
+        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), .replicated, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
+        defer logits_bf16_buffer.deinit();
+        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
+        defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
+
+        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });
+
+        try std.testing.expectEqual([_]i32{ 0, 1, 2, 3 }, try indices.getValue([4]i32, std.testing.io));
+        try zml.testing.expectEqual([_]bf16{ boost, nerf, nerf, nerf }, try new_logits.getValue([4]bf16, std.testing.io));
+    }
+}
+
+const ShapeError = error{ DimMismatch, NotFound };
+const NOT_SET: i64 = -2;
+const DIM_MISMATCH: i64 = -1;
+
+/// Collect the given dimensions inside a struct containing tagged tensors.
+pub fn collectDims(
+    comptime dims: anytype,
+    v: anytype,
+    comptime mode: enum { strict, allow_extra_dims, ignore_errors },
+) ShapeError!ShapeStruct(dims) {
+    const LocalContext = struct {
+        res: ShapeStruct(dims),
+        mode: @TypeOf(mode),
+    };
+
+    var context = LocalContext{
+        .res = undefined,
+        .mode = mode,
+    };
+    @memset(std.mem.bytesAsSlice(i64, std.mem.asBytes(&context.res)), NOT_SET);
+
+    meta.visit((struct {
+        fn cb(ctx: *LocalContext, shape: *const Shape) void {
+            inline for (dims) |a| {
+                if (shape.hasTag(a)) |axis| {
+                    const dim = shape.dim(axis);
+
+                    const expected_dim = &@field(ctx.res, @tagName(a));
+                    if (expected_dim.* == NOT_SET) {
+                        expected_dim.* = dim;
+                    } else if (expected_dim.* == DIM_MISMATCH) {
+                        // this axis has already been reported as invalid.
+                    } else if (dim != expected_dim.*) {
+                        if (mode != .ignore_errors) {
+                            log.warn("Dim mismatch ! Axis {0s}={1d} but received a new tensor where {0s}={2d}", .{ @tagName(a), expected_dim.*, dim });
+                        }
+                        expected_dim.* = DIM_MISMATCH;
+                    }
+                }
+            }
+        }
+    }).cb, &context, v);
+
+    if (context.mode != .ignore_errors) {
+        inline for (shapeToDims(context.res), dims) |dim, dim_tag| {
+            if (dim == NOT_SET) {
+                log.warn("Axis not found: {s}", .{@tagName(dim_tag)});
+                return error.NotFound;
+            }
+            if (dim == DIM_MISMATCH) return error.DimMismatch;
+        }
+    }
+    return context.res;
+}
+
+fn shapeToDims(shape: anytype) [@divExact(@sizeOf(@TypeOf(shape)), @sizeOf(i64))]i64 {
+    return @bitCast(shape);
+}
+
+test collectDims {
+    const Model = struct {
+        x: Shape,
+        y: Shape,
+        bias: Shape,
+    };
+
+    {
+        var model: Model = .{
+            .x = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .y = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .bias = Shape.init(.{5}, .f32).withTags(.{.d}),
+        };
+        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .strict), .{ .b = 2, .d = 5 });
+    }
+    {
+        var model: Model = .{
+            .x = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .y = Shape.init(.{ 3, 5 }, .f32).withTags(.{ .b, .d }),
+            .bias = Shape.init(.{5}, .f32).withTags(.{.d}),
+        };
+        try std.testing.expectEqual(
+            collectDims(.{ .b, .d }, &model, .strict),
+            error.DimMismatch,
+        );
+        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = DIM_MISMATCH, .d = 5 });
+    }
+    {
+        var model: Model = .{
+            .x = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .y = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .bias = Shape.init(.{5}, .f32).withTags(.{.d}),
+        };
+        try std.testing.expectEqual(collectDims(.{ .b, .d, .c }, &model, .strict), error.NotFound);
+        try zml.testing.expectEqual(collectDims(.{ .b, .d, .c }, &model, .ignore_errors), .{ .b = 2, .d = 5, .c = NOT_SET });
+    }
+    {
+        var model: Model = .{
+            .x = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .y = Shape.init(.{ 2, 5 }, .f32).withTags(.{ .b, .d }),
+            .bias = Shape.init(.{7}, .f32).withTags(.{.d}),
+        };
+        try std.testing.expectEqual(collectDims(.{ .b, .d }, &model, .strict), error.DimMismatch);
+        try zml.testing.expectEqual(collectDims(.{ .b, .d }, &model, .ignore_errors), .{ .b = 2, .d = DIM_MISMATCH });
+    }
+}
+
+fn ShapeStruct(comptime dims: anytype) type {
+    const rank = dims.len;
+    @setEvalBranchQuota(rank + 5);
+    var struct_field_names: [rank][]const u8 = undefined;
+    var struct_field_types: [rank]type = undefined;
+    var struct_field_attrs: [rank]std.builtin.Type.StructField.Attributes = undefined;
+    const default: i64 = NOT_SET;
+    for (&struct_field_names, &struct_field_types, &struct_field_attrs, dims) |*field_name, *field_type, *field_attr, axis| {
+        field_name.* = @tagName(axis);
+        field_type.* = i64;
+        field_attr.* = .{
+            .@"align" = @alignOf(i64),
+            .default_value_ptr = &default,
+        };
+    }
+
+    return @Struct(.@"extern", null, &struct_field_names, &struct_field_types, &struct_field_attrs);
+}

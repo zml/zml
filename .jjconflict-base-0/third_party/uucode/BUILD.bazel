@@ -1,0 +1,4 @@
+exports_files([
+    "build_config.zig",
+    "uucode.bazel",
+])

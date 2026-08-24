@@ -1,0 +1,25 @@
+diff --git a/xla/tsl/platform/default/BUILD b/xla/tsl/platform/default/BUILD
+index f01bdfc67e..18a30d44a 100644
+--- a/xla/tsl/platform/default/BUILD
++++ b/xla/tsl/platform/default/BUILD
+@@ -82,13 +82,13 @@ cc_library(
+         if_false = ["@cuda_nvcc//:nvvm"],
+         if_true = ["@cuda_nvvm//:nvvm"],
+     )),
+-    local_defines = [
+-        "CUDA_NVCC_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvcc") + "\\\"",
+-        "CUDA_NVDISASM_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvdisasm") + "\\\"",
+-        "NVIDIA_NVSHMEM_REPO_NAME=\\\"" + get_canonical_repo_name("nvidia_nvshmem") + "\\\"",
+-        "CUDA_NVVM_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvvm") + "\\\"",
+-        "CUDA_CUDART_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_cudart") + "\\\"",
+-    ],
++    # local_defines = [
++    #     "CUDA_NVCC_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvcc") + "\\\"",
++    #     "CUDA_NVDISASM_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvdisasm") + "\\\"",
++    #     "NVIDIA_NVSHMEM_REPO_NAME=\\\"" + get_canonical_repo_name("nvidia_nvshmem") + "\\\"",
++    #     "CUDA_NVVM_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_nvvm") + "\\\"",
++    #     "CUDA_CUDART_REPO_NAME=\\\"" + get_canonical_repo_name("cuda_cudart") + "\\\"",
++    # ],
+     tags = [
+         "manual",
+         "no_oss",

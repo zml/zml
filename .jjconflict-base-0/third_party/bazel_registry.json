@@ -1,0 +1,6 @@
+{
+    "mirrors": [
+        "https://storage.googleapis.com/mirror.tensorflow.org/"
+    ],
+    "module_base_path": "."
+}

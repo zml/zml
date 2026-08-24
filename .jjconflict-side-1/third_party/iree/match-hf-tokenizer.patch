@@ -1,0 +1,1643 @@
+diff --git a/runtime/src/iree/tokenizer/model/bpe.c b/runtime/src/iree/tokenizer/model/bpe.c
+index 309f1e261f..02fb055eee 100644
+--- a/runtime/src/iree/tokenizer/model/bpe.c
++++ b/runtime/src/iree/tokenizer/model/bpe.c
+@@ -179,16 +179,17 @@ iree_status_t iree_tokenizer_bpe_model_allocate(
+     // Backtracking path capacities.
+     // Segments up to this size use the O(n) backtracking algorithm.
+     // Larger segments fall back to the O(n log L) window+heap path.
+-    // Capped at 4095 so the bitfield (ceil_div(4096, 64) = 64 words) fits in
+-    // a single uint64_t dirty mask for O(1) amortized per-segment init.
++    // Capped at 32768 to keep exact backtracking state bounded while covering
++    // large normalized prompts that still need HuggingFace-compatible
++    // suffix/prefix merge validation.
+     iree_host_size_t min_backtrack = 0;
+     if (!iree_host_size_checked_mul(16, model->max_token_length,
+                                     &min_backtrack)) {
+       // Overflow implies very large token length; clamp to maximum.
+-      min_backtrack = 4095;
++      min_backtrack = 32768;
+     }
+-    if (min_backtrack < 2048) min_backtrack = 2048;
+-    if (min_backtrack > 4095) min_backtrack = 4095;
++    if (min_backtrack < 32768) min_backtrack = 32768;
++    if (min_backtrack > 32768) min_backtrack = 32768;
+     model->max_backtrack_segment_bytes = min_backtrack;
+     // Stack holds at most one token per byte (worst case: all single-byte
+     // tokens).
+@@ -311,6 +312,7 @@ static void iree_tokenizer_bpe_model_destroy(
+   iree_tokenizer_vocab_trie_free(model->trie);
+   iree_tokenizer_vocab_merge_hash_free(model->merge_hash);
+   iree_allocator_free(allocator, model->backtrack_tables.slab);
++  iree_allocator_free(allocator, model->backtrack_tables.alternate_suffix_slab);
+   iree_allocator_free(allocator, model);
+ 
+   IREE_TRACE_ZONE_END(z0);
+diff --git a/runtime/src/iree/tokenizer/model/bpe_backtrack.c b/runtime/src/iree/tokenizer/model/bpe_backtrack.c
+index 7f2cab797c..02b272838f 100644
+--- a/runtime/src/iree/tokenizer/model/bpe_backtrack.c
++++ b/runtime/src/iree/tokenizer/model/bpe_backtrack.c
+@@ -81,10 +81,9 @@ typedef struct iree_tokenizer_bpe_validation_frame_t {
+ static bool iree_tokenizer_bpe_is_valid_token_pair(
+     const iree_tokenizer_bpe_model_t* model, uint32_t token1, uint32_t token2,
+     uint32_t deferred_merge_rank) {
+-  const iree_tokenizer_vocab_t* vocab = model->vocab;
+-  const uint32_t* effective_rank = model->backtrack_tables.effective_rank;
+   const iree_tokenizer_bpe_split_entry_t* split_table =
+       model->backtrack_tables.split_table;
++  const iree_tokenizer_vocab_t* vocab = model->vocab;
+ 
+   iree_tokenizer_bpe_validation_frame_t
+       stack[IREE_TOKENIZER_BPE_PAIR_VALIDATION_STACK_CAPACITY];
+@@ -111,7 +110,7 @@ static bool iree_tokenizer_bpe_is_valid_token_pair(
+                                                  (int32_t)frame->token1,
+                                                  (int32_t)frame->token2);
+       if (merge.result_id >= 0) {
+-        uint32_t combined_rank = effective_rank[(uint32_t)merge.result_id];
++        uint32_t combined_rank = merge.rank + 1;
+         // A merge is invalid if it should have fired (rank < limit) UNLESS
+         // it was intentionally deferred for a better suffix merge. When
+         // suffix_blocked triggers, it reports the rank of the blocked token;
+@@ -140,7 +139,8 @@ static bool iree_tokenizer_bpe_is_valid_token_pair(
+       // Need to split at least one token. Determine order based on rank.
+       // Higher-ranked tokens (formed later in BPE) are split first.
+       bool try_token1_first =
+-          effective_rank[frame->token1] > effective_rank[frame->token2];
++          iree_tokenizer_bpe_token_formation_rank(model, frame->token1) >
++          iree_tokenizer_bpe_token_formation_rank(model, frame->token2);
+ 
+       if (try_token1_first) {
+         frame->side =
+@@ -172,16 +172,26 @@ static bool iree_tokenizer_bpe_is_valid_token_pair(
+       if (split.left_id != decompose_token) {
+         // Non-base token: split_table provides (left_id, right_id) directly.
+         // By construction, merge(left_id, right_id) == decompose_token.
++        uint32_t decomposition_rank =
++            iree_tokenizer_bpe_token_formation_rank(model, decompose_token);
++        iree_tokenizer_merge_hash_result_t split_merge =
++            iree_tokenizer_vocab_merge_hash_lookup(
++                model->merge_hash, (int32_t)split.left_id,
++                (int32_t)split.right_id);
++        if (split_merge.result_id == (int32_t)decompose_token) {
++          decomposition_rank = split_merge.rank + 1;
++        }
++
+         uint32_t new_limit;
+         uint32_t new_token1, new_token2;
+         if (frame->side == 1) {
+           new_token1 = split.right_id;
+           new_token2 = frame->token2;
+-          new_limit = effective_rank[frame->token1];
++          new_limit = decomposition_rank;
+         } else {
+           new_token1 = frame->token1;
+           new_token2 = split.left_id;
+-          new_limit = effective_rank[frame->token2] + 1;
++          new_limit = decomposition_rank + 1;
+         }
+ 
+         if (stack_count < IREE_TOKENIZER_BPE_PAIR_VALIDATION_STACK_CAPACITY) {
+@@ -243,16 +253,17 @@ static bool iree_tokenizer_bpe_is_valid_token_pair(
+         if (merge.result_id != (int32_t)decompose_token) continue;
+ 
+         // Valid decomposition found. Compute new limit and push child frame.
++        uint32_t decomposition_rank = merge.rank + 1;
+         uint32_t new_limit;
+         uint32_t new_token1, new_token2;
+         if (frame->side == 1) {
+           new_token1 = (uint32_t)right_id;
+           new_token2 = frame->token2;
+-          new_limit = effective_rank[frame->token1];
++          new_limit = decomposition_rank;
+         } else {
+           new_token1 = frame->token1;
+           new_token2 = (uint32_t)left_id;
+-          new_limit = effective_rank[frame->token2] + 1;
++          new_limit = decomposition_rank + 1;
+         }
+ 
+         // Save resume position for backtracking.
+@@ -381,160 +392,202 @@ static int32_t iree_tokenizer_bpe_find_first_token_at(
+ static int32_t iree_tokenizer_bpe_token_at_position(
+     const iree_tokenizer_bpe_model_t* model, const uint8_t* data,
+     iree_host_size_t size, iree_host_size_t* out_length) {
+-  int32_t token = iree_tokenizer_bpe_single_char_token(model, data[0]);
+-  if (token >= 0) {
+-    if (out_length) *out_length = 1;
+-    return token;
++  return iree_tokenizer_bpe_base_token_at_position(model, data, size,
++                                                   out_length);
++}
++
++static bool iree_tokenizer_bpe_is_suffix_blocked(
++    const iree_tokenizer_bpe_model_t* model, int32_t token,
++    const uint8_t* remaining_data, iree_host_size_t remaining_size,
++    const char* suffix_data, iree_host_size_t suffix_length,
++    uint32_t* out_blocking_rank);
++static bool iree_tokenizer_bpe_is_suffix_blocked_impl(
++    const iree_tokenizer_bpe_model_t* model, int32_t token,
++    const uint8_t* remaining_data, iree_host_size_t remaining_size,
++    const char* suffix_data, iree_host_size_t suffix_length,
++    uint32_t* out_blocking_rank, int depth);
++
++// Recursive implementation for iree_tokenizer_bpe_is_token_consumed_rightward.
++//
++// |ready_rank_plus_one| tracks when the right compound is available. Base
++// tokens are available at rank 0; a compound built by an internal merge at
++// rank N is available starting at N+1, so an outer merge at rank R can use it
++// iff ready_rank_plus_one <= R.
++static bool iree_tokenizer_bpe_is_token_consumed_rightward_impl(
++    const iree_tokenizer_bpe_model_t* model, int32_t token,
++    const uint8_t* remaining_data, iree_host_size_t remaining_size,
++    iree_host_size_t token_end, uint32_t max_rank, int depth) {
++  if (token_end >= remaining_size) return false;
++  if (depth >= 8) return false;
++
++  const iree_tokenizer_bpe_split_entry_t* split_table =
++      model->backtrack_tables.split_table;
++  const bool byte_level =
++      iree_all_bits_set(model->flags, IREE_TOKENIZER_BPE_FLAG_BYTE_LEVEL_INPUT);
++
++  iree_tokenizer_trie_cursor_t cursor;
++  iree_tokenizer_trie_cursor_reset(&cursor, model->trie);
++
++  for (iree_host_size_t i = token_end; i < remaining_size; ++i) {
++    if (!iree_tokenizer_bpe_trie_advance_byte(&cursor, remaining_data[i],
++                                              byte_level)) {
++      break;
++    }
++
++    int32_t compound_token = iree_tokenizer_trie_cursor_token_id(&cursor);
++    if (compound_token < 0) continue;
++
++    iree_host_size_t compound_end = i + 1;
++    iree_tokenizer_merge_hash_result_t merge =
++        iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, token,
++                                               compound_token);
++    if (!iree_tokenizer_merge_hash_result_is_valid(merge) ||
++        merge.rank >= max_rank) {
++      continue;
++    }
++
++    uint32_t compound = (uint32_t)compound_token;
++    bool compound_is_base = split_table[compound].left_id == compound;
++    uint32_t compound_ready_rank =
++        iree_tokenizer_bpe_token_formation_rank(model, compound);
++    if (compound_ready_rank > merge.rank) continue;
++    if (!compound_is_base &&
++        !iree_tokenizer_bpe_is_first_token_reachable(model, compound)) {
++      continue;
++    }
++
++    if (!compound_is_base && compound_end < remaining_size) {
++      uint32_t rightmost_base =
++          iree_tokenizer_bpe_rightmost_base_token(model, compound);
++      uint32_t right_consumed =
++          iree_tokenizer_bpe_right_boundary_consumed_rank(model, compound);
++      if (right_consumed > 0 &&
++          iree_tokenizer_bpe_is_token_consumed_rightward_impl(
++              model, (int32_t)rightmost_base, remaining_data, remaining_size,
++              compound_end, right_consumed - 1, depth + 1)) {
++        continue;
++      }
++    }
++
++    uint32_t result_token = (uint32_t)merge.result_id;
++    if (compound_end < remaining_size && depth < 4) {
++      uint32_t blocking_rank = 0;
++      if (iree_tokenizer_bpe_is_suffix_blocked_impl(
++              model, (int32_t)result_token, remaining_data + compound_end,
++              remaining_size - compound_end, NULL, 0, &blocking_rank,
++              depth + 1)) {
++        continue;
++      }
++    }
++
++    // merge(token, compound) would consume token if the compound is not itself
++    // consumed to the right before that merge rank.
++    if (!iree_tokenizer_bpe_is_token_consumed_rightward_impl(
++            model, compound_token, remaining_data, remaining_size, compound_end,
++            merge.rank, depth + 1)) {
++      return true;
++    }
+   }
+-  return iree_tokenizer_bpe_find_first_token_at(model, data, size, 8,
+-                                                out_length);
++  return false;
+ }
+ 
+ // Checks whether a token at a given position is consumed by a rightward merge
+ // at rank lower than |max_rank|. This means merge(token, following) exists and
+ // fires before any merge at |max_rank| would.
+ //
+-// To verify the rightward merge actually fires, also checks that the following
+-// token isn't itself consumed by an even lower-rank merge. This handles chains
+-// like: merge(c,h) would consume c, but merge(h,X) at lower rank consumes h
+-// first — so merge(c,h) can't fire and c survives.
++// The following token may itself be a compound formed by lower-rank rightward
++// merges (for example t+ry after r+y has formed). This bounded search mirrors
++// the short compound lookahead used by suffix-blocking preemption.
+ static bool iree_tokenizer_bpe_is_token_consumed_rightward(
+     const iree_tokenizer_bpe_model_t* model, int32_t token,
+     const uint8_t* remaining_data, iree_host_size_t remaining_size,
+     iree_host_size_t token_end, uint32_t max_rank) {
+-  if (token_end >= remaining_size) return false;
+-  iree_host_size_t following_length = 1;
+-  int32_t following_token = iree_tokenizer_bpe_token_at_position(
+-      model, remaining_data + token_end, remaining_size - token_end,
+-      &following_length);
+-  if (following_token < 0) return false;
+-
+-  iree_tokenizer_merge_hash_result_t merge =
+-      iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, token,
+-                                             following_token);
+-  if (!iree_tokenizer_merge_hash_result_is_valid(merge) ||
+-      merge.rank >= max_rank) {
+-    return false;
+-  }
+-
+-  // merge(token, following) would fire. Verify following is available: if
+-  // merge(following, next_after) fires at even lower rank, following is
+-  // consumed and merge(token, following) can't fire.
+-  iree_host_size_t next_after_end = token_end + following_length;
+-  if (next_after_end < remaining_size) {
+-    int32_t next_after_token = iree_tokenizer_bpe_token_at_position(
+-        model, remaining_data + next_after_end, remaining_size - next_after_end,
+-        NULL);
+-    if (next_after_token >= 0) {
+-      iree_tokenizer_merge_hash_result_t following_merge =
+-          iree_tokenizer_vocab_merge_hash_lookup(
+-              model->merge_hash, following_token, next_after_token);
+-      if (iree_tokenizer_merge_hash_result_is_valid(following_merge) &&
+-          following_merge.rank < merge.rank) {
+-        return false;  // Following consumed first, token survives.
+-      }
+-    }
+-  }
+-  return true;
++  return iree_tokenizer_bpe_is_token_consumed_rightward_impl(
++      model, token, remaining_data, remaining_size, token_end, max_rank, 0);
+ }
+ 
+ // Checks if a suffix merge is preempted by lower-rank merges in the following
+ // input. Returns true if the suffix merge would NOT actually fire because the
+ // prefix token would be consumed first.
+ //
+-// Two preemption paths:
+-//   Direct: merge(prefix, next) at rank < suffix_merge_rank, where the next
+-//     token is available (not consumed by a lower-rank rightward merge).
+-//   Compound: merge(prefix, compound) where compound is built by progressively
+-//     merging characters: next+third->c1, c1+fourth->c2, etc. This handles
+-//     cases where the direct merge can't fire but the prefix is still consumed
+-//     via a deeper compound (e.g., merge(l, ish) when i+s fires first).
+-//
+-// For non-byte-level tokenizers (e.g., SentencePiece), uses trie lookup to find
+-// tokens when single-char lookup fails. This handles multi-byte base tokens
+-// like metaspace (E2 96 81).
++// This delegates to the same bounded rightward-consumption search used to
++// validate prefix availability. That search handles direct and compound merges
++// while checking that each compound component is actually available at the rank
++// where it would be used.
+ static bool iree_tokenizer_bpe_is_suffix_merge_preempted(
+     const iree_tokenizer_bpe_model_t* model, int32_t prefix_token,
+     uint32_t suffix_merge_rank, const uint8_t* remaining_data,
+     iree_host_size_t remaining_size, iree_host_size_t prefix_end) {
+-  if (prefix_end >= remaining_size) return false;
+-
+-  iree_host_size_t next_length = 1;
+-  int32_t next_token = iree_tokenizer_bpe_token_at_position(
+-      model, remaining_data + prefix_end, remaining_size - prefix_end,
+-      &next_length);
+-  if (next_token < 0) return false;
+-
+-  // Direct preemption: merge(prefix, next) at rank < suffix_merge_rank.
+-  // Only valid if next is actually available (not consumed rightward).
+-  iree_tokenizer_merge_hash_result_t prefix_next =
+-      iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, prefix_token,
+-                                             next_token);
+-  if (iree_tokenizer_merge_hash_result_is_valid(prefix_next) &&
+-      prefix_next.rank < suffix_merge_rank) {
+-    if (!iree_tokenizer_bpe_is_token_consumed_rightward(
+-            model, next_token, remaining_data, remaining_size,
+-            prefix_end + next_length, prefix_next.rank)) {
++  return iree_tokenizer_bpe_is_token_consumed_rightward(
++      model, prefix_token, remaining_data, remaining_size, prefix_end,
++      suffix_merge_rank);
++}
++
++static bool iree_tokenizer_bpe_suffix_already_collected(
++    const uint32_t* suffixes, const uint32_t* suffix_consumed_at,
++    iree_host_size_t suffix_count, uint32_t suffix, uint32_t consumed_at) {
++  for (iree_host_size_t i = 0; i < suffix_count; ++i) {
++    if (suffixes[i] == suffix && suffix_consumed_at[i] == consumed_at) {
+       return true;
+     }
+   }
++  return false;
++}
+ 
+-  // Compound preemption: build progressively longer compounds from the
+-  // characters following the prefix, checking merge(prefix, compound) at each
+-  // step. This catches cases where the direct merge can't fire but the prefix
+-  // merges with a multi-character compound that forms at lower rank.
+-  //
+-  // Example (Whisper "establish"):
+-  //   prefix=l, next=i, merge(l,i) can't fire (i consumed by i+s at rank 15)
+-  //   compound: i+s->is (rank 15), is+h->ish (rank 486)
+-  //   merge(l, ish) at rank 1677 < suffix_merge_rank -> preempted
+-  iree_host_size_t compound_end = prefix_end + next_length;
+-  iree_host_size_t extension_length = 1;
+-  int32_t extension_token = -1;
+-  if (compound_end < remaining_size) {
+-    extension_token = iree_tokenizer_bpe_token_at_position(
+-        model, remaining_data + compound_end, remaining_size - compound_end,
+-        &extension_length);
+-  }
+-  if (extension_token < 0) return false;
++static void iree_tokenizer_bpe_collect_reachable_suffixes(
++    const iree_tokenizer_bpe_model_t* model, uint32_t token,
++    uint32_t* suffixes, uint32_t* suffix_consumed_at,
++    iree_host_size_t* suffix_count, iree_host_size_t suffix_capacity,
++    int depth) {
++  if (*suffix_count >= suffix_capacity || depth >= 16) return;
+ 
+-  iree_tokenizer_merge_hash_result_t compound_merge =
+-      iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, next_token,
+-                                             extension_token);
+-  if (!iree_tokenizer_merge_hash_result_is_valid(compound_merge) ||
+-      compound_merge.rank >= suffix_merge_rank) {
+-    return false;
+-  }
++  const iree_tokenizer_vocab_t* vocab = model->vocab;
++  const iree_tokenizer_bpe_split_entry_t* split_table =
++      model->backtrack_tables.split_table;
+ 
+-  // Build the compound progressively, checking at each level.
+-  int32_t compound_token = compound_merge.result_id;
+-  compound_end += extension_length;
+-  for (int depth = 0; depth < 4; ++depth) {
+-    iree_tokenizer_merge_hash_result_t prefix_compound =
+-        iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, prefix_token,
+-                                               compound_token);
+-    if (iree_tokenizer_merge_hash_result_is_valid(prefix_compound) &&
+-        prefix_compound.rank < suffix_merge_rank) {
+-      return true;
++  if (split_table[token].left_id == token) return;  // Base token.
++
++  iree_string_view_t token_text =
++      iree_tokenizer_vocab_token_text(vocab, (int32_t)token);
++
++  for (iree_host_size_t split_pos = 1;
++       split_pos < token_text.size && *suffix_count < suffix_capacity;
++       ++split_pos) {
++    iree_string_view_t left_text =
++        iree_make_string_view(token_text.data, split_pos);
++    iree_string_view_t right_text = iree_make_string_view(
++        token_text.data + split_pos, token_text.size - split_pos);
++
++    int32_t left_id = iree_tokenizer_vocab_lookup(vocab, left_text);
++    int32_t right_id = iree_tokenizer_vocab_lookup(vocab, right_text);
++    if (left_id < 0 || right_id < 0) continue;
++
++    iree_tokenizer_merge_hash_result_t merge =
++        iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, left_id,
++                                               right_id);
++    if (merge.result_id != (int32_t)token) continue;
++
++    if (!iree_tokenizer_bpe_is_decomposition_reachable(
++            model, (uint32_t)left_id, (uint32_t)right_id, token)) {
++      continue;
+     }
+ 
+-    // Extend compound by one more character.
+-    if (compound_end >= remaining_size) break;
+-    extension_token = iree_tokenizer_bpe_token_at_position(
+-        model, remaining_data + compound_end, remaining_size - compound_end,
+-        &extension_length);
+-    if (extension_token < 0) break;
+-
+-    compound_merge = iree_tokenizer_vocab_merge_hash_lookup(
+-        model->merge_hash, compound_token, extension_token);
+-    if (!iree_tokenizer_merge_hash_result_is_valid(compound_merge) ||
+-        compound_merge.rank >= suffix_merge_rank) {
+-      break;
++    uint32_t consumed_at = merge.rank + 1;
++    if (!iree_tokenizer_bpe_suffix_already_collected(
++            suffixes, suffix_consumed_at, *suffix_count, (uint32_t)right_id,
++            consumed_at)) {
++      suffixes[*suffix_count] = (uint32_t)right_id;
++      suffix_consumed_at[*suffix_count] = consumed_at;
++      ++*suffix_count;
+     }
+-    compound_token = compound_merge.result_id;
+-    compound_end += extension_length;
++
++    // Walk deeper suffixes of the right child. This generalizes the old
++    // rightmost split_table walk to alternate reachable decompositions, e.g.
++    // recon can split as rec+on or re+con and both suffixes can matter.
++    iree_tokenizer_bpe_collect_reachable_suffixes(
++        model, (uint32_t)right_id, suffixes, suffix_consumed_at, suffix_count,
++        suffix_capacity, depth + 1);
+   }
+-  return false;
+ }
+ 
+ // Checks if a candidate token is "suffix-blocked" - meaning a proper suffix of
+@@ -566,21 +619,25 @@ static bool iree_tokenizer_bpe_is_suffix_merge_preempted(
+ // This allows pair validation to accept pairs whose merge rank >=
+ // blocking_rank, since those merges were intentionally deferred for better
+ // suffix merges.
+-static bool iree_tokenizer_bpe_is_suffix_blocked(
++static bool iree_tokenizer_bpe_is_suffix_blocked_impl(
+     const iree_tokenizer_bpe_model_t* model, int32_t token,
+     const uint8_t* remaining_data, iree_host_size_t remaining_size,
+     const char* suffix_data, iree_host_size_t suffix_length,
+-    uint32_t* out_blocking_rank) {
++    uint32_t* out_blocking_rank, int depth) {
+   *out_blocking_rank = 0;
++  if (depth >= 8) return false;
+   if (remaining_size == 0 && suffix_length == 0) return false;
+ 
+   const iree_tokenizer_bpe_split_entry_t* split_table =
+       model->backtrack_tables.split_table;
+-  const uint32_t* effective_rank = model->backtrack_tables.effective_rank;
++  const uint64_t* token_has_reachable_alternates =
++      model->backtrack_tables.token_has_reachable_alternates;
++  const iree_tokenizer_vocab_t* vocab = model->vocab;
+   const bool byte_level =
+       iree_all_bits_set(model->flags, IREE_TOKENIZER_BPE_FLAG_BYTE_LEVEL_INPUT);
+ 
+-  uint32_t token_rank = effective_rank[(uint32_t)token];
++  uint32_t token_rank =
++      iree_tokenizer_bpe_token_formation_rank(model, (uint32_t)token);
+   if (token_rank <= 1) return false;  // Base token, no suffix to check.
+ 
+   // Collect all rightmost suffixes with their consumption ranks.
+@@ -601,29 +658,64 @@ static bool iree_tokenizer_bpe_is_suffix_blocked(
+   uint32_t suffix_consumed_at[32];
+   iree_host_size_t suffix_count = 0;
+ 
++  bool needs_alternate_suffixes = false;
+   for (uint32_t current = (uint32_t)token;
+-       suffix_count < 32 && split_table[current].left_id != current;
++       suffix_count < IREE_ARRAYSIZE(suffixes) &&
++       split_table[current].left_id != current;
+        current = split_table[current].right_id) {
+-    // Check if this decomposition is actually reachable via BPE. If the
+-    // split_table decomposition is blocked by a boundary merge, skip this
+-    // suffix - it won't exist in the actual BPE token sequence.
++    if (iree_any_bit_set(token_has_reachable_alternates[current / 64],
++                         1ull << (current % 64))) {
++      needs_alternate_suffixes = true;
++      break;
++    }
+     uint32_t left = split_table[current].left_id;
+     uint32_t right = split_table[current].right_id;
+     bool reachable = iree_tokenizer_bpe_is_decomposition_reachable(
+         model, left, right, current);
+     if (!reachable) {
+-      // This decomposition is blocked. The actual BPE path uses a different
+-      // decomposition, so we can't rely on this suffix chain. Stop collecting
+-      // suffixes here - the actual suffixes depend on the alternate path which
+-      // we don't have easy access to.
++      needs_alternate_suffixes = true;
+       break;
+     }
+     suffixes[suffix_count] = right;
+-    suffix_consumed_at[suffix_count] = effective_rank[current];
++    suffix_consumed_at[suffix_count] =
++        iree_tokenizer_bpe_token_formation_rank(model, current);
+     suffix_count++;
++    iree_tokenizer_bpe_collect_reachable_suffixes(
++        model, right, suffixes, suffix_consumed_at, &suffix_count,
++        IREE_ARRAYSIZE(suffixes), 0);
++  }
++  if (needs_alternate_suffixes) {
++    suffix_count = 0;
++    if (model->backtrack_tables.alternate_suffix_offsets) {
++      uint32_t token_id = (uint32_t)token;
++      uint32_t start =
++          model->backtrack_tables.alternate_suffix_offsets[token_id];
++      uint32_t end =
++          model->backtrack_tables.alternate_suffix_offsets[token_id + 1];
++      for (uint32_t i = start;
++           i < end && suffix_count < IREE_ARRAYSIZE(suffixes); ++i) {
++        suffixes[suffix_count] =
++            model->backtrack_tables.alternate_suffixes[i];
++        suffix_consumed_at[suffix_count] =
++            model->backtrack_tables.alternate_suffix_consumed_at[i];
++        ++suffix_count;
++      }
++      iree_host_size_t loaded_suffix_count = suffix_count;
++      for (iree_host_size_t i = 0; i < loaded_suffix_count; ++i) {
++        iree_tokenizer_bpe_collect_reachable_suffixes(
++            model, suffixes[i], suffixes, suffix_consumed_at, &suffix_count,
++            IREE_ARRAYSIZE(suffixes), 0);
++      }
++    } else {
++      iree_tokenizer_bpe_collect_reachable_suffixes(
++          model, (uint32_t)token, suffixes, suffix_consumed_at, &suffix_count,
++          IREE_ARRAYSIZE(suffixes), 0);
++    }
++  } else {
++    IREE_ASSERT(suffix_count < IREE_ARRAYSIZE(suffixes),
++                "suffix chain depth exceeds capacity");
+   }
+-  IREE_ASSERT(suffix_count < IREE_ARRAYSIZE(suffixes),
+-              "suffix chain depth exceeds capacity");
++
+   if (suffix_count == 0) return false;
+ 
+   // Walk the trie to enumerate all prefix tokens of the remaining input.
+@@ -652,18 +744,33 @@ static bool iree_tokenizer_bpe_is_suffix_blocked(
+ 
+       // Skip if merge rank is too high to matter.
+       uint32_t merge_effective_rank = merge.rank + 1;
++      uint32_t suffix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model, suffixes[s]);
++      uint32_t prefix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model,
++                                                  (uint32_t)prefix_token);
++      if (merge_effective_rank < suffix_available_at) continue;
++      if (merge_effective_rank < prefix_available_at) continue;
+       if (merge_effective_rank >= token_rank) continue;
+ 
+       // Skip if the suffix is consumed before this merge could fire.
+       if (merge_effective_rank >= suffix_consumed_at[s]) continue;
+ 
+-      // Skip when suffix == prefix (repeating pattern case).
+-      // When the suffix token equals the prefix token, we have a repeating
+-      // pattern like consecutive metaspaces. In this case, any shorter token
+-      // would also face suffix blocking by the same pattern, creating an
+-      // infinite loop. The suffix blocking optimization doesn't help here
+-      // because there's no "better" tokenization to defer to.
+-      if ((int32_t)suffixes[s] == prefix_token) continue;
++      // If the prefix token would itself be split to enable a better suffix
++      // merge with following bytes, it is not available for this boundary
++      // merge. This handles chains such as ge|uffer|t where b+uffer would
++      // form "buffer" before ge+b, except "uffer" is blocked by er+t.
++      if (i + 1 < remaining_size && depth < 7 &&
++          iree_tokenizer_bpe_token_formation_rank(
++              model, (uint32_t)prefix_token) > 1) {
++        uint32_t prefix_blocking_rank = 0;
++        if (iree_tokenizer_bpe_is_suffix_blocked_impl(
++                model, prefix_token, remaining_data + i + 1,
++                remaining_size - (i + 1), NULL, 0, &prefix_blocking_rank,
++                depth + 1)) {
++          continue;
++        }
++      }
+ 
+       // Check if the prefix would be consumed by lower-rank merges first.
+       if (iree_tokenizer_bpe_is_suffix_merge_preempted(
+@@ -678,7 +785,8 @@ static bool iree_tokenizer_bpe_is_suffix_blocked(
+       // the rightmost base of the prefix merges with the following
+       // character at a rank lower than the prefix's internal consumption
+       // of that base, the prefix cannot form here.
+-      if (effective_rank[(uint32_t)prefix_token] > 1 &&
++      if (iree_tokenizer_bpe_token_formation_rank(
++              model, (uint32_t)prefix_token) > 1 &&
+           i + 1 < remaining_size) {
+         uint32_t rightmost_base = iree_tokenizer_bpe_rightmost_base_token(
+             model, (uint32_t)prefix_token);
+@@ -725,14 +833,18 @@ static bool iree_tokenizer_bpe_is_suffix_blocked(
+ 
+       // Skip if merge rank is too high to matter.
+       uint32_t merge_effective_rank = merge.rank + 1;
++      uint32_t suffix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model, suffixes[s]);
++      uint32_t prefix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model,
++                                                  (uint32_t)prefix_token);
++      if (merge_effective_rank < suffix_available_at) continue;
++      if (merge_effective_rank < prefix_available_at) continue;
+       if (merge_effective_rank >= token_rank) continue;
+ 
+       // Skip if the token suffix is consumed before this merge could fire.
+       if (merge_effective_rank >= suffix_consumed_at[s]) continue;
+ 
+-      // Skip when suffix == prefix (repeating pattern case).
+-      if ((int32_t)suffixes[s] == prefix_token) continue;
+-
+       // Suffixed tokens consume all remaining input + suffix bytes, so no
+       // preemption check is needed. The prefix_token represents the complete
+       // remaining segment (remaining_data + partial suffix) and nothing
+@@ -745,6 +857,16 @@ static bool iree_tokenizer_bpe_is_suffix_blocked(
+   return false;
+ }
+ 
++static bool iree_tokenizer_bpe_is_suffix_blocked(
++    const iree_tokenizer_bpe_model_t* model, int32_t token,
++    const uint8_t* remaining_data, iree_host_size_t remaining_size,
++    const char* suffix_data, iree_host_size_t suffix_length,
++    uint32_t* out_blocking_rank) {
++  return iree_tokenizer_bpe_is_suffix_blocked_impl(
++      model, token, remaining_data, remaining_size, suffix_data, suffix_length,
++      out_blocking_rank, 0);
++}
++
+ //===----------------------------------------------------------------------===//
+ // BPE Backtracking: Core Algorithm
+ //===----------------------------------------------------------------------===//
+@@ -774,18 +896,11 @@ void iree_tokenizer_bpe_backtrack_encode(
+       iree_tokenizer_bpe_state_pair_cache(state, model);
+   const uint32_t pair_cache_mask = (uint32_t)(model->pair_cache_capacity - 1);
+ 
+-  // Reset only the bitfield words dirtied by the previous segment's
+-  // backtracking. On the first call, dirty_mask is pre-set to all-ones by
+-  // state_initialize, so this performs the equivalent of a full init.
+-  // On subsequent calls with no backtracking, dirty_mask is 0 and this
+-  // loop body executes zero times.
+-  uint64_t dirty = state->backtrack.dirty_mask;
+-  while (dirty) {
+-    iree_host_size_t word_index =
+-        (iree_host_size_t)iree_math_count_trailing_zeros_u64(dirty);
+-    bitfield[word_index] = UINT64_MAX;
+-    dirty &= dirty - 1;  // Clear lowest set bit.
+-  }
++  // Reset the reachability bitfield for this segment. The exact backtracking
++  // path supports more than 64 bitfield words, so a single dirty mask is not
++  // expressive enough.
++  memset(bitfield, 0xFF,
++         model->backtrack_bitfield_capacity * sizeof(uint64_t));
+   state->backtrack.dirty_mask = 0;
+ 
+   iree_host_size_t stack_count = 0;
+@@ -984,7 +1099,8 @@ void iree_tokenizer_bpe_backtrack_encode(
+       // fires first, blocking the path to "hello" as a single token.
+       bool token_unreachable =
+           token_raw_length > 1 &&
+-          model->backtrack_tables.effective_rank[(uint32_t)token] > 1 &&
++          iree_tokenizer_bpe_token_formation_rank(model, (uint32_t)token) >
++              1 &&
+           !iree_any_bit_set(
+               model->backtrack_tables.token_reachable[(uint32_t)token / 64],
+               1ull << ((uint32_t)token % 64));
+diff --git a/runtime/src/iree/tokenizer/model/bpe_encode.c b/runtime/src/iree/tokenizer/model/bpe_encode.c
+index bf140ae97c..4fa090026f 100644
+--- a/runtime/src/iree/tokenizer/model/bpe_encode.c
++++ b/runtime/src/iree/tokenizer/model/bpe_encode.c
+@@ -280,39 +280,29 @@ static iree_status_t iree_tokenizer_bpe_encode_segment(
+          byte_position < segment.size; ++byte_position) {
+       uint8_t input_byte = (uint8_t)segment.data[byte_position];
+ 
+-      // Look up single-byte token. For ByteLevel mode, this is the UTF-8
+-      // encoding of the ByteLevel codepoint (e.g., space -> "Ġ").
+-      int32_t token_id = model->byte_to_token[input_byte];
++      // Seed with the shortest base vocabulary token. Some base symbols (for
++      // example SentencePiece's U+2581 metaspace) span multiple UTF-8 bytes,
++      // and byte-fallback vocabularies may also have tokens for each raw byte.
++      // The BPE heap must start from the base symbol, not the byte fallback.
+       iree_host_size_t token_byte_length = 1;
++      int32_t token_id = iree_tokenizer_bpe_base_token_at_position(
++          model, (const uint8_t*)segment.data + byte_position,
++          segment.size - byte_position, &token_byte_length);
+       if (token_id < 0) {
+-        // No direct single-byte token. Try a multi-byte trie match first:
+-        // some base vocabulary tokens (e.g., SentencePiece's ▁ = U+2581,
+-        // 3 bytes) span multiple raw bytes but are never produced by a merge.
+-        // The trie walk finds the longest such token; effective_rank filtering
+-        // inside backtrack_longest_match ensures we only accept tokens that
+-        // participate in BPE (not stray added tokens).
+-        iree_host_size_t trie_raw_length = 0;
+-        iree_tokenizer_bpe_backtrack_longest_match(
+-            model, (const uint8_t*)segment.data + byte_position,
+-            segment.size - byte_position, &token_id, &trie_raw_length);
+-        if (token_id >= 0) {
+-          token_byte_length = trie_raw_length;
+-        } else {
+-          // No trie match. Fall back to byte-fallback (<0xNN>) or UNK.
+-          // For FUSE_UNK, check the last token in the window (not yet emitted)
+-          // before falling back to last_emitted_token_id.
+-          int32_t previous_token =
+-              (state->window.count > 0)
+-                  ? iree_tokenizer_bpe_window_at(state, model,
+-                                                 state->window.count - 1)
+-                        ->token_id
+-                  : state->last_emitted_token_id;
+-          token_id = iree_tokenizer_bpe_handle_unknown_byte(model, input_byte,
+-                                                            previous_token);
+-          if (token_id < 0) {
+-            // Byte was fused with previous UNK. Skip to next byte.
+-            continue;
+-          }
++        // No trie match. Fall back to byte-fallback (<0xNN>) or UNK. For
++        // FUSE_UNK, check the last token in the window (not yet emitted)
++        // before falling back to last_emitted_token_id.
++        int32_t previous_token =
++            (state->window.count > 0)
++                ? iree_tokenizer_bpe_window_at(state, model,
++                                               state->window.count - 1)
++                      ->token_id
++                : state->last_emitted_token_id;
++        token_id = iree_tokenizer_bpe_handle_unknown_byte(model, input_byte,
++                                                          previous_token);
++        if (token_id < 0) {
++          // Byte was fused with previous UNK. Skip to next byte.
++          continue;
+         }
+       }
+ 
+@@ -620,13 +610,14 @@ iree_host_size_t iree_tokenizer_bpe_state_reclaim(
+     window[index].end_byte -= (uint32_t)committed;
+   }
+ 
+-  // Adjust heap entry byte positions.
+-  // After BYTE_LOOP processes all segment bytes, apply_pending_merges has
+-  // drained most entries. Any remaining entries reference current window tokens
+-  // (left_start_byte >= committed). Stale entries that would underflow are
+-  // discarded by lazy invalidation when popped.
+-  for (iree_host_size_t i = 0; i < bpe_state->heap.size; ++i) {
+-    bpe_state->heap.entries[i].left_start_byte -= (uint32_t)committed;
++  // Rebuild heap entries for the rebased window. The heap can contain stale
++  // entries for tokens that were already emitted; subtracting |committed| from
++  // those would underflow their start byte and leave noisy stale entries. The
++  // window is bounded, so rebuilding is cheap and keeps all held-back merges
++  // visible after reclaim.
++  iree_tokenizer_bpe_heap_reset(&bpe_state->heap);
++  for (iree_host_size_t i = 0; i + 1 < bpe_state->window.count; ++i) {
++    iree_tokenizer_bpe_maybe_add_merge(bpe_state, model, i);
+   }
+ 
+   return committed;
+diff --git a/runtime/src/iree/tokenizer/model/bpe_internal.h b/runtime/src/iree/tokenizer/model/bpe_internal.h
+index 69546df3f0..4e9873e653 100644
+--- a/runtime/src/iree/tokenizer/model/bpe_internal.h
++++ b/runtime/src/iree/tokenizer/model/bpe_internal.h
+@@ -45,50 +45,42 @@ typedef struct iree_tokenizer_bpe_split_entry_t {
+   uint32_t right_id;
+ } iree_tokenizer_bpe_split_entry_t;
+ 
+-// Backtracking stack entry: token ID and the byte position where it starts.
+-// Bit-packed backtrack entry to maintain 8-byte size while supporting large
+-// vocabs. start_byte is bounded by max_backtrack_segment_bytes (<=4095), so
+-// we use 12 bits for it and 20 bits for deferred_merge_rank (supports 1M
+-// tokens, covering all realistic vocabularies).
+-#define IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_BITS 12
+-#define IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_MASK \
+-  ((1u << IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_BITS) - 1)
+-#define IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_BITS 20
++// Backtracking stack entry: token ID, byte start, and deferred merge rank.
++// Keep deferred_merge_rank as a full 19-bit value (Gemma-sized vocabularies
++// need it) and store start_byte separately so exact backtracking can cover
++// larger normalized segments without falling back to the approximate heap path.
++#define IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_BITS 19
+ #define IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_MAX \
+   ((1u << IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_BITS) - 1)
+ 
+ typedef struct iree_tokenizer_bpe_backtrack_entry_t {
+   int32_t token_id;
+-  // Packed field: lower 12 bits = start_byte, upper 20 bits = deferred_rank.
++  uint32_t start_byte;
+   // The deferred_merge_rank is the effective_rank that was active when this
+   // token was pushed. It tells pair validation at the next position which
+   // merges were intentionally deferred due to suffix blocking.
+-  uint32_t start_byte_and_deferred_rank;
++  uint32_t deferred_rank;
+ } iree_tokenizer_bpe_backtrack_entry_t;
+ 
+ static inline uint32_t iree_tokenizer_bpe_backtrack_entry_start_byte(
+     const iree_tokenizer_bpe_backtrack_entry_t* entry) {
+-  return entry->start_byte_and_deferred_rank &
+-         IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_MASK;
++  return entry->start_byte;
+ }
+ 
+ static inline uint32_t iree_tokenizer_bpe_backtrack_entry_deferred_rank(
+     const iree_tokenizer_bpe_backtrack_entry_t* entry) {
+-  return entry->start_byte_and_deferred_rank >>
+-         IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_BITS;
++  return entry->deferred_rank;
+ }
+ 
+ static inline void iree_tokenizer_bpe_backtrack_entry_set(
+     iree_tokenizer_bpe_backtrack_entry_t* entry, int32_t token_id,
+     uint32_t start_byte, uint32_t deferred_rank) {
+   entry->token_id = token_id;
+-  // Cap deferred_rank at 20-bit max (supports vocabs up to 1M tokens).
+   if (deferred_rank > IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_MAX) {
+     deferred_rank = IREE_TOKENIZER_BPE_BACKTRACK_DEFERRED_RANK_MAX;
+   }
+-  entry->start_byte_and_deferred_rank =
+-      (start_byte & IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_MASK) |
+-      (deferred_rank << IREE_TOKENIZER_BPE_BACKTRACK_START_BYTE_BITS);
++  entry->start_byte = start_byte;
++  entry->deferred_rank = deferred_rank;
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -101,11 +93,19 @@ static inline void iree_tokenizer_bpe_backtrack_entry_set(
+ typedef struct iree_tokenizer_bpe_backtrack_tables_t {
+   // Single allocation for all tables below.
+   void* slab;
++  void* alternate_suffix_slab;
+   iree_tokenizer_bpe_split_entry_t* split_table;  // Inverse merge table.
+   // Longest proper prefix token, or UINT32_MAX.
+   uint32_t* next_prefix_match;
+   uint32_t* effective_rank;   // 0 = non-participant, >0 = BPE-reachable.
+   uint64_t* token_reachable;  // Precomputed reachability bits.
++  // Tokens with more than one reachable decomposition. Suffix blocking must
++  // inspect alternate decompositions for these tokens instead of only walking
++  // split_table's right spine.
++  uint64_t* token_has_reachable_alternates;
++  uint32_t* alternate_suffix_offsets;  // vocab_capacity + 1 entries.
++  uint32_t* alternate_suffixes;
++  uint32_t* alternate_suffix_consumed_at;
+ } iree_tokenizer_bpe_backtrack_tables_t;
+ 
+ //===----------------------------------------------------------------------===//
+@@ -118,10 +118,9 @@ typedef struct iree_tokenizer_bpe_backtrack_state_t {
+   iree_host_size_t stack_count;  // Tokens in the stack.
+   // Next token to emit from stack.
+   iree_host_size_t emit_index;
+-  // Dirty mask for lazy bitfield reset. Each bit corresponds to a uint64_t
+-  // word in the backtrack bitfield that was modified (cleared) during the
+-  // previous segment's backtracking. On segment start, only these words are
+-  // reset to UINT64_MAX, giving O(backtracks) init instead of O(capacity).
++  // Retained for state layout compatibility with older code paths. The
++  // backtracking bitfield is reset as a whole at segment start because the
++  // exact path now supports more than 64 bitfield words.
+   uint64_t dirty_mask;
+ } iree_tokenizer_bpe_backtrack_state_t;
+ 
+@@ -210,6 +209,22 @@ typedef struct iree_tokenizer_bpe_model_t {
+   iree_host_size_t pair_cache_offset;
+ } iree_tokenizer_bpe_model_t;
+ 
++static inline uint32_t iree_tokenizer_bpe_token_formation_rank(
++    const iree_tokenizer_bpe_model_t* model, uint32_t token) {
++  iree_tokenizer_bpe_split_entry_t split =
++      model->backtrack_tables.split_table[token];
++  if (split.left_id == token) return 0;  // Base token.
++
++  iree_tokenizer_merge_hash_result_t merge =
++      iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash,
++                                             (int32_t)split.left_id,
++                                             (int32_t)split.right_id);
++  if (merge.result_id == (int32_t)token) {
++    return merge.rank + 1;
++  }
++  return model->backtrack_tables.effective_rank[token];
++}
++
+ //===----------------------------------------------------------------------===//
+ // Segment Context (State-Side)
+ //===----------------------------------------------------------------------===//
+@@ -589,9 +604,9 @@ static inline bool iree_tokenizer_bpe_bitfield_is_set(
+ 
+ static inline void iree_tokenizer_bpe_bitfield_clear(
+     uint64_t* bitfield, uint64_t* dirty_mask, iree_host_size_t position) {
++  (void)dirty_mask;
+   iree_host_size_t word_index = position / 64;
+   bitfield[word_index] &= ~((uint64_t)1 << (position % 64));
+-  *dirty_mask |= (uint64_t)1 << word_index;
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -679,6 +694,73 @@ iree_tokenizer_bpe_backtrack_longest_match(
+   }
+ }
+ 
++// Finds the shortest base vocabulary token matching raw input bytes at data[0].
++// BPE starts from base symbols and applies merge rules by rank. For
++// SentencePiece-style tokenizers, some base symbols (for example U+2581
++// metaspace) span multiple UTF-8 bytes and cannot be found through byte_to_token.
++// The window/heap path must seed those base symbols, not the longest reachable
++// merged token, otherwise rank-priority merges can be skipped.
++static inline int32_t iree_tokenizer_bpe_base_token_at_position(
++    const iree_tokenizer_bpe_model_t* model, const uint8_t* data,
++    iree_host_size_t size, iree_host_size_t* out_raw_length) {
++  if (size == 0) return -1;
++
++  int32_t byte_token = model->byte_to_token[data[0]];
++
++  const bool byte_level =
++      iree_all_bits_set(model->flags, IREE_TOKENIZER_BPE_FLAG_BYTE_LEVEL_INPUT);
++
++  iree_tokenizer_trie_cursor_t cursor;
++  iree_tokenizer_trie_cursor_reset(&cursor, model->trie);
++
++  int32_t fallback_base_token = -1;
++  iree_host_size_t fallback_base_length = 0;
++  for (iree_host_size_t raw_consumed = 0; raw_consumed < size;
++       ++raw_consumed) {
++    if (!iree_tokenizer_bpe_trie_advance_byte(&cursor, data[raw_consumed],
++                                              byte_level)) {
++      break;
++    }
++
++    int32_t token = iree_tokenizer_trie_cursor_token_id(&cursor);
++    if (token < 0) continue;
++
++    const uint32_t token_id = (uint32_t)token;
++    if (token_id >= model->vocab_capacity) continue;
++
++    iree_tokenizer_bpe_split_entry_t split =
++        model->backtrack_tables.split_table[token_id];
++    const bool is_base_token =
++        split.left_id == token_id && split.right_id == token_id;
++    const bool is_matchable =
++        model->backtrack_tables.effective_rank[token_id] > 0;
++    if (is_base_token && is_matchable) {
++      iree_string_view_t token_text =
++          iree_tokenizer_vocab_token_text(model->vocab, token);
++      if (raw_consumed == 0 && data[0] >= 0x80 && token_text.size == 1 &&
++          raw_consumed + 1 < size) {
++        fallback_base_token = token;
++        fallback_base_length = raw_consumed + 1;
++        continue;
++      }
++      if (out_raw_length) *out_raw_length = raw_consumed + 1;
++      return token;
++    }
++  }
++
++  if (fallback_base_token >= 0) {
++    if (out_raw_length) *out_raw_length = fallback_base_length;
++    return fallback_base_token;
++  }
++
++  if (byte_token >= 0) {
++    if (out_raw_length) *out_raw_length = 1;
++    return byte_token;
++  }
++
++  return -1;
++}
++
+ //===----------------------------------------------------------------------===//
+ // Table Construction (bpe_tables.c)
+ //===----------------------------------------------------------------------===//
+diff --git a/runtime/src/iree/tokenizer/model/bpe_tables.c b/runtime/src/iree/tokenizer/model/bpe_tables.c
+index c44021d3e1..480d7cc4e8 100644
+--- a/runtime/src/iree/tokenizer/model/bpe_tables.c
++++ b/runtime/src/iree/tokenizer/model/bpe_tables.c
+@@ -13,6 +13,28 @@
+ #include "iree/tokenizer/vocab/vocab_merge_hash.h"
+ #include "iree/tokenizer/vocab/vocab_trie.h"
+ 
++static bool iree_tokenizer_bpe_is_repeated_initial_symbol(
++    iree_string_view_t text) {
++  if (text.size < 2) return false;
++
++  bool all_newlines = true;
++  bool all_tabs = true;
++  for (iree_host_size_t i = 0; i < text.size; ++i) {
++    all_newlines &= text.data[i] == '\n';
++    all_tabs &= text.data[i] == '\t';
++  }
++  if (all_newlines || all_tabs) return true;
++
++  static const char kMetaspace[] = "\xE2\x96\x81";
++  if (text.size % (sizeof(kMetaspace) - 1) != 0) return false;
++  for (iree_host_size_t i = 0; i < text.size; i += sizeof(kMetaspace) - 1) {
++    if (memcmp(text.data + i, kMetaspace, sizeof(kMetaspace) - 1) != 0) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ //===----------------------------------------------------------------------===//
+ // BPE Backtracking: First Token Reachability
+ //===----------------------------------------------------------------------===//
+@@ -56,7 +78,6 @@ uint32_t iree_tokenizer_bpe_right_boundary_consumed_rank(
+     const iree_tokenizer_bpe_model_t* model, uint32_t token) {
+   const iree_tokenizer_bpe_split_entry_t* split_table =
+       model->backtrack_tables.split_table;
+-  const uint32_t* effective_rank = model->backtrack_tables.effective_rank;
+ 
+   // Walk down the right spine until we find where the rightmost base token
+   // is consumed (i.e., where the right child is a base token).
+@@ -64,7 +85,7 @@ uint32_t iree_tokenizer_bpe_right_boundary_consumed_rank(
+     uint32_t right = split_table[token].right_id;
+     if (split_table[right].left_id == right) {
+       // Right child is a base token - it's consumed at this token's merge.
+-      return effective_rank[token];
++      return iree_tokenizer_bpe_token_formation_rank(model, token);
+     }
+     // Recurse into right subtree.
+     token = right;
+@@ -81,7 +102,6 @@ static uint32_t iree_tokenizer_bpe_left_boundary_consumed_rank(
+     const iree_tokenizer_bpe_model_t* model, uint32_t token) {
+   const iree_tokenizer_bpe_split_entry_t* split_table =
+       model->backtrack_tables.split_table;
+-  const uint32_t* effective_rank = model->backtrack_tables.effective_rank;
+ 
+   // Walk down the left spine until we find where the leftmost base token
+   // is consumed (i.e., where the left child is a base token).
+@@ -89,7 +109,7 @@ static uint32_t iree_tokenizer_bpe_left_boundary_consumed_rank(
+     uint32_t left = split_table[token].left_id;
+     if (split_table[left].left_id == left) {
+       // Left child is a base token - it's consumed at this token's merge.
+-      return effective_rank[token];
++      return iree_tokenizer_bpe_token_formation_rank(model, token);
+     }
+     // Recurse into left subtree.
+     token = left;
+@@ -121,6 +141,67 @@ bool iree_tokenizer_bpe_is_first_token_reachable(
+                           1ull << (token % 64));
+ }
+ 
++static bool iree_tokenizer_bpe_decomposition_has_suffix_prefix_block(
++    const iree_tokenizer_bpe_model_t* model, uint32_t left, uint32_t right,
++    uint32_t token, uint32_t token_rank) {
++  const iree_tokenizer_bpe_split_entry_t* split_table =
++      model->backtrack_tables.split_table;
++
++  uint32_t suffixes[32];
++  uint32_t suffix_consumed_at[32];
++  iree_host_size_t suffix_count = 0;
++  for (uint32_t current = left;
++       suffix_count < IREE_ARRAYSIZE(suffixes) &&
++       split_table[current].left_id != current;
++       current = split_table[current].right_id) {
++    suffixes[suffix_count] = split_table[current].right_id;
++    suffix_consumed_at[suffix_count] =
++        iree_tokenizer_bpe_token_formation_rank(model, current);
++    suffix_count++;
++  }
++  if (suffix_count == 0) return false;
++
++  uint32_t prefixes[32];
++  uint32_t prefix_consumed_at[32];
++  iree_host_size_t prefix_count = 0;
++  prefixes[prefix_count] = right;
++  prefix_consumed_at[prefix_count] = UINT32_MAX;
++  ++prefix_count;
++  for (uint32_t current = right;
++       prefix_count < IREE_ARRAYSIZE(prefixes) &&
++       split_table[current].left_id != current;
++       current = split_table[current].left_id) {
++    prefixes[prefix_count] = split_table[current].left_id;
++    prefix_consumed_at[prefix_count] =
++        iree_tokenizer_bpe_token_formation_rank(model, current);
++    ++prefix_count;
++  }
++
++  for (iree_host_size_t p = 0; p < prefix_count; ++p) {
++    for (iree_host_size_t s = 0; s < suffix_count; ++s) {
++      iree_tokenizer_merge_hash_result_t merge =
++          iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash,
++                                                 (int32_t)suffixes[s],
++                                                 (int32_t)prefixes[p]);
++      if (!iree_tokenizer_merge_hash_result_is_valid(merge)) continue;
++      if ((uint32_t)merge.result_id == token) continue;
++
++      uint32_t merge_effective_rank = merge.rank + 1;
++      uint32_t suffix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model, suffixes[s]);
++      uint32_t prefix_available_at =
++          iree_tokenizer_bpe_token_formation_rank(model, prefixes[p]);
++      if (merge_effective_rank < suffix_available_at) continue;
++      if (merge_effective_rank < prefix_available_at) continue;
++      if (merge_effective_rank >= token_rank) continue;
++      if (merge_effective_rank >= suffix_consumed_at[s]) continue;
++      if (merge_effective_rank > prefix_consumed_at[p]) continue;
++      return true;
++    }
++  }
++  return false;
++}
++
+ // Checks if a specific decomposition (left + right) of a token is reachable.
+ // This is separate from is_first_token_reachable to allow checking alternative
+ // decompositions when a token has multiple merges producing it.
+@@ -128,6 +209,22 @@ bool iree_tokenizer_bpe_is_decomposition_reachable(
+     const iree_tokenizer_bpe_model_t* model, uint32_t left, uint32_t right,
+     uint32_t token) {
+   const uint32_t* effective_rank = model->backtrack_tables.effective_rank;
++  uint32_t decomposition_rank = effective_rank[token];
++  iree_tokenizer_merge_hash_result_t decomposition_merge =
++      iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, (int32_t)left,
++                                             (int32_t)right);
++  if (decomposition_merge.result_id == (int32_t)token) {
++    decomposition_rank = decomposition_merge.rank + 1;
++  }
++
++  uint32_t left_available_at =
++      iree_tokenizer_bpe_token_formation_rank(model, left);
++  uint32_t right_available_at =
++      iree_tokenizer_bpe_token_formation_rank(model, right);
++  if (decomposition_rank < left_available_at ||
++      decomposition_rank < right_available_at) {
++    return false;
++  }
+ 
+   // Check for blocking merge at the split boundary.
+   //
+@@ -158,17 +255,18 @@ bool iree_tokenizer_bpe_is_decomposition_reachable(
+   if (boundary_merge.result_id >= 0 &&
+       (uint32_t)boundary_merge.result_id != token) {
+     // There's a different merge at this boundary. It blocks only if it fires
+-    // before EITHER boundary token is consumed by internal merges.
+-    uint32_t boundary_rank = effective_rank[(uint32_t)boundary_merge.result_id];
++    // before the left boundary token is consumed by an internal merge and
++    // before or tied with the right boundary token's internal merge. Ties are
++    // resolved left-to-right: an internal merge in the left token starts before
++    // this boundary and wins the tie, while an internal merge in the right
++    // token starts after this boundary and loses the tie.
++    uint32_t boundary_rank = boundary_merge.rank + 1;
+     uint32_t left_boundary_consumed =
+         iree_tokenizer_bpe_right_boundary_consumed_rank(model, left);
+     uint32_t right_boundary_consumed =
+         iree_tokenizer_bpe_left_boundary_consumed_rank(model, right);
+-    uint32_t min_boundary_consumed =
+-        left_boundary_consumed < right_boundary_consumed
+-            ? left_boundary_consumed
+-            : right_boundary_consumed;
+-    if (boundary_rank < min_boundary_consumed) {
++    if (boundary_rank < left_boundary_consumed &&
++        boundary_rank <= right_boundary_consumed) {
+       return false;  // Blocking merge fires before either boundary is consumed.
+     }
+   }
+@@ -180,7 +278,74 @@ bool iree_tokenizer_bpe_is_decomposition_reachable(
+       iree_tokenizer_bpe_is_first_token_reachable(model, left);
+   bool right_reachable =
+       iree_tokenizer_bpe_is_first_token_reachable(model, right);
+-  return left_reachable && right_reachable;
++  if (!left_reachable || !right_reachable) return false;
++
++  return !iree_tokenizer_bpe_decomposition_has_suffix_prefix_block(
++      model, left, right, token, decomposition_rank);
++}
++
++static bool iree_tokenizer_bpe_table_suffix_already_collected(
++    const uint32_t* suffixes, const uint32_t* suffix_consumed_at,
++    iree_host_size_t suffix_count, uint32_t suffix, uint32_t consumed_at) {
++  for (iree_host_size_t i = 0; i < suffix_count; ++i) {
++    if (suffixes[i] == suffix && suffix_consumed_at[i] == consumed_at) {
++      return true;
++    }
++  }
++  return false;
++}
++
++static void iree_tokenizer_bpe_table_collect_reachable_suffixes(
++    const iree_tokenizer_bpe_model_t* model, uint32_t token,
++    uint32_t* suffixes, uint32_t* suffix_consumed_at,
++    iree_host_size_t* suffix_count, iree_host_size_t suffix_capacity,
++    int depth) {
++  if (*suffix_count >= suffix_capacity || depth >= 16) return;
++
++  const iree_tokenizer_vocab_t* vocab = model->vocab;
++  const iree_tokenizer_bpe_split_entry_t* split_table =
++      model->backtrack_tables.split_table;
++
++  if (split_table[token].left_id == token) return;  // Base token.
++
++  iree_string_view_t token_text =
++      iree_tokenizer_vocab_token_text(vocab, (int32_t)token);
++
++  for (iree_host_size_t split_pos = 1;
++       split_pos < token_text.size && *suffix_count < suffix_capacity;
++       ++split_pos) {
++    iree_string_view_t left_text =
++        iree_make_string_view(token_text.data, split_pos);
++    iree_string_view_t right_text = iree_make_string_view(
++        token_text.data + split_pos, token_text.size - split_pos);
++
++    int32_t left_id = iree_tokenizer_vocab_lookup(vocab, left_text);
++    int32_t right_id = iree_tokenizer_vocab_lookup(vocab, right_text);
++    if (left_id < 0 || right_id < 0) continue;
++
++    iree_tokenizer_merge_hash_result_t merge =
++        iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash, left_id,
++                                               right_id);
++    if (merge.result_id != (int32_t)token) continue;
++
++    if (!iree_tokenizer_bpe_is_decomposition_reachable(
++            model, (uint32_t)left_id, (uint32_t)right_id, token)) {
++      continue;
++    }
++
++    uint32_t consumed_at = merge.rank + 1;
++    if (!iree_tokenizer_bpe_table_suffix_already_collected(
++            suffixes, suffix_consumed_at, *suffix_count, (uint32_t)right_id,
++            consumed_at)) {
++      suffixes[*suffix_count] = (uint32_t)right_id;
++      suffix_consumed_at[*suffix_count] = consumed_at;
++      ++*suffix_count;
++    }
++
++    iree_tokenizer_bpe_table_collect_reachable_suffixes(
++        model, (uint32_t)right_id, suffixes, suffix_consumed_at, suffix_count,
++        suffix_capacity, depth + 1);
++  }
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -213,6 +378,7 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+   iree_host_size_t next_prefix_offset = 0;
+   iree_host_size_t effective_rank_offset = 0;
+   iree_host_size_t token_reachable_offset = 0;
++  iree_host_size_t token_has_reachable_alternates_offset = 0;
+   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+       z0,
+       IREE_STRUCT_LAYOUT(
+@@ -222,7 +388,9 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+           IREE_STRUCT_FIELD(vocab_capacity, uint32_t, &next_prefix_offset),
+           IREE_STRUCT_FIELD(vocab_capacity, uint32_t, &effective_rank_offset),
+           IREE_STRUCT_FIELD(reachable_words, uint64_t,
+-                            &token_reachable_offset)));
++                            &token_reachable_offset),
++          IREE_STRUCT_FIELD(reachable_words, uint64_t,
++                            &token_has_reachable_alternates_offset)));
+ 
+   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+       z0, iree_allocator_malloc(model->allocator, slab_size,
+@@ -237,6 +405,8 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+       (uint32_t*)(slab + effective_rank_offset);
+   model->backtrack_tables.token_reachable =
+       (uint64_t*)(slab + token_reachable_offset);
++  model->backtrack_tables.token_has_reachable_alternates =
++      (uint64_t*)(slab + token_has_reachable_alternates_offset);
+ 
+   // Initialize: base tokens map to (self, self), rank 0, no prefix.
+   for (iree_host_size_t i = 0; i < vocab_capacity; ++i) {
+@@ -309,6 +479,30 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+     }
+   }
+ 
++  // Gemma-style BPE vocabularies contain repeated initial-symbol tokens
++  // (metaspace, newline, and tab runs) whose merge entries are not a
++  // rank-ordered DAG: longer runs can appear before the shorter runs needed to
++  // build them. HuggingFace still matches these as direct vocabulary symbols.
++  // Treat them as base tokens so reachability and suffix blocking do not try
++  // to validate impossible synthetic merge trees.
++  for (iree_host_size_t token_id = 0; token_id < vocab_capacity; ++token_id) {
++    iree_tokenizer_token_attr_t attrs =
++        iree_tokenizer_vocab_token_attrs(vocab, (int32_t)token_id);
++    if (attrs & IREE_TOKENIZER_TOKEN_ATTR_SPECIAL) continue;
++
++    iree_string_view_t text =
++        iree_tokenizer_vocab_token_text(vocab, (int32_t)token_id);
++    if (!iree_tokenizer_bpe_is_repeated_initial_symbol(text)) continue;
++
++    model->backtrack_tables.split_table[token_id].left_id =
++        (uint32_t)token_id;
++    model->backtrack_tables.split_table[token_id].right_id =
++        (uint32_t)token_id;
++    if (model->backtrack_tables.effective_rank[token_id] == 0) {
++      model->backtrack_tables.effective_rank[token_id] = 1;
++    }
++  }
++
+   // Mark multi-byte merge participants as matchable.
+   //
+   // Some base vocabulary tokens (e.g., SentencePiece's ▁ character, U+2581)
+@@ -433,6 +627,8 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+   // and no blocking boundary merge.
+   memset(model->backtrack_tables.token_reachable, 0,
+          reachable_words * sizeof(uint64_t));
++  memset(model->backtrack_tables.token_has_reachable_alternates, 0,
++         reachable_words * sizeof(uint64_t));
+ 
+   // Initialize: mark single-codepoint base tokens as reachable.
+   for (iree_host_size_t token_id = 0; token_id < vocab_capacity; ++token_id) {
+@@ -448,7 +644,8 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+           codepoint_count++;
+         }
+       }
+-      if (codepoint_count <= 1) {
++      if (codepoint_count <= 1 ||
++          iree_tokenizer_bpe_is_repeated_initial_symbol(token_text)) {
+         model->backtrack_tables.token_reachable[token_id / 64] |=
+             1ull << (token_id % 64);
+       }
+@@ -491,36 +688,10 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+         continue;
+       }
+ 
+-      // Check for blocking merge at the boundary.
+-      uint32_t left_boundary =
+-          iree_tokenizer_bpe_rightmost_base_token(model, merge.left_id);
+-      uint32_t right_boundary =
+-          iree_tokenizer_bpe_leftmost_base_token(model, merge.right_id);
+-
+-      iree_tokenizer_merge_hash_result_t boundary_merge =
+-          iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash,
+-                                                 (int32_t)left_boundary,
+-                                                 (int32_t)right_boundary);
+-      if (boundary_merge.result_id >= 0 &&
+-          (uint32_t)boundary_merge.result_id != (uint32_t)result_id) {
+-        // There's a different merge at this boundary. It blocks only if it
+-        // fires before EITHER boundary token is consumed by internal merges.
+-        uint32_t boundary_rank =
+-            model->backtrack_tables
+-                .effective_rank[(uint32_t)boundary_merge.result_id];
+-        uint32_t left_boundary_consumed =
+-            iree_tokenizer_bpe_right_boundary_consumed_rank(model,
+-                                                            merge.left_id);
+-        uint32_t right_boundary_consumed =
+-            iree_tokenizer_bpe_left_boundary_consumed_rank(model,
+-                                                           merge.right_id);
+-        uint32_t min_boundary_consumed =
+-            left_boundary_consumed < right_boundary_consumed
+-                ? left_boundary_consumed
+-                : right_boundary_consumed;
+-        if (boundary_rank < min_boundary_consumed) {
+-          continue;  // Blocking merge fires first.
+-        }
++      if (!iree_tokenizer_bpe_is_decomposition_reachable(
++              model, (uint32_t)merge.left_id, (uint32_t)merge.right_id,
++              (uint32_t)result_id)) {
++        continue;
+       }
+ 
+       // This decomposition is reachable!
+@@ -549,6 +720,175 @@ iree_status_t iree_tokenizer_bpe_build_backtrack_tables(
+     }
+   }
+ 
++  // Mark tokens that have reachable decompositions besides the canonical
++  // split_table decomposition. Most tokens have exactly one reachable path and
++  // can use the cheap right-spine suffix walk during encode; ambiguous tokens
++  // need the slower all-splits suffix collection for HuggingFace parity.
++  for (iree_host_size_t rank = 0; rank < merge_count; ++rank) {
++    iree_tokenizer_merge_t merge = iree_tokenizer_vocab_merge(vocab, rank);
++    iree_tokenizer_merge_hash_result_t merge_result =
++        iree_tokenizer_vocab_merge_hash_lookup(model->merge_hash,
++                                               merge.left_id, merge.right_id);
++    int32_t result_id = merge_result.result_id;
++    if (result_id < 0 || (iree_host_size_t)result_id >= vocab_capacity) {
++      continue;
++    }
++
++    uint32_t result = (uint32_t)result_id;
++    if (!iree_any_bit_set(model->backtrack_tables.token_reachable[result / 64],
++                          1ull << (result % 64))) {
++      continue;
++    }
++    if (!iree_tokenizer_bpe_is_decomposition_reachable(
++            model, (uint32_t)merge.left_id, (uint32_t)merge.right_id,
++            result)) {
++      continue;
++    }
++
++    iree_tokenizer_bpe_split_entry_t canonical =
++        model->backtrack_tables.split_table[result];
++    if (canonical.left_id != (uint32_t)merge.left_id ||
++        canonical.right_id != (uint32_t)merge.right_id) {
++      model->backtrack_tables.token_has_reachable_alternates[result / 64] |=
++          1ull << (result % 64);
++    }
++  }
++
++  // Propagate the ambiguity bit to any token whose right-spine suffixes pass
++  // through an ambiguous token. Those parent tokens also need the precomputed
++  // all-splits suffix list during suffix blocking.
++  for (iree_host_size_t token_id = 0; token_id < vocab_capacity; ++token_id) {
++    for (uint32_t current = (uint32_t)token_id;
++         model->backtrack_tables.split_table[current].left_id != current;
++         current = model->backtrack_tables.split_table[current].right_id) {
++      if (iree_any_bit_set(
++              model->backtrack_tables
++                  .token_has_reachable_alternates[current / 64],
++              1ull << (current % 64))) {
++        model->backtrack_tables
++            .token_has_reachable_alternates[token_id / 64] |=
++            1ull << (token_id % 64);
++        break;
++      }
++    }
++  }
++
++  for (iree_host_size_t token_id = 0; token_id < vocab_capacity; ++token_id) {
++    uint32_t cheap_suffixes[32];
++    uint32_t cheap_consumed_at[32];
++    iree_host_size_t cheap_count = 0;
++    for (uint32_t current = (uint32_t)token_id;
++         cheap_count < IREE_ARRAYSIZE(cheap_suffixes) &&
++         model->backtrack_tables.split_table[current].left_id != current;
++         current = model->backtrack_tables.split_table[current].right_id) {
++      cheap_suffixes[cheap_count] =
++          model->backtrack_tables.split_table[current].right_id;
++      cheap_consumed_at[cheap_count] =
++          iree_tokenizer_bpe_token_formation_rank(model, current);
++      ++cheap_count;
++    }
++
++    uint32_t all_suffixes[32];
++    uint32_t all_consumed_at[32];
++    iree_host_size_t all_count = 0;
++    iree_tokenizer_bpe_table_collect_reachable_suffixes(
++        model, (uint32_t)token_id, all_suffixes, all_consumed_at, &all_count,
++        IREE_ARRAYSIZE(all_suffixes), 0);
++
++    bool differs = cheap_count != all_count;
++    for (iree_host_size_t i = 0; i < all_count && !differs; ++i) {
++      bool found = false;
++      for (iree_host_size_t j = 0; j < cheap_count; ++j) {
++        if (all_suffixes[i] == cheap_suffixes[j] &&
++            all_consumed_at[i] == cheap_consumed_at[j]) {
++          found = true;
++          break;
++        }
++      }
++      differs = !found;
++    }
++    if (differs) {
++      model->backtrack_tables.token_has_reachable_alternates[token_id / 64] |=
++          1ull << (token_id % 64);
++    }
++  }
++
++  iree_host_size_t total_alternate_suffixes = 0;
++  for (iree_host_size_t token_id = 0; token_id < vocab_capacity; ++token_id) {
++    if (!iree_any_bit_set(
++            model->backtrack_tables
++                .token_has_reachable_alternates[token_id / 64],
++            1ull << (token_id % 64))) {
++      continue;
++    }
++    uint32_t suffixes[32];
++    uint32_t suffix_consumed_at[32];
++    iree_host_size_t suffix_count = 0;
++    iree_tokenizer_bpe_table_collect_reachable_suffixes(
++        model, (uint32_t)token_id, suffixes, suffix_consumed_at, &suffix_count,
++        IREE_ARRAYSIZE(suffixes), 0);
++    total_alternate_suffixes += suffix_count;
++  }
++
++  if (total_alternate_suffixes > 0) {
++    iree_host_size_t alt_slab_size = 0;
++    iree_host_size_t alt_offsets_offset = 0;
++    iree_host_size_t alt_suffixes_offset = 0;
++    iree_host_size_t alt_consumed_offset = 0;
++    IREE_RETURN_AND_END_ZONE_IF_ERROR(
++        z0,
++        IREE_STRUCT_LAYOUT(
++            /*base_size=*/0, &alt_slab_size,
++            IREE_STRUCT_FIELD(vocab_capacity + 1, uint32_t,
++                              &alt_offsets_offset),
++            IREE_STRUCT_FIELD(total_alternate_suffixes, uint32_t,
++                              &alt_suffixes_offset),
++            IREE_STRUCT_FIELD(total_alternate_suffixes, uint32_t,
++                              &alt_consumed_offset)));
++
++    IREE_RETURN_AND_END_ZONE_IF_ERROR(
++        z0, iree_allocator_malloc(model->allocator, alt_slab_size,
++                                  &model->backtrack_tables
++                                       .alternate_suffix_slab));
++
++    uint8_t* alt_slab =
++        (uint8_t*)model->backtrack_tables.alternate_suffix_slab;
++    model->backtrack_tables.alternate_suffix_offsets =
++        (uint32_t*)(alt_slab + alt_offsets_offset);
++    model->backtrack_tables.alternate_suffixes =
++        (uint32_t*)(alt_slab + alt_suffixes_offset);
++    model->backtrack_tables.alternate_suffix_consumed_at =
++        (uint32_t*)(alt_slab + alt_consumed_offset);
++
++    iree_host_size_t write_index = 0;
++    for (iree_host_size_t token_id = 0; token_id < vocab_capacity;
++         ++token_id) {
++      model->backtrack_tables.alternate_suffix_offsets[token_id] =
++          (uint32_t)write_index;
++      if (!iree_any_bit_set(
++              model->backtrack_tables
++                  .token_has_reachable_alternates[token_id / 64],
++              1ull << (token_id % 64))) {
++        continue;
++      }
++
++      uint32_t suffixes[32];
++      uint32_t suffix_consumed_at[32];
++      iree_host_size_t suffix_count = 0;
++      iree_tokenizer_bpe_table_collect_reachable_suffixes(
++          model, (uint32_t)token_id, suffixes, suffix_consumed_at,
++          &suffix_count, IREE_ARRAYSIZE(suffixes), 0);
++      for (iree_host_size_t i = 0; i < suffix_count; ++i) {
++        model->backtrack_tables.alternate_suffixes[write_index] = suffixes[i];
++        model->backtrack_tables.alternate_suffix_consumed_at[write_index] =
++            suffix_consumed_at[i];
++        ++write_index;
++      }
++    }
++    model->backtrack_tables.alternate_suffix_offsets[vocab_capacity] =
++        (uint32_t)write_index;
++  }
++
+   IREE_TRACE_ZONE_END(z0);
+   return iree_ok_status();
+ }
+diff --git a/runtime/src/iree/tokenizer/model/bpe_test.cc b/runtime/src/iree/tokenizer/model/bpe_test.cc
+index f2b82260d5..5bac3f0f44 100644
+--- a/runtime/src/iree/tokenizer/model/bpe_test.cc
++++ b/runtime/src/iree/tokenizer/model/bpe_test.cc
+@@ -82,13 +82,13 @@ TEST_F(BPEModelTest, StateSizeIsReasonable) {
+   // tokens. For max_token_length=1, vocab_capacity=1:
+   //   window: 2 * 12 = 24
+   //   heap: 3 * 8 = 24
+-  //   backtrack stack: 2048 * 8 = 16,384
+-  //   backtrack bitfield: 33 * 8 = 264
++  //   backtrack stack: 32768 * 12 = 393,216
++  //   backtrack bitfield: 513 * 8 = 4,104
+   //   pair cache: 4096 * 8 = 32,768
+   //   word cache: 0 (disabled, vocab < 256)
+   //   struct: ~128
+-  //   total: ~49,592
+-  EXPECT_LE(state_size, 65536u);
++  //   total: ~430,240
++  EXPECT_LE(state_size, 512 * 1024u);
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -2738,6 +2738,43 @@ TEST_F(BPEModelTest, MergePriorityWithPrecedingToken) {
+              /*expect_pending_after_encode=*/false);
+ }
+ 
++// Gemma-style tokenizers use U+2581 metaspace as a multi-byte base token. Very
++// long segments bypass the backtracking path and use the window/heap encoder,
++// which must still seed base tokens before applying rank-priority merges.
++TEST_F(BPEModelTest, LongSegmentMergePriorityAfterMultiByteBaseToken) {
++  ScopedVocabBuilder builder;
++
++  builder.AddToken(0, "▁");
++  builder.AddToken(1, "z");
++  builder.AddToken(2, "m");
++  builder.AddToken(3, "l");
++  builder.AddToken(4, "x");
++  builder.AddToken(5, "▁z");
++  builder.AddToken(6, "ml");
++  builder.AddToken(7, "▁zm");
++  builder.AddToken(8, "zm");
++
++  builder.AddMerge(0, 1);  // Rank 0: ▁ + z -> ▁z
++  builder.AddMerge(2, 3);  // Rank 1: m + l -> ml
++  builder.AddMerge(5, 2);  // Rank 2: ▁z + m -> ▁zm
++  builder.AddMerge(0, 8);  // Rank 3: ▁ + zm -> ▁zm (alternate path)
++  builder.AddMerge(1, 2);  // Rank 4: z + m -> zm
++
++  CreateModel(builder);
++
++  std::string input = "▁zml";
++  input.append(9000, 'x');
++  auto tokens = EncodeAndFinalize(model(), input,
++                                  /*expect_pending_after_encode=*/false);
++
++  ASSERT_EQ(tokens.size(), 9002u);
++  EXPECT_EQ(tokens[0], 5);  // ▁z
++  EXPECT_EQ(tokens[1], 6);  // ml
++  for (size_t i = 2; i < tokens.size(); ++i) {
++    EXPECT_EQ(tokens[i], 4);
++  }
++}
++
+ // Tests ByteLevel transformation of multi-byte UTF-8 sequences.
+ // This is the Qwen unicode bug scenario where 'él' (UTF-8: c3 a9 6c) should
+ // transform to 'Ã©l' (UTF-8: c3 83 c2 a9 6c) and match as a single token.
+diff --git a/runtime/src/iree/tokenizer/tokenizer.c b/runtime/src/iree/tokenizer/tokenizer.c
+index 2299f0de7e..76011353f9 100644
+--- a/runtime/src/iree/tokenizer/tokenizer.c
++++ b/runtime/src/iree/tokenizer/tokenizer.c
+@@ -1571,6 +1571,19 @@ static iree_status_t iree_tokenizer_encode_ring_as_segment(
+            state->transform_buffer.data, physical_write);
+   }
+ 
++  if (is_partial) {
++    iree_host_size_t incomplete_tail =
++        iree_unicode_utf8_incomplete_tail_length(
++            (const char*)state->transform_buffer.data + physical_read,
++            data_length);
++    data_length -= incomplete_tail;
++    if (data_length == 0) {
++      *out_tokens_written = 0;
++      *out_segment_complete = false;
++      return iree_ok_status();
++    }
++  }
++
+   iree_tokenizer_segment_t segment = {
+       .start = physical_read,
+       .end = physical_read + data_length,
+diff --git a/runtime/src/iree/tokenizer/tokenizer.h b/runtime/src/iree/tokenizer/tokenizer.h
+index 098e6fef87..40db2bb459 100644
+--- a/runtime/src/iree/tokenizer/tokenizer.h
++++ b/runtime/src/iree/tokenizer/tokenizer.h
+@@ -32,16 +32,17 @@ extern "C" {
+ // Maximum transform buffer allocation.
+ // Recommended values:
+ //   8KB:  Minimal memory, suitable for most English text
+-//  16KB:  Good balance for mixed content and cache locality
++//  64KB:  Keeps a 32KB logical ring so large metaspace-normalized prompts can
++//         stay on the exact BPE path instead of the approximate streaming path.
+ //
+ // The transform buffer determines the maximum segment size that the segmenter
+ // pipeline processes. Larger buffers allow longer segments, but segments that
+-// exceed L1 data cache (typically 32KB) cause DFA cache misses during
+-// multi-stage pre-tokenization. 16KB (8KB logical capacity after ring buffer
+-// halving) keeps the working set cache-friendly for segmenters with multiple
+-// children (e.g., DeepSeek V3's 4-stage Sequence pre-tokenizer).
++// exceed L1 data cache (typically 32KB) can cause DFA cache misses during
++// multi-stage pre-tokenization. 64KB (32KB logical capacity after ring buffer
++// halving) favors HuggingFace-compatible exact BPE for long normalized
++// segments.
+ #ifndef IREE_TOKENIZER_TRANSFORM_BUFFER_MAX_SIZE
+-#define IREE_TOKENIZER_TRANSFORM_BUFFER_MAX_SIZE (16 * 1024)
++#define IREE_TOKENIZER_TRANSFORM_BUFFER_MAX_SIZE (64 * 1024)
+ #endif
+ 
+ // Normalizer expansion factor for transform buffer sizing.

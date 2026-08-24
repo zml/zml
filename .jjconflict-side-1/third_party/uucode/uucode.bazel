@@ -1,0 +1,89 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+# Generator
+
+zig_library(
+    name = "_config_gen",
+    import_name = "config.zig",
+    main = "src/config.zig",
+    srcs = [
+        "src/components.zig",
+        "src/fields.zig",
+        "src/multi_slice.zig",
+        "src/quirks.zig",
+        "src/storage.zig",
+        "src/types.zig",
+    ],
+)
+
+zig_library(
+    name = "_build_config_gen",
+    import_name = "build_config",
+    main = "build_config.zig",
+    deps = [":_config_gen"],
+)
+
+zig_binary(
+    name = "gen_tables",
+    main = "src/generate.zig",
+    deps = [":_build_config_gen", ":_config_gen"],
+)
+
+genrule(
+    name = "tables",
+    srcs = glob(["ucd/**"]),
+    outs = ["tables.zig"],
+    cmd = "OUT=$$PWD/$@ && TOOL=$$PWD/$(execpath :gen_tables) && cd $$(dirname $(location ucd/UnicodeData.txt))/.. && $$TOOL $$OUT",
+    tools = [":gen_tables"],
+)
+
+# Library
+
+zig_library(
+    name = "types",
+    import_name = "types.zig",
+    main = "src/types.zig",
+)
+
+zig_library(
+    name = "config",
+    import_name = "config.zig",
+    main = "src/config.zig",
+    srcs = [
+        "src/components.zig",
+        "src/fields.zig",
+        "src/multi_slice.zig",
+        "src/quirks.zig",
+        "src/storage.zig",
+    ],
+    deps = [":types"],
+)
+
+zig_library(
+    name = "build_config",
+    import_name = "build_config",
+    main = "build_config.zig",
+    deps = [":config"],
+)
+
+zig_library(
+    name = "tables_lib",
+    import_name = "tables",
+    main = ":tables",
+    deps = [":build_config", ":config"],
+)
+
+zig_library(
+    name = "uucode",
+    import_name = "uucode",
+    main = "src/root.zig",
+    srcs = [
+        "src/ascii.zig",
+        "src/code_point.zig",
+        "src/get.zig",
+        "src/grapheme.zig",
+        "src/utf8.zig",
+    ],
+    deps = [":config", ":tables_lib", ":types"],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,13 @@
+diff --git a/BUILD b/BUILD
+index 0e4bda7e16..dbe1708421 100644
+--- a/BUILD
++++ b/BUILD
+@@ -1236,7 +1236,7 @@ grpc_cc_library(
+         "avoid_dep",
+         "nofixdeps",
+     ],
+-    visibility = ["//bazel:grpc++_unsecure"],
++    visibility = ["//visibility:public"],
+     deps = [
+         "channel_arg_names",
+         "global_callback_hook",

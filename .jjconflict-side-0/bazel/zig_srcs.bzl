@@ -1,0 +1,36 @@
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
+load("@rules_zig//zig:defs.bzl", "zig_static_library")
+
+def zig_srcs(name, zig_bin = "", zig_lib = ""):
+    """For a given zig_library, recursively extract all zig sources into a tarball.
+
+    This also includes the files translated from C headers.
+    It's also possible to pass zig_lib instead of zig_bin in which case,
+    The rule takes care of creating an intermediary binary from the lib.
+    """
+    if zig_bin == "":
+        zig_bin = "{}_bin".format(name)
+        zig_static_library(
+            name = zig_bin,
+            tags = ["manual"],
+            deps = [zig_lib],
+        )
+
+    native.filegroup(
+        name = "{}_files".format(name),
+        srcs = [zig_bin],
+        tags = ["manual"],
+        output_group = "srcs",
+    )
+    mtree_spec(
+        name = "{}_mtree".format(name),
+        srcs = [":{}_files".format(name)],
+        tags = ["manual"],
+    )
+    tar(
+        name = name,
+        srcs = ["{}_files".format(name)],
+        args = [],
+        mtree = "{}_mtree".format(name),
+    )

@@ -1,0 +1,45 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    tags = ["manual"],
+    defines = ["ZML_RUNTIME_TPU_DISABLED"],
+)
+
+cc_library(
+    name = "libpjrt_tpu",
+    tags = ["manual"],
+    defines = ["ZML_RUNTIME_TPU"],
+    deps = ["@libpjrt_tpu"],
+)
+
+zig_library(
+    name = "tpu",
+    tags = ["manual"],
+    import_name = "platforms/tpu",
+    main = "tpu.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//stdx",
+    ] + select({
+        "//platforms:tpu.enabled": [
+            ":libpjrt_tpu",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)
+
+zig_library(
+    name = "ragged_paged",
+    tags = ["manual"],
+    import_name = "platforms/tpu/ragged_paged",
+    main = "ragged_paged.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+        "//mlir",
+    ],
+)

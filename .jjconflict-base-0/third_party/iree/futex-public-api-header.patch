@@ -1,0 +1,17 @@
+diff --git a/runtime/src/iree/base/threading/futex.h b/runtime/src/iree/base/threading/futex.h
+index 9b42d3cfd0..f2509b77e9 100644
+--- a/runtime/src/iree/base/threading/futex.h
++++ b/runtime/src/iree/base/threading/futex.h
+@@ -30,11 +30,8 @@
+ 
+ #include <stdint.h>
+ 
+-#include "iree/base/attributes.h"
+-#include "iree/base/config.h"
+-#include "iree/base/status.h"
++#include "iree/base/api.h"
+ #include "iree/base/target_platform.h"
+-#include "iree/base/time.h"
+ 
+ //===----------------------------------------------------------------------===//
+ // Platform detection

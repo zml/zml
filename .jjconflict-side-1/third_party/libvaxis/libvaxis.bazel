@@ -1,0 +1,17 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "vaxis",
+    srcs = glob([
+        "src/*.zig",
+        "src/vxfw/*.zig",
+        "src/widgets/*.zig",
+        "src/widgets/terminal/*.zig",
+    ]),
+    main = "src/main.zig",
+    deps = [
+        "@zigimg",
+        "@uucode",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,31 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "stdx",
+    tags = ["manual"],
+    srcs = [
+        "Io.zig",
+        "bounded_array.zig",
+        "crypto.zig",
+        "debug.zig",
+        "flags.zig",
+        "fmt.zig",
+        "json.zig",
+        "math.zig",
+        "meta.zig",
+        "process.zig",
+        "queue.zig",
+        "segmented_list.zig",
+        "time.zig",
+        "unicode.zig",
+    ],
+    main = "stdx.zig",
+    visibility = ["//visibility:public"],
+    zigopts = ["-lc"],
+)
+
+zig_test(
+    name = "test",
+    testonly = False,
+    deps = [":stdx"],
+)

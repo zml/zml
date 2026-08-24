@@ -1,0 +1,37 @@
+load("@bazel_lib//lib:run_binary.bzl", "run_binary")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+run_binary(
+    name = "stamp_cc_src",
+    outs = ["stamp.c"],
+    args = [
+        "$(location stamp.c)",
+        "bazel-out/stable-status.txt",
+        "bazel-out/volatile-status.txt",
+    ],
+    stamp = 1,
+    tool = ":genstamp",
+    visibility = ["//visibility:private"],
+)
+
+cc_binary(
+    name = "genstamp",
+    srcs = ["genstamp.c"],
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
+    name = "cc",
+    srcs = [":stamp_cc_src"],
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
+    name = "zig",
+    import_name = "bazel/stamp",
+    main = "stamp.zig",
+    visibility = ["//visibility:public"],
+    deps = [":cc"],
+)

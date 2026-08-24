@@ -1,0 +1,78 @@
+diff --git a/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c b/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
+--- a/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
++++ b/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
+@@ -217,0 +218,10 @@
++  // Some code-oriented tokenizers use this lookahead split only to attach
++  // single-newline runs to the next segment. The IREE regex compiler does not
++  // support lookahead; the following ByteLevel/GPT split still preserves the
++  // input bytes, so treat this grouping hint as a no-op instead of rejecting
++  // the tokenizer at load time.
++  if (iree_string_view_equal(
++          pattern, IREE_SV("(?:\\r?\\n)+(?!\\r?\\n)")) &&
++      behavior == IREE_TOKENIZER_UTIL_REGEX_SPLIT_MERGED_WITH_NEXT && !invert) {
++    return iree_ok_status();
++  }
+diff --git a/runtime/src/iree/tokenizer/format/huggingface/model_json.c b/runtime/src/iree/tokenizer/format/huggingface/model_json.c
+--- a/runtime/src/iree/tokenizer/format/huggingface/model_json.c
++++ b/runtime/src/iree/tokenizer/format/huggingface/model_json.c
+@@ -444,0 +445,46 @@
++static char iree_tokenizer_ascii_upper(char c) {
++  return c >= 'a' && c <= 'z' ? (char)(c - ('a' - 'A')) : c;
++}
++
++static bool iree_tokenizer_string_view_contains_ascii_case(
++    iree_string_view_t value, iree_string_view_t needle) {
++  if (needle.size == 0 || needle.size > value.size) return false;
++  for (iree_host_size_t i = 0; i <= value.size - needle.size; ++i) {
++    bool match = true;
++    for (iree_host_size_t j = 0; j < needle.size; ++j) {
++      if (iree_tokenizer_ascii_upper(value.data[i + j]) !=
++          iree_tokenizer_ascii_upper(needle.data[j])) {
++        match = false;
++        break;
++      }
++    }
++    if (match) return true;
++  }
++  return false;
++}
++
++static bool iree_tokenizer_huggingface_find_added_unk_token(
++    const iree_tokenizer_huggingface_added_tokens_t* added_tokens,
++    iree_tokenizer_token_id_t* out_token_id) {
++  *out_token_id = IREE_TOKENIZER_TOKEN_ID_INVALID;
++  if (!added_tokens) return false;
++  for (iree_host_size_t i = 0; i < added_tokens->count; ++i) {
++    const iree_tokenizer_huggingface_added_token_t* token =
++        iree_tokenizer_huggingface_added_tokens_get(added_tokens, i);
++    if (!iree_any_bit_set(
++            token->flags,
++            IREE_TOKENIZER_HUGGINGFACE_ADDED_TOKEN_FLAG_SPECIAL)) {
++      continue;
++    }
++    iree_string_view_t content =
++        iree_tokenizer_huggingface_added_token_content(added_tokens, token);
++    if (!iree_tokenizer_string_view_contains_ascii_case(content,
++                                                        IREE_SV("unk"))) {
++      continue;
++    }
++    *out_token_id = token->id;
++    return true;
++  }
++  return false;
++}
++
+@@ -584,3 +630,10 @@
+-        status = iree_make_status(IREE_STATUS_NOT_FOUND,
+-                                  "unk_token '%.*s' not found in vocabulary",
+-                                  (int)unk_length, unk_buffer);
++        // Some tokenizer.json files keep a stale default `unk_token` in the BPE
++        // model section while declaring the real unknown token in added_tokens
++        // (for example, custom bracketed forms such as `〈|UNK|〉`). Prefer that
++        // explicit special added token before failing the whole tokenizer load.
++        if (!iree_tokenizer_huggingface_find_added_unk_token(added_tokens,
++                                                             &unk_token_id)) {
++          status = iree_make_status(IREE_STATUS_NOT_FOUND,
++                                    "unk_token '%.*s' not found in vocabulary",
++                                    (int)unk_length, unk_buffer);
++        }

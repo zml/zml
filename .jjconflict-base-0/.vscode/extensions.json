@@ -1,0 +1,8 @@
+{
+    "recommendations": [
+        "BazelBuild.vscode-bazel",
+        "llvm-vs-code-extensions.vscode-mlir",
+        "ms-azuretools.vscode-docker",
+        "ziglang.vscode-zig",
+    ]
+}

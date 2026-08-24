@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "mosaic_tpu",
+    import_name = "mlir/dialects/mosaic_tpu",
+    main = "mosaic_tpu.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+        "@mosaic_tpu//:tpu_dialect_capi",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":mosaic_tpu"],
+)

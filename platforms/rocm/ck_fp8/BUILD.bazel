@@ -1,0 +1,27 @@
+# ROCm/AITER ba59a37aa65a34ed19edb169c7b8ea59e4781af5, MIT licensed.
+# Original code-object SHA-256:
+# a7139c406a69d89e5adeda121ddb33145df41f39acca2ea8e0ff2ec711c4a157
+genrule(
+    name = "aiter_moe_gfx942",
+    srcs = ["fmoe_bf16_blockscale_fp8_gfx942.co.b64"],
+    outs = ["fmoe_bf16_blockscale_fp8_gfx942.co"],
+    cmd = "base64 -d $(location fmoe_bf16_blockscale_fp8_gfx942.co.b64) > $@",
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["AITER-LICENSE"])
+
+genrule(
+    name = "libzml_ck_fp8",
+    srcs = [
+        "aiter_moe.cpp",
+        "ck_fp8.cpp",
+    ],
+    outs = ["libzml_ck_fp8.so"],
+    cmd = "/opt/rocm/bin/hipcc -std=c++17 -O3 -fPIC -shared --offload-arch=gfx942 -I/opt/rocm/include $(location ck_fp8.cpp) $(location aiter_moe.cpp) -o $@",
+    tags = [
+        "manual",
+        "no-sandbox",
+    ],
+    visibility = ["//visibility:public"],
+)

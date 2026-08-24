@@ -1,0 +1,34 @@
+load("//bazel:swig.bzl", "swig_cc_library")
+load("//bazel:zig_srcs.bzl", "zig_srcs")
+load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+swig_cc_library(
+    name = "sentencepiece_swig",
+    tags = ["manual"],
+    interface = "sentencepiece.i",
+    module = "sentencepiece",
+    deps = [
+        "//ffi:cc",
+        "@com_google_sentencepiece//:sentencepiece_processor",
+    ],
+)
+
+zig_library(
+    name = "sentencepiece",
+    tags = ["manual"],
+    import_name = "sentencepiece",
+    main = "sentencepiece.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sentencepiece_swig",
+        "//ffi:zig",
+        "//stdx",
+    ],
+)
+
+# todo: reenable after fix
+# zig_srcs(
+#     name = "sources",
+#     zig_lib = ":sentencepiece",
+# )

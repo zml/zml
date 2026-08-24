@@ -1,0 +1,20 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "flashattn",
+    tags = ["manual"],
+    import_name = "platforms/cuda/flashattn",
+    main = "flashattn.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "@llvm//platforms/config:linux_x86_64": ["@flashattn_linux_amd64//:c"],
+        "@llvm//platforms/config:linux_aarch64": ["@flashattn_linux_arm64//:c"],
+    }),
+    data = select({
+        "@llvm//platforms/config:linux_x86_64": ["@flashattn_linux_amd64//:libflashattn"],
+        "@llvm//platforms/config:linux_aarch64": ["@flashattn_linux_arm64//:libflashattn"],
+    }),
+)

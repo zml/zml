@@ -1,0 +1,44 @@
+# Bazel symlinks
+bazel-*
+
+# macOS
+.DS_Store
+
+# Local Checkouts
+/stablehlo/
+/llvm-project/
+/xla/
+
+# Just in case, Zig caches
+.zig-cache/
+zig-out/
+
+# Models
+*.safetensors
+*.pb
+*.trace.json
+*.pt
+*.bin
+
+# Data files
+*.wav
+*.ecdc
+
+# Python slope
+.venv
+venv
+
+# Editor specific
+## Neovim
+.nvim.local.lua
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
