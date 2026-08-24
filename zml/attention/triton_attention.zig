@@ -642,7 +642,7 @@ pub const paged = struct {
         const config: Config2D = .{
             .block_m = paged_opts.block_m,
             .block_q = 1,
-            .total_q_blocks = @intCast(q.dim(.q)),
+            .total_q_blocks = paged_opts.total_q_blocks,
             .num_warps = 4,
             .num_stages = 2,
             .tile_size = @min(@as(usize, @intCast(topk.dim(.topk))), 16),
@@ -762,6 +762,7 @@ pub const paged = struct {
         block_m: usize,
         rope_rank: usize,
         scale: ?f32,
+        total_q_blocks: usize,
     };
 
     pub fn pagedSparseMla(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
@@ -809,6 +810,7 @@ pub const paged = struct {
                         .block_m = block_m,
                         .rope_rank = @intCast(ctx_.opts.rope_rank),
                         .scale = ctx_.opts.scale,
+                        .total_q_blocks = @intCast(q_.dim(.q)),
                     };
 
                     return pagedSparseMla2d(
