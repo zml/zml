@@ -14,8 +14,8 @@ _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
 # _PJRT_ROCM_URL = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-20T15-30-00Z/pjrt-rocm_linux-amd64.tar.gz"
 # _PJRT_ROCM_SHA256 = "6fd0515beb299550e298996f6919db09aec79859feee7362443bf2ebff900d0f"
 
-_PJRT_ROCM_URL = "file:///home/hugo/.cache/zml/rocm/pjrt-rocm-v0.11-local-linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "013619fcfc3c1d08a401b9f6d2912a0a81ae568a6212d4d7a00172cc0ee3a669"
+_PJRT_ROCM_URL = "file:///home/hugo/xla/pjrt-rocm_linux-amd64.tar.gz"
+_PJRT_ROCM_SHA256 = "4fc6eb649215aee9179d325df31b4ee2f484502d624df12df4884d92e20f080f"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION

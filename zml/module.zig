@@ -688,7 +688,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             .rocm => {
                 // Do not enable the FUSION command buffer to avoid some weird crashes.
                 // This is what AMD recommendeds in the meantime.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
+                // try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
             .oneapi => {
                 // More efficient for the allgather/broadcast implementation of the collective permute.
