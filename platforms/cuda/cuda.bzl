@@ -11,8 +11,8 @@ CUDA_VARIANT = "cuda13.3"
 CUDA_REDIST_JSON_SHA256 = "507eddaab1360336bc0fe17b77552e0b7dfe1e74da888671c3a2f5fad7775db1"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.22.0"
-CUDNN_REDIST_JSON_SHA256 = "3dbb9002d52112ef69aa09187f523ef1ff07f8baf3892ee01e540af639d8f55f"
+CUDNN_VERSION = "9.24.0"
+CUDNN_REDIST_JSON_SHA256 = "89a0626f1925d9f4ceb8d6bc0b2de160b30e92afaae5471e6cfbb50234ae5488"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
 NVSHMEM_VERSION = "3.6.5"
@@ -213,15 +213,15 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-07-31T19-22-00Z"
+PJRT_CUDA_RELEASE = "manual-2026-09-03T15-04-00Z"
 
 _PJRT_CUDA_ASSETS = {
     "amd64": {
-        "sha256": "c3fe395ed8b0493975e4afeba454e0cbecec7eac540488522fd4523103e353f3",
+        "sha256": "d8558a442c6fd755d19cdc396bbd6b74c8ae5a2105f706c8c23306b7ac339bfc",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "3c23c31dbfb3a97ca1bf8558d1e8347431fa30c192236d97de7bd6539d354ca5",
+        "sha256": "af5fec9ae4bbdf3f0ae95c845107b4379ec840af0d72273f95b2e2374e6c8084",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
     },
 }
