@@ -1,0 +1,26 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "minimax_h3",
+    srcs = glob(["**/*.zig"]),
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "h3_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":minimax_h3",
+        ":h3_tests",
+    ],
+)
