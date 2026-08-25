@@ -90,12 +90,13 @@ pub const Tensor = struct {
     ///
     /// The shape is derived from the type of the mlir.Value.
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
+        const ctx = CompilationContext.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
         const n = ranked_tensor.rank();
 
         stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = mlirx.Type.toDType(mlirCtx(), ranked_tensor.elementType()) };
+        var sh: Shape = .{ ._dtype = ctx.dtype(ranked_tensor.elementType()) };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }

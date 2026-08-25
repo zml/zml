@@ -8,6 +8,7 @@ const stdx = @import("stdx");
 const upb = @import("upb");
 
 const Buffer = @import("buffer.zig").Buffer;
+const DataType = @import("dtype.zig").DataType;
 const Exe = @import("exe.zig").Exe;
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
@@ -104,6 +105,8 @@ pub const CompilationContext = struct {
     platform: *const Platform,
     partitioning: Sharding.Partitioning,
 
+    mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
+
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
 
@@ -135,6 +138,13 @@ pub const CompilationContext = struct {
             }
         }
 
+        var mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type) = .initUndefined();
+        {
+            for (0.., &mlir_known_types.values) |i, *mlir_type| {
+                mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @enumFromInt(i));
+            }
+        }
+
         // Ensure replicated sharding is always included as a fallback option.
         var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
         var needs_replicated: bool = true;
@@ -153,6 +163,7 @@ pub const CompilationContext = struct {
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
             .mlir_pass_manager = pass_manager,
+            .mlir_known_types = mlir_known_types,
             .module = module,
             .platform = platform,
             .partitioning = partitioning,
@@ -212,6 +223,18 @@ pub const CompilationContext = struct {
     pub fn nextCompositeId(self: *CompilationContext) i64 {
         self.composite_id += 1;
         return self.composite_id;
+    }
+
+    pub fn mlirType(self: *const CompilationContext, dt: DataType) *const mlir.Type {
+        return self.mlir_known_types.get(dt);
+    }
+
+    pub fn dtype(self: *const CompilationContext, mlir_type: *const mlir.Type) DataType {
+        @setRuntimeSafety(false);
+        for (0.., &self.mlir_known_types.values) |i, known_type| {
+            if (known_type == mlir_type) return @enumFromInt(i);
+        }
+        std.debug.panic("Can't convert unknown mlir type to dtype: {f}", .{mlir_type});
     }
 
     pub fn abortOOM(self: *CompilationContext) noreturn {
