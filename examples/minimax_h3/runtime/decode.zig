@@ -397,8 +397,8 @@ pub fn decodeVideo(
             }
         }
 
-        // Official `_decode`: clip is two `chunk_frames` slices. First (minus pre-pad) is written;
-        // the second is held as the next blend overlap and appended after the last chunk.
+        // Each clip is two `chunk_frames` slices: write the first (minus pre-pad);
+        // hold the second as the next overlap and append it after the last chunk.
         const take = @min(chunk_frames - pre, out_frames - written);
         var f: u32 = 0;
         while (f < take) : (f += 1) {

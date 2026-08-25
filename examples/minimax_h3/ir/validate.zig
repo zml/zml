@@ -516,8 +516,6 @@ fn creativityRules(allocator: std.mem.Allocator, out: *std.ArrayList(Finding), d
     }
     if (has_text and ctx.forbids_text) {
         try add(allocator, out, "Q1-forbidden-element-present", true, "the request ruled out on-screen text and the brief contains it", .{});
-    } else if (has_text and !permitsText(ctx.creativity) and !std.mem.eql(u8, ctx.creativity, "balanced")) {
-        // quoted words in cinematic prose are common; only enforce when bold+ or forbidden
     }
     if (std.mem.eql(u8, ctx.creativity, "extreme") and containsIgnoreCase(desc, "camera")) {
         if (std.mem.indexOf(u8, desc, "with large amplitude") == null and std.mem.indexOf(u8, desc, "at fast speed") == null) {

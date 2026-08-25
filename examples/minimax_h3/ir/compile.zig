@@ -333,7 +333,8 @@ pub fn parseChatContent(allocator: std.mem.Allocator, json_text: []const u8) ![]
 }
 
 pub fn validate(allocator: std.mem.Allocator, text: []const u8, variant: config.Variant, cards: []const Card, duration_s: f32) ![]Finding {
-    return validate_mod.validate(allocator, text, contextFrom(variant, cards, duration_s));
+    var role_buf: [16]validate_mod.RoleDecl = undefined;
+    return validate_mod.validate(allocator, text, contextFrom(variant, cards, duration_s, &role_buf));
 }
 
 fn compileDraft(allocator: std.mem.Allocator, req: Request) !Brief {
@@ -344,12 +345,14 @@ fn compileDraft(allocator: std.mem.Allocator, req: Request) !Brief {
     const cards = try labelAssets(allocator, assets);
     defer freeCards(allocator, cards);
     const have = countsFromCards(cards);
+    var role_buf: [16]validate_mod.RoleDecl = undefined;
     const findings = try validate_mod.validate(allocator, text, .{
         .variant = req.variant,
         .duration_s = req.duration_s,
         .n_pictures = have.picture,
         .n_videos = have.video,
         .n_audios = have.audio,
+        .declared_roles = rolesFromCards(cards, &role_buf),
         .creativity = @tagName(req.creativity),
         .pinned_shots = req.shots,
         .dialogue = req.dialogue,
@@ -670,7 +673,18 @@ fn countsFromCards(cards: []const Card) struct { picture: u32, video: u32, audio
     return .{ .picture = picture, .video = video, .audio = audio };
 }
 
-fn contextFrom(variant: config.Variant, cards: []const Card, duration_s: f32) validate_mod.Context {
+fn rolesFromCards(cards: []const Card, buf: []validate_mod.RoleDecl) []validate_mod.RoleDecl {
+    var n: usize = 0;
+    for (cards) |card| {
+        const role = card.asset.role orelse continue;
+        if (n == buf.len) break;
+        buf[n] = .{ .label = card.label, .role = role };
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+fn contextFrom(variant: config.Variant, cards: []const Card, duration_s: f32, role_buf: []validate_mod.RoleDecl) validate_mod.Context {
     const have = countsFromCards(cards);
     return .{
         .variant = variant,
@@ -678,5 +692,6 @@ fn contextFrom(variant: config.Variant, cards: []const Card, duration_s: f32) va
         .n_pictures = have.picture,
         .n_videos = have.video,
         .n_audios = have.audio,
+        .declared_roles = rolesFromCards(cards, role_buf),
     };
 }

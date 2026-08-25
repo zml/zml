@@ -96,7 +96,7 @@ const Attention = struct {
 
     pub fn forward(self: Attention, x: zml.Tensor, rotary: ?struct { zml.Tensor, zml.Tensor }) zml.Tensor {
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
-        // Official fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
+        // Fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
         const split = self.qkv.forward(x_qkv).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
             .withPartitioning(.{ .h = .model });
         const parts = split.chunkExact(.p, 3);

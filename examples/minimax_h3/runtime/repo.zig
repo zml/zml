@@ -21,13 +21,13 @@ pub const Bundle = struct {
     visual_source: ?std.Io.Dir,
     audio_dir: std.Io.Dir,
 
-    dit_registry: zml.safetensors.TensorRegistry,
+    dit_registry: *zml.safetensors.TensorRegistry,
     dit_store: zml.io.TensorStore,
-    enc_registry: zml.safetensors.TensorRegistry,
+    enc_registry: *zml.safetensors.TensorRegistry,
     enc_store: zml.io.TensorStore,
-    visual_registry: zml.safetensors.TensorRegistry,
+    visual_registry: *zml.safetensors.TensorRegistry,
     visual_store: zml.io.TensorStore,
-    audio_registry: zml.safetensors.TensorRegistry,
+    audio_registry: *zml.safetensors.TensorRegistry,
     audio_store: zml.io.TensorStore,
 
     dit: dit.LoadedModel,
@@ -61,24 +61,33 @@ pub const Bundle = struct {
 
         const visual_weights = visual_source orelse visual_cfg;
 
-        var dit_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, transformer);
+        const dit_registry = try allocator.create(zml.safetensors.TensorRegistry);
+        errdefer allocator.destroy(dit_registry);
+        dit_registry.* = try .fromRepo(allocator, io, transformer);
         errdefer dit_registry.deinit();
-        try refuseUnsupported(&dit_registry, allocator);
-        var dit_store: zml.io.TensorStore = .fromRegistry(allocator, &dit_registry);
+        try refuseUnsupported(dit_registry, allocator);
+        var dit_store: zml.io.TensorStore = .fromRegistry(allocator, dit_registry);
         errdefer dit_store.deinit();
 
-        var enc_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, encoder_dir);
+        const enc_registry = try allocator.create(zml.safetensors.TensorRegistry);
+        errdefer allocator.destroy(enc_registry);
+        enc_registry.* = try .fromRepo(allocator, io, encoder_dir);
         errdefer enc_registry.deinit();
-        var enc_store: zml.io.TensorStore = .fromRegistry(allocator, &enc_registry);
+        var enc_store: zml.io.TensorStore = .fromRegistry(allocator, enc_registry);
         errdefer enc_store.deinit();
 
-        var visual_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, visual_weights);
+        const visual_registry = try allocator.create(zml.safetensors.TensorRegistry);
+        errdefer allocator.destroy(visual_registry);
+        visual_registry.* = try .fromRepo(allocator, io, visual_weights);
         errdefer visual_registry.deinit();
-        var visual_store: zml.io.TensorStore = .fromRegistry(allocator, &visual_registry);
+        var visual_store: zml.io.TensorStore = .fromRegistry(allocator, visual_registry);
         errdefer visual_store.deinit();
-        var audio_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, audio_dir);
+
+        const audio_registry = try allocator.create(zml.safetensors.TensorRegistry);
+        errdefer allocator.destroy(audio_registry);
+        audio_registry.* = try .fromRepo(allocator, io, audio_dir);
         errdefer audio_registry.deinit();
-        var audio_store: zml.io.TensorStore = .fromRegistry(allocator, &audio_registry);
+        var audio_store: zml.io.TensorStore = .fromRegistry(allocator, audio_registry);
         errdefer audio_store.deinit();
         if (!visual_vae.ready(visual_store.view()) or !audio_vae.decodeReady(audio_store.view()))
             return error.VaeSchemaMismatch;
@@ -125,12 +134,16 @@ pub const Bundle = struct {
         self.dit.deinit(allocator);
         self.audio_store.deinit();
         self.audio_registry.deinit();
+        allocator.destroy(self.audio_registry);
         self.visual_store.deinit();
         self.visual_registry.deinit();
+        allocator.destroy(self.visual_registry);
         self.enc_store.deinit();
         self.enc_registry.deinit();
+        allocator.destroy(self.enc_registry);
         self.dit_store.deinit();
         self.dit_registry.deinit();
+        allocator.destroy(self.dit_registry);
         self.audio_dir.close(io);
         if (self.visual_source) |*dir| dir.close(io);
         self.visual_cfg.close(io);

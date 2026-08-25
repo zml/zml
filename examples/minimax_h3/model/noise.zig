@@ -4,8 +4,7 @@ const config = @import("../core/config.zig");
 const packing = @import("packing.zig");
 const scheduler = @import("scheduler.zig");
 
-/// PyTorch CPU `Generator` + `randn` (`at::mt19937`, 16-wide Box-Muller).
-/// Official H3 draws condition NCHW, then target `(C,T,H,W)`, then audio `(2*T,C)`.
+/// mt19937, 16-wide Box-Muller. Draw order: condition NCHW, target `(C,T,H,W)`, audio `(2*T,C)`.
 const n = 624;
 const m = 397;
 const matrix_a: u32 = 0x9908b0df;
@@ -87,7 +86,7 @@ pub const Generator = struct {
     }
 };
 
-/// Matches ATen `normal_fill` for `numel >= 16`. Smaller tensors use serial Box-Muller.
+/// 16-wide Box-Muller when `numel >= 16`; serial otherwise.
 pub fn randn(gen: *Generator, out: []f32) void {
     if (out.len < 16) {
         randnSerial(gen, out);

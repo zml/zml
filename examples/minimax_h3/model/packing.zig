@@ -413,7 +413,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
     return b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
 }
 
-/// Official video noise is `(C, T, H, W)` (batch squeezed). Host patchify wants `{t,h,w,c}`.
+/// Video noise is `(C, T, H, W)`. Patchify consumes `{t,h,w,c}`.
 pub fn nchwToThwc(dst: []f32, src: []const f32, c: u32, t: u32, h: u32, w: u32) void {
     std.debug.assert(dst.len == src.len);
     std.debug.assert(src.len == @as(usize, c) * t * h * w);
@@ -434,7 +434,7 @@ pub fn nchwToThwc(dst: []f32, src: []const f32, c: u32, t: u32, h: u32, w: u32) 
     }
 }
 
-/// Host patchify of `{t,h,w,c}` with patch `(pt,ph,pw)` into rows of `c*pt*ph*pw`.
+/// Patchify `{t,h,w,c}` with `(pt,ph,pw)` into rows of `c*pt*ph*pw`.
 pub fn patchify(
     allocator: std.mem.Allocator,
     src: []const f32,
@@ -459,7 +459,7 @@ pub fn patchify(
             var ww: u32 = 0;
             while (ww < w) : (ww += pw) {
                 var dst: usize = 0;
-                // Official `patchify_video_latents`: permute to (T',H',W',C,pt,ph,pw).
+                // Permute to (T',H',W',C,pt,ph,pw).
                 for (0..c) |ch| {
                     for (0..pt) |dt| {
                         for (0..ph) |dh| {

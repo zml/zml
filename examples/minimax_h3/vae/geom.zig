@@ -83,8 +83,8 @@ pub const TilePlan = struct {
     }
 };
 
-/// Official `_split_tiles`: cover `length` with `tile_size` tiles, overlaps at least `min_overlap`,
-/// slack distributed in `align_to` steps (spatial compression).
+/// Cover `length` with `tile_size` tiles, overlap at least `min_overlap`,
+/// slack in `align_to` steps.
 pub fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_overlap: u32, align_to: u32) !TilePlan {
     if (tile_size >= length) {
         const starts = try allocator.alloc(u32, 1);
@@ -188,7 +188,7 @@ pub fn f16BitsToF32(bits: u16) f32 {
     return @as(f16, @bitCast(bits));
 }
 
-/// Official visual-condition posterior: mean+std*randn(seed=42), then FP16 round-trip.
+/// Visual-condition posterior: mean + std * randn(seed=42), then FP16 round-trip.
 pub fn sampleVisualPosteriorNchw(
     allocator: std.mem.Allocator,
     moments_nchw: []const f32,

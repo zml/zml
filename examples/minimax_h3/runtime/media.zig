@@ -159,7 +159,6 @@ pub const Scratch = struct {
     path: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Scratch {
-        // Host IO: VFS Dir.deleteTree panics on path-only scratch dirs.
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
         const name = try std.fmt.allocPrint(allocator, "h3_{x}", .{tmpId()});

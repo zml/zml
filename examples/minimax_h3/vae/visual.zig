@@ -573,7 +573,7 @@ pub fn hostPositions(allocator: std.mem.Allocator, t: u32, h: u32, w: u32, regis
     return out;
 }
 
-/// Host unpack of ViT patch tokens `{s, 3*pt*ph*pw}` into NCHW `{3, T, H, W}`.
+/// Unpack ViT patch tokens `{s, 3*pt*ph*pw}` into NCHW `{3, T, H, W}`.
 pub fn unpackPatches(
     allocator: std.mem.Allocator,
     patches: []const f32,
