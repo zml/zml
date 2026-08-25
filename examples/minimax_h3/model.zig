@@ -400,7 +400,8 @@ pub const config = struct {
     }
 
     pub fn audioLatentLength(duration_s: f32) u32 {
-        return @intFromFloat(@round(duration_s * audio_hz));
+        const frames = alignFrameCount(frameCount(duration_s));
+        return @intFromFloat(@round(@as(f32, @floatFromInt(frames)) / video_fps * audio_hz));
     }
 
     pub fn videoTokenCount(latent_t: u32, latent_h: u32, latent_w: u32, patch: [3]i64) u32 {
