@@ -32,7 +32,7 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     return error.UnsupportedDataType,
-                .f16, .f32 => .triton,
+                .f8e8m0, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
             .rocm, .oneapi => switch (weights_dtype) {
@@ -85,10 +85,10 @@ pub const Parameters = union(Backend) {
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
         metal: metal.Parameters.InitOptions,
 
-        pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
+        pub fn fromBackend(backend: Backend, num_experts_per_tok: u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
                 .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
-                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
@@ -96,7 +96,7 @@ pub const Parameters = union(Backend) {
                     },
                 } },
                 .triton => .{ .triton = .{
-                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
@@ -104,7 +104,7 @@ pub const Parameters = union(Backend) {
                     },
                 } },
                 .mosaic_tpu => .{ .mosaic_tpu = .{
-                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
@@ -112,7 +112,7 @@ pub const Parameters = union(Backend) {
                     },
                 } },
                 .metal => .{ .metal = .{
-                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
@@ -183,6 +183,11 @@ pub const Metadata = union(Backend) {
     }
 };
 
+pub const Options = struct {
+    activation_threshold: ?f32,
+    quant_scheme: ?zml.nn.QuantScheme,
+};
+
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -195,6 +200,7 @@ pub fn forwardMoe(
     bias_down: ?zml.Tensor,
     w1_global_scale: ?zml.Tensor,
     w2_global_scale: ?zml.Tensor,
+    opts: Options,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -391,76 +397,88 @@ pub fn forwardMoe(
                 else => return error.InvalidMetadata,
             };
 
+            const global_num_experts = weights_gate_up.dim(.expert);
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
-            if (expert_partition.eql(.init(.experts))) {
-                const global_num_experts = weights_down.dim(.expert);
-
-                break :b zml.ops.manualComputation(
-                    .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
-                    input.shape(),
+            if (!expert_partition.eql(.init(.experts))) {
+                break :b try triton.fusedExpertsImpl(
+                    input,
+                    weights_gate_up,
+                    weights_down,
+                    topk_weights,
+                    topk_ids,
+                    triton_metadata,
                     .{
                         .activation = parameters.triton.activation,
                         .global_num_experts = global_num_experts,
-                        .scales_gate_up = scales_gate_up,
-                        .bias_gate_up = bias_gate_up,
-                        .scales_down = scales_down,
-                        .bias_down = bias_down,
+                        .w1_scale = scales_gate_up,
+                        .w2_scale = scales_down,
+                        .w1_bias = bias_gate_up,
+                        .w2_bias = bias_down,
+                        .quant_scheme = opts.quant_scheme,
+                        .activation_threshold = opts.activation_threshold,
                     },
-                    (struct {
-                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                            const local_num_experts = sharded_inputs[3].dim(.expert);
-                            const partition_id = zml.ops.partitionId().convert(.i32);
-                            const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                            // List of global expert ids
-                            const global_expert_ids = zml.Tensor.arange(.{ .end = ctx.global_num_experts }, .i32).withTags(.{.expert});
-
-                            // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
-                            const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                                .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                            const expert_map = local_expert_mask.select(
-                                global_expert_ids.sub(expert_start),
-                                zml.Tensor.scalar(-1, .i32),
-                            );
-                            const local_output = triton.fusedExpertsImpl(
-                                sharded_inputs[0],
-                                sharded_inputs[3],
-                                sharded_inputs[4],
-                                sharded_inputs[2],
-                                sharded_inputs[1],
-                                .{},
-                                .{
-                                    .activation = ctx.activation,
-                                    .global_num_experts = ctx.global_num_experts,
-                                    .expert_map = expert_map,
-                                    .w1_scale = ctx.scales_gate_up,
-                                    .w2_scale = ctx.scales_down,
-                                    .w1_bias = ctx.bias_gate_up,
-                                    .w2_bias = ctx.bias_down,
-                                },
-                            ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            const local_reshaped = local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
-                            return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
-                        }
-                    }).body,
                 );
             }
 
-            break :b try triton.fusedExpertsImpl(
-                input,
-                weights_gate_up,
-                weights_down,
-                topk_weights,
-                topk_ids,
-                triton_metadata,
+            break :b zml.ops.manualComputation(
+                .{
+                    input,
+                    topk_ids,
+                    topk_weights,
+                    weights_gate_up,
+                    scales_gate_up,
+                    weights_down,
+                    scales_down,
+                },
+                input.shape(),
                 .{
                     .activation = parameters.triton.activation,
-                    .global_num_experts = weights_gate_up.dim(.expert),
-                    .w1_scale = scales_gate_up,
-                    .w2_scale = scales_down,
-                    .w1_bias = bias_gate_up,
-                    .w2_bias = bias_down,
+                    .global_num_experts = global_num_experts,
+                    .bias_gate_up = bias_gate_up,
+                    .bias_down = bias_down,
+                    .quant_scheme = opts.quant_scheme,
+                    .activation_threshold = opts.activation_threshold,
                 },
+                (struct {
+                    fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
+                        const local_num_experts = sharded_inputs[3].dim(.expert);
+                        const partition_id = zml.ops.partitionId().convert(.i32);
+                        const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                        // List of global expert ids
+                        const global_expert_ids = zml.Tensor.arange(.{ .end = ctx.global_num_experts }, .i32).withTags(.{.expert});
+
+                        // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
+                        const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                            .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                        const expert_map = local_expert_mask.select(
+                            global_expert_ids.sub(expert_start),
+                            zml.Tensor.scalar(-1, .i32),
+                        );
+
+                        const local_output = triton.fusedExpertsImpl(
+                            sharded_inputs[0],
+                            sharded_inputs[3],
+                            sharded_inputs[5],
+                            sharded_inputs[2],
+                            sharded_inputs[1],
+                            .{},
+                            .{
+                                .activation = ctx.activation,
+                                .global_num_experts = ctx.global_num_experts,
+                                .expert_map = expert_map,
+                                .w1_scale = sharded_inputs[4],
+                                .w2_scale = sharded_inputs[6],
+                                .w1_bias = ctx.bias_gate_up,
+                                .w2_bias = ctx.bias_down,
+                                .quant_scheme = ctx.quant_scheme,
+                                .activation_threshold = ctx.activation_threshold,
+                            },
+                        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                        const local_reshaped = local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                        return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                    }
+                }).body,
             );
         },
         .mosaic_tpu => b: {
