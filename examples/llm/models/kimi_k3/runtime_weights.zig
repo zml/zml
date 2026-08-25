@@ -2,27 +2,46 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+const fast_loader = @import("fast_loader.zig");
 const kda = @import("kda.zig");
 const layer = @import("layer.zig");
 const mla = @import("mla.zig");
+const moe = @import("moe.zig");
 
 const log = std.log.scoped(.kimi_k3_weights);
 
+pub const LoaderResources = fast_loader.Resources;
+
 pub const expert_count: usize = 896;
 
+fn expertIdLexicalLessThan(_: void, lhs: usize, rhs: usize) bool {
+    var lhs_buffer: [4]u8 = undefined;
+    var rhs_buffer: [4]u8 = undefined;
+    const lhs_text = std.fmt.bufPrint(&lhs_buffer, "{}", .{lhs}) catch unreachable;
+    const rhs_text = std.fmt.bufPrint(&rhs_buffer, "{}", .{rhs}) catch unreachable;
+    return std.mem.order(u8, lhs_text, rhs_text) == .lt;
+}
+
 /// Placement of the six routed-expert MXFP4 value/scale tensors. The
-/// shared-axis mode uses the existing four physical ranks for both TP4 and EP4.
+/// shared-axis mode uses the same physical ranks for tensor and expert
+/// partitioning. Normal execution supports four or eight CUDA ranks.
 pub const ExpertPlacement = enum {
     replicated,
-    shared_axis_four_way,
+    shared_axis,
 
-    pub const shared_axis_ranks: usize = 4;
-    pub const shared_axis_local_experts: usize = expert_count / shared_axis_ranks;
+    pub fn isSupportedSharedAxisDeviceCount(device_count: usize) bool {
+        return device_count == 4 or device_count == 8;
+    }
 
     pub fn validate(self: ExpertPlacement, device_count: usize) !void {
         if (self == .replicated) return;
-        if (device_count != shared_axis_ranks) return error.KimiK3SharedAxisExpertPartitionRequiresFourCudaDevices;
-        if (expert_count % shared_axis_ranks != 0) return error.KimiK3ExpertCountNotDivisibleByFour;
+        if (!isSupportedSharedAxisDeviceCount(device_count)) return error.KimiK3SharedAxisExpertPartitionRequiresFourOrEightCudaDevices;
+        if (expert_count % device_count != 0) return error.KimiK3ExpertCountNotDivisibleByDeviceCount;
+    }
+
+    pub fn localExpertCount(self: ExpertPlacement, device_count: usize) !usize {
+        try self.validate(device_count);
+        return if (self == .replicated) expert_count else @divExact(expert_count, device_count);
     }
 
     pub fn partitionShape(self: ExpertPlacement, shape: zml.Shape, device_count: usize) !zml.Shape {
@@ -32,7 +51,7 @@ pub const ExpertPlacement = enum {
         }
         return switch (self) {
             .replicated => shape,
-            .shared_axis_four_way => shape.withPartitioning(.{ .expert = .experts }),
+            .shared_axis => shape.withPartitioning(.{ .expert = .experts }),
         };
     }
 };
@@ -40,13 +59,73 @@ pub const ExpertPlacement = enum {
 /// Mutable instrumentation shared by copied Loader values. Payload counters
 /// cover explicit runtime layer reads; head/layer-0 bulk loading is separate.
 pub const LoadStats = struct {
+    mutex: std.Io.Mutex = .init,
     layer_loads: usize = 0,
     payload_reads: u64 = 0,
     payload_bytes: u64 = 0,
+    physical_read_extents: u64 = 0,
+    physical_read_bytes: u64 = 0,
+    physical_file_opens: u64 = 0,
+    read_time_ns: u64 = 0,
+    upload_wait_time_ns: u64 = 0,
+    total_loading_time_ns: u64 = 0,
+    packed_expert_layers: usize = 0,
+    fallback_expert_layers: usize = 0,
 
-    fn recordPayload(self: *LoadStats, bytes: usize) void {
+    expert_physical_read_extents: u64 = 0,
+    expert_physical_read_bytes: u64 = 0,
+    pub fn recordPayload(self: *LoadStats, io: std.Io, bytes: usize) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.payload_reads += 1;
         self.payload_bytes += bytes;
+    }
+
+    pub fn recordPayloads(self: *LoadStats, io: std.Io, count: u64, bytes: u64) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.payload_reads += count;
+        self.payload_bytes += bytes;
+    }
+
+    pub fn recordLayer(self: *LoadStats, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.layer_loads += 1;
+    }
+
+    pub fn recordTransfer(self: *LoadStats, io: std.Io, transfer: fast_loader.TransferStats) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.physical_read_extents += transfer.extents;
+        self.physical_read_bytes += transfer.bytes;
+        self.physical_file_opens += transfer.opens;
+        self.read_time_ns += transfer.read_ns;
+        self.upload_wait_time_ns += transfer.upload_wait_ns;
+        self.total_loading_time_ns += transfer.total_ns;
+    }
+
+    pub fn recordExpertTransfer(self: *LoadStats, io: std.Io, transfer: fast_loader.TransferStats) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.physical_read_extents += transfer.extents;
+        self.physical_read_bytes += transfer.bytes;
+        self.physical_file_opens += transfer.opens;
+        self.read_time_ns += transfer.read_ns;
+        self.upload_wait_time_ns += transfer.upload_wait_ns;
+        self.total_loading_time_ns += transfer.total_ns;
+        self.expert_physical_read_extents += transfer.extents;
+        self.expert_physical_read_bytes += transfer.bytes;
+    }
+
+    pub fn recordExpertLayerMode(self: *LoadStats, io: std.Io, is_packed: bool) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (is_packed) {
+            self.packed_expert_layers += 1;
+        } else {
+            self.fallback_expert_layers += 1;
+        }
     }
 };
 
@@ -171,7 +250,9 @@ pub const Loader = struct {
     expert_sharding: zml.Sharding,
     expert_placement: ExpertPlacement = .replicated,
     stats: ?*LoadStats = null,
+    component_progress: ?*std.Progress.Node = null,
 
+    resources: *fast_loader.Resources,
     fn rootView(self: Loader) zml.io.TensorStore.View {
         return self.store.view();
     }
@@ -184,25 +265,20 @@ pub const Loader = struct {
         );
     }
 
+    fn findSource(self: Loader, key: []const u8) !zml.safetensors.Tensor {
+        return self.store.registry.tensors.get(key) orelse error.MissingKimiK3RuntimeWeight;
+    }
+
     fn loadRoot(self: Loader, key: []const u8, tags: anytype) !zml.Buffer {
-        const shape = self.rootView().getShape(key) orelse {
-            log.err("Missing required runtime tensor: {s}", .{key});
-            return error.MissingKimiK3RuntimeWeight;
-        };
-        const bytes = try self.allocator.alloc(u8, shape.byteSize());
-        defer self.allocator.free(bytes);
-        var io_buffer: [8 * 1024]u8 = undefined;
-        var reader = try self.rootView().getReader(key, self.io, &io_buffer);
-        defer reader.deinit();
-        _ = try reader.interface.readSliceAll(bytes);
-        if (self.stats) |stats| stats.recordPayload(bytes.len);
-        return zml.Buffer.fromBytes(
-            self.io,
-            self.platform,
-            shape.withTags(tags),
-            self.model_sharding,
-            bytes,
-        );
+        const source = try self.findSource(key);
+        const target = source.shape.withTags(tags);
+        var output: zml.Buffer = undefined;
+        const transfer = try self.resources.streamSources(&.{source}, target, self.model_sharding, &output, null);
+        if (self.stats) |stats| {
+            stats.recordPayload(self.io, @intCast(source.byteSize()));
+            stats.recordTransfer(self.io, transfer);
+        }
+        return output;
     }
 
     fn loadLayer(self: Loader, layer_index: usize, suffix: []const u8, tags: anytype) !zml.Buffer {
@@ -214,16 +290,15 @@ pub const Loader = struct {
     fn loadLayerAs(self: Loader, layer_index: usize, suffix: []const u8, target: zml.Shape) !zml.Buffer {
         const key = try self.layerKey(layer_index, suffix);
         defer self.allocator.free(key);
-        const source = self.rootView().getShape(key) orelse return error.MissingKimiK3RuntimeWeight;
+        const source = try self.findSource(key);
         if (source.byteSize() != target.byteSize()) return error.KimiK3RuntimeWeightReshapeMismatch;
-        const bytes = try self.allocator.alloc(u8, source.byteSize());
-        defer self.allocator.free(bytes);
-        var io_buffer: [8 * 1024]u8 = undefined;
-        var reader = try self.rootView().getReader(key, self.io, &io_buffer);
-        defer reader.deinit();
-        _ = try reader.interface.readSliceAll(bytes);
-        if (self.stats) |stats| stats.recordPayload(bytes.len);
-        return zml.Buffer.fromBytes(self.io, self.platform, target, self.model_sharding, bytes);
+        var output: zml.Buffer = undefined;
+        const transfer = try self.resources.streamSources(&.{source}, target, self.model_sharding, &output, null);
+        if (self.stats) |stats| {
+            stats.recordPayload(self.io, @intCast(source.byteSize()));
+            stats.recordTransfer(self.io, transfer);
+        }
+        return output;
     }
 
     fn loadExpertComponent(
@@ -235,29 +310,202 @@ pub const Loader = struct {
     ) !zml.Buffer {
         const partitioned_target = try self.expert_placement.partitionShape(target, self.platform.devices.len);
         const per_expert = @divExact(partitioned_target.byteSize(), expert_count);
-        const bytes = try self.allocator.alloc(u8, target.byteSize());
-        defer self.allocator.free(bytes);
-        var io_buffer: [8 * 1024]u8 = undefined;
+
+        var packed_sources: [fast_loader.canonical_parts]zml.safetensors.Tensor = undefined;
+        if (try self.resources.packedExpertSources(layer_index, projection, component, &packed_sources)) {
+            const expected_part_bytes = @divExact(target.byteSize(), fast_loader.canonical_parts);
+            for (packed_sources) |packed_source| {
+                const dims = packed_source.shape.dims();
+                if (dims.len != target.dims().len or
+                    dims[0] != fast_loader.experts_per_part or
+                    packed_source.byteSize() != expected_part_bytes)
+                {
+                    return error.KimiK3PackedExpertTensorShapeMismatch;
+                }
+            }
+            var output: zml.Buffer = undefined;
+            const transfer = try self.resources.streamSources(&packed_sources, partitioned_target, self.expert_sharding, &output, self.component_progress);
+            if (self.stats) |stats| {
+                stats.recordPayloads(self.io, expert_count, partitioned_target.byteSize());
+                stats.recordExpertTransfer(self.io, transfer);
+            }
+            return output;
+        }
+
+        var sources: [expert_count]zml.safetensors.Tensor = undefined;
         for (0..expert_count) |expert| {
-            const suffix = try std.fmt.allocPrint(
-                self.allocator,
-                "block_sparse_moe.experts.{d}.{s}.{s}",
-                .{ expert, projection, component },
+            var key_buffer: [192]u8 = undefined;
+            const key = try std.fmt.bufPrint(
+                &key_buffer,
+                "language_model.model.layers.{d}.block_sparse_moe.experts.{d}.{s}.{s}",
+                .{ layer_index, expert, projection, component },
             );
-            defer self.allocator.free(suffix);
-            const key = try self.layerKey(layer_index, suffix);
-            defer self.allocator.free(key);
-            const source = self.rootView().getShape(key) orelse {
+            const source = self.store.registry.tensors.get(key) orelse {
                 log.err("Missing expert tensor: {s}", .{key});
                 return error.MissingKimiK3ExpertWeight;
             };
             if (source.byteSize() != per_expert) return error.KimiK3ExpertShapeMismatch;
-            var reader = try self.rootView().getReader(key, self.io, &io_buffer);
-            defer reader.deinit();
-            _ = try reader.interface.readSliceAll(bytes[expert * per_expert ..][0..per_expert]);
-            if (self.stats) |stats| stats.recordPayload(per_expert);
+            sources[expert] = source;
         }
-        return zml.Buffer.fromBytes(self.io, self.platform, partitioned_target, self.expert_sharding, bytes);
+        var output: zml.Buffer = undefined;
+        const transfer = try self.resources.streamSources(&sources, partitioned_target, self.expert_sharding, &output, null);
+        if (self.component_progress) |progress| progress.completeOne();
+        if (self.stats) |stats| {
+            stats.recordPayloads(self.io, expert_count, partitioned_target.byteSize());
+            stats.recordExpertTransfer(self.io, transfer);
+        }
+        return output;
+    }
+
+    fn loadFallbackExpertComponent(
+        self: Loader,
+        bytes: []const u8,
+        component_locations: *const [expert_count][6]usize,
+        component_index: usize,
+        target: zml.Shape,
+    ) !zml.Buffer {
+        defer if (self.component_progress) |progress| progress.completeOne();
+        const partitioned_target = try self.expert_placement.partitionShape(target, self.platform.devices.len);
+        const component_bytes = @divExact(target.byteSize(), expert_count);
+        var offsets: [expert_count]usize = undefined;
+        for (&offsets, component_locations) |*offset, locations|
+            offset.* = locations[component_index];
+        var output: zml.Buffer = undefined;
+        const transfer = try self.resources.streamMemoryOffsets(
+            bytes,
+            &offsets,
+            component_bytes,
+            partitioned_target,
+            self.expert_sharding,
+            &output,
+        );
+        if (self.stats) |stats| stats.recordTransfer(self.io, transfer);
+        return output;
+    }
+
+    fn loadExpertBank(self: Loader, layer_index: usize) !zml.Bufferized(moe.ExpertBank) {
+        const targets = [6]zml.Shape{
+            zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
+            zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+            zml.Shape.init(.{ .expert = expert_count, .latent = 3584, .kw = 1536 }, .u8),
+            zml.Shape.init(.{ .expert = expert_count, .latent = 3584, .block = 96 }, .u8),
+            zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8),
+            zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8),
+        };
+        const projections = [6][]const u8{ "w1", "w1", "w2", "w2", "w3", "w3" };
+        const components = [6][]const u8{
+            "weight_packed",
+            "weight_scale",
+            "weight_packed",
+            "weight_scale",
+            "weight_packed",
+            "weight_scale",
+        };
+
+        if (self.resources.usesPackedCache()) {
+            if (self.stats) |stats| stats.recordExpertLayerMode(self.io, true);
+            var result: zml.Bufferized(moe.ExpertBank) = undefined;
+            result.w1.values = try self.loadExpertComponent(layer_index, projections[0], components[0], targets[0]);
+            errdefer result.w1.values.deinit();
+            result.w1.scale = try self.loadExpertComponent(layer_index, projections[1], components[1], targets[1]);
+            errdefer result.w1.scale.deinit();
+            result.w2.values = try self.loadExpertComponent(layer_index, projections[2], components[2], targets[2]);
+            errdefer result.w2.values.deinit();
+            result.w2.scale = try self.loadExpertComponent(layer_index, projections[3], components[3], targets[3]);
+            errdefer result.w2.scale.deinit();
+            result.w3.values = try self.loadExpertComponent(layer_index, projections[4], components[4], targets[4]);
+            errdefer result.w3.values.deinit();
+            result.w3.scale = try self.loadExpertComponent(layer_index, projections[5], components[5], targets[5]);
+            return result;
+        }
+
+        if (self.stats) |stats| stats.recordExpertLayerMode(self.io, false);
+        const SourceExtent = struct {
+            source: zml.safetensors.Tensor,
+            scratch_offset: usize,
+            bytes: usize,
+        };
+        var extents: [expert_count]SourceExtent = undefined;
+        var extent_count: usize = 0;
+        var expected_source_offset: u64 = 0;
+        var logical_offset: usize = 0;
+        var component_locations: [expert_count][6]usize = undefined;
+        var expert_stride: usize = 0;
+        for (targets) |target|
+            expert_stride += @divExact(target.byteSize(), expert_count);
+        if (expert_stride * expert_count != expert_component_bytes.device_bank)
+            return error.KimiK3ExpertBankByteAccountingMismatch;
+
+        var expert_order: [expert_count]usize = undefined;
+        for (&expert_order, 0..) |*expert, index| expert.* = index;
+        std.mem.sort(usize, &expert_order, {}, expertIdLexicalLessThan);
+
+        for (expert_order) |expert| {
+            for (projections, components, 0..) |projection, component, component_index| {
+                var key_buffer: [192]u8 = undefined;
+                const key = try std.fmt.bufPrint(
+                    &key_buffer,
+                    "language_model.model.layers.{d}.block_sparse_moe.experts.{d}.{s}.{s}",
+                    .{ layer_index, expert, projection, component },
+                );
+                const source = self.store.registry.tensors.get(key) orelse
+                    return error.MissingKimiK3ExpertWeight;
+                const expected_bytes = @divExact(targets[component_index].byteSize(), expert_count);
+                if (source.byteSize() != expected_bytes)
+                    return error.KimiK3ExpertShapeMismatch;
+
+                const starts_new_extent = extent_count == 0 or
+                    !std.mem.eql(u8, extents[extent_count - 1].source.file_uri, source.file_uri) or
+                    source.offset != expected_source_offset;
+                if (starts_new_extent) {
+                    if (component_index != 0) return error.KimiK3ExpertComponentsNotContiguous;
+                    if (extent_count == extents.len)
+                        return error.KimiK3ExpertLayerSpansTooManySourceExtents;
+                    if (extent_count != 0)
+                        extents[extent_count - 1].bytes =
+                            logical_offset - extents[extent_count - 1].scratch_offset;
+                    extents[extent_count] = .{
+                        .source = source,
+                        .scratch_offset = logical_offset,
+                        .bytes = 0,
+                    };
+                    extent_count += 1;
+                }
+                component_locations[expert][component_index] = logical_offset;
+                expected_source_offset = source.offset + source.byteSize();
+                logical_offset += @intCast(source.byteSize());
+            }
+        }
+        if (extent_count == 0) return error.MissingKimiK3ExpertWeight;
+        extents[extent_count - 1].bytes =
+            logical_offset - extents[extent_count - 1].scratch_offset;
+        const total_bytes = logical_offset;
+        if (total_bytes != expert_stride * expert_count)
+            return error.KimiK3ExpertBankByteAccountingMismatch;
+
+        const scratch = try self.allocator.alloc(u8, total_bytes);
+        defer self.allocator.free(scratch);
+        for (extents[0..extent_count]) |extent| {
+            const destination = scratch[extent.scratch_offset..][0..extent.bytes];
+            const transfer = try self.resources.readExtent(extent.source, destination);
+            if (self.stats) |stats| stats.recordExpertTransfer(self.io, transfer);
+        }
+        if (self.stats) |stats|
+            stats.recordPayloads(self.io, expert_count * 6, total_bytes);
+
+        var result: zml.Bufferized(moe.ExpertBank) = undefined;
+        result.w1.values = try self.loadFallbackExpertComponent(scratch, &component_locations, 0, targets[0]);
+        errdefer result.w1.values.deinit();
+        result.w1.scale = try self.loadFallbackExpertComponent(scratch, &component_locations, 1, targets[1]);
+        errdefer result.w1.scale.deinit();
+        result.w2.values = try self.loadFallbackExpertComponent(scratch, &component_locations, 2, targets[2]);
+        errdefer result.w2.values.deinit();
+        result.w2.scale = try self.loadFallbackExpertComponent(scratch, &component_locations, 3, targets[3]);
+        errdefer result.w2.scale.deinit();
+        result.w3.values = try self.loadFallbackExpertComponent(scratch, &component_locations, 4, targets[4]);
+        errdefer result.w3.values.deinit();
+        result.w3.scale = try self.loadFallbackExpertComponent(scratch, &component_locations, 5, targets[5]);
+        return result;
     }
 
     pub fn loadHead(self: Loader) !HeadWeights {
@@ -326,18 +574,8 @@ pub const Loader = struct {
         result.moe.gate.correction_bias = try self.loadLayer(layer_index, "block_sparse_moe.gate.e_score_correction_bias", .{.expert});
         errdefer result.moe.gate.correction_bias.deinit();
 
-        result.moe.experts.w1.values = try self.loadExpertComponent(layer_index, "w1", "weight_packed", zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8));
-        errdefer result.moe.experts.w1.values.deinit();
-        result.moe.experts.w1.scale = try self.loadExpertComponent(layer_index, "w1", "weight_scale", zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8));
-        errdefer result.moe.experts.w1.scale.deinit();
-        result.moe.experts.w2.values = try self.loadExpertComponent(layer_index, "w2", "weight_packed", zml.Shape.init(.{ .expert = expert_count, .latent = 3584, .kw = 1536 }, .u8));
-        errdefer result.moe.experts.w2.values.deinit();
-        result.moe.experts.w2.scale = try self.loadExpertComponent(layer_index, "w2", "weight_scale", zml.Shape.init(.{ .expert = expert_count, .latent = 3584, .block = 96 }, .u8));
-        errdefer result.moe.experts.w2.scale.deinit();
-        result.moe.experts.w3.values = try self.loadExpertComponent(layer_index, "w3", "weight_packed", zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .kw = 1792 }, .u8));
-        errdefer result.moe.experts.w3.values.deinit();
-        result.moe.experts.w3.scale = try self.loadExpertComponent(layer_index, "w3", "weight_scale", zml.Shape.init(.{ .expert = expert_count, .intermediate = 3072, .block = 112 }, .u8));
-        errdefer result.moe.experts.w3.scale.deinit();
+        result.moe.experts = try self.loadExpertBank(layer_index);
+        errdefer zml.Buffer.deinitAll(moe.ExpertBank, &result.moe.experts);
 
         result.moe.dense.routed_down = try self.loadLayer(layer_index, "block_sparse_moe.routed_expert_down_proj.weight", .{ .latent, .d });
         errdefer result.moe.dense.routed_down.deinit();
@@ -354,7 +592,7 @@ pub const Loader = struct {
     }
 
     pub fn loadKdaMoe(self: Loader, layer_index: usize) !zml.Bufferized(layer.KdaMoeWeights) {
-        if (self.stats) |stats| stats.layer_loads += 1;
+        if (self.stats) |stats| stats.recordLayer(self.io);
         var result: zml.Bufferized(layer.KdaMoeWeights) = undefined;
         result.common = try self.loadCommon(layer_index);
         errdefer zml.Buffer.deinitAll(layer.MoeLayerWeights, &result.common);
@@ -389,7 +627,7 @@ pub const Loader = struct {
     }
 
     pub fn loadMlaMoe(self: Loader, layer_index: usize) !zml.Bufferized(layer.MlaMoeWeights) {
-        if (self.stats) |stats| stats.layer_loads += 1;
+        if (self.stats) |stats| stats.recordLayer(self.io);
         var result: zml.Bufferized(layer.MlaMoeWeights) = undefined;
         result.common = try self.loadCommon(layer_index);
         errdefer zml.Buffer.deinitAll(layer.MoeLayerWeights, &result.common);
@@ -444,7 +682,10 @@ pub fn tensor(buffer: zml.Buffer) zml.Tensor {
 }
 
 fn symbolicExpert(expert_placement: ExpertPlacement, shape: zml.Shape) zml.Tensor {
-    return .fromShape(expert_placement.partitionShape(shape, ExpertPlacement.shared_axis_ranks) catch unreachable);
+    return .fromShape(switch (expert_placement) {
+        .replicated => shape,
+        .shared_axis => shape.withPartitioning(.{ .expert = .experts }),
+    });
 }
 
 fn symbolicCommon(expert_placement: ExpertPlacement) layer.MoeLayerWeights {

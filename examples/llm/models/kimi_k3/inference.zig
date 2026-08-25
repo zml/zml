@@ -89,10 +89,21 @@ pub const CompilationParameters = struct {
     mla_cache: mla.SessionCache,
     seqlen: usize,
     source_slots: usize,
+    active_layer_count: usize,
     shardings: common.Shardings,
 
     pub fn init(mdl: model.Model, seqlen: usize, shardings: common.Shardings) !CompilationParameters {
-        const end = try mdl.selection.end(mdl.config);
+        return initForLayers(mdl, seqlen, shardings, mdl.layers.len);
+    }
+
+    pub fn initForLayers(
+        mdl: model.Model,
+        seqlen: usize,
+        shardings: common.Shardings,
+        active_layer_count: usize,
+    ) !CompilationParameters {
+        if (active_layer_count == 0 or active_layer_count > mdl.layers.len) return error.InvalidKimiK3ActiveLayerCount;
+        const end = mdl.selection.first_layer + active_layer_count;
         const block_size: usize = @intCast(mdl.config.text_config.attn_res_block_size);
         const source_slots = @max(@as(usize, 1), std.math.divCeil(usize, end, block_size) catch unreachable);
         return .{
@@ -106,6 +117,7 @@ pub const CompilationParameters = struct {
             .mla_cache = runtime_weights.symbolicMlaCache(seqlen),
             .seqlen = seqlen,
             .source_slots = source_slots,
+            .active_layer_count = active_layer_count,
             .shardings = shardings,
         };
     }
@@ -174,7 +186,7 @@ pub const CompiledModel = struct {
         var has_kda_boundary = false;
         var has_mla_boundary = false;
         const block_size: usize = @intCast(mdl.config.text_config.attn_res_block_size);
-        for (mdl.layers) |planned| switch (planned.kind()) {
+        for (mdl.layers[0..params.active_layer_count]) |planned| switch (planned.kind()) {
             .kda_dense => {},
             .kda_moe => {
                 has_kda_moe = true;

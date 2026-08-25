@@ -15,22 +15,37 @@ import numpy as np
 MINIMUM_CLOSE_FRACTION = 0.995
 # dumpSessionCache writes all four tensors for each KDA layer before advancing
 # to the next layer. Keep the public report ordered the same way.
-def segments(capacity: int) -> tuple[tuple[str, str, int, float, float], ...]:
+def segments(
+    capacity: int,
+    kda_count: int = 3,
+    mla_count: int = 1,
+) -> tuple[tuple[str, str, int, float, float], ...]:
     if capacity < 1:
         raise ValueError(f"cache capacity must be positive: {capacity}")
-    return tuple(
-        item
-        for layer in range(3)
-        for item in (
-            (f"layer{layer}.q_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
-            (f"layer{layer}.k_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
-            (f"layer{layer}.v_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
-            (f"layer{layer}.recurrent", "f32", 1 * 96 * 128 * 128, 5e-3, 2e-2),
+    if kda_count < 0 or mla_count < 0 or kda_count + mla_count == 0:
+        raise ValueError(
+            f"cache family counts must be non-negative and non-empty: "
+            f"kda={kda_count} mla={mla_count}"
         )
-    ) + (
-        ("layer3.compressed", "bf16", capacity * 512, 5e-2, 2e-2),
-        ("layer3.extra_key", "bf16", capacity * 64, 5e-2, 2e-2),
+    kda_segments = tuple(
+        item
+        for ordinal in range(kda_count)
+        for item in (
+            (f"kda{ordinal}.q_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
+            (f"kda{ordinal}.k_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
+            (f"kda{ordinal}.v_conv", "bf16", 1 * 12_288 * 4, 5e-2, 2e-2),
+            (f"kda{ordinal}.recurrent", "f32", 1 * 96 * 128 * 128, 5e-3, 2e-2),
+        )
     )
+    mla_segments = tuple(
+        item
+        for ordinal in range(mla_count)
+        for item in (
+            (f"mla{ordinal}.compressed", "bf16", capacity * 512, 5e-2, 2e-2),
+            (f"mla{ordinal}.extra_key", "bf16", capacity * 64, 5e-2, 2e-2),
+        )
+    )
+    return kda_segments + mla_segments
 
 
 SEGMENTS = segments(1)
@@ -41,10 +56,16 @@ def _bf16(raw: bytes) -> np.ndarray:
     return (words << 16).view(np.float32)
 
 
-def compare(gpu0_path: Path, tp4_path: Path, capacity: int = 1) -> dict[str, Any]:
+def compare(
+    gpu0_path: Path,
+    tp4_path: Path,
+    capacity: int = 1,
+    kda_count: int = 3,
+    mla_count: int = 1,
+) -> dict[str, Any]:
     gpu0_raw = gpu0_path.read_bytes()
     tp4_raw = tp4_path.read_bytes()
-    cache_segments = segments(capacity)
+    cache_segments = segments(capacity, kda_count, mla_count)
     expected_bytes = sum(count * (2 if dtype == "bf16" else 4) for _, dtype, count, _, _ in cache_segments)
     if len(gpu0_raw) != expected_bytes or len(tp4_raw) != expected_bytes:
         raise ValueError(
@@ -84,6 +105,8 @@ def compare(gpu0_path: Path, tp4_path: Path, capacity: int = 1) -> dict[str, Any
     result = {
         "schema_version": 1,
         "status": "pass" if all(record["passed"] for record in records) else "fail",
+        "kda_count": kda_count,
+        "mla_count": mla_count,
         "scope": (
             "four_layer_prefill_cache_gpu0_vs_tp4_ep1"
             if capacity == 1
@@ -107,8 +130,10 @@ def main() -> None:
     parser.add_argument("--tp4", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--capacity", type=int, default=1)
+    parser.add_argument("--kda-count", type=int, default=3)
+    parser.add_argument("--mla-count", type=int, default=1)
     args = parser.parse_args()
-    result = compare(args.gpu0, args.tp4, args.capacity)
+    result = compare(args.gpu0, args.tp4, args.capacity, args.kda_count, args.mla_count)
     if result["status"] != "pass":
         failed = [record["name"] for record in result["segments"] if not record["passed"]]
         raise SystemExit(f"distributed cache comparison failed: {failed}")

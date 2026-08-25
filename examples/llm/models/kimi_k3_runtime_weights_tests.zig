@@ -50,6 +50,8 @@ pub fn main(init: std.process.Init) !void {
     defer registry.deinit();
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
+    var resources = try runtime_weights.LoaderResources.init(allocator, io, platform, null);
+    defer resources.deinit();
     const loader: runtime_weights.Loader = .{
         .allocator = allocator,
         .io = io,
@@ -57,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
         .store = &store,
         .model_sharding = platform.replicated_sharding,
         .expert_sharding = platform.replicated_sharding,
+        .resources = &resources,
     };
     var stdout_file = std.Io.File.stdout().writerStreaming(io, &.{});
 

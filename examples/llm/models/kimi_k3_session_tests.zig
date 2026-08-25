@@ -36,8 +36,8 @@ const Args = struct {
         \\  --layer-limit=<count> Selected prefix depth (default: 4)
         \\  --compile-only        Compile selected families without loading weights
         \\  --resident            Keep every selected prefix layer resident across tokens
-        \\  --distributed         Require physical TP4 across four visible GPUs
-        \\  --partition-experts   Test-only shared-axis TP4+EP4 expert placement
+        \\  --distributed         Require physical TP4 or TP8 on four/eight GPUs
+        \\  --partition-experts   Test-only shared-axis TP+EP expert placement
         \\  --force-eos-after-prefill  Test-only exercise of the EOS stop branch
         \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
         \\  --cache-dump-decode=<path>   Test-only raw cache output after continuation
@@ -51,6 +51,10 @@ const example_resident_layer_loads: usize = 46;
 // 35 KDA+MoE layers x 5,404 reads plus 11 MLA+MoE layers x 5,398 reads.
 const example_resident_payload_reads: u64 = 248_518;
 const example_resident_payload_bytes: u64 = 776_886_773_760;
+const full_resident_layer_loads: usize = 92;
+// 68 KDA+MoE layers x 5,404 reads plus 24 MLA+MoE layers x 5,398 reads.
+const full_resident_payload_reads: u64 = 497_024;
+const full_resident_payload_bytes: u64 = 1_552_926_730_240;
 const example_expert_hbm_per_rank: u64 = 180_807_008_256;
 
 fn elapsedUs(io: std.Io, started: i96) i96 {
@@ -75,7 +79,7 @@ fn initSelectedModel(
         try model.Model.initSelected(allocator, store, parsed.value, .{
             .max_seq_len = parsed.value.text_config.max_position_embeddings,
         }, selection);
-    return .{ .inner = inner, .parsed_config = parsed, .expert_placement = expert_placement };
+    return .{ .inner = inner, .parsed_config = parsed, .expert_placement = expert_placement, .repo = repo };
 }
 
 fn hashBuffer(
@@ -139,19 +143,23 @@ pub fn main(init: std.process.Init) !void {
     if (args.force_eos_after_prefill and !args.decode_one) return error.ForceEosRequiresDecodeGate;
     if (args.layer_limit == 0 or args.layer_limit > 93) return error.InvalidLayerLimit;
     if (args.resident and args.compile_only) return error.InvalidResidentSessionMode;
-    if (args.resident and args.layer_limit > 4 and !args.distributed) return error.ExtendedResidentSessionRequiresFourDevices;
-    if (args.partition_experts and !args.distributed) return error.PartitionedExpertsRequireFourDevices;
+    if (args.resident and args.layer_limit > 4 and !args.distributed) return error.ExtendedResidentSessionRequiresDistributedDevices;
+    if (args.partition_experts and !args.distributed) return error.PartitionedExpertsRequireDistributedDevices;
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.NvidiaCudaRequired;
-    if (args.distributed and platform.devices.len != 4) return error.KimiK3DistributedSessionRequiresFourDevices;
+    if (args.distributed and !runtime_weights.ExpertPlacement.isSupportedSharedAxisDeviceCount(platform.devices.len))
+        return error.KimiK3DistributedSessionRequiresFourOrEightDevices;
     if (!args.distributed and platform.devices.len != 1) return error.KimiK3Gpu0SessionRequiresOneDevice;
     const layout: []const u8 = if (args.partition_experts)
-        "tp4_ep4_shared_axis"
-    else if (args.distributed) "tp4_ep1" else "gpu0";
+        if (platform.devices.len == 4) "tp4_ep4_shared_axis" else "tp8_ep8_shared_axis"
+    else if (args.distributed)
+        if (platform.devices.len == 4) "tp4_ep1" else "tp8_ep1"
+    else
+        "gpu0";
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -166,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
         store.view(),
         args.layer_limit,
         args.compile_only,
-        if (args.partition_experts) .shared_axis_four_way else .replicated,
+        if (args.partition_experts) .shared_axis else .replicated,
     );
     defer loaded_model.deinit(allocator);
     const shardings: common.Shardings = try .init(platform);
@@ -220,22 +228,48 @@ pub fn main(init: std.process.Init) !void {
     var session = try session_impl.Session.init(allocator, io, platform, tokenizer, &compiled, &buffers);
     const resident_load_stats = buffers.load_stats.*;
     defer session.deinit();
-    if (args.resident and args.partition_experts and args.layer_limit == model.example_resident_layer_count) {
-        if (@divExact(runtime_weights.expert_component_bytes.device_bank, 4) * example_resident_layer_loads !=
-            example_expert_hbm_per_rank)
+    const canonical_resident = args.resident and args.partition_experts and
+        ((args.layer_limit == model.example_resident_layer_count and platform.devices.len == 4) or
+            (args.layer_limit == model.full_model_layer_count and platform.devices.len == 8));
+    if (canonical_resident) {
+        const expected_loads = if (platform.devices.len == 4)
+            example_resident_layer_loads
+        else
+            full_resident_layer_loads;
+        const expected_reads = if (platform.devices.len == 4)
+            example_resident_payload_reads
+        else
+            full_resident_payload_reads;
+        const expected_bytes = if (platform.devices.len == 4)
+            example_resident_payload_bytes
+        else
+            full_resident_payload_bytes;
+        if (@divExact(runtime_weights.expert_component_bytes.device_bank, platform.devices.len) *
+            expected_loads != example_expert_hbm_per_rank)
         {
-            return error.KimiK3ExampleResidentExpertHbmAccountingMismatch;
+            return error.KimiK3ResidentExpertHbmAccountingMismatch;
         }
-        if (resident_load_stats.layer_loads != example_resident_layer_loads or
-            resident_load_stats.payload_reads != example_resident_payload_reads or
-            resident_load_stats.payload_bytes != example_resident_payload_bytes)
+        if (resident_load_stats.layer_loads != expected_loads or
+            resident_load_stats.payload_reads != expected_reads or
+            resident_load_stats.payload_bytes != expected_bytes)
         {
-            return error.KimiK3ExampleResidentLoadAccountingMismatch;
+            return error.KimiK3ResidentLoadAccountingMismatch;
         }
+        if (resident_load_stats.packed_expert_layers +
+            resident_load_stats.fallback_expert_layers != expected_loads)
+        {
+            return error.KimiK3ResidentExpertLoadModeAccountingMismatch;
+        }
+        if (resident_load_stats.packed_expert_layers == expected_loads and
+            resident_load_stats.expert_physical_read_extents != expected_loads * 24)
+        {
+            return error.KimiK3PackedExpertExtentAccountingMismatch;
+        }
+
         for (platform.devices) |device| {
             const memory = device.memoryStats();
             if (memory.bytes_limit) |limit| {
-                if (memory.bytes_in_use >= limit) return error.KimiK3ExampleResidentAllocatorLimitExceeded;
+                if (memory.bytes_in_use >= limit) return error.KimiK3ResidentAllocatorLimitExceeded;
             }
         }
     }

@@ -1,0 +1,19 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+py_binary(
+    name = "prepack_experts",
+    srcs = ["prepack_experts.py"],
+    main = "prepack_experts.py",
+    python_version = "PY3",
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "prepack_experts_test",
+    srcs = ["prepack_experts_test.py"],
+    data = ["prepack_experts.py"],
+    imports = ["."],
+    main = "prepack_experts_test.py",
+    python_version = "PY3",
+)

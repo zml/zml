@@ -9,10 +9,10 @@ Rules enforced by the project plan:
 - full-model compilation, staging, and historical conformance remain pinned to
   physical GPU 0; Milestones 22–26 additionally allow physical GPUs 0–3 for
   their isolated four-layer diagnostic and distributed tests;
-- the normal Kimi `//examples/llm` command is a distinct fixed 47-layer
-  resident diagnostic on exactly four CUDA devices, using the same ranks for
-  TP4 and four-way routed-expert partitioning; it is not complete 93-layer
-  inference;
+- the normal Kimi `//examples/llm` command runs a 47-layer TP4+EP4 resident
+  diagnostic on four CUDA devices or all 93 layers with TP8+EP8 on eight;
+  TP and EP share the same physical ranks, and generated facts remain marked
+  unreliable in both modes;
 - CPU inference fallback is forbidden;
 - model weights are never downloaded by project scripts;
 - checkpoint input is read from the workspace-local

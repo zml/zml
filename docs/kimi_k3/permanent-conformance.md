@@ -6,9 +6,10 @@ and binds all 93 text layers. Partial layer selection, compact expert fixtures,
 recorded route alignment, and expanded intermediate tensors remain isolated in
 dedicated conformance executables.
 
-The normal Kimi `//examples/llm` path is now a separate fixed diagnostic: it
-selects layers 0-16 and keeps them resident on exactly four CUDA devices. It is
-not full-model initialization and its decoded text is not a reliable answer.
+The normal Kimi `//examples/llm` path is a separate device-count-driven
+resident diagnostic. Four visible CUDA devices execute layers 0-46 with
+TP4+EP4; eight execute all layers 0-92 with TP8+EP8. Decoded text remains
+marked `reliable_answer=false` in both configurations.
 
 All commands below are offline with respect to model data. Project scripts never
 download weights. Historical and full-model conformance use physical NVIDIA GPU 0. The
@@ -44,21 +45,50 @@ The dependency-free policy audit is:
 .venv/bin/python tools/kimi_k3/cleanup_audit.py
 ```
 
-## Fixed 47-layer example
+## Four- and eight-GPU resident example
 
-The normal Kimi `//examples/llm` command executes layers 0-46 and keeps every
-selected weight resident while generating tokens. It requires exactly four CUDA
-devices and targets four NVIDIA GB300 GPUs. Ordinary tensors retain TP4 while
-the same physical ranks each own a contiguous 224-expert shard of the six
-routed-expert value/scale banks. This is shared-axis TP4+EP4, not a 16-rank
-Cartesian topology. Routed-expert HBM is exactly 180,807,008,256 bytes per rank
-for the 46 resident MoE layers; expected total allocator use is approximately
-200-210 GB per rank.
+The normal Kimi `//examples/llm` command keeps every active weight resident
+while generating tokens and accepts exactly four or eight visible CUDA devices:
 
-The fixed selection performs 46 resident MoE loads, 248,518 checkpoint payload
-reads, and 776,886,773,760 source payload bytes. The read total is the measured
-family sum `35*5,404 + 11*5,398`; it corrects the earlier 248,492 estimate
-without changing the source-byte accounting.
+- four devices execute layers 0-46 (1 dense KDA, 35 KDA+MoE, 11 MLA+MoE)
+  with TP4+EP4 and 224 local experts per rank;
+- eight devices execute all layers 0-92 (1 dense KDA, 68 KDA+MoE, 24 MLA+MoE)
+  with TP8+EP8 and 112 local experts per rank.
+
+TP and EP share the same physical axis; there is no Cartesian 16- or 64-rank
+topology. Routed-expert HBM is exactly 180,807,008,256 bytes per rank in either
+canonical configuration. The four-rank run performs 46 resident MoE loads,
+248,518 logical payload reads, and 776,886,773,760 logical source bytes. The
+eight-rank run performs 92 loads, 497,024 logical reads, and
+1,552,926,730,240 logical source bytes.
+
+For fastest startup, generate the optional versioned component-major cache once:
+
+```bash
+bazel run //tools/kimi_k3:prepack_experts -- \
+  --model=/home/kevin/kimi-k3/moonshot/kimi-k3
+```
+
+The command is resumable, writes four canonical 224-expert safetensors files,
+records source fingerprints, canonical tensor shapes, ranges, byte totals,
+file sizes, and checksums, then publishes its manifest atomically. Inference
+uses a valid cache automatically. If it is absent, the runtime logs the slower
+original-checkpoint fallback and coalesces each layer's
+physically adjacent expert records through persistent positional file reads.
+A present invalid or stale cache is a hard error and is never replaced
+implicitly.
+
+The canonical capacity gate starts with at least 280,000 MiB free on every
+GPU. It checks the exact logical and physical loader counters, zero file reads
+during reset/prefill/decode, local expert widths, all-reduce rank sets, and the
+existing 90% allocator limit. Compiled/runtime inspection must reject an
+expert all-gather or any complete 896-expert temporary buffer. Resident and
+streaming runs must retain greedy-token and complete-cache parity.
+
+Immediately before the packed capacity gate, read an 8 GiB span from the same
+filesystem as a sequential baseline. Packed loading, including weight reads
+and completed DMA uploads but excluding compilation, must sustain at least 70%
+of that measured bandwidth.
 
 Create the model-local tokenizer link once:
 
@@ -89,8 +119,10 @@ bazel run \
 ```
 
 The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=47 full_model=false
-reliable_answer=false`. Output is deliberately truncated-model diagnostic text;
-it must not be presented as a factual response or as full Kimi K3 inference.
+reliable_answer=false` on four GPUs. On eight GPUs it emits
+`layers=93 full_model=true reliable_answer=false`. Four-GPU output is
+deliberately truncated-model diagnostic text; neither mode's generated facts
+should be treated as reliable without external verification.
 
 ## Conformance groups
 
@@ -132,8 +164,8 @@ CUDA_VISIBLE_DEVICES=0 bazel-bin/examples/llm/kimi_k3_session_tests \
 ```
 
 `--layer-limit` belongs to this test executable only. The normal `llm` command
-has no configurable partial-model option; Kimi uses the fixed internal
-47-layer diagnostic selection described above.
+has no configurable partial-model option; Kimi selects its internal 47- or
+93-layer resident schedule from the visible four- or eight-device platform.
 
 ## Fixture regeneration
 

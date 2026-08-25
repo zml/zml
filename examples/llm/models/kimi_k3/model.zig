@@ -9,13 +9,13 @@ const runtime_weights = @import("runtime_weights.zig");
 
 const log = std.log.scoped(.kimi_k3);
 
-/// Fixed resident prefix used by the normal `//examples/llm` Kimi K3 path.
-/// It executes logical layers 0–46 on exactly four NVIDIA GB300 GPUs. Ordinary
-/// model tensors use TP4 while the same physical ranks each own 224 routed
-/// experts. Expected per-rank resident weight use is approximately 200–210 GB.
-/// This is a diagnostic truncated model, not equivalent to the complete
-/// 93-layer Kimi K3 model, and its decoded output is not a reliable answer.
+/// Normal `//examples/llm` execution is selected from visible CUDA ranks:
+/// four GB300s execute diagnostic layers 0–46 with TP4+EP4, while eight execute
+/// the complete layers 0–92 with TP8+EP8. Both layouts own 180,807,008,256
+/// routed-expert bytes per rank before runtime overhead. Generated text is not
+/// presented as a guaranteed factual answer in either mode.
 pub const example_resident_layer_count: usize = 47;
+pub const full_model_layer_count: usize = 93;
 
 pub const ExpertPlacement = runtime_weights.ExpertPlacement;
 pub const Config = struct {
@@ -391,6 +391,30 @@ pub const ResidentMoeLayer = union(enum) {
     }
 };
 
+fn loadResidentLayer(
+    loader: runtime_weights.Loader,
+    planned: TransformerLayer,
+    progress: *std.Progress.Node,
+) !ResidentMoeLayer {
+    const transfer_items: usize = if (loader.resources.usesPackedCache()) 24 else 6;
+    var component_node = progress.start("Streaming expert extents/components...", transfer_items);
+    defer component_node.end();
+    var layer_loader = loader;
+    layer_loader.component_progress = &component_node;
+    const logical_index = planned.weights().logical_index;
+    return switch (planned.kind()) {
+        .kda_dense => error.UnsupportedSecondDenseKimiK3Layer,
+        .kda_moe => .{ .kda_moe = .{
+            .logical_index = logical_index,
+            .weights = try layer_loader.loadKdaMoe(logical_index),
+        } },
+        .mla_moe => .{ .mla_moe = .{
+            .logical_index = logical_index,
+            .weights = try layer_loader.loadMlaMoe(logical_index),
+        } },
+    };
+}
+
 pub const Buffers = struct {
     head: runtime_weights.HeadWeights,
     layer0: zml.Bufferized(layer_ops.Layer0Weights),
@@ -422,6 +446,7 @@ pub const LoadedModel = struct {
     parsed_config: std.json.Parsed(Config),
     expert_placement: ExpertPlacement = .replicated,
     fixed_example_prefix: bool = false,
+    repo: ?std.Io.Dir = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -442,11 +467,12 @@ pub const LoadedModel = struct {
                 store,
                 parsed.value,
                 options,
-                .{ .layer_limit = example_resident_layer_count },
+                .{},
             ),
             .parsed_config = parsed,
-            .expert_placement = .shared_axis_four_way,
+            .expert_placement = .shared_axis,
             .fixed_example_prefix = true,
+            .repo = repo,
         };
     }
 
@@ -454,17 +480,26 @@ pub const LoadedModel = struct {
         self.inner.deinit(allocator);
         self.parsed_config.deinit();
     }
-    fn validateFixedExamplePlatform(self: *const LoadedModel, platform: *const zml.Platform) !void {
-        if (!self.fixed_example_prefix) return;
+    pub fn normalLayerCount(device_count: usize) !usize {
+        return switch (device_count) {
+            4 => example_resident_layer_count,
+            8 => full_model_layer_count,
+            else => error.KimiK3NormalExampleRequiresFourOrEightCudaDevices,
+        };
+    }
+
+    fn validateFixedExamplePlatform(self: *const LoadedModel, platform: *const zml.Platform) !usize {
+        if (!self.fixed_example_prefix) return self.inner.layers.len;
         if (platform.target != .cuda) return error.NvidiaCudaRequired;
-        if (platform.devices.len != 4) return error.KimiK3FixedResidentExampleRequiresFourCudaDevices;
+        const active_layer_count = try normalLayerCount(platform.devices.len);
         try self.expert_placement.validate(platform.devices.len);
         if (self.inner.selection.first_layer != 0 or
-            self.inner.layers.len != example_resident_layer_count or
-            self.expert_placement != .shared_axis_four_way)
+            self.inner.layers.len != full_model_layer_count or
+            self.expert_placement != .shared_axis)
         {
             return error.InvalidKimiK3FixedResidentExampleSelection;
         }
+        return active_layer_count;
     }
 
     pub fn loadBuffers(
@@ -477,10 +512,11 @@ pub const LoadedModel = struct {
         shardings: common.Shardings,
     ) !Buffers {
         if (self.fixed_example_prefix) {
-            try self.validateFixedExamplePlatform(platform);
+            const active_layer_count = try self.validateFixedExamplePlatform(platform);
+            const full_model = active_layer_count == full_model_layer_count;
             log.warn(
-                "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model=false reliable_answer=false",
-                .{example_resident_layer_count},
+                "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model={} reliable_answer=false",
+                .{ active_layer_count, full_model },
             );
             return self.loadResidentBuffers(allocator, io, platform, store, progress, shardings);
         }
@@ -507,6 +543,12 @@ pub const LoadedModel = struct {
         const load_stats = try allocator.create(runtime_weights.LoadStats);
         load_stats.* = .{};
         errdefer allocator.destroy(load_stats);
+        const resources = try allocator.create(runtime_weights.LoaderResources);
+        errdefer allocator.destroy(resources);
+        resources.* = try .init(allocator, io, platform, self.repo);
+        errdefer resources.deinit();
+        if (self.fixed_example_prefix and !resources.usesPackedCache())
+            log.warn("KIMI_K3_PACKED_CACHE absent=true fallback=original_checkpoint", .{});
         const loader: runtime_weights.Loader = .{
             .allocator = allocator,
             .io = io,
@@ -516,6 +558,7 @@ pub const LoadedModel = struct {
             .model_sharding = shardings.model,
             .expert_sharding = shardings.experts,
             .stats = load_stats,
+            .resources = resources,
         };
         var head = try loader.loadHead();
         errdefer zml.Buffer.deinitAll(runtime_weights.HeadTensors, &head);
@@ -537,31 +580,56 @@ pub const LoadedModel = struct {
         if (self.inner.selection.first_layer != 0 or self.inner.layers.len == 0) {
             return error.UnsupportedKimiK3ResidentSelection;
         }
+        const active_layer_count = try self.validateFixedExamplePlatform(platform);
         var buffers = try self.loadStreamingBuffers(allocator, io, platform, store, progress, shardings);
         errdefer self.unloadBuffers(&buffers, allocator);
-        const residents = try allocator.alloc(ResidentMoeLayer, self.inner.layers.len - 1);
+        const residents = try allocator.alloc(ResidentMoeLayer, active_layer_count - 1);
         var initialized: usize = 0;
         errdefer {
             for (residents[0..initialized]) |*resident| resident.deinit();
             allocator.free(residents);
         }
-        var node = progress.start("Loading Kimi K3 resident prefix layers...", self.inner.layers.len - 1);
+        var node = progress.start("Loading Kimi K3 resident layers...", active_layer_count - 1);
         defer node.end();
-        for (self.inner.layers[1..], 0..) |planned, offset| {
-            const logical_index = planned.weights().logical_index;
-            residents[offset] = switch (planned.kind()) {
-                .kda_dense => return error.UnsupportedSecondDenseKimiK3Layer,
-                .kda_moe => .{ .kda_moe = .{
-                    .logical_index = logical_index,
-                    .weights = try buffers.loader.loadKdaMoe(logical_index),
-                } },
-                .mla_moe => .{ .mla_moe = .{
-                    .logical_index = logical_index,
-                    .weights = try buffers.loader.loadMlaMoe(logical_index),
-                } },
+        var offset: usize = 0;
+        while (offset < residents.len) {
+            const has_second = offset + 1 < residents.len;
+            var first = try io.concurrent(loadResidentLayer, .{ buffers.loader, self.inner.layers[offset + 1], &node });
+            var first_pending = true;
+            errdefer if (first_pending) {
+                if (first.cancel(io)) |value| {
+                    var loaded = value;
+                    loaded.deinit();
+                } else |_| {}
             };
-            initialized += 1;
-            node.completeOne();
+
+            if (has_second) {
+                var second = try io.concurrent(loadResidentLayer, .{ buffers.loader, self.inner.layers[offset + 2], &node });
+                var second_pending = true;
+                errdefer if (second_pending) {
+                    if (second.cancel(io)) |value| {
+                        var loaded = value;
+                        loaded.deinit();
+                    } else |_| {}
+                };
+
+                residents[offset] = try first.await(io);
+                first_pending = false;
+                initialized += 1;
+                node.completeOne();
+
+                residents[offset + 1] = try second.await(io);
+                second_pending = false;
+                initialized += 1;
+                node.completeOne();
+                offset += 2;
+            } else {
+                residents[offset] = try first.await(io);
+                first_pending = false;
+                initialized += 1;
+                node.completeOne();
+                offset += 1;
+            }
         }
         buffers.resident_layers = residents;
         return buffers;
@@ -591,6 +659,8 @@ pub const LoadedModel = struct {
         }
         zml.Buffer.deinitAll(runtime_weights.HeadTensors, &buffers.head);
         zml.Buffer.deinitAll(layer_ops.Layer0Weights, &buffers.layer0);
+        buffers.loader.resources.deinit();
+        allocator.destroy(buffers.loader.resources);
         allocator.destroy(buffers.load_stats);
     }
 
@@ -605,8 +675,8 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        try self.validateFixedExamplePlatform(platform);
-        const params = try inference.CompilationParameters.init(self.inner, seqlen, shardings);
+        const active_layer_count = try self.validateFixedExamplePlatform(platform);
+        const params = try inference.CompilationParameters.initForLayers(self.inner, seqlen, shardings, active_layer_count);
         return inference.CompiledModel.init(allocator, io, platform, self, params, progress);
     }
 };

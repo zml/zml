@@ -32,7 +32,7 @@ pub const Session = struct {
         if (platform.target != .cuda) return error.NvidiaCudaRequired;
         var kda_count: usize = 0;
         var mla_count: usize = 0;
-        for (compiled.loaded_model.inner.layers) |planned| switch (planned.kind()) {
+        for (compiled.loaded_model.inner.layers[0..compiled.params.active_layer_count]) |planned| switch (planned.kind()) {
             .kda_dense, .kda_moe => kda_count += 1,
             .mla_moe => mla_count += 1,
         };
@@ -188,7 +188,7 @@ pub const Session = struct {
         var kda_ordinal: usize = 1;
         var mla_ordinal: usize = 0;
         const block_size: usize = @intCast(self.compiled.loaded_model.inner.config.text_config.attn_res_block_size);
-        for (self.compiled.loaded_model.inner.layers[1..]) |planned| {
+        for (self.compiled.loaded_model.inner.layers[1..self.compiled.params.active_layer_count]) |planned| {
             const layer_index = planned.weights().logical_index;
             switch (planned.kind()) {
                 .kda_dense => return error.UnsupportedSecondDenseKimiK3Layer,

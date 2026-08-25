@@ -52,26 +52,36 @@ def audit(root: Path) -> dict[str, Any]:
         r"pub const example_resident_layer_count: usize = (\d+);",
         production["model"],
     )
+    full_layer_match = re.search(
+        r"pub const full_model_layer_count: usize = (\d+);",
+        production["model"],
+    )
     if fixed_layer_match is None or int(fixed_layer_match.group(1)) != 47:
-        issues.append("normal Kimi example is not fixed to 47 resident layers")
-    for required_fixed_example in (
+        issues.append("four-rank Kimi example is not fixed to 47 resident layers")
+    if full_layer_match is None or int(full_layer_match.group(1)) != 93:
+        issues.append("eight-rank Kimi example is not fixed to 93 resident layers")
+    for required_resident_example in (
         "fixed_example_prefix = true",
-        "KimiK3FixedResidentExampleRequiresFourCudaDevices",
+        "KimiK3NormalExampleRequiresFourOrEightCudaDevices",
         "return self.loadResidentBuffers(",
-        "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model=false reliable_answer=false",
+        "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model={} reliable_answer=false",
+        "4 => example_resident_layer_count",
+        "8 => full_model_layer_count",
     ):
-        if required_fixed_example not in production["model"]:
-            issues.append(f"missing fixed Kimi example invariant: {required_fixed_example}")
+        if required_resident_example not in production["model"]:
+            issues.append(f"missing resident Kimi example invariant: {required_resident_example}")
     for required_expert_partition in (
-        "shared_axis_four_way",
+        "shared_axis",
         "withPartitioning(.{ .expert = .experts })",
-        "KimiK3SharedAxisExpertPartitionRequiresFourCudaDevices",
+        "KimiK3SharedAxisExpertPartitionRequiresFourOrEightCudaDevices",
+        "device_count == 4 or device_count == 8",
     ):
         if required_expert_partition not in production["runtime_weights"] and required_expert_partition not in production["model"]:
             issues.append(f"missing Kimi shared-axis expert invariant: {required_expert_partition}")
 
-
-    for name in ("session", "runtime_weights"):
+    # Model-local loading telemetry is required; inference/session hot paths
+    # remain free of timing and logging.
+    for name in ("session",):
         if "std.Io.Clock.now" in production[name] or "log.info(" in production[name]:
             issues.append(f"hot-path timing/logging remains in {name}")
     for token in (
@@ -106,6 +116,8 @@ def audit(root: Path) -> dict[str, Any]:
         "production_layer_limit": False,
         "public_configurable_layer_limit": False,
         "normal_example_fixed_resident_layers": 47,
+        "normal_example_eight_gpu_resident_layers": 93,
+        "normal_example_supported_device_counts": [4, 8],
         "production_hot_path_debug": False,
         "production_results": "compact",
         "diagnostic_target_removed": True,
