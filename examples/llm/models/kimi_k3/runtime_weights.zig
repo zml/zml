@@ -12,6 +12,14 @@ const log = std.log.scoped(.kimi_k3_weights);
 
 pub const LoaderResources = fast_loader.Resources;
 
+/// Validate the mandatory four-rank full-model expert cache without retaining
+/// loader resources or creating any files.
+pub fn requirePackedExpertCache(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !void {
+    var cache = (try fast_loader.PackedCache.open(allocator, io, repo)) orelse
+        return error.KimiK3FourGpuFullModelRequiresPackedExpertCache;
+    cache.deinit();
+}
+
 pub const expert_count: usize = 896;
 
 fn expertIdLexicalLessThan(_: void, lhs: usize, rhs: usize) bool {
@@ -666,7 +674,12 @@ pub const Loader = struct {
     }
 
     pub fn zeroBlocks(self: Loader, source_slots: usize) !zml.Buffer {
-        return zeroBuffer(self, zml.Shape.init(.{ .token = 1, .source = source_slots, .d = 7168 }, .bf16));
+        return self.zeroBlocksForTokens(1, source_slots);
+    }
+
+    pub fn zeroBlocksForTokens(self: Loader, token_count: usize, source_slots: usize) !zml.Buffer {
+        if (token_count == 0 or source_slots == 0) return error.InvalidKimiK3BlockWorkspaceShape;
+        return zeroBuffer(self, zml.Shape.init(.{ .token = token_count, .source = source_slots, .d = 7168 }, .bf16));
     }
 
     fn zeroBuffer(self: Loader, shape: zml.Shape) !zml.Buffer {

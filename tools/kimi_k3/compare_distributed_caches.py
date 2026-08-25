@@ -134,11 +134,11 @@ def main() -> None:
     parser.add_argument("--mla-count", type=int, default=1)
     args = parser.parse_args()
     result = compare(args.gpu0, args.tp4, args.capacity, args.kda_count, args.mla_count)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     if result["status"] != "pass":
         failed = [record["name"] for record in result["segments"] if not record["passed"]]
         raise SystemExit(f"distributed cache comparison failed: {failed}")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

@@ -56,14 +56,23 @@ pub fn main(init: std.process.Init) !void {
     if (model_plan.layers.len != selected_count) return error.ModelPlanCountMismatch;
     if (model.example_resident_layer_count != 47 or model.full_model_layer_count != 93)
         return error.KimiK3ResidentLayerCountMismatch;
-    if (try model.LoadedModel.normalLayerCount(4) != 47 or
-        try model.LoadedModel.normalLayerCount(8) != 93)
+    if (try model.LoadedModel.normalLayerCount(4) != 93 or
+        try model.LoadedModel.normalLayerCount(8) != 93 or
+        try model.LoadedModel.normalExecutionMode(4) != .two_slab or
+        try model.LoadedModel.normalExecutionMode(8) != .full_resident)
     {
         return error.KimiK3NormalDeviceLayerSelectionMismatch;
     }
     if (model.LoadedModel.normalLayerCount(6)) |_| {
         return error.KimiK3ExpectedUnsupportedDeviceCount;
     } else |err| if (err != error.KimiK3NormalExampleRequiresFourOrEightCudaDevices) return err;
+    if (model.slab_a.first_layer != 1 or model.slab_a.end_layer != 47 or
+        model.slab_b.first_layer != 47 or model.slab_b.end_layer != 93 or
+        model.slab_a.count() != 46 or model.slab_b.count() != 46 or
+        model.slab_a.end_layer != model.slab_b.first_layer)
+    {
+        return error.KimiK3TwoSlabCoverageMismatch;
+    }
 
     var example_plan = try model.ModelPlan.init(
         allocator,
@@ -83,6 +92,22 @@ pub fn main(init: std.process.Init) !void {
         return error.KimiK3ExampleResidentFamilyCountMismatch;
     if ((std.math.divCeil(usize, example_plan.layers.len, 12) catch unreachable) != 4)
         return error.KimiK3ExampleResidentSourceSlotMismatch;
+
+    var slab_b_plan = try model.ModelPlan.init(
+        allocator,
+        parsed.value,
+        .{ .first_layer = model.slab_b.first_layer, .layer_limit = model.slab_b.count() },
+    );
+    defer slab_b_plan.deinit(allocator);
+    var slab_b_kda_moe: usize = 0;
+    var slab_b_mla_moe: usize = 0;
+    for (slab_b_plan.layers) |kind| switch (kind) {
+        .kda_dense => return error.KimiK3UnexpectedDenseLayerInSlabB,
+        .kda_moe => slab_b_kda_moe += 1,
+        .mla_moe => slab_b_mla_moe += 1,
+    };
+    if (slab_b_kda_moe != 33 or slab_b_mla_moe != 13)
+        return error.KimiK3SlabBFamilyCountMismatch;
 
     var full_plan = try model.ModelPlan.init(allocator, parsed.value, .{});
     defer full_plan.deinit(allocator);
@@ -149,6 +174,12 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.PackedCacheMemoryMismatch;
     }
+    const capacity_128_memory = try packed_cache.memoryBytes(1, 128);
+    if (capacity_128_memory.total_bytes != 457_998_336 or
+        capacity_128_memory.total_bytes >= 512 * zml.MiB)
+    {
+        return error.KimiK3FullCacheCapacity128MemoryMismatch;
+    }
     if (try model.PackedCachePlan.validateAppend(1_048_575, 1, 1_048_576) != 1_048_576) return error.CacheAppendBoundaryMismatch;
     if (model.PackedCachePlan.validateAppend(1_048_576, 1, 1_048_576)) |_| {
         return error.ExpectedCacheCapacityError;
@@ -189,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
 
     // Explicit selected construction remains replicated conformance; normal
-    // execution selects 47 layers on four ranks or all 93 on eight ranks.
+    // execution selects all 93 layers in two slabs on four ranks or resident on eight ranks.
     var instance = model.Model.initSelected(
         allocator,
         store.view(),

@@ -57,19 +57,23 @@ def audit(root: Path) -> dict[str, Any]:
         production["model"],
     )
     if fixed_layer_match is None or int(fixed_layer_match.group(1)) != 47:
-        issues.append("four-rank Kimi example is not fixed to 47 resident layers")
+        issues.append("historical Kimi prefix is not fixed to 47 layers")
     if full_layer_match is None or int(full_layer_match.group(1)) != 93:
-        issues.append("eight-rank Kimi example is not fixed to 93 resident layers")
-    for required_resident_example in (
+        issues.append("normal Kimi execution is not fixed to all 93 layers")
+    for required_full_model_example in (
         "fixed_example_prefix = true",
         "KimiK3NormalExampleRequiresFourOrEightCudaDevices",
-        "return self.loadResidentBuffers(",
-        "KIMI_K3_DIAGNOSTIC_WARNING layers={} full_model={} reliable_answer=false",
-        "4 => example_resident_layer_count",
-        "8 => full_model_layer_count",
+        "4 => .two_slab",
+        "8 => .full_resident",
+        "KIMI_K3_DIAGNOSTIC_WARNING layers=93 full_model=true reliable_answer=false mode=two_slab",
+        "KIMI_K3_DIAGNOSTIC_WARNING layers=93 full_model=true reliable_answer=false mode=full_resident",
+        "KimiK3FourGpuFullModelRequiresPackedExpertCache",
+        "pub const slab_a: ResidentRange = .{ .first_layer = 1, .end_layer = 47 }",
+        "pub const slab_b: ResidentRange = .{ .first_layer = 47, .end_layer = 93 }",
+        "pub fn loadResidentRange(",
     ):
-        if required_resident_example not in production["model"]:
-            issues.append(f"missing resident Kimi example invariant: {required_resident_example}")
+        if required_full_model_example not in production["model"]:
+            issues.append(f"missing full-model Kimi example invariant: {required_full_model_example}")
     for required_expert_partition in (
         "shared_axis",
         "withPartitioning(.{ .expert = .experts })",
@@ -79,11 +83,20 @@ def audit(root: Path) -> dict[str, Any]:
         if required_expert_partition not in production["runtime_weights"] and required_expert_partition not in production["model"]:
             issues.append(f"missing Kimi shared-axis expert invariant: {required_expert_partition}")
 
-    # Model-local loading telemetry is required; inference/session hot paths
-    # remain free of timing and logging.
+    # Model-local slab-phase warnings are required; inference/session hot paths
+    # remain free of timing and informational debug logging.
     for name in ("session",):
         if "std.Io.Clock.now" in production[name] or "log.info(" in production[name]:
             issues.append(f"hot-path timing/logging remains in {name}")
+    for required_two_slab_session in (
+        "KIMI_K3_SLAB_LOAD",
+        "ensurePrefillCompiled",
+        "runBatchedPrefill",
+        "try self.loadSlab(model.slab_a",
+        "try self.loadSlab(model.slab_b",
+    ):
+        if required_two_slab_session not in production["session"]:
+            issues.append(f"missing two-slab session invariant: {required_two_slab_session}")
     for token in (
         "layer.forwardLayer0,",
         "layer.diagnosticSessionHead,",
@@ -95,6 +108,8 @@ def audit(root: Path) -> dict[str, Any]:
     for required in (
         "layer.forwardLayer0Compact",
         "layer.forwardKdaMoeDecodeCompact",
+        "layer.forwardKdaMoePrefillCompact",
+        "layer.forwardKdaMoePrefillBoundaryCompact",
         "layer.forwardMlaMoeSessionCompact",
         "layer.sessionHead",
     ):
@@ -115,8 +130,11 @@ def audit(root: Path) -> dict[str, Any]:
         "scanned_files": scanned,
         "production_layer_limit": False,
         "public_configurable_layer_limit": False,
-        "normal_example_fixed_resident_layers": 47,
+        "selected_prefix_resident_layers": 47,
+        "normal_example_four_gpu_layers": 93,
+        "normal_example_four_gpu_mode": "two_slab",
         "normal_example_eight_gpu_resident_layers": 93,
+        "normal_example_eight_gpu_mode": "full_resident",
         "normal_example_supported_device_counts": [4, 8],
         "production_hot_path_debug": False,
         "production_results": "compact",

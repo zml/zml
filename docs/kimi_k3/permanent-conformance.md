@@ -7,9 +7,10 @@ recorded route alignment, and expanded intermediate tensors remain isolated in
 dedicated conformance executables.
 
 The normal Kimi `//examples/llm` path is a separate device-count-driven
-resident diagnostic. Four visible CUDA devices execute layers 0-46 with
-TP4+EP4; eight execute all layers 0-92 with TP8+EP8. Decoded text remains
-marked `reliable_answer=false` in both configurations.
+full-depth diagnostic. Four visible CUDA devices execute all layers 0-92 with
+TP4+EP4 by swapping two mutually exclusive resident slabs; eight execute the
+same layers fully resident with TP8+EP8. Decoded text remains marked
+`reliable_answer=false` in both configurations.
 
 All commands below are offline with respect to model data. Project scripts never
 download weights. Historical and full-model conformance use physical NVIDIA GPU 0. The
@@ -35,8 +36,9 @@ step:
 Expanded KDA, MLA, routing, MoE, layer, and head results remain permanent
 numerical oracles in isolated conformance binaries. They are not compiled as the
 result arity of the production session. Production token execution contains no
-activation transfer, per-token wall clock, or expert-staging progress log.
-Use standard ZML profiling for performance attribution.
+activation transfer or per-token wall clock. Four-GPU execution emits only the
+required A/B slab-exchange phase progress; use standard ZML profiling for
+performance attribution.
 
 The dependency-free policy audit is:
 
@@ -45,24 +47,36 @@ The dependency-free policy audit is:
 .venv/bin/python tools/kimi_k3/cleanup_audit.py
 ```
 
-## Four- and eight-GPU resident example
+## Four-GPU two-slab and eight-GPU resident example
 
-The normal Kimi `//examples/llm` command keeps every active weight resident
-while generating tokens and accepts exactly four or eight visible CUDA devices:
+The normal Kimi `//examples/llm` command accepts exactly four or eight visible
+CUDA devices:
 
-- four devices execute layers 0-46 (1 dense KDA, 35 KDA+MoE, 11 MLA+MoE)
-  with TP4+EP4 and 224 local experts per rank;
+- four devices execute all layers 0-92 with TP4+EP4 and 224 local experts per
+  rank, using slab A for layers 0-46 (MoE weights 1-46) and slab B for layers
+  47-92;
 - eight devices execute all layers 0-92 (1 dense KDA, 68 KDA+MoE, 24 MLA+MoE)
   with TP8+EP8 and 112 local experts per rank.
 
 TP and EP share the same physical axis; there is no Cartesian 16- or 64-rank
 topology. Routed-expert HBM is exactly 180,807,008,256 bytes per rank in either
-canonical configuration. The four-rank run performs 46 resident MoE loads,
-248,518 logical payload reads, and 776,886,773,760 logical source bytes. The
-eight-rank run performs 92 loads, 497,024 logical reads, and
-1,552,926,730,240 logical source bytes.
+four-rank slab or in the eight-rank fully resident model. Slab A performs 46
+resident MoE loads, 248,518 logical payload reads, and 776,886,773,760 logical
+source bytes. Slab B performs 46 loads, 248,506 reads, and 776,039,956,480
+source bytes. A full four-rank token pass therefore performs 92 loads, 497,024
+reads, 1,552,926,730,240 source bytes, and 2,208 packed expert extents.
 
-For fastest startup, generate the optional versioned component-major cache once:
+Embedding, layer 0, output-head weights, loader resources, and all 69 KDA plus
+24 MLA caches remain resident. Only one MoE slab may occupy HBM at a time; the
+old slab is completely released before the next is allocated. Exact-length
+batched prefill runs one A-to-B pass for the complete prompt. Each subsequent
+decoded token reloads A and then B while carrying hidden state, eight Attention
+Residual sources, active-source flags, and global cache ordinals across the
+layer-46/47 boundary. Eight-GPU execution retains the existing fully resident
+token-at-a-time behavior.
+
+Four-GPU compilation requires the versioned component-major expert cache.
+Generate it once before running the public command:
 
 ```bash
 bazel run //tools/kimi_k3:prepack_experts -- \
@@ -71,12 +85,11 @@ bazel run //tools/kimi_k3:prepack_experts -- \
 
 The command is resumable, writes four canonical 224-expert safetensors files,
 records source fingerprints, canonical tensor shapes, ranges, byte totals,
-file sizes, and checksums, then publishes its manifest atomically. Inference
-uses a valid cache automatically. If it is absent, the runtime logs the slower
-original-checkpoint fallback and coalesces each layer's
-physically adjacent expert records through persistent positional file reads.
-A present invalid or stale cache is a hard error and is never replaced
-implicitly.
+file sizes, and checksums, then publishes its manifest atomically. A missing
+cache fails the four-GPU path with
+`KimiK3FourGpuFullModelRequiresPackedExpertCache`; a present invalid or stale
+cache also remains a hard failure and is never replaced implicitly. The
+eight-GPU path retains its existing fully resident loading behavior.
 
 The canonical capacity gate starts with at least 280,000 MiB free on every
 GPU. It checks the exact logical and physical loader counters, zero file reads
@@ -118,11 +131,12 @@ bazel run \
   --seqlen=128
 ```
 
-The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=47 full_model=false
-reliable_answer=false` on four GPUs. On eight GPUs it emits
-`layers=93 full_model=true reliable_answer=false`. Four-GPU output is
-deliberately truncated-model diagnostic text; neither mode's generated facts
-should be treated as reliable without external verification.
+The process emits `KIMI_K3_DIAGNOSTIC_WARNING layers=93 full_model=true
+reliable_answer=false mode=two_slab` on four GPUs. On eight GPUs it emits the
+same full-depth fields with `mode=full_resident`. Both execute every text layer,
+but neither mode's generated facts should be treated as reliable without
+external verification until the corresponding numerical conformance is
+recorded.
 
 ## Conformance groups
 
@@ -163,9 +177,10 @@ CUDA_VISIBLE_DEVICES=0 bazel-bin/examples/llm/kimi_k3_session_tests \
   --layer-limit=4 --token-count=4 --repeats=2
 ```
 
-`--layer-limit` belongs to this test executable only. The normal `llm` command
-has no configurable partial-model option; Kimi selects its internal 47- or
-93-layer resident schedule from the visible four- or eight-device platform.
+`--layer-limit` and `--two-slab` belong to this test executable only. The normal
+`llm` command has no configurable partial-model option; Kimi selects its
+internal 93-layer two-slab or fully resident schedule from the visible four-
+or eight-device platform.
 
 ## Fixture regeneration
 

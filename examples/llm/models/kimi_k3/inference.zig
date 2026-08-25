@@ -17,6 +17,35 @@ fn updateBlockSource(blocks: zml.Tensor, source: zml.Tensor, block_index: zml.Te
     return blocks.dynamicUpdateSlice(.{ .source = block_index }, source);
 }
 
+fn kdaMoePrefillStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    weights: layer.KdaMoeWeights,
+    cache: kda.Cache,
+) layer.KdaMoeCompactResult {
+    return layer.forwardKdaMoePrefillCompact(input, blocks, active, weights, cache, .{ .top_k = 16 });
+}
+
+fn kdaMoePrefillBoundaryStep(
+    input: zml.Tensor,
+    blocks: zml.Tensor,
+    active: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: layer.KdaMoeWeights,
+    cache: kda.Cache,
+) layer.KdaMoeBoundaryCompactResult {
+    return layer.forwardKdaMoePrefillBoundaryCompact(
+        input,
+        blocks,
+        active,
+        block_index,
+        weights,
+        cache,
+        .{ .top_k = 16 },
+    );
+}
+
 fn kdaMoeStep(
     input: zml.Tensor,
     blocks: zml.Tensor,
@@ -119,6 +148,37 @@ pub const CompilationParameters = struct {
             .source_slots = source_slots,
             .active_layer_count = active_layer_count,
             .shardings = shardings,
+        };
+    }
+};
+
+pub const PrefillCompilationParameters = struct {
+    tokens: zml.Tensor,
+    hidden: zml.Tensor,
+    blocks: zml.Tensor,
+    active_blocks: zml.Tensor,
+    token_index: zml.Tensor,
+    block_index: zml.Tensor,
+    kda_cache: kda.Cache,
+    mla_cache: mla.SessionCache,
+    prompt_len: usize,
+    source_slots: usize,
+    shardings: common.Shardings,
+
+    pub fn init(base: CompilationParameters, prompt_len: usize) !PrefillCompilationParameters {
+        if (prompt_len == 0 or prompt_len > base.seqlen) return error.InvalidKimiK3PrefillLength;
+        return .{
+            .tokens = .init(.{ .b = 1, .s = prompt_len }, .u32),
+            .hidden = .init(.{ .b = 1, .s = prompt_len, .d = 7168 }, .bf16),
+            .blocks = .init(.{ .token = prompt_len, .source = base.source_slots, .d = 7168 }, .bf16),
+            .active_blocks = base.active_blocks,
+            .token_index = base.token_index,
+            .block_index = base.block_index,
+            .kda_cache = base.kda_cache,
+            .mla_cache = base.mla_cache,
+            .prompt_len = prompt_len,
+            .source_slots = base.source_slots,
+            .shardings = base.shardings,
         };
     }
 };
@@ -275,6 +335,155 @@ pub const CompiledModel = struct {
         if (self.kda_moe_boundary) |*exe| exe.deinit();
         if (self.mla_moe) |*exe| exe.deinit();
         if (self.mla_moe_boundary) |*exe| exe.deinit();
+        self.head.deinit();
+    }
+};
+
+pub const PrefillCompiledModel = struct {
+    embedding: zml.Exe,
+    layer0: zml.Exe,
+    block_update: zml.Exe,
+    kda_moe: zml.Exe,
+    kda_moe_boundary: zml.Exe,
+    mla_moe: zml.Exe,
+    mla_moe_boundary: zml.Exe,
+    head: zml.Exe,
+    params: PrefillCompilationParameters,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        loaded_model: *const model.LoadedModel,
+        base: CompilationParameters,
+        prompt_len: usize,
+        progress: *std.Progress.Node,
+    ) !PrefillCompiledModel {
+        if (platform.target != .cuda) return error.NvidiaCudaRequired;
+        const params = try PrefillCompilationParameters.init(base, prompt_len);
+        var node = progress.start("Compiling Kimi K3 exact-length prefill...", 8);
+        defer node.end();
+        const all_shardings = params.shardings.all();
+        const sharding = &all_shardings;
+        const mdl = loaded_model.inner;
+
+        const embedding = try platform.compileFn(
+            allocator,
+            io,
+            embedTokens,
+            .{ params.tokens, mdl.runtime_head.embedding },
+            .{ .shardings = sharding },
+        );
+        errdefer embedding.deinit();
+        node.completeOne();
+        const layer0_exe = try platform.compileFn(
+            allocator,
+            io,
+            layer.forwardLayer0Compact,
+            .{ params.hidden, mdl.runtime_layer0, params.kda_cache },
+            .{ .shardings = sharding },
+        );
+        errdefer layer0_exe.deinit();
+        node.completeOne();
+        const block_update_exe = try platform.compileFn(
+            allocator,
+            io,
+            updateBlockSource,
+            .{
+                params.blocks,
+                zml.Tensor.init(.{ .token = prompt_len, .source = 1, .d = 7168 }, .bf16),
+                params.block_index,
+            },
+            .{ .shardings = sharding },
+        );
+        errdefer block_update_exe.deinit();
+        node.completeOne();
+        // A length-one prefill is also a decode at position zero. Compile the
+        // decode family in that case so the two-slab path remains the exact
+        // oracle of the permanent token-at-a-time streaming session.
+        const kda_moe_exe = if (prompt_len == 1)
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoeStep,
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
+                .{ .shardings = sharding },
+            )
+        else
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoePrefillStep,
+                .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
+                .{ .shardings = sharding },
+            );
+        errdefer kda_moe_exe.deinit();
+        node.completeOne();
+        const kda_boundary_exe = if (prompt_len == 1)
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoeBoundaryStep,
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
+                .{ .shardings = sharding },
+            )
+        else
+            try platform.compileFn(
+                allocator,
+                io,
+                kdaMoePrefillBoundaryStep,
+                .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicKdaMoe(loaded_model.expert_placement), params.kda_cache },
+                .{ .shardings = sharding },
+            );
+        errdefer kda_boundary_exe.deinit();
+        node.completeOne();
+        const mla_moe_exe = try platform.compileFn(
+            allocator,
+            io,
+            mlaMoeStep,
+            .{ params.hidden, params.blocks, params.active_blocks, runtime_weights.symbolicMlaMoe(loaded_model.expert_placement), params.mla_cache, params.token_index },
+            .{ .shardings = sharding },
+        );
+        errdefer mla_moe_exe.deinit();
+        node.completeOne();
+        const mla_boundary_exe = try platform.compileFn(
+            allocator,
+            io,
+            mlaMoeBoundaryStep,
+            .{ params.hidden, params.blocks, params.active_blocks, params.block_index, runtime_weights.symbolicMlaMoe(loaded_model.expert_placement), params.mla_cache, params.token_index },
+            .{ .shardings = sharding },
+        );
+        errdefer mla_boundary_exe.deinit();
+        node.completeOne();
+        const head_exe = try platform.compileFn(
+            allocator,
+            io,
+            layer.sessionHead,
+            .{ params.hidden, params.blocks, params.active_blocks, mdl.runtime_head.output_res_norm, mdl.runtime_head.output_res_projection, mdl.runtime_head.final_norm, mdl.runtime_head.lm_head },
+            .{ .shardings = sharding },
+        );
+        node.completeOne();
+        return .{
+            .embedding = embedding,
+            .layer0 = layer0_exe,
+            .block_update = block_update_exe,
+            .kda_moe = kda_moe_exe,
+            .kda_moe_boundary = kda_boundary_exe,
+            .mla_moe = mla_moe_exe,
+            .mla_moe_boundary = mla_boundary_exe,
+            .head = head_exe,
+            .params = params,
+        };
+    }
+
+    pub fn deinit(self: *PrefillCompiledModel) void {
+        self.embedding.deinit();
+        self.layer0.deinit();
+        self.block_update.deinit();
+        self.kda_moe.deinit();
+        self.kda_moe_boundary.deinit();
+        self.mla_moe.deinit();
+        self.mla_moe_boundary.deinit();
         self.head.deinit();
     }
 };

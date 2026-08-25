@@ -20,6 +20,7 @@ const Args = struct {
     resident: bool = false,
     distributed: bool = false,
     partition_experts: bool = false,
+    two_slab: bool = false,
     force_eos_after_prefill: bool = false,
     cache_dump_prefill: []const u8 = "",
     cache_dump_decode: []const u8 = "",
@@ -38,6 +39,7 @@ const Args = struct {
         \\  --resident            Keep every selected prefix layer resident across tokens
         \\  --distributed         Require physical TP4 or TP8 on four/eight GPUs
         \\  --partition-experts   Test-only shared-axis TP+EP expert placement
+        \\  --two-slab           Test-only full-93 two-slab execution on four GPUs
         \\  --force-eos-after-prefill  Test-only exercise of the EOS stop branch
         \\  --cache-dump-prefill=<path>  Test-only raw cache output after prefill
         \\  --cache-dump-decode=<path>   Test-only raw cache output after continuation
@@ -56,6 +58,21 @@ const full_resident_layer_loads: usize = 92;
 const full_resident_payload_reads: u64 = 497_024;
 const full_resident_payload_bytes: u64 = 1_552_926_730_240;
 const example_expert_hbm_per_rank: u64 = 180_807_008_256;
+
+fn validateTwoSlabStats(buffers: *const model.Buffers, passes: usize) !void {
+    const stats = buffers.load_stats;
+    if (stats.layer_loads != full_resident_layer_loads * passes or
+        stats.payload_reads != full_resident_payload_reads * passes or
+        stats.payload_bytes != full_resident_payload_bytes * passes or
+        stats.packed_expert_layers != full_resident_layer_loads * passes or
+        stats.fallback_expert_layers != 0 or
+        stats.expert_physical_read_extents != full_resident_layer_loads * 24 * passes)
+    {
+        return error.KimiK3TwoSlabLoadAccountingMismatch;
+    }
+    const range = buffers.resident_range orelse return error.KimiK3TwoSlabFinalRangeMissing;
+    if (!std.meta.eql(range, model.slab_b)) return error.KimiK3TwoSlabDidNotFinishWithSlabB;
+}
 
 fn elapsedUs(io: std.Io, started: i96) i96 {
     return @divTrunc(std.Io.Clock.now(.real, io).toNanoseconds() - started, 1000);
@@ -145,6 +162,12 @@ pub fn main(init: std.process.Init) !void {
     if (args.resident and args.compile_only) return error.InvalidResidentSessionMode;
     if (args.resident and args.layer_limit > 4 and !args.distributed) return error.ExtendedResidentSessionRequiresDistributedDevices;
     if (args.partition_experts and !args.distributed) return error.PartitionedExpertsRequireDistributedDevices;
+    if (args.two_slab and (args.resident or args.compile_only)) return error.InvalidTwoSlabSessionMode;
+    if (args.two_slab and
+        (args.layer_limit != model.full_model_layer_count or !args.distributed or !args.partition_experts))
+    {
+        return error.KimiK3TwoSlabRequiresFullDistributedExpertPartitioning;
+    }
 
     const platform: *zml.Platform = try .init(allocator, io, .cuda, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
@@ -154,6 +177,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.distributed and !runtime_weights.ExpertPlacement.isSupportedSharedAxisDeviceCount(platform.devices.len))
         return error.KimiK3DistributedSessionRequiresFourOrEightDevices;
     if (!args.distributed and platform.devices.len != 1) return error.KimiK3Gpu0SessionRequiresOneDevice;
+    if (args.two_slab and platform.devices.len != 4) return error.KimiK3TwoSlabRequiresFourDevices;
     const layout: []const u8 = if (args.partition_experts)
         if (platform.devices.len == 4) "tp4_ep4_shared_axis" else "tp8_ep8_shared_axis"
     else if (args.distributed)
@@ -162,6 +186,7 @@ pub fn main(init: std.process.Init) !void {
         "gpu0";
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.weights);
+    if (args.two_slab) try runtime_weights.requirePackedExpertCache(allocator, io, repo);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
@@ -222,6 +247,7 @@ pub fn main(init: std.process.Init) !void {
         try loaded_model.loadResidentBuffers(allocator, io, platform, &store, &progress, shardings)
     else
         try loaded_model.loadStreamingBuffers(allocator, io, platform, &store, &progress, shardings);
+    if (args.two_slab) buffers.execution_mode = .two_slab;
     defer loaded_model.unloadBuffers(&buffers, allocator);
     var tokenizer = try zml.tokenizer.Tokenizer.fromFile(allocator, io, args.tokenizer);
     defer tokenizer.deinit();
@@ -280,6 +306,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..args.repeats) |repeat| {
         const started = std.Io.Clock.now(.real, io).toNanoseconds();
         try session.runPrefill(official_prefix[0..args.token_count]);
+        if (args.two_slab) try validateTwoSlabStats(&buffers, repeat + 1);
         if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
         const greedy = session.last_generated_token;
         const cache_digest = try sessionCacheDigest(&session);
@@ -308,7 +335,7 @@ pub fn main(init: std.process.Init) !void {
                 greedy,
                 compile_us,
                 elapsedUs(io, started),
-                if (args.resident) "resident" else "streaming",
+                if (args.two_slab) "two_slab" else if (args.resident) "resident" else "streaming",
                 &cache_digest,
                 platform.devices.len,
                 layout,
@@ -324,6 +351,7 @@ pub fn main(init: std.process.Init) !void {
             }
             const streamed = session.last_generated_token;
             try session.runDecode(&history, &stdout_file.interface);
+            if (args.two_slab) try validateTwoSlabStats(&buffers, repeat + 2);
             if (args.resident and !std.meta.eql(resident_load_stats, buffers.load_stats.*)) return error.KimiK3ResidentWeightsReloaded;
             if (args.force_eos_after_prefill) {
                 if (history.items.len != args.token_count or session.last_generated_token != streamed) {
@@ -369,7 +397,7 @@ pub fn main(init: std.process.Init) !void {
             "device_bytes_in_use={} device_peak_bytes_in_use={} device_bytes_limit={}\n",
         .{
             args.layer_limit == 4 and args.token_count == official_prefix.len,
-            if (args.resident) "resident" else "streaming",
+            if (args.two_slab) "two_slab" else if (args.resident) "resident" else "streaming",
             buffers.load_stats.layer_loads,
             buffers.load_stats.payload_reads,
             buffers.load_stats.payload_bytes,

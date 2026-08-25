@@ -544,6 +544,55 @@ pub fn forwardKdaMoeDecode(
     );
 }
 
+/// Official AttnRes block-boundary prefill. Attention input selection uses
+/// the old source set; MLP selection uses the source appended at this layer.
+pub fn forwardKdaMoePrefillBoundary(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeBoundaryResult {
+    const selected_input = selectSequence(
+        input,
+        block_sources,
+        active_blocks,
+        weights.common.attention_res_norm,
+        weights.common.attention_res_projection,
+    );
+    const updated = appendBoundarySource(input, block_sources, active_blocks, block_index);
+    const input_norm = primitives.rmsNorm(selected_input.output, weights.common.input_norm, 1e-5);
+    const attention = kda.prefill(input_norm, weights.attention, cache);
+    const selected_mlp = selectSequence(
+        attention.output,
+        updated[0],
+        updated[1],
+        weights.common.mlp_res_norm,
+        weights.common.mlp_res_projection,
+    );
+    const moe_input = primitives.rmsNorm(selected_mlp.output, weights.common.post_attention_norm, 1e-5);
+    const moe_result = moe.forward(moe_input, weights.common.moe, route_config);
+    return .{
+        .layer = .{
+            .selected_input = selected_input.output,
+            .input_selector_weights = selected_input.probabilities,
+            .input_norm = input_norm,
+            .attention_output = attention.output,
+            .prefix_after_attention = attention.output,
+            .selected_mlp = selected_mlp.output,
+            .mlp_selector_weights = selected_mlp.probabilities,
+            .moe_input = moe_input,
+            .moe_result = moe_result,
+            .output = attention.output.add(moe_result.output),
+            .cache = attention.cache,
+        },
+        .block_sources = updated[0],
+        .active_blocks = updated[1],
+    };
+}
+
 /// Official AttnRes block-boundary decode. Attention input selection uses the
 /// old source set; MLP selection uses the source appended at this layer.
 pub fn forwardKdaMoeBoundary(
@@ -882,6 +931,43 @@ pub const KdaMoeBoundaryCompactResult = struct {
     block_sources: zml.Tensor,
     active_blocks: zml.Tensor,
 };
+
+pub fn forwardKdaMoePrefillCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeCompactResult {
+    const result = forwardKdaMoePrefill(input, block_sources, active_blocks, weights, cache, route_config);
+    return .{ .output = result.output, .cache = partitionRuntimeKdaCache(result.cache) };
+}
+
+pub fn forwardKdaMoePrefillBoundaryCompact(
+    input: zml.Tensor,
+    block_sources: zml.Tensor,
+    active_blocks: zml.Tensor,
+    block_index: zml.Tensor,
+    weights: KdaMoeWeights,
+    cache: kda.Cache,
+    route_config: router.Config,
+) KdaMoeBoundaryCompactResult {
+    const result = forwardKdaMoePrefillBoundary(
+        input,
+        block_sources,
+        active_blocks,
+        block_index,
+        weights,
+        cache,
+        route_config,
+    );
+    return .{
+        .layer = .{ .output = result.layer.output, .cache = partitionRuntimeKdaCache(result.layer.cache) },
+        .block_sources = result.block_sources,
+        .active_blocks = result.active_blocks,
+    };
+}
 
 pub fn forwardKdaMoeDecodeCompact(
     input: zml.Tensor,

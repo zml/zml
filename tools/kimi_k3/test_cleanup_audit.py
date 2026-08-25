@@ -14,7 +14,11 @@ class CleanupAuditTests(unittest.TestCase):
         self.assertEqual(report["status"], "pass", report["issues"])
         self.assertEqual(report["production_results"], "compact")
         self.assertFalse(report["public_configurable_layer_limit"])
-        self.assertEqual(report["normal_example_fixed_resident_layers"], 47)
+        self.assertEqual(report["selected_prefix_resident_layers"], 47)
+        self.assertEqual(report["normal_example_four_gpu_layers"], 93)
+        self.assertEqual(report["normal_example_four_gpu_mode"], "two_slab")
+        self.assertEqual(report["normal_example_eight_gpu_resident_layers"], 93)
+        self.assertEqual(report["normal_example_eight_gpu_mode"], "full_resident")
 
     def test_temporary_marker_is_detected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
