@@ -119,6 +119,11 @@ fn bufferFromFfiBuffer(ffi_buffer: *const ffi.Buffer) Buffer {
     };
 }
 
+fn modelAxisPartitions(shape: zml.Shape) i32 {
+    const ctx = CompilationContext.current();
+    return @intCast(ctx.partitioning.numPartitionsForLogicalAxis(shape, .model) catch 1);
+}
+
 fn getScalarAttributeAs(comptime T: type, call_frame: *ffi.CallFrame, attribute_name: []const u8) ?T {
     const attribute = call_frame.attrs.getByName(.scalar, attribute_name) orelse return null;
     return attribute.get(T);
@@ -234,19 +239,21 @@ pub const fa2 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
+            head_dim: i64 = 128,
         };
 
         pub fn init(opts: InitOptions) Metadata {
+            const hd = if (opts.head_dim > 0) opts.head_dim else 128;
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
                     .withTags(.{ .s, .h, .dummy })
                     .withPartitioning(.{ .h = .model })),
 
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, hd }, .f32)
                     .withTags(.{ .dummy, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
 
-                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
+                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, hd }, .f32)
                     .withTags(.{ .s, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
             };
@@ -353,6 +360,85 @@ pub const fa2 = struct {
             o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
         else
             o.rename(.{ .tot = .q });
+    }
+
+    pub const DenseOpts = struct {
+        is_causal: bool = false,
+        softmax_scale: ?f32 = null,
+    };
+
+    /// Dense (possibly non-causal) FA2. Scratch tensors are graph-local and reused
+    /// across sequential runs of the same compiled executable.
+    pub fn dense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, opts: DenseOpts) zml.Tensor {
+        var bs: i64 = 1;
+        var q = q_;
+        var k = k_;
+        var v = v_;
+
+        if (q.shape().hasTag(.b)) |_| {
+            bs = q.dim(.b);
+            q = q.merge(.{ .tot = .{ .b, .q } });
+            k = k.merge(.{ .tot = .{ .b, .k } });
+            v = v.merge(.{ .tot = .{ .b, .k } });
+        } else {
+            q = q.rename(.{ .q = .tot });
+            k = k.rename(.{ .k = .tot });
+            v = v.rename(.{ .k = .tot });
+        }
+
+        const max_seqlen_q: i32 = @intCast(q_.dim(.q));
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const num_heads: i32 = @intCast(q_.dim(.h));
+        const head_dim = q.dim(.hd);
+        const tot_q = q.dim(.tot);
+
+        const scratch = Metadata.init(.{
+            .seqlen = tot_q,
+            .num_heads = q_.dim(.h),
+            .head_dim = head_dim,
+        });
+        const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
+        const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
+        const out_accum = zml.Tensor.uninitialized(scratch.out_accum.shape());
+
+        const cu_seqlens_q: zml.Tensor = .arange(.{ .end = max_seqlen_q * (bs + 1), .step = max_seqlen_q }, .i32);
+        const cu_seqlens_k: zml.Tensor = .arange(.{ .end = max_seqlen_k * (bs + 1), .step = max_seqlen_k }, .i32);
+        const seqused_k = zml.Tensor.scalar(max_seqlen_k, .i32).broad(.init(.{ .b = bs }, .i32));
+
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const model_partitions: i32 = modelAxisPartitions(q_sharded.shape());
+        const scale = opts.softmax_scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+
+        const output = fa2_mha_varlen_fwd.call(
+            .{
+                .q = q_sharded,
+                .k = k.withPartitioning(.{ .h = .model }),
+                .v = v.withPartitioning(.{ .h = .model }),
+                .cu_seqlens_q = cu_seqlens_q,
+                .cu_seqlens_k = cu_seqlens_k,
+                .seqused_k = seqused_k,
+                .softmax_lse = softmax_lse,
+                .softmax_lse_accum = softmax_lse_accum,
+                .out_accum = out_accum,
+            },
+            .{
+                .o = q_sharded.shape(),
+            },
+            .{
+                .softmax_scale = scale,
+                .is_causal = opts.is_causal,
+                .window_size_left = -1,
+                .window_size_right = -1,
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+                .num_heads = @divExact(num_heads, model_partitions),
+            },
+        );
+
+        return if (q_.shape().hasTag(.b)) |_|
+            output.o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
+        else
+            output.o.rename(.{ .tot = .q });
     }
 };
 
@@ -526,6 +612,82 @@ pub const fa3 = struct {
         );
 
         return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
+    }
+
+    pub const DenseOpts = struct {
+        is_causal: bool = false,
+        softmax_scale: ?f32 = null,
+    };
+
+    /// Dense (possibly non-causal) FA3. Scratch is graph-local, same layout as `attention`.
+    pub fn dense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, opts: DenseOpts) zml.Tensor {
+        var bs: i64 = 1;
+        var q = q_;
+        var k = k_;
+        var v = v_;
+
+        if (q.shape().hasTag(.b)) |_| {
+            bs = q.dim(.b);
+            q = q.merge(.{ .tot = .{ .b, .q } });
+            k = k.merge(.{ .tot = .{ .b, .k } });
+            v = v.merge(.{ .tot = .{ .b, .k } });
+        } else {
+            q = q.rename(.{ .q = .tot });
+            k = k.rename(.{ .k = .tot });
+            v = v.rename(.{ .k = .tot });
+        }
+
+        const max_seqlen_q: i32 = @intCast(q_.dim(.q));
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const head_dim = q.dim(.hd);
+        const tot_q = q.dim(.tot);
+        const scratch = Metadata.init(.{
+            .seqlen = tot_q,
+            .num_heads = q_.dim(.h),
+        });
+        const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
+        const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
+        const out_accum = zml.Tensor.uninitialized(scratch.out_accum.shape());
+        const scheduler_metadata = zml.Tensor.uninitialized(scratch.scheduler_metadata.shape());
+
+        const cu_seqlens_q = zml.Tensor.arange(.{ .end = max_seqlen_q * (bs + 1), .step = max_seqlen_q }, .i32)
+            .withPartitioning(.{ ._0 = .replicated });
+        const cu_seqlens_k = zml.Tensor.arange(.{ .end = max_seqlen_k * (bs + 1), .step = max_seqlen_k }, .i32)
+            .withPartitioning(.{ ._0 = .replicated });
+        const scale = opts.softmax_scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+
+        var o = zml.ops.customCall(
+            custom_call_name,
+            .{
+                q.withPartitioning(.{ .h = .model }),
+                k.withPartitioning(.{ .h = .model }),
+                v.withPartitioning(.{ .h = .model }),
+                cu_seqlens_q,
+                cu_seqlens_k,
+                softmax_lse,
+                softmax_lse_accum,
+                out_accum,
+                scheduler_metadata,
+            },
+            .{q.withPartitioning(.{ .h = .model }).shape()},
+            .{
+                .softmax_scale = scale,
+                .is_causal = opts.is_causal,
+                .window_size_left = @as(i32, -1),
+                .window_size_right = @as(i32, -1),
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+            },
+            .{
+                .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
+                .has_side_effect = false,
+            },
+        );
+
+        return if (q_.shape().hasTag(.b)) |_|
+            o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
+        else
+            o.rename(.{ .tot = .q });
     }
 };
 

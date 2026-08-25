@@ -302,6 +302,15 @@ pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !s
     return parseJson(Config, allocator, io, dir, "config.json");
 }
 
+pub fn loadDitConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !Config {
+    const parsed = parseConfig(allocator, io, dir) catch |err| switch (err) {
+        error.FileNotFound => return Config.official(),
+        else => return err,
+    };
+    defer parsed.deinit();
+    return parsed.value.resolve();
+}
+
 pub const Size = struct { w: u32, h: u32 };
 
 /// Canvas: short edge, area cap `768*1344`, then nearest multiple of 32.

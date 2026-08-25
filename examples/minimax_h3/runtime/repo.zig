@@ -16,6 +16,8 @@ pub const Bundle = struct {
     task: std.Io.Dir,
     task_owned: bool,
     transformer: std.Io.Dir,
+    transformer_owned: bool,
+    dit_filename: ?[]u8,
     encoder: std.Io.Dir,
     visual_cfg: std.Io.Dir,
     visual_source: ?std.Io.Dir,
@@ -41,12 +43,14 @@ pub const Bundle = struct {
         repo: std.Io.Dir,
         variant: config.Variant,
         shardings: sharding.Shardings,
+        model_path: []const u8,
+        dit_override: []const u8,
     ) !Bundle {
         const task = try config.openTaskDir(io, repo, variant);
         errdefer if (task.owned) task.dir.close(io);
 
-        var transformer = try openTransformer(io, task.dir, repo, variant);
-        errdefer transformer.close(io);
+        var dit_src = try resolveDitSource(allocator, io, repo, task.dir, variant, model_path, dit_override);
+        errdefer dit_src.deinit(allocator, io);
         var encoder_dir = openSharedComponent(io, task.dir, repo, "text_encoder") orelse
             return error.EncoderMissing;
         errdefer encoder_dir.close(io);
@@ -63,7 +67,7 @@ pub const Bundle = struct {
 
         const dit_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(dit_registry);
-        dit_registry.* = try .fromRepo(allocator, io, transformer);
+        dit_registry.* = try openDitRegistry(allocator, io, dit_src.dir, dit_src.file);
         errdefer dit_registry.deinit();
         try refuseUnsupported(dit_registry, allocator);
         var dit_store: zml.io.TensorStore = .fromRegistry(allocator, dit_registry);
@@ -92,7 +96,7 @@ pub const Bundle = struct {
         if (!visual_vae.ready(visual_store.view()) or !audio_vae.decodeReady(audio_store.view()))
             return error.VaeSchemaMismatch;
 
-        var loaded_dit = try dit.LoadedModel.init(allocator, io, transformer, dit_store.view());
+        var loaded_dit = try dit.LoadedModel.init(allocator, io, dit_src.dir, dit_store.view());
         errdefer loaded_dit.deinit(allocator);
         var loaded_enc = try encoder.LoadedModel.init(allocator, io, encoder_dir, enc_store.view());
         errdefer loaded_enc.deinit(allocator);
@@ -107,7 +111,9 @@ pub const Bundle = struct {
         return .{
             .task = task.dir,
             .task_owned = task.owned,
-            .transformer = transformer,
+            .transformer = dit_src.dir,
+            .transformer_owned = dit_src.dir_owned,
+            .dit_filename = dit_src.file,
             .encoder = encoder_dir,
             .visual_cfg = visual_cfg,
             .visual_source = visual_source,
@@ -148,7 +154,8 @@ pub const Bundle = struct {
         if (self.visual_source) |*dir| dir.close(io);
         self.visual_cfg.close(io);
         self.encoder.close(io);
-        self.transformer.close(io);
+        if (self.transformer_owned) self.transformer.close(io);
+        if (self.dit_filename) |name| allocator.free(name);
         if (self.task_owned) self.task.close(io);
     }
 };
@@ -172,6 +179,112 @@ pub fn openSharedComponent(io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir, n
     if (openOptionalDir(io, task_dir, name)) |dir| return dir;
     if (openOptionalDir(io, repo, name)) |dir| return dir;
     return openNestedDir(io, repo, "FL2VA", name);
+}
+
+const DitSource = struct {
+    dir: std.Io.Dir,
+    dir_owned: bool,
+    file: ?[]u8,
+
+    fn deinit(self: *DitSource, allocator: std.mem.Allocator, io: std.Io) void {
+        if (self.file) |name| allocator.free(name);
+        if (self.dir_owned) self.dir.close(io);
+    }
+};
+
+fn openDitRegistry(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    filename: ?[]const u8,
+) !zml.safetensors.TensorRegistry {
+    if (filename) |name| {
+        const file = try dir.openFile(io, name, .{ .mode = .read_only });
+        defer file.close(io);
+        log.info("dit weights: {s}", .{name});
+        return zml.safetensors.fetchRegistry(allocator, io, dir, file);
+    }
+    return .fromRepo(allocator, io, dir);
+}
+
+fn fileInDir(io: std.Io, dir: std.Io.Dir, name: []const u8) bool {
+    const file = dir.openFile(io, name, .{ .mode = .read_only }) catch return false;
+    file.close(io);
+    return true;
+}
+
+fn familyOf(variant: config.Variant) checkpoint.DitFamily {
+    return switch (variant.taskFamily()) {
+        .fl2va => .fl2va,
+        .ref2va => .ref2va,
+    };
+}
+
+fn scanDitFilename(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, family: checkpoint.DitFamily) !?[]u8 {
+    var it = dir.iterate();
+    var found: ?[]u8 = null;
+    errdefer if (found) |name| allocator.free(name);
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!checkpoint.ditFilenameMatches(entry.name, family)) continue;
+        if (found != null) return error.AmbiguousDit;
+        found = try allocator.dupe(u8, entry.name);
+    }
+    return found;
+}
+
+fn resolveDitSource(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    repo: std.Io.Dir,
+    task_dir: std.Io.Dir,
+    variant: config.Variant,
+    model_path: []const u8,
+    dit_override: []const u8,
+) !DitSource {
+    if (dit_override.len != 0) return openDitPath(allocator, io, repo, dit_override);
+    if (std.mem.endsWith(u8, model_path, ".safetensors")) {
+        return .{
+            .dir = repo,
+            .dir_owned = false,
+            .file = try allocator.dupe(u8, std.fs.path.basename(model_path)),
+        };
+    }
+    if (openTransformer(io, task_dir, repo, variant)) |dir| {
+        return .{ .dir = dir, .dir_owned = true, .file = null };
+    } else |err| switch (err) {
+        error.TransformerMissing, error.Ref2vaTransformerMissing => {},
+        else => return err,
+    }
+    if (openOptionalIterateDir(io, repo, "diffusion_models")) |dir| {
+        if (try scanDitFilename(allocator, io, dir, familyOf(variant))) |name| {
+            return .{ .dir = dir, .dir_owned = true, .file = name };
+        }
+        dir.close(io);
+    }
+    return if (variant.taskFamily() == .ref2va) error.Ref2vaTransformerMissing else error.TransformerMissing;
+}
+
+fn openDitPath(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, path: []const u8) !DitSource {
+    const base = std.fs.path.basename(path);
+    if (std.fs.path.dirname(path) != null and (std.mem.indexOfScalar(u8, path, '/') != null or std.mem.indexOfScalar(u8, path, '\\') != null)) {
+        var dir = try zml.safetensors.resolveModelRepo(io, path);
+        return .{ .dir = dir, .dir_owned = true, .file = try allocator.dupe(u8, base) };
+    }
+    if (fileInDir(io, repo, base)) {
+        return .{ .dir = repo, .dir_owned = false, .file = try allocator.dupe(u8, base) };
+    }
+    if (openOptionalDir(io, repo, "diffusion_models")) |dir| {
+        if (fileInDir(io, dir, base)) {
+            return .{ .dir = dir, .dir_owned = true, .file = try allocator.dupe(u8, base) };
+        }
+        dir.close(io);
+    }
+    return error.TransformerMissing;
+}
+
+fn openOptionalIterateDir(io: std.Io, parent: std.Io.Dir, name: []const u8) ?std.Io.Dir {
+    return parent.openDir(io, name, .{ .iterate = true }) catch null;
 }
 
 pub fn openTransformer(io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir, variant: config.Variant) !std.Io.Dir {

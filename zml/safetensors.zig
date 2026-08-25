@@ -253,6 +253,8 @@ pub const TensorRegistry = struct {
 
     tensors: Tensors,
     metadata: Metadatas,
+    /// Layer stem → Hadamard group. Filled from small uint8 JSON siblings (`convrot`).
+    convrot_group: std.StringHashMapUnmanaged(u32) = .{},
 
     mutex: std.Io.Mutex = .init,
 
@@ -309,6 +311,7 @@ pub const TensorRegistry = struct {
         const allocator = self.arena.allocator();
         self.tensors.deinit(allocator);
         self.metadata.deinit(allocator);
+        self.convrot_group.deinit(allocator);
         self.arena.deinit();
     }
 
@@ -457,7 +460,59 @@ pub fn parseSafetensors(
         };
 
         try registry.registerTensor(tensor);
+        try ingestConvrotMarker(registry, io, file, tensor);
     }
+}
+
+const quant_marker_max_bytes: usize = 512;
+
+fn markerStem(name: []const u8) ?[]const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
+    if (dot == 0) return null;
+    return name[0..dot];
+}
+
+/// `null` = not marker JSON. `0` = marker, rotation off. `4`/`16`/`256` = group.
+pub fn convrotGroupFromMarker(bytes: []const u8) error{UnsupportedConvrotGroup}!?u32 {
+    if (bytes.len == 0 or bytes[0] != '{') return null;
+    var scratch: [4096]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&scratch);
+    const parsed = std.json.parseFromSlice(
+        struct { convrot: bool = false, convrot_groupsize: u32 = 0 },
+        fba.allocator(),
+        bytes,
+        .{ .ignore_unknown_fields = true },
+    ) catch return null;
+    if (!parsed.value.convrot) return 0;
+    const group = if (parsed.value.convrot_groupsize == 0) 256 else parsed.value.convrot_groupsize;
+    return switch (group) {
+        4, 16, 256 => group,
+        else => error.UnsupportedConvrotGroup,
+    };
+}
+
+fn ingestConvrotMarker(
+    registry: *TensorRegistry,
+    io: std.Io,
+    file: std.Io.File,
+    tensor: Tensor,
+) !void {
+    const n = tensor.byteSize();
+    if (tensor.shape.dtype() != .u8 or tensor.shape.rank() > 1 or n == 0 or n > quant_marker_max_bytes) return;
+    var bytes: [quant_marker_max_bytes]u8 = undefined;
+    const slice = bytes[0..@intCast(n)];
+    const got = try file.readPositional(io, &.{slice}, tensor.offset);
+    if (got != @as(usize, @intCast(n))) return error.UnexpectedEndOfFile;
+    const group = (try convrotGroupFromMarker(slice)) orelse return;
+    if (group == 0) return;
+    const stem = markerStem(tensor.name) orelse return;
+    if (registry.convrot_group.get(stem)) |existing| {
+        if (existing != group) return error.ConflictingConvrotGroup;
+        return;
+    }
+    const allocator = registry.arena.allocator();
+    const key = try allocator.dupe(u8, stem);
+    try registry.convrot_group.put(allocator, key, group);
 }
 
 const SafetensorsIndex = struct {
@@ -867,4 +922,18 @@ fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
     }
 
     return item_type;
+}
+
+test "convrotGroupFromMarker" {
+    const expect = std.testing.expectEqual;
+    try expect(@as(?u32, 256), try convrotGroupFromMarker(
+        "{\"format\":\"int8_tensorwise\",\"convrot\":true,\"convrot_groupsize\":256}",
+    ));
+    try expect(@as(?u32, 16), try convrotGroupFromMarker("{\"convrot\":true,\"convrot_groupsize\":16}"));
+    try expect(@as(?u32, 256), try convrotGroupFromMarker("{\"convrot\":true}"));
+    try expect(@as(?u32, 0), try convrotGroupFromMarker("{\"format\":\"int8_tensorwise\"}"));
+    try expect(@as(?u32, 0), try convrotGroupFromMarker("{\"format\":\"nvfp4\",\"full_precision_matrix_mult\":true}"));
+    try std.testing.expectError(error.UnsupportedConvrotGroup, convrotGroupFromMarker("{\"convrot\":true,\"convrot_groupsize\":64}"));
+    try expect(@as(?u32, null), try convrotGroupFromMarker("not-json"));
+    try expect(@as(?u32, null), try convrotGroupFromMarker(""));
 }

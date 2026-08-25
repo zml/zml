@@ -133,7 +133,7 @@ fn compileDitBlock(ctx: CompileCtx, dit_model: dit.Model, seq_len: u32, num_time
     return compileLogged(dit.TransformerBlock.forward, "minimax_h3_block", ctx, .{.{
         .layer = dit_model.blocks[0],
         .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = dit_model.cfg.hidden_size }, dt),
-        .temb = zml.Tensor.init(.{ .n = num_timesteps, .d = dit_model.cfg.time_embed_dim }, .f32),
+        .temb = zml.Tensor.init(.{ .n = num_timesteps, .d = dit_model.time_embedder.outDim() }, .f32),
         .adaln_indices = zml.Tensor.init(.{ .s = seq_len }, .u32),
         .cos = zml.Tensor.init(.{ .s = seq_len, .f = dit_model.cfg.rotaryDim() }, dt),
         .sin = zml.Tensor.init(.{ .s = seq_len, .f = dit_model.cfg.rotaryDim() }, dt),
@@ -145,7 +145,7 @@ fn compileDitFinish(ctx: CompileCtx, dit_model: dit.Model, geo: Geometry, seq_le
     return compileLogged(dit.finish, "minimax_h3_finish", ctx, .{.{
         .model = dit_model.finishPart(),
         .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = dit_model.cfg.hidden_size }, dt),
-        .temb = zml.Tensor.init(.{ .n = num_timesteps, .d = dit_model.cfg.time_embed_dim }, .f32),
+        .temb = zml.Tensor.init(.{ .n = num_timesteps, .d = dit_model.time_embedder.outDim() }, .f32),
         .timestep_indices = .init(.{ .s = seq_len }, .u32),
         .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
         .audio_indices = .init(.{ .s = geo.audio_tokens }, .u32),

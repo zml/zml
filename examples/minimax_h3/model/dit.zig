@@ -30,17 +30,81 @@ const RmsNorm = struct {
     }
 };
 
+fn weightStem(weight_name: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, weight_name, ".weight"))
+        weight_name[0 .. weight_name.len - ".weight".len]
+    else
+        weight_name;
+}
+
+fn siblingShape(store: zml.io.TensorStore.View, buf: []u8, stem: []const u8, suffix: []const u8) ?struct { key: []const u8, shape: zml.Shape } {
+    const key = std.fmt.bufPrint(buf, "{s}.{s}", .{ stem, suffix }) catch return null;
+    const shape = store.getShape(key) orelse return null;
+    return .{ .key = key, .shape = shape };
+}
+
+fn attachQuant(store: zml.io.TensorStore.View, weight_name: []const u8, layer: *zml.nn.Linear) void {
+    const stem = weightStem(weight_name);
+    var buf: [256]u8 = undefined;
+    const found = siblingShape(store, &buf, stem, "weight_scale") orelse
+        siblingShape(store, &buf, stem, "weight_scale_inv") orelse return;
+    const scheme = zml.nn.QuantScheme.classify(layer.weight.shape(), found.shape) orelse return;
+    const scales = if (found.shape.rank() == 0)
+        store.createTensor(found.key, .{}, .replicated)
+    else switch (scheme) {
+        .nvfp4 => store.createTensor(found.key, .{ .dout, .sc }, .replicated),
+        else => store.createTensor(found.key, .{ .dout, .sc }, .replicated),
+    };
+
+    var gbuf: [256]u8 = undefined;
+    const global = siblingShape(store, &gbuf, stem, "weight_global_scale");
+    var ibuf: [256]u8 = undefined;
+    const input = siblingShape(store, &ibuf, stem, "input_scale") orelse
+        siblingShape(store, &ibuf, stem, "pre_quant_scale");
+
+    var convrot_group: u32 = 0;
+    if (scheme == .int8_per_channel) {
+        const k = layer.weight.dim(.d);
+        if (k > 0 and @rem(k, 256) == 0) convrot_group = 256;
+    }
+
+    layer.quant = .{
+        .scheme = scheme,
+        .scales = scales,
+        .weight_scale = if (global) |g| .{
+            .value = store.createTensor(g.key, .{}, .replicated),
+            .direction = .multiplier,
+        } else null,
+        .input_scale = if (input) |i| .{
+            .value = store.createTensor(i.key, if (i.shape.rank() == 0) .{} else .{.d}, .replicated),
+            .direction = .multiplier,
+        } else null,
+        .convrot_group = convrot_group,
+    };
+}
+
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
-    return .init(
-        store.createTensor(weight_name, .{ .dout, .d }, partitions),
+    const stem = weightStem(weight_name);
+    var buf: [256]u8 = undefined;
+    const wshape = store.getShape(weight_name);
+    const scale = siblingShape(store, &buf, stem, "weight_scale") orelse
+        siblingShape(store, &buf, stem, "weight_scale_inv");
+    const packed_nvfp4 = blk: {
+        const w = wshape orelse break :blk false;
+        const s = scale orelse break :blk false;
+        break :blk zml.nn.QuantScheme.classify(w, s.shape) == .nvfp4 and w.dtype() == .u8;
+    };
+    var layer: zml.nn.Linear = .init(
+        store.createTensor(weight_name, if (packed_nvfp4) .{ .dout, .kw } else .{ .dout, .d }, partitions),
         if (bias_name) |name| store.maybeCreateTensor(name, .{.dout}, bias_partitions) else null,
         .d,
     );
+    attachQuant(store, weight_name, &layer);
+    return layer;
 }
 
 fn unloadLinear(lin: *zml.Bufferized(zml.nn.Linear)) void {
-    lin.weight.deinit();
-    if (lin.bias) |*bias| bias.deinit();
+    zml.nn.Linear.unloadBuffers(lin);
 }
 
 const SwiGlu = struct {
@@ -151,10 +215,14 @@ pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) str
 }
 
 const TimeEmbedder = struct {
-    proj_in: zml.nn.Linear,
-    proj_out: zml.nn.Linear,
+    table: ?zml.Tensor = null,
+    proj_in: ?zml.nn.Linear = null,
+    proj_out: ?zml.nn.Linear = null,
 
     pub fn init(store: zml.io.TensorStore.View) TimeEmbedder {
+        if (store.maybeCreateTensor("adaln_t_table", .{ .t, .d }, .replicated)) |table| {
+            return .{ .table = table };
+        }
         const prefix = store.withPrefix("time_embedder");
         return .{
             .proj_in = linear(prefix, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
@@ -162,15 +230,47 @@ const TimeEmbedder = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TimeEmbedder)) void {
-        unloadLinear(&self.proj_in);
-        unloadLinear(&self.proj_out);
+    pub fn outDim(self: TimeEmbedder) i64 {
+        if (self.table) |table| return table.dim(.d);
+        return self.proj_out.?.weight.dim(.dout);
     }
 
-    pub fn forward(self: TimeEmbedder, features: zml.Tensor) zml.Tensor {
-        return self.proj_out.forward(self.proj_in.forward(features).silu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    pub fn unloadBuffers(self: *zml.Bufferized(TimeEmbedder)) void {
+        if (self.table) |*table| table.deinit();
+        if (self.proj_in) |*layer| unloadLinear(layer);
+        if (self.proj_out) |*layer| unloadLinear(layer);
+    }
+
+    pub fn forwardMlp(self: TimeEmbedder, features: zml.Tensor) zml.Tensor {
+        return self.proj_out.?.forward(self.proj_in.?.forward(features).silu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };
+
+/// Maps `t ∈ [0, 1]` onto a table with `rows` evenly spaced entries.
+pub fn tableCoord(t: f32, rows: u32) struct { i0: u32, i1: u32, frac: f32 } {
+    std.debug.assert(rows >= 2);
+    const last = @as(f32, @floatFromInt(rows - 1));
+    const x = std.math.clamp(t, 0.0, 1.0) * last;
+    const i0: u32 = @intFromFloat(@floor(x));
+    const i1 = @min(i0 + 1, rows - 1);
+    return .{
+        .i0 = i0,
+        .i1 = i1,
+        .frac = x - @as(f32, @floatFromInt(i0)),
+    };
+}
+
+fn interpolateTable(table: zml.Tensor, t: zml.Tensor) zml.Tensor {
+    const last_i = table.dim(.t) - 1;
+    const last = zml.Tensor.scalar(@as(f32, @floatFromInt(last_i)), .f32);
+    const x = t.convert(.f32).mul(last).clamp(.scalar(0, .f32), last);
+    const i0 = x.floor();
+    const i1 = i0.addConstant(1).minimum(last);
+    const a = table.gather(.{ .t = i0.convert(.u32).withPartialTags(.{.n}) }, .{});
+    const b = table.gather(.{ .t = i1.convert(.u32).withPartialTags(.{.n}) }, .{});
+    const frac = x.sub(i0).withPartialTags(.{.n}).broad(a.shape());
+    return a.mul(zml.Tensor.scalar(1, a.dtype()).sub(frac.convert(a.dtype()))).add(b.mul(frac.convert(b.dtype())));
+}
 
 pub fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
     const inv = zml.nn.invFreq(dim, .{
@@ -182,16 +282,17 @@ pub fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
 }
 
 const AdaLn = struct {
-    kind: enum { full, curve } = .full,
+    kind: enum { full, curve, rank8 } = .full,
     linear: zml.nn.Linear,
     hidden_size: i64,
     expand: i64,
     modalities: i64,
 
     pub fn init(store: zml.io.TensorStore.View, hidden_size: i64, expand: i64, modalities: i64) AdaLn {
+        const layer = linear(store, "linear.weight", "linear.bias", .replicated, .replicated);
         return .{
-            .kind = .full,
-            .linear = linear(store, "linear.weight", "linear.bias", .replicated, .replicated),
+            .kind = if (layer.weight.dim(.d) <= 16) .rank8 else .full,
+            .linear = layer,
             .hidden_size = hidden_size,
             .expand = expand,
             .modalities = modalities,
@@ -213,7 +314,8 @@ const AdaLn = struct {
     }
 
     pub fn forward(self: AdaLn, temb: zml.Tensor) zml.Tensor {
-        const raw = self.linear.forward(temb.silu().convert(self.linear.weight.dtype()));
+        const cond = if (self.kind == .rank8) temb else temb.silu();
+        const raw = self.linear.forward(cond.convert(self.linear.weight.dtype()));
         if (self.modalities == 1) {
             return raw.splitAxis(.dout, .{ .k = self.expand, .d = self.hidden_size });
         }
@@ -515,8 +617,10 @@ pub fn embed(input: EmbedInput) EmbedOutput {
     hidden = hidden.scatterSlices(.{ .s = input.audio_indices.withTags(.{.s}) }, audio.convert(text.dtype()), .{ .update_fn = zml.Tensor.ScatterOpts.override });
     hidden = hidden.withPartitioning(.{ .d = .replicated });
 
-    const features = timestepFeatures(input.timestep, self.cfg.freq_dim);
-    const temb = self.time_embedder.forward(features);
+    const temb = if (self.time_embedder.table) |table|
+        interpolateTable(table, input.timestep)
+    else
+        self.time_embedder.forwardMlp(timestepFeatures(input.timestep, self.cfg.freq_dim));
     const cos, const sin = mmRope(input.position_ids, self.cfg.rope_freq_dim, self.cfg.rope_theta);
     return .{
         .hidden = hidden,
@@ -544,8 +648,7 @@ pub fn finish(input: FinishInput) FinishOutput {
     const self = input.model;
     const hidden = input.hidden.withPartitioning(.{ .d = .replicated });
     const n = self.final_layer.norm.forward(hidden, .d);
-    const raw = self.final_layer.adaln.linear.forward(input.temb.silu().convert(self.final_layer.adaln.linear.weight.dtype()));
-    const table = raw.splitAxis(.dout, .{ .k = 2, .d = self.cfg.hidden_size });
+    const table = self.final_layer.adaln.forward(input.temb);
     const selected = table.gather(.{ .n = input.timestep_indices }, .{});
     const parts = selected.chunkExact(.k, 2);
     const shift = parts[0].squeeze(.k);
@@ -566,9 +669,7 @@ pub const LoadedModel = struct {
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const parsed = try config_mod.parseConfig(allocator, io, repo);
-        defer parsed.deinit();
-        const cfg = parsed.value.resolve();
+        const cfg = try config_mod.loadDitConfig(allocator, io, repo);
         log.info("dit: {d} layers hidden={d} heads={d} text_dim={d}", .{
             cfg.num_layers,
             cfg.hidden_size,

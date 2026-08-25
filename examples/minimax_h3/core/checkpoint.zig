@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const AdalnKind = enum { full, curve, missing };
+pub const AdalnKind = enum { full, curve, rank8, missing };
 
 pub const LinearStorage = enum {
     int8_convrot,
@@ -24,9 +24,9 @@ fn hasKey(keys: []const []const u8, suffix: []const u8) bool {
 fn detectAdaln(keys: []const []const u8) AdalnKind {
     const has_table = hasKey(keys, "adaln_t_table");
     const has_full = hasKey(keys, "blocks.0.adaln_proj.linear.weight") or hasKey(keys, "adaln_proj.linear.weight");
-    if (has_table and !has_full) return .curve;
-    if (has_full) return .full;
+    if (has_table and has_full) return .rank8;
     if (has_table) return .curve;
+    if (has_full) return .full;
     return .missing;
 }
 
@@ -53,12 +53,22 @@ pub fn inspect(keys: []const []const u8) Report {
 pub fn refuseReason(report: Report) ?[]const u8 {
     return switch (report.adaln) {
         .missing => "AdaLN projection weights missing; not a recognized H3 DiT",
-        .curve => null,
-        .full => switch (report.dit_storage) {
-            .int8_convrot => "INT8 ConvRot DiT weights are not implemented",
-            .fp8 => "scaled FP8 DiT weights are not implemented",
-            .nvfp4_awq => "NVFP4/AWQ DiT weights are not implemented",
-            .unknown => null,
-        },
+        .curve, .full, .rank8 => null,
     };
+}
+
+pub const DitFamily = enum { fl2va, ref2va };
+
+pub fn ditFilenameMatches(name: []const u8, family: DitFamily) bool {
+    if (!std.mem.endsWith(u8, name, ".safetensors")) return false;
+    const needle = switch (family) {
+        .fl2va => "fl2va",
+        .ref2va => "ref2va",
+    };
+    if (name.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= name.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(name[i..][0..needle.len], needle)) return true;
+    }
+    return false;
 }
