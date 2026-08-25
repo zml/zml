@@ -326,6 +326,7 @@ pub fn prepare(
                 .latent_t = item.latent_t,
                 .latent_h = item.latent_h,
                 .latent_w = item.latent_w,
+                .keyframe_index = item.keyframe_index,
             };
             @memset(d.thwc, 0);
             n_dv += 1;
@@ -461,6 +462,7 @@ pub fn prepare(
                 try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.frames, item.h, item.w)
             else
                 try encode_mod.encodeKeyframe(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
+            out.keyframe_index = item.keyframe_index;
             n_vis += 1;
         }
         for (audios.items, encoded_audios) |item, *out| {

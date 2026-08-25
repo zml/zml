@@ -7,6 +7,7 @@ const media = @import("media.zig");
 const pipeline = @import("pipeline.zig");
 const vae = @import("vae.zig");
 const visual_vae = @import("visual_vae.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3_decode);
 
@@ -117,9 +118,10 @@ fn loadVisualBlock(
     shardings: []const zml.Sharding,
     index: usize,
     progress: *std.Progress.Node,
+    loader: *zml.io.Loader,
 ) !zml.Bufferized(visual_vae.TransformerBlock) {
     const now: std.Io.Timestamp = .now(io, .awake);
-    const bufs = try loaded.loadBlock(allocator, io, platform, store, shardings, index, progress);
+    const bufs = try loaded.loadBlock(allocator, io, platform, store, shardings, index, progress, loader);
     log.debug("visual block {d}: loaded [{f}]", .{ index + 1, now.untilNow(io, .awake) });
     return bufs;
 }
@@ -159,16 +161,23 @@ fn loadVisualCache(
         for (blocks[0..filled]) |*block| visual_vae.TransformerBlock.unloadBuffers(block);
     }
 
+    var loaders: [load_window]zml.io.Loader = undefined;
+    var ready: usize = 0;
+    defer for (loaders[0..ready]) |*loader| loader.deinit();
+    while (ready < load_window) : (ready += 1) {
+        loaders[ready] = try weights.initLoader(allocator, platform);
+    }
+
     var start: usize = 0;
     while (start < n_blocks) {
         const batch = @min(load_window, n_blocks - start);
         var futs: [load_window]@TypeOf(try io.concurrent(loadVisualBlock, .{
-            allocator, io, platform, loaded, store, shardings, start, progress,
+            allocator, io, platform, loaded, store, shardings, start, progress, &loaders[0],
         })) = undefined;
         var spawned: usize = 0;
         while (spawned < batch) : (spawned += 1) {
             futs[spawned] = try io.concurrent(loadVisualBlock, .{
-                allocator, io, platform, loaded, store, shardings, start + spawned, progress,
+                allocator, io, platform, loaded, store, shardings, start + spawned, progress, &loaders[spawned],
             });
         }
         var got: usize = 0;
@@ -244,16 +253,20 @@ fn runVisualTile(
     log.debug("visual embed: ran {f} [{f}]", .{ hidden.shape(), t.untilNow(io, .awake) });
 
     const n_blocks = limits.blockCap(cache.blocks.len);
+    const BlockRunner = zml.FnExe(visual_vae.TransformerBlock.forward).Runner(.{.layer});
+    var block_runner: ?BlockRunner = null;
+    defer if (block_runner) |*r| r.deinit(allocator);
     var i: usize = 0;
     while (i < n_blocks) : (i += 1) {
-        var block_runner = try zml.FnExe(visual_vae.TransformerBlock.forward).Runner(.{.layer}).init(&compiled.block, allocator, .{
-            .layer = cache.blocks[i],
-        });
-        defer block_runner.deinit(allocator);
+        if (block_runner) |*r| {
+            weights.rebake(r, .{ .layer = cache.blocks[i] });
+        } else {
+            block_runner = try BlockRunner.init(&compiled.block, allocator, .{ .layer = cache.blocks[i] });
+        }
         var next: zml.Buffer = undefined;
         t = .now(io, .awake);
         log.debug("visual block {d}/{d}: run", .{ i + 1, n_blocks });
-        block_runner.run(io, .{
+        block_runner.?.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin },
             .outputs = .{ .hidden = &next },
             .opts = .{ .wait = true },
@@ -358,6 +371,12 @@ pub fn decodeVideo(
     );
     defer cache.deinit(allocator);
 
+    const plane = geo.pixel_h * geo.pixel_w;
+    const overlap_n = 3 * frame_overlap * plane;
+    const pending = try allocator.alloc(f32, overlap_n);
+    defer allocator.free(pending);
+    var has_overlap = false;
+
     var written: u32 = 0;
     var chunk_i: u32 = 0;
     while (chunk_i < num_chunks) : (chunk_i += 1) {
@@ -394,11 +413,13 @@ pub fn decodeVideo(
                 pasteNchw(clip, clip_t, geo.pixel_h, geo.pixel_w, pix, clip_t, ylen, xlen, y0, x0, blend_y, blend_x);
             }
         }
+
+        // Official `_decode`: clip is two `chunk_frames` slices. First (minus pre-pad) is written;
+        // the second is held as the next blend overlap and appended after the last chunk.
         const take = @min(chunk_frames - pre, out_frames - written);
-        const plane = geo.pixel_h * geo.pixel_w;
         var f: u32 = 0;
         while (f < take) : (f += 1) {
-            if (chunk_i > 0 and f < frame_overlap) {
+            if (has_overlap and f < frame_overlap) {
                 const w = @as(f32, @floatFromInt(f)) / @as(f32, @floatFromInt(frame_overlap));
                 var c: u32 = 0;
                 while (c < 3) : (c += 1) {
@@ -406,7 +427,8 @@ pub fn decodeVideo(
                     while (p < plane) : (p += 1) {
                         const oi = ((c * out_frames + written + f) * plane) + p;
                         const ci = ((c * clip_t + pre + f) * plane) + p;
-                        out[oi] = out[oi] * (1.0 - w) + clip[ci] * w;
+                        const pi = ((c * frame_overlap + f) * plane) + p;
+                        out[oi] = pending[pi] * (1.0 - w) + clip[ci] * w;
                     }
                 }
             } else {
@@ -419,7 +441,35 @@ pub fn decodeVideo(
             }
         }
         written += take;
+
+        const overlap_src = chunk_frames + pre;
+        if (frame_overlap > 0 and overlap_src < clip_t) {
+            const avail = @min(frame_overlap, clip_t - overlap_src);
+            var c: u32 = 0;
+            while (c < 3) : (c += 1) {
+                var of: u32 = 0;
+                while (of < avail) : (of += 1) {
+                    const si = (c * clip_t + overlap_src + of) * plane;
+                    const di = (c * frame_overlap + of) * plane;
+                    @memcpy(pending[di..][0..plane], clip[si..][0..plane]);
+                }
+            }
+            has_overlap = true;
+        }
         if (written >= out_frames) break;
+    }
+    if (has_overlap and written < out_frames) {
+        const take = @min(frame_overlap, out_frames - written);
+        var c: u32 = 0;
+        while (c < 3) : (c += 1) {
+            var f: u32 = 0;
+            while (f < take) : (f += 1) {
+                const oi = (c * out_frames + written + f) * plane;
+                const pi = (c * frame_overlap + f) * plane;
+                @memcpy(out[oi..][0..plane], pending[pi..][0..plane]);
+            }
+        }
+        written += take;
     }
 
     vae.denormImagenetRgb(out);
@@ -496,13 +546,11 @@ pub fn decodeAudio(
     progress: *std.Progress.Node,
 ) ![]f32 {
     vae.applyLatentNorm(packed_audio, @intCast(loaded.cfg.latent_channels), &loaded.cfg.latents_mean, &loaded.cfg.latents_std, true);
-    const stereo = vae.unpackStereo(packed_audio);
-    const channels: usize = @intCast(loaded.cfg.latent_channels);
-    const t: usize = geo.audio_t;
-    const batch = try allocator.alloc(f32, 2 * channels * t);
+    const channels: u32 = @intCast(loaded.cfg.latent_channels);
+    const t = geo.audio_t;
+    const batch = try allocator.alloc(f32, 2 * @as(usize, channels) * t);
     defer allocator.free(batch);
-    @memcpy(batch[0 .. channels * t], stereo.left);
-    @memcpy(batch[channels * t ..], stereo.right);
+    vae.audioRowsToBct(batch, packed_audio, channels, t);
 
     log.info("audio: load", .{});
     var clock: std.Io.Timestamp = .now(io, .awake);
@@ -584,7 +632,7 @@ fn pull(allocator: std.mem.Allocator, io: std.Io, buf: zml.Buffer, comptime name
     done(io, clock, "{s}: toSlice ok bytes={d}", .{ name, host.shape.byteSize() });
 }
 
-/// Run each compiled VAE executable once on zeros. Stops at the first Metal/CPU failure.
+/// Run each compiled VAE executable once on zeros.
 pub fn probe(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -659,7 +707,7 @@ pub fn probe(
 
     log.info("probe 2/4 visual block 0: load", .{});
     clock = .now(io, .awake);
-    var block_bufs = try loaded_visual.loadBlock(allocator, io, platform, visual_store, shardings, 0, progress);
+    var block_bufs = try loaded_visual.loadBlock(allocator, io, platform, visual_store, shardings, 0, progress, null);
     defer visual_vae.TransformerBlock.unloadBuffers(&block_bufs);
     done(io, clock, "probe 2/4 visual block 0: loaded", .{});
     var block_runner = try zml.FnExe(visual_vae.TransformerBlock.forward).Runner(.{.layer}).init(&compiled.block, allocator, .{

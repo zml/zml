@@ -202,6 +202,7 @@ pub const VisualLatent = struct {
     latent_t: u32,
     latent_h: u32,
     latent_w: u32,
+    keyframe_index: i32 = 0,
 
     pub fn deinit(self: VisualLatent, allocator: std.mem.Allocator) void {
         allocator.free(self.thwc);
@@ -364,7 +365,9 @@ pub fn encodeAudio(
     errdefer allocator.free(host);
     try latents.toSlice(io, .init(zml.Shape.init(.{ .b = 2, .c = loaded.cfg.latent_channels, .t = latent_t }, .f32), std.mem.sliceAsBytes(host)));
 
-    const packed_latents = try vae.packStereo(allocator, host[0 .. channels * latent_t], host[channels * latent_t ..], @intCast(channels));
+    const packed_latents = try allocator.alloc(f32, host.len);
+    errdefer allocator.free(packed_latents);
+    vae.audioBctToRows(packed_latents, host, @intCast(channels), latent_t);
     allocator.free(host);
     vae.applyLatentNorm(packed_latents, @intCast(channels), &loaded.cfg.latents_mean, &loaded.cfg.latents_std, false);
     log.info("audio encode samples={d} latent_t={d} channels={d}", .{ samples, latent_t, channels });
@@ -399,12 +402,12 @@ pub fn packConditions(
     const vmeta = try allocator.alloc(packing.ConditionVideo, visuals.len);
     errdefer allocator.free(vmeta);
     var vlen: usize = 0;
-    for (visuals, vmeta, 0..) |v, *m, i| {
+    for (visuals, vmeta) |v, *m| {
         m.* = .{
             .latent_t = v.latent_t,
             .latent_h = v.latent_h,
             .latent_w = v.latent_w,
-            .keyframe_index = if (i == 0) 0 else 1,
+            .keyframe_index = v.keyframe_index,
         };
         vlen += config_mod.videoTokenCount(v.latent_t, v.latent_h, v.latent_w, patch) * patchDim(patch);
     }

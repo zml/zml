@@ -3,12 +3,12 @@ const std = @import("std");
 const zml = @import("zml");
 
 const config_mod = @import("config.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
 pub const Config = config_mod.Config;
 
-pub const Buffers = zml.Bufferized(Model);
 
 const RmsNorm = struct {
     weight: zml.Tensor,
@@ -122,7 +122,8 @@ const Attention = struct {
         var k: zml.Tensor = undefined;
         var v: zml.Tensor = undefined;
         if (self.qkv) |qkv| {
-            const split = qkv.forward(x_qkv).splitAxis(.dout, .{ .p = 3, .h = self.num_heads, .hd = self.head_dim })
+            // Official fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
+            const split = qkv.forward(x_qkv).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
                 .withPartitioning(.{ .h = .model });
             const parts = split.chunkExact(.p, 3);
             q = parts[0].squeeze(.p);
@@ -476,18 +477,6 @@ pub const Model = struct {
         allocator.free(self.blocks);
     }
 
-    pub fn unloadBuffers(self: *const Model, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        unloadLinear(&buffers.video_proj);
-        unloadLinear(&buffers.audio_proj);
-        unloadLinear(&buffers.condition_proj);
-        TimeEmbedder.unloadBuffers(&buffers.time_embedder);
-        TokenRefiner.unloadBuffers(&buffers.token_refiner, allocator);
-        for (buffers.blocks) |*block| TransformerBlock.unloadBuffers(block);
-        allocator.free(buffers.blocks);
-        FinalLayer.unloadBuffers(&buffers.final_layer);
-        _ = self;
-    }
-
     pub fn embedPart(self: Model) EmbedModel {
         return .{
             .video_proj = self.video_proj,
@@ -645,38 +634,6 @@ pub const LoadedModel = struct {
         self.parsed_config.deinit();
     }
 
-    pub fn loadBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        shardings: []const zml.Sharding,
-        progress: *std.Progress.Node,
-    ) !Buffers {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-
-        var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
-        errdefer self.inner.unloadBuffers(&buffers, allocator);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
-        defer loader.deinit();
-
-        loader.load(io, Model, &self.inner, &buffers, store, shardings, .{ .progress = progress });
-        try loader.await(io);
-
-        const took = now.untilNow(io, .awake);
-        const total_bytes: u64 = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded DiT weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-        return buffers;
-    }
-
     pub fn loadEmbed(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
@@ -687,7 +644,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !zml.Bufferized(EmbedModel) {
         const part = self.inner.embedPart();
-        return loadPart(allocator, io, platform, store, shardings, EmbedModel, &part, progress);
+        return weights.load(allocator, io, platform, store, shardings, EmbedModel, &part, progress, null);
     }
 
     pub fn loadFinish(
@@ -700,7 +657,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !zml.Bufferized(FinishModel) {
         const part = self.inner.finishPart();
-        return loadPart(allocator, io, platform, store, shardings, FinishModel, &part, progress);
+        return weights.load(allocator, io, platform, store, shardings, FinishModel, &part, progress, null);
     }
 
     pub fn loadBlock(
@@ -712,29 +669,8 @@ pub const LoadedModel = struct {
         shardings: []const zml.Sharding,
         index: usize,
         progress: *std.Progress.Node,
+        loader: ?*zml.io.Loader,
     ) !zml.Bufferized(TransformerBlock) {
-        return loadPart(allocator, io, platform, store, shardings, TransformerBlock, &self.inner.blocks[index], progress);
+        return weights.load(allocator, io, platform, store, shardings, TransformerBlock, &self.inner.blocks[index], progress, loader);
     }
 };
-
-fn loadPart(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    store: *zml.io.TensorStore,
-    shardings: []const zml.Sharding,
-    comptime T: type,
-    model: *const T,
-    progress: *std.Progress.Node,
-) !zml.Bufferized(T) {
-    var buffers = try zml.mem.bufferize(allocator, T, model);
-    var loader: zml.io.Loader = try .init(allocator, platform, .{
-        .dma_chunks = 32,
-        .dma_chunk_size = 256 * zml.MiB,
-        .parallelism = 16,
-    });
-    defer loader.deinit();
-    loader.load(io, T, model, &buffers, store, shardings, .{ .progress = progress });
-    try loader.await(io);
-    return buffers;
-}

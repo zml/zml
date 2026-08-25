@@ -11,6 +11,7 @@ const dit = @import("dit.zig");
 const encode_mod = @import("encode.zig");
 const encoder = @import("encoder.zig");
 const ir_mod = @import("ir.zig");
+const media = @import("media.zig");
 const packing = @import("packing.zig");
 const pipeline = @import("pipeline.zig");
 const scheduler_mod = @import("scheduler.zig");
@@ -46,17 +47,19 @@ const Args = struct {
     last_image: []const u8 = "",
     refs: []const u8 = "",
     out: []const u8 = ".",
-    backend: ?zml.attention.Backend = null,
+    shared: []const u8 = "",
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
         \\
-        \\ MiniMax-H3 joint video+audio (H3-Base). CPU/Metal default to the
-        \\ community 352-short preview canvas. --full is official 768p.
+        \\ MiniMax-H3 joint video+audio. Pick one canvas: --tiny, --preview, or --full.
+        \\ Auto is preview on CPU/Metal and on devices under 40 GiB; official 768p
+        \\ otherwise. --full, --short-side above 352, and preview + audio --refs
+        \\ are refused below 40 GiB (use --tiny for image+audio refs).
         \\
         \\ Options:
         \\   --model=<path>      Repository (hf://MiniMaxAI/MiniMax-H3 or local)
-        \\   --prompt=<string>   Text prompt (wrapped by OpenH3-IR / Prompting Guidance)
+        \\   --prompt=<string>   Text prompt (OpenH3-IR or Prompting Guidance wrap)
         \\   --ir=<mode>         auto | prompt | h3ir | off (default: auto)
         \\   --variant=<name>    t2va | fl2va | ref2va (default: t2va)
         \\   --image=<path>      FL2VA first frame (ppm/jpg/png)
@@ -67,16 +70,16 @@ const Args = struct {
         \\   --steps=<n>         Denoising steps (0 = canvas default)
         \\   --short-side=<px>   Short edge before snap-32 (0 = canvas default)
         \\   --preview           352 short side, 10 steps
-        \\   --tiny              128 short side, 4 steps (Mac compile smoke)
+        \\   --tiny              128 short side, 4 steps
         \\   --full              768 short side, 30 steps
         \\   --compile-only      Stop after compile; skip weight load
         \\   --decode-only       Decode video_latents.f32 and audio_latents.f32 from --out
-        \\   --probe             Run each VAE executable once (embed, 1 block, finish, audio)
+        \\   --probe             Run each VAE executable once
         \\   --max-vae-blocks=n  Decode at most n visual blocks (0 = all)
         \\   --max-vae-chunks=n  Decode at most n temporal chunks (0 = all)
         \\   --out=<dir>         Frames, audio.wav, output.mp4, and *.f32 latents
+        \\   --shared=<dir>      Official video_noise.f32, audio_noise.f32, prompt_embeds.f32
         \\   --seed=<n>          RNG seed
-        \\   --backend=<name>    Logged only; DiT uses full-sequence sdpa
         \\
     ;
 };
@@ -105,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
         return reject(error.Ref2vaNeedsRefs, "ref2va requires --refs", .{});
     if (variant == .t2va and (args.image.len != 0 or args.last_image.len != 0 or args.refs.len != 0))
         return reject(error.T2vaRejectsMedia, "t2va does not take --image, --last-image, or --refs", .{});
+    const canvas_choice = config_mod.parseCanvas(args.tiny, args.preview, args.full) catch
+        return reject(error.ConflictingCanvas, "use only one of --tiny, --preview, --full", .{});
 
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
@@ -131,27 +136,49 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const canvas = config_mod.canvasForTarget(platform.target, args.full, args.preview, args.tiny);
+    const device_bytes = config_mod.minDeviceBytes(platform);
+    if (canvas_choice == .full and device_bytes != 0 and device_bytes < config_mod.full_canvas_min_device_bytes) {
+        return reject(
+            error.FullCanvasTooLarge,
+            "--full needs at least {d} GiB per device; this platform reports {d} GiB. Use --preview.",
+            .{ config_mod.full_canvas_min_device_bytes / (1024 * 1024 * 1024), device_bytes / (1024 * 1024 * 1024) },
+        );
+    }
+    const canvas = config_mod.canvasForTarget(platform.target, canvas_choice, device_bytes);
     const short_side = if (args.short_side == 0) canvas.short_side else args.short_side;
+    if (device_bytes != 0 and device_bytes < config_mod.full_canvas_min_device_bytes and short_side > config_mod.preview_short_side) {
+        return reject(
+            error.CanvasTooLarge,
+            "short side {d} needs at least {d} GiB per device; this platform reports {d} GiB. Use --preview or --tiny.",
+            .{ short_side, config_mod.full_canvas_min_device_bytes / (1024 * 1024 * 1024), device_bytes / (1024 * 1024 * 1024) },
+        );
+    }
     const steps = if (args.steps == 0) canvas.steps else args.steps;
+    if (variant == .ref2va and !args.decode_only and !args.probe and config_mod.audioRefsNeedTiny(short_side, device_bytes) and media.refsContainAudio(args.refs)) {
+        return reject(
+            error.AudioRefTooLarge,
+            "preview + audio --refs needs --tiny on devices under {d} GiB; this platform reports {d} GiB",
+            .{ config_mod.full_canvas_min_device_bytes / (1024 * 1024 * 1024), device_bytes / (1024 * 1024 * 1024) },
+        );
+    }
 
     const shardings: sharding_mod.Shardings = try .init(platform);
     const px = config_mod.pixelSize(aspect, short_side);
     log.info(
-        "run model={s} variant={s} ir={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} backend={}",
+        "run model={s} variant={s} canvas={s} ir={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d}",
         .{
             args.model,
             @tagName(variant),
+            @tagName(canvas_choice),
             @tagName(ir_mode),
             px.w,
             px.h,
-            config_mod.frameCount(args.duration),
+            config_mod.alignFrameCount(config_mod.frameCount(args.duration)),
             steps,
             args.seed,
             @tagName(platform.target),
             shardings.model.numPartitionsForLogicalAxis(.model),
             platform.devices.len,
-            args.backend orelse config_mod.attentionBackend(platform),
         },
     );
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
@@ -171,22 +198,30 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
-    var transformer_dir = openOptionalDir(io, task_dir, "transformer") orelse openOptionalDir(io, repo, "transformer");
-    defer if (transformer_dir) |*dir| dir.close(io);
-    const transformer = transformer_dir orelse task_dir;
+    var transformer_dir = openTransformer(io, task_dir, repo, variant) catch |err| switch (err) {
+        error.Ref2vaTransformerMissing => return reject(
+            err,
+            "ref2va needs Ref2VA/transformer or transformer_ref (hf download MiniMaxAI/MiniMax-H3 --include \"Ref2VA/*\")",
+            .{},
+        ),
+        error.TransformerMissing => return reject(err, "transformer weights not found under {s}", .{args.model}),
+    };
+    defer transformer_dir.close(io);
+    const transformer = transformer_dir;
 
-    var encoder_dir = openOptionalDir(io, task_dir, "text_encoder") orelse openOptionalDir(io, repo, "text_encoder");
+    var encoder_dir = openSharedComponent(io, task_dir, repo, "text_encoder");
     defer if (encoder_dir) |*dir| dir.close(io);
     const enc_dir = encoder_dir orelse task_dir;
 
-    var visual_dir = openNestedDir(io, task_dir, "video_vae", "source") orelse
-        openOptionalDir(io, task_dir, "video_vae") orelse
-        openOptionalDir(io, repo, "vae") orelse
-        openNestedDir(io, repo, "video_vae", "source") orelse
-        openOptionalDir(io, repo, "video_vae");
+    var visual_cfg_dir = openSharedComponent(io, task_dir, repo, "video_vae") orelse
+        openSharedComponent(io, task_dir, repo, "vae");
+    defer if (visual_cfg_dir) |*dir| dir.close(io);
+    var visual_dir = if (visual_cfg_dir) |dir| openOptionalDir(io, dir, "source") else null;
     defer if (visual_dir) |*dir| dir.close(io);
+    const visual_weights = visual_dir orelse visual_cfg_dir;
+    const visual_cfg = visual_cfg_dir orelse visual_dir;
 
-    var audio_dir = openOptionalDir(io, task_dir, "audio_vae") orelse openOptionalDir(io, repo, "audio_vae");
+    var audio_dir = openSharedComponent(io, task_dir, repo, "audio_vae");
     defer if (audio_dir) |*dir| dir.close(io);
 
     var dit_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, transformer);
@@ -223,15 +258,15 @@ pub fn main(init: std.process.Init) !void {
         if (audio_store) |*s| s.deinit();
         if (audio_registry) |*r| r.deinit();
     }
-    if (visual_dir != null and audio_dir != null) {
-        visual_registry = try .fromRepo(allocator, io, visual_dir.?);
+    if (visual_weights != null and audio_dir != null) {
+        visual_registry = try .fromRepo(allocator, io, visual_weights.?);
         visual_store = .fromRegistry(allocator, &visual_registry.?);
         audio_registry = try .fromRepo(allocator, io, audio_dir.?);
         audio_store = .fromRegistry(allocator, &audio_registry.?);
         const vview = visual_store.?.view();
         const aview = audio_store.?.view();
         if (visual_vae.ready(vview) and audio_vae.decodeReady(aview)) {
-            loaded_visual = try visual_vae.LoadedModel.init(allocator, io, visual_dir.?, vview);
+            loaded_visual = try visual_vae.LoadedModel.init(allocator, io, visual_cfg.?, vview);
             loaded_audio = try audio_vae.LoadedModel.init(allocator, io, audio_dir.?, aview);
             log.info("vae: video+audio graphs ready", .{});
         } else {
@@ -337,12 +372,27 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    const text_len: u32 = @intCast(tokens.len);
-    log.info("prompt tokens={d} refs={d} cond_video={d} cond_audio={d}", .{
+    var shared_inputs: ?session_mod.SharedInputs = null;
+    defer if (shared_inputs) |s| s.deinit(allocator);
+    if (args.shared.len != 0 and !args.decode_only and !args.probe) {
+        var shared_dir = try std.Io.Dir.cwd().openDir(io, args.shared, .{});
+        defer shared_dir.close(io);
+        const loaded = try session_mod.loadShared(allocator, io, shared_dir, geo_work, @intCast(dit_cfg.text_dim));
+        shared_inputs = loaded;
+        allocator.free(text_tags);
+        text_tags = try allocator.dupe(u8, loaded.tags);
+    }
+
+    const text_len: u32 = if (shared_inputs) |s| blk: {
+        const dim: usize = @intCast(dit_cfg.text_dim);
+        break :blk @intCast(s.embeds.len / dim);
+    } else @intCast(tokens.len);
+    log.info("prompt tokens={d} refs={d} cond_video={d} cond_audio={d} shared={s}", .{
         text_len,
         cond_set.references.len,
         cond_set.videos.len,
         cond_set.audios.len,
+        if (args.shared.len == 0) "-" else args.shared,
     });
 
     const schedules = try scheduler_mod.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
@@ -454,7 +504,16 @@ pub fn main(init: std.process.Init) !void {
         log.info("decode-only: loaded video_latents.f32 ({d}) audio_latents.f32 ({d})", .{ video.len, audio.len });
         break :blk .{ .video = video, .audio = audio };
     } else blk: {
-        var text = try session_mod.encodeText(allocator, io, platform, &compiled.?, &loaded_enc, &enc_store, &all, tokens, text_extras, &progress);
+        var text = if (shared_inputs) |s|
+            try session_mod.bufferFromF32(
+                allocator,
+                io,
+                platform,
+                .init(.{ .b = 1, .s = text_len, .d = dit_cfg.text_dim }, loaded_enc.inner.embed_tokens.weight.dtype()),
+                s.embeds,
+            )
+        else
+            try session_mod.encodeText(allocator, io, platform, &compiled.?, &loaded_enc, &enc_store, &all, tokens, text_extras, &progress);
         defer text.deinit();
         const denoised = try session_mod.denoise(
             allocator,
@@ -474,10 +533,8 @@ pub fn main(init: std.process.Init) !void {
             .{
                 .video_patches = cond_set.video_patches,
                 .audio_patches = cond_set.audio_patches,
-                .videos = cond_set.videos,
-                .audios = cond_set.audios,
-                .references = cond_set.references,
-                .text_tags = text_tags,
+                .video_noise = if (shared_inputs) |s| s.video_rows else null,
+                .audio_noise = if (shared_inputs) |s| s.audio_rows else null,
             },
             &progress,
         );
@@ -512,6 +569,24 @@ fn openOptionalDir(io: std.Io, parent: std.Io.Dir, name: []const u8) ?std.Io.Dir
     return parent.openDir(io, name, .{}) catch null;
 }
 
+fn openSharedComponent(io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir, name: []const u8) ?std.Io.Dir {
+    if (openOptionalDir(io, task_dir, name)) |dir| return dir;
+    if (openOptionalDir(io, repo, name)) |dir| return dir;
+    return openNestedDir(io, repo, "FL2VA", name);
+}
+
+fn openTransformer(io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir, variant: config_mod.Variant) !std.Io.Dir {
+    if (openOptionalDir(io, task_dir, "transformer")) |dir| return dir;
+    if (variant == .ref2va) {
+        if (openOptionalDir(io, repo, "transformer_ref")) |dir| return dir;
+        if (openNestedDir(io, repo, "Ref2VA", "transformer")) |dir| return dir;
+        return error.Ref2vaTransformerMissing;
+    }
+    if (openOptionalDir(io, repo, "transformer")) |dir| return dir;
+    if (openNestedDir(io, repo, "FL2VA", "transformer")) |dir| return dir;
+    return error.TransformerMissing;
+}
+
 fn openNestedDir(io: std.Io, parent: std.Io.Dir, first: []const u8, second: []const u8) ?std.Io.Dir {
     var outer = parent.openDir(io, first, .{}) catch return null;
     const inner = outer.openDir(io, second, .{}) catch {
@@ -533,13 +608,7 @@ fn loadTokenizer(
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
 
-    const bytes = readTokenizer(allocator, io, task_dir) catch |err| switch (err) {
-        error.MissingTokenizer => readTokenizer(allocator, io, repo) catch |repo_err| switch (repo_err) {
-            error.MissingTokenizer => return reject(error.MissingTokenizer, "tokenizer.json not found under the task dir or repo root", .{}),
-            else => return repo_err,
-        },
-        else => return err,
-    };
+    const bytes = try readTokenizerAny(allocator, io, task_dir, repo);
     defer allocator.free(bytes);
     log.info("tokenizer: {d} bytes", .{bytes.len});
     return try .fromBytes(allocator, bytes);
@@ -548,6 +617,24 @@ fn loadTokenizer(
 fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
     log.err(fmt, args);
     return err;
+}
+
+fn readTokenizerAny(allocator: std.mem.Allocator, io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir) ![]u8 {
+    if (readTokenizer(allocator, io, task_dir)) |bytes| return bytes else |err| switch (err) {
+        error.MissingTokenizer => {},
+        else => return err,
+    }
+    if (readTokenizer(allocator, io, repo)) |bytes| return bytes else |err| switch (err) {
+        error.MissingTokenizer => {},
+        else => return err,
+    }
+    var fl = repo.openDir(io, "FL2VA", .{}) catch
+        return reject(error.MissingTokenizer, "tokenizer.json not found under the task dir, repo root, or FL2VA/", .{});
+    defer fl.close(io);
+    return readTokenizer(allocator, io, fl) catch |err| switch (err) {
+        error.MissingTokenizer => return reject(error.MissingTokenizer, "tokenizer.json not found under the task dir, repo root, or FL2VA/", .{}),
+        else => return err,
+    };
 }
 
 fn readTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) ![]u8 {

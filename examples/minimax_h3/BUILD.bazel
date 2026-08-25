@@ -21,6 +21,7 @@ H3_SRCS = [
     "vision.zig",
     "visual_enc.zig",
     "visual_vae.zig",
+    "weights.zig",
 ]
 
 zig_binary(

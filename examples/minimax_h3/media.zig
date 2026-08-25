@@ -127,36 +127,41 @@ fn tempRoot() []const u8 {
 }
 
 const Scratch = struct {
-    parent: std.Io.Dir,
-    parent_owned: bool,
-    dir: std.Io.Dir,
-    name: []u8,
+    path: []u8,
 
-    fn init(allocator: std.mem.Allocator, io: std.Io) !Scratch {
-        const root = tempRoot();
-        const cwd_root = std.mem.eql(u8, root, ".");
-        var parent = if (cwd_root) std.Io.Dir.cwd() else try std.Io.Dir.openDir(.cwd(), io, root, .{});
-        errdefer if (!cwd_root) parent.close(io);
+    fn init(allocator: std.mem.Allocator) !Scratch {
+        // Host IO: VFS Dir.deleteTree panics on path-only scratch dirs.
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        const io = threaded.io();
         const name = try std.fmt.allocPrint(allocator, "h3_{x}", .{tmpId()});
-        errdefer allocator.free(name);
-        const dir = try parent.createDirPathOpen(io, name, .{});
-        return .{
-            .parent = parent,
-            .parent_owned = !cwd_root,
-            .dir = dir,
-            .name = name,
-        };
+        defer allocator.free(name);
+        const path = try std.fs.path.join(allocator, &.{ tempRoot(), name });
+        errdefer allocator.free(path);
+        try std.Io.Dir.cwd().createDirPath(io, path);
+        return .{ .path = path };
     }
 
     fn join(self: Scratch, allocator: std.mem.Allocator, file: []const u8) ![]u8 {
-        return std.fs.path.join(allocator, &.{ tempRoot(), self.name, file });
+        return std.fs.path.join(allocator, &.{ self.path, file });
     }
 
-    fn deinit(self: *Scratch, allocator: std.mem.Allocator, io: std.Io) void {
-        self.dir.close(io);
-        self.parent.deleteTree(io, self.name) catch {};
-        if (self.parent_owned) self.parent.close(io);
-        allocator.free(self.name);
+    fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        const io = threaded.io();
+        if (std.fs.path.isAbsolute(self.path)) {
+            if (std.fs.path.dirname(self.path)) |parent_path| {
+                var parent = std.Io.Dir.openDirAbsolute(io, parent_path, .{}) catch {
+                    allocator.free(self.path);
+                    self.* = undefined;
+                    return;
+                };
+                defer parent.close(io);
+                parent.deleteTree(io, std.fs.path.basename(self.path)) catch {};
+            }
+        } else {
+            std.Io.Dir.cwd().deleteTree(io, self.path) catch {};
+        }
+        allocator.free(self.path);
         self.* = undefined;
     }
 };
@@ -287,8 +292,8 @@ pub fn wavSampleCount(allocator: std.mem.Allocator, io: std.Io, path: []const u8
 
 pub fn loadRgbRaw(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !RgbImage {
     if (readPpmRgb(allocator, io, path)) |img| return img else |_| {}
-    var scratch = try Scratch.init(allocator, io);
-    defer scratch.deinit(allocator, io);
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
     const tmp_name = try scratch.join(allocator, "in.ppm");
     defer allocator.free(tmp_name);
     const result = runFfmpeg(allocator, io, &.{
@@ -316,8 +321,8 @@ pub fn loadRgb(
         return resizeRgb(allocator, img.rgb, img.w, img.h, dst_w, dst_h);
     } else |_| {}
 
-    var scratch = try Scratch.init(allocator, io);
-    defer scratch.deinit(allocator, io);
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
     const tmp_name = try scratch.join(allocator, "in.ppm");
     defer allocator.free(tmp_name);
     const scale = try std.fmt.allocPrint(allocator, "scale={d}:{d}", .{ dst_w, dst_h });
@@ -345,8 +350,8 @@ pub fn loadVideoRgb(
     dst_h: u32,
     frames: u32,
 ) !struct { rgb: []u8, frames: u32, w: u32, h: u32 } {
-    var scratch = try Scratch.init(allocator, io);
-    defer scratch.deinit(allocator, io);
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
     const tmp_pat = try scratch.join(allocator, "f_%04d.ppm");
     defer allocator.free(tmp_pat);
     const fps = try std.fmt.allocPrint(allocator, "fps=24,scale={d}:{d}", .{ dst_w, dst_h });
@@ -403,8 +408,8 @@ pub fn rgbVideoToNchwImagenet(allocator: std.mem.Allocator, rgb: []const u8, fra
 
 pub fn loadWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sample_rate: u32) ![]f32 {
     if (readWavStereo(allocator, io, path, sample_rate)) |pcm| return pcm else |_| {}
-    var scratch = try Scratch.init(allocator, io);
-    defer scratch.deinit(allocator, io);
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
     const tmp = try scratch.join(allocator, "in.wav");
     defer allocator.free(tmp);
     const rate = try std.fmt.allocPrint(allocator, "{d}", .{sample_rate});
@@ -483,6 +488,15 @@ fn readWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sam
         }
     }
     return out;
+}
+
+pub fn refsContainAudio(refs: []const u8) bool {
+    var it = std.mem.splitScalar(u8, refs, ',');
+    while (it.next()) |part| {
+        const path = std.mem.trim(u8, part, " \t");
+        if (path.len != 0 and guessKind(path) == .audio) return true;
+    }
+    return false;
 }
 
 pub fn guessKind(path: []const u8) packing.ReferenceKind {
