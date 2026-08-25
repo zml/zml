@@ -239,7 +239,7 @@ pub const Slice = struct {
         slice: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{slice});
+        return writer.print("Slice({f})@0x{x} [mut={}, off={d}, strides={any}]", .{ slice.shape, @intFromPtr(slice.bytes.ptr), slice.mutable, slice.offset_bytes, slice.byte_strides.slice() });
     }
 
     pub fn formatNumber(slice: Slice, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
