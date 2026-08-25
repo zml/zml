@@ -8,10 +8,13 @@ pub const audio_hz: f32 = 40.0;
 pub const audio_sample_rate: u32 = 32_000;
 pub const visual_spatial: u32 = 16;
 pub const visual_temporal: u32 = 4;
+/// Official VAE clip: `17 * n + 5` pixel frames, `5 * n + 2` latent frames.
+pub const visual_clip_length: u32 = 17;
+pub const visual_latents_per_chunk: u32 = 5;
 pub const visual_cond_timestep: f32 = 0.999;
 pub const frame_rescale: f32 = 5.0 / 3.0;
 pub const default_short_side: u32 = 768;
-/// Community Mac preview (ComfyUI 0.2 MP path): 16:9 → 640×352 after snap-32.
+/// Community preview canvas (ComfyUI 0.2 MP path): 16:9 → 640×352 after snap-32.
 pub const preview_short_side: u32 = 352;
 pub const tiny_short_side: u32 = 128;
 pub const preview_steps: u32 = 10;
@@ -213,28 +216,49 @@ pub const EncoderFileConfig = struct {
     }
 };
 
-/// Full-sequence bidirectional attention. Flash-attn LLM backends expect a KV cache.
-/// XLA compiles `zml.nn.sdpa` for every `zml.Platform.Target`.
-pub fn attentionBackend(platform: *const zml.Platform) zml.attention.Backend {
-    return zml.attention.Backend.auto(platform);
+/// Floor for official 768p. Below this, auto canvas is preview and `--full` is refused.
+pub const full_canvas_min_device_bytes: u64 = 40 * 1024 * 1024 * 1024;
+
+/// Preview + audio refs packs hundreds of extra tokens. Refused under 40 GiB.
+pub fn audioRefsNeedTiny(short_side: u32, device_bytes: u64) bool {
+    return short_side > tiny_short_side and device_bytes != 0 and device_bytes < full_canvas_min_device_bytes;
 }
 
-pub fn canvasForTarget(target: zml.Target, full: bool, preview: bool, tiny: bool) struct { short_side: u32, steps: u32 } {
-    if (tiny) return .{ .short_side = tiny_short_side, .steps = tiny_steps };
-    if (full) return .{ .short_side = default_short_side, .steps = 30 };
-    if (preview) return .{ .short_side = preview_short_side, .steps = preview_steps };
-    return switch (target) {
-        .cpu, .metal => .{ .short_side = preview_short_side, .steps = preview_steps },
-        else => .{ .short_side = default_short_side, .steps = 30 },
-    };
+pub const Canvas = enum { auto, tiny, preview, full };
+
+pub fn parseCanvas(tiny: bool, preview: bool, full: bool) error{ConflictingCanvas}!Canvas {
+    const n = @as(u2, @intFromBool(tiny)) + @as(u2, @intFromBool(preview)) + @as(u2, @intFromBool(full));
+    if (n > 1) return error.ConflictingCanvas;
+    if (tiny) return .tiny;
+    if (preview) return .preview;
+    if (full) return .full;
+    return .auto;
 }
 
-pub fn attentionBackendForTarget(target: zml.Target) zml.attention.Backend {
-    return switch (target) {
-        .cuda => .cuda_fa2,
-        .neuron => .nki,
-        .metal => .metal_fa,
-        .cpu, .rocm, .tpu, .oneapi => .vanilla,
+pub fn minDeviceBytes(platform: *const zml.Platform) u64 {
+    var min_b: u64 = 0;
+    var any = false;
+    for (platform.devices) |device| {
+        if (device.memoryStats().bytes_limit) |bytes| {
+            if (!any or bytes < min_b) min_b = bytes;
+            any = true;
+        }
+    }
+    return min_b;
+}
+
+/// `device_bytes == 0` means unknown: CPU/Metal stay preview, accelerators stay official 768p.
+pub fn canvasForTarget(target: zml.Target, canvas: Canvas, device_bytes: u64) struct { short_side: u32, steps: u32 } {
+    return switch (canvas) {
+        .tiny => .{ .short_side = tiny_short_side, .steps = tiny_steps },
+        .preview => .{ .short_side = preview_short_side, .steps = preview_steps },
+        .full => .{ .short_side = default_short_side, .steps = 30 },
+        .auto => if (device_bytes != 0 and device_bytes < full_canvas_min_device_bytes)
+            .{ .short_side = preview_short_side, .steps = preview_steps }
+        else switch (target) {
+            .cpu, .metal => .{ .short_side = preview_short_side, .steps = preview_steps },
+            else => .{ .short_side = default_short_side, .steps = 30 },
+        },
     };
 }
 
@@ -274,11 +298,25 @@ pub fn frameCount(duration_s: f32) u32 {
     return @intFromFloat(@round(duration_s * video_fps));
 }
 
+/// Snap up to the next `17 * n + 5` the video VAE can encode.
+pub fn alignFrameCount(frames: u32) u32 {
+    const n: u32 = if (frames < 1) 1 else frames;
+    const rem = n % visual_clip_length;
+    if (rem == visual_latents_per_chunk) return n;
+    return n + (visual_latents_per_chunk + visual_clip_length - rem) % visual_clip_length;
+}
+
+/// Latent frames for an aligned `17 * n + 5` pixel count: `5 * n + 2`.
+pub fn videoLatentFrames(aligned_frames: u32) u32 {
+    std.debug.assert(aligned_frames % visual_clip_length == visual_latents_per_chunk);
+    return (aligned_frames - visual_latents_per_chunk) / visual_clip_length * visual_latents_per_chunk + 2;
+}
+
 pub const LatentHw = struct { t: u32, h: u32, w: u32 };
 
 pub fn visualLatentSize(pixel_h: u32, pixel_w: u32, frames: u32) LatentHw {
     return .{
-        .t = std.math.divCeil(u32, frames, visual_temporal) catch unreachable,
+        .t = videoLatentFrames(alignFrameCount(frames)),
         .h = pixel_h / visual_spatial,
         .w = pixel_w / visual_spatial,
     };

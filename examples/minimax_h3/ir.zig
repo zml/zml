@@ -5,8 +5,6 @@ const config = @import("config.zig");
 const log = std.log.scoped(.minimax_h3_ir);
 
 /// How the text that reaches the H3 encoder is produced.
-/// Official MiniMax rec: hosted Context-IR, or the Prompting Guidance fields.
-/// Community rec: OpenH3-IR (`h3ir`) against a local OpenAI-compatible model.
 pub const Mode = enum {
     off,
     prompt,
@@ -97,8 +95,9 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, req: Request) !Brief {
     }
     const brief: Brief = switch (mode) {
         .off => .{ .text = try allocator.dupe(u8, req.prompt), .source = .raw },
-        .prompt, .auto => .{ .text = try promptingGuidance(allocator, req), .source = .prompting_guidance },
+        .prompt => .{ .text = try promptingGuidance(allocator, req), .source = .prompting_guidance },
         .h3ir => .{ .text = try compileH3ir(allocator, io, req), .source = .openh3_ir },
+        .auto => unreachable,
     };
     log.info("ir source={s} chars={d} variant={s}", .{ @tagName(brief.source), brief.text.len, @tagName(req.variant) });
     return brief;

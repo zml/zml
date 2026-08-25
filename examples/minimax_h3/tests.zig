@@ -6,6 +6,7 @@ const audio_vae = @import("audio_vae.zig");
 const conditions = @import("conditions.zig");
 const config = @import("config.zig");
 const ir = @import("ir.zig");
+const media = @import("media.zig");
 const sharding_mod = @import("sharding.zig");
 const packing = @import("packing.zig");
 const scheduler = @import("scheduler.zig");
@@ -23,7 +24,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     try testConfig();
-    try testHardwareBackends();
     try testSharding(allocator);
     try testSplitComma(allocator);
     try testScheduler(allocator);
@@ -35,19 +35,23 @@ pub fn main() !void {
     try testEncodeVideoLatentT();
     try testVisionSpatial();
     try testPatchify(allocator);
+    try testNchwToThwc();
     try testCanvas();
     try testVaeGeometry();
     try testMmRopeHost();
     try testOfficialSpatialGrid();
     try testOfficialRotateHalf();
-    try testOfficialAdaLnIndex();
     try testPromptingGuidance(allocator);
     try testCanvasPresets();
+    try testAudioRefGuard();
     try testVaeTiling(allocator);
     try testVitCoords();
     try testImagenet();
     try testSnake();
+    try testOfficialAudioLatents();
+    try testOfficialVisualLatents();
     try testTokenDrop();
+    try testAudioRowBct();
 
     std.debug.print("minimax_h3 tests: all passed\n", .{});
 }
@@ -77,6 +81,13 @@ fn testConfig() !void {
     try std.testing.expectEqual(@as(i64, 2), aliased.num_refiner_layers);
     try std.testing.expectEqual(@as(i64, 24), aliased.in_channels);
     try std.testing.expectEqual(@as(i64, 16), aliased.rope_freq_dim);
+
+    try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.t2va.taskFamily());
+    try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.fl2va.taskFamily());
+    try std.testing.expectEqual(config.TaskFamily.ref2va, config.Variant.ref2va.taskFamily());
+    try std.testing.expectEqualStrings("FL2VA", config.Variant.t2va.dirName());
+    try std.testing.expectEqualStrings("FL2VA", config.Variant.fl2va.dirName());
+    try std.testing.expectEqualStrings("Ref2VA", config.Variant.ref2va.dirName());
 }
 
 fn testSharding(allocator: std.mem.Allocator) !void {
@@ -256,21 +267,6 @@ fn testSplitComma(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), blanks.len);
 }
 
-fn testHardwareBackends() !void {
-    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.cpu));
-    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.rocm));
-    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.tpu));
-    try std.testing.expectEqual(zml.attention.Backend.vanilla, config.attentionBackendForTarget(.oneapi));
-    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, config.attentionBackendForTarget(.cuda));
-    try std.testing.expectEqual(zml.attention.Backend.nki, config.attentionBackendForTarget(.neuron));
-    try std.testing.expectEqual(zml.attention.Backend.metal_fa, config.attentionBackendForTarget(.metal));
-
-    inline for (std.meta.tags(zml.Target)) |target| {
-        const backend = config.attentionBackendForTarget(target);
-        _ = backend;
-    }
-}
-
 fn testScheduler(allocator: std.mem.Allocator) !void {
     const sched = try scheduler.Schedule.init(allocator, 12.0, 8);
     defer sched.deinit(allocator);
@@ -351,13 +347,13 @@ fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
 }
 
 fn testPackingFl2va(allocator: std.mem.Allocator) !void {
-    const cond = [_]packing.ConditionVideo{.{
+    const first = [_]packing.ConditionVideo{.{
         .latent_t = 1,
         .latent_h = 4,
         .latent_w = 4,
         .keyframe_index = 0,
     }};
-    const layout = try packing.build(allocator, .{
+    const first_layout = try packing.build(allocator, .{
         .text_len = 2,
         .latent_t = 2,
         .latent_h = 4,
@@ -365,11 +361,33 @@ fn testPackingFl2va(allocator: std.mem.Allocator) !void {
         .audio_t = 2,
         .video_t = 0.2,
         .audio_t_noise = 0.4,
-        .condition_videos = &cond,
+        .condition_videos = &first,
     });
-    defer layout.deinit(allocator);
-    try std.testing.expect(layout.seqLen() > 2 + 4 + 8);
-    try std.testing.expect(layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
+    defer first_layout.deinit(allocator);
+    try std.testing.expect(first_layout.seqLen() > 2 + 4 + 8);
+    try std.testing.expect(first_layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), first_layout.positions[first_layout.video_indices[0]].t, 1e-5);
+
+    const last = [_]packing.ConditionVideo{.{
+        .latent_t = 1,
+        .latent_h = 4,
+        .latent_w = 4,
+        .keyframe_index = 1,
+    }};
+    const last_layout = try packing.build(allocator, .{
+        .text_len = 2,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.2,
+        .audio_t_noise = 0.4,
+        .condition_videos = &last,
+    });
+    defer last_layout.deinit(allocator);
+    const last_t = 2.0 + packing.videoDuration(2) - config.frame_rescale;
+    try std.testing.expectApproxEqAbs(last_t, last_layout.positions[last_layout.video_indices[0]].t, 1e-5);
+    try std.testing.expect(last_layout.positions[last_layout.video_indices[0]].t > first_layout.positions[first_layout.video_indices[0]].t);
 }
 
 fn testPackingRef2va(allocator: std.mem.Allocator) !void {
@@ -396,12 +414,39 @@ fn testPackingRef2va(allocator: std.mem.Allocator) !void {
     defer layout.deinit(allocator);
     try std.testing.expect(layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
     try std.testing.expect(layout.seqLen() > 3);
+
+    const audios = [_]packing.ConditionAudio{.{ .latent_t = 3 }};
+    const av_refs = [_]packing.ReferenceBlock{.{
+        .kind = .video_audio,
+        .video_index = 0,
+        .audio_index = 0,
+    }};
+    const av = try packing.build(allocator, .{
+        .text_len = 3,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.3,
+        .audio_t_noise = 0.5,
+        .condition_videos = &videos,
+        .condition_audios = &audios,
+        .references = &av_refs,
+    });
+    defer av.deinit(allocator);
+    try std.testing.expect(av.audio_indices.len > 4);
+    try std.testing.expect(av.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
 }
 
 fn testEncodeVideoLatentT() !void {
     try std.testing.expectEqual(@as(u32, 2), vae.encodeVideoLatentT(vae.official_visual, 5));
     try std.testing.expectEqual(@as(u32, 2), vae.encodeVideoLatentT(vae.official_visual, 17));
     try std.testing.expectEqual(@as(u32, 7), vae.encodeVideoLatentT(vae.official_visual, 34));
+    try std.testing.expectEqual(@as(u32, 37), vae.encodeVideoLatentT(vae.official_visual, 120));
+    try std.testing.expectEqual(
+        config.videoLatentFrames(config.alignFrameCount(120)),
+        vae.encodeVideoLatentT(vae.official_visual, 120),
+    );
 }
 
 fn testVisionSpatial() !void {
@@ -428,10 +473,22 @@ fn testPatchify(allocator: std.mem.Allocator) !void {
     const rows = try packing.patchify(allocator, src, t, h, w, c, .{ 1, 2, 2 });
     defer allocator.free(rows);
     try std.testing.expectEqual(@as(usize, 2 * 2 * 2 * (2 * 1 * 2 * 2)), rows.len);
+    // First 2×2 patch, channel-major: ch0 of four voxels, then ch1.
+    try std.testing.expectEqual(@as(f32, 0), rows[0]);
+    try std.testing.expectEqual(@as(f32, 2), rows[1]);
+    try std.testing.expectEqual(@as(f32, 8), rows[2]);
+    try std.testing.expectEqual(@as(f32, 10), rows[3]);
 
     const back = try packing.unpatchify(allocator, rows, t, h, w, c, .{ 1, 2, 2 });
     defer allocator.free(back);
     try std.testing.expectEqualSlices(f32, src, back);
+}
+
+fn testNchwToThwc() !void {
+    const src = [_]f32{ 0, 1, 2, 3, 10, 11, 12, 13 };
+    var dst: [8]f32 = undefined;
+    packing.nchwToThwc(&dst, &src, 2, 2, 1, 2);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 10, 1, 11, 2, 12, 3, 13 }, &dst);
 }
 
 fn testCanvas() !void {
@@ -447,11 +504,16 @@ fn testCanvas() !void {
     const portrait = config.pixelSize(.@"9:16", 768);
     try std.testing.expect(portrait.h > portrait.w);
     try std.testing.expectEqual(@as(u32, 120), config.frameCount(5.0));
+    try std.testing.expectEqual(@as(u32, 5), config.alignFrameCount(1));
+    try std.testing.expectEqual(@as(u32, 5), config.alignFrameCount(5));
+    try std.testing.expectEqual(@as(u32, 22), config.alignFrameCount(17));
+    try std.testing.expectEqual(@as(u32, 124), config.alignFrameCount(120));
+    try std.testing.expectEqual(@as(u32, 37), config.videoLatentFrames(124));
 }
 
 fn testVaeGeometry() !void {
     const lat = vae.official_visual.latentFromPixels(768, 1376, 120);
-    try std.testing.expectEqual(@as(u32, 30), lat.t);
+    try std.testing.expectEqual(@as(u32, 37), lat.t);
     try std.testing.expectEqual(@as(u32, 48), lat.h);
     try std.testing.expectEqual(@as(u32, 86), lat.w);
     try std.testing.expectEqual(@as(u32, 96), vae.official_visual.patchDim());
@@ -494,12 +556,6 @@ fn testOfficialRotateHalf() !void {
     try std.testing.expectEqualSlices(f32, &rotated, &out);
 }
 
-fn testOfficialAdaLnIndex() !void {
-    try std.testing.expectEqual(@as(u32, 0 * 3 + 0), @as(u32, 0));
-    try std.testing.expectEqual(@as(u32, 1 * 3 + 1), @as(u32, 4));
-    try std.testing.expectEqual(@as(u32, 2 * 3 + 2), @as(u32, 8));
-}
-
 fn testPromptingGuidance(allocator: std.mem.Allocator) !void {
     const brief = try ir.promptingGuidance(allocator, .{
         .prompt = "a lighthouse keeper lights the lamp",
@@ -518,17 +574,62 @@ fn testPromptingGuidance(allocator: std.mem.Allocator) !void {
     });
     defer allocator.free(passthrough);
     try std.testing.expectEqualStrings(brief, passthrough);
+
+    const fl = try ir.promptingGuidance(allocator, .{
+        .prompt = "a lighthouse keeper lights the lamp",
+        .variant = .fl2va,
+        .duration_s = 5,
+    });
+    defer allocator.free(fl);
+    try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 2") != null);
+
+    const ref = try ir.promptingGuidance(allocator, .{
+        .prompt = "a lighthouse keeper lights the lamp",
+        .variant = .ref2va,
+        .duration_s = 5,
+    });
+    defer allocator.free(ref);
+    try std.testing.expect(std.mem.indexOf(u8, ref, "subject_definitions:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ref, "retention_analysis:") != null);
 }
 
 fn testCanvasPresets() !void {
-    const cpu = config.canvasForTarget(.cpu, false, false, false);
+    try std.testing.expectError(error.ConflictingCanvas, config.parseCanvas(true, true, false));
+    try std.testing.expectEqual(config.Canvas.auto, try config.parseCanvas(false, false, false));
+    try std.testing.expectEqual(config.Canvas.tiny, try config.parseCanvas(true, false, false));
+    try std.testing.expectEqual(config.Canvas.preview, try config.parseCanvas(false, true, false));
+    try std.testing.expectEqual(config.Canvas.full, try config.parseCanvas(false, false, true));
+
+    const cpu = config.canvasForTarget(.cpu, .auto, 0);
     try std.testing.expectEqual(config.preview_short_side, cpu.short_side);
-    const full = config.canvasForTarget(.cpu, true, false, false);
+    const full = config.canvasForTarget(.cpu, .full, 0);
     try std.testing.expectEqual(config.default_short_side, full.short_side);
-    const tiny = config.canvasForTarget(.cuda, false, false, true);
+    const tiny = config.canvasForTarget(.cuda, .tiny, 0);
     try std.testing.expectEqual(config.tiny_short_side, tiny.short_side);
-    const cuda = config.canvasForTarget(.cuda, false, false, false);
+    const cuda = config.canvasForTarget(.cuda, .auto, 0);
     try std.testing.expectEqual(config.default_short_side, cuda.short_side);
+    const consumer = config.canvasForTarget(.cuda, .auto, 24 * 1024 * 1024 * 1024);
+    try std.testing.expectEqual(config.preview_short_side, consumer.short_side);
+    const large = config.canvasForTarget(.cuda, .auto, 80 * 1024 * 1024 * 1024);
+    try std.testing.expectEqual(config.default_short_side, large.short_side);
+    const metal = config.canvasForTarget(.metal, .auto, 0);
+    try std.testing.expectEqual(config.preview_short_side, metal.short_side);
+    const rocm_unknown = config.canvasForTarget(.rocm, .auto, 0);
+    try std.testing.expectEqual(config.default_short_side, rocm_unknown.short_side);
+    const rocm_consumer = config.canvasForTarget(.rocm, .auto, 24 * 1024 * 1024 * 1024);
+    try std.testing.expectEqual(config.preview_short_side, rocm_consumer.short_side);
+}
+
+fn testAudioRefGuard() !void {
+    const consumer = 24 * 1024 * 1024 * 1024;
+    const large = 80 * 1024 * 1024 * 1024;
+    try std.testing.expect(config.audioRefsNeedTiny(config.preview_short_side, consumer));
+    try std.testing.expect(!config.audioRefsNeedTiny(config.tiny_short_side, consumer));
+    try std.testing.expect(!config.audioRefsNeedTiny(config.preview_short_side, large));
+    try std.testing.expect(!config.audioRefsNeedTiny(config.preview_short_side, 0));
+    try std.testing.expect(media.refsContainAudio("a.png,b.wav"));
+    try std.testing.expect(!media.refsContainAudio("a.png,b.mp4"));
 }
 
 fn testVaeTiling(allocator: std.mem.Allocator) !void {
@@ -562,7 +663,21 @@ fn testSnake() !void {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), audio_vae.snake(0, 1), 1e-6);
     const y = audio_vae.snake(1.0, 1.0);
     try std.testing.expect(y > 1.0);
-    _ = visual_vae.Config.official().rotaryDim();
+}
+
+fn testOfficialAudioLatents() !void {
+    const cfg = audio_vae.Config.official();
+    try std.testing.expectEqualSlices(f32, &audio_vae.official_latents_mean, &cfg.latents_mean);
+    try std.testing.expectEqualSlices(f32, &audio_vae.official_latents_std, &cfg.latents_std);
+    try std.testing.expect(cfg.latents_std[0] != 1.0);
+}
+
+fn testOfficialVisualLatents() !void {
+    const cfg = visual_vae.Config.official();
+    try std.testing.expectEqualSlices(f32, &visual_vae.official_latents_mean, &cfg.latents_mean);
+    try std.testing.expectEqualSlices(f32, &visual_vae.official_latents_std, &cfg.latents_std);
+    try std.testing.expectEqual(@as(i64, 48), cfg.rotaryDim());
+    try std.testing.expect(cfg.latents_std[0] != 1.0);
 }
 
 fn testTokenDrop() !void {
@@ -571,4 +686,16 @@ fn testTokenDrop() !void {
     try std.testing.expectEqual(@as(u32, 2), spec.tokenOverlap());
     try std.testing.expectEqual(@as(u32, 3), spec.framePrePadding());
     try std.testing.expectEqual(@as(u32, 5), spec.frameOverlap());
+}
+
+fn testAudioRowBct() !void {
+    const channels: u32 = 2;
+    const t: u32 = 3;
+    const rows = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var bct: [12]f32 = undefined;
+    vae.audioRowsToBct(&bct, &rows, channels, t);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 2, 4, 1, 3, 5, 6, 8, 10, 7, 9, 11 }, &bct);
+    var back: [12]f32 = undefined;
+    vae.audioBctToRows(&back, &bct, channels, t);
+    try std.testing.expectEqualSlices(f32, &rows, &back);
 }

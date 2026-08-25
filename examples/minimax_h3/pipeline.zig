@@ -44,7 +44,7 @@ pub const Geometry = struct {
 
     pub fn init(opts: Options, dit_cfg: config_mod.Config) Geometry {
         const px = config_mod.pixelSize(opts.aspect, opts.short_side);
-        const frames = config_mod.frameCount(opts.duration_s);
+        const frames = config_mod.alignFrameCount(config_mod.frameCount(opts.duration_s));
         const lat = config_mod.visualLatentSize(px.h, px.w, frames);
         const audio_t = config_mod.audioLatentLength(opts.duration_s);
         const vt = config_mod.videoTokenCount(lat.t, lat.h, lat.w, dit_cfg.patch_size);

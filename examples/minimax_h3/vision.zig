@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const config_mod = @import("config.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3_vision);
 
@@ -328,53 +329,26 @@ pub const LoadedModel = struct {
     }
 
     pub fn loadEmbed(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, progress: *std.Progress.Node) !zml.Bufferized(EmbedModel) {
-        return loadPart(allocator, io, platform, store, shardings, EmbedModel, &self.inner.embed, progress);
+        return weights.load(allocator, io, platform, store, shardings, EmbedModel, &self.inner.embed, progress, null);
     }
 
-    pub fn loadBlock(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, index: usize, progress: *std.Progress.Node) !zml.Bufferized(VisionBlock) {
-        return loadPart(allocator, io, platform, store, shardings, VisionBlock, &self.inner.blocks[index], progress);
+    pub fn loadBlock(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, index: usize, progress: *std.Progress.Node, loader: ?*zml.io.Loader) !zml.Bufferized(VisionBlock) {
+        return weights.load(allocator, io, platform, store, shardings, VisionBlock, &self.inner.blocks[index], progress, loader);
     }
 
     pub fn loadMerger(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, progress: *std.Progress.Node) !zml.Bufferized(Merger) {
-        return loadPart(allocator, io, platform, store, shardings, Merger, &self.inner.merger, progress);
+        return weights.load(allocator, io, platform, store, shardings, Merger, &self.inner.merger, progress, null);
     }
 
     pub fn loadDeepstack(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, index: usize, progress: *std.Progress.Node) !zml.Bufferized(Merger) {
-        return loadPart(allocator, io, platform, store, shardings, Merger, &self.inner.deepstack[index], progress);
+        return weights.load(allocator, io, platform, store, shardings, Merger, &self.inner.deepstack[index], progress, null);
     }
 
     pub fn loadPosEmbed(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, progress: *std.Progress.Node) !zml.Buffer {
         var part = self.inner.pos_embed;
-        var buffers = try zml.mem.bufferize(allocator, zml.Tensor, &part);
-        var loader: zml.io.Loader = try .init(allocator, platform, .{ .dma_chunks = 8, .dma_chunk_size = 64 * zml.MiB, .parallelism = 4 });
-        defer loader.deinit();
-        loader.load(io, zml.Tensor, &part, &buffers, store, shardings, .{ .progress = progress });
-        try loader.await(io);
-        return buffers;
+        return weights.load(allocator, io, platform, store, shardings, zml.Tensor, &part, progress, null);
     }
 };
-
-fn loadPart(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    store: *zml.io.TensorStore,
-    shardings: []const zml.Sharding,
-    comptime T: type,
-    model: *const T,
-    progress: *std.Progress.Node,
-) !zml.Bufferized(T) {
-    var buffers = try zml.mem.bufferize(allocator, T, model);
-    var loader: zml.io.Loader = try .init(allocator, platform, .{
-        .dma_chunks = 16,
-        .dma_chunk_size = 128 * zml.MiB,
-        .parallelism = 8,
-    });
-    defer loader.deinit();
-    loader.load(io, T, model, &buffers, store, shardings, .{ .progress = progress });
-    try loader.await(io);
-    return buffers;
-}
 
 pub const Grid = struct { h: u32, w: u32 };
 
@@ -678,6 +652,25 @@ fn runPatches(
     defer EmbedModel.unloadBuffers(&embed_bufs);
     var pos_table = try loaded.loadPosEmbed(allocator, io, platform, store, shardings, progress);
     defer pos_table.deinit();
+
+    var loaders = [2]zml.io.Loader{
+        try weights.initLoader(allocator, platform),
+        try weights.initLoader(allocator, platform),
+    };
+    defer loaders[0].deinit();
+    defer loaders[1].deinit();
+    const VisFut = @TypeOf(try io.concurrent(loadVisionBlock, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+    }));
+    var current_f: ?VisFut = if (n_blocks > 0) try io.concurrent(loadVisionBlock, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+    }) else null;
+    var next_f: ?VisFut = if (n_blocks > 1) try io.concurrent(loadVisionBlock, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress, &loaders[1],
+    }) else null;
+    errdefer cancelVision(&current_f, io);
+    errdefer cancelVision(&next_f, io);
+
     const table_host = try bufferToF32(allocator, io, pos_table);
     defer allocator.free(table_host);
     const side: u32 = @intFromFloat(@sqrt(@as(f32, @floatFromInt(loaded.cfg.num_position_embeddings))));
@@ -717,17 +710,9 @@ fn runPatches(
         for (deepstack) |d| if (d.len != 0) allocator.free(d);
     }
     var ds_i: usize = 0;
-    const VisFut = @TypeOf(try io.concurrent(loadVisionBlock, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-    }));
-    var current_f: ?VisFut = if (n_blocks > 0) try io.concurrent(loadVisionBlock, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-    }) else null;
-    var next_f: ?VisFut = if (n_blocks > 1) try io.concurrent(loadVisionBlock, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress,
-    }) else null;
-    errdefer cancelVision(&current_f, io);
-    errdefer cancelVision(&next_f, io);
+    const BlockRunner = zml.FnExe(VisionBlock.forward).Runner(.{.layer});
+    var block_runner: ?BlockRunner = null;
+    defer if (block_runner) |*r| r.deinit(allocator);
     var block_i: usize = 0;
     while (block_i < n_blocks) : (block_i += 1) {
         var block_bufs = try current_f.?.await(io);
@@ -735,12 +720,15 @@ fn runPatches(
         defer VisionBlock.unloadBuffers(&block_bufs);
         current_f = next_f;
         next_f = if (block_i + 2 < n_blocks) try io.concurrent(loadVisionBlock, .{
-            allocator, io, platform, loaded, store, shardings, block_i + 2, progress,
+            allocator, io, platform, loaded, store, shardings, block_i + 2, progress, &loaders[(block_i + 2) % 2],
         }) else null;
-        var runner = try zml.FnExe(VisionBlock.forward).Runner(.{.layer}).init(&compiled.block, allocator, .{ .layer = block_bufs });
-        defer runner.deinit(allocator);
+        if (block_runner) |*r| {
+            weights.rebake(r, .{ .layer = block_bufs });
+        } else {
+            block_runner = try BlockRunner.init(&compiled.block, allocator, .{ .layer = block_bufs });
+        }
         var next: zml.Buffer = undefined;
-        runner.run(io, .{
+        block_runner.?.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf },
             .outputs = .{ .hidden = &next },
             .opts = .{ .wait = true },
@@ -799,8 +787,9 @@ fn loadVisionBlock(
     shardings: []const zml.Sharding,
     index: usize,
     progress: *std.Progress.Node,
+    loader: *zml.io.Loader,
 ) !zml.Bufferized(VisionBlock) {
-    return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress);
+    return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
 fn bufferFromF32(

@@ -4,8 +4,28 @@ const zml = @import("zml");
 
 const config_mod = @import("config.zig");
 const vae = @import("vae.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_vae);
+
+/// Per-channel latent moments from the released `video_vae/config.json`.
+pub const official_latents_mean = [24]f32{
+    0.858090341091156,    -0.9606591463088989, 1.0661640167236328,   -0.5090325474739075,
+    -0.2727581858634949,  -1.3675414323806763, -0.2553254961967468,  -0.26907554268836975,
+    -0.5376840829849243,  -0.0464097298681736, 0.6657370328903198,   0.19690127670764923,
+    -0.5460608005523682,  -0.4035342037677765, -0.23683024942874908, 0.25928452610969543,
+    -0.30133944749832153, 0.211341992020607,   -1.1206848621368408,  0.3581933379173279,
+    -0.04225143790245056, 0.2604829967021942,  0.22864092886447906,  0.7056031823158264,
+};
+
+pub const official_latents_std = [24]f32{
+    1.2223774194717407, 1.2767263650894165,  1.68317747116088865, 1.7549455165863037,
+    1.5636216402053833, 2.194143533706665,   0.96531379222869875, 1.05698859691619875,
+    0.841948926448822,  0.7729952931404114,  1.8955937623977661,  0.946841835975647,
+    0.7996809482574463, 0.44988900423049925, 0.7197399735450745,  0.69362932443618775,
+    2.961095094680786,  2.7694199085235595,  3.0496184825897215,  2.1088054180145265,
+    3.276226282119751,  3.1627357006073,     2.28168129920959475, 2.6127843856811525,
+};
 
 pub const Config = struct {
     latent_channels: i64 = 24,
@@ -22,8 +42,8 @@ pub const Config = struct {
     token_drop: u32 = 3,
     tile_px: u32 = 256,
     tile_overlap_px: u32 = 64,
-    latents_mean: [24]f32 = @splat(0),
-    latents_std: [24]f32 = @splat(1),
+    latents_mean: [24]f32 = official_latents_mean,
+    latents_std: [24]f32 = official_latents_std,
 
     pub fn dim(self: Config) i64 {
         return self.decoder_num_attention_heads * self.decoder_attention_head_dim;
@@ -74,8 +94,7 @@ const FileConfig = struct {
     latents_mean: ?[]const f32 = null,
     latents_std: ?[]const f32 = null,
 
-    fn resolve(self: FileConfig) Config {
-        var out = Config.official();
+    fn overlay(self: FileConfig, out: *Config) void {
         if (self.latent_channels) |v| out.latent_channels = v;
         if (self.out_channels) |v| out.out_channels = v;
         if (self.decoder_num_layers orelse self.num_layers) |v| out.decoder_num_layers = v;
@@ -96,7 +115,6 @@ const FileConfig = struct {
         if (self.latents_std) |stddev| {
             for (0..@min(stddev.len, out.latents_std.len)) |i| out.latents_std[i] = stddev[i];
         }
-        return out;
     }
 };
 
@@ -468,28 +486,31 @@ pub fn finish(input: FinishInput) FinishOutput {
 
 pub const LoadedModel = struct {
     inner: Model,
-    parsed: ?std.json.Parsed(FileConfig),
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch
-            config_mod.parseJson(FileConfig, allocator, io, repo, "source/config.json") catch null;
-        const cfg = if (parsed) |p| p.value.resolve() else Config.official();
-        log.info("visual vae: {d} layers latent_c={d} tile={d}", .{
+        var parsed_root = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
+        defer if (parsed_root) |*parsed| parsed.deinit();
+        var parsed_source = config_mod.parseJson(FileConfig, allocator, io, repo, "source/config.json") catch null;
+        defer if (parsed_source) |*parsed| parsed.deinit();
+        var cfg = Config.official();
+        if (parsed_source) |parsed| parsed.value.overlay(&cfg);
+        if (parsed_root) |parsed| parsed.value.overlay(&cfg);
+        log.info("visual vae: {d} layers latent_c={d} tile={d} mean0={d:.3} std0={d:.3}", .{
             cfg.decoder_num_layers,
             cfg.latent_channels,
             cfg.spec().tile_px,
+            cfg.latents_mean[0],
+            cfg.latents_std[0],
         });
         return .{
             .inner = try .init(allocator, store, cfg),
-            .parsed = parsed,
             .cfg = cfg,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
-        if (self.parsed) |*parsed| parsed.deinit();
     }
 
     pub fn loadEmbed(
@@ -501,7 +522,7 @@ pub const LoadedModel = struct {
         shardings: []const zml.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(EmbedModel) {
-        return loadPart(allocator, io, platform, store, shardings, EmbedModel, &self.inner.embed, progress);
+        return weights.load(allocator, io, platform, store, shardings, EmbedModel, &self.inner.embed, progress, null);
     }
 
     pub fn loadFinish(
@@ -513,7 +534,7 @@ pub const LoadedModel = struct {
         shardings: []const zml.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(FinishModel) {
-        return loadPart(allocator, io, platform, store, shardings, FinishModel, &self.inner.finish, progress);
+        return weights.load(allocator, io, platform, store, shardings, FinishModel, &self.inner.finish, progress, null);
     }
 
     pub fn loadBlock(
@@ -525,32 +546,11 @@ pub const LoadedModel = struct {
         shardings: []const zml.Sharding,
         index: usize,
         progress: *std.Progress.Node,
+        loader: ?*zml.io.Loader,
     ) !zml.Bufferized(TransformerBlock) {
-        return loadPart(allocator, io, platform, store, shardings, TransformerBlock, &self.inner.blocks[index], progress);
+        return weights.load(allocator, io, platform, store, shardings, TransformerBlock, &self.inner.blocks[index], progress, loader);
     }
 };
-
-fn loadPart(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    store: *zml.io.TensorStore,
-    shardings: []const zml.Sharding,
-    comptime T: type,
-    model: *const T,
-    progress: *std.Progress.Node,
-) !zml.Bufferized(T) {
-    var buffers = try zml.mem.bufferize(allocator, T, model);
-    var loader: zml.io.Loader = try .init(allocator, platform, .{
-        .dma_chunks = 32,
-        .dma_chunk_size = 256 * zml.MiB,
-        .parallelism = 16,
-    });
-    defer loader.deinit();
-    loader.load(io, T, model, &buffers, store, shardings, .{ .progress = progress });
-    try loader.await(io);
-    return buffers;
-}
 
 pub const TileShape = struct {
     latent_t: u32,

@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const visual_vae = @import("visual_vae.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_enc);
 
@@ -331,15 +332,10 @@ pub const LoadedModel = struct {
     ) !zml.Bufferized(Model) {
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer Model.unloadBuffers(&buffers);
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader = try weights.initLoader(allocator, platform);
         defer loader.deinit();
         const now: std.Io.Timestamp = .now(io, .awake);
-        loader.load(io, Model, &self.inner, &buffers, store, shardings, .{ .progress = progress });
-        try loader.await(io);
+        try weights.populate(&loader, io, store, shardings, Model, &self.inner, &buffers, progress);
         log.info("loaded visual VAE encoder [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }

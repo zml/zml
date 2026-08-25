@@ -22,10 +22,6 @@ pub const VisualSpec = struct {
         return config.visualLatentSize(pixel_h, pixel_w, frames);
     }
 
-    pub fn tokenCount(self: VisualSpec, latent_t: u32, latent_h: u32, latent_w: u32) u32 {
-        return config.videoTokenCount(latent_t, latent_h, latent_w, self.patch);
-    }
-
     pub fn patchDim(self: VisualSpec) u32 {
         return self.channels * @as(u32, @intCast(self.patch[0] * self.patch[1] * self.patch[2]));
     }
@@ -58,11 +54,6 @@ pub const AudioSpec = struct {
     sample_rate: u32 = config.audio_sample_rate,
     hop: u32 = 800,
 
-    pub fn latentLength(self: AudioSpec, duration_s: f32) u32 {
-        _ = self;
-        return config.audioLatentLength(duration_s);
-    }
-
     pub fn tokenCount(self: AudioSpec, latent_t: u32) u32 {
         return latent_t * self.stereo;
     }
@@ -74,11 +65,6 @@ pub const AudioSpec = struct {
 
 pub const official_visual: VisualSpec = .{};
 pub const official_audio: AudioSpec = .{};
-
-pub const TileSpan = struct {
-    start: u32,
-    len: u32,
-};
 
 pub const TilePlan = struct {
     starts: []u32,
@@ -157,19 +143,40 @@ pub fn tokenDropPad(spec: VisualSpec, latent_t: u32) u32 {
     return (chunk - (num_tokens % chunk)) % chunk;
 }
 
-/// Stereo channels share one encoder/decoder and are packed as `[left..., right...]`.
-pub fn packStereo(allocator: std.mem.Allocator, left: []const f32, right: []const f32, channels: u32) ![]f32 {
-    std.debug.assert(left.len == right.len);
-    std.debug.assert(left.len % channels == 0);
-    const out = try allocator.alloc(f32, left.len * 2);
-    @memcpy(out[0..left.len], left);
-    @memcpy(out[left.len..], right);
-    return out;
+/// Packed DiT audio is channel-major stereo: `(2 * T, C)` = left then right, each `(T, C)`.
+/// The mono audio VAE consumes `(2, C, T)`.
+pub fn audioRowsToBct(dst: []f32, rows: []const f32, channels: u32, t: u32) void {
+    std.debug.assert(dst.len == rows.len);
+    std.debug.assert(rows.len == 2 * @as(usize, channels) * t);
+    var ear: usize = 0;
+    while (ear < 2) : (ear += 1) {
+        const src = rows[ear * t * channels ..][0 .. t * channels];
+        const out = dst[ear * channels * t ..][0 .. channels * t];
+        var ti: usize = 0;
+        while (ti < t) : (ti += 1) {
+            var c: usize = 0;
+            while (c < channels) : (c += 1) {
+                out[c * t + ti] = src[ti * channels + c];
+            }
+        }
+    }
 }
 
-pub fn unpackStereo(packed_latents: []const f32) struct { left: []const f32, right: []const f32 } {
-    const mid = packed_latents.len / 2;
-    return .{ .left = packed_latents[0..mid], .right = packed_latents[mid..] };
+pub fn audioBctToRows(dst: []f32, bct: []const f32, channels: u32, t: u32) void {
+    std.debug.assert(dst.len == bct.len);
+    std.debug.assert(bct.len == 2 * @as(usize, channels) * t);
+    var ear: usize = 0;
+    while (ear < 2) : (ear += 1) {
+        const src = bct[ear * channels * t ..][0 .. channels * t];
+        const out = dst[ear * t * channels ..][0 .. t * channels];
+        var c: usize = 0;
+        while (c < channels) : (c += 1) {
+            var ti: usize = 0;
+            while (ti < t) : (ti += 1) {
+                out[ti * channels + c] = src[c * t + ti];
+            }
+        }
+    }
 }
 
 pub fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []const f32, decode: bool) void {
@@ -201,36 +208,6 @@ pub fn denormImagenetRgb(pixels: []f32) void {
     }
 }
 
-pub fn normImagenetRgb(pixels: []f32) void {
-    std.debug.assert(pixels.len % 3 == 0);
-    const plane = pixels.len / 3;
-    var c: usize = 0;
-    while (c < 3) : (c += 1) {
-        const mean = imagenet_mean[c];
-        const stddev = imagenet_std[c];
-        var i: usize = 0;
-        while (i < plane) : (i += 1) {
-            pixels[c * plane + i] = (pixels[c * plane + i] - mean) / stddev;
-        }
-    }
-}
-
-pub fn blend1d(a: []f32, b: []const f32, extent: u32, stride: usize) void {
-    if (extent == 0) return;
-    const n = @min(@min(a.len, b.len) / stride, extent);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const wa = 1.0 - @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(extent));
-        const wb = 1.0 - wa;
-        var s: usize = 0;
-        while (s < stride) : (s += 1) {
-            const ai = (a.len / stride - n + i) * stride + s;
-            const bi = i * stride + s;
-            a[ai] = a[ai] * wa + b[bi] * wb;
-        }
-    }
-}
-
 pub fn nchwToThwc(allocator: std.mem.Allocator, nchw: []const f32, channels: u32, t: u32, h: u32, w: u32) ![]f32 {
     const plane = @as(usize, t) * h * w;
     std.debug.assert(nchw.len >= plane * channels);
@@ -246,28 +223,6 @@ pub fn nchwToThwc(allocator: std.mem.Allocator, nchw: []const f32, channels: u32
                     const src = ((@as(usize, c) * t + tt) * h + hh) * w + ww;
                     const dst = ((@as(usize, tt) * h + hh) * w + ww) * channels + c;
                     out[dst] = nchw[src];
-                }
-            }
-        }
-    }
-    return out;
-}
-
-pub fn thwcToNchw(allocator: std.mem.Allocator, thwc: []const f32, channels: u32, t: u32, h: u32, w: u32) ![]f32 {
-    const plane = @as(usize, t) * h * w;
-    std.debug.assert(thwc.len >= plane * channels);
-    const out = try allocator.alloc(f32, plane * channels);
-    var tt: u32 = 0;
-    while (tt < t) : (tt += 1) {
-        var hh: u32 = 0;
-        while (hh < h) : (hh += 1) {
-            var ww: u32 = 0;
-            while (ww < w) : (ww += 1) {
-                var c: u32 = 0;
-                while (c < channels) : (c += 1) {
-                    const src = ((@as(usize, tt) * h + hh) * w + ww) * channels + c;
-                    const dst = ((@as(usize, c) * t + tt) * h + hh) * w + ww;
-                    out[dst] = thwc[src];
                 }
             }
         }

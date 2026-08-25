@@ -4,8 +4,32 @@ const zml = @import("zml");
 
 const config_mod = @import("config.zig");
 const vae = @import("vae.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3_audio_vae);
+
+/// Per-channel latent moments from the released `audio_vae/config.json`.
+pub const official_latents_mean = [32]f32{
+    -0.020211687488382354, 0.3876466479950502,   -0.04398279799186767, -0.28591514936373,
+    0.08179686214561671,   -0.35782641352446604, 0.040623809960919084, -0.01552534501956604,
+    -0.223362481667332,    0.1821006842509091,   0.2941778783780663,   -0.07901167601970885,
+    -0.056815072777201,    -0.3699028221860095,  -0.31616315591624855, 0.5905951377425391,
+    -0.052139568068853864, 0.013673160263486295, -0.03691647864630577, 0.09732660653298163,
+    -0.3394662328788498,   -0.30685677538541667, -0.24504598907458763, -0.034698524462007344,
+    0.02868032184767538,   -0.21217779266454084, -0.1678263169941987,  0.3221287889040614,
+    -0.1223055851554907,   0.4356604928128464,   -0.0502599202236253,  0.3979258376211797,
+};
+
+pub const official_latents_std = [32]f32{
+    1.6895524230479284, 2.76263727217653,   1.7945344281264435, 1.6801681847309828,
+    1.6390226546605453, 2.7788298348882177, 1.7659090095747236, 1.6199757612137327,
+    2.6336525640336896, 1.8539356672817833, 2.5056497896915633, 1.811019237886178,
+    1.9579657790720237, 1.6685498243529284, 1.4922469314453364, 3.298670198067373,
+    1.9491804496832168, 1.8720003270431442, 1.8334080103291832, 1.6488070416529093,
+    1.6176957696319716, 1.9131449234774398, 1.5695245398428617, 1.6943659940415912,
+    1.8318420762504692, 1.5540637421583379, 1.9344930328968526, 1.599198216109855,
+    1.718045989838149,  1.6307219190837705, 1.8661226051202384, 1.5613768203168363,
+};
 
 pub const Config = struct {
     latent_channels: i64 = 32,
@@ -19,8 +43,8 @@ pub const Config = struct {
     encoder_rates: [5]i64 = .{ 2, 4, 4, 5, 5 },
     resblock_kernels: [3]i64 = .{ 3, 7, 11 },
     resblock_dilations: [3][3]i64 = .{ .{ 1, 3, 5 }, .{ 1, 3, 5 }, .{ 1, 3, 5 } },
-    latents_mean: [32]f32 = @splat(0),
-    latents_std: [32]f32 = @splat(1),
+    latents_mean: [32]f32 = official_latents_mean,
+    latents_std: [32]f32 = official_latents_std,
 
     pub fn official() Config {
         return .{};
@@ -102,10 +126,28 @@ fn pickTranspose(store: zml.io.TensorStore.View, names: []const []const u8) zml.
     };
 }
 
+fn pickChannel(store: zml.io.TensorStore.View, names: []const []const u8) zml.Tensor {
+    const name = firstKey(store, names);
+    return switch (tensorRank(store, name)) {
+        3 => store.createTensor(name, .{ .unused_a, .c, .unused_b }, .replicated),
+        2 => store.createTensor(name, .{ .unused_a, .c }, .replicated),
+        else => store.createTensor(name, .{.c}, .replicated),
+    };
+}
+
 fn squeezeToTag(t: zml.Tensor, comptime tag: anytype) zml.Tensor {
     var out = t.convert(.f32);
-    while (out.rank() > 1) {
-        out = out.squeeze(-1);
+    var changed = true;
+    while (changed and out.rank() > 1) {
+        changed = false;
+        var ax: i8 = 0;
+        while (ax < @as(i8, @intCast(out.rank()))) : (ax += 1) {
+            if (out.dim(ax) == 1) {
+                out = out.squeeze(ax);
+                changed = true;
+                break;
+            }
+        }
     }
     return out.withTags(.{tag});
 }
@@ -209,14 +251,14 @@ const TransposeConv = struct {
         const v = self.weight_v.convert(.f32).withPartialTags(.{ .ci, .co, .k });
         const g = squeezeToTag(self.weight_g, .ci);
         const sq = squeezeToTag(v.mul(v).sum(.k).sum(.co), .ci).addConstant(1e-9);
-        const fused = v.mul(g.mul(sq.rsqrt()).broad(v.shape()));
+        // CUDA ignores StableHLO window_reversal on this conv; reverse matches conv_transpose1d.
+        const fused = v.mul(g.mul(sq.rsqrt()).broad(v.shape())).reverse(.{.k});
         const official_pad = @divFloor(self.kernel - self.stride, 2);
         const xla_pad = self.kernel - 1 - official_pad;
         var y = x.convert(.f32).withPartialTags(.{ .b, .c, .t }).conv1d(fused, .{
             .window_strides = 1,
             .lhs_dilation = self.stride,
             .padding = &.{ xla_pad, xla_pad },
-            .window_reversal = true,
             .kernel_input_feature_dimension = 0,
             .kernel_output_feature_dimension = 1,
             .kernel_spatial_dimensions = 2,
@@ -234,8 +276,8 @@ const SnakeBeta = struct {
     pub fn init(store: zml.io.TensorStore.View) SnakeBeta {
         const act = if (store.hasKey("act.alpha")) store.withPrefix("act") else store;
         return .{
-            .alpha = pick(act, &.{"alpha"}, .{.c}),
-            .beta = pick(act, &.{"beta"}, .{.c}),
+            .alpha = pickChannel(act, &.{"alpha"}),
+            .beta = pickChannel(act, &.{"beta"}),
         };
     }
 
@@ -445,12 +487,19 @@ pub const DecodeOutput = struct {
     wav: zml.Tensor,
 };
 
-pub fn decode(input: DecodeInput) DecodeOutput {
-    const self = input.model;
-    var x = input.latents.withPartialTags(.{ .b, .c, .t }).convert(.f32);
+fn projectIn(self: Model, latents: zml.Tensor) zml.Tensor {
+    const x = latents.withPartialTags(.{ .b, .c, .t }).convert(.f32);
     var weight = self.dec_in_proj.weight;
     while (weight.rank() > 2) weight = weight.squeeze(-1);
-    x = (zml.nn.Linear.init(weight.withTags(.{ .dout, .d }), self.dec_in_proj.bias, .d)).forward(x.rename(.{ .c = .d })).rename(.{ .dout = .c }).transpose(.{ .b, .c, .t });
+    return (zml.nn.Linear.init(weight.withTags(.{ .dout, .d }), self.dec_in_proj.bias, .d))
+        .forward(x.rename(.{ .c = .d }))
+        .rename(.{ .dout = .c })
+        .transpose(.{ .b, .c, .t });
+}
+
+pub fn decode(input: DecodeInput) DecodeOutput {
+    const self = input.model;
+    var x = projectIn(self, input.latents);
     x = self.conv_pre.forward(x);
     const n_up = self.ups.len;
     const n_k: usize = 3;
@@ -474,7 +523,7 @@ const Snake1d = struct {
     alpha: zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) Snake1d {
-        return .{ .alpha = pick(store, &.{ "alpha", "act.alpha" }, .{.c}) };
+        return .{ .alpha = pickChannel(store, &.{ "alpha", "act.alpha" }) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Snake1d)) void {
@@ -660,12 +709,13 @@ const CausalAttn = struct {
         const k_i = zml.Tensor.arange(.{ .end = seq }, .f32).withTags(.{.k});
         const neg = zml.Tensor.scalar(-1.0e9, .f32);
         const zero = zml.Tensor.scalar(0.0, .f32);
-        const mask = q_i.cmp(.GE, k_i.broad(zml.Shape.init(.{ .q = seq, .k = seq }, .f32))).select(zero, neg);
+        const qk = zml.Shape.init(.{ .q = seq, .k = seq }, .f32);
+        const mask = q_i.broad(qk).cmp(.GE, k_i.broad(qk)).select(zero, neg);
         var attn = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask }).rename(.{ .q = .s });
-        attn = attn.mean(.h);
+        attn = attn.mean(.h).squeeze(.h);
         const pool = @divExact(self.head_dim, self.out_dim);
-        attn = attn.splitAxis(.hd, .{ .d = self.out_dim, .k = pool }).mean(.k);
-        return self.proj.forward(attn.rename(.{ .d = .d })).rename(.{ .dout = .d });
+        attn = attn.splitAxis(.hd, .{ .d = self.out_dim, .k = pool }).mean(.k).squeeze(.k);
+        return self.proj.forward(attn).rename(.{ .dout = .d });
     }
 };
 
@@ -779,7 +829,8 @@ pub fn encode(input: EncodeInput) EncodeOutput {
     x = self.conv_out.forward(self.snake.forward(x));
     x = x.transpose(.{ .b, .t, .c }).rename(.{ .c = .d, .t = .s });
     x = self.pre_block.forward(x);
-    x = self.mean_proj.forward(x.rename(.{ .d = .d })).rename(.{ .dout = .c });
+    x = self.mean_proj.forward(x).rename(.{ .dout = .c });
+    if (x.shape().hasTag(.k) != null) x = x.squeeze(.k);
     return .{ .latents = x.transpose(.{ .b, .c, .s }).rename(.{ .s = .t }) };
 }
 
@@ -802,15 +853,10 @@ pub const LoadedEncoder = struct {
     ) !zml.Bufferized(EncoderModel) {
         var buffers = try zml.mem.bufferize(allocator, EncoderModel, &self.inner);
         errdefer EncoderModel.unloadBuffers(&buffers);
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader = try weights.initLoader(allocator, platform);
         defer loader.deinit();
         const now: std.Io.Timestamp = .now(io, .awake);
-        loader.load(io, EncoderModel, &self.inner, &buffers, store, shardings, .{ .progress = progress });
-        try loader.await(io);
+        try weights.populate(&loader, io, store, shardings, EncoderModel, &self.inner, &buffers, progress);
         log.info("loaded audio VAE encoder [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }
@@ -824,7 +870,12 @@ pub const LoadedModel = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
         const cfg = if (parsed) |p| p.value.resolve() else Config.official();
-        log.info("audio vae: hop={d} latent_c={d}", .{ cfg.hop, cfg.latent_channels });
+        log.info("audio vae: hop={d} latent_c={d} mean0={d:.4} std0={d:.4}", .{
+            cfg.hop,
+            cfg.latent_channels,
+            cfg.latents_mean[0],
+            cfg.latents_std[0],
+        });
         return .{
             .inner = try .init(allocator, store, cfg),
             .parsed = parsed,
@@ -848,15 +899,10 @@ pub const LoadedModel = struct {
     ) !zml.Bufferized(Model) {
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer Model.unloadBuffers(&buffers, allocator);
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader = try weights.initLoader(allocator, platform);
         defer loader.deinit();
         const now: std.Io.Timestamp = .now(io, .awake);
-        loader.load(io, Model, &self.inner, &buffers, store, shardings, .{ .progress = progress });
-        try loader.await(io);
+        try weights.populate(&loader, io, store, shardings, Model, &self.inner, &buffers, progress);
         log.info("loaded audio VAE [{f}]", .{now.untilNow(io, .awake)});
         return buffers;
     }
@@ -866,11 +912,4 @@ pub fn snake(x: f32, alpha: f32) f32 {
     const a = alpha + 1e-9;
     const s = @sin(alpha * x);
     return x + (1.0 / a) * (s * s);
-}
-
-pub fn snakeBeta(x: f32, alpha_log: f32, beta_log: f32) f32 {
-    const alpha = @exp(alpha_log);
-    const beta = @exp(beta_log);
-    const s = @sin(alpha * x);
-    return x + (1.0 / (beta + 1e-9)) * (s * s);
 }

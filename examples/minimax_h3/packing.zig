@@ -408,6 +408,27 @@ pub fn buildT2va(
     });
 }
 
+/// Official video noise is `(C, T, H, W)` (batch squeezed). Host patchify wants `{t,h,w,c}`.
+pub fn nchwToThwc(dst: []f32, src: []const f32, c: u32, t: u32, h: u32, w: u32) void {
+    std.debug.assert(dst.len == src.len);
+    std.debug.assert(src.len == @as(usize, c) * t * h * w);
+    var ci: u32 = 0;
+    while (ci < c) : (ci += 1) {
+        var ti: u32 = 0;
+        while (ti < t) : (ti += 1) {
+            var hi: u32 = 0;
+            while (hi < h) : (hi += 1) {
+                var wi: u32 = 0;
+                while (wi < w) : (wi += 1) {
+                    const s = ((((ci * t) + ti) * h + hi) * w) + wi;
+                    const d = ((((ti * h) + hi) * w + wi) * c) + ci;
+                    dst[d] = src[s];
+                }
+            }
+        }
+    }
+}
+
 /// Host patchify of `{t,h,w,c}` with patch `(pt,ph,pw)` into rows of `c*pt*ph*pw`.
 pub fn patchify(
     allocator: std.mem.Allocator,
@@ -433,15 +454,18 @@ pub fn patchify(
             var ww: u32 = 0;
             while (ww < w) : (ww += pw) {
                 var dst: usize = 0;
-                for (0..pt) |dt| {
-                    for (0..ph) |dh| {
-                        for (0..pw) |dw| {
-                            const src_t = tt + @as(u32, @intCast(dt));
-                            const src_h = hh + @as(u32, @intCast(dh));
-                            const src_w = ww + @as(u32, @intCast(dw));
-                            const base = (((@as(usize, src_t) * h + src_h) * w + src_w) * c);
-                            @memcpy(out[row * width + dst ..][0..c], src[base..][0..c]);
-                            dst += c;
+                // Official `patchify_video_latents`: permute to (T',H',W',C,pt,ph,pw).
+                for (0..c) |ch| {
+                    for (0..pt) |dt| {
+                        for (0..ph) |dh| {
+                            for (0..pw) |dw| {
+                                const src_t = tt + @as(u32, @intCast(dt));
+                                const src_h = hh + @as(u32, @intCast(dh));
+                                const src_w = ww + @as(u32, @intCast(dw));
+                                const base = (((@as(usize, src_t) * h + src_h) * w + src_w) * c) + ch;
+                                out[row * width + dst] = src[base];
+                                dst += 1;
+                            }
                         }
                     }
                 }
@@ -474,15 +498,17 @@ pub fn unpatchify(
             var ww: u32 = 0;
             while (ww < w) : (ww += pw) {
                 var src_i: usize = 0;
-                for (0..pt) |dt| {
-                    for (0..ph) |dh| {
-                        for (0..pw) |dw| {
-                            const dst_t = tt + @as(u32, @intCast(dt));
-                            const dst_h = hh + @as(u32, @intCast(dh));
-                            const dst_w = ww + @as(u32, @intCast(dw));
-                            const base = (((@as(usize, dst_t) * h + dst_h) * w + dst_w) * c);
-                            @memcpy(out[base..][0..c], src[row * width + src_i ..][0..c]);
-                            src_i += c;
+                for (0..c) |ch| {
+                    for (0..pt) |dt| {
+                        for (0..ph) |dh| {
+                            for (0..pw) |dw| {
+                                const dst_t = tt + @as(u32, @intCast(dt));
+                                const dst_h = hh + @as(u32, @intCast(dh));
+                                const dst_w = ww + @as(u32, @intCast(dw));
+                                const base = (((@as(usize, dst_t) * h + dst_h) * w + dst_w) * c) + ch;
+                                out[base] = src[row * width + src_i];
+                                src_i += 1;
+                            }
                         }
                     }
                 }

@@ -2,12 +2,15 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+const config_mod = @import("config.zig");
 const dit = @import("dit.zig");
 const encoder = @import("encoder.zig");
 const packing = @import("packing.zig");
 const pipeline = @import("pipeline.zig");
 const scheduler_mod = @import("scheduler.zig");
+const vae = @import("vae.zig");
 const vision = @import("vision.zig");
+const weights = @import("weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -122,7 +125,7 @@ fn bufferFromItems(io: std.Io, platform: *const zml.Platform, shape: zml.Shape, 
     return zml.Buffer.fromBytes(io, platform, shape, .replicated, bytes);
 }
 
-fn bufferFromF32(
+pub fn bufferFromF32(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
@@ -149,14 +152,33 @@ pub fn writeF32File(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []con
 }
 
 pub fn readF32File(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, expected: usize) ![]f32 {
+    const out = try readF32FileAll(allocator, io, dir, name);
+    errdefer allocator.free(out);
+    if (out.len != expected) return error.LatentSizeMismatch;
+    return out;
+}
+
+pub fn readF32FileAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) ![]f32 {
     const file = try dir.openFile(io, name, .{});
     defer file.close(io);
     const n = try file.length(io);
-    if (n != expected * @sizeOf(f32)) return error.LatentSizeMismatch;
-    const out = try allocator.alloc(f32, expected);
+    if (n % @sizeOf(f32) != 0) return error.LatentSizeMismatch;
+    const out = try allocator.alloc(f32, n / @sizeOf(f32));
     errdefer allocator.free(out);
     var reader = file.reader(io, &.{});
     try reader.interface.readSliceAll(std.mem.sliceAsBytes(out));
+    return out;
+}
+
+pub fn readU8File(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, expected: usize) ![]u8 {
+    const file = try dir.openFile(io, name, .{});
+    defer file.close(io);
+    const n = try file.length(io);
+    if (n != expected) return error.LatentSizeMismatch;
+    const out = try allocator.alloc(u8, expected);
+    errdefer allocator.free(out);
+    var reader = file.reader(io, &.{});
+    try reader.interface.readSliceAll(out);
     return out;
 }
 
@@ -223,6 +245,27 @@ pub fn encodeText(
         .embedding = embed_bufs,
     });
     defer embed_runner.deinit(allocator);
+
+    var loaders = [2]zml.io.Loader{
+        try weights.initLoader(allocator, platform),
+        try weights.initLoader(allocator, platform),
+    };
+    defer loaders[0].deinit();
+    defer loaders[1].deinit();
+
+    const n_layers = loaded.inner.layers.len;
+    const EncFut = @TypeOf(try io.concurrent(loadEncoderLayer, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+    }));
+    var current_f: ?EncFut = if (n_layers > 0) try io.concurrent(loadEncoderLayer, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+    }) else null;
+    var next_f: ?EncFut = if (n_layers > 1) try io.concurrent(loadEncoderLayer, .{
+        allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress, &loaders[1],
+    }) else null;
+    errdefer cancelEnc(&current_f, io);
+    errdefer cancelEnc(&next_f, io);
+
     var hidden: zml.Buffer = undefined;
     log.debug("encoder embed: run tokens={d}", .{tokens.len});
     embed_runner.run(io, .{
@@ -261,18 +304,9 @@ pub fn encodeText(
     var zero_delta = try bufferFromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), zeros);
     defer zero_delta.deinit();
 
-    const n_layers = loaded.inner.layers.len;
-    const EncFut = @TypeOf(try io.concurrent(loadEncoderLayer, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-    }));
-    var current_f: ?EncFut = if (n_layers > 0) try io.concurrent(loadEncoderLayer, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-    }) else null;
-    var next_f: ?EncFut = if (n_layers > 1) try io.concurrent(loadEncoderLayer, .{
-        allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress,
-    }) else null;
-    errdefer cancelEnc(&current_f, io);
-    errdefer cancelEnc(&next_f, io);
+    const LayerRunner = zml.FnExe(encoder.TransformerLayer.forward).Runner(.{.layer});
+    var layer_runner: ?LayerRunner = null;
+    defer if (layer_runner) |*r| r.deinit(allocator);
     var layer_i: usize = 0;
     while (layer_i < n_layers) : (layer_i += 1) {
         var layer_bufs = try current_f.?.await(io);
@@ -280,12 +314,13 @@ pub fn encodeText(
         defer encoder.TransformerLayer.unloadBuffers(&layer_bufs);
         current_f = next_f;
         next_f = if (layer_i + 2 < n_layers) try io.concurrent(loadEncoderLayer, .{
-            allocator, io, platform, loaded, store, shardings, layer_i + 2, progress,
+            allocator, io, platform, loaded, store, shardings, layer_i + 2, progress, &loaders[(layer_i + 2) % 2],
         }) else null;
-        var layer_runner = try zml.FnExe(encoder.TransformerLayer.forward).Runner(.{.layer}).init(&compiled.encode_layer, allocator, .{
-            .layer = layer_bufs,
-        });
-        defer layer_runner.deinit(allocator);
+        if (layer_runner) |*r| {
+            weights.rebake(r, .{ .layer = layer_bufs });
+        } else {
+            layer_runner = try LayerRunner.init(&compiled.encode_layer, allocator, .{ .layer = layer_bufs });
+        }
 
         var owned_delta: ?zml.Buffer = null;
         defer if (owned_delta) |*b| b.deinit();
@@ -298,7 +333,7 @@ pub fn encodeText(
         } else zero_delta;
         var next: zml.Buffer = undefined;
         log.debug("encoder layer {d}/{d}: run", .{ layer_i + 1, n_layers });
-        layer_runner.run(io, .{
+        layer_runner.?.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf, .visual_delta = delta },
             .outputs = .{ .hidden = &next },
             .opts = .{ .wait = true },
@@ -310,13 +345,75 @@ pub fn encodeText(
     return hidden;
 }
 
+pub const SharedInputs = struct {
+    video_rows: []f32,
+    audio_rows: []f32,
+    embeds: []f32,
+    tags: []u8,
+
+    pub fn deinit(self: SharedInputs, allocator: std.mem.Allocator) void {
+        allocator.free(self.video_rows);
+        allocator.free(self.audio_rows);
+        allocator.free(self.embeds);
+        allocator.free(self.tags);
+    }
+};
+
+pub fn loadShared(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    geo: pipeline.Geometry,
+    text_dim: u32,
+) !SharedInputs {
+    const channels: u32 = 24;
+    const patch = [_]i64{ 1, 2, 2 };
+    const nchw_n = @as(usize, channels) * geo.latent_t * geo.latent_h * geo.latent_w;
+    const nchw = try readF32File(allocator, io, dir, "video_noise.f32", nchw_n);
+    defer allocator.free(nchw);
+    const thwc = try allocator.alloc(f32, nchw_n);
+    defer allocator.free(thwc);
+    packing.nchwToThwc(thwc, nchw, channels, geo.latent_t, geo.latent_h, geo.latent_w);
+    const video_rows = try packing.patchify(allocator, thwc, geo.latent_t, geo.latent_h, geo.latent_w, channels, patch);
+    errdefer allocator.free(video_rows);
+
+    const bct_n = @as(usize, 2) * geo.audio_dim * geo.audio_t;
+    const bct = try readF32File(allocator, io, dir, "audio_noise.f32", bct_n);
+    defer allocator.free(bct);
+    const audio_rows = try allocator.alloc(f32, bct_n);
+    errdefer allocator.free(audio_rows);
+    vae.audioBctToRows(audio_rows, bct, geo.audio_dim, geo.audio_t);
+
+    const embeds = try readF32FileAll(allocator, io, dir, "prompt_embeds.f32");
+    errdefer allocator.free(embeds);
+    if (embeds.len == 0 or embeds.len % text_dim != 0) return error.SharedEmbedSize;
+    const text_len = embeds.len / text_dim;
+    const tags = readU8File(allocator, io, dir, "text_tags.u8", text_len) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const filled = try allocator.alloc(u8, text_len);
+            @memset(filled, @intFromEnum(packing.Modality.text));
+            break :blk filled;
+        },
+        else => return err,
+    };
+
+    log.info(
+        "shared: video_rows={d} audio_rows={d} embeds={d}x{d}",
+        .{ video_rows.len, audio_rows.len, text_len, text_dim },
+    );
+    return .{
+        .video_rows = video_rows,
+        .audio_rows = audio_rows,
+        .embeds = embeds,
+        .tags = tags,
+    };
+}
+
 pub const DenoiseCond = struct {
     video_patches: []const f32 = &.{},
     audio_patches: []const f32 = &.{},
-    videos: []const packing.ConditionVideo = &.{},
-    audios: []const packing.ConditionAudio = &.{},
-    references: []const packing.ReferenceBlock = &.{},
-    text_tags: []const u8 = &.{},
+    video_noise: ?[]const f32 = null,
+    audio_noise: ?[]const f32 = null,
 };
 
 pub fn denoise(
@@ -348,16 +445,34 @@ pub fn denoise(
     defer allocator.free(video_vel);
     const audio_vel = try allocator.alloc(f32, audio_n);
     defer allocator.free(audio_vel);
-    fillUnitNormal(rng.random(), video);
-    fillUnitNormal(rng.random(), audio);
+    if (cond.video_noise) |src| {
+        if (src.len != video.len) return error.SharedNoiseSize;
+        @memcpy(video, src);
+    } else {
+        fillUnitNormal(rng.random(), video);
+    }
+    if (cond.audio_noise) |src| {
+        if (src.len != audio.len) return error.SharedNoiseSize;
+        @memcpy(audio, src);
+    } else {
+        fillUnitNormal(rng.random(), audio);
+    }
     if (cond.video_patches.len != 0) {
         std.debug.assert(cond.video_patches.len <= video.len);
-        @memcpy(video[0..cond.video_patches.len], cond.video_patches);
+        // Official: x_t = t*x0 + (1-t)*noise at t=0.999, held for every step.
+        var i: usize = 0;
+        while (i < cond.video_patches.len) : (i += 1) {
+            video[i] = scheduler_mod.Schedule.scaleNoise(config_mod.visual_cond_timestep, cond.video_patches[i], video[i]);
+        }
     }
     if (cond.audio_patches.len != 0) {
         std.debug.assert(cond.audio_patches.len <= audio.len);
         @memcpy(audio[0..cond.audio_patches.len], cond.audio_patches);
     }
+    const held_video = try allocator.dupe(f32, video[0..cond.video_patches.len]);
+    defer allocator.free(held_video);
+    const held_audio = try allocator.dupe(f32, audio[0..cond.audio_patches.len]);
+    defer allocator.free(held_audio);
 
     const video_shape = zml.Shape.init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32);
     const audio_shape = zml.Shape.init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32);
@@ -388,6 +503,16 @@ pub fn denoise(
     var finish_runner = try zml.FnExe(dit.finish).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = finish_bufs });
     defer finish_runner.deinit(allocator);
 
+    var loaders = [2]zml.io.Loader{
+        try weights.initLoader(allocator, platform),
+        try weights.initLoader(allocator, platform),
+    };
+    defer loaders[0].deinit();
+    defer loaders[1].deinit();
+    const BlockRunner = zml.FnExe(dit.TransformerBlock.forward).Runner(.{.layer});
+    var block_runner: ?BlockRunner = null;
+    defer if (block_runner) |*r| r.deinit(allocator);
+
     const steps = schedules.video.stepCount();
     const n_blocks = loaded.inner.blocks.len;
     const denoise_start: std.Io.Timestamp = .now(io, .awake);
@@ -410,6 +535,18 @@ pub fn denoise(
         defer audio_buf.deinit();
         var timestep_buf = try bufferFromItems(io, platform, .init(.{ .n = packing.timestep_slot_count }, .f32), host.timesteps);
         defer timestep_buf.deinit();
+
+        const DitFut = @TypeOf(try io.concurrent(loadDitBlock, .{
+            allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+        }));
+        var current_f: ?DitFut = if (n_blocks > 0) try io.concurrent(loadDitBlock, .{
+            allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
+        }) else null;
+        var next_f: ?DitFut = if (n_blocks > 1) try io.concurrent(loadDitBlock, .{
+            allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress, &loaders[1],
+        }) else null;
+        errdefer cancelDit(&current_f, io);
+        errdefer cancelDit(&next_f, io);
 
         var hidden: zml.Buffer = undefined;
         var temb: zml.Buffer = undefined;
@@ -434,17 +571,6 @@ pub fn denoise(
         defer cos.deinit();
         defer sin.deinit();
 
-        const DitFut = @TypeOf(try io.concurrent(loadDitBlock, .{
-            allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-        }));
-        var current_f: ?DitFut = if (n_blocks > 0) try io.concurrent(loadDitBlock, .{
-            allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress,
-        }) else null;
-        var next_f: ?DitFut = if (n_blocks > 1) try io.concurrent(loadDitBlock, .{
-            allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress,
-        }) else null;
-        errdefer cancelDit(&current_f, io);
-        errdefer cancelDit(&next_f, io);
         var block_i: usize = 0;
         while (block_i < n_blocks) : (block_i += 1) {
             var block_bufs = try current_f.?.await(io);
@@ -452,15 +578,16 @@ pub fn denoise(
             defer dit.TransformerBlock.unloadBuffers(&block_bufs);
             current_f = next_f;
             next_f = if (block_i + 2 < n_blocks) try io.concurrent(loadDitBlock, .{
-                allocator, io, platform, loaded, store, shardings, block_i + 2, progress,
+                allocator, io, platform, loaded, store, shardings, block_i + 2, progress, &loaders[(block_i + 2) % 2],
             }) else null;
-            var block_runner = try zml.FnExe(dit.TransformerBlock.forward).Runner(.{.layer}).init(&compiled.block, allocator, .{
-                .layer = block_bufs,
-            });
-            defer block_runner.deinit(allocator);
+            if (block_runner) |*r| {
+                weights.rebake(r, .{ .layer = block_bufs });
+            } else {
+                block_runner = try BlockRunner.init(&compiled.block, allocator, .{ .layer = block_bufs });
+            }
 
             var next: zml.Buffer = undefined;
-            block_runner.run(io, .{
+            block_runner.?.run(io, .{
                 .inputs = .{
                     .hidden = hidden,
                     .temb = temb,
@@ -497,8 +624,8 @@ pub fn denoise(
         if (cond.audio_patches.len != 0) @memset(audio_vel[0..cond.audio_patches.len], 0);
         schedules.video.step(step_i, video, video_vel);
         schedules.audio.step(step_i, audio, audio_vel);
-        if (cond.video_patches.len != 0) @memcpy(video[0..cond.video_patches.len], cond.video_patches);
-        if (cond.audio_patches.len != 0) @memcpy(audio[0..cond.audio_patches.len], cond.audio_patches);
+        if (held_video.len != 0) @memcpy(video[0..held_video.len], held_video);
+        if (held_audio.len != 0) @memcpy(audio[0..held_audio.len], held_audio);
         log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
             step_i + 1,
             steps,
@@ -547,9 +674,10 @@ fn loadEncoderLayer(
     shardings: []const zml.Sharding,
     index: usize,
     progress: *std.Progress.Node,
+    loader: *zml.io.Loader,
 ) !zml.Bufferized(encoder.TransformerLayer) {
     log.debug("encoder layer {d}: load", .{index + 1});
-    return loaded.loadLayer(allocator, io, platform, store, shardings, index, progress);
+    return loaded.loadLayer(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
 fn loadDitBlock(
@@ -561,8 +689,9 @@ fn loadDitBlock(
     shardings: []const zml.Sharding,
     index: usize,
     progress: *std.Progress.Node,
+    loader: *zml.io.Loader,
 ) !zml.Bufferized(dit.TransformerBlock) {
-    return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress);
+    return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
 fn fillUnitNormal(random: std.Random, out: []f32) void {
