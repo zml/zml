@@ -14,7 +14,6 @@ const repo = generate.ckpt;
 const request = generate.request;
 const session = generate.session;
 const sharding = generate.sharding;
-const telemetry = generate.telemetry;
 const weights = @import("model.zig").weights;
 
 const log = std.log.scoped(.minimax_h3);
@@ -35,11 +34,6 @@ const Args = struct {
     seed: u64 = 0,
     out: []const u8 = "output",
     dit: []const u8 = "",
-    encoder: []const u8 = "",
-    vae_video: []const u8 = "",
-    vae_audio: []const u8 = "",
-    tokenizer: []const u8 = "",
-    profile: bool = false,
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
@@ -58,12 +52,7 @@ const Args = struct {
         \\   --canvas=<size>     auto | tiny | preview | full (auto: 768p or 640×352)
         \\   --seed=<n>          RNG seed
         \\   --out=<path>        Directory or .mp4 (default: output/)
-        \\   --dit=<path>        DiT override when a folder has more than one match
-        \\   --encoder=<path>    Text-encoder override
-        \\   --vae-video=<path>  Video VAE override
-        \\   --vae-audio=<path>  Audio VAE override
-        \\   --tokenizer=<path>  tokenizer.json, or a directory that contains it
-        \\   --profile           PJRT/TraceMe around generation
+        \\   --dit=<path>        Transformer weights (size / quant). Encoder and VAE stay with --model
         \\
     ;
 };
@@ -82,9 +71,7 @@ fn rejectUser(err: anyerror) anyerror {
         error.ConditionedPreviewTooLarge => reject(err, "preview + media needs --canvas=tiny under {d} GiB", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
         error.Ref2vaTransformerMissing => reject(err, "ref2va needs Ref2VA/transformer", .{}),
         error.TransformerMissing => reject(err, "transformer weights not found", .{}),
-        error.AmbiguousDit => reject(err, "multiple DiT files match; pass --dit=<file>", .{}),
-        error.AmbiguousEncoder => reject(err, "multiple encoder files match; pass --encoder=<file>", .{}),
-        error.AmbiguousVae => reject(err, "multiple VAE files match; pass --vae-video/--vae-audio", .{}),
+        error.AmbiguousDit => reject(err, "multiple transformer files match; pass --dit=<file>", .{}),
         error.EncoderMissing => reject(err, "text_encoder not found", .{}),
         error.VaeMissing => reject(err, "video_vae or audio_vae not found", .{}),
         error.VaeSchemaMismatch => reject(err, "VAE weight names not recognized", .{}),
@@ -121,10 +108,6 @@ pub fn main(init: std.process.Init) !void {
     const paths: repo.Open = .{
         .model = args.model,
         .dit = args.dit,
-        .encoder = args.encoder,
-        .vae_video = args.vae_video,
-        .vae_audio = args.vae_audio,
-        .tokenizer = args.tokenizer,
     };
 
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
@@ -145,18 +128,6 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("s3", s3_vfs.io());
 
     const io = vfs.io();
-
-    const ir_args = .{ allocator, ir.Request{
-        .prompt = args.prompt,
-        .variant = variant,
-        .duration_s = args.duration,
-        .aspect = @tagName(args.ratio),
-        .image = args.image,
-        .last_image = args.last_image,
-        .refs = args.refs,
-    } };
-    var ir_fut: ?@TypeOf(try init.io.concurrent(ir.compile, ir_args)) = try init.io.concurrent(ir.compile, ir_args);
-    errdefer cancelBrief(&ir_fut, init.io, allocator);
 
     const platform: *zml.Platform = try .auto(allocator, io, .{
         .cpu = .{ .device_count = 1 },
@@ -206,17 +177,18 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
-    const brief = blk: {
-        const result = ir_fut.?.await(init.io) catch |err| {
-            ir_fut = null;
-            return rejectUser(err);
-        };
-        ir_fut = null;
-        break :blk result;
-    };
+    var brief = ir.compile(allocator, .{
+        .prompt = args.prompt,
+        .variant = variant,
+        .duration_s = args.duration,
+        .aspect = @tagName(args.ratio),
+        .image = args.image,
+        .last_image = args.last_image,
+        .refs = args.refs,
+    }) catch |err| return rejectUser(err);
     defer brief.deinit(allocator);
 
-    var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, paths, &progress) catch |err| return rejectUser(err);
+    var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, args.model, &progress) catch |err| return rejectUser(err);
     defer tokenizer.deinit();
     var tok_enc = try tokenizer.encoder();
     defer tok_enc.deinit();
@@ -314,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const all = shardings.all();
-    const compile_args = .{
+    var compiled = try pipeline.compile(
         allocator,
         io,
         platform,
@@ -326,10 +298,8 @@ pub fn main(init: std.process.Init) !void {
         compile_policy,
         shardings,
         &progress,
-    };
-    var dit_compile: ?@TypeOf(try io.concurrent(pipeline.compile, compile_args)) =
-        try io.concurrent(pipeline.compile, compile_args);
-    errdefer cancelCompiled(&dit_compile, io);
+    );
+    defer compiled.deinit();
 
     var compiled_vae = try pipeline.compileVae(
         allocator,
@@ -344,16 +314,6 @@ pub fn main(init: std.process.Init) !void {
     );
     defer compiled_vae.deinit();
 
-    var compiled = dit_compile.?.await(io) catch |err| {
-        dit_compile = null;
-        return err;
-    };
-    dit_compile = null;
-    defer compiled.deinit();
-
-    var sink = telemetry.Sink.init(args.profile);
-    var gen_span = zml.tracer.span("h3.generate", .{ .root = true });
-    defer gen_span.end();
     try session.generate(allocator, io, platform, &models, &compiled, &compiled_vae, &all, &progress, .{
         .opts = opts,
         .geo = geo_work,
@@ -370,24 +330,5 @@ pub fn main(init: std.process.Init) !void {
         .seed = args.seed,
         .brief = brief.text,
         .out = args.out,
-        .sink = &sink,
     });
-}
-
-fn cancelBrief(fut: anytype, io: std.Io, allocator: std.mem.Allocator) void {
-    if (fut.*) |*f| {
-        if (f.cancel(io)) |b| {
-            var owned = b;
-            owned.deinit(allocator);
-        } else |_| {}
-    }
-}
-
-fn cancelCompiled(fut: anytype, io: std.Io) void {
-    if (fut.*) |*f| {
-        if (f.cancel(io)) |exe| {
-            var compiled = exe;
-            compiled.deinit();
-        } else |_| {}
-    }
 }

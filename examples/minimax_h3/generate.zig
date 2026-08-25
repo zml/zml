@@ -587,90 +587,6 @@ pub const memory = struct {
     }
 };
 
-// --- core/telemetry.zig ---
-pub const telemetry = struct {
-    const std = @import("std");
-
-    const zml = @import("zml");
-
-    const log = std.log.scoped(.minimax_h3);
-
-    pub const Phase = enum { encoder, denoise };
-
-    pub const Sample = struct {
-        bytes_in_use: u64 = 0,
-        peak_bytes_in_use: u64 = 0,
-        bytes_limit: u64 = 0,
-        pool_bytes: u64 = 0,
-    };
-
-    pub fn sampleDeviceMemory(platform: *const zml.Platform) Sample {
-        var out: Sample = .{};
-        for (platform.devices) |device| {
-            const stats = device.memoryStats();
-            out.bytes_in_use = @max(out.bytes_in_use, stats.bytes_in_use);
-            if (stats.peak_bytes_in_use) |peak| out.peak_bytes_in_use = @max(out.peak_bytes_in_use, peak);
-            if (stats.bytes_limit) |limit| {
-                if (out.bytes_limit == 0 or limit < out.bytes_limit) out.bytes_limit = limit;
-            }
-            if (stats.pool_bytes) |pool| out.pool_bytes = @max(out.pool_bytes, pool);
-        }
-        return out;
-    }
-
-    pub const Sink = struct {
-        enabled: bool = false,
-        bytes_loaded: std.atomic.Value(u64) = .init(0),
-        high_water: Sample = .{},
-
-        pub fn init(enabled: bool) Sink {
-            return .{ .enabled = enabled };
-        }
-
-        pub fn addBytes(self: *Sink, n: u64) void {
-            _ = self.bytes_loaded.fetchAdd(n, .monotonic);
-        }
-
-        pub fn bytes(self: *const Sink) u64 {
-            return self.bytes_loaded.load(.monotonic);
-        }
-
-        pub fn noteMemory(self: *Sink, platform: *const zml.Platform) Sample {
-            const sample = sampleDeviceMemory(platform);
-            self.high_water.bytes_in_use = @max(self.high_water.bytes_in_use, sample.bytes_in_use);
-            self.high_water.peak_bytes_in_use = @max(self.high_water.peak_bytes_in_use, sample.peak_bytes_in_use);
-            self.high_water.pool_bytes = @max(self.high_water.pool_bytes, sample.pool_bytes);
-            if (sample.bytes_limit != 0) self.high_water.bytes_limit = sample.bytes_limit;
-            return sample;
-        }
-
-        pub fn logPhase(self: *Sink, platform: *const zml.Platform, phase: Phase) void {
-            const sample = self.noteMemory(platform);
-            if (!self.enabled) return;
-            log.info(
-                "profile {s} bytes_loaded={d} device_in_use={d}MiB peak={d}MiB pool={d}MiB",
-                .{
-                    @tagName(phase),
-                    self.bytes(),
-                    sample.bytes_in_use / (1024 * 1024),
-                    sample.peak_bytes_in_use / (1024 * 1024),
-                    sample.pool_bytes / (1024 * 1024),
-                },
-            );
-        }
-    };
-
-    pub fn span(comptime name: []const u8, metadata: anytype) zml.tracer.Span {
-        return zml.tracer.span(name, metadata);
-    }
-
-    pub fn hashF32(values: []const f32) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(std.mem.sliceAsBytes(values));
-        return hasher.final();
-    }
-};
-
 // --- ir/grid.zig ---
 pub const grid = struct {
     const std = @import("std");
@@ -1489,14 +1405,6 @@ pub const ir = struct {
         paired_video_path: ?[]const u8 = null,
     };
 
-    pub const Card = struct {
-        asset: Asset,
-        label: []const u8,
-        width: u32 = 0,
-        height: u32 = 0,
-        seconds: f32 = 0,
-    };
-
     pub const Request = struct {
         prompt: []const u8,
         variant: config.Variant = .t2va,
@@ -1507,8 +1415,6 @@ pub const ir = struct {
         refs: []const u8 = "",
         creativity: Creativity = .balanced,
         shots: ?u32 = null,
-        silent: bool = false,
-        dialogue: []const []const u8 = &.{},
     };
 
     pub const Brief = struct {
@@ -1606,60 +1512,6 @@ pub const ir = struct {
             },
         }
         return out.toOwnedSlice(allocator);
-    }
-
-    pub fn labelAssets(allocator: std.mem.Allocator, assets: []const Asset) ![]Card {
-        const cards = try allocator.alloc(Card, assets.len);
-        @memset(cards, .{ .asset = .{ .kind = "", .path = "" }, .label = "" });
-        errdefer {
-            for (cards) |card| {
-                if (card.label.len != 0) allocator.free(card.label);
-            }
-            allocator.free(cards);
-        }
-        var picture: u32 = 0;
-        var video: u32 = 0;
-        var audio: u32 = 0;
-        for (assets, cards) |asset, *card| {
-            const n, const word = switch (asset.kind[0]) {
-                'i' => blk: {
-                    picture += 1;
-                    break :blk .{ picture, "Picture" };
-                },
-                'v' => blk: {
-                    video += 1;
-                    break :blk .{ video, "Video" };
-                },
-                else => blk: {
-                    audio += 1;
-                    break :blk .{ audio, "Audio" };
-                },
-            };
-            card.* = .{
-                .asset = asset,
-                .label = try std.fmt.allocPrint(allocator, "{s} {d}", .{ word, n }),
-            };
-        }
-        return cards;
-    }
-
-    pub fn freeCards(allocator: std.mem.Allocator, cards: []Card) void {
-        for (cards) |card| allocator.free(card.label);
-        allocator.free(cards);
-    }
-
-    pub fn instructionLine(allocator: std.mem.Allocator, variant: config.Variant, assets: []const Asset, last_shot: u32, duration_s: f32) ![]u8 {
-        var n_pic: u32 = 0;
-        var first = false;
-        var last = false;
-        for (assets) |asset| {
-            if (asset.kind[0] != 'i') continue;
-            n_pic += 1;
-            const role = asset.role orelse "";
-            if (std.mem.eql(u8, role, "frame_anchor_first")) first = true;
-            if (std.mem.eql(u8, role, "frame_anchor_last")) last = true;
-        }
-        return grid.instructionLine(allocator, variant, last_shot, duration_s, n_pic, last and !first);
     }
 
     pub fn promptingGuidance(allocator: std.mem.Allocator, req: Request) ![]u8 {
@@ -2910,10 +2762,6 @@ pub const ckpt = struct {
     pub const Open = struct {
         model: []const u8,
         dit: []const u8 = "",
-        encoder: []const u8 = "",
-        vae_video: []const u8 = "",
-        vae_audio: []const u8 = "",
-        tokenizer: []const u8 = "",
     };
 
     pub const FileSource = struct {
@@ -2976,33 +2824,24 @@ pub const ckpt = struct {
             var dit_src = try resolveDit(allocator, io, search, variant, opts);
             errdefer dit_src.deinit(allocator, io);
             var enc_src = try resolveComponent(allocator, io, search, .{
-                .override = opts.encoder,
-                .folders = &.{"text_encoders"},
                 .official = "text_encoder",
                 .scan = "text_encoders",
                 .needles = &.{},
                 .missing = error.EncoderMissing,
-                .ambiguous = error.AmbiguousEncoder,
             });
             errdefer enc_src.deinit(allocator, io);
             var visual_src = try resolveComponent(allocator, io, search, .{
-                .override = opts.vae_video,
-                .folders = &.{"vae"},
                 .official = "video_vae",
                 .scan = "vae",
                 .needles = &.{ "video", "vae" },
                 .missing = error.VaeMissing,
-                .ambiguous = error.AmbiguousVae,
             });
             errdefer visual_src.deinit(allocator, io);
             var audio_src = try resolveComponent(allocator, io, search, .{
-                .override = opts.vae_audio,
-                .folders = &.{"vae"},
                 .official = "audio_vae",
                 .scan = "vae",
                 .needles = &.{ "audio", "vae" },
                 .missing = error.VaeMissing,
-                .ambiguous = error.AmbiguousVae,
             });
             errdefer audio_src.deinit(allocator, io);
 
@@ -3184,20 +3023,17 @@ pub const ckpt = struct {
         else
             error.TransformerMissing;
         return takeScan(
-            scanIn(allocator, io, search, "diffusion_models", needles),
+            scanIn(allocator, io, search, "diffusion_models", needles, true),
             missing,
             error.AmbiguousDit,
         );
     }
 
     const ComponentSpec = struct {
-        override: []const u8,
-        folders: []const []const u8,
         official: []const u8,
         scan: []const u8,
         needles: []const []const u8,
         missing: anyerror,
-        ambiguous: anyerror,
     };
 
     fn resolveComponent(
@@ -3206,13 +3042,11 @@ pub const ckpt = struct {
         search: Search,
         spec: ComponentSpec,
     ) !FileSource {
-        if (spec.override.len != 0)
-            return openFilePath(allocator, io, search, spec.override, spec.folders) catch
-                return spec.missing;
         if (openShared(io, search.task, search.repo, spec.official)) |dir| {
             return .{ .dir = dir, .dir_owned = true, .file = null };
         }
-        return takeScan(scanIn(allocator, io, search, spec.scan, spec.needles), spec.missing, spec.ambiguous);
+        const src = (try scanIn(allocator, io, search, spec.scan, spec.needles, false)) orelse return spec.missing;
+        return src;
     }
 
     fn openOfficialDit(io: std.Io, search: Search, variant: config.Variant) ?std.Io.Dir {
@@ -3279,10 +3113,11 @@ pub const ckpt = struct {
         search: Search,
         folder: []const u8,
         needles: []const []const u8,
+        unique: bool,
     ) !?FileSource {
-        if (try scanFolder(allocator, io, search.repo, folder, needles)) |src| return src;
+        if (try scanFolder(allocator, io, search.repo, folder, needles, unique)) |src| return src;
         if (search.extra) |root| {
-            if (try scanFolder(allocator, io, root, folder, needles)) |src| return src;
+            if (try scanFolder(allocator, io, root, folder, needles, unique)) |src| return src;
         }
         return null;
     }
@@ -3293,9 +3128,10 @@ pub const ckpt = struct {
         root: std.Io.Dir,
         folder: []const u8,
         needles: []const []const u8,
+        unique: bool,
     ) !?FileSource {
         const dir = root.openDir(io, folder, .{ .iterate = true }) catch return null;
-        if (scanFilename(allocator, io, dir, needles)) |name| {
+        if (scanFilename(allocator, io, dir, needles, unique)) |name| {
             if (name) |found| return .{ .dir = dir, .dir_owned = true, .file = found };
             dir.close(io);
             return null;
@@ -3310,6 +3146,7 @@ pub const ckpt = struct {
         io: std.Io,
         dir: std.Io.Dir,
         needles: []const []const u8,
+        unique: bool,
     ) !?[]u8 {
         var it = dir.iterate();
         var found: ?[]u8 = null;
@@ -3317,7 +3154,10 @@ pub const ckpt = struct {
         while (try it.next(io)) |entry| {
             if (entry.kind != .file) continue;
             if (!checkpoint.safetensorsContains(entry.name, needles)) continue;
-            if (found != null) return error.AmbiguousWeights;
+            if (found != null) {
+                if (unique) return error.AmbiguousWeights;
+                continue;
+            }
             found = try allocator.dupe(u8, entry.name);
         }
         return found;
@@ -3343,14 +3183,14 @@ pub const ckpt = struct {
         io: std.Io,
         task_dir: std.Io.Dir,
         repo: std.Io.Dir,
-        open: Open,
+        model: []const u8,
         progress: *std.Progress.Node,
     ) !zml.tokenizer.Tokenizer {
         progress.increaseEstimatedTotalItems(1);
         var node = progress.start("Loading tokenizer...", 1);
         defer node.end();
 
-        const bytes = try readTokenizerBytes(allocator, io, task_dir, repo, open);
+        const bytes = try readTokenizerBytes(allocator, io, task_dir, repo, model);
         defer allocator.free(bytes);
         log.info("tokenizer: {d} bytes", .{bytes.len});
         return try .fromBytes(allocator, bytes);
@@ -3371,10 +3211,9 @@ pub const ckpt = struct {
         io: std.Io,
         task_dir: std.Io.Dir,
         repo: std.Io.Dir,
-        open: Open,
+        model: []const u8,
     ) ![]u8 {
-        if (open.tokenizer.len != 0) return readTokenizerPath(allocator, io, open.tokenizer);
-        if (readTokenizerAny(allocator, io, task_dir, repo, open.model)) |bytes| return bytes else |err| switch (err) {
+        if (readTokenizerAny(allocator, io, task_dir, repo, model)) |bytes| return bytes else |err| switch (err) {
             error.MissingTokenizer => {},
             else => return err,
         }
@@ -3408,17 +3247,6 @@ pub const ckpt = struct {
             }
         }
         return error.MissingTokenizer;
-    }
-
-    fn readTokenizerPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
-        if (std.mem.endsWith(u8, path, ".json")) {
-            const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.MissingTokenizer;
-            defer file.close(io);
-            return readTokenizerFile(allocator, io, file);
-        }
-        var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return error.MissingTokenizer;
-        defer dir.close(io);
-        return readTokenizer(allocator, io, dir);
     }
 
     fn readOfficialTokenizer(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -4752,8 +4580,6 @@ pub const decode = struct {
         video_thwc: []f32,
         progress: *std.Progress.Node,
     ) ![]f32 {
-        var decode_span = zml.tracer.span("h3.vae.visual", .{});
-        defer decode_span.end();
         const decode_start: std.Io.Timestamp = .now(io, .awake);
         const cfg = loaded.cfg;
         const spec = cfg.spec();
@@ -5953,6 +5779,7 @@ pub const session = struct {
 
     const zml = @import("zml");
 
+    const config = @import("model.zig").config;
     const dit = @import("model.zig").dit;
     const encoder = @import("model.zig").encoder;
     const noise = @import("model.zig").noise;
@@ -6103,43 +5930,6 @@ pub const session = struct {
             },
             else => return error.UnsupportedEmbedDtype,
         }
-    }
-
-    pub fn writeAtomic(io: std.Io, dir: std.Io.Dir, name: []const u8, bytes: []const u8) !void {
-        var tmp_buf: [160]u8 = undefined;
-        const tmp = try std.fmt.bufPrint(&tmp_buf, ".{s}.tmp", .{name});
-        {
-            const file = try dir.createFile(io, tmp, .{});
-            defer file.close(io);
-            var writer = file.writer(io, &.{});
-            try writer.interface.writeAll(bytes);
-        }
-        dir.rename(tmp, dir, name, io) catch {
-            const file = try dir.createFile(io, name, .{});
-            defer file.close(io);
-            var writer = file.writer(io, &.{});
-            try writer.interface.writeAll(bytes);
-        };
-        dir.deleteFile(io, tmp) catch {};
-    }
-
-    pub fn readF32File(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, expected: usize) ![]f32 {
-        const out = try readF32FileAll(allocator, io, dir, name);
-        errdefer allocator.free(out);
-        if (out.len != expected) return error.LatentSizeMismatch;
-        return out;
-    }
-
-    pub fn readF32FileAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) ![]f32 {
-        const file = try dir.openFile(io, name, .{});
-        defer file.close(io);
-        const n = try file.length(io);
-        if (n % @sizeOf(f32) != 0) return error.LatentSizeMismatch;
-        const out = try allocator.alloc(f32, n / @sizeOf(f32));
-        errdefer allocator.free(out);
-        var reader = file.reader(io, &.{});
-        try reader.interface.readSliceAll(std.mem.sliceAsBytes(out));
-        return out;
     }
 
     pub const VisionSpan = struct {
@@ -6352,7 +6142,6 @@ pub const session = struct {
         seed: u64,
         cond: DenoiseCond,
         progress: *std.Progress.Node,
-        sink: ?*telemetry.Sink,
     ) !Latents {
         var gen = noise.Generator.init(seed);
         var video = try noise.drawVideo(
@@ -6398,30 +6187,22 @@ pub const session = struct {
         var text_runner = try zml.FnExe(dit.prepareText).Runner(.{.model}).init(&compiled.prepare_text, allocator, .{ .model = text_bufs });
         defer text_runner.deinit(allocator);
         var refined_text: zml.Buffer = undefined;
-        {
-            var span = zml.tracer.span("h3.prepare.text", .{});
-            defer span.end();
-            text_runner.run(io, .{
-                .inputs = .{ .text = text },
-                .outputs = .{ .text = &refined_text },
-                .opts = .{ .wait = true },
-            });
-        }
+        text_runner.run(io, .{
+            .inputs = .{ .text = text },
+            .outputs = .{ .text = &refined_text },
+            .opts = .{ .wait = true },
+        });
         defer refined_text.deinit();
 
         var rope_runner = try zml.FnExe(dit.prepareRope).Runner(.{}).init(&compiled.prepare_rope, allocator, .{});
         defer rope_runner.deinit(allocator);
         var cos: zml.Buffer = undefined;
         var sin: zml.Buffer = undefined;
-        {
-            var span = zml.tracer.span("h3.prepare.rope", .{});
-            defer span.end();
-            rope_runner.run(io, .{
-                .inputs = .{ .position_ids = pos_buf },
-                .outputs = .{ .cos = &cos, .sin = &sin },
-                .opts = .{ .wait = true },
-            });
-        }
+        rope_runner.run(io, .{
+            .inputs = .{ .position_ids = pos_buf },
+            .outputs = .{ .cos = &cos, .sin = &sin },
+            .opts = .{ .wait = true },
+        });
         defer cos.deinit();
         defer sin.deinit();
 
@@ -6441,8 +6222,6 @@ pub const session = struct {
         {
             var temb_runner = try zml.FnExe(dit.prepareTemb).Runner(.{.model}).init(&compiled.prepare_temb, allocator, .{ .model = time_bufs });
             defer temb_runner.deinit(allocator);
-            var span = zml.tracer.span("h3.prepare.temb", .{});
-            defer span.end();
             temb_runner.run(io, .{
                 .inputs = .{ .timestep = flat_buf },
                 .outputs = .{ .temb = &all_temb },
@@ -6454,7 +6233,6 @@ pub const session = struct {
 
         const core0 = loaded.inner.blocks[0].corePart();
         const core_bytes = weights.modelBytes(&core0);
-        const device_bytes = if (sink) |s| s.high_water.bytes_limit else 0;
         const tp: u32 = if (shardings.len > 0) @intCast(shardings[0].numPartitionsForLogicalAxis(.model)) else 1;
         const decision = policy.decide(.{
             .target = platform.target,
@@ -6465,7 +6243,7 @@ pub const session = struct {
             .layers = @intCast(n_blocks),
             .steps = @intCast(steps),
             .dtype = loaded.inner.blocks[0].norm1.weight.dtype(),
-            .device_bytes = if (device_bytes == 0) configDeviceBytes(platform) else device_bytes,
+            .device_bytes = config.minDeviceBytes(platform),
             .tp = tp,
             .devices = @intCast(platform.devices.len),
             .block_core_bytes = core_bytes / @max(1, tp),
@@ -6512,10 +6290,7 @@ pub const session = struct {
         defer if (prev_adaln) |*a| dit.AdaLn.unloadBuffers(a);
         var block_i: usize = 0;
         while (block_i < n_blocks) : (block_i += 1) {
-            var span = zml.tracer.span("h3.prepare.adaln", .{ .block = @as(u32, @intCast(block_i)) });
-            defer span.end();
             const adaln_loader = &loaders[block_i % 2];
-            const adaln_before = adaln_loader.bytes_loaded.load(.monotonic);
             const adaln_bufs = try loaded.loadAdaln(allocator, io, platform, store, shardings, block_i, progress, adaln_loader);
             if (adaln_runner) |*r| {
                 weights.rebake(r, .{ .model = .{ .adaln = adaln_bufs } });
@@ -6533,14 +6308,7 @@ pub const session = struct {
             tables[block_i] = table;
             tables_filled += 1;
             if (block_i < n_resident) {
-                const core_loader = &loaders[(block_i + 1) % 2];
-                const core_before = core_loader.bytes_loaded.load(.monotonic);
-                cores[block_i] = try loaded.loadCore(allocator, io, platform, store, shardings, block_i, progress, core_loader);
-                if (sink) |s| s.addBytes(core_loader.bytes_loaded.load(.monotonic) - core_before);
-            }
-            if (sink) |s| {
-                s.addBytes(adaln_loader.bytes_loaded.load(.monotonic) - adaln_before);
-                _ = s.noteMemory(platform);
+                cores[block_i] = try loaded.loadCore(allocator, io, platform, store, shardings, block_i, progress, &loaders[(block_i + 1) % 2]);
             }
         }
         if (adaln_runner) |*r| {
@@ -6616,8 +6384,6 @@ pub const session = struct {
 
         var step_i: usize = 0;
         while (step_i < steps) : (step_i += 1) {
-            var step_span = zml.tracer.span("h3.denoise.step", .{ .step = @as(u32, @intCast(step_i)) });
-            defer step_span.end();
             const step_start: std.Io.Timestamp = .now(io, .awake);
             const video_t = schedules.video.timesteps[step_i];
             const audio_t = 1.0 - scheduler_mod.timeShiftSigma(1.0 - video_t, opts.video_shift, opts.audio_shift);
@@ -6625,29 +6391,23 @@ pub const session = struct {
             defer step_buf.deinit();
 
             var hidden: zml.Buffer = undefined;
-            {
-                var span = zml.tracer.span("h3.denoise.embed", .{});
-                defer span.end();
-                patch_runner.run(io, .{
-                    .inputs = .{
-                        .video = video_buf,
-                        .audio = audio_buf,
-                        .text = refined_text,
-                        .video_indices = video_idx,
-                        .audio_indices = audio_idx,
-                        .text_indices = text_idx,
-                    },
-                    .outputs = .{ .hidden = &hidden },
-                    .opts = .{ .wait = true },
-                });
-            }
+            patch_runner.run(io, .{
+                .inputs = .{
+                    .video = video_buf,
+                    .audio = audio_buf,
+                    .text = refined_text,
+                    .video_indices = video_idx,
+                    .audio_indices = audio_idx,
+                    .text_indices = text_idx,
+                },
+                .outputs = .{ .hidden = &hidden },
+                .opts = .{ .wait = true },
+            });
             defer hidden.deinit();
 
             var i: usize = 0;
             if (use_group) {
                 while (i + group_size <= n_resident) {
-                    var span = zml.tracer.span("h3.denoise.group", .{ .block = @as(u32, @intCast(i)) });
-                    defer span.end();
                     var g: usize = 0;
                     while (g < group_size) : (g += 1) {
                         group_layers[g] = cores[i + g].?;
@@ -6677,15 +6437,10 @@ pub const session = struct {
                 }
             }
             while (i < n_blocks) : (i += 1) {
-                var span = zml.tracer.span("h3.denoise.block", .{ .block = @as(u32, @intCast(i)) });
-                defer span.end();
                 var owned_core: ?zml.Bufferized(dit.BlockCore) = null;
                 defer if (owned_core) |*c| dit.BlockCore.unloadBuffers(c);
                 const core = if (cores[i]) |c| c else blk: {
-                    const core_loader = &loaders[i % 2];
-                    const core_before = core_loader.bytes_loaded.load(.monotonic);
-                    owned_core = try loaded.loadCore(allocator, io, platform, store, shardings, i, progress, core_loader);
-                    if (sink) |s| s.addBytes(core_loader.bytes_loaded.load(.monotonic) - core_before);
+                    owned_core = try loaded.loadCore(allocator, io, platform, store, shardings, i, progress, &loaders[i % 2]);
                     break :blk owned_core.?;
                 };
                 if (block_runner) |*r| {
@@ -6712,22 +6467,18 @@ pub const session = struct {
 
             var video_out: zml.Buffer = undefined;
             var audio_out: zml.Buffer = undefined;
-            {
-                var span = zml.tracer.span("h3.denoise.finish", .{});
-                defer span.end();
-                finish_runner.run(io, .{
-                    .inputs = .{
-                        .hidden = hidden,
-                        .table = final_table,
-                        .step = step_buf,
-                        .timestep_indices = time_idx,
-                        .video_indices = video_idx,
-                        .audio_indices = audio_idx,
-                    },
-                    .opts = .{ .wait = true },
-                    .outputs = .{ .video = &video_out, .audio = &audio_out },
-                });
-            }
+            finish_runner.run(io, .{
+                .inputs = .{
+                    .hidden = hidden,
+                    .table = final_table,
+                    .step = step_buf,
+                    .timestep_indices = time_idx,
+                    .video_indices = video_idx,
+                    .audio_indices = audio_idx,
+                },
+                .opts = .{ .wait = true },
+                .outputs = .{ .video = &video_out, .audio = &audio_out },
+            });
             defer video_out.deinit();
             defer audio_out.deinit();
 
@@ -6785,7 +6536,6 @@ pub const session = struct {
                 audio_t,
                 step_start.untilNow(io, .awake),
             });
-            if (sink) |s| _ = s.noteMemory(platform);
         }
 
         try video_buf.toSlice(io, .init(video_shape, std.mem.sliceAsBytes(video)));
@@ -6797,7 +6547,6 @@ pub const session = struct {
         allocator.free(cores);
 
         log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
-        if (sink) |s| s.logPhase(platform, .denoise);
 
         if (cond.video_patches.len == 0 and cond.audio_patches.len == 0) {
             return .{ .video = video, .audio = audio };
@@ -6808,18 +6557,6 @@ pub const session = struct {
         allocator.free(video);
         allocator.free(audio);
         return .{ .video = v_out, .audio = a_out };
-    }
-
-    fn configDeviceBytes(platform: *const zml.Platform) u64 {
-        var min_b: u64 = 0;
-        var any = false;
-        for (platform.devices) |device| {
-            if (device.memoryStats().bytes_limit) |bytes| {
-                if (!any or bytes < min_b) min_b = bytes;
-                any = true;
-            }
-        }
-        return min_b;
     }
 
     fn cancelLoad(comptime unload: anytype, fut: anytype, io: std.Io) void {
@@ -6862,8 +6599,6 @@ pub const session = struct {
         seed: u64,
         brief: []const u8,
         out: []const u8,
-        capture_latents: bool = false,
-        sink: ?*telemetry.Sink = null,
     };
 
     pub fn generate(
@@ -6886,7 +6621,6 @@ pub const session = struct {
         defer if (!dest.isCwd()) out_dir.close(io);
         try writeText(io, out_dir, "prompt.txt", req.brief);
 
-        var enc_span = zml.tracer.span("h3.encoder", .{});
         var text = try encodeText(
             allocator,
             io,
@@ -6899,11 +6633,8 @@ pub const session = struct {
             req.extras,
             progress,
         );
-        enc_span.end();
         defer text.deinit();
-        if (req.sink) |s| s.logPhase(platform, .encoder);
 
-        var denoise_span = zml.tracer.span("h3.denoise", .{});
         var latents = try denoise(
             allocator,
             io,
@@ -6921,21 +6652,8 @@ pub const session = struct {
             req.seed,
             req.cond,
             progress,
-            req.sink,
         );
-        denoise_span.end();
         defer latents.deinit(allocator);
-        if (req.capture_latents) {
-            try writeAtomic(io, out_dir, "video_latents.f32", std.mem.sliceAsBytes(latents.video));
-            try writeAtomic(io, out_dir, "audio_latents.f32", std.mem.sliceAsBytes(latents.audio));
-            var hash_buf: [128]u8 = undefined;
-            const hashes = try std.fmt.bufPrint(&hash_buf, "video={x}\naudio={x}\n", .{
-                telemetry.hashF32(latents.video),
-                telemetry.hashF32(latents.audio),
-            });
-            try writeText(io, out_dir, "latent_hashes.txt", hashes);
-            log.info("captured latents video={d} audio={d}", .{ latents.video.len, latents.audio.len });
-        }
 
         const channels: u32 = @intCast(models.dit.cfg.in_channels);
         const thwc = try packing.unpatchify(

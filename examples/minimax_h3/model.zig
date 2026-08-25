@@ -595,8 +595,6 @@ pub const weights = struct {
         buffers: *zml.Bufferized(T),
         progress: *std.Progress.Node,
     ) !void {
-        var span = zml.tracer.span("h3.weights.load", .{});
-        defer span.end();
         loader.load(io, T, model, buffers, store, shardings, .{ .progress = progress });
         try loader.await(io);
     }
