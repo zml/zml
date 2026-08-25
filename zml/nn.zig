@@ -128,7 +128,7 @@ pub const QuantScheme = enum {
                 scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
             .mxfp8 => weight.dtype() == .f8e4m3fn and isMxScale(scale) and
                 scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
-            .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
+            .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .i8 or weight.dtype() == .f4e2m1) and
                 isMxScale(scale) and
                 scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
             .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
@@ -180,7 +180,8 @@ pub const ActivationQuant = enum {
 };
 
 pub fn isPackedFp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
-    return (scheme == .nvfp4 or scheme == .mxfp4) and weight_dtype == .u8;
+    return (scheme == .nvfp4 or scheme == .mxfp4) and
+        (weight_dtype == .u8 or weight_dtype == .i8);
 }
 
 fn isMxScale(scale: Shape) bool {
@@ -257,6 +258,10 @@ test "QuantScheme.classify" {
     // an e8m0 scale per 32 -- so K = 2 * 2560 = 5120 and 5120 / 32 = 160.
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .u8)));
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0)));
+    // DeepSeek V4 stores the same packed bytes as signed i8.
+    const deepseek_mxfp4_packed: Shape = .init(.{ .dout = 2048, .kw = 2048 }, .i8);
+    try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(deepseek_mxfp4_packed, .init(.{ .dout = 2048, .sc = 128 }, .u8)));
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(deepseek_mxfp4_packed, .init(.{ .dout = 2048, .sc = 64 }, .u8)));
     // Native (unpacked) f4e2m1, K no longer halved.
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(
         .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
