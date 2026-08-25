@@ -2,6 +2,9 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+pub const official_repo = "MiniMaxAI/MiniMax-H3";
+pub const official_revision = "42ed227ee7df40d41602854ae760620d6eb651fe";
+
 pub const modality_count: i64 = 3;
 pub const video_fps: f32 = 24.0;
 pub const audio_hz: f32 = 40.0;
@@ -14,7 +17,7 @@ pub const visual_latents_per_chunk: u32 = 5;
 pub const visual_cond_timestep: f32 = 0.999;
 pub const frame_rescale: f32 = 5.0 / 3.0;
 pub const default_short_side: u32 = 768;
-/// Community preview canvas (ComfyUI 0.2 MP path): 16:9 → 640×352 after snap-32.
+/// Preview canvas: 16:9 → 640×352 after snap-32.
 pub const preview_short_side: u32 = 352;
 pub const tiny_short_side: u32 = 128;
 pub const preview_steps: u32 = 10;
@@ -22,6 +25,19 @@ pub const tiny_steps: u32 = 4;
 pub const video_shift: f32 = 12.0;
 pub const audio_shift: f32 = 3.0;
 pub const encoder_layers_used: u32 = 50;
+pub const qwen_video_fps: f32 = 2.0;
+pub const canvas_multiple: u32 = 32;
+pub const canvas_max_pixels: u32 = 768 * 1344;
+pub const min_aspect: f32 = 0.25;
+pub const max_aspect: f32 = 4.0;
+pub const max_ref_files: u32 = 12;
+pub const max_ref_images: u32 = 9;
+pub const max_ref_videos: u32 = 3;
+pub const max_ref_audios: u32 = 3;
+pub const visual_encode_seed: u64 = 42;
+
+pub const PosteriorPolicy = enum { sample_seed42, mean };
+pub const posterior: PosteriorPolicy = .mean;
 
 pub const Variant = enum {
     t2va,
@@ -219,8 +235,9 @@ pub const EncoderFileConfig = struct {
 /// Floor for official 768p. Below this, auto canvas is preview and `--full` is refused.
 pub const full_canvas_min_device_bytes: u64 = 40 * 1024 * 1024 * 1024;
 
-/// Preview + audio refs packs hundreds of extra tokens. Refused under 40 GiB.
-pub fn audioRefsNeedTiny(short_side: u32, device_bytes: u64) bool {
+/// Preview + keyframes or refs: packed attention OOM'd at 10 GiB on 24 GiB cards.
+pub fn conditionedPreviewNeedsTiny(variant: Variant, short_side: u32, device_bytes: u64) bool {
+    if (variant == .t2va) return false;
     return short_side > tiny_short_side and device_bytes != 0 and device_bytes < full_canvas_min_device_bytes;
 }
 
@@ -247,7 +264,14 @@ pub fn minDeviceBytes(platform: *const zml.Platform) u64 {
     return min_b;
 }
 
-/// `device_bytes == 0` means unknown: CPU/Metal stay preview, accelerators stay official 768p.
+/// `device_bytes == 0` means unknown: CPU/Metal/oneAPI stay preview, CUDA/ROCm/TPU/Neuron stay 768p.
+pub fn checkCanvas(choice: Canvas, variant: Variant, short_side: u32, device_bytes: u64) !void {
+    if (choice == .full and device_bytes != 0 and device_bytes < full_canvas_min_device_bytes)
+        return error.FullCanvasTooLarge;
+    if (conditionedPreviewNeedsTiny(variant, short_side, device_bytes))
+        return error.ConditionedPreviewTooLarge;
+}
+
 pub fn canvasForTarget(target: zml.Target, canvas: Canvas, device_bytes: u64) struct { short_side: u32, steps: u32 } {
     return switch (canvas) {
         .tiny => .{ .short_side = tiny_short_side, .steps = tiny_steps },
@@ -256,7 +280,7 @@ pub fn canvasForTarget(target: zml.Target, canvas: Canvas, device_bytes: u64) st
         .auto => if (device_bytes != 0 and device_bytes < full_canvas_min_device_bytes)
             .{ .short_side = preview_short_side, .steps = preview_steps }
         else switch (target) {
-            .cpu, .metal => .{ .short_side = preview_short_side, .steps = preview_steps },
+            .cpu, .metal, .oneapi => .{ .short_side = preview_short_side, .steps = preview_steps },
             else => .{ .short_side = default_short_side, .steps = 30 },
         },
     };
@@ -278,20 +302,39 @@ pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !s
     return parseJson(Config, allocator, io, dir, "config.json");
 }
 
-pub fn snap32(value: u32) u32 {
-    if (value == 0) return 32;
-    return (value + 16) / 32 * 32;
+pub const Size = struct { w: u32, h: u32 };
+
+/// Official canvas: short edge, area cap `768*1344`, then nearest multiple of 32.
+pub fn resolveCanvas(aspect_w: f32, aspect_h: f32, short_edge: u32, max_pixels: u32) error{InvalidAspect}!Size {
+    if (aspect_w <= 0 or aspect_h <= 0) return error.InvalidAspect;
+    const ratio = aspect_w / aspect_h;
+    if (ratio < min_aspect or ratio > max_aspect) return error.InvalidAspect;
+
+    var width: f32 = undefined;
+    var height: f32 = undefined;
+    if (ratio >= 1.0) {
+        width = @as(f32, @floatFromInt(short_edge)) * ratio;
+        height = @floatFromInt(short_edge);
+    } else {
+        width = @floatFromInt(short_edge);
+        height = @as(f32, @floatFromInt(short_edge)) / ratio;
+    }
+    const area = width * height;
+    if (area > @as(f32, @floatFromInt(max_pixels))) {
+        const scale = @sqrt(@as(f32, @floatFromInt(max_pixels)) / area);
+        width *= scale;
+        height *= scale;
+    }
+    const multiple: f32 = @floatFromInt(canvas_multiple);
+    return .{
+        .w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(width / multiple))) * canvas_multiple),
+        .h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(height / multiple))) * canvas_multiple),
+    };
 }
 
-pub fn pixelSize(aspect: Aspect, short_side: u32) struct { w: u32, h: u32 } {
+pub fn pixelSize(aspect: Aspect, short_side: u32) Size {
     const r = aspect.ratio();
-    const short = snap32(short_side);
-    if (r.w >= r.h) {
-        const long = snap32(@intCast((@as(u64, short) * r.w + r.h / 2) / r.h));
-        return .{ .w = long, .h = short };
-    }
-    const long = snap32(@intCast((@as(u64, short) * r.h + r.w / 2) / r.w));
-    return .{ .w = short, .h = long };
+    return resolveCanvas(@floatFromInt(r.w), @floatFromInt(r.h), short_side, canvas_max_pixels) catch unreachable;
 }
 
 pub fn frameCount(duration_s: f32) u32 {

@@ -1,7 +1,10 @@
+const builtin = @import("builtin");
 const std = @import("std");
 
-const packing = @import("packing.zig");
-const vae = @import("vae.zig");
+const config = @import("../core/config.zig");
+const geom = @import("../conditioning/geom.zig");
+const packing = @import("../model/packing.zig");
+const vae = @import("../vae/geom.zig");
 
 const log = std.log.scoped(.minimax_h3_media);
 
@@ -68,6 +71,26 @@ pub fn rgbU8FromNchw(allocator: std.mem.Allocator, nchw: []const f32, frames: u3
     return out;
 }
 
+pub const Output = struct {
+    dir: []const u8,
+    mp4_name: []const u8,
+
+    pub fn parse(path: []const u8) Output {
+        if (path.len == 0) return .{ .dir = "output", .mp4_name = "output.mp4" };
+        if (path.len >= 4 and std.ascii.eqlIgnoreCase(path[path.len - 4 ..], ".mp4")) {
+            return .{
+                .dir = std.fs.path.dirname(path) orelse ".",
+                .mp4_name = std.fs.path.basename(path),
+            };
+        }
+        return .{ .dir = path, .mp4_name = "output.mp4" };
+    }
+
+    pub fn isCwd(self: Output) bool {
+        return self.dir.len == 0 or std.mem.eql(u8, self.dir, ".");
+    }
+};
+
 pub fn writeFrameSequence(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -123,13 +146,19 @@ fn envDir(name: [:0]const u8) ?[]const u8 {
 }
 
 fn tempRoot() []const u8 {
-    return envDir("TMPDIR") orelse envDir("TEMP") orelse envDir("TMP") orelse ".";
+    if (envDir("TMPDIR")) |p| return p;
+    if (envDir("TEMP")) |p| return p;
+    if (envDir("TMP")) |p| return p;
+    return switch (builtin.os.tag) {
+        .windows => "C:\\Windows\\Temp",
+        else => "/tmp",
+    };
 }
 
-const Scratch = struct {
+pub const Scratch = struct {
     path: []u8,
 
-    fn init(allocator: std.mem.Allocator) !Scratch {
+    pub fn init(allocator: std.mem.Allocator) !Scratch {
         // Host IO: VFS Dir.deleteTree panics on path-only scratch dirs.
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
@@ -141,11 +170,11 @@ const Scratch = struct {
         return .{ .path = path };
     }
 
-    fn join(self: Scratch, allocator: std.mem.Allocator, file: []const u8) ![]u8 {
+    pub fn join(self: Scratch, allocator: std.mem.Allocator, file: []const u8) ![]u8 {
         return std.fs.path.join(allocator, &.{ self.path, file });
     }
 
-    fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         var threaded: std.Io.Threaded = .init_single_threaded;
         const io = threaded.io();
         if (std.fs.path.isAbsolute(self.path)) {
@@ -174,14 +203,15 @@ fn runFfmpeg(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8)
     });
 }
 
-pub fn muxMp4(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8, frames: u32) !bool {
-    _ = frames;
-    const frame_in = try std.fs.path.join(allocator, &.{ out_path, "frame_%04d.ppm" });
+pub fn muxMp4(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    frames_dir: []const u8,
+    audio_path: []const u8,
+    mp4_path: []const u8,
+) !bool {
+    const frame_in = try std.fs.path.join(allocator, &.{ frames_dir, "frame_%04d.ppm" });
     defer allocator.free(frame_in);
-    const audio_in = try std.fs.path.join(allocator, &.{ out_path, "audio.wav" });
-    defer allocator.free(audio_in);
-    const mp4 = try std.fs.path.join(allocator, &.{ out_path, "output.mp4" });
-    defer allocator.free(mp4);
     const result = runFfmpeg(allocator, io, &.{
         ffmpeg_bin,
         "-y",
@@ -193,14 +223,14 @@ pub fn muxMp4(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8, fr
         "-i",
         frame_in,
         "-i",
-        audio_in,
+        audio_path,
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
-        mp4,
+        mp4_path,
     }) catch |err| {
         log.warn("ffmpeg {s}: {s}", .{ ffmpeg_bin, @errorName(err) });
         return false;
@@ -209,13 +239,53 @@ pub fn muxMp4(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8, fr
     defer allocator.free(result.stderr);
     switch (result.term) {
         .exited => |code| if (code == 0) {
-            log.info("muxed output.mp4 with {s}", .{ffmpeg_bin});
+            log.info("muxed {s} with {s}", .{ mp4_path, ffmpeg_bin });
             return true;
         } else {
             log.warn("{s} exited {d}: {s}", .{ ffmpeg_bin, code, result.stderr });
         },
         else => log.warn("{s} did not exit cleanly", .{ffmpeg_bin}),
     }
+    return false;
+}
+
+pub fn openPath(io: std.Io, path: []const u8) !std.Io.Dir {
+    if (std.fs.path.isAbsolute(path)) return std.Io.Dir.openDirAbsolute(io, path, .{});
+    return std.Io.Dir.cwd().openDir(io, path, .{});
+}
+
+pub fn writeGeneratedVideo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dest_dir: std.Io.Dir,
+    dest_path: []const u8,
+    mp4_name: []const u8,
+    nchw: []const f32,
+    frames: u32,
+    height: u32,
+    width: u32,
+    pcm: []const i16,
+    sample_rate: u32,
+) !bool {
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
+    var scratch_dir = try openPath(io, scratch.path);
+    defer scratch_dir.close(io);
+    try writeFrameSequence(allocator, io, scratch_dir, nchw, frames, height, width);
+    try writeWavS16(io, scratch_dir, "audio.wav", sample_rate, 2, pcm);
+    const audio_in = try scratch.join(allocator, "audio.wav");
+    defer allocator.free(audio_in);
+    const mp4 = try std.fs.path.join(allocator, &.{ dest_path, mp4_name });
+    defer allocator.free(mp4);
+    if (try muxMp4(allocator, io, scratch.path, audio_in, mp4)) return true;
+
+    const frames_path = try std.fs.path.join(allocator, &.{ dest_path, "frames" });
+    defer allocator.free(frames_path);
+    try std.Io.Dir.cwd().createDirPath(io, frames_path);
+    var fallback = try openPath(io, frames_path);
+    defer fallback.close(io);
+    try writeFrameSequence(allocator, io, fallback, nchw, frames, height, width);
+    try writeWavS16(io, dest_dir, "audio.wav", sample_rate, 2, pcm);
     return false;
 }
 
@@ -229,19 +299,7 @@ pub fn readPpmRgb(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !R
 }
 
 pub fn resizeRgb(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
-    const out = try allocator.alloc(u8, @as(usize, dst_w) * dst_h * 3);
-    var y: u32 = 0;
-    while (y < dst_h) : (y += 1) {
-        const sy = @min(src_h - 1, @as(u32, @intCast((@as(u64, y) * src_h) / dst_h)));
-        var x: u32 = 0;
-        while (x < dst_w) : (x += 1) {
-            const sx = @min(src_w - 1, @as(u32, @intCast((@as(u64, x) * src_w) / dst_w)));
-            const si = (@as(usize, sy) * src_w + sx) * 3;
-            const di = (@as(usize, y) * dst_w + x) * 3;
-            @memcpy(out[di..][0..3], src[si..][0..3]);
-        }
-    }
-    return out;
+    return geom.resizeLanczos(allocator, src, src_w, src_h, dst_w, dst_h);
 }
 
 pub fn ppmSize(io: std.Io, path: []const u8) !Size {
@@ -351,31 +409,132 @@ pub fn loadRgb(
     dst_w: u32,
     dst_h: u32,
 ) ![]u8 {
-    if (readPpmRgb(allocator, io, path)) |img| {
-        defer allocator.free(img.rgb);
-        if (img.w == dst_w and img.h == dst_h) return allocator.dupe(u8, img.rgb);
-        return resizeRgb(allocator, img.rgb, img.w, img.h, dst_w, dst_h);
-    } else |_| {}
+    const raw = try loadRgbRaw(allocator, io, path);
+    defer allocator.free(raw.rgb);
+    if (raw.w == dst_w and raw.h == dst_h) return allocator.dupe(u8, raw.rgb);
+    return resizeRgb(allocator, raw.rgb, raw.w, raw.h, dst_w, dst_h);
+}
 
-    var scratch = try Scratch.init(allocator);
-    defer scratch.deinit(allocator);
-    const tmp_name = try scratch.join(allocator, "in.ppm");
-    defer allocator.free(tmp_name);
-    const scale = try std.fmt.allocPrint(allocator, "scale={d}:{d}", .{ dst_w, dst_h });
-    defer allocator.free(scale);
+pub fn loadRgbCover(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    dst_w: u32,
+    dst_h: u32,
+) ![]u8 {
+    const raw = try loadRgbRaw(allocator, io, path);
+    defer allocator.free(raw.rgb);
+    return geom.coverCropLanczos(allocator, raw.rgb, raw.w, raw.h, dst_w, dst_h);
+}
+
+pub const VideoClip = struct {
+    rgb: []u8,
+    frames: u32,
+    w: u32,
+    h: u32,
+    fps: f32,
+    has_audio: bool = false,
+};
+
+pub fn probeVideo(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !struct { w: u32, h: u32, fps: f32, has_audio: bool } {
     const result = runFfmpeg(allocator, io, &.{
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-vf", scale, "-frames:v", "1", tmp_name,
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate",
+        "-of",
+        "csv=p=0",
+        path,
     }) catch return error.FfmpegMissing;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.ImageLoadFailed,
-        else => return error.ImageLoadFailed,
+        .exited => |code| if (code != 0) return error.VideoLoadFailed,
+        else => return error.VideoLoadFailed,
     }
-    const img = try readPpmRgb(allocator, io, tmp_name);
-    defer allocator.free(img.rgb);
-    if (img.w == dst_w and img.h == dst_h) return allocator.dupe(u8, img.rgb);
-    return resizeRgb(allocator, img.rgb, img.w, img.h, dst_w, dst_h);
+    var it = std.mem.splitScalar(u8, std.mem.trim(u8, result.stdout, " \r\n"), ',');
+    const w = try std.fmt.parseInt(u32, it.next() orelse return error.VideoLoadFailed, 10);
+    const h = try std.fmt.parseInt(u32, it.next() orelse return error.VideoLoadFailed, 10);
+    const rate = it.next() orelse return error.VideoLoadFailed;
+    const fps = parseRate(rate) orelse return error.VideoLoadFailed;
+
+    const audio = runFfmpeg(allocator, io, &.{
+        "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
+    }) catch return .{ .w = w, .h = h, .fps = fps, .has_audio = false };
+    defer allocator.free(audio.stdout);
+    defer allocator.free(audio.stderr);
+    const has_audio = std.mem.indexOf(u8, audio.stdout, "audio") != null;
+    return .{ .w = w, .h = h, .fps = fps, .has_audio = has_audio };
+}
+
+fn parseRate(text: []const u8) ?f32 {
+    const trimmed = std.mem.trim(u8, text, " \r\n");
+    if (std.mem.indexOfScalar(u8, trimmed, '/')) |slash| {
+        const num = std.fmt.parseFloat(f32, trimmed[0..slash]) catch return null;
+        const den = std.fmt.parseFloat(f32, trimmed[slash + 1 ..]) catch return null;
+        if (den == 0) return null;
+        return num / den;
+    }
+    return std.fmt.parseFloat(f32, trimmed) catch null;
+}
+
+pub fn loadVideoNative(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !VideoClip {
+    const meta = try probeVideo(allocator, io, path);
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
+    const tmp_pat = try scratch.join(allocator, "f_%04d.ppm");
+    defer allocator.free(tmp_pat);
+    const result = runFfmpeg(allocator, io, &.{
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-vsync", "0", tmp_pat,
+    }) catch return error.FfmpegMissing;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.VideoLoadFailed,
+        else => return error.VideoLoadFailed,
+    }
+
+    var frames_list: std.ArrayList([]u8) = .empty;
+    defer {
+        for (frames_list.items) |f| allocator.free(f);
+        frames_list.deinit(allocator);
+    }
+    var loaded: u32 = 0;
+    var fw: u32 = meta.w;
+    var fh: u32 = meta.h;
+    while (loaded < 4096) : (loaded += 1) {
+        var name_buf: [16]u8 = undefined;
+        const frame_name = try std.fmt.bufPrint(&name_buf, "f_{d:0>4}.ppm", .{loaded + 1});
+        const name = try scratch.join(allocator, frame_name);
+        defer allocator.free(name);
+        const img = readPpmRgb(allocator, io, name) catch break;
+        fw = img.w;
+        fh = img.h;
+        try frames_list.append(allocator, img.rgb);
+    }
+    if (frames_list.items.len == 0) return error.VideoLoadFailed;
+    const plane = @as(usize, fw) * fh * 3;
+    const out = try allocator.alloc(u8, frames_list.items.len * plane);
+    for (frames_list.items, 0..) |frame, i| {
+        if (frame.len != plane) {
+            const resized = try resizeRgb(allocator, frame, fw, fh, fw, fh);
+            defer allocator.free(resized);
+            @memcpy(out[i * plane ..][0..plane], resized[0..plane]);
+        } else {
+            @memcpy(out[i * plane ..][0..plane], frame);
+        }
+    }
+    return .{
+        .rgb = out,
+        .frames = @intCast(frames_list.items.len),
+        .w = fw,
+        .h = fh,
+        .fps = meta.fps,
+        .has_audio = meta.has_audio,
+    };
 }
 
 pub fn loadVideoRgb(
@@ -386,44 +545,27 @@ pub fn loadVideoRgb(
     dst_h: u32,
     frames: u32,
 ) !struct { rgb: []u8, frames: u32, w: u32, h: u32 } {
-    var scratch = try Scratch.init(allocator);
-    defer scratch.deinit(allocator);
-    const tmp_pat = try scratch.join(allocator, "f_%04d.ppm");
-    defer allocator.free(tmp_pat);
-    const fps = try std.fmt.allocPrint(allocator, "fps=24,scale={d}:{d}", .{ dst_w, dst_h });
-    defer allocator.free(fps);
-    const nbuf = try std.fmt.allocPrint(allocator, "{d}", .{frames});
-    defer allocator.free(nbuf);
-    const result = runFfmpeg(allocator, io, &.{
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-vf", fps, "-frames:v", nbuf, tmp_pat,
-    }) catch return error.FfmpegMissing;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| if (code != 0) return error.VideoLoadFailed,
-        else => return error.VideoLoadFailed,
-    }
-
+    const clip = try loadVideoNative(allocator, io, path);
+    defer allocator.free(clip.rgb);
+    const indices = try geom.resampleFrameIndices(clip.frames, clip.fps, config.video_fps, allocator);
+    defer allocator.free(indices);
+    const keep = @min(frames, @as(u32, @intCast(indices.len)));
     const plane = @as(usize, dst_w) * dst_h * 3;
-    const out = try allocator.alloc(u8, frames * plane);
+    const src_plane = @as(usize, clip.w) * clip.h * 3;
+    const out = try allocator.alloc(u8, keep * plane);
     errdefer allocator.free(out);
-    var loaded: u32 = 0;
-    while (loaded < frames) : (loaded += 1) {
-        var name_buf: [16]u8 = undefined;
-        const frame_name = try std.fmt.bufPrint(&name_buf, "f_{d:0>4}.ppm", .{loaded + 1});
-        const name = try scratch.join(allocator, frame_name);
-        defer allocator.free(name);
-        const img = readPpmRgb(allocator, io, name) catch break;
-        defer allocator.free(img.rgb);
-        const rgb = if (img.w == dst_w and img.h == dst_h)
-            img.rgb
+    var i: u32 = 0;
+    while (i < keep) : (i += 1) {
+        const src_i = indices[i];
+        const src = clip.rgb[src_i * src_plane ..][0..src_plane];
+        const rgb = if (clip.w == dst_w and clip.h == dst_h)
+            try allocator.dupe(u8, src)
         else
-            try resizeRgb(allocator, img.rgb, img.w, img.h, dst_w, dst_h);
-        defer if (rgb.ptr != img.rgb.ptr) allocator.free(rgb);
-        @memcpy(out[loaded * plane ..][0..plane], rgb);
+            try resizeRgb(allocator, src, clip.w, clip.h, dst_w, dst_h);
+        defer allocator.free(rgb);
+        @memcpy(out[i * plane ..][0..plane], rgb);
     }
-    if (loaded == 0) return error.VideoLoadFailed;
-    return .{ .rgb = out, .frames = loaded, .w = dst_w, .h = dst_h };
+    return .{ .rgb = out, .frames = keep, .w = dst_w, .h = dst_h };
 }
 
 pub fn rgbVideoToNchwImagenet(allocator: std.mem.Allocator, rgb: []const u8, frames: u32, height: u32, width: u32) ![]f32 {
@@ -440,6 +582,43 @@ pub fn rgbVideoToNchwImagenet(allocator: std.mem.Allocator, rgb: []const u8, fra
         }
     }
     return out;
+}
+
+pub const Pcm = struct { stereo: []f32, rate: u32 };
+
+pub fn loadWavNative(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Pcm {
+    if (readWavAny(allocator, io, path)) |pcm| return pcm else |_| {}
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
+    const tmp = try scratch.join(allocator, "native.wav");
+    defer allocator.free(tmp);
+    const result = runFfmpeg(allocator, io, &.{
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-ac", "2", tmp,
+    }) catch return error.FfmpegMissing;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.AudioLoadFailed,
+        else => return error.AudioLoadFailed,
+    }
+    return readWavAny(allocator, io, tmp);
+}
+
+fn readWavAny(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Pcm {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(bytes);
+    const info = try parseWavHeader(bytes);
+    const stereo = try decodeWavStereo(allocator, bytes, info);
+    return .{ .stereo = stereo, .rate = info.rate };
+}
+
+pub fn loadAudioOfficial(allocator: std.mem.Allocator, io: std.Io, path: []const u8, duration_s: f32, dst_rate: u32) ![]f32 {
+    const native = try loadWavNative(allocator, io, path);
+    defer allocator.free(native.stereo);
+    const max_pcm: u32 = @intFromFloat(@round(duration_s * @as(f32, @floatFromInt(native.rate))));
+    const truncated = try geom.truncateStereo(allocator, native.stereo, max_pcm);
+    defer allocator.free(truncated);
+    return geom.resampleLinear(allocator, truncated, native.rate, dst_rate);
 }
 
 pub fn loadWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sample_rate: u32) ![]f32 {
@@ -464,7 +643,7 @@ pub fn loadWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
 
 const WavInfo = struct { samples: u32, ch: u16, rate: u32, bits: u16, data_off: usize };
 
-fn parseWavHeader(bytes: []const u8) !WavInfo {
+pub fn parseWavHeader(bytes: []const u8) !WavInfo {
     if (bytes.len < 44) return error.BadWav;
     if (!std.mem.eql(u8, bytes[0..4], "RIFF") or !std.mem.eql(u8, bytes[8..12], "WAVE")) return error.BadWav;
     var off: usize = 12;
@@ -499,23 +678,15 @@ fn parseWavHeader(bytes: []const u8) !WavInfo {
     };
 }
 
-fn readWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sample_rate: u32) ![]f32 {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
-    defer allocator.free(bytes);
-    const info = try parseWavHeader(bytes);
-    if (info.rate != sample_rate) return error.WavRateMismatch;
-    const samples = info.samples;
-    const ch = info.ch;
-    const bits = info.bits;
-    const data_off = info.data_off;
-    const out = try allocator.alloc(f32, samples * 2);
+fn decodeWavStereo(allocator: std.mem.Allocator, bytes: []const u8, info: WavInfo) ![]f32 {
+    const out = try allocator.alloc(f32, @as(usize, info.samples) * 2);
     var i: usize = 0;
-    while (i < samples) : (i += 1) {
+    while (i < info.samples) : (i += 1) {
         var c: u16 = 0;
         while (c < 2) : (c += 1) {
-            const src_c = if (c < ch) c else 0;
-            const idx = data_off + (i * ch + src_c) * (bits / 8);
-            const s: f32 = switch (bits) {
+            const src_c = if (c < info.ch) c else 0;
+            const idx = info.data_off + (i * info.ch + src_c) * (info.bits / 8);
+            const s: f32 = switch (info.bits) {
                 16 => @as(f32, @floatFromInt(std.mem.readInt(i16, bytes[idx..][0..2], .little))) / 32768.0,
                 32 => std.mem.bytesAsValue(f32, bytes[idx..][0..4]).*,
                 else => return error.UnsupportedWav,
@@ -524,6 +695,14 @@ fn readWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sam
         }
     }
     return out;
+}
+
+fn readWavStereo(allocator: std.mem.Allocator, io: std.Io, path: []const u8, sample_rate: u32) ![]f32 {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(bytes);
+    const info = try parseWavHeader(bytes);
+    if (info.rate != sample_rate) return error.WavRateMismatch;
+    return decodeWavStereo(allocator, bytes, info);
 }
 
 pub fn refsContainAudio(refs: []const u8) bool {

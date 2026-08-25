@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const config = @import("config.zig");
+const config = @import("../core/config.zig");
 
 pub const Modality = enum(u8) {
     video = 0,
@@ -31,6 +31,8 @@ pub const ConditionVideo = struct {
     latent_w: u32,
     /// 0 = first frame, last frame otherwise. Ignored for Ref2VA.
     keyframe_index: i32 = 0,
+    /// When set, place this condition at that pixel frame (negative from the end).
+    guide_frame: ?i32 = null,
 };
 
 pub const ConditionAudio = struct {
@@ -62,6 +64,15 @@ pub fn timestepValues(video_t: f32, audio_t: f32) [timestep_slot_count]f32 {
         @max(video_t, config.visual_cond_timestep),
         @max(audio_t, 1.0),
     };
+}
+
+/// `mask[i] != 0` keeps the row on `slot`; otherwise the row is unchanged.
+pub fn applyRowMask(timestep_indices: []u32, mask: []const u8, slot: u32) void {
+    const n = @min(timestep_indices.len, mask.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (mask[i] != 0) timestep_indices[i] = slot;
+    }
 }
 
 pub fn writeTimesteps(out: []f32, video_t: f32, audio_t: f32) void {
@@ -119,12 +130,25 @@ pub const BuildArgs = struct {
     condition_audios: []const ConditionAudio = &.{},
     references: []const ReferenceBlock = &.{},
     text_tags: []const u8 = &.{},
+    pixel_frames: u32 = 0,
 };
 
 const video_spans = [_]u32{ 1, 4, 4, 4, 4 };
 
 pub fn videoSpan(frame: u32) f32 {
     return config.frame_rescale * @as(f32, @floatFromInt(video_spans[frame % video_spans.len]));
+}
+
+fn guideStartT(text_len: u32, frame: i32, frames: u32, duration: f32) f32 {
+    const base: f32 = @floatFromInt(text_len);
+    if (frames == 0) return base;
+    const last: i64 = @as(i64, frames) - 1;
+    const idx: i64 = if (frame < 0) last + 1 + frame else frame;
+    const clamped: u32 = @intCast(std.math.clamp(idx, 0, last));
+    if (clamped == 0) return base;
+    if (clamped == @as(u32, @intCast(last))) return base + duration - config.frame_rescale;
+    const frac = @as(f32, @floatFromInt(clamped)) / @as(f32, @floatFromInt(last));
+    return base + frac * duration;
 }
 
 pub fn videoDuration(latent_t: u32) f32 {
@@ -322,7 +346,9 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
             const ch = spatialAxis(cond.latent_h, area, &ch_buf);
             const cw = spatialAxis(cond.latent_w, area, &cw_buf);
             const is_first = cond.keyframe_index == 0;
-            const keyframe_t = if (is_first)
+            const keyframe_t = if (cond.guide_frame) |gf|
+                guideStartT(args.text_len, gf, args.pixel_frames, duration)
+            else if (is_first)
                 @as(f32, @floatFromInt(args.text_len))
             else
                 @as(f32, @floatFromInt(args.text_len)) + duration - config.frame_rescale;
@@ -385,27 +411,6 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
     const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, cursor, video_time, .target_video, -1);
 
     return b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
-}
-
-pub fn buildT2va(
-    allocator: std.mem.Allocator,
-    text_len: u32,
-    latent_t: u32,
-    latent_h: u32,
-    latent_w: u32,
-    audio_t: u32,
-    video_t: f32,
-    audio_t_noise: f32,
-) !Layout {
-    return build(allocator, .{
-        .text_len = text_len,
-        .latent_t = latent_t,
-        .latent_h = latent_h,
-        .latent_w = latent_w,
-        .audio_t = audio_t,
-        .video_t = video_t,
-        .audio_t_noise = audio_t_noise,
-    });
 }
 
 /// Official video noise is `(C, T, H, W)` (batch squeezed). Host patchify wants `{t,h,w,c}`.

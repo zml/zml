@@ -2,9 +2,9 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
-const vae = @import("vae.zig");
-const weights = @import("weights.zig");
+const config_mod = @import("../core/config.zig");
+const vae = @import("geom.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_audio_vae);
 
@@ -840,12 +840,12 @@ pub const LoadedEncoder = struct {
 
 pub const LoadedModel = struct {
     inner: Model,
-    parsed: ?std.json.Parsed(FileConfig),
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
-        const cfg = if (parsed) |p| p.value.resolve() else Config.official();
+        const parsed = try config_mod.parseJson(FileConfig, allocator, io, repo, "config.json");
+        defer parsed.deinit();
+        const cfg = parsed.value.resolve();
         log.info("audio vae: hop={d} latent_c={d} mean0={d:.4} std0={d:.4}", .{
             cfg.hop,
             cfg.latent_channels,
@@ -854,14 +854,12 @@ pub const LoadedModel = struct {
         });
         return .{
             .inner = try .init(allocator, store, cfg),
-            .parsed = parsed,
             .cfg = cfg,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
-        if (self.parsed) |*parsed| parsed.deinit();
     }
 
     pub fn loadBuffers(

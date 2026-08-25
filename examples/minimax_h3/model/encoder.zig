@@ -2,8 +2,8 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
-const weights = @import("weights.zig");
+const config_mod = @import("../core/config.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_encoder);
 
@@ -220,7 +220,6 @@ pub const Model = struct {
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
-
 };
 
 fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
@@ -230,12 +229,12 @@ fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
 
 pub const LoadedModel = struct {
     inner: Model,
-    parsed_config: ?std.json.Parsed(config_mod.EncoderFileConfig),
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const parsed: ?std.json.Parsed(config_mod.EncoderFileConfig) = config_mod.parseJson(config_mod.EncoderFileConfig, allocator, io, repo, "config.json") catch null;
-        const cfg = if (parsed) |p| p.value.resolve() else Config{};
+        const parsed = try config_mod.parseJson(config_mod.EncoderFileConfig, allocator, io, repo, "config.json");
+        defer parsed.deinit();
+        const cfg = parsed.value.resolve();
         log.info("encoder: {d} layers hidden={d} heads={d}", .{
             cfg.used_hidden_layers,
             cfg.hidden_size,
@@ -243,14 +242,12 @@ pub const LoadedModel = struct {
         });
         return .{
             .inner = try .init(allocator, store, cfg),
-            .parsed_config = parsed,
             .cfg = cfg,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
-        if (self.parsed_config) |*parsed| parsed.deinit();
     }
 
     pub fn loadEmbed(

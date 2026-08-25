@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const config = @import("config.zig");
-
 /// Rectified-flow Euler (`eta = 0`). Transformer predicts data-ward velocity:
 /// `x0 = x_t + sigma * v`, `t = 1 - sigma` in `[0, 1]`.
 pub const Schedule = struct {
@@ -57,20 +55,6 @@ pub const Schedule = struct {
         return self.timesteps.len;
     }
 
-    pub fn step(self: Schedule, step_index: usize, sample: []f32, velocity: []const f32) void {
-        std.debug.assert(sample.len == velocity.len);
-        std.debug.assert(step_index < self.timesteps.len);
-
-        const sigma = self.sigmas[step_index];
-        const sigma_next = self.sigmas[step_index + 1];
-        const ratio = sigma_next / sigma;
-
-        for (sample, velocity) |*x, v| {
-            const denoised = x.* + sigma * v;
-            x.* = ratio * x.* + (1.0 - ratio) * denoised;
-        }
-    }
-
     pub fn scaleNoise(t: f32, clean: f32, noise: f32) f32 {
         return t * clean + (1.0 - t) * noise;
     }
@@ -85,10 +69,6 @@ pub const DualSchedule = struct {
         errdefer video.deinit(allocator);
         const audio = try Schedule.init(allocator, audio_shift, steps);
         return .{ .video = video, .audio = audio };
-    }
-
-    pub fn initOfficial(allocator: std.mem.Allocator, steps: u32) !DualSchedule {
-        return init(allocator, steps, config.video_shift, config.audio_shift);
     }
 
     pub fn deinit(self: DualSchedule, allocator: std.mem.Allocator) void {

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const config = @import("config.zig");
+const config = @import("../core/config.zig");
 const packing = @import("packing.zig");
 const scheduler = @import("scheduler.zig");
 
@@ -33,6 +33,10 @@ pub const Generator = struct {
             self.state[j] = 1812433253 *% (prev ^ (prev >> 30)) +% @as(u32, @intCast(j));
         }
         return self;
+    }
+
+    pub fn reset(self: *Generator) void {
+        self.* = init(self.seed);
     }
 
     pub fn random(self: *Generator) u32 {
@@ -160,6 +164,7 @@ pub fn drawVideo(
     latent_h: u32,
     latent_w: u32,
     patch: [3]i64,
+    reset_before_target: bool,
 ) ![]f32 {
     const channels: u32 = 24;
     const row_w = @as(usize, channels) * @as(usize, @intCast(patch[0] * patch[1] * patch[2]));
@@ -185,6 +190,8 @@ pub fn drawVideo(
         }
         off += noise_rows.len;
     }
+
+    if (reset_before_target) gen.reset();
 
     const nchw = try nchwRandn(allocator, gen, channels, latent_t, latent_h, latent_w);
     defer allocator.free(nchw);

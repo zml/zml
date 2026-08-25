@@ -1,33 +1,19 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-H3_SRCS = [
-    "audio_vae.zig",
-    "conditions.zig",
-    "config.zig",
-    "decode.zig",
-    "dit.zig",
-    "encode.zig",
-    "encoder.zig",
-    "ir.zig",
-    "main.zig",
-    "media.zig",
-    "noise.zig",
-    "packing.zig",
-    "pipeline.zig",
-    "scheduler.zig",
-    "session.zig",
-    "sharding.zig",
-    "vae.zig",
-    "vision.zig",
-    "visual_enc.zig",
-    "visual_vae.zig",
-    "weights.zig",
+H3_EMBED = [
+    "ir/golden/official_fl2va_example.txt",
+    "ir/golden/official_ref2va_example.txt",
+    "ir/golden/t2va.ir.txt",
+    "ir/prompts/compose.v2.txt",
+    "ir/prompts/compose_base.v1.txt",
 ]
 
 zig_binary(
     name = "minimax_h3",
-    srcs = H3_SRCS,
+    srcs = glob(["**/*.zig"]),
+    extra_srcs = H3_EMBED,
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -35,14 +21,22 @@ zig_binary(
 
 zig_binary(
     name = "h3_tests",
-    srcs = H3_SRCS + ["tests.zig"],
+    srcs = glob(["**/*.zig"]),
+    extra_srcs = H3_EMBED,
     main = "tests.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
 
-build_test(
+sh_test(
     name = "test",
+    srcs = ["run_h3_tests.sh"],
+    args = ["$(rootpath :h3_tests)"],
+    data = [":h3_tests"],
+)
+
+build_test(
+    name = "compile",
     targets = [
         ":minimax_h3",
         ":h3_tests",

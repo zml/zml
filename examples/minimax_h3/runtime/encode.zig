@@ -2,12 +2,12 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const audio_vae = @import("audio_vae.zig");
-const config_mod = @import("config.zig");
-const packing = @import("packing.zig");
+const audio_vae = @import("../vae/audio.zig");
+const config_mod = @import("../core/config.zig");
+const packing = @import("../model/packing.zig");
 const pipeline = @import("pipeline.zig");
-const vae = @import("vae.zig");
-const visual_enc = @import("visual_enc.zig");
+const vae = @import("../vae/geom.zig");
+const visual_enc = @import("../vae/visual_enc.zig");
 
 const log = std.log.scoped(.minimax_h3_encode);
 
@@ -185,14 +185,11 @@ fn momentsToLatentThwc(
     w: u32,
     mean: []const f32,
     stddev: []const f32,
+    policy: config_mod.PosteriorPolicy,
 ) ![]f32 {
-    const thwc48 = try vae.nchwToThwc(allocator, moments_nchw, 48, t, h, w);
-    defer allocator.free(thwc48);
-    const out = try allocator.alloc(f32, @as(usize, t) * h * w * 24);
-    var i: usize = 0;
-    while (i < @as(usize, t) * h * w) : (i += 1) {
-        @memcpy(out[i * 24 ..][0..24], thwc48[i * 48 ..][0..24]);
-    }
+    const sampled = try vae.sampleVisualPosteriorNchw(allocator, moments_nchw, t, h, w, policy);
+    defer allocator.free(sampled);
+    const out = try vae.nchwToThwc(allocator, sampled, 24, t, h, w);
     vae.applyLatentNorm(out, 24, mean, stddev, false);
     return out;
 }
@@ -203,6 +200,7 @@ pub const VisualLatent = struct {
     latent_h: u32,
     latent_w: u32,
     keyframe_index: i32 = 0,
+    guide_frame: ?i32 = null,
 
     pub fn deinit(self: VisualLatent, allocator: std.mem.Allocator) void {
         allocator.free(self.thwc);
@@ -219,6 +217,7 @@ pub fn encodeKeyframe(
     pixels_nchw: []const f32,
     height: u32,
     width: u32,
+    policy: config_mod.PosteriorPolicy,
 ) !VisualLatent {
     const moments = try runVisualClip(allocator, io, platform, compiled, bufs, pixels_nchw, 1, height, width);
     defer allocator.free(moments);
@@ -226,7 +225,7 @@ pub fn encodeKeyframe(
     const lw = width / 16;
     log.info("visual encode keyframe {d}x{d} -> latent 1x{d}x{d}", .{ width, height, lh, lw });
     return .{
-        .thwc = try momentsToLatentThwc(allocator, moments, 1, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
+        .thwc = try momentsToLatentThwc(allocator, moments, 1, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std, policy),
         .latent_t = 1,
         .latent_h = lh,
         .latent_w = lw,
@@ -244,6 +243,7 @@ pub fn encodeVideo(
     frames: u32,
     height: u32,
     width: u32,
+    policy: config_mod.PosteriorPolicy,
 ) !VisualLatent {
     const spec = vae.official_visual;
     const pad = (spec.clip_length - (frames % spec.clip_length)) % spec.clip_length;
@@ -302,7 +302,7 @@ pub fn encodeVideo(
         encode_start.untilNow(io, .awake),
     });
     return .{
-        .thwc = try momentsToLatentThwc(allocator, kept, keep_t, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
+        .thwc = try momentsToLatentThwc(allocator, kept, keep_t, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std, policy),
         .latent_t = keep_t,
         .latent_h = lh,
         .latent_w = lw,
@@ -383,6 +383,18 @@ pub const ConditionSet = struct {
     target_audio_offset: u32,
     references: []packing.ReferenceBlock,
 
+    pub fn empty() ConditionSet {
+        return .{
+            .videos = &.{},
+            .video_patches = &.{},
+            .target_video_offset = 0,
+            .audios = &.{},
+            .audio_patches = &.{},
+            .target_audio_offset = 0,
+            .references = &.{},
+        };
+    }
+
     pub fn deinit(self: ConditionSet, allocator: std.mem.Allocator) void {
         allocator.free(self.videos);
         allocator.free(self.video_patches);
@@ -408,6 +420,7 @@ pub fn packConditions(
             .latent_h = v.latent_h,
             .latent_w = v.latent_w,
             .keyframe_index = v.keyframe_index,
+            .guide_frame = v.guide_frame,
         };
         vlen += config_mod.videoTokenCount(v.latent_t, v.latent_h, v.latent_w, patch) * patchDim(patch);
     }

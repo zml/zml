@@ -2,15 +2,18 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const dit = @import("dit.zig");
-const encoder = @import("encoder.zig");
-const noise = @import("noise.zig");
-const packing = @import("packing.zig");
+const decode = @import("decode.zig");
+const media = @import("media.zig");
+const dit = @import("../model/dit.zig");
+const encoder = @import("../model/encoder.zig");
+const noise = @import("../model/noise.zig");
+const packing = @import("../model/packing.zig");
 const pipeline = @import("pipeline.zig");
-const scheduler_mod = @import("scheduler.zig");
-const vae = @import("vae.zig");
-const vision = @import("vision.zig");
-const weights = @import("weights.zig");
+const repo = @import("repo.zig");
+const scheduler_mod = @import("../model/scheduler.zig");
+const vision = @import("../model/vision.zig");
+const weights = @import("../core/weights.zig");
+const multistep = @import("../sampling/multistep.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -144,11 +147,22 @@ pub fn bufferFromF32(
     }
 }
 
-pub fn writeF32File(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []const f32) !void {
-    const file = try dir.createFile(io, name, .{});
-    defer file.close(io);
-    var writer = file.writer(io, &.{});
-    try writer.interface.writeAll(std.mem.sliceAsBytes(values));
+pub fn writeAtomic(io: std.Io, dir: std.Io.Dir, name: []const u8, bytes: []const u8) !void {
+    var tmp_buf: [160]u8 = undefined;
+    const tmp = try std.fmt.bufPrint(&tmp_buf, ".{s}.tmp", .{name});
+    {
+        const file = try dir.createFile(io, tmp, .{});
+        defer file.close(io);
+        var writer = file.writer(io, &.{});
+        try writer.interface.writeAll(bytes);
+    }
+    dir.rename(tmp, dir, name, io) catch {
+        const file = try dir.createFile(io, name, .{});
+        defer file.close(io);
+        var writer = file.writer(io, &.{});
+        try writer.interface.writeAll(bytes);
+    };
+    dir.deleteFile(io, tmp) catch {};
 }
 
 pub fn readF32File(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, expected: usize) ![]f32 {
@@ -167,18 +181,6 @@ pub fn readF32FileAll(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir,
     errdefer allocator.free(out);
     var reader = file.reader(io, &.{});
     try reader.interface.readSliceAll(std.mem.sliceAsBytes(out));
-    return out;
-}
-
-pub fn readU8File(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, expected: usize) ![]u8 {
-    const file = try dir.openFile(io, name, .{});
-    defer file.close(io);
-    const n = try file.length(io);
-    if (n != expected) return error.LatentSizeMismatch;
-    const out = try allocator.alloc(u8, expected);
-    errdefer allocator.free(out);
-    var reader = file.reader(io, &.{});
-    try reader.interface.readSliceAll(out);
     return out;
 }
 
@@ -341,76 +343,10 @@ pub fn encodeText(
     return hidden;
 }
 
-pub const SharedInputs = struct {
-    video_rows: []f32,
-    audio_rows: []f32,
-    embeds: []f32,
-    tags: []u8,
-
-    pub fn deinit(self: SharedInputs, allocator: std.mem.Allocator) void {
-        allocator.free(self.video_rows);
-        allocator.free(self.audio_rows);
-        allocator.free(self.embeds);
-        allocator.free(self.tags);
-    }
-};
-
-pub fn loadShared(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    dir: std.Io.Dir,
-    geo: pipeline.Geometry,
-    text_dim: u32,
-) !SharedInputs {
-    const channels: u32 = 24;
-    const patch = [_]i64{ 1, 2, 2 };
-    const nchw_n = @as(usize, channels) * geo.latent_t * geo.latent_h * geo.latent_w;
-    const nchw = try readF32File(allocator, io, dir, "video_noise.f32", nchw_n);
-    defer allocator.free(nchw);
-    const thwc = try allocator.alloc(f32, nchw_n);
-    defer allocator.free(thwc);
-    packing.nchwToThwc(thwc, nchw, channels, geo.latent_t, geo.latent_h, geo.latent_w);
-    const video_rows = try packing.patchify(allocator, thwc, geo.latent_t, geo.latent_h, geo.latent_w, channels, patch);
-    errdefer allocator.free(video_rows);
-
-    const bct_n = @as(usize, 2) * geo.audio_dim * geo.audio_t;
-    const bct = try readF32File(allocator, io, dir, "audio_noise.f32", bct_n);
-    defer allocator.free(bct);
-    const audio_rows = try allocator.alloc(f32, bct_n);
-    errdefer allocator.free(audio_rows);
-    vae.audioBctToRows(audio_rows, bct, geo.audio_dim, geo.audio_t);
-
-    const embeds = try readF32FileAll(allocator, io, dir, "prompt_embeds.f32");
-    errdefer allocator.free(embeds);
-    if (embeds.len == 0 or embeds.len % text_dim != 0) return error.SharedEmbedSize;
-    const text_len = embeds.len / text_dim;
-    const tags = readU8File(allocator, io, dir, "text_tags.u8", text_len) catch |err| switch (err) {
-        error.FileNotFound => blk: {
-            const filled = try allocator.alloc(u8, text_len);
-            @memset(filled, @intFromEnum(packing.Modality.text));
-            break :blk filled;
-        },
-        else => return err,
-    };
-
-    log.info(
-        "shared: video_rows={d} audio_rows={d} embeds={d}x{d}",
-        .{ video_rows.len, audio_rows.len, text_len, text_dim },
-    );
-    return .{
-        .video_rows = video_rows,
-        .audio_rows = audio_rows,
-        .embeds = embeds,
-        .tags = tags,
-    };
-}
-
 pub const DenoiseCond = struct {
     videos: []const packing.ConditionVideo = &.{},
     video_patches: []const f32 = &.{},
     audio_patches: []const f32 = &.{},
-    video_noise: ?[]const f32 = null,
-    audio_noise: ?[]const f32 = null,
 };
 
 pub fn denoise(
@@ -432,10 +368,7 @@ pub fn denoise(
     progress: *std.Progress.Node,
 ) !Latents {
     var gen = noise.Generator.init(seed);
-    var video = if (cond.video_noise) |src| blk: {
-        const copy = try allocator.dupe(f32, src);
-        break :blk copy;
-    } else try noise.drawVideo(
+    var video = try noise.drawVideo(
         allocator,
         &gen,
         cond.videos,
@@ -444,12 +377,10 @@ pub fn denoise(
         geo.latent_h,
         geo.latent_w,
         loaded.inner.cfg.patch_size,
+        true,
     );
     errdefer allocator.free(video);
-    var audio = if (cond.audio_noise) |src| blk: {
-        const copy = try allocator.dupe(f32, src);
-        break :blk copy;
-    } else try noise.drawAudio(allocator, &gen, cond.audio_patches, geo.audio_dim, geo.audio_t);
+    var audio = try noise.drawAudio(allocator, &gen, cond.audio_patches, geo.audio_dim, geo.audio_t);
     errdefer allocator.free(audio);
     if (video.len != geo.video_tokens * geo.video_patch_dim) return error.VideoNoiseSize;
     if (audio.len != geo.audio_tokens * geo.audio_dim) return error.AudioNoiseSize;
@@ -497,6 +428,8 @@ pub fn denoise(
     var block_runner: ?BlockRunner = null;
     defer if (block_runner) |*r| r.deinit(allocator);
 
+    var step_state = multistep.State.init(allocator);
+    defer step_state.deinit();
     const steps = schedules.video.stepCount();
     const n_blocks = loaded.inner.blocks.len;
     const denoise_start: std.Io.Timestamp = .now(io, .awake);
@@ -624,8 +557,7 @@ pub fn denoise(
         try audio_out.toSlice(io, .init(audio_shape, std.mem.sliceAsBytes(audio_vel)));
         if (cond.video_patches.len != 0) @memset(video_vel[0..cond.video_patches.len], 0);
         if (cond.audio_patches.len != 0) @memset(audio_vel[0..cond.audio_patches.len], 0);
-        schedules.video.step(step_i, video, video_vel);
-        schedules.audio.step(step_i, audio, audio_vel);
+        try multistep.dualResMultistep(schedules, step_i, video, audio, video_vel, audio_vel, &step_state);
         if (held_video.len != 0) @memcpy(video[0..held_video.len], held_video);
         if (held_audio.len != 0) @memcpy(audio[0..held_audio.len], held_audio);
         log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
@@ -695,3 +627,118 @@ fn loadDitBlock(
     return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
+pub const Request = struct {
+    opts: pipeline.Options,
+    geo: pipeline.Geometry,
+    target: pipeline.Geometry,
+    tokens: []const u32,
+    extras: TextExtras,
+    layout: packing.Layout,
+    schedules: scheduler_mod.DualSchedule,
+    cond: DenoiseCond,
+    seed: u64,
+    brief: []const u8,
+    out: []const u8,
+};
+
+pub fn generate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    models: *repo.Bundle,
+    compiled: *const pipeline.Compiled,
+    compiled_vae: *const pipeline.VaeCompiled,
+    shardings: []const zml.Sharding,
+    progress: *std.Progress.Node,
+    req: Request,
+) !void {
+    const dest = media.Output.parse(req.out);
+    if (!dest.isCwd()) try std.Io.Dir.cwd().createDirPath(io, dest.dir);
+    var out_dir: std.Io.Dir = if (dest.isCwd())
+        .cwd()
+    else
+        try std.Io.Dir.cwd().openDir(io, dest.dir, .{});
+    defer if (!dest.isCwd()) out_dir.close(io);
+    try writeText(io, out_dir, "prompt.txt", req.brief);
+
+    var text = try encodeText(
+        allocator,
+        io,
+        platform,
+        compiled,
+        &models.enc,
+        &models.enc_store,
+        shardings,
+        req.tokens,
+        req.extras,
+        progress,
+    );
+    defer text.deinit();
+    var latents = try denoise(
+        allocator,
+        io,
+        platform,
+        compiled,
+        &models.dit,
+        &models.dit_store,
+        shardings,
+        req.opts,
+        req.geo,
+        text,
+        @intCast(req.tokens.len),
+        req.layout,
+        req.schedules,
+        req.seed,
+        req.cond,
+        progress,
+    );
+    defer latents.deinit(allocator);
+
+    const channels: u32 = @intCast(models.dit.cfg.in_channels);
+    const thwc = try packing.unpatchify(
+        allocator,
+        latents.video,
+        req.target.latent_t,
+        req.target.latent_h,
+        req.target.latent_w,
+        channels,
+        models.dit.cfg.patch_size,
+    );
+    defer allocator.free(thwc);
+    const rgb = try decode.decodeVideo(
+        allocator,
+        io,
+        platform,
+        compiled_vae,
+        &models.visual,
+        &models.visual_store,
+        shardings,
+        req.target,
+        thwc,
+        progress,
+    );
+    defer allocator.free(rgb);
+    const wav = try decode.decodeAudio(
+        allocator,
+        io,
+        platform,
+        compiled_vae,
+        &models.audio,
+        &models.audio_store,
+        shardings,
+        req.target,
+        latents.audio,
+        progress,
+    );
+    defer allocator.free(wav);
+    try decode.writeOutputs(allocator, io, out_dir, dest.dir, dest.mp4_name, req.target, rgb, wav);
+}
+
+fn writeText(io: std.Io, dir: std.Io.Dir, name: []const u8, text: []const u8) !void {
+    const file = try dir.createFile(io, name, .{});
+    defer file.close(io);
+    var writer = file.writer(io, &.{});
+    try writer.interface.writeAll(text);
+    if (text.len == 0 or text[text.len - 1] != '\n')
+        try writer.interface.writeByte('\n');
+}
