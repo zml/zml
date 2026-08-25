@@ -5219,9 +5219,9 @@ pub const pipeline = struct {
             .model = .{ .hold = hold },
             .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
             .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
-            .prev_velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
-            .dt = .init(.{}, .f32),
-            .use_ab2 = .init(.{}, .u32),
+            .sigma = .init(.{}, .f32),
+            .sigma_next = .init(.{}, .f32),
+            .sigma_t = .init(.{}, .f32),
         }});
     }
 
@@ -5230,9 +5230,9 @@ pub const pipeline = struct {
             .model = .{ .hold = hold },
             .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
             .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
-            .prev_velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
-            .dt = .init(.{}, .f32),
-            .use_ab2 = .init(.{}, .u32),
+            .sigma = .init(.{}, .f32),
+            .sigma_next = .init(.{}, .f32),
+            .sigma_t = .init(.{}, .f32),
         }});
     }
 
@@ -6371,10 +6371,6 @@ pub const session = struct {
         defer video_buf.deinit();
         var audio_buf = try bufferFromItems(io, platform, audio_shape, audio);
         defer audio_buf.deinit();
-        var prev_v = try bufferFromItems(io, platform, video_shape, video);
-        defer prev_v.deinit();
-        var prev_a = try bufferFromItems(io, platform, audio_shape, audio);
-        defer prev_a.deinit();
 
         const denoise_start: std.Io.Timestamp = .now(io, .awake);
         log.info(
@@ -6482,52 +6478,48 @@ pub const session = struct {
             defer video_out.deinit();
             defer audio_out.deinit();
 
-            const dt_video = schedules.video.sigmas[step_i] - schedules.video.sigmas[step_i + 1];
-            const dt_audio = schedules.audio.sigmas[step_i] - schedules.audio.sigmas[step_i + 1];
-            const last = schedules.video.sigmas[step_i + 1] == 0;
-            const use_ab2: u32 = if (step_i == 0 or last) 0 else 1;
-            var dt_v = try scalarF32(io, platform, dt_video);
-            defer dt_v.deinit();
-            var dt_a = try scalarF32(io, platform, dt_audio);
-            defer dt_a.deinit();
-            var mode = try scalarU32(io, platform, use_ab2);
-            defer mode.deinit();
+            var sigma_v = try scalarF32(io, platform, schedules.video.sigmas[step_i]);
+            defer sigma_v.deinit();
+            var sigma_v_next = try scalarF32(io, platform, schedules.video.sigmas[step_i + 1]);
+            defer sigma_v_next.deinit();
+            var sigma_v_t = try scalarF32(io, platform, 1.0 - schedules.video.timesteps[step_i]);
+            defer sigma_v_t.deinit();
+            var sigma_a = try scalarF32(io, platform, schedules.audio.sigmas[step_i]);
+            defer sigma_a.deinit();
+            var sigma_a_next = try scalarF32(io, platform, schedules.audio.sigmas[step_i + 1]);
+            defer sigma_a_next.deinit();
+            var sigma_a_t = try scalarF32(io, platform, 1.0 - schedules.audio.timesteps[step_i]);
+            defer sigma_a_t.deinit();
 
             var next_video: zml.Buffer = undefined;
-            var next_prev_v: zml.Buffer = undefined;
             apply_v.run(io, .{
                 .inputs = .{
                     .sample = video_buf,
                     .velocity = video_out,
-                    .prev_velocity = prev_v,
-                    .dt = dt_v,
-                    .use_ab2 = mode,
+                    .sigma = sigma_v,
+                    .sigma_next = sigma_v_next,
+                    .sigma_t = sigma_v_t,
                 },
-                .outputs = .{ .sample = &next_video, .prev = &next_prev_v },
+                .outputs = .{ .sample = &next_video },
                 .opts = .{ .wait = true },
             });
             video_buf.deinit();
-            prev_v.deinit();
             video_buf = next_video;
-            prev_v = next_prev_v;
 
             var next_audio: zml.Buffer = undefined;
-            var next_prev_a: zml.Buffer = undefined;
             apply_a.run(io, .{
                 .inputs = .{
                     .sample = audio_buf,
                     .velocity = audio_out,
-                    .prev_velocity = prev_a,
-                    .dt = dt_a,
-                    .use_ab2 = mode,
+                    .sigma = sigma_a,
+                    .sigma_next = sigma_a_next,
+                    .sigma_t = sigma_a_t,
                 },
-                .outputs = .{ .sample = &next_audio, .prev = &next_prev_a },
+                .outputs = .{ .sample = &next_audio },
                 .opts = .{ .wait = true },
             });
             audio_buf.deinit();
-            prev_a.deinit();
             audio_buf = next_audio;
-            prev_a = next_prev_a;
 
             log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
                 step_i + 1,

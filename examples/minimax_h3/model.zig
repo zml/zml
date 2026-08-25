@@ -1503,67 +1503,26 @@ pub const multistep = struct {
 
     const zml = @import("zml");
 
-    /// Second-order multistep on one flow stream. Data-ward velocity:
-    /// `x_next = x + (sigma - sigma_next) * (1.5 v - 0.5 v_prev)` after step 0.
-    pub fn resMultistep(
+    /// Official `MiniMaxH3Scheduler.step`: data-ward Euler (`eta = 0`).
+    /// `x0 = x_t + (1 - t) * v`, then `x_next = r*x_t + (1-r)*x0` with `r = sigma_next / sigma`.
+    pub fn eulerStep(
         sigmas: []const f32,
+        timesteps: []const f32,
         step_index: usize,
         sample: []f32,
         velocity: []const f32,
-        prev_velocity: ?[]const f32,
     ) void {
         std.debug.assert(step_index + 1 < sigmas.len);
+        std.debug.assert(step_index < timesteps.len);
         std.debug.assert(sample.len == velocity.len);
         const sigma = sigmas[step_index];
         const sigma_next = sigmas[step_index + 1];
-        const dt = sigma - sigma_next;
-        if (step_index == 0 or prev_velocity == null or sigma_next == 0) {
-            for (sample, velocity) |*x, v| x.* += dt * v;
-            return;
+        const sigma_t = 1.0 - timesteps[step_index];
+        const ratio = sigma_next / sigma;
+        for (sample, velocity) |*x, v| {
+            const denoised = x.* + sigma_t * v;
+            x.* = ratio * x.* + (1.0 - ratio) * denoised;
         }
-        const prev = prev_velocity.?;
-        std.debug.assert(prev.len == sample.len);
-        for (sample, velocity, prev) |*x, v, pv| {
-            x.* += dt * (1.5 * v - 0.5 * pv);
-        }
-    }
-
-    pub const State = struct {
-        prev_video: ?[]f32 = null,
-        prev_audio: ?[]f32 = null,
-        allocator: std.mem.Allocator,
-
-        pub fn init(allocator: std.mem.Allocator) State {
-            return .{ .allocator = allocator };
-        }
-
-        pub fn deinit(self: *State) void {
-            if (self.prev_video) |p| self.allocator.free(p);
-            if (self.prev_audio) |p| self.allocator.free(p);
-            self.prev_video = null;
-            self.prev_audio = null;
-        }
-
-        pub fn remember(self: *State, video: []const f32, audio: []const f32) !void {
-            if (self.prev_video) |p| self.allocator.free(p);
-            if (self.prev_audio) |p| self.allocator.free(p);
-            self.prev_video = try self.allocator.dupe(f32, video);
-            self.prev_audio = try self.allocator.dupe(f32, audio);
-        }
-    };
-
-    pub fn dualResMultistep(
-        schedules: scheduler.DualSchedule,
-        step_index: usize,
-        video: []f32,
-        audio: []f32,
-        video_vel: []const f32,
-        audio_vel: []const f32,
-        state: *State,
-    ) !void {
-        resMultistep(schedules.video.sigmas, step_index, video, video_vel, state.prev_video);
-        resMultistep(schedules.audio.sigmas, step_index, audio, audio_vel, state.prev_audio);
-        try state.remember(video_vel, audio_vel);
     }
 
     pub const StepModel = struct {
@@ -1574,34 +1533,31 @@ pub const multistep = struct {
         model: StepModel,
         sample: zml.Tensor,
         velocity: zml.Tensor,
-        prev_velocity: zml.Tensor,
-        dt: zml.Tensor,
-        use_ab2: zml.Tensor,
+        sigma: zml.Tensor,
+        sigma_next: zml.Tensor,
+        sigma_t: zml.Tensor,
     };
 
     pub const StepOutput = struct {
         sample: zml.Tensor,
-        prev: zml.Tensor,
     };
 
     pub fn apply(input: StepInput) StepOutput {
-        const vel = input.velocity.convert(.f32);
-        const prev = input.prev_velocity.convert(.f32);
-        const sample = input.sample.convert(.f32);
-        const ab2 = vel.mul(zml.Tensor.scalar(1.5, .f32)).sub(prev.mul(zml.Tensor.scalar(0.5, .f32)));
-        const use = input.use_ab2.cmp(.NE, zml.Tensor.scalar(0, input.use_ab2.dtype()));
-        const v = zml.Tensor.select(use.broad(vel.shape()), ab2, vel);
-        var next = sample.add(v.mul(input.dt.convert(.f32).broad(v.shape())));
+        const sample = input.sample;
+        const vel = input.velocity.convert(sample.dtype());
+        const sigma_t = input.sigma_t.convert(sample.dtype()).broad(sample.shape());
+        const denoised = sample.add(vel.mul(sigma_t));
+        const sample_f = sample.convert(.f32);
+        const denoised_f = denoised.convert(.f32);
+        const ratio = input.sigma_next.convert(.f32).div(input.sigma.convert(.f32)).broad(sample_f.shape());
+        var next = ratio.mul(sample_f).add(zml.Tensor.scalar(1.0, .f32).sub(ratio).mul(denoised_f));
         if (input.model.hold > 0) {
             const seq = next.dim(.s);
-            const prefix = sample.slice1d(.s, .{ .start = 0, .end = input.model.hold });
+            const prefix = sample_f.slice1d(.s, .{ .start = 0, .end = input.model.hold });
             const rest = next.slice1d(.s, .{ .start = input.model.hold, .end = seq });
             next = zml.Tensor.concatenate(&.{ prefix, rest }, .s);
         }
-        return .{
-            .sample = next.reuseBuffer(input.sample),
-            .prev = vel.reuseBuffer(input.prev_velocity),
-        };
+        return .{ .sample = next.convert(sample.dtype()).reuseBuffer(input.sample) };
     }
 };
 

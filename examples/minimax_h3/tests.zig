@@ -97,11 +97,11 @@ pub fn main() !void {
     try testSchemaFixtures();
     try testTableCoord();
     try testHostFwht();
-    try testMultistepAb2();
+    try testOfficialEuler();
     try testAttentionPolicy();
     try testMemoryPlanExact(allocator);
     try testAdalnIndexLayout(allocator);
-    try testSchedulerFormula();
+    try testSchedulerFormula(allocator);
 
     std.debug.print("minimax_h3 tests: all passed\n", .{});
 }
@@ -1164,11 +1164,11 @@ fn testMultistepSampler() !void {
     var x = [_]f32{1.0};
     const v = [_]f32{1.0};
     const sig = [_]f32{ 1.0, 0.5, 0.0 };
-    multistep_mod.resMultistep(&sig, 0, &x, &v, null);
+    const ts = [_]f32{ 0.0, 0.5 };
+    multistep_mod.eulerStep(&sig, &ts, 0, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
-    const prev = [_]f32{1.0};
     x[0] = 1.0;
-    multistep_mod.resMultistep(&sig, 1, &x, &v, &prev);
+    multistep_mod.eulerStep(&sig, &ts, 1, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
 
@@ -1454,13 +1454,13 @@ fn testHostFwht() !void {
     try std.testing.expectApproxEqAbs(ref, acc, 1e-6);
 }
 
-fn testMultistepAb2() !void {
+fn testOfficialEuler() !void {
     var x = [_]f32{1.0};
     const v = [_]f32{2.0};
-    const prev = [_]f32{0.0};
     const sig = [_]f32{ 1.0, 0.5, 0.25 };
-    multistep_mod.resMultistep(&sig, 1, &x, &v, &prev);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.75), x[0], 1e-6);
+    const ts = [_]f32{ 0.0, 0.5 };
+    multistep_mod.eulerStep(&sig, &ts, 1, &x, &v);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
 
 fn testAttentionPolicy() !void {
@@ -1636,15 +1636,26 @@ fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(per_block * 2 + final, bytes);
 }
 
-fn testSchedulerFormula() !void {
-    const x = [_]f32{1.0};
+fn testSchedulerFormula(allocator: std.mem.Allocator) !void {
+    const sched = try scheduler.Schedule.init(allocator, 12.0, 8);
+    defer sched.deinit(allocator);
+    const want = [_]f32{ 1.0, 0.98630137, 0.96774194, 0.94117647, 0.9, 0.82758621, 0.66666667, 0.0 };
+    try std.testing.expectEqual(want.len, sched.sigmas.len);
+    try std.testing.expectEqual(want.len - 1, sched.timesteps.len);
+    for (want, sched.sigmas) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), sched.timesteps[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), sched.timesteps[6], 1e-6);
+
+    const audio = try scheduler.Schedule.init(allocator, 3.0, 8);
+    defer audio.deinit(allocator);
+    const want_a = [_]f32{ 1.0, 0.94736842, 0.88235294, 0.8, 0.69230769, 0.54545455, 1.0 / 3.0, 0.0 };
+    try std.testing.expectEqual(want_a.len, audio.sigmas.len);
+    for (want_a, audio.sigmas) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
+
+    var x = [_]f32{1.0};
     const v = [_]f32{1.0};
-    const prev = [_]f32{0.5};
     const sig = [_]f32{ 1.0, 0.5, 0.0 };
-    var y = x;
-    multistep_mod.resMultistep(&sig, 0, &y, &v, null);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), y[0], 1e-6);
-    y = x;
-    multistep_mod.resMultistep(&sig, 1, &y, &v, &prev);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), y[0], 1e-6);
+    const ts = [_]f32{ 0.0, 0.5 };
+    multistep_mod.eulerStep(&sig, &ts, 0, &x, &v);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
