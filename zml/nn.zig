@@ -15,6 +15,32 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/nn");
 
+fn weightStem(weight_name: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, weight_name, ".weight"))
+        weight_name[0 .. weight_name.len - ".weight".len]
+    else
+        weight_name;
+}
+
+const Sibling = struct { key: []const u8, shape: Shape };
+
+fn siblingShape(store: zml.io.TensorStore.View, buf: []u8, stem: []const u8, suffix: []const u8) ?Sibling {
+    const key = std.fmt.bufPrint(buf, "{s}.{s}", .{ stem, suffix }) catch return null;
+    const shape = store.getShape(key) orelse return null;
+    return .{ .key = key, .shape = shape };
+}
+
+fn firstSibling(store: zml.io.TensorStore.View, buf: []u8, stem: []const u8, suffixes: []const []const u8) ?Sibling {
+    for (suffixes) |suffix| {
+        if (siblingShape(store, buf, stem, suffix)) |found| return found;
+    }
+    return null;
+}
+
+const scale_suffixes = [_][]const u8{ "weight_scale", "weight_scale_inv" };
+const global_scale_suffixes = [_][]const u8{ "weight_global_scale", "weight_scale_2" };
+const input_scale_suffixes = [_][]const u8{ "input_scale", "pre_quant_scale" };
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -26,6 +52,8 @@ pub const Linear = struct {
         scales: Tensor,
         weight_scale: ?TensorScale = null,
         input_scale: ?TensorScale = null,
+        /// Normalized Hadamard group on the contraction axis (0 = off). 4, 16, or 256.
+        convrot_group: u32 = 0,
     };
 
     /// A per-tensor scale and the polarity its producer wrote it in
@@ -54,6 +82,58 @@ pub const Linear = struct {
         };
     }
 
+    pub fn fromStore(
+        store: zml.io.TensorStore.View,
+        weight_name: []const u8,
+        bias_name: ?[]const u8,
+        partitions: anytype,
+        bias_partitions: anytype,
+        tag: anytype,
+    ) Linear {
+        const bias = if (bias_name) |name| store.maybeCreateTensor(name, .{.dout}, bias_partitions) else null;
+        var layer: Linear = .init(store.createTensor(weight_name, .{ .dout, .d }, partitions), bias, tag);
+        layer.attachQuant(store, weight_name);
+        return layer;
+    }
+
+    pub fn attachQuant(self: *Linear, store: zml.io.TensorStore.View, weight_name: []const u8) void {
+        const stem = weightStem(weight_name);
+        var buf: [256]u8 = undefined;
+        const found = firstSibling(store, &buf, stem, &scale_suffixes) orelse return;
+        const scheme = QuantScheme.classify(self.weight.shape(), found.shape) orelse {
+            log.warn("ignoring scale {s}: shape {f} does not match weight {f}", .{ found.key, found.shape, self.weight.shape() });
+            return;
+        };
+        const scales = if (found.shape.rank() == 0)
+            store.createTensor(found.key, .{}, .replicated)
+        else
+            store.createTensor(found.key, .{ .dout, .sc }, .replicated);
+
+        var gbuf: [256]u8 = undefined;
+        const global = firstSibling(store, &gbuf, stem, &global_scale_suffixes);
+        var ibuf: [256]u8 = undefined;
+        const input = firstSibling(store, &ibuf, stem, &input_scale_suffixes);
+
+        const convrot_group = if (scheme == .int8_per_channel) store.convrotGroup(stem) else 0;
+
+        self.quant = .{
+            .scheme = scheme,
+            .scales = scales,
+            .weight_scale = if (global) |g| .{
+                .value = store.createTensor(g.key, .{}, .replicated),
+                .direction = .multiplier,
+            } else null,
+            .input_scale = if (input) |i| .{
+                .value = if (i.shape.rank() == 0)
+                    store.createTensor(i.key, .{}, .replicated)
+                else
+                    store.createTensor(i.key, .{.d}, .replicated),
+                .direction = .multiplier,
+            } else null,
+            .convrot_group = convrot_group,
+        };
+    }
+
     pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
         zml.Buffer.deinitAll(Linear, self);
     }
@@ -68,6 +148,7 @@ pub const Linear = struct {
 
         if (q.scheme == .int8_per_channel) {
             var lhs = x.convert(.f32);
+            if (q.convrot_group > 0) lhs = applyConvrot(lhs, self.tag, q.convrot_group);
             if (q.input_scale) |s| lhs = lhs.mul(s.asMultiplier().convert(.f32).broad(lhs.shape()));
             const w = self.weight.convert(.f32).mul(q.scales.convert(.f32).broad(self.weight.shape().withDtype(.f32)));
             return lhs.dot(w, self.tag).convert(x.dtype());
@@ -76,7 +157,13 @@ pub const Linear = struct {
         const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
         const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
 
-        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag) else self.weight;
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) blk: {
+            const packed_w = if (self.weight.shape().hasTag(.kw) != null)
+                self.weight
+            else
+                self.weight.renameTag(self.tag, .kw);
+            break :blk unpackFp4(packed_w, self.tag);
+        } else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
             q.scales.bitCast(.f8e8m0)
         else
@@ -198,6 +285,42 @@ fn isMxScale(scale: Shape) bool {
     return scale.rank() == 2 and (scale.dtype() == .f8e8m0 or scale.dtype() == .u8);
 }
 
+/// Normalized Walsh–Hadamard on `axis`, in groups of `group` (power of two).
+/// `H = Hᵀ = H⁻¹`. Used so `(x @ H) @ (W @ H)ᵀ = x @ Wᵀ`.
+pub fn fwhtAlong(x: Tensor, axis: anytype, comptime group: u32) Tensor {
+    comptime {
+        if (group < 2 or group & (group - 1) != 0) {
+            @compileError("fwhtAlong group must be a power of two >= 2");
+        }
+    }
+    const k_tag = Shape.toTag(axis);
+    stdx.debug.assert(x.shape().hasTag(k_tag) != null, "fwhtAlong expects {any} on {f}", .{ k_tag, x.shape() });
+    stdx.debug.assert(@rem(x.dim(k_tag), group) == 0, "fwhtAlong expects {any} multiple of {}, got {f}", .{ k_tag, group, x.shape() });
+
+    var y = x.splitAxis(k_tag, .{ .wh_g = -1, .wh_h = group });
+    comptime var half: u32 = 1;
+    inline while (half < group) : (half *= 2) {
+        const blk = @divExact(group, 2 * half);
+        y = y.splitAxis(.wh_h, .{ .wh_blk = blk, .wh_side = 2, .wh_inn = half });
+        const parts = y.chunkExact(.wh_side, 2);
+        const sum = parts[0].add(parts[1]);
+        const diff = parts[0].sub(parts[1]);
+        y = Tensor.concatenate(&.{ sum, diff }, .wh_side);
+        y = y.reshape(y.shape().mergeAxis(.wh_h, .{ .wh_blk, .wh_side, .wh_inn }));
+    }
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(group)));
+    return y.scale(scale).reshape(y.shape().mergeAxis(k_tag, .{ .wh_g, .wh_h }));
+}
+
+fn applyConvrot(x: Tensor, tag: Shape.Tag, group: u32) Tensor {
+    return switch (group) {
+        4 => fwhtAlong(x, tag, 4),
+        16 => fwhtAlong(x, tag, 16),
+        256 => fwhtAlong(x, tag, 256),
+        else => stdx.debug.panic("Linear.Quant.convrot_group must be 4, 16, or 256, got {}", .{group}),
+    };
+}
+
 // Note: this test will evolve as we support more (INT4/8 and FP8 block-128 as a
 // scaled-dot are still open; see the scaledDot doc comment).
 test "QuantScheme.classify" {
@@ -315,6 +438,56 @@ test "QuantScheme.classify" {
         .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
         .init(.{ .dout = 1, .sc = 1 }, .bf16),
     ));
+}
+
+fn testFwhtGroup(comptime group: u32, src: []const f32, expect_rot: ?[]const f32) !void {
+    const platform = zml.testing.env();
+    const x_shape: Shape = .init(.{ .n = 1, .d = group }, .f32);
+    const x: Tensor = .init(.{ .n = 1, .d = group }, .f32);
+
+    const Local = struct {
+        fn once(input: Tensor) Tensor {
+            return fwhtAlong(input, .d, group);
+        }
+        fn twice(input: Tensor) Tensor {
+            return fwhtAlong(fwhtAlong(input, .d, group), .d, group);
+        }
+    };
+
+    var exe_once = try zml.module.compile(std.testing.allocator, std.testing.io, Local.once, .{x}, platform, .{});
+    defer exe_once.deinit();
+    var exe_twice = try zml.module.compile(std.testing.allocator, std.testing.io, Local.twice, .{x}, platform, .{});
+    defer exe_twice.deinit();
+
+    var input: zml.Buffer = try .fromBytes(std.testing.io, platform, x_shape, .replicated, std.mem.sliceAsBytes(src));
+    defer input.deinit();
+
+    var rotated = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_once, Local.once, .{input});
+    defer rotated.deinit();
+    var restored = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_twice, Local.twice, .{input});
+    defer restored.deinit();
+
+    if (expect_rot) |want| {
+        const expect_slice: Slice = .init(x_shape, std.mem.sliceAsBytes(want));
+        try zml.testing.expectClose(std.testing.io, expect_slice, rotated, .{});
+    }
+    try zml.testing.expectClose(std.testing.io, input, restored, .{});
+}
+
+test "fwhtAlong H4 is involution and matches Sylvester" {
+    // H4 @ [1,2,3,4] / 2 after unnormalized butterflies, then /2 from normalize:
+    // unnormalized natural FWHT = [10, -2, -4, 0]; scale 1/2 → [5, -1, -2, 0]
+    try testFwhtGroup(4, &.{ 1.0, 2.0, 3.0, 4.0 }, &.{ 5.0, -1.0, -2.0, 0.0 });
+}
+
+test "fwhtAlong H16 and H256 are involutions" {
+    var h16: [16]f32 = undefined;
+    for (&h16, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    try testFwhtGroup(16, &h16, null);
+
+    var h256: [256]f32 = undefined;
+    for (&h256, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    try testFwhtGroup(256, &h256, null);
 }
 
 /// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
@@ -517,11 +690,38 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
 
 pub const TokenEmbedding = struct {
     weight: Tensor,
+    scales: ?Tensor = null,
+
+    pub fn fromStore(
+        store: zml.io.TensorStore.View,
+        weight_name: []const u8,
+        partitions: anytype,
+    ) TokenEmbedding {
+        const stem = weightStem(weight_name);
+        var buf: [256]u8 = undefined;
+        const scale = firstSibling(store, &buf, stem, &scale_suffixes);
+        return .{
+            .weight = store.createTensor(weight_name, .{ .voc, .d }, partitions),
+            .scales = if (scale) |s|
+                store.createTensor(s.key, .{ .voc, .sc }, .{ .voc = .replicated, .sc = .replicated })
+            else
+                null,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
+        zml.Buffer.deinitAll(TokenEmbedding, self);
+    }
 
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
-        return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
+        const gathered = self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
+        const scales = self.scales orelse return gathered;
+        var scale = scales.withTags(.{ .voc, .sc }).gather(.{ .voc = idx }, .{});
+        if (scale.shape().hasTag(.sc) != null and scale.dim(.sc) == 1) scale = scale.squeeze(.sc);
+        const out_dt = if (gathered.dtype().isFloat()) gathered.dtype() else .bf16;
+        return gathered.convert(.f32).mul(scale.convert(.f32).broad(gathered.shape().withDtype(.f32))).convert(out_dt);
     }
 };
 

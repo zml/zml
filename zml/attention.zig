@@ -190,6 +190,26 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     };
 }
 
+pub const DenseOpts = struct {
+    is_causal: bool = false,
+};
+
+/// Dense attention (causal or bidirectional). FA2 / FA3 on CUDA when selected;
+/// `zml.nn.sdpa` is the fallback for every other backend.
+pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, parameters: Parameters, opts: DenseOpts) zml.Tensor {
+    return switch (parameters) {
+        .vanilla, .attnd, .nki, .metal_fa => blk: {
+            const mask = if (opts.is_causal)
+                zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
+            else
+                null;
+            break :blk zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+        },
+        .cuda_fa2 => flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+        .cuda_fa3 => flashattn.fa3.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+    };
+}
+
 test "attention: q=1,qh=64,kh=8" {
     try testAttention(
         .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
@@ -239,6 +259,125 @@ test "attention: q=8,qh=64,kh=8" {
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
         &.{56},
     );
+}
+
+test "dense attention: non-causal hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+}
+
+test "dense attention: causal hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: short and long buckets" {
+    try testDense(
+        .init(.{ .q = 8, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 8, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .q = 64, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+}
+
+test "dense attention: f16 hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .f16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .f16),
+        false,
+    );
+}
+
+test "dense attention: gqa causal hd=128" {
+    try testDense(
+        .init(.{ .q = 16, .h = 16, .hd = 128 }, .bf16),
+        .init(.{ .k = 16, .h = 4, .hd = 128 }, .bf16),
+        true,
+    );
+}
+
+pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const platform = zml.testing.env();
+
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } = .{
+        .q = .fromShape(q_shape),
+        .k = .fromShape(k_shape),
+        .v = .fromShape(k_shape),
+    };
+
+    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_q.deinit();
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_k.deinit();
+
+    const q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+    const k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    const v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+
+    const shardings = platform.shardings.values();
+    const vanilla_exe = try platform.compileFn(
+        allocator,
+        io,
+        dense,
+        .{ tensors.q, tensors.k, tensors.v, .vanilla, DenseOpts{ .is_causal = is_causal } },
+        .{
+            .program_name = "dense_attention_vanilla",
+            .shardings = shardings,
+        },
+    );
+    defer vanilla_exe.deinit();
+
+    const vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, dense, .{ q, k, v });
+    try vanilla_d.await(io);
+    const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
+    defer vanilla_h.free(allocator);
+
+    const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
+    for (backends) |backend| {
+        if (!backend.isAvailable(platform)) continue;
+        const parameters: Parameters = .init(.fromBackend(backend));
+        const exe = try platform.compileFn(
+            allocator,
+            io,
+            dense,
+            .{ tensors.q, tensors.k, tensors.v, parameters, DenseOpts{ .is_causal = is_causal } },
+            .{
+                .program_name = try std.fmt.allocPrint(arena, "dense_attention_{t}", .{backend}),
+                .shardings = shardings,
+            },
+        );
+        defer exe.deinit();
+
+        var output_d = try zml.testing.autoCall(allocator, io, &exe, dense, .{ q, k, v });
+        defer output_d.deinit();
+        try output_d.await(io);
+        const output_h = try output_d.toSliceAlloc(allocator, io);
+        defer output_h.free(allocator);
+
+        try zml.testing.expectClose(io, vanilla_h, output_h, .{
+            .absolute_tolerance = 5e-3,
+            .relative_tolerance = 1e-2,
+            .epsilon_relative = 1e-3,
+            .minimum_close_fraction = 0.99,
+        });
+    }
 }
 
 pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {

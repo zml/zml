@@ -22,6 +22,7 @@ pub const std_options: std.Options = .{
 
 const Args = struct {
     model: []const u8,
+    dit: []const u8 = "",
     prompt: []const u8 = "A cinematic wide shot of waves at dusk.",
     image: []const u8 = "",
     last_image: []const u8 = "",
@@ -42,7 +43,8 @@ const Args = struct {
         \\ Attachments pick the task: none, --image/--last-image, or --refs.
         \\
         \\ Options:
-        \\   --model=<path>      Model repository (required)
+        \\   --model=<path>      Model repository or DiT .safetensors (required)
+        \\   --dit=<path>        Quantized DiT weights (optional; encoder/VAE still from --model)
         \\   --prompt=<string>   Text prompt
         \\   --image=<path>      First frame
         \\   --last-image=<path> Last frame
@@ -84,7 +86,8 @@ fn rejectUser(err: anyerror) anyerror {
             .{},
         ),
         error.TransformerMissing => reject(err, "transformer weights not found", .{}),
-        error.EncoderMissing => reject(err, "text_encoder not found", .{}),
+        error.AmbiguousDit => reject(err, "multiple DiT files match this task; pass --dit=<file>", .{}),
+        error.EncoderMissing => reject(err, "text_encoder not found (official text_encoder/ next to --model)", .{}),
         error.VaeMissing => reject(err, "video_vae or audio_vae not found", .{}),
         error.VaeSchemaMismatch => reject(err, "VAE weight names not recognized", .{}),
         error.MissingTokenizer => reject(err, "tokenizer.json not found under the task dir, repo root, or FL2VA/", .{}),
@@ -207,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
     // Model
     //
     const model_repo = try zml.safetensors.resolveModelRepo(io, args.model);
-    var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings) catch |err| return rejectUser(err);
+    var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings, args.model, args.dit) catch |err| return rejectUser(err);
     defer models.deinit(allocator, io);
 
     const opts: pipeline.Options = .{
