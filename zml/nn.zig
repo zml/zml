@@ -106,13 +106,12 @@ pub const QuantScheme = enum {
     /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
     /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
     fp8_per_channel,
-    /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
-    /// vendors publish themselves, under `weight_scale_inv`.
+    /// f8e4m3fn values, one bf16 scale per 128×128 tile (`weight_scale_inv`).
     fp8_block128,
     /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
     /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
     fp8_per_tensor,
-    /// i8 values, one f32/bf16 scale per output row. Host ConvRot/AWQ apply before this.
+    /// i8 values, one f32/bf16 scale per output row.
     int8_per_channel,
 
     pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {

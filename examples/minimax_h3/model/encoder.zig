@@ -108,7 +108,7 @@ const SelfAttn = struct {
         q = applyRotary(q, cos, sin);
         k = applyRotary(k, cos, sin);
 
-        // Official Qwen3-VL text attention is causal (`is_causal = True`).
+        // Text attention is causal.
         const mask = zml.nn.causalAttnMask(.{ .q = q.dim(.s), .k = k.dim(.s) }, q.dtype(), null);
         const attn = zml.nn.sdpa(
             q.rename(.{ .s = .q }),

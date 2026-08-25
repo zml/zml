@@ -847,6 +847,14 @@ fn testIrPipeline(allocator: std.mem.Allocator) !void {
     });
     defer compiled.deinit(allocator);
     try std.testing.expect(ir.alreadyCompiled(compiled.text));
+    const last_only = try ir.compile(allocator, threaded.io(), .{
+        .prompt = "waves at dusk",
+        .variant = .fl2va,
+        .duration_s = 4,
+        .last_image = "last.png",
+    });
+    defer last_only.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, last_only.text, "4.46-second") != null);
     try std.testing.expectError(error.TooManyRefImages, ir.compile(allocator, threaded.io(), .{
         .prompt = "x",
         .variant = .ref2va,

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-/// Sized for one streamed H3 block (~0.5–1 GiB), not a full 33B dump.
+/// Loader sized for one streamed transformer block (~768 MiB).
 pub const loader_opts: zml.io.Loader.Opts = .{
     .dma_chunks = 8,
     .dma_chunk_size = 64 * zml.MiB,

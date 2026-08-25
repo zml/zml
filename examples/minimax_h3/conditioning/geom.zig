@@ -139,7 +139,7 @@ pub fn coverCropLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u3
     return cropRgb(allocator, resized, box.w, box.h, box.x, box.y, dst_w, dst_h);
 }
 
-/// Official 24 fps hold-resample: each source frame is held until the next slot.
+/// 24 fps hold-resample: each source frame is held until the next slot.
 pub fn resampleFrameIndices(src_frames: u32, src_fps: f32, dst_fps: f32, allocator: std.mem.Allocator) ![]u32 {
     if (src_frames == 0) return error.EmptyVideo;
     if (src_fps <= 0 or dst_fps <= 0) return error.InvalidFps;
@@ -224,7 +224,7 @@ pub fn fillBlockTimestamps(sample_count: u32, sample_fps: f32, temporal_patch: u
     return blocks;
 }
 
-/// Python `"{:.1f}"` (round-half-to-even). Zig `@round` is half-away-from-zero.
+/// One decimal place, round half to even.
 pub fn formatSeconds1(value: f32, buf: []u8) []const u8 {
     const scaled = @as(f64, value) * 10.0;
     const whole = @floor(scaled);

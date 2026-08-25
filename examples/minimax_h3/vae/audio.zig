@@ -248,7 +248,7 @@ const TransposeConv = struct {
         const v = self.weight_v.convert(.f32).withPartialTags(.{ .ci, .co, .k });
         const g = squeezeToTag(self.weight_g, .ci);
         const sq = squeezeToTag(v.mul(v).sum(.k).sum(.co), .ci).addConstant(1e-9);
-        // CUDA ignores StableHLO window_reversal on this conv; reverse matches conv_transpose1d.
+        // Reverse along `k`: this conv is conv_transpose1d.
         const fused = v.mul(g.mul(sq.rsqrt()).broad(v.shape())).reverse(.{.k});
         const official_pad = @divFloor(self.kernel - self.stride, 2);
         const xla_pad = self.kernel - 1 - official_pad;

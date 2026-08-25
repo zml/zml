@@ -11,7 +11,7 @@ pub const audio_hz: f32 = 40.0;
 pub const audio_sample_rate: u32 = 32_000;
 pub const visual_spatial: u32 = 16;
 pub const visual_temporal: u32 = 4;
-/// Official VAE clip: `17 * n + 5` pixel frames, `5 * n + 2` latent frames.
+/// VAE clip: `17 * n + 5` pixel frames, `5 * n + 2` latent frames.
 pub const visual_clip_length: u32 = 17;
 pub const visual_latents_per_chunk: u32 = 5;
 pub const visual_cond_timestep: f32 = 0.999;
@@ -232,10 +232,10 @@ pub const EncoderFileConfig = struct {
     }
 };
 
-/// Floor for official 768p. Below this, auto canvas is preview and `--full` is refused.
+/// Minimum measured device memory for 768p (`--full`, and auto on large accelerators).
 pub const full_canvas_min_device_bytes: u64 = 40 * 1024 * 1024 * 1024;
 
-/// Preview + keyframes or refs: packed attention OOM'd at 10 GiB on 24 GiB cards.
+/// FL2VA and Ref2VA at preview or larger need this budget; otherwise `--tiny`.
 pub fn conditionedPreviewNeedsTiny(variant: Variant, short_side: u32, device_bytes: u64) bool {
     if (variant == .t2va) return false;
     return short_side > tiny_short_side and device_bytes != 0 and device_bytes < full_canvas_min_device_bytes;
@@ -264,7 +264,7 @@ pub fn minDeviceBytes(platform: *const zml.Platform) u64 {
     return min_b;
 }
 
-/// `device_bytes == 0` means unknown: CPU/Metal/oneAPI stay preview, CUDA/ROCm/TPU/Neuron stay 768p.
+/// Unreported device memory (`0`): CPU, Metal, and oneAPI use preview; CUDA, ROCm, TPU, and Neuron use 768p.
 pub fn checkCanvas(choice: Canvas, variant: Variant, short_side: u32, device_bytes: u64) !void {
     if (choice == .full and device_bytes != 0 and device_bytes < full_canvas_min_device_bytes)
         return error.FullCanvasTooLarge;
@@ -304,7 +304,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !s
 
 pub const Size = struct { w: u32, h: u32 };
 
-/// Official canvas: short edge, area cap `768*1344`, then nearest multiple of 32.
+/// Canvas: short edge, area cap `768*1344`, then nearest multiple of 32.
 pub fn resolveCanvas(aspect_w: f32, aspect_h: f32, short_edge: u32, max_pixels: u32) error{InvalidAspect}!Size {
     if (aspect_w <= 0 or aspect_h <= 0) return error.InvalidAspect;
     const ratio = aspect_w / aspect_h;

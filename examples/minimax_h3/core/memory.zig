@@ -14,7 +14,7 @@ pub const Plan = struct {
     reason: []const u8,
 };
 
-/// One streamed official block is ~0.5–1 GiB (see `core/weights.zig`).
+/// Bytes reserved for one streamed transformer block.
 pub const streamed_block_bytes: u64 = 768 * 1024 * 1024;
 pub const safety_numer: u64 = 85;
 pub const safety_denom: u64 = 100;

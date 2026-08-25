@@ -578,11 +578,6 @@ fn styleSentence(phrase: []const u8) []const u8 {
 }
 
 fn lowerFirst(text: []const u8) []const u8 {
-    if (text.len == 0) return text;
-    if (text[0] >= 'A' and text[0] <= 'Z') {
-        // Return original; callers that need a lowered copy should alloc. For render we print
-        // the first char lowered inline when the body already starts with a capital from draft.
-    }
     return text;
 }
 
