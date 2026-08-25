@@ -224,10 +224,7 @@ pub const Model = struct {
 };
 
 fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("embed_tokens.weight")) return store;
     if (store.hasKey("model.language_model.embed_tokens.weight")) return store.withPrefix("model.language_model");
-    if (store.hasKey("language_model.embed_tokens.weight")) return store.withPrefix("language_model");
-    if (store.hasKey("model.embed_tokens.weight")) return store.withPrefix("model");
     return store;
 }
 

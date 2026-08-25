@@ -32,10 +32,23 @@ Weights stream one encoder layer and one DiT block at a time. After denoise the 
 
 ## Prompt IR
 
-- `--ir=auto` (default): OpenH3-IR when `H3IR_LLM_URL` is set and `h3ir` is on PATH, otherwise official Prompting Guidance fields
-- `--ir=h3ir`: [open-h3-ir](https://github.com/ruashots/open-h3-ir) plus a local OpenAI-compatible model
-- `--ir=prompt`: official guidance wrap, no LLM
+Official H3-Context-IR is hosted-only. The example writes the same Prompting Guidance fields in-process. No `h3ir` sidecar.
+
+- `--ir=auto` (default): compiler below when `--ir-llm` / `H3IR_LLM_URL` is set; wrap if the URL is missing or the call fails
+- `--ir=h3ir`: require the compiler; fail if the LLM is missing or the call fails
+- `--ir=prompt`: official guidance wrap, no network
 - `--ir=off`: raw string
+
+Compiler stages, in order: capacity (12 files / 9 images / 3 videos / 3 audios) → local measure → vision thumbs on image/video refs (one multimodal compose) → shot plan (1 if under 8 s, 2 if under 12 s, else 3) → beat sheet (LLM only when shots > 1) → compose → validate (S1–S5, S9, I1–I3, L1, L3, L4) → mechanical instruction-line fix → up to 2 LLM repair rounds.
+
+FL2VA wrap and citations follow attached frames (one or two). Ref2VA wrap emits `<Picture N>` / `<Video N>` / `<Audio N>` for each `--refs` item. Duration on the instruction line is the snapped 17n+5 length.
+
+`--ir-llm` is an OpenAI-compatible `/v1` (or full `/v1/chat/completions`). `--ir-model` / `H3IR_LLM_MODEL` selects the model id. `--ir-creativity` and `--ir-director` go in that request. The compiled brief is written to `prompt_ir.txt` under `--out`. The LLM call overlaps weight load.
+
+```bash
+export H3IR_LLM_URL=http://127.0.0.1:8000/v1
+export H3IR_LLM_MODEL=qwen3-vl
+```
 
 ## Run
 
@@ -76,7 +89,7 @@ bazel run //examples/minimax_h3 -- --tiny --decode-only --out=out_t2va
 
 Metal, ROCm, and TPU use the same flags plus the matching `--@zml//platforms:...=true`.
 
-`--shared=<dir>` loads official `video_noise.f32`, `audio_noise.f32`, and `prompt_embeds.f32` and skips encoder sampling. Use this to compare DiT output against official dumps of the same inputs.
+`--seed` uses the official PyTorch CPU generator: condition NCHW, then target `(C,T,H,W)` patchified, then audio rows `(2*T,C)`. `--shared=<dir>` loads official `video_noise.f32`, `audio_noise.f32`, and `prompt_embeds.f32` and skips that draw plus encoder sampling.
 
 ## Weights
 
@@ -120,7 +133,7 @@ Layout: `config.zig` hyperparams, `sharding.zig` device mesh, `conditions.zig` F
 
 ## Tests
 
-Host tests cover config aliases, MM-RoPE dims, AdaLN table width, dual schedules, packing, patchify, canvas snap-to-32, and tensor-parallel degree for every `Platform.Target`. They do not need weights or a GPU.
+Host tests cover config aliases, MM-RoPE dims, AdaLN table width, dual schedules, packing, patchify, official CPU `randn`, canvas snap-to-32, IR capacity / wrap / validate, chat parse, and tensor-parallel degree for every `Platform.Target`. They do not need weights or a GPU.
 
 ```bash
 bazel run //examples/minimax_h3:h3_tests

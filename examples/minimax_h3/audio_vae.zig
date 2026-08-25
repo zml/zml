@@ -190,8 +190,8 @@ const WNConv1d = struct {
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64, dilation: i64, padding: i64) WNConv1d {
         return .{
-            .weight_v = pickByRank(store, &.{ "weight_v", "parametrizations.weight.original1", "weight" }),
-            .weight_g = pickByRank(store, &.{ "weight_g", "parametrizations.weight.original0" }),
+            .weight_v = pickByRank(store, &.{"weight_v"}),
+            .weight_g = pickByRank(store, &.{"weight_g"}),
             .bias = maybe(store, &.{"bias"}, .{.co}),
             .stride = stride,
             .dilation = dilation,
@@ -228,13 +228,10 @@ const TransposeConv = struct {
     kernel: i64,
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64, kernel: i64) TransposeConv {
-        const inner = if (store.hasKey("0.weight_v") or store.hasKey("0.weight") or store.hasKey("0.parametrizations.weight.original1"))
-            store.withPrefix("0")
-        else
-            store;
+        const inner = store.withPrefix("0");
         return .{
-            .weight_v = pickTranspose(inner, &.{ "weight_v", "parametrizations.weight.original1", "weight" }),
-            .weight_g = pickByRank(inner, &.{ "weight_g", "parametrizations.weight.original0" }),
+            .weight_v = pickTranspose(inner, &.{"weight_v"}),
+            .weight_g = pickByRank(inner, &.{"weight_g"}),
             .bias = maybe(inner, &.{"bias"}, .{.co}),
             .stride = stride,
             .kernel = kernel,
@@ -274,7 +271,7 @@ const SnakeBeta = struct {
     logscale: bool = true,
 
     pub fn init(store: zml.io.TensorStore.View) SnakeBeta {
-        const act = if (store.hasKey("act.alpha")) store.withPrefix("act") else store;
+        const act = store.withPrefix("act");
         return .{
             .alpha = pickChannel(act, &.{"alpha"}),
             .beta = pickChannel(act, &.{"beta"}),
@@ -416,12 +413,8 @@ pub const Model = struct {
     conv_post: WNConv1d,
     cfg: Config,
 
-    pub fn init(allocator: std.mem.Allocator, store_: zml.io.TensorStore.View, cfg: Config) !Model {
-        const store = rootView(store_);
-        const dec = if (store.hasKey("decoder.conv_pre.weight_g") or store.hasKey("decoder.conv_pre.weight") or store.hasKey("decoder.conv_pre.weight_v"))
-            store.withPrefix("decoder")
-        else
-            store;
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !Model {
+        const dec = store.withPrefix("decoder");
 
         const ups = try allocator.alloc(TransposeConv, cfg.upsample_rates.len);
         errdefer allocator.free(ups);
@@ -442,7 +435,7 @@ pub const Model = struct {
             }
         }
 
-        const proj_store = if (store.hasKey("dec_in_proj.weight")) store.withPrefix("dec_in_proj") else store.withPrefix("decoder.dec_in_proj");
+        const proj_store = store.withPrefix("dec_in_proj");
         return .{
             .dec_in_proj = conv1x1(proj_store),
             .conv_pre = .init(dec.withPrefix("conv_pre"), 1, 1, 3),
@@ -471,12 +464,6 @@ pub const Model = struct {
         WNConv1d.unloadBuffers(&self.conv_post);
     }
 };
-
-fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("dec_in_proj.weight") or store.hasKey("decoder.conv_pre.weight_v") or store.hasKey("decoder.conv_pre.weight")) return store;
-    if (store.hasKey("model.dec_in_proj.weight")) return store.withPrefix("model");
-    return store;
-}
 
 pub const DecodeInput = struct {
     model: Model,
@@ -545,7 +532,7 @@ const ResidualUnit = struct {
     conv1: WNConv1d,
 
     pub fn init(store: zml.io.TensorStore.View, dilation: i64) ResidualUnit {
-        const inner = if (store.hasKey("block.1.weight_v") or store.hasKey("block.1.weight")) store.withPrefix("block") else store;
+        const inner = store.withPrefix("block");
         const pad = @divFloor(6 * dilation, 2);
         return .{
             .snake0 = .init(inner.withLayer(0)),
@@ -582,7 +569,7 @@ const EncoderBlock = struct {
     conv: WNConv1d,
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64) EncoderBlock {
-        const inner = if (store.hasKey("block.0.block.0.alpha") or store.hasKey("block.0.block.1.weight_v")) store.withPrefix("block") else store;
+        const inner = store.withPrefix("block");
         const pad = std.math.divCeil(i64, stride, 2) catch stride;
         return .{
             .unit0 = .init(inner.withLayer(0), 1),
@@ -756,18 +743,11 @@ const AttnProjection = struct {
 };
 
 pub fn decodeReady(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("dec_in_proj.weight") or
-        store.hasKey("decoder.conv_pre.weight_v") or
-        store.hasKey("decoder.conv_pre.weight") or
-        store.hasKey("decoder.conv_pre.parametrizations.weight.original1") or
-        store.hasKey("model.dec_in_proj.weight");
+    return store.hasKey("dec_in_proj.weight") and store.hasKey("decoder.conv_pre.weight_v");
 }
 
 pub fn encodeReady(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("encoder.block.0.weight_v") or
-        store.hasKey("encoder.block.0.weight") or
-        store.hasKey("encoder.0.weight_v") or
-        store.hasKey("mean_proj.weight");
+    return store.hasKey("encoder.block.0.weight_v") and store.hasKey("mean_proj.weight");
 }
 
 pub const EncoderModel = struct {
@@ -779,12 +759,8 @@ pub const EncoderModel = struct {
     mean_proj: zml.nn.Linear,
     cfg: Config,
 
-    pub fn init(store_: zml.io.TensorStore.View, cfg: Config) EncoderModel {
-        const store = rootView(store_);
-        const enc = if (store.hasKey("encoder.block.0.weight_v") or store.hasKey("encoder.block.0.weight") or store.hasKey("encoder.block.0.block.0.alpha"))
-            store.withPrefix("encoder.block")
-        else
-            store.withPrefix("encoder");
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config) EncoderModel {
+        const enc = store.withPrefix("encoder.block");
         return .{
             .conv_in = .init(enc.withLayer(0), 1, 1, 3),
             .blocks = .{

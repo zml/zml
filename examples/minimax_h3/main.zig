@@ -48,6 +48,10 @@ const Args = struct {
     refs: []const u8 = "",
     out: []const u8 = ".",
     shared: []const u8 = "",
+    ir_llm: []const u8 = "",
+    ir_model: []const u8 = "",
+    ir_creativity: []const u8 = "balanced",
+    ir_director: []const u8 = "",
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
@@ -61,6 +65,10 @@ const Args = struct {
         \\   --model=<path>      Repository (hf://MiniMaxAI/MiniMax-H3 or local)
         \\   --prompt=<string>   Text prompt (OpenH3-IR or Prompting Guidance wrap)
         \\   --ir=<mode>         auto | prompt | h3ir | off (default: auto)
+        \\   --ir-llm=<url>      OpenAI-compatible chat API (env H3IR_LLM_URL)
+        \\   --ir-model=<name>   model id on that API (env H3IR_LLM_MODEL)
+        \\   --ir-creativity=    restrained | balanced | bold | extreme (default: balanced)
+        \\   --ir-director=      optional director note for the IR writer
         \\   --variant=<name>    t2va | fl2va | ref2va (default: t2va)
         \\   --image=<path>      FL2VA first frame (ppm/jpg/png)
         \\   --last-image=<path> FL2VA last frame
@@ -100,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
         return reject(error.UnknownAspect, "unknown --ratio={s} (21:9|16:9|4:3|1:1|3:4|9:16)", .{args.ratio});
     const ir_mode = ir_mod.Mode.parse(args.ir) orelse
         return reject(error.UnknownIrMode, "unknown --ir={s} (auto|prompt|h3ir|off)", .{args.ir});
+    const ir_creativity = ir_mod.Creativity.parse(args.ir_creativity) orelse
+        return reject(error.UnknownIrCreativity, "unknown --ir-creativity={s} (restrained|balanced|bold|extreme)", .{args.ir_creativity});
     if (args.duration < 4.0 or args.duration > 15.0)
         return reject(error.InvalidDuration, "--duration must be 4–15, got {d}", .{args.duration});
     if (variant == .fl2va and args.image.len == 0 and args.last_image.len == 0 and !args.decode_only and !args.probe)
@@ -113,6 +123,8 @@ pub fn main(init: std.process.Init) !void {
 
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
+    var ir_http: std.http.Client = .{ .allocator = allocator, .io = init.io };
+    defer ir_http.deinit();
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
     defer http_client.deinit();
     var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
@@ -181,6 +193,30 @@ pub fn main(init: std.process.Init) !void {
             platform.devices.len,
         },
     );
+
+    const ir_req: ir_mod.Request = .{
+        .prompt = args.prompt,
+        .variant = variant,
+        .duration_s = args.duration,
+        .aspect = args.ratio,
+        .mode = if (args.decode_only or args.probe) .off else ir_mode,
+        .llm_url = if (args.ir_llm.len != 0) args.ir_llm else init.environ_map.get("H3IR_LLM_URL"),
+        .llm_model = if (args.ir_model.len != 0) args.ir_model else init.environ_map.get("H3IR_LLM_MODEL"),
+        .image = args.image,
+        .last_image = args.last_image,
+        .refs = args.refs,
+        .seed = args.seed,
+        .creativity = ir_creativity,
+        .director = args.ir_director,
+        .http = &ir_http,
+    };
+    const want_llm = ir_req.mode == .h3ir or (ir_req.mode == .auto and ir_mod.hasLlm(ir_req));
+    var ir_fut = if (want_llm) try init.io.concurrent(ir_mod.compile, .{ allocator, init.io, ir_req }) else null;
+    errdefer if (ir_fut) |*f| if (f.cancel(init.io)) |b| {
+        var owned = b;
+        owned.deinit(allocator);
+    } else |_| {} else {};
+
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     const task = try config_mod.openTaskDir(io, repo, variant);
     var task_dir = task.dir;
@@ -278,13 +314,17 @@ pub fn main(init: std.process.Init) !void {
 
     const geo = pipeline.Geometry.init(opts, dit_cfg);
 
-    var brief = try ir_mod.compile(allocator, io, .{
-        .prompt = args.prompt,
-        .variant = variant,
-        .duration_s = args.duration,
-        .mode = ir_mode,
-        .llm_url = init.environ_map.get("H3IR_LLM_URL"),
-    });
+    var brief = blk: {
+        if (ir_fut) |*f| {
+            const result = f.await(init.io) catch |err| {
+                ir_fut = null;
+                return rejectIr(err);
+            };
+            ir_fut = null;
+            break :blk result;
+        }
+        break :blk ir_mod.compile(allocator, init.io, ir_req) catch |err| return rejectIr(err);
+    };
     defer brief.deinit(allocator);
 
     var tokenizer = try loadTokenizer(allocator, io, task_dir, repo, &progress);
@@ -495,6 +535,8 @@ pub fn main(init: std.process.Init) !void {
         out_owned = true;
     }
     defer if (out_owned) out_dir.close(io);
+    if (!args.decode_only and !args.probe)
+        try writeText(io, out_dir, "prompt_ir.txt", brief.text);
 
     const video_n = geo.video_tokens * geo.video_patch_dim;
     const audio_n = geo.audio_tokens * geo.audio_dim;
@@ -531,6 +573,7 @@ pub fn main(init: std.process.Init) !void {
             schedules,
             args.seed,
             .{
+                .videos = cond_set.videos,
                 .video_patches = cond_set.video_patches,
                 .audio_patches = cond_set.audio_patches,
                 .video_noise = if (shared_inputs) |s| s.video_rows else null,
@@ -617,6 +660,29 @@ fn loadTokenizer(
 fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
     log.err(fmt, args);
     return err;
+}
+
+fn rejectIr(err: anyerror) anyerror {
+    return switch (err) {
+        error.H3irLlmMissing => reject(err, "--ir=h3ir needs --ir-llm or H3IR_LLM_URL (OpenAI-compatible /v1). Use --ir=prompt for no LLM.", .{}),
+        error.H3irLlmFailed => reject(err, "IR LLM call failed. Check --ir-llm / H3IR_LLM_URL.", .{}),
+        error.H3irEmpty => reject(err, "IR LLM returned an empty brief", .{}),
+        error.H3irHttpMissing => reject(err, "IR HTTP client missing", .{}),
+        error.TooManyRefs => reject(err, "too many --refs (max 12 files)", .{}),
+        error.TooManyRefImages => reject(err, "too many reference images (max 9)", .{}),
+        error.TooManyRefVideos => reject(err, "too many reference videos (max 3)", .{}),
+        error.TooManyRefAudios => reject(err, "too many reference audios (max 3)", .{}),
+        else => err,
+    };
+}
+
+fn writeText(io: std.Io, dir: std.Io.Dir, name: []const u8, text: []const u8) !void {
+    const file = try dir.createFile(io, name, .{});
+    defer file.close(io);
+    var writer = file.writer(io, &.{});
+    try writer.interface.writeAll(text);
+    if (text.len == 0 or text[text.len - 1] != '\n')
+        try writer.interface.writeByte('\n');
 }
 
 fn readTokenizerAny(allocator: std.mem.Allocator, io: std.Io, task_dir: std.Io.Dir, repo: std.Io.Dir) ![]u8 {

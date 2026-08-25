@@ -74,18 +74,12 @@ const FileConfig = struct {
 };
 
 fn visionView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("visual.patch_embed.proj.weight") or store.hasKey("visual.blocks.0.norm1.weight")) return store.withPrefix("visual");
     if (store.hasKey("model.visual.patch_embed.proj.weight")) return store.withPrefix("model.visual");
-    if (store.hasKey("vision_tower.patch_embed.proj.weight")) return store.withPrefix("vision_tower");
-    if (store.hasKey("patch_embed.proj.weight")) return store;
     return store;
 }
 
 pub fn ready(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("visual.patch_embed.proj.weight") or
-        store.hasKey("model.visual.patch_embed.proj.weight") or
-        store.hasKey("vision_tower.patch_embed.proj.weight") or
-        store.hasKey("patch_embed.proj.weight");
+    return store.hasKey("model.visual.patch_embed.proj.weight");
 }
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
@@ -167,15 +161,15 @@ pub const VisionBlock = struct {
     pub const Output = struct { hidden: zml.Tensor };
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) VisionBlock {
-        const attn = if (store.hasKey("attn.qkv.weight")) store.withPrefix("attn") else store;
-        const mlp = if (store.hasKey("mlp.linear_fc1.weight")) store.withPrefix("mlp") else store;
+        const attn = store.withPrefix("attn");
+        const mlp = store.withPrefix("mlp");
         return .{
             .norm1 = .init(store.withPrefix("norm1")),
-            .qkv = linear(attn, if (attn.hasKey("qkv.weight")) "qkv.weight" else "qkv_proj.weight", if (attn.hasKey("qkv.bias")) "qkv.bias" else null),
-            .proj = linear(attn, if (attn.hasKey("proj.weight")) "proj.weight" else "proj.0.weight", if (attn.hasKey("proj.bias")) "proj.bias" else "proj.0.bias"),
+            .qkv = linear(attn, "qkv.weight", "qkv.bias"),
+            .proj = linear(attn, "proj.weight", "proj.bias"),
             .norm2 = .init(store.withPrefix("norm2")),
-            .fc1 = linear(mlp, if (mlp.hasKey("linear_fc1.weight")) "linear_fc1.weight" else "fc1.weight", if (mlp.hasKey("linear_fc1.bias")) "linear_fc1.bias" else "fc1.bias"),
-            .fc2 = linear(mlp, if (mlp.hasKey("linear_fc2.weight")) "linear_fc2.weight" else "fc2.weight", if (mlp.hasKey("linear_fc2.bias")) "linear_fc2.bias" else "fc2.bias"),
+            .fc1 = linear(mlp, "linear_fc1.weight", "linear_fc1.bias"),
+            .fc2 = linear(mlp, "linear_fc2.weight", "linear_fc2.bias"),
             .num_heads = cfg.num_heads,
             .head_dim = cfg.headDim(),
         };
@@ -748,8 +742,6 @@ fn runPatches(
             ds_i += 1;
         }
     }
-    log.debug("vision blocks {d}", .{n_blocks});
-
     var merge_bufs = try loaded.loadMerger(allocator, io, platform, store, shardings, progress);
     defer Merger.unloadBuffers(&merge_bufs);
     var merge_run = try zml.FnExe(Merger.forward).Runner(.{.model}).init(&compiled.merger, allocator, .{ .model = merge_bufs });

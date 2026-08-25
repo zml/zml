@@ -2,9 +2,9 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
 const dit = @import("dit.zig");
 const encoder = @import("encoder.zig");
+const noise = @import("noise.zig");
 const packing = @import("packing.zig");
 const pipeline = @import("pipeline.zig");
 const scheduler_mod = @import("scheduler.zig");
@@ -238,7 +238,6 @@ pub fn encodeText(
     defer token_buf.deinit();
     const encode_start: std.Io.Timestamp = .now(io, .awake);
     log.info("encoder: start tokens={d} layers={d}", .{ tokens.len, loaded.inner.layers.len });
-    log.debug("encoder embed: load", .{});
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
     var embed_runner = try zml.FnExe(encoder.EmbedTokens.forward).Runner(.{.embedding}).init(&compiled.encode_embed, allocator, .{
@@ -267,13 +266,11 @@ pub fn encodeText(
     errdefer cancelEnc(&next_f, io);
 
     var hidden: zml.Buffer = undefined;
-    log.debug("encoder embed: run tokens={d}", .{tokens.len});
     embed_runner.run(io, .{
         .inputs = .{ .tokens = token_buf },
         .outputs = .{ .hidden = &hidden },
         .opts = .{ .wait = true },
     });
-    log.debug("encoder embed: ok {f}", .{hidden.shape()});
     errdefer hidden.deinit();
 
     if (extras.vision_merged) |merged| {
@@ -332,7 +329,6 @@ pub fn encodeText(
             break :blk zero_delta;
         } else zero_delta;
         var next: zml.Buffer = undefined;
-        log.debug("encoder layer {d}/{d}: run", .{ layer_i + 1, n_layers });
         layer_runner.?.run(io, .{
             .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf, .visual_delta = delta },
             .outputs = .{ .hidden = &next },
@@ -410,6 +406,7 @@ pub fn loadShared(
 }
 
 pub const DenoiseCond = struct {
+    videos: []const packing.ConditionVideo = &.{},
     video_patches: []const f32 = &.{},
     audio_patches: []const f32 = &.{},
     video_noise: ?[]const f32 = null,
@@ -434,41 +431,32 @@ pub fn denoise(
     cond: DenoiseCond,
     progress: *std.Progress.Node,
 ) !Latents {
-    var rng = std.Random.DefaultPrng.init(seed);
-    const video_n = geo.video_tokens * geo.video_patch_dim;
-    const audio_n = geo.audio_tokens * geo.audio_dim;
-    const video = try allocator.alloc(f32, video_n);
+    var gen = noise.Generator.init(seed);
+    var video = if (cond.video_noise) |src| blk: {
+        const copy = try allocator.dupe(f32, src);
+        break :blk copy;
+    } else try noise.drawVideo(
+        allocator,
+        &gen,
+        cond.videos,
+        cond.video_patches,
+        geo.latent_t,
+        geo.latent_h,
+        geo.latent_w,
+        loaded.inner.cfg.patch_size,
+    );
     errdefer allocator.free(video);
-    const audio = try allocator.alloc(f32, audio_n);
+    var audio = if (cond.audio_noise) |src| blk: {
+        const copy = try allocator.dupe(f32, src);
+        break :blk copy;
+    } else try noise.drawAudio(allocator, &gen, cond.audio_patches, geo.audio_dim, geo.audio_t);
     errdefer allocator.free(audio);
-    const video_vel = try allocator.alloc(f32, video_n);
+    if (video.len != geo.video_tokens * geo.video_patch_dim) return error.VideoNoiseSize;
+    if (audio.len != geo.audio_tokens * geo.audio_dim) return error.AudioNoiseSize;
+    const video_vel = try allocator.alloc(f32, video.len);
     defer allocator.free(video_vel);
-    const audio_vel = try allocator.alloc(f32, audio_n);
+    const audio_vel = try allocator.alloc(f32, audio.len);
     defer allocator.free(audio_vel);
-    if (cond.video_noise) |src| {
-        if (src.len != video.len) return error.SharedNoiseSize;
-        @memcpy(video, src);
-    } else {
-        fillUnitNormal(rng.random(), video);
-    }
-    if (cond.audio_noise) |src| {
-        if (src.len != audio.len) return error.SharedNoiseSize;
-        @memcpy(audio, src);
-    } else {
-        fillUnitNormal(rng.random(), audio);
-    }
-    if (cond.video_patches.len != 0) {
-        std.debug.assert(cond.video_patches.len <= video.len);
-        // Official: x_t = t*x0 + (1-t)*noise at t=0.999, held for every step.
-        var i: usize = 0;
-        while (i < cond.video_patches.len) : (i += 1) {
-            video[i] = scheduler_mod.Schedule.scaleNoise(config_mod.visual_cond_timestep, cond.video_patches[i], video[i]);
-        }
-    }
-    if (cond.audio_patches.len != 0) {
-        std.debug.assert(cond.audio_patches.len <= audio.len);
-        @memcpy(audio[0..cond.audio_patches.len], cond.audio_patches);
-    }
     const held_video = try allocator.dupe(f32, video[0..cond.video_patches.len]);
     defer allocator.free(held_video);
     const held_audio = try allocator.dupe(f32, audio[0..cond.audio_patches.len]);
@@ -493,22 +481,18 @@ pub fn denoise(
     var time_idx = try bufferFromItems(io, platform, .init(.{ .s = seq }, .u32), host.timestep_indices);
     defer time_idx.deinit();
 
-    var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
-    defer dit.EmbedModel.unloadBuffers(&embed_bufs, allocator);
-    var embed_runner = try zml.FnExe(dit.embed).Runner(.{.model}).init(&compiled.embed, allocator, .{ .model = embed_bufs });
-    defer embed_runner.deinit(allocator);
-
-    var finish_bufs = try loaded.loadFinish(allocator, io, platform, store, shardings, progress);
-    defer dit.FinishModel.unloadBuffers(&finish_bufs);
-    var finish_runner = try zml.FnExe(dit.finish).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = finish_bufs });
-    defer finish_runner.deinit(allocator);
-
     var loaders = [2]zml.io.Loader{
         try weights.initLoader(allocator, platform),
         try weights.initLoader(allocator, platform),
     };
     defer loaders[0].deinit();
     defer loaders[1].deinit();
+    const EmbedRunner = zml.FnExe(dit.embed).Runner(.{.model});
+    var embed_runner: ?EmbedRunner = null;
+    defer if (embed_runner) |*r| r.deinit(allocator);
+    const FinishRunner = zml.FnExe(dit.finish).Runner(.{.model});
+    var finish_runner: ?FinishRunner = null;
+    defer if (finish_runner) |*r| r.deinit(allocator);
     const BlockRunner = zml.FnExe(dit.TransformerBlock.forward).Runner(.{.layer});
     var block_runner: ?BlockRunner = null;
     defer if (block_runner) |*r| r.deinit(allocator);
@@ -536,6 +520,38 @@ pub fn denoise(
         var timestep_buf = try bufferFromItems(io, platform, .init(.{ .n = packing.timestep_slot_count }, .f32), host.timesteps);
         defer timestep_buf.deinit();
 
+        var hidden: zml.Buffer = undefined;
+        var temb: zml.Buffer = undefined;
+        var cos: zml.Buffer = undefined;
+        var sin: zml.Buffer = undefined;
+        {
+            var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
+            defer dit.EmbedModel.unloadBuffers(&embed_bufs, allocator);
+            if (embed_runner) |*r| {
+                weights.rebake(r, .{ .model = embed_bufs });
+            } else {
+                embed_runner = try EmbedRunner.init(&compiled.embed, allocator, .{ .model = embed_bufs });
+            }
+            embed_runner.?.run(io, .{
+                .inputs = .{
+                    .video = video_buf,
+                    .audio = audio_buf,
+                    .text = text,
+                    .timestep = timestep_buf,
+                    .position_ids = pos_buf,
+                    .video_indices = video_idx,
+                    .audio_indices = audio_idx,
+                    .text_indices = text_idx,
+                },
+                .outputs = .{ .hidden = &hidden, .temb = &temb, .cos = &cos, .sin = &sin },
+                .opts = .{ .wait = true },
+            });
+        }
+        defer hidden.deinit();
+        defer temb.deinit();
+        defer cos.deinit();
+        defer sin.deinit();
+
         const DitFut = @TypeOf(try io.concurrent(loadDitBlock, .{
             allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
         }));
@@ -547,29 +563,6 @@ pub fn denoise(
         }) else null;
         errdefer cancelDit(&current_f, io);
         errdefer cancelDit(&next_f, io);
-
-        var hidden: zml.Buffer = undefined;
-        var temb: zml.Buffer = undefined;
-        var cos: zml.Buffer = undefined;
-        var sin: zml.Buffer = undefined;
-        embed_runner.run(io, .{
-            .inputs = .{
-                .video = video_buf,
-                .audio = audio_buf,
-                .text = text,
-                .timestep = timestep_buf,
-                .position_ids = pos_buf,
-                .video_indices = video_idx,
-                .audio_indices = audio_idx,
-                .text_indices = text_idx,
-            },
-            .outputs = .{ .hidden = &hidden, .temb = &temb, .cos = &cos, .sin = &sin },
-            .opts = .{ .wait = true },
-        });
-        defer hidden.deinit();
-        defer temb.deinit();
-        defer cos.deinit();
-        defer sin.deinit();
 
         var block_i: usize = 0;
         while (block_i < n_blocks) : (block_i += 1) {
@@ -604,17 +597,26 @@ pub fn denoise(
 
         var video_out: zml.Buffer = undefined;
         var audio_out: zml.Buffer = undefined;
-        finish_runner.run(io, .{
-            .inputs = .{
-                .hidden = hidden,
-                .temb = temb,
-                .timestep_indices = time_idx,
-                .video_indices = video_idx,
-                .audio_indices = audio_idx,
-            },
-            .opts = .{ .wait = true },
-            .outputs = .{ .video = &video_out, .audio = &audio_out },
-        });
+        {
+            var finish_bufs = try loaded.loadFinish(allocator, io, platform, store, shardings, progress);
+            defer dit.FinishModel.unloadBuffers(&finish_bufs);
+            if (finish_runner) |*r| {
+                weights.rebake(r, .{ .model = finish_bufs });
+            } else {
+                finish_runner = try FinishRunner.init(&compiled.finish, allocator, .{ .model = finish_bufs });
+            }
+            finish_runner.?.run(io, .{
+                .inputs = .{
+                    .hidden = hidden,
+                    .temb = temb,
+                    .timestep_indices = time_idx,
+                    .video_indices = video_idx,
+                    .audio_indices = audio_idx,
+                },
+                .opts = .{ .wait = true },
+                .outputs = .{ .video = &video_out, .audio = &audio_out },
+            });
+        }
         defer video_out.deinit();
         defer audio_out.deinit();
 
@@ -676,7 +678,6 @@ fn loadEncoderLayer(
     progress: *std.Progress.Node,
     loader: *zml.io.Loader,
 ) !zml.Bufferized(encoder.TransformerLayer) {
-    log.debug("encoder layer {d}: load", .{index + 1});
     return loaded.loadLayer(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
@@ -694,15 +695,3 @@ fn loadDitBlock(
     return loaded.loadBlock(allocator, io, platform, store, shardings, index, progress, loader);
 }
 
-fn fillUnitNormal(random: std.Random, out: []f32) void {
-    var i: usize = 0;
-    while (i + 1 < out.len) : (i += 2) {
-        const unit_a = @max(random.float(f32), 1e-7);
-        const unit_b = random.float(f32);
-        const r = @sqrt(-2.0 * @log(unit_a));
-        const theta = 2.0 * std.math.pi * unit_b;
-        out[i] = r * @cos(theta);
-        out[i + 1] = r * @sin(theta);
-    }
-    if (i < out.len) out[i] = random.floatNorm(f32);
-}
