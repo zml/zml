@@ -596,6 +596,7 @@ fn testCanvas() !void {
     try std.testing.expectEqual(@as(u32, 22), config.alignFrameCount(17));
     try std.testing.expectEqual(@as(u32, 124), config.alignFrameCount(120));
     try std.testing.expectEqual(@as(u32, 37), config.videoLatentFrames(124));
+    try std.testing.expectEqual(@as(u32, 207), config.audioLatentLength(5.0));
 }
 
 fn testVaeGeometry() !void {
