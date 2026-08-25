@@ -190,7 +190,7 @@ const Downsample = struct {
     spatial_stride: i64,
 
     pub fn init(store: zml.io.TensorStore.View, temporal_stride: i64, spatial_stride: i64) Downsample {
-        const inner = if (store.hasKey("conv.weight")) store.withPrefix("conv") else store;
+        const inner = store.withPrefix("conv");
         return .{
             .conv = .init(inner, temporal_stride, spatial_stride, 0, 2),
             .spatial_stride = spatial_stride,
@@ -217,12 +217,12 @@ const DownBlock = struct {
     downsample: ?Downsample,
 
     pub fn init(store: zml.io.TensorStore.View, temporal_factor: i64, spatial_factor: i64) DownBlock {
-        const blocks = if (store.hasKey("block.0.conv1.weight")) store.withPrefix("block") else store.withPrefix("resnets");
+        const blocks = store.withPrefix("block");
         return .{
             .block0 = .init(blocks.withLayer(0)),
             .block1 = .init(blocks.withLayer(1)),
             .downsample = if (temporal_factor * spatial_factor > 1)
-                .init(if (store.hasKey("downsample.conv.weight") or store.hasKey("downsample.weight")) store.withPrefix("downsample") else store, temporal_factor, spatial_factor)
+                .init(store.withPrefix("downsample"), temporal_factor, spatial_factor)
             else
                 null,
         };
@@ -242,21 +242,11 @@ const DownBlock = struct {
 };
 
 fn encoderView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("encoder.conv_in.weight")) return store.withPrefix("encoder");
-    if (store.hasKey("model.encoder.conv_in.weight")) return store.withPrefix("model.encoder");
-    return store;
-}
-
-fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("encoder.conv_in.weight") or store.hasKey("quant_conv.weight")) return store;
-    if (store.hasKey("model.encoder.conv_in.weight")) return store.withPrefix("model");
-    return store;
+    return store.withPrefix("encoder");
 }
 
 pub fn ready(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("encoder.conv_in.weight") or
-        store.hasKey("model.encoder.conv_in.weight") or
-        store.hasKey("conv_in.weight");
+    return store.hasKey("encoder.conv_in.weight") and store.hasKey("quant_conv.weight");
 }
 
 pub const Model = struct {
@@ -266,18 +256,15 @@ pub const Model = struct {
     conv_out: CausalConv3d,
     quant_conv: CausalConv3d,
 
-    pub fn init(store_: zml.io.TensorStore.View) Model {
-        const root = rootView(store_);
+    pub fn init(store: zml.io.TensorStore.View) Model {
+        const root = store;
         const enc = encoderView(root);
-        const down_root = if (enc.hasKey("down.0.block.0.conv1.weight") or enc.hasKey("down.0.resnets.0.conv1.weight"))
-            enc.withPrefix("down")
-        else
-            enc.withPrefix("down_blocks");
+        const down_root = enc.withPrefix("down");
         var downs: [6]DownBlock = undefined;
         for (&downs, 0..) |*block, i| {
             block.* = .init(down_root.withLayer(i), temporal_downsample[i], spatial_downsample[i]);
         }
-        const quant = if (root.hasKey("quant_conv.weight")) root.withPrefix("quant_conv") else enc.withPrefix("quant_conv");
+        const quant = root.withPrefix("quant_conv");
         return .{
             .conv_in = .init(enc.withPrefix("conv_in"), 1, 1, 1, 2),
             .downs = downs,

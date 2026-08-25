@@ -12,6 +12,7 @@ H3_SRCS = [
     "ir.zig",
     "main.zig",
     "media.zig",
+    "noise.zig",
     "packing.zig",
     "pipeline.zig",
     "scheduler.zig",

@@ -283,6 +283,42 @@ pub fn imageSize(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Si
     return .{ .w = img.w, .h = img.h };
 }
 
+pub fn loadJpegThumb(allocator: std.mem.Allocator, io: std.Io, path: []const u8, max_side: u32) ![]u8 {
+    var scratch = try Scratch.init(allocator);
+    defer scratch.deinit(allocator);
+    const out = try scratch.join(allocator, "thumb.jpg");
+    defer allocator.free(out);
+    const vf = try std.fmt.allocPrint(
+        allocator,
+        "scale={d}:{d}:force_original_aspect_ratio=decrease",
+        .{ max_side, max_side },
+    );
+    defer allocator.free(vf);
+    const result = runFfmpeg(allocator, io, &.{
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        path,
+        "-vf",
+        vf,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "5",
+        out,
+    }) catch return error.FfmpegMissing;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.ImageLoadFailed,
+        else => return error.ImageLoadFailed,
+    }
+    return std.Io.Dir.cwd().readFileAlloc(io, out, allocator, .limited(2 * 1024 * 1024));
+}
+
 pub fn wavSampleCount(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u32 {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 * 1024));
     defer allocator.free(bytes);
@@ -509,14 +545,5 @@ pub fn guessKind(path: []const u8) packing.ReferenceKind {
 }
 
 pub fn rgbToNchwImagenet(allocator: std.mem.Allocator, rgb: []const u8, height: u32, width: u32) ![]f32 {
-    const plane = @as(usize, height) * width;
-    const out = try allocator.alloc(f32, plane * 3);
-    var i: usize = 0;
-    while (i < plane) : (i += 1) {
-        inline for (0..3) |c| {
-            const v = @as(f32, @floatFromInt(rgb[i * 3 + c])) / 255.0;
-            out[c * plane + i] = (v - vae.imagenet_mean[c]) / vae.imagenet_std[c];
-        }
-    }
-    return out;
+    return rgbVideoToNchwImagenet(allocator, rgb, 1, height, width);
 }

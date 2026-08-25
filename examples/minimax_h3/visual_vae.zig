@@ -178,15 +178,9 @@ const SwiGlu = struct {
     w2: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) SwiGlu {
-        if (store.hasKey("w1.weight")) {
-            return .{
-                .w1 = linear(store, "w1.weight", "w1.bias"),
-                .w2 = linear(store, "w2.weight", "w2.bias"),
-            };
-        }
         return .{
-            .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias"),
-            .w2 = linear(store, "net.2.weight", "net.2.bias"),
+            .w1 = linear(store, "w1.weight", "w1.bias"),
+            .w2 = linear(store, "w2.weight", "w2.bias"),
         };
     }
 
@@ -203,23 +197,16 @@ const SwiGlu = struct {
 };
 
 const Attention = struct {
-    qkv: ?zml.nn.Linear,
-    to_q: ?zml.nn.Linear,
-    to_k: ?zml.nn.Linear,
-    to_v: ?zml.nn.Linear,
+    qkv: zml.nn.Linear,
     out: zml.nn.Linear,
     num_heads: i64,
     head_dim: i64,
     eps: f32,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
-        const fused = store.hasKey("to_qkv.weight");
         return .{
-            .qkv = if (fused) linear(store, "to_qkv.weight", "to_qkv.bias") else null,
-            .to_q = if (!fused) linear(store, "to_q.weight", "to_q.bias") else null,
-            .to_k = if (!fused) linear(store, "to_k.weight", "to_k.bias") else null,
-            .to_v = if (!fused) linear(store, "to_v.weight", "to_v.bias") else null,
-            .out = linear(store, if (store.hasKey("to_out.weight")) "to_out.weight" else "to_out.0.weight", if (store.hasKey("to_out.bias")) "to_out.bias" else "to_out.0.bias"),
+            .qkv = linear(store, "to_qkv.weight", "to_qkv.bias"),
+            .out = linear(store, "to_out.weight", "to_out.bias"),
             .num_heads = cfg.decoder_num_attention_heads,
             .head_dim = cfg.decoder_attention_head_dim,
             .eps = cfg.decoder_norm_eps,
@@ -227,28 +214,16 @@ const Attention = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-        if (self.qkv) |*qkv| unloadLinear(qkv);
-        if (self.to_q) |*q| unloadLinear(q);
-        if (self.to_k) |*k| unloadLinear(k);
-        if (self.to_v) |*v| unloadLinear(v);
+        unloadLinear(&self.qkv);
         unloadLinear(&self.out);
     }
 
     pub fn forward(self: Attention, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        var q: zml.Tensor = undefined;
-        var k: zml.Tensor = undefined;
-        var v: zml.Tensor = undefined;
-        if (self.qkv) |qkv| {
-            const split = qkv.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 3 * self.head_dim });
-            const parts = split.chunkExact(.hd, 3);
-            q = parts[0];
-            k = parts[1];
-            v = parts[2];
-        } else {
-            q = self.to_q.?.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = self.head_dim });
-            k = self.to_k.?.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = self.head_dim });
-            v = self.to_v.?.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = self.head_dim });
-        }
+        const split = self.qkv.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 3 * self.head_dim });
+        const parts = split.chunkExact(.hd, 3);
+        var q = parts[0];
+        var k = parts[1];
+        const v = parts[2];
         q = zml.nn.rmsNorm(q.convert(.f32), .hd, self.eps).convert(x.dtype());
         k = zml.nn.rmsNorm(k.convert(.f32), .hd, self.eps).convert(x.dtype());
         q = applyRotary(q, cos, sin);
@@ -314,8 +289,8 @@ pub const TransformerBlock = struct {
     };
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TransformerBlock {
-        const attn_store = if (store.hasKey("attn.to_qkv.weight") or store.hasKey("attn.to_q.weight")) store.withPrefix("attn") else store;
-        const ff_store = if (store.hasKey("ff.w1.weight") or store.hasKey("ff.net.0.proj.weight")) store.withPrefix("ff") else store;
+        const attn_store = store.withPrefix("attn");
+        const ff_store = store.withPrefix("ff");
         return .{
             .norm1 = .init(store.withPrefix("norm1"), cfg.decoder_norm_eps),
             .attn = .init(attn_store, cfg),
@@ -375,20 +350,18 @@ pub const Model = struct {
     finish: FinishModel,
     cfg: Config,
 
-    pub fn init(allocator: std.mem.Allocator, store_: zml.io.TensorStore.View, cfg: Config) !Model {
-        const store = rootView(store_);
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !Model {
         const dec = decoderView(store);
         const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.decoder_num_layers));
         errdefer allocator.free(blocks);
-        const block_store = if (dec.hasKey("transformer_blocks.0.norm1.weight")) dec.withPrefix("transformer_blocks") else dec.withPrefix("blocks");
+        const block_store = dec.withPrefix("transformer_blocks");
         for (blocks, 0..) |*block, i| block.* = .init(block_store.withLayer(i), cfg);
 
-        const proj_name = if (dec.hasKey("x_embedder.weight")) "x_embedder" else "proj_in";
-        const post = if (store.hasKey("post_quant_conv.weight")) store.withPrefix("post_quant_conv") else store.withPrefix("decoder.post_quant_conv");
+        const post = store.withPrefix("post_quant_conv");
         return .{
             .embed = .{
                 .post_quant = linear(post, "weight", "bias"),
-                .proj = linear(dec.withPrefix(proj_name), "weight", "bias"),
+                .proj = linear(dec.withPrefix("x_embedder"), "weight", "bias"),
                 .register_tokens = dec.createTensor("register_tokens", .{ .b, .s, .d }, .replicated),
                 .cfg = cfg,
             },
@@ -408,23 +381,11 @@ pub const Model = struct {
 };
 
 pub fn ready(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("decoder.x_embedder.weight") or
-        store.hasKey("decoder.proj_in.weight") or
-        store.hasKey("x_embedder.weight") or
-        store.hasKey("proj_in.weight") or
-        store.hasKey("post_quant_conv.weight") or
-        store.hasKey("model.decoder.x_embedder.weight");
-}
-
-fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("decoder.x_embedder.weight") or store.hasKey("decoder.proj_in.weight") or store.hasKey("post_quant_conv.weight")) return store;
-    if (store.hasKey("model.decoder.x_embedder.weight")) return store.withPrefix("model");
-    return store;
+    return store.hasKey("decoder.x_embedder.weight") and store.hasKey("post_quant_conv.weight");
 }
 
 fn decoderView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("decoder.x_embedder.weight") or store.hasKey("decoder.proj_in.weight")) return store.withPrefix("decoder");
-    return store;
+    return store.withPrefix("decoder");
 }
 
 pub const EmbedInput = struct {

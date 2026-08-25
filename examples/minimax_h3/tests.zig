@@ -7,6 +7,7 @@ const conditions = @import("conditions.zig");
 const config = @import("config.zig");
 const ir = @import("ir.zig");
 const media = @import("media.zig");
+const noise = @import("noise.zig");
 const sharding_mod = @import("sharding.zig");
 const packing = @import("packing.zig");
 const scheduler = @import("scheduler.zig");
@@ -42,6 +43,9 @@ pub fn main() !void {
     try testOfficialSpatialGrid();
     try testOfficialRotateHalf();
     try testPromptingGuidance(allocator);
+    try testOpenH3irAssets(allocator);
+    try testIrLlm(allocator);
+    try testIrPipeline(allocator);
     try testCanvasPresets();
     try testAudioRefGuard();
     try testVaeTiling(allocator);
@@ -52,6 +56,7 @@ pub fn main() !void {
     try testOfficialVisualLatents();
     try testTokenDrop();
     try testAudioRowBct();
+    try testTorchNoise(allocator);
 
     std.debug.print("minimax_h3 tests: all passed\n", .{});
 }
@@ -584,14 +589,215 @@ fn testPromptingGuidance(allocator: std.mem.Allocator) !void {
     try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 2") != null);
 
+    const one = try ir.promptingGuidance(allocator, .{
+        .prompt = "a lighthouse keeper lights the lamp",
+        .variant = .fl2va,
+        .duration_s = 5,
+        .image = "first.png",
+    });
+    defer allocator.free(one);
+    try std.testing.expect(std.mem.indexOf(u8, one, "Picture 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, one, "Picture 2") == null);
+
     const ref = try ir.promptingGuidance(allocator, .{
         .prompt = "a lighthouse keeper lights the lamp",
         .variant = .ref2va,
         .duration_s = 5,
+        .refs = "face.png,clip.mp4",
     });
     defer allocator.free(ref);
     try std.testing.expect(std.mem.indexOf(u8, ref, "subject_definitions:") != null);
     try std.testing.expect(std.mem.indexOf(u8, ref, "retention_analysis:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ref, "<Picture 1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ref, "<Video 1>") != null);
+}
+
+fn testOpenH3irAssets(allocator: std.mem.Allocator) !void {
+    const fl = try ir.collectAssets(allocator, .{
+        .prompt = "x",
+        .variant = .fl2va,
+        .image = "first.png",
+        .last_image = "last.png",
+    });
+    defer allocator.free(fl);
+    try std.testing.expectEqual(@as(usize, 2), fl.len);
+    try std.testing.expectEqualStrings("frame_anchor_first", fl[0].role.?);
+    try std.testing.expectEqualStrings("frame_anchor_last", fl[1].role.?);
+
+    const refs = try ir.collectAssets(allocator, .{
+        .prompt = "x",
+        .variant = .ref2va,
+        .refs = "face.png,clip.mp4,bed.wav,alone.wav",
+    });
+    defer allocator.free(refs);
+    try std.testing.expectEqual(@as(usize, 4), refs.len);
+    try std.testing.expectEqualStrings("image", refs[0].kind);
+    try std.testing.expectEqualStrings("video", refs[1].kind);
+    try std.testing.expectEqualStrings("audio", refs[2].kind);
+    try std.testing.expectEqualStrings("clip.mp4", refs[2].paired_video_path.?);
+    try std.testing.expectEqualStrings("audio", refs[3].kind);
+    try std.testing.expect(refs[3].paired_video_path == null);
+}
+
+fn testIrLlm(allocator: std.mem.Allocator) !void {
+    const v1 = try ir.resolveChatUrl(allocator, "http://127.0.0.1:8000/v1/");
+    defer allocator.free(v1);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", v1);
+    const full = try ir.resolveChatUrl(allocator, "http://host/v1/chat/completions");
+    defer allocator.free(full);
+    try std.testing.expectEqualStrings("http://host/v1/chat/completions", full);
+    const bare = try ir.resolveChatUrl(allocator, "http://host:8000");
+    defer allocator.free(bare);
+    try std.testing.expectEqualStrings("http://host:8000/v1/chat/completions", bare);
+
+    const assets = try ir.collectAssets(allocator, .{
+        .prompt = "waves",
+        .variant = .fl2va,
+        .image = "first.png",
+        .last_image = "last.png",
+    });
+    defer allocator.free(assets);
+    const user = try ir.userMessage(allocator, .{
+        .prompt = "waves at dusk",
+        .variant = .fl2va,
+        .duration_s = 5.17,
+        .aspect = "16:9",
+        .creativity = .bold,
+        .image = "first.png",
+        .last_image = "last.png",
+    }, assets);
+    defer allocator.free(user);
+    try std.testing.expect(std.mem.indexOf(u8, user, "variant: fl2va") != null);
+    try std.testing.expect(std.mem.indexOf(u8, user, "Picture 1: image role=frame_anchor_first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, user, "Picture 2: image role=frame_anchor_last") != null);
+
+    const text = try ir.parseChatContent(allocator,
+        \\{"choices":[{"message":{"content":"```\ndetailed_description:\n[Shot 1] ok\n```"}}]}
+    );
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("detailed_description:\n[Shot 1] ok", text);
+    try std.testing.expect(ir.alreadyCompiled(text));
+    try std.testing.expectError(error.H3irEmpty, ir.parseChatContent(allocator, "{\"choices\":[]}"));
+    try std.testing.expect(!ir.hasLlm(.{ .prompt = "x" }));
+    try std.testing.expect(ir.hasLlm(.{ .prompt = "x", .llm_url = "http://127.0.0.1:8000/v1" }));
+    try std.testing.expectEqual(@as(f32, 0.5), ir.Creativity.balanced.temperature());
+}
+
+fn hasIrCode(findings: []const ir.Finding, code: []const u8) bool {
+    for (findings) |finding| {
+        if (std.mem.eql(u8, finding.code, code)) return true;
+    }
+    return false;
+}
+
+fn testIrPipeline(allocator: std.mem.Allocator) !void {
+    try std.testing.expectEqual(@as(u32, 1), ir.shotCount(5.17, .balanced));
+    try std.testing.expectEqual(@as(u32, 2), ir.shotCount(10, .balanced));
+    try std.testing.expectEqual(@as(u32, 3), ir.shotCount(10, .extreme));
+    try std.testing.expectEqual(@as(u32, 3), ir.shotCount(13, .balanced));
+    try std.testing.expectApproxEqAbs(@as(f32, 5.17), ir.effectiveSeconds(5.0), 0.005);
+
+    var over: [10]ir.Asset = undefined;
+    for (&over) |*asset| asset.* = .{ .kind = "image", .path = "x.png" };
+    try std.testing.expectError(error.TooManyRefImages, ir.checkCapacity(&over));
+    const files = [_]ir.Asset{.{ .kind = "image", .path = "x.png" }} ** 12 ++ [_]ir.Asset{.{ .kind = "video", .path = "y.mp4" }};
+    try std.testing.expectError(error.TooManyRefs, ir.checkCapacity(&files));
+
+    const req: ir.Request = .{
+        .prompt = "waves at dusk",
+        .variant = .fl2va,
+        .duration_s = 5,
+        .image = "first.png",
+        .last_image = "last.png",
+    };
+    const assets = try ir.collectAssets(allocator, req);
+    defer allocator.free(assets);
+    const cards = try ir.labelAssets(allocator, assets);
+    defer ir.freeCards(allocator, cards);
+    const wrap = try ir.promptingGuidance(allocator, req);
+    defer allocator.free(wrap);
+    const clean = try ir.validate(allocator, wrap, .fl2va, cards, 5);
+    defer ir.freeFindings(allocator, clean);
+    try std.testing.expectEqual(@as(u32, 0), ir.countErrors(clean));
+
+    const missing = try ir.validate(allocator, "overall_soundscape: wind\n", .t2va, &.{}, 5);
+    defer ir.freeFindings(allocator, missing);
+    try std.testing.expect(hasIrCode(missing, "S1-missing-section"));
+
+    const fence = try ir.validate(allocator,
+        \\```
+        \\integrated_multimodal_description: [Shot 1] x
+        \\
+        \\overall_soundscape: wind
+        \\
+        \\non_diegetic_music: N/A
+        \\```
+    , .t2va, &.{}, 5);
+    defer ir.freeFindings(allocator, fence);
+    try std.testing.expect(hasIrCode(fence, "S4-code-fence"));
+
+    const phantom = try ir.validate(allocator,
+        \\integrated_multimodal_description: [Shot 1] follows <Picture 1>
+        \\
+        \\overall_soundscape: wind
+        \\
+        \\non_diegetic_music: N/A
+        \\
+    , .t2va, &.{}, 5);
+    defer ir.freeFindings(allocator, phantom);
+    try std.testing.expect(hasIrCode(phantom, "L3-phantom-media"));
+
+    const unknown = try ir.validate(allocator,
+        \\integrated_multimodal_description: [Shot 1] follows <Image 1>
+        \\
+        \\overall_soundscape: wind
+        \\
+        \\non_diegetic_music: N/A
+        \\
+    , .t2va, &.{}, 5);
+    defer ir.freeFindings(allocator, unknown);
+    try std.testing.expect(hasIrCode(unknown, "L1-unknown-label"));
+
+    const no_align = try ir.validate(allocator, wrap[std.mem.indexOf(u8, wrap, "integrated_multimodal_description:").?..], .fl2va, cards, 5);
+    defer ir.freeFindings(allocator, no_align);
+    try std.testing.expect(hasIrCode(no_align, "I1-instruction-line-missing"));
+
+    const unused = try ir.validate(allocator,
+        \\subject_definitions:
+        \\A supplied face is the reference.
+        \\
+        \\summary:
+        \\[reference generation] a wave
+        \\
+        \\retention_analysis:
+        \\appearance stays consistent
+        \\
+        \\detailed_description:
+        \\[Shot 1] a wave
+        \\
+        \\overall_soundscape: wind
+        \\
+        \\non_diegetic_music: N/A
+        \\
+    , .ref2va, cards[0..1], 5);
+    defer ir.freeFindings(allocator, unused);
+    try std.testing.expect(hasIrCode(unused, "L4-unused-media"));
+
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const compiled = try ir.compile(allocator, threaded.io(), .{
+        .prompt = "waves at dusk",
+        .mode = .prompt,
+        .variant = .t2va,
+        .duration_s = 5,
+    });
+    defer compiled.deinit(allocator);
+    try std.testing.expect(ir.alreadyCompiled(compiled.text));
+    try std.testing.expectError(error.TooManyRefImages, ir.compile(allocator, threaded.io(), .{
+        .prompt = "x",
+        .mode = .prompt,
+        .variant = .ref2va,
+        .refs = "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png",
+    }));
 }
 
 fn testCanvasPresets() !void {
@@ -686,6 +892,34 @@ fn testTokenDrop() !void {
     try std.testing.expectEqual(@as(u32, 2), spec.tokenOverlap());
     try std.testing.expectEqual(@as(u32, 3), spec.framePrePadding());
     try std.testing.expectEqual(@as(u32, 5), spec.frameOverlap());
+}
+
+fn testTorchNoise(allocator: std.mem.Allocator) !void {
+    var gen = noise.Generator.init(1);
+    const want_u = [_]f32{ 0.7576315999031067, 0.2793108820915222, 0.40306925773620605, 0.7346844673156738, 0.029281556606292725, 0.7998586297035217, 0.3971373438835144, 0.7543719410896301 };
+    for (want_u) |w| try std.testing.expectApproxEqAbs(w, gen.uniform01(), 1e-7);
+
+    var gen_n = noise.Generator.init(1);
+    var n16: [16]f32 = undefined;
+    noise.randn(&gen_n, &n16);
+    const want_n = [_]f32{ -1.5255959033966064, -0.7502318024635315, -0.6539809107780457, -1.6094847917556763, -0.1001671776175499, -0.6091889142990112, -0.9797722697257996, -1.6090962886810303 };
+    for (want_n, n16[0..8]) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-5);
+
+    var gen_v = noise.Generator.init(1);
+    const video = try noise.drawVideo(allocator, &gen_v, &.{}, &.{}, 2, 4, 4, .{ 1, 2, 2 });
+    defer allocator.free(video);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 2 * 96), video.len);
+
+    const audio = try noise.drawAudio(allocator, &gen_v, &.{}, 32, 3);
+    defer allocator.free(audio);
+    try std.testing.expectEqual(@as(usize, 2 * 3 * 32), audio.len);
+
+    var gen_c = noise.Generator.init(7);
+    const conds = [_]packing.ConditionVideo{.{ .latent_t = 1, .latent_h = 2, .latent_w = 2 }};
+    const clean = [_]f32{0} ** 96;
+    const mixed = try noise.drawVideo(allocator, &gen_c, &conds, &clean, 2, 4, 4, .{ 1, 2, 2 });
+    defer allocator.free(mixed);
+    try std.testing.expectEqual(@as(usize, 96 + 2 * 2 * 2 * 96), mixed.len);
 }
 
 fn testAudioRowBct() !void {
