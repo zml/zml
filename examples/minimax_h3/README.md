@@ -28,13 +28,13 @@ bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- \
 
 ## Options
 
-- `--model=<path>`: Official repository, community bundle, DiT `.safetensors`, or `hf://MiniMaxAI/MiniMax-H3`
-- `--dit` / `--encoder` / `--vae-video` / `--vae-audio` / `--tokenizer`: overrides
+- `--model=<path>`: Official repository or `hf://MiniMaxAI/MiniMax-H3`. Encoder, VAEs, and tokenizer come from here.
+- `--dit=<path>`: Swap only the transformer (another size or quant). Leave empty to use `FL2VA/transformer` or `Ref2VA/transformer`.
 - `--prompt`, `--image`, `--last-image`, `--refs`
 - `--duration` 4–15 (default 5)
 - `--ratio` `21:9` `16:9` `4:3` `1:1` `3:4` `9:16`
 - `--canvas=auto|tiny|preview|full` — `auto` is 768p at ≥40 GiB/device, else 640×352
-- `--seed`, `--out`, `--profile`
+- `--seed`, `--out`
 
 Muxing needs `ffmpeg` on `PATH`.
 

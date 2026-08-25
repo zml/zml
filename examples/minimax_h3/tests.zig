@@ -10,7 +10,6 @@ const audio_vae = vae_mod.audio;
 const checkpoint = generate.checkpoint;
 const memory_mod = generate.memory;
 const policy_mod = model.policy;
-const telemetry = generate.telemetry;
 const multistep_mod = model.multistep;
 const config = model.config;
 const dit = model.dit;
@@ -23,7 +22,6 @@ const pipeline = generate.pipeline;
 const repo = generate.ckpt;
 const presentation = generate.presentation;
 const request_mod = generate.request;
-const session_mod = generate.session;
 const scheduler = model.scheduler;
 const sharding_mod = generate.sharding;
 const vae = vae_mod.geom;
@@ -93,7 +91,6 @@ pub fn main() !void {
     try testRefSize();
     try testGroupRefs(allocator);
     try testPixelCrc(allocator);
-    try testCorruptLatent(allocator);
     try testRngReset(allocator);
     try testStandaloneAudio(allocator);
     try testFirstLastFl2va(allocator);
@@ -105,7 +102,6 @@ pub fn main() !void {
     try testMemoryPlanExact(allocator);
     try testAdalnIndexLayout(allocator);
     try testSchedulerFormula();
-    try testLatentHash();
 
     std.debug.print("minimax_h3 tests: all passed\n", .{});
 }
@@ -1363,18 +1359,6 @@ fn testPixelCrc(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 12), crop.len);
 }
 
-fn testCorruptLatent(allocator: std.mem.Allocator) !void {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const io = threaded.io();
-    var scratch = try media.Scratch.init(allocator);
-    defer scratch.deinit(allocator);
-    var dir = try media.openPath(io, scratch.path);
-    defer dir.close(io);
-    const bytes = [_]f32{ 1, 2, 3 };
-    try session_mod.writeAtomic(io, dir, "bad.f32", std.mem.sliceAsBytes(&bytes));
-    try std.testing.expectError(error.LatentSizeMismatch, session_mod.readF32File(allocator, io, dir, "bad.f32", 4));
-}
-
 fn testRngReset(allocator: std.mem.Allocator) !void {
     const conds = [_]packing.ConditionVideo{.{ .latent_t = 1, .latent_h = 2, .latent_w = 2 }};
     const clean = [_]f32{0} ** 96;
@@ -1663,12 +1647,4 @@ fn testSchedulerFormula() !void {
     y = x;
     multistep_mod.resMultistep(&sig, 1, &y, &v, &prev);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), y[0], 1e-6);
-}
-
-fn testLatentHash() !void {
-    const a = [_]f32{ 1.0, 2.0, 3.0 };
-    const b = [_]f32{ 1.0, 2.0, 3.0 };
-    const c = [_]f32{ 1.0, 2.0, 3.1 };
-    try std.testing.expectEqual(telemetry.hashF32(&a), telemetry.hashF32(&b));
-    try std.testing.expect(telemetry.hashF32(&a) != telemetry.hashF32(&c));
 }
