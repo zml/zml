@@ -2,25 +2,33 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const audio_vae = @import("vae/audio.zig");
-const checkpoint = @import("core/checkpoint.zig");
-const memory_mod = @import("core/memory.zig");
-const multistep_mod = @import("sampling/multistep.zig");
-const config = @import("core/config.zig");
-const geom = @import("conditioning/geom.zig");
-const ir = @import("ir/compile.zig");
-const media = @import("runtime/media.zig");
-const noise = @import("model/noise.zig");
-const packing = @import("model/packing.zig");
-const pipeline = @import("runtime/pipeline.zig");
-const presentation = @import("conditioning/presentation.zig");
-const request_mod = @import("core/request.zig");
-const session_mod = @import("runtime/session.zig");
-const scheduler = @import("model/scheduler.zig");
-const sharding_mod = @import("core/sharding.zig");
-const vae = @import("vae/geom.zig");
-const vision = @import("model/vision.zig");
-const visual_vae = @import("vae/visual.zig");
+const generate = @import("generate.zig");
+const model = @import("model.zig");
+const vae_mod = @import("vae.zig");
+
+const audio_vae = vae_mod.audio;
+const checkpoint = generate.checkpoint;
+const memory_mod = generate.memory;
+const policy_mod = model.policy;
+const telemetry = generate.telemetry;
+const multistep_mod = model.multistep;
+const config = model.config;
+const dit = model.dit;
+const geom = generate.cond_geom;
+const ir = generate.ir;
+const media = generate.media;
+const noise = model.noise;
+const packing = model.packing;
+const pipeline = generate.pipeline;
+const repo = generate.ckpt;
+const presentation = generate.presentation;
+const request_mod = generate.request;
+const session_mod = generate.session;
+const scheduler = model.scheduler;
+const sharding_mod = generate.sharding;
+const vae = vae_mod.geom;
+const vision = model.vision;
+const visual_vae = vae_mod.visual;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -32,6 +40,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     try testConfig();
+    try testCli();
     try testSharding(allocator);
     try testSplitComma(allocator);
     try testScheduler(allocator);
@@ -51,9 +60,7 @@ pub fn main() !void {
     try testOfficialRotateHalf();
     try testPromptingGuidance(allocator);
     try testOpenH3irAssets(allocator);
-    try testIrLlm(allocator);
     try testIrPipeline(allocator);
-    try testOpenH3irGoldens(allocator);
     try testCanvasPresets();
     try testAudioRefGuard();
     try testVaeTiling(allocator);
@@ -81,6 +88,8 @@ pub fn main() !void {
     try testExportVideo(allocator);
     try testRowMask();
     try testOfficialPin();
+    try testTokenizerRelpaths();
+    try testConvrotMarker();
     try testRefSize();
     try testGroupRefs(allocator);
     try testPixelCrc(allocator);
@@ -89,7 +98,14 @@ pub fn main() !void {
     try testStandaloneAudio(allocator);
     try testFirstLastFl2va(allocator);
     try testSchemaFixtures();
+    try testTableCoord();
+    try testHostFwht();
     try testMultistepAb2();
+    try testAttentionPolicy();
+    try testMemoryPlanExact(allocator);
+    try testAdalnIndexLayout(allocator);
+    try testSchedulerFormula();
+    try testLatentHash();
 
     std.debug.print("minimax_h3 tests: all passed\n", .{});
 }
@@ -126,6 +142,23 @@ fn testConfig() !void {
     try std.testing.expectEqualStrings("FL2VA", config.Variant.t2va.dirName());
     try std.testing.expectEqualStrings("FL2VA", config.Variant.fl2va.dirName());
     try std.testing.expectEqualStrings("Ref2VA", config.Variant.ref2va.dirName());
+    try std.testing.expectEqualStrings(config.taskDirName(.fl2va), config.official_task_dirs[0]);
+    try std.testing.expectEqualStrings(config.taskDirName(.ref2va), config.official_task_dirs[1]);
+
+    const enc = config.EncoderConfig.official();
+    try std.testing.expectEqual(@as(i64, 5120), enc.hidden_size);
+    try std.testing.expectEqual(@as(i64, 50), enc.used_hidden_layers);
+    try std.testing.expectEqual(@as(i64, 151936), enc.vocab_size);
+    const from_file = (config.EncoderFileConfig{}).resolve();
+    try std.testing.expectEqual(enc.hidden_size, from_file.hidden_size);
+    try std.testing.expectEqual(enc.num_hidden_layers, from_file.num_hidden_layers);
+    try std.testing.expectEqual(enc.vocab_size, from_file.vocab_size);
+}
+
+fn testCli() !void {
+    try config.checkDuration(5);
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(3));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(16));
 }
 
 fn testSharding(allocator: std.mem.Allocator) !void {
@@ -694,57 +727,6 @@ fn testOpenH3irAssets(allocator: std.mem.Allocator) !void {
     try std.testing.expect(refs[3].paired_video_path == null);
 }
 
-fn testIrLlm(allocator: std.mem.Allocator) !void {
-    const v1 = try ir.resolveChatUrl(allocator, "http://127.0.0.1:8000/v1/");
-    defer allocator.free(v1);
-    try std.testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", v1);
-    const full = try ir.resolveChatUrl(allocator, "http://host/v1/chat/completions");
-    defer allocator.free(full);
-    try std.testing.expectEqualStrings("http://host/v1/chat/completions", full);
-    const bare = try ir.resolveChatUrl(allocator, "http://host:8000");
-    defer allocator.free(bare);
-    try std.testing.expectEqualStrings("http://host:8000/v1/chat/completions", bare);
-
-    const assets = try ir.collectAssets(allocator, .{
-        .prompt = "waves",
-        .variant = .fl2va,
-        .image = "first.png",
-        .last_image = "last.png",
-    });
-    defer allocator.free(assets);
-    const user = try ir.userMessage(allocator, .{
-        .prompt = "waves at dusk",
-        .variant = .fl2va,
-        .duration_s = 5.17,
-        .aspect = "16:9",
-        .creativity = .bold,
-        .image = "first.png",
-        .last_image = "last.png",
-    }, assets);
-    defer allocator.free(user);
-    try std.testing.expect(std.mem.indexOf(u8, user, "variant: fl2va") != null);
-    try std.testing.expect(std.mem.indexOf(u8, user, "Picture 1: image role=frame_anchor_first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, user, "Picture 2: image role=frame_anchor_last") != null);
-
-    const text = try ir.parseChatContent(allocator,
-        \\{"choices":[{"message":{"content":"```\ndetailed_description:\n[Shot 1] ok\n```"}}]}
-    );
-    defer allocator.free(text);
-    try std.testing.expectEqualStrings("detailed_description:\n[Shot 1] ok", text);
-    try std.testing.expect(ir.alreadyCompiled(text));
-    try std.testing.expectError(error.H3irEmpty, ir.parseChatContent(allocator, "{\"choices\":[]}"));
-    try std.testing.expect(!ir.hasLlm(.{ .prompt = "x" }));
-    try std.testing.expect(ir.hasLlm(.{ .prompt = "x", .llm_url = "http://127.0.0.1:8000/v1" }));
-    try std.testing.expectEqual(@as(f32, 0.5), ir.Creativity.balanced.temperature());
-}
-
-fn hasIrCode(findings: []const ir.Finding, code: []const u8) bool {
-    for (findings) |finding| {
-        if (std.mem.eql(u8, finding.code, code)) return true;
-    }
-    return false;
-}
-
 fn testIrPipeline(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 2), ir.shotCount(5.17, .t2va));
     try std.testing.expectEqual(@as(u32, 1), ir.shotCount(5.17, .fl2va));
@@ -759,95 +741,26 @@ fn testIrPipeline(allocator: std.mem.Allocator) !void {
     const files = [_]ir.Asset{.{ .kind = "image", .path = "x.png" }} ** 12 ++ [_]ir.Asset{.{ .kind = "video", .path = "y.mp4" }};
     try std.testing.expectError(error.TooManyRefs, ir.checkCapacity(&files));
 
-    const req: ir.Request = .{
-        .prompt = "waves at dusk",
-        .variant = .fl2va,
-        .duration_s = 5,
-        .image = "first.png",
-        .last_image = "last.png",
-    };
-    const assets = try ir.collectAssets(allocator, req);
-    defer allocator.free(assets);
-    const cards = try ir.labelAssets(allocator, assets);
-    defer ir.freeCards(allocator, cards);
-    const wrap = try ir.promptingGuidance(allocator, req);
-    defer allocator.free(wrap);
-    const clean = try ir.validate(allocator, wrap, .fl2va, cards, 5);
-    defer ir.freeFindings(allocator, clean);
-    try std.testing.expectEqual(@as(u32, 0), ir.countErrors(clean));
-
-    const missing = try ir.validate(allocator, "overall_soundscape: wind\n", .t2va, &.{}, 5);
-    defer ir.freeFindings(allocator, missing);
-    try std.testing.expect(hasIrCode(missing, "S1-missing-section"));
-
-    const fence = try ir.validate(allocator,
-        \\```
-        \\integrated_multimodal_description: [Shot 1] x
-        \\
-        \\overall_soundscape: wind
-        \\
-        \\non_diegetic_music: N/A
-        \\```
-    , .t2va, &.{}, 5);
-    defer ir.freeFindings(allocator, fence);
-    try std.testing.expect(hasIrCode(fence, "S4-code-fence"));
-
-    const phantom = try ir.validate(allocator,
-        \\integrated_multimodal_description: [Shot 1] follows <Picture 1>
-        \\
-        \\overall_soundscape: wind
-        \\
-        \\non_diegetic_music: N/A
-        \\
-    , .t2va, &.{}, 5);
-    defer ir.freeFindings(allocator, phantom);
-    try std.testing.expect(hasIrCode(phantom, "L3-phantom-media"));
-
-    const unknown = try ir.validate(allocator,
-        \\integrated_multimodal_description: [Shot 1] follows <Image 1>
-        \\
-        \\overall_soundscape: wind
-        \\
-        \\non_diegetic_music: N/A
-        \\
-    , .t2va, &.{}, 5);
-    defer ir.freeFindings(allocator, unknown);
-    try std.testing.expect(hasIrCode(unknown, "L1-unknown-label"));
-
-    const no_align = try ir.validate(allocator, wrap[std.mem.indexOf(u8, wrap, "integrated_multimodal_description:").?..], .fl2va, cards, 5);
-    defer ir.freeFindings(allocator, no_align);
-    try std.testing.expect(hasIrCode(no_align, "I1-instruction-line-missing"));
-
-    const unused = try ir.validate(allocator,
-        \\subject_definitions:
-        \\A supplied face is the reference.
-        \\
-        \\summary:
-        \\[reference generation] a wave
-        \\
-        \\retention_analysis:
-        \\appearance stays consistent
-        \\
-        \\detailed_description:
-        \\[Shot 1] a wave
-        \\
-        \\overall_soundscape: wind
-        \\
-        \\non_diegetic_music: N/A
-        \\
-    , .ref2va, cards[0..1], 5);
-    defer ir.freeFindings(allocator, unused);
-    try std.testing.expect(hasIrCode(unused, "L4-unused-media"));
-
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    const compiled = try ir.compile(allocator, threaded.io(), .{
+    const compiled = try ir.compile(allocator, .{
         .prompt = "waves at dusk",
         .variant = .t2va,
         .duration_s = 5,
     });
     defer compiled.deinit(allocator);
     try std.testing.expect(ir.alreadyCompiled(compiled.text));
-    const last_only = try ir.compile(allocator, threaded.io(), .{
+    const ten = try ir.compile(allocator, .{
+        .prompt = "waves at dusk",
+        .variant = .t2va,
+        .duration_s = 10,
+    });
+    defer ten.deinit(allocator);
+    const fifteen = try ir.compile(allocator, .{
+        .prompt = "waves at dusk",
+        .variant = .t2va,
+        .duration_s = 15,
+    });
+    defer fifteen.deinit(allocator);
+    const last_only = try ir.compile(allocator, .{
         .prompt = "waves at dusk",
         .variant = .fl2va,
         .duration_s = 4,
@@ -855,81 +768,18 @@ fn testIrPipeline(allocator: std.mem.Allocator) !void {
     });
     defer last_only.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, last_only.text, "4.46-second") != null);
-    try std.testing.expectError(error.TooManyRefImages, ir.compile(allocator, threaded.io(), .{
+    try std.testing.expectError(error.TooManyRefImages, ir.compile(allocator, .{
         .prompt = "x",
         .variant = .ref2va,
         .refs = "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png",
     }));
-    try std.testing.expectError(error.IntentEmpty, ir.compile(allocator, threaded.io(), .{
+    try std.testing.expectError(error.IntentEmpty, ir.compile(allocator, .{
         .prompt = "   ",
         .variant = .t2va,
     }));
 }
 
-fn testOpenH3irGoldens(allocator: std.mem.Allocator) !void {
-    const fl = @embedFile("ir/golden/official_fl2va_example.txt");
-    const fl_cards = [_]ir.Card{
-        .{ .asset = .{ .kind = "image", .path = "a.jpg", .role = "frame_anchor_first" }, .label = "Picture 1" },
-        .{ .asset = .{ .kind = "image", .path = "b.jpg", .role = "frame_anchor_last" }, .label = "Picture 2" },
-    };
-    const fl_findings = try ir.validate(allocator, fl, .fl2va, &fl_cards, 8);
-    defer ir.freeFindings(allocator, fl_findings);
-    try std.testing.expectEqual(@as(u32, 0), ir.countErrors(fl_findings));
-
-    const ref = @embedFile("ir/golden/official_ref2va_example.txt");
-    const ref_cards = [_]ir.Card{
-        .{ .asset = .{ .kind = "image", .path = "a.jpg" }, .label = "Picture 1" },
-        .{ .asset = .{ .kind = "image", .path = "b.jpg" }, .label = "Picture 2" },
-        .{ .asset = .{ .kind = "image", .path = "c.jpg" }, .label = "Picture 3" },
-        .{ .asset = .{ .kind = "image", .path = "d.jpg" }, .label = "Picture 4" },
-        .{ .asset = .{ .kind = "video", .path = "e.mp4" }, .label = "Video 1" },
-        .{ .asset = .{ .kind = "video", .path = "f.mp4" }, .label = "Video 2" },
-        .{ .asset = .{ .kind = "audio", .path = "g.wav" }, .label = "Audio 1" },
-    };
-    const ref_findings = try ir.validate(allocator, ref, .ref2va, &ref_cards, 8);
-    defer ir.freeFindings(allocator, ref_findings);
-    try std.testing.expect(hasIrCode(ref_findings, "P5-camera-no-motion-type"));
-    for (ref_findings) |finding| {
-        if (finding.err) try std.testing.expectEqualStrings("P5-camera-no-motion-type", finding.code);
-    }
-
-    const t2 = @embedFile("ir/golden/t2va.ir.txt");
-    const t2_findings = try ir.validate(allocator, t2, .t2va, &.{}, 10.125);
-    defer ir.freeFindings(allocator, t2_findings);
-    try std.testing.expectEqual(@as(u32, 0), ir.countErrors(t2_findings));
-
-    try expectMutant(allocator, ref, &ref_cards, "<Picture 1>", "<Image 1>", "L1-unknown-label");
-    try expectMutant(allocator, ref, &ref_cards, "[Shot 1] A medium shot", "[Shot 1] At 00:00.000, A medium shot", "T2-shot1-timestamp");
-    try expectMutant(allocator, ref, &ref_cards, "fully_preserved - the exposed brick wall", "mostly_preserved - the exposed brick wall", "R2-illegal-marker");
-    try expectMutant(allocator, ref, &ref_cards, "<Subject 2> (appears in [Shot 1], [Shot 2]):", "<Subject 2>:", "R3-missing-appears-in");
-    try expectMutant(allocator, ref, &ref_cards, "<Audio 1>: reference -", "<Audio 1> (S1): reference -", "R4-speaker-in-retention");
-    try expectMutant(allocator, ref, &ref_cards, "the Samoyed's thick white fur", "the Samoyed\u{2019}s thick white fur", "H1-unicode-hazard");
-    try expectMutant(allocator, ref, &ref_cards, "[reference generation + audio reference]", "[reference generation + vibes]", "M2-task-type");
-    try expectMutant(allocator, ref, &ref_cards, "<d>[English] Hey!", "<D>[English] Hey!", "D5-marker-not-byte-exact");
-    try expectMutant(allocator, ref, &ref_cards, "<Subject 2> is the fluffy white Samoyed in <Picture 2>,", "<Subject 2> is the fluffy white Samoyed in <Picture 2,", "L6-label-not-closed");
-    const fenced = try std.fmt.allocPrint(allocator, "```\n{s}\n```", .{t2});
-    defer allocator.free(fenced);
-    const fence_findings = try ir.validate(allocator, fenced, .t2va, &.{}, 10.125);
-    defer ir.freeFindings(allocator, fence_findings);
-    try std.testing.expect(hasIrCode(fence_findings, "S4-code-fence"));
-}
-
-fn expectMutant(allocator: std.mem.Allocator, src: []const u8, cards: []const ir.Card, needle: []const u8, replacement: []const u8, code: []const u8) !void {
-    const mutant = try std.mem.replaceOwned(u8, allocator, src, needle, replacement);
-    defer allocator.free(mutant);
-    try std.testing.expect(!std.mem.eql(u8, mutant, src));
-    const findings = try ir.validate(allocator, mutant, .ref2va, cards, 8);
-    defer ir.freeFindings(allocator, findings);
-    try std.testing.expect(hasIrCode(findings, code));
-}
-
 fn testCanvasPresets() !void {
-    try std.testing.expectError(error.ConflictingCanvas, config.parseCanvas(true, true, false));
-    try std.testing.expectEqual(config.Canvas.auto, try config.parseCanvas(false, false, false));
-    try std.testing.expectEqual(config.Canvas.tiny, try config.parseCanvas(true, false, false));
-    try std.testing.expectEqual(config.Canvas.preview, try config.parseCanvas(false, true, false));
-    try std.testing.expectEqual(config.Canvas.full, try config.parseCanvas(false, false, true));
-
     const cpu = config.canvasForTarget(.cpu, .auto, 0);
     try std.testing.expectEqual(config.preview_short_side, cpu.short_side);
     const full = config.canvasForTarget(.cpu, .full, 0);
@@ -1224,20 +1074,39 @@ fn testRequest(allocator: std.mem.Allocator) !void {
 fn testCheckpoint() !void {
     const full = [_][]const u8{
         "video_patch_proj.weight",
+        "time_embedder.proj_in.weight",
         "blocks.0.adaln_proj.linear.weight",
         "final_layer.adaln_proj.linear.weight",
     };
-    const report = checkpoint.inspect(&full);
-    try std.testing.expectEqual(checkpoint.AdalnKind.full, report.adaln);
-    try std.testing.expect(checkpoint.refuseReason(report) == null);
+    try std.testing.expect(checkpoint.inspect(&full).has_adaln_proj);
+    try std.testing.expect(checkpoint.inspect(&full).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&full)) == null);
 
-    const curve = [_][]const u8{ "adaln_t_table", "video_patch_proj.weight" };
-    try std.testing.expectEqual(checkpoint.AdalnKind.curve, checkpoint.inspect(&curve).adaln);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&curve)) == null);
+    const table_only = [_][]const u8{ "adaln_t_table", "video_patch_proj.weight" };
+    try std.testing.expect(!checkpoint.inspect(&table_only).has_adaln_proj);
+    try std.testing.expect(checkpoint.inspect(&table_only).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&table_only)) != null);
 
-    const quant = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale_inv" };
-    try std.testing.expectEqual(checkpoint.LinearStorage.fp8, checkpoint.inspect(&quant).dit_storage);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&quant)) != null);
+    const no_time = [_][]const u8{"blocks.0.adaln_proj.linear.weight"};
+    try std.testing.expect(checkpoint.inspect(&no_time).has_adaln_proj);
+    try std.testing.expect(!checkpoint.inspect(&no_time).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&no_time)) != null);
+
+    const rank8 = [_][]const u8{ "adaln_t_table", "blocks.0.adaln_proj.linear.weight" };
+    try std.testing.expect(checkpoint.inspect(&rank8).has_adaln_proj);
+    try std.testing.expect(checkpoint.inspect(&rank8).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&rank8)) == null);
+
+    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"fl2va"}));
+    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_ref2va_fp8_scaled.safetensors", &.{"ref2va"}));
+    try std.testing.expect(!checkpoint.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"ref2va"}));
+    try std.testing.expect(!checkpoint.safetensorsContains("notes.txt", &.{"fl2va"}));
+    try std.testing.expect(checkpoint.safetensorsContains("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", &.{}));
+    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_video_vae_fp16.safetensors", &.{ "video", "vae" }));
+    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "audio", "vae" }));
+    try std.testing.expect(!checkpoint.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "video", "vae" }));
+    try std.testing.expect(checkpoint.isBundleLeaf("text_encoders"));
+    try std.testing.expect(!checkpoint.isBundleLeaf("transformer"));
 }
 
 fn testPosterior(allocator: std.mem.Allocator) !void {
@@ -1427,6 +1296,33 @@ fn testRowMask() !void {
 fn testOfficialPin() !void {
     try std.testing.expectEqualStrings("MiniMaxAI/MiniMax-H3", config.official_repo);
     try std.testing.expectEqualStrings("42ed227ee7df40d41602854ae760620d6eb651fe", config.official_revision);
+    var buf: [256]u8 = undefined;
+    const uri = try config.officialTokenizerUri(&buf);
+    try std.testing.expectEqualStrings(
+        "hf://MiniMaxAI/MiniMax-H3@42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA/tokenizer/tokenizer.json",
+        uri,
+    );
+}
+
+fn testTokenizerRelpaths() !void {
+    try std.testing.expectEqual(@as(usize, 4), repo.tokenizer_relpaths.len);
+    try std.testing.expectEqualStrings("tokenizer/tokenizer.json", repo.tokenizer_relpaths[0]);
+    try std.testing.expectEqualStrings("processor/tokenizer.json", repo.tokenizer_relpaths[1]);
+    try std.testing.expectEqualStrings("text_encoder/tokenizer.json", repo.tokenizer_relpaths[2]);
+    try std.testing.expectEqualStrings("tokenizer.json", repo.tokenizer_relpaths[3]);
+}
+
+fn testConvrotMarker() !void {
+    try std.testing.expectEqual(@as(?u32, 256), try zml.safetensors.convrotGroupFromMarker(
+        "{\"format\":\"int8_tensorwise\",\"convrot\":true,\"convrot_groupsize\":256}",
+    ));
+    try std.testing.expectEqual(@as(?u32, 0), try zml.safetensors.convrotGroupFromMarker("{\"format\":\"int8_tensorwise\"}"));
+    try std.testing.expectEqual(@as(?u32, 0), try zml.safetensors.convrotGroupFromMarker(
+        "{\"format\":\"nvfp4\",\"full_precision_matrix_mult\":true}",
+    ));
+    try std.testing.expectError(error.UnsupportedConvrotGroup, zml.safetensors.convrotGroupFromMarker(
+        "{\"convrot\":true,\"convrot_groupsize\":64}",
+    ));
 }
 
 fn testRefSize() !void {
@@ -1519,16 +1415,59 @@ fn testFirstLastFl2va(allocator: std.mem.Allocator) !void {
 }
 
 fn testSchemaFixtures() !void {
-    const missing = checkpoint.inspect(&.{});
-    try std.testing.expectEqual(checkpoint.AdalnKind.missing, missing.adaln);
-    try std.testing.expect(checkpoint.refuseReason(missing) != null);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&.{})) != null);
 
-    const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "convrot", "weight" };
-    try std.testing.expectEqual(checkpoint.LinearStorage.int8_convrot, checkpoint.inspect(&int8).dit_storage);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&int8)) != null);
+    const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale", "adaln_t_table" };
+    try std.testing.expect(checkpoint.inspect(&int8).has_adaln_proj);
+    try std.testing.expect(checkpoint.inspect(&int8).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&int8)) == null);
+}
 
-    const nv = [_][]const u8{ "pre_quant_scale", "weight.nvfp4" };
-    try std.testing.expectEqual(checkpoint.LinearStorage.nvfp4_awq, checkpoint.inspect(&nv).dit_storage);
+fn testTableCoord() !void {
+    const a = dit.tableCoord(0, 1025);
+    try std.testing.expectEqual(@as(u32, 0), a.i0);
+    try std.testing.expectEqual(@as(u32, 1), a.i1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), a.frac, 1e-6);
+
+    const b = dit.tableCoord(1, 1025);
+    try std.testing.expectEqual(@as(u32, 1024), b.i0);
+    try std.testing.expectEqual(@as(u32, 1024), b.i1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), b.frac, 1e-6);
+
+    const c = dit.tableCoord(0.5, 5);
+    try std.testing.expectEqual(@as(u32, 2), c.i0);
+    try std.testing.expectEqual(@as(u32, 3), c.i1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), c.frac, 1e-6);
+}
+
+fn fwht4(v: [4]f32) [4]f32 {
+    const s1 = [4]f32{ v[0] + v[1], v[0] - v[1], v[2] + v[3], v[2] - v[3] };
+    const s2 = [4]f32{ s1[0] + s1[2], s1[1] + s1[3], s1[0] - s1[2], s1[1] - s1[3] };
+    return .{ s2[0] * 0.5, s2[1] * 0.5, s2[2] * 0.5, s2[3] * 0.5 };
+}
+
+fn testHostFwht() !void {
+    const x = [4]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const y = fwht4(x);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), y[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), y[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.0), y[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y[3], 1e-6);
+    const z = fwht4(y);
+    try std.testing.expectApproxEqAbs(x[0], z[0], 1e-6);
+    try std.testing.expectApproxEqAbs(x[1], z[1], 1e-6);
+    try std.testing.expectApproxEqAbs(x[2], z[2], 1e-6);
+    try std.testing.expectApproxEqAbs(x[3], z[3], 1e-6);
+
+    const w = [4]f32{ 0.5, -0.25, 0.75, 0.0 };
+    const wh = fwht4(w);
+    var acc: f32 = 0;
+    var ref: f32 = 0;
+    for (x, y, w, wh) |xi, yi, wi, whi| {
+        acc += yi * whi;
+        ref += xi * wi;
+    }
+    try std.testing.expectApproxEqAbs(ref, acc, 1e-6);
 }
 
 fn testMultistepAb2() !void {
@@ -1538,4 +1477,198 @@ fn testMultistepAb2() !void {
     const sig = [_]f32{ 1.0, 0.5, 0.25 };
     multistep_mod.resMultistep(&sig, 1, &x, &v, &prev);
     try std.testing.expectApproxEqAbs(@as(f32, 1.75), x[0], 1e-6);
+}
+
+fn testAttentionPolicy() !void {
+    const short = policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 64,
+        .causal = false,
+        .tp = 2,
+    });
+    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, short);
+
+    const long = policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+    });
+    try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, long);
+
+    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+        .target = .cpu,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+    }));
+    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .f32,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+    }));
+
+    for ([_]u32{ 1, 2, 4, 8 }) |tp| {
+        try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 7440,
+            .causal = false,
+            .tp = tp,
+        }));
+        try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 64,
+            .causal = false,
+            .tp = tp,
+        }));
+        try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 256,
+            .causal = false,
+            .tp = tp,
+        }));
+    }
+}
+
+fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
+    const geo: pipeline.Geometry = .{
+        .pixel_w = 640,
+        .pixel_h = 352,
+        .frames = 107,
+        .latent_t = 8,
+        .latent_h = 22,
+        .latent_w = 40,
+        .audio_t = 200,
+        .video_tokens = 7040,
+        .audio_tokens = 400,
+        .target_video_tokens = 7040,
+        .target_audio_tokens = 400,
+        .video_patch_dim = 96,
+        .audio_dim = 32,
+    };
+    var layout = try packing.build(allocator, .{
+        .text_len = 8,
+        .latent_t = 8,
+        .latent_h = 22,
+        .latent_w = 40,
+        .audio_t = 200,
+        .video_t = 0,
+        .audio_t_noise = 0,
+    });
+    defer layout.deinit(allocator);
+    const seq = layout.seqLen();
+    const sdpa = memory_mod.planWith(.{
+        .geo = geo,
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 9,
+        .device_bytes = 48 * 1024 * 1024 * 1024,
+        .tp = 1,
+        .target = .cpu,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+    });
+    try std.testing.expectEqual(policy_mod.sdpaScoreBytes(seq, 56, 1), sdpa.score_bytes);
+    try std.testing.expect(policy_mod.sdpaScoreBytes(7440, 56, 1) > 10 * 1024 * 1024 * 1024);
+
+    const fa2 = memory_mod.planWith(.{
+        .geo = geo,
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 9,
+        .device_bytes = 48 * 1024 * 1024 * 1024,
+        .tp = 2,
+        .target = .cuda,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+    });
+    try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, fa2.attention);
+    try std.testing.expect(fa2.fa2_scratch_bytes > 0);
+    try std.testing.expect(fa2.fa2_scratch_bytes < fa2.score_bytes);
+    try std.testing.expect(fa2.adaln_table_bytes > 0);
+    try std.testing.expect(policy_mod.groupSize(0) == 1);
+    try std.testing.expect(policy_mod.groupSize(2) == 2);
+    try std.testing.expect(policy_mod.groupSize(8) == 4);
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(0, 1, 100, 2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(5, 1, 100, 2));
+    try std.testing.expect(fa2.tile_batch >= 1);
+    try std.testing.expect(pipeline.partitionsVaeBatch(6, 2));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(6, 1));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(5, 2));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(1, 2));
+}
+
+fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
+    const layout = try packing.build(allocator, .{
+        .text_len = 4,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 3,
+        .video_t = 0.25,
+        .audio_t_noise = 0.6,
+    });
+    defer layout.deinit(allocator);
+    const idx = try pipeline.adalnIndices(allocator, layout);
+    defer allocator.free(idx);
+    try std.testing.expectEqual(layout.seqLen(), idx.len);
+    try std.testing.expectEqual(layout.adalnIndex(0), idx[0]);
+    try std.testing.expectEqual(@as(u32, 1), idx[0] % 3);
+    try std.testing.expectEqual(@as(u32, 2), idx[layout.target_audio_start] % 3);
+    try std.testing.expectEqual(@as(u32, 0), idx[layout.target_video_start] % 3);
+
+    const slots = packing.timestep_slot_count;
+    const steps: u32 = 4;
+    const hidden: i64 = 16;
+    const bytes = policy_mod.adalnTableBytes(steps, hidden, 2, 2);
+    const per_block = @as(u64, steps) * slots * 3 * 6 * 16 * 2;
+    const final = @as(u64, steps) * slots * 2 * 16 * 2;
+    try std.testing.expectEqual(per_block * 2 + final, bytes);
+}
+
+fn testSchedulerFormula() !void {
+    const x = [_]f32{1.0};
+    const v = [_]f32{1.0};
+    const prev = [_]f32{0.5};
+    const sig = [_]f32{ 1.0, 0.5, 0.0 };
+    var y = x;
+    multistep_mod.resMultistep(&sig, 0, &y, &v, null);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), y[0], 1e-6);
+    y = x;
+    multistep_mod.resMultistep(&sig, 1, &y, &v, &prev);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), y[0], 1e-6);
+}
+
+fn testLatentHash() !void {
+    const a = [_]f32{ 1.0, 2.0, 3.0 };
+    const b = [_]f32{ 1.0, 2.0, 3.0 };
+    const c = [_]f32{ 1.0, 2.0, 3.1 };
+    try std.testing.expectEqual(telemetry.hashF32(&a), telemetry.hashF32(&b));
+    try std.testing.expect(telemetry.hashF32(&a) != telemetry.hashF32(&c));
 }
