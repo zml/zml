@@ -97,7 +97,7 @@ MiniMax-H3 generates video and audio together. Use `//examples/minimax_h3`. See 
 
 ```
 bazel run //examples/minimax_h3:h3_tests
-bazel run --config=release //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3 --preview --prompt="A cinematic wide shot of waves at dusk."
+bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3
 ```
 
 

@@ -2,18 +2,9 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-H3_EMBED = [
-    "ir/golden/official_fl2va_example.txt",
-    "ir/golden/official_ref2va_example.txt",
-    "ir/golden/t2va.ir.txt",
-    "ir/prompts/compose.v2.txt",
-    "ir/prompts/compose_base.v1.txt",
-]
-
 zig_binary(
     name = "minimax_h3",
-    srcs = glob(["**/*.zig"]),
-    extra_srcs = H3_EMBED,
+    srcs = glob(["*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -21,8 +12,7 @@ zig_binary(
 
 zig_binary(
     name = "h3_tests",
-    srcs = glob(["**/*.zig"]),
-    extra_srcs = H3_EMBED,
+    srcs = glob(["*.zig"]),
     main = "tests.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
