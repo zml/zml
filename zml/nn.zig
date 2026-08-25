@@ -66,6 +66,13 @@ pub const Linear = struct {
     fn forwardWeight(self: Linear, x: Tensor) Tensor {
         const q = self.quant orelse return x.dot(self.weight, self.tag);
 
+        if (q.scheme == .int8_per_channel) {
+            var lhs = x.convert(.f32);
+            if (q.input_scale) |s| lhs = lhs.mul(s.asMultiplier().convert(.f32).broad(lhs.shape()));
+            const w = self.weight.convert(.f32).mul(q.scales.convert(.f32).broad(self.weight.shape().withDtype(.f32)));
+            return lhs.dot(w, self.tag).convert(x.dtype());
+        }
+
         const wgs: ?Tensor = if (q.weight_scale) |s| s.asMultiplier() else null;
         const igs: ?Tensor = if (q.input_scale) |s| s.asMultiplier() else null;
 
@@ -105,6 +112,8 @@ pub const QuantScheme = enum {
     /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
     /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
     fp8_per_tensor,
+    /// i8 values, one f32/bf16 scale per output row. Host ConvRot/AWQ apply before this.
+    int8_per_channel,
 
     pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {
         if (weight.rank() != 2) return false;
@@ -125,6 +134,9 @@ pub const QuantScheme = enum {
                 scale.count() > 1 and scale.rank() == 2 and
                 @rem(n, 128) == 0 and @rem(k, 128) == 0 and
                 scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+            .int8_per_channel => (weight.dtype() == .i8 or weight.dtype() == .u8) and
+                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
+                scale.dim(0) == n and (scale.rank() == 1 or scale.dim(1) == 1),
         };
     }
 
@@ -139,7 +151,7 @@ pub const QuantScheme = enum {
     pub fn activationQuant(self: QuantScheme) ?ActivationQuant {
         return switch (self) {
             .nvfp4 => .nvfp4,
-            .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+            .fp8_per_channel, .fp8_block128, .fp8_per_tensor, .int8_per_channel => null,
         };
     }
 };
@@ -202,6 +214,11 @@ test "QuantScheme.classify" {
     // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
+
+    try expect(@as(?QuantScheme, .int8_per_channel), QuantScheme.classify(
+        .init(.{ .dout = 64, .d = 128 }, .i8),
+        .init(.{ .dout = 64, .sc = 1 }, .f32),
+    ));
 
     // Rejected: everything no backend here can express.
     const fp8: Shape = .init(.{ .dout = 10240, .d = 5120 }, .f8e4m3fn);
