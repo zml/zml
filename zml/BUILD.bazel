@@ -99,7 +99,6 @@ zig_library(
         "io.zig",
         "kernel.zig",
         "logo.zig",
-        "kernel.zig",
         "mem.zig",
         "meta.zig",
         "mlirx.zig",
