@@ -2,8 +2,8 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
-const weights = @import("weights.zig");
+const config_mod = @import("../core/config.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -182,6 +182,7 @@ pub fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
 }
 
 const AdaLn = struct {
+    kind: enum { full, curve } = .full,
     linear: zml.nn.Linear,
     hidden_size: i64,
     expand: i64,
@@ -189,7 +190,18 @@ const AdaLn = struct {
 
     pub fn init(store: zml.io.TensorStore.View, hidden_size: i64, expand: i64, modalities: i64) AdaLn {
         return .{
+            .kind = .full,
             .linear = linear(store, "linear.weight", "linear.bias", .replicated, .replicated),
+            .hidden_size = hidden_size,
+            .expand = expand,
+            .modalities = modalities,
+        };
+    }
+
+    pub fn initCurve(table: zml.Tensor, hidden_size: i64, expand: i64, modalities: i64) AdaLn {
+        return .{
+            .kind = .curve,
+            .linear = .{ .weight = table, .tag = zml.Shape.toTag(.d) },
             .hidden_size = hidden_size,
             .expand = expand,
             .modalities = modalities,
@@ -238,12 +250,16 @@ pub const TransformerBlock = struct {
         const attn_store = store.withPrefix("attn");
         const mlp_store = store.withPrefix("mlp");
         const adaln_store = store.withPrefix("adaln_proj");
+        const curve_table = store.maybeCreateTensor("adaln_t_table", .{ .t, .d }, .replicated);
         return .{
             .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
             .attn = .init(attn_store, cfg),
             .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
             .mlp = .init(mlp_store),
-            .adaln = .init(adaln_store, cfg.hidden_size, 6, config_mod.modality_count),
+            .adaln = if (curve_table) |table|
+                .initCurve(table, cfg.hidden_size, 6, config_mod.modality_count)
+            else
+                .init(adaln_store, cfg.hidden_size, 6, config_mod.modality_count),
             .hidden_size = cfg.hidden_size,
         };
     }
@@ -258,9 +274,17 @@ pub const TransformerBlock = struct {
 
     pub fn forward(input: Input) Output {
         const self = input.layer;
-        const table = self.adaln.forward(input.temb);
-        const mods = table.merge(.{ .n = .{ .n, .mod } });
-        const selected = mods.gather(.{ .n = input.adaln_indices }, .{});
+        const selected = if (self.adaln.kind == .curve) blk: {
+            const raw = self.adaln.linear.weight.splitAxis(.d, .{
+                .k = self.adaln.expand,
+                .d = self.adaln.hidden_size,
+            });
+            break :blk raw.gather(.{ .t = input.adaln_indices }, .{});
+        } else blk: {
+            const table = self.adaln.forward(input.temb);
+            const mods = table.merge(.{ .n = .{ .n, .mod } });
+            break :blk mods.gather(.{ .n = input.adaln_indices }, .{});
+        };
         const parts = selected.chunkExact(.k, 6);
         const shift_msa = parts[0].squeeze(.k);
         const scale_msa = parts[1].squeeze(.k);
@@ -539,11 +563,11 @@ pub fn finish(input: FinishInput) FinishOutput {
 
 pub const LoadedModel = struct {
     inner: Model,
-    parsed_config: std.json.Parsed(Config),
+    cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         const parsed = try config_mod.parseConfig(allocator, io, repo);
-        errdefer parsed.deinit();
+        defer parsed.deinit();
         const cfg = parsed.value.resolve();
         log.info("dit: {d} layers hidden={d} heads={d} text_dim={d}", .{
             cfg.num_layers,
@@ -553,13 +577,12 @@ pub const LoadedModel = struct {
         });
         return .{
             .inner = try .init(allocator, store, cfg),
-            .parsed_config = parsed,
+            .cfg = cfg,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
-        self.parsed_config.deinit();
     }
 
     pub fn loadEmbed(

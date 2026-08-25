@@ -2,8 +2,8 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const visual_vae = @import("visual_vae.zig");
-const weights = @import("weights.zig");
+const visual_vae = @import("visual.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_enc);
 

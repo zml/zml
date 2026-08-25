@@ -2,17 +2,17 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const audio_vae = @import("audio_vae.zig");
-const config_mod = @import("config.zig");
-const dit = @import("dit.zig");
-const encoder = @import("encoder.zig");
-const packing = @import("packing.zig");
-const sharding_mod = @import("sharding.zig");
-const scheduler_mod = @import("scheduler.zig");
-const vae = @import("vae.zig");
-const vision = @import("vision.zig");
-const visual_enc = @import("visual_enc.zig");
-const visual_vae = @import("visual_vae.zig");
+const audio_vae = @import("../vae/audio.zig");
+const config_mod = @import("../core/config.zig");
+const dit = @import("../model/dit.zig");
+const encoder = @import("../model/encoder.zig");
+const packing = @import("../model/packing.zig");
+const sharding_mod = @import("../core/sharding.zig");
+const scheduler_mod = @import("../model/scheduler.zig");
+const vae = @import("../vae/geom.zig");
+const vision = @import("../model/vision.zig");
+const visual_enc = @import("../vae/visual_enc.zig");
+const visual_vae = @import("../vae/visual.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -502,6 +502,47 @@ pub fn compileVision(
         .seq = seq,
         .merged = merged,
     };
+}
+
+pub const Packed = struct {
+    layout: packing.Layout,
+    schedules: scheduler_mod.DualSchedule,
+
+    pub fn deinit(self: *Packed, allocator: std.mem.Allocator) void {
+        self.layout.deinit(allocator);
+        self.schedules.deinit(allocator);
+    }
+};
+
+pub fn pack(
+    allocator: std.mem.Allocator,
+    opts: Options,
+    geo: Geometry,
+    text_len: u32,
+    text_tags: []const u8,
+    videos: []const packing.ConditionVideo,
+    audios: []const packing.ConditionAudio,
+    references: []const packing.ReferenceBlock,
+) !Packed {
+    const schedules = try scheduler_mod.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
+    errdefer schedules.deinit(allocator);
+    const video_t = schedules.video.timesteps[0];
+    const audio_t = 1.0 - scheduler_mod.timeShiftSigma(1.0 - video_t, opts.video_shift, opts.audio_shift);
+    const layout = try packing.build(allocator, .{
+        .text_len = text_len,
+        .latent_t = geo.latent_t,
+        .latent_h = geo.latent_h,
+        .latent_w = geo.latent_w,
+        .audio_t = geo.audio_t,
+        .video_t = video_t,
+        .audio_t_noise = audio_t,
+        .condition_videos = videos,
+        .condition_audios = audios,
+        .references = references,
+        .text_tags = text_tags,
+        .pixel_frames = geo.frames,
+    });
+    return .{ .layout = layout, .schedules = schedules };
 }
 
 pub fn describe(opts: Options, geo: Geometry, layout: packing.Layout) void {

@@ -2,9 +2,9 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
-const vae = @import("vae.zig");
-const weights = @import("weights.zig");
+const config_mod = @import("../core/config.zig");
+const vae = @import("geom.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_vae);
 
@@ -445,15 +445,23 @@ pub fn finish(input: FinishInput) FinishOutput {
     return .{ .patches = proj.slice1d(.s, .{ .start = 0, .end = keep }) };
 }
 
+fn parseOptional(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, name: []const u8) !?std.json.Parsed(FileConfig) {
+    return config_mod.parseJson(FileConfig, allocator, io, repo, name) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+}
+
 pub const LoadedModel = struct {
     inner: Model,
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        var parsed_root = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
+        var parsed_root = try parseOptional(allocator, io, repo, "config.json");
         defer if (parsed_root) |*parsed| parsed.deinit();
-        var parsed_source = config_mod.parseJson(FileConfig, allocator, io, repo, "source/config.json") catch null;
+        var parsed_source = try parseOptional(allocator, io, repo, "source/config.json");
         defer if (parsed_source) |*parsed| parsed.deinit();
+        if (parsed_root == null and parsed_source == null) return error.FileNotFound;
         var cfg = Config.official();
         if (parsed_source) |parsed| parsed.value.overlay(&cfg);
         if (parsed_root) |parsed| parsed.value.overlay(&cfg);

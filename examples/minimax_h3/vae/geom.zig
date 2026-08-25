@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const config = @import("config.zig");
+const config = @import("../core/config.zig");
+const noise = @import("../model/noise.zig");
 
 const LatentHw = config.LatentHw;
 
@@ -177,6 +178,46 @@ pub fn audioBctToRows(dst: []f32, bct: []const f32, channels: u32, t: u32) void 
             }
         }
     }
+}
+
+pub fn f32ToF16Bits(value: f32) u16 {
+    return @as(u16, @bitCast(@as(f16, @floatCast(value))));
+}
+
+pub fn f16BitsToF32(bits: u16) f32 {
+    return @as(f16, @bitCast(bits));
+}
+
+/// Official visual-condition posterior: mean+std*randn(seed=42), then FP16 round-trip.
+pub fn sampleVisualPosteriorNchw(
+    allocator: std.mem.Allocator,
+    moments_nchw: []const f32,
+    t: u32,
+    h: u32,
+    w: u32,
+    policy: config.PosteriorPolicy,
+) ![]f32 {
+    const spatial = @as(usize, t) * h * w;
+    std.debug.assert(moments_nchw.len >= spatial * 48);
+    const out = try allocator.alloc(f32, spatial * 24);
+    if (policy == .mean) {
+        @memcpy(out, moments_nchw[0..out.len]);
+        return out;
+    }
+    var gen = noise.Generator.init(config.visual_encode_seed);
+    const eps = try allocator.alloc(f32, out.len);
+    defer allocator.free(eps);
+    noise.randn(&gen, eps);
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        const mean = moments_nchw[i];
+        var logvar = moments_nchw[spatial * 24 + i];
+        logvar = std.math.clamp(logvar, -30.0, 20.0);
+        const stddev = @exp(0.5 * logvar);
+        const sampled = mean + stddev * eps[i];
+        out[i] = f16BitsToF32(f32ToF16Bits(sampled));
+    }
+    return out;
 }
 
 pub fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []const f32, decode: bool) void {

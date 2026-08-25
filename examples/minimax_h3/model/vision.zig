@@ -2,8 +2,8 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("config.zig");
-const weights = @import("weights.zig");
+const config_mod = @import("../core/config.zig");
+const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_vision);
 
@@ -300,26 +300,18 @@ pub fn embed(input: EmbedInput) EmbedOutput {
 
 pub const LoadedModel = struct {
     inner: Model,
-    parsed: ?std.json.Parsed(FileConfig),
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View, text_hidden: i64) !LoadedModel {
-        const parsed: ?std.json.Parsed(FileConfig) = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch null;
-        const cfg = if (parsed) |p| p.value.resolve(text_hidden) else blk: {
-            var c = Config{};
-            c.out_hidden_size = text_hidden;
-            break :blk c;
-        };
+        const cfg = try configFromRepo(allocator, io, repo, text_hidden);
         return .{
             .inner = try .init(allocator, store, cfg),
-            .parsed = parsed,
             .cfg = cfg,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
-        if (self.parsed) |*p| p.deinit();
     }
 
     pub fn loadEmbed(self: *const LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, shardings: []const zml.Sharding, progress: *std.Progress.Node) !zml.Bufferized(EmbedModel) {
@@ -366,7 +358,7 @@ pub fn chooseGrid(cfg: Config, src_h: u32, src_w: u32, video: bool) struct { h: 
 }
 
 pub fn patchifyRgb(allocator: std.mem.Allocator, rgb: []const u8, src_h: u32, src_w: u32, cfg: Config) !struct { patches: []f32, grid: Grid, seq: u32 } {
-    const media = @import("media.zig");
+    const media = @import("../runtime/media.zig");
     const size = chooseGrid(cfg, src_h, src_w, false);
     const resized = try media.resizeRgb(allocator, rgb, src_w, src_h, size.w, size.h);
     defer allocator.free(resized);
@@ -420,7 +412,7 @@ pub fn patchifyVideo(
     src_w: u32,
     cfg: Config,
 ) !struct { patches: []f32, grid: Grid, seq: u32, temporal: u32 } {
-    const media = @import("media.zig");
+    const media = @import("../runtime/media.zig");
     const size = chooseGrid(cfg, src_h, src_w, true);
     const even = frames + (frames % 2);
     const temporal = even / 2;
@@ -620,7 +612,7 @@ fn runPatches(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    compiled: *const @import("pipeline.zig").VisionCompiled,
+    compiled: *const @import("../runtime/pipeline.zig").VisionCompiled,
     loaded: *const LoadedModel,
     store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
@@ -833,7 +825,7 @@ pub fn runImage(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    compiled: *const @import("pipeline.zig").VisionCompiled,
+    compiled: *const @import("../runtime/pipeline.zig").VisionCompiled,
     loaded: *const LoadedModel,
     store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
@@ -851,7 +843,7 @@ pub fn runVideo(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    compiled: *const @import("pipeline.zig").VisionCompiled,
+    compiled: *const @import("../runtime/pipeline.zig").VisionCompiled,
     loaded: *const LoadedModel,
     store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
@@ -885,12 +877,8 @@ pub fn applyVisionPositions(pos: []f32, start: u32, tokens: u32, grid_h: u32, gr
     cursor.* = base + @as(f32, @floatFromInt(@max(@max(rows, cols), time)));
 }
 
-pub fn configFromRepo(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, text_hidden: i64) Config {
-    const parsed = config_mod.parseJson(FileConfig, allocator, io, repo, "config.json") catch {
-        var out = Config{};
-        out.out_hidden_size = text_hidden;
-        return out;
-    };
+pub fn configFromRepo(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, text_hidden: i64) !Config {
+    const parsed = try config_mod.parseJson(FileConfig, allocator, io, repo, "config.json");
     defer parsed.deinit();
     return parsed.value.resolve(text_hidden);
 }
