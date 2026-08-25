@@ -502,6 +502,19 @@ pub const Float4E2M1 = packed struct(u4) {
         }
         try std.testing.expectEqualSlices(u4, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, @ptrCast(&from_f32_res));
     }
+
+    pub const Packed = packed struct(@Int(.unsigned, @bitSizeOf(Float4E2M1) * 2)) {
+        x: Float4E2M1,
+        y: Float4E2M1,
+
+        pub fn fromF32(x: f32, y: f32) Packed {
+            return .{ .x = .fromF32(x), .y = .fromF32(y) };
+        }
+
+        pub fn toF32(xy: Packed) [2]f32 {
+            return .{ xy.x.toF32(), xy.y.toF32() };
+        }
+    };
 };
 
 pub fn floatCast(T: type, x: anytype) T {

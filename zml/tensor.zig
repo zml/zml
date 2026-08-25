@@ -1221,8 +1221,10 @@ pub const Tensor = struct {
         // f4e2m1
         {
             const x = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
-            var x_f4: [x.len]floats.Float4E2M1 = undefined;
-            for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
+            var x_f4_packed: [x.len / 2]floats.Float4E2M1.Packed = undefined;
+            for (&x_f4_packed, 0..) |*f4_as_u4, i| {
+                f4_as_u4.* = .fromF32(x[2 * i], x[2 * i + 1]);
+            }
 
             const x_d: Tensor = .init(.{x.len}, .f32);
             const exe = try zml.module.compile(
@@ -1242,8 +1244,8 @@ pub const Tensor = struct {
             const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
             defer x_f4_xla.free(std.testing.allocator);
 
-            errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
-            try std.testing.expectEqualDeep(&x_f4, x_f4_xla.items(floats.Float4E2M1));
+            errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4_packed, x_f4_xla });
+            try std.testing.expectEqualSlices(u8, @ptrCast(&x_f4_packed), x_f4_xla.constData());
         }
 
         // f8e3m4
