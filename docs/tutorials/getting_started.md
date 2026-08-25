@@ -93,11 +93,11 @@ For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 ### MiniMax-H3
 
-Omni video+audio generation (33B DiT + Qwen3-VL-32B encoder). Not an LLM; use `//examples/minimax_h3`. Variants: `t2va`, `fl2va`, `ref2va`. Consumer GPUs default to `--preview` (352 short side); official 768p is `--full` and needs at least 40 GiB per device. Preview + audio `--refs` needs `--tiny` under 40 GiB. Host tests do not need weights. Full flags and limits: [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md).
+Joint video+audio from a MiniMax-H3 repository. Not an LLM; use `//examples/minimax_h3`. See [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md).
 
 ```
 bazel run //examples/minimax_h3:h3_tests
-bazel run --config=release //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3 --variant=t2va --preview --prompt="A cinematic wide shot of waves at dusk."
+bazel run --config=release //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3 --preview --prompt="A cinematic wide shot of waves at dusk."
 ```
 
 
