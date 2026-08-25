@@ -189,8 +189,8 @@ pub fn fusedExpertsImpl(
     const expert_ids = topk_ids.reshape(.{ .token = num_tokens, .top_expert = top_expert }).withTags(.{ .token, .top_expert })
         .merge(.{ .r = .{ .token, .top_expert } }).convert(.i32);
 
-    const gate_up_w = if (gate_up.dtype() == .u8) zml.nn.unpackNvfp4(gate_up, .d) else gate_up;
-    const down_w = if (down.dtype() == .u8) zml.nn.unpackNvfp4(down, .dout) else down;
+    const gate_up_w = if (gate_up.dtype() == .u8) zml.nn.unpackFp4(gate_up, .d) else gate_up;
+    const down_w = if (down.dtype() == .u8) zml.nn.unpackFp4(down, .dout) else down;
 
     const gate_up_out = try applyGateUpGlobalScale(moeGemm(
         x_rows,
