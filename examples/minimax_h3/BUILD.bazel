@@ -4,7 +4,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "minimax_h3",
-    srcs = glob(["*.zig"]),
+    srcs = glob(["**/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -12,7 +12,7 @@ zig_binary(
 
 zig_binary(
     name = "h3_tests",
-    srcs = glob(["*.zig"]),
+    srcs = glob(["**/*.zig"]),
     main = "tests.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],

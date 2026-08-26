@@ -1,0 +1,974 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+const config_mod = @import("../core/config.zig");
+const policy = @import("../core/policy.zig");
+const weights = @import("../core/weights.zig");
+
+const log = std.log.scoped(.minimax_h3);
+
+pub const Config = config_mod.Config;
+
+const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", tagz, .replicated),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    pub fn forward(self: RmsNorm, input: zml.Tensor, axis: anytype) zml.Tensor {
+        const normalized = zml.nn.rmsNorm(input, axis, self.eps);
+        return normalized.mul(self.weight.convert(input.dtype()).broad(input.shape()));
+    }
+};
+
+fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
+    return .fromStore(store, weight_name, bias_name, partitions, bias_partitions, .d);
+}
+
+const SwiGlu = struct {
+    fc1: zml.nn.Linear,
+    fc2: zml.nn.Linear,
+    /// Official Diffusers `SwiGLU` chunks `(value, gate)`. Custom `fc1` chunks `(gate, value)`.
+    value_first: bool = false,
+
+    pub fn init(store: zml.io.TensorStore.View) SwiGlu {
+        const in_part = .{ .dout = .model, .d = .replicated };
+        const out_part = .{ .dout = .replicated, .d = .model };
+        if (store.getShape("fc1.weight") != null) {
+            return .{
+                .fc1 = linear(store, "fc1.weight", null, in_part, .replicated),
+                .fc2 = linear(store, "fc2.weight", null, out_part, .replicated),
+            };
+        }
+        return .{
+            .fc1 = linear(store, "net.0.proj.weight", null, in_part, .replicated),
+            .fc2 = linear(store, "net.2.weight", null, out_part, .replicated),
+            .value_first = true,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(SwiGlu)) void {
+        zml.nn.Linear.unloadBuffers(&self.fc1);
+        zml.nn.Linear.unloadBuffers(&self.fc2);
+    }
+
+    pub fn forward(self: SwiGlu, x: zml.Tensor) zml.Tensor {
+        const uv = self.fc1.forward(x);
+        const a, const b = uv.chunkExact(-1, 2);
+        const gated = if (self.value_first) b.silu().mul(a) else a.silu().mul(b);
+        return self.fc2.forward(gated.rename(.{ .dout = .d }));
+    }
+};
+
+const Attention = struct {
+    qkv: ?zml.nn.Linear = null,
+    q: ?zml.nn.Linear = null,
+    k: ?zml.nn.Linear = null,
+    v: ?zml.nn.Linear = null,
+    out: zml.nn.Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+    num_heads: i64,
+    head_dim: i64,
+    attn_kind: policy.AttnKind = .vanilla,
+
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
+        const qkv_part = .{ .dout = .model, .d = .replicated };
+        const out_part = .{ .dout = .replicated, .d = .model };
+        const q_norm = RmsNorm.init(
+            store.withPrefix(if (store.hasKey("q_norm")) "q_norm" else "norm_q"),
+            .{.hd},
+            cfg.qk_norm_eps,
+        );
+        const k_norm = RmsNorm.init(
+            store.withPrefix(if (store.hasKey("k_norm")) "k_norm" else "norm_k"),
+            .{.hd},
+            cfg.qk_norm_eps,
+        );
+        if (store.getShape("qkv_proj.weight") != null) {
+            return .{
+                .qkv = linear(store, "qkv_proj.weight", null, qkv_part, .replicated),
+                .out = linear(store, "out_proj.weight", null, out_part, .replicated),
+                .q_norm = q_norm,
+                .k_norm = k_norm,
+                .num_heads = cfg.num_attention_heads,
+                .head_dim = cfg.attention_head_dim,
+            };
+        }
+        return .{
+            .q = linear(store, "to_q.weight", null, qkv_part, .replicated),
+            .k = linear(store, "to_k.weight", null, qkv_part, .replicated),
+            .v = linear(store, "to_v.weight", null, qkv_part, .replicated),
+            .out = linear(store, "to_out.0.weight", null, out_part, .replicated),
+            .q_norm = q_norm,
+            .k_norm = k_norm,
+            .num_heads = cfg.num_attention_heads,
+            .head_dim = cfg.attention_head_dim,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
+        if (self.qkv) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        if (self.q) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        if (self.k) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        if (self.v) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        zml.nn.Linear.unloadBuffers(&self.out);
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
+    }
+
+    fn projectQkv(self: Attention, x: zml.Tensor) struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } {
+        if (self.qkv) |qkv| {
+            // Fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
+            const split = qkv.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
+                .withPartitioning(.{ .h = .model });
+            const parts = split.chunkExact(.p, 3);
+            return .{
+                .q = parts[0].squeeze(.p),
+                .k = parts[1].squeeze(.p),
+                .v = parts[2].squeeze(.p),
+            };
+        }
+        const heads = .{ .h = self.num_heads, .hd = self.head_dim };
+        return .{
+            .q = self.q.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            .k = self.k.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            .v = self.v.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+        };
+    }
+
+    pub fn forward(self: Attention, x: zml.Tensor, rotary: ?struct { zml.Tensor, zml.Tensor }) zml.Tensor {
+        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+        const qk = projectQkv(self, x_qkv);
+        var q = qk.q;
+        var k = qk.k;
+        const v = qk.v;
+
+        q = self.q_norm.forward(q, .hd);
+        k = self.k_norm.forward(k, .hd);
+        if (rotary) |pe| {
+            q = applyRotary(q, pe[0], pe[1]);
+            k = applyRotary(k, pe[0], pe[1]);
+        }
+        const q_s = q.rename(.{ .s = .q });
+        const k_s = k.rename(.{ .s = .k });
+        const v_s = v.rename(.{ .s = .k });
+        const attn = switch (self.attn_kind) {
+            .cuda_fa2 => zml.attention.flashattn.fa2.dense(q_s, k_s, v_s, .{ .is_causal = false }),
+            .vanilla => zml.nn.sdpa(q_s, k_s, v_s, .{}),
+        }.rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
+        return self.out.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+    }
+};
+
+fn rotateHalf(x: zml.Tensor) zml.Tensor {
+    const half = @divExact(x.dim(-1), 2);
+    const x1 = x.slice1d(-1, .{ .start = 0, .end = half });
+    const x2 = x.slice1d(-1, .{ .start = half, .end = x.dim(-1) });
+    return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+}
+
+fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
+    const rotary_dim = cos.dim(-1);
+    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
+    const x_pass = x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) });
+    const cos_x = cos.rename(.{ .f = .hd }).broad(x_rot.shape());
+    const sin_x = sin.rename(.{ .f = .hd }).broad(x_rot.shape());
+    const rotated = x_rot.mul(cos_x).add(rotateHalf(x_rot).mul(sin_x));
+    return zml.Tensor.concatenate(&.{ rotated, x_pass }, -1);
+}
+
+pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) struct { zml.Tensor, zml.Tensor } {
+    const pos = position_ids.convert(.f32).withPartialTags(.{ .s, .ax });
+    const inv = zml.nn.invFreq(2 * rope_freq_dim, .{
+        .layout = .real_im_pass,
+        .scaling = .{ .default = .{ .rope_theta = rope_theta } },
+    }).withTags(.{.f});
+    const freqs = pos.outer(inv);
+    const parts = freqs.chunkExact(.ax, 3);
+    const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
+    const emb = zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
+    return .{ emb.cos(), emb.sin() };
+}
+
+pub const TimeEmbedder = struct {
+    table: ?zml.Tensor = null,
+    proj_in: ?zml.nn.Linear = null,
+    proj_out: ?zml.nn.Linear = null,
+
+    pub fn init(store: zml.io.TensorStore.View) TimeEmbedder {
+        if (store.getShape("time_embedder.proj_in.weight") != null) {
+            const prefix = store.withPrefix("time_embedder");
+            return .{
+                .proj_in = linear(prefix, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
+                .proj_out = linear(prefix, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
+            };
+        }
+        if (store.getShape("time_embedder.linear_1.weight") != null) {
+            const prefix = store.withPrefix("time_embedder");
+            return .{
+                .proj_in = linear(prefix, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
+                .proj_out = linear(prefix, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
+            };
+        }
+        if (store.maybeCreateTensor("adaln_t_table", .{ .t, .d }, .replicated)) |table| {
+            return .{ .table = table };
+        }
+        std.debug.panic("DiT has neither time_embedder nor adaln_t_table", .{});
+    }
+
+    pub fn outDim(self: TimeEmbedder) i64 {
+        if (self.table) |table| return table.dim(.d);
+        return self.proj_out.?.weight.dim(.dout);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TimeEmbedder)) void {
+        if (self.table) |*table| table.deinit();
+        if (self.proj_in) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        if (self.proj_out) |*layer| zml.nn.Linear.unloadBuffers(layer);
+    }
+
+    fn forwardMlp(self: TimeEmbedder, features: zml.Tensor) zml.Tensor {
+        return self.proj_out.?.forward(self.proj_in.?.forward(features).silu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    }
+
+    fn activateAdaln(self: TimeEmbedder) bool {
+        return self.proj_in != null;
+    }
+
+    pub fn forward(self: TimeEmbedder, t: zml.Tensor, freq_dim: i64) zml.Tensor {
+        if (self.table) |table| return interpolateTable(table, t);
+        return self.forwardMlp(timestepFeatures(t, freq_dim));
+    }
+};
+
+/// Maps `t ∈ [0, 1]` onto a table with `rows` evenly spaced entries.
+pub fn tableCoord(t: f32, rows: u32) struct { i0: u32, i1: u32, frac: f32 } {
+    std.debug.assert(rows >= 2);
+    const last = @as(f32, @floatFromInt(rows - 1));
+    const x = std.math.clamp(t, 0.0, 1.0) * last;
+    const lo: u32 = @intFromFloat(@floor(x));
+    const hi = @min(lo + 1, rows - 1);
+    return .{
+        .i0 = lo,
+        .i1 = hi,
+        .frac = x - @as(f32, @floatFromInt(lo)),
+    };
+}
+
+fn interpolateTable(table: zml.Tensor, t: zml.Tensor) zml.Tensor {
+    const last_i = table.dim(.t) - 1;
+    const last = zml.Tensor.scalar(@as(f32, @floatFromInt(last_i)), .f32);
+    const x = t.convert(.f32).mul(last).clamp(zml.Tensor.scalar(0, .f32), last);
+    const lo = x.floor();
+    const hi = lo.addConstant(1).minimum(last);
+    const a = table.gather(.{ .t = lo.convert(.u32).withPartialTags(.{.n}) }, .{});
+    const b = table.gather(.{ .t = hi.convert(.u32).withPartialTags(.{.n}) }, .{});
+    const frac = x.sub(lo).withPartialTags(.{.n}).broad(a.shape());
+    return a.mul(zml.Tensor.scalar(1, a.dtype()).sub(frac.convert(a.dtype()))).add(b.mul(frac.convert(b.dtype())));
+}
+
+pub fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
+    const inv = zml.nn.invFreq(dim, .{
+        .layout = .real_im_pass,
+        .scaling = .{ .default = .{ .rope_theta = 10000.0 } },
+    }).withTags(.{.f});
+    const angles = t.convert(.f32).withPartialTags(.{.n}).outer(inv);
+    return zml.Tensor.concatenate(&.{ angles.cos(), angles.sin() }, .f).rename(.{ .f = .d });
+}
+
+pub const AdaLn = struct {
+    linear: zml.nn.Linear,
+    hidden_size: i64,
+    expand: i64,
+    modalities: i64,
+    activate: bool,
+
+    pub fn init(store: zml.io.TensorStore.View, hidden_size: i64, expand: i64, modalities: i64, activate: bool) AdaLn {
+        return .{
+            .linear = linear(store, "linear.weight", "linear.bias", .replicated, .replicated),
+            .hidden_size = hidden_size,
+            .expand = expand,
+            .modalities = modalities,
+            .activate = activate,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AdaLn)) void {
+        zml.nn.Linear.unloadBuffers(&self.linear);
+    }
+
+    pub fn forward(self: AdaLn, temb: zml.Tensor) zml.Tensor {
+        const cond = if (self.activate) temb.silu() else temb;
+        const raw = self.linear.forward(cond.convert(self.linear.weight.dtype()));
+        if (self.modalities == 1) {
+            return raw.splitAxis(.dout, .{ .k = self.expand, .d = self.hidden_size });
+        }
+        return raw.splitAxis(.dout, .{
+            .mod = self.modalities,
+            .k = self.expand,
+            .d = self.hidden_size,
+        });
+    }
+};
+
+pub const BlockCore = struct {
+    norm1: RmsNorm,
+    attn: Attention,
+    norm2: RmsNorm,
+    mlp: SwiGlu,
+    hidden_size: i64,
+
+    pub const Input = struct {
+        layer: BlockCore,
+        hidden: zml.Tensor,
+        mods: zml.Tensor,
+        adaln_indices: zml.Tensor,
+        cos: zml.Tensor,
+        sin: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+    };
+
+    pub fn unloadBuffers(self: *zml.Bufferized(BlockCore)) void {
+        RmsNorm.unloadBuffers(&self.norm1);
+        Attention.unloadBuffers(&self.attn);
+        RmsNorm.unloadBuffers(&self.norm2);
+        SwiGlu.unloadBuffers(&self.mlp);
+    }
+
+    pub fn forward(input: Input) Output {
+        const self = input.layer;
+        const mods = if (input.mods.shape().hasTag(.mod)) |_|
+            input.mods.merge(.{ .n = .{ .n, .mod } })
+        else
+            input.mods;
+        const selected = mods.gather(.{ .n = input.adaln_indices }, .{});
+        const parts = selected.chunkExact(.k, 6);
+        const shift_msa = parts[0].squeeze(.k);
+        const scale_msa = parts[1].squeeze(.k);
+        const gate_msa = parts[2].squeeze(.k);
+        const shift_mlp = parts[3].squeeze(.k);
+        const scale_mlp = parts[4].squeeze(.k);
+        const gate_mlp = parts[5].squeeze(.k);
+
+        const residual0 = input.hidden.withPartitioning(.{ .d = .replicated });
+        const n1 = self.norm1.forward(residual0, .d);
+        const one = zml.Tensor.scalar(1.0, n1.dtype());
+        const attn_in = n1.mul(one.add(scale_msa.convert(n1.dtype()).broad(n1.shape()))).add(shift_msa.convert(n1.dtype()).broad(n1.shape()));
+        const attn_out = self.attn.forward(attn_in, .{ input.cos, input.sin });
+        const x1 = residual0.add(gate_msa.convert(attn_out.dtype()).broad(attn_out.shape()).mul(attn_out)).withPartitioning(.{ .d = .replicated });
+
+        const n2 = self.norm2.forward(x1, .d);
+        const mlp_in = n2.mul(one.add(scale_mlp.convert(n2.dtype()).broad(n2.shape()))).add(shift_mlp.convert(n2.dtype()).broad(n2.shape()));
+        const mlp_out = self.mlp.forward(mlp_in).rename(.{ .dout = .d });
+        const x2 = x1.add(gate_mlp.convert(mlp_out.dtype()).broad(mlp_out.shape()).mul(mlp_out)).withPartitioning(.{ .d = .replicated });
+        return .{ .hidden = x2.reuseBuffer(input.hidden) };
+    }
+};
+
+pub const StepBlockInput = struct {
+    layer: BlockCore,
+    hidden: zml.Tensor,
+    table: zml.Tensor,
+    step: zml.Tensor,
+    adaln_indices: zml.Tensor,
+    cos: zml.Tensor,
+    sin: zml.Tensor,
+};
+
+pub fn stepBlock(input: StepBlockInput) BlockCore.Output {
+    const mods = input.table.gather(.{ .t = input.step }, .{});
+    return BlockCore.forward(.{
+        .layer = input.layer,
+        .hidden = input.hidden,
+        .mods = mods,
+        .adaln_indices = input.adaln_indices,
+        .cos = input.cos,
+        .sin = input.sin,
+    });
+}
+
+pub const BlockGroup = struct {
+    layers: []BlockCore,
+
+    pub const Input = struct {
+        group: BlockGroup,
+        hidden: zml.Tensor,
+        tables: []zml.Tensor,
+        step: zml.Tensor,
+        adaln_indices: zml.Tensor,
+        cos: zml.Tensor,
+        sin: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+    };
+
+    pub fn unloadBuffers(self: *zml.Bufferized(BlockGroup), allocator: std.mem.Allocator) void {
+        for (self.layers) |*layer| BlockCore.unloadBuffers(layer);
+        allocator.free(self.layers);
+    }
+
+    pub fn forward(input: Input) Output {
+        var hidden = input.hidden;
+        for (input.group.layers, input.tables) |layer, table| {
+            const mods = table.gather(.{ .t = input.step }, .{});
+            hidden = BlockCore.forward(.{
+                .layer = layer,
+                .hidden = hidden,
+                .mods = mods,
+                .adaln_indices = input.adaln_indices,
+                .cos = input.cos,
+                .sin = input.sin,
+            }).hidden;
+        }
+        return .{ .hidden = hidden };
+    }
+};
+
+pub const TransformerBlock = struct {
+    norm1: RmsNorm,
+    attn: Attention,
+    norm2: RmsNorm,
+    mlp: SwiGlu,
+    adaln: AdaLn,
+    hidden_size: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config, activate_adaln: bool) TransformerBlock {
+        const attn_store = store.withPrefix("attn");
+        const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
+        const adaln_store = store.withPrefix("adaln_proj");
+        return .{
+            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
+            .attn = .init(attn_store, cfg),
+            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
+            .mlp = .init(mlp_store),
+            .adaln = .init(adaln_store, cfg.hidden_size, 6, config_mod.modality_count, activate_adaln),
+            .hidden_size = cfg.hidden_size,
+        };
+    }
+
+    pub fn corePart(self: TransformerBlock) BlockCore {
+        return .{
+            .norm1 = self.norm1,
+            .attn = self.attn,
+            .norm2 = self.norm2,
+            .mlp = self.mlp,
+            .hidden_size = self.hidden_size,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerBlock)) void {
+        RmsNorm.unloadBuffers(&self.norm1);
+        Attention.unloadBuffers(&self.attn);
+        RmsNorm.unloadBuffers(&self.norm2);
+        SwiGlu.unloadBuffers(&self.mlp);
+        AdaLn.unloadBuffers(&self.adaln);
+    }
+};
+
+const TokenRefinerBlock = struct {
+    norm1: RmsNorm,
+    attn: Attention,
+    norm2: RmsNorm,
+    mlp: SwiGlu,
+
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config) TokenRefinerBlock {
+        const attn_store = store.withPrefix("attn");
+        const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
+        return .{
+            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
+            .attn = .init(attn_store, cfg),
+            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
+            .mlp = .init(mlp_store),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenRefinerBlock)) void {
+        RmsNorm.unloadBuffers(&self.norm1);
+        Attention.unloadBuffers(&self.attn);
+        RmsNorm.unloadBuffers(&self.norm2);
+        SwiGlu.unloadBuffers(&self.mlp);
+    }
+
+    pub fn forward(self: TokenRefinerBlock, x: zml.Tensor) zml.Tensor {
+        const residual = x.withPartitioning(.{ .d = .replicated });
+        const x1 = residual.add(self.attn.forward(self.norm1.forward(residual, .d), null));
+        return x1.add(self.mlp.forward(self.norm2.forward(x1, .d)).rename(.{ .dout = .d })).withPartitioning(.{ .d = .replicated }).reuseBuffer(x);
+    }
+};
+
+const TokenRefiner = struct {
+    blocks: []TokenRefinerBlock,
+    final_norm: RmsNorm,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !TokenRefiner {
+        const block_store = store.withPrefix(if (store.hasKey("refiner_blocks")) "refiner_blocks" else "blocks");
+        const blocks = try allocator.alloc(TokenRefinerBlock, @intCast(cfg.num_refiner_layers));
+        errdefer allocator.free(blocks);
+        for (blocks, 0..) |*block, i| {
+            block.* = .init(block_store.withLayer(i), cfg);
+        }
+        return .{
+            .blocks = blocks,
+            .final_norm = .init(store.withPrefix("final_norm"), .{.d}, cfg.final_norm_eps),
+        };
+    }
+
+    pub fn deinit(self: TokenRefiner, allocator: std.mem.Allocator) void {
+        allocator.free(self.blocks);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenRefiner), allocator: std.mem.Allocator) void {
+        for (self.blocks) |*block| TokenRefinerBlock.unloadBuffers(block);
+        allocator.free(self.blocks);
+        RmsNorm.unloadBuffers(&self.final_norm);
+    }
+
+    pub fn forward(self: TokenRefiner, x: zml.Tensor) zml.Tensor {
+        var hidden = x;
+        for (self.blocks) |block| {
+            hidden = block.forward(hidden);
+        }
+        return self.final_norm.forward(hidden, .d);
+    }
+};
+
+const FinalLayer = struct {
+    norm: RmsNorm,
+    adaln: AdaLn,
+    video_out: zml.nn.Linear,
+    audio_out: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config, activate_adaln: bool) FinalLayer {
+        if (store.hasKey("final_layer")) {
+            const layer = store.withPrefix("final_layer");
+            return .{
+                .norm = .init(layer.withPrefix("norm"), .{.d}, cfg.final_norm_eps),
+                .adaln = .init(layer.withPrefix("adaln_proj"), cfg.hidden_size, 2, 1, activate_adaln),
+                .video_out = linear(layer, "video_out.weight", "video_out.bias", .replicated, .replicated),
+                .audio_out = linear(layer, "audio_out.weight", "audio_out.bias", .replicated, .replicated),
+            };
+        }
+        return .{
+            .norm = .init(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
+            .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size, 2, 1, activate_adaln),
+            .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
+            .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(FinalLayer)) void {
+        RmsNorm.unloadBuffers(&self.norm);
+        AdaLn.unloadBuffers(&self.adaln);
+        zml.nn.Linear.unloadBuffers(&self.video_out);
+        zml.nn.Linear.unloadBuffers(&self.audio_out);
+    }
+};
+
+pub const Model = struct {
+    video_proj: zml.nn.Linear,
+    audio_proj: zml.nn.Linear,
+    condition_proj: zml.nn.Linear,
+    time_embedder: TimeEmbedder,
+    token_refiner: TokenRefiner,
+    blocks: []TransformerBlock,
+    final_layer: FinalLayer,
+    cfg: Config,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !Model {
+        const blocks_store = store.withPrefix(if (store.hasKey("transformer_blocks")) "transformer_blocks" else "blocks");
+        const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.num_layers));
+        errdefer allocator.free(blocks);
+
+        const token_refiner = try TokenRefiner.init(allocator, store.withPrefix("token_refiner"), cfg);
+        errdefer token_refiner.deinit(allocator);
+
+        const time_embedder: TimeEmbedder = .init(store);
+        const activate_adaln = time_embedder.activateAdaln();
+        for (blocks, 0..) |*block, i| {
+            block.* = .init(blocks_store.withLayer(i), cfg, activate_adaln);
+        }
+
+        const video_proj = if (store.getShape("proj_in.weight") != null)
+            linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated)
+        else
+            linear(store, "video_patch_proj.weight", "video_patch_proj.bias", .replicated, .replicated);
+        const audio_proj = if (store.getShape("audio_proj_in.weight") != null)
+            linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated)
+        else
+            linear(store, "audio_patch_proj.weight", "audio_patch_proj.bias", .replicated, .replicated);
+        const condition_proj = if (store.getShape("context_embedder.weight") != null)
+            linear(store, "context_embedder.weight", "context_embedder.bias", .replicated, .replicated)
+        else
+            linear(store, "condition_proj.weight", "condition_proj.bias", .replicated, .replicated);
+
+        return .{
+            .video_proj = video_proj,
+            .audio_proj = audio_proj,
+            .condition_proj = condition_proj,
+            .time_embedder = time_embedder,
+            .token_refiner = token_refiner,
+            .blocks = blocks,
+            .final_layer = FinalLayer.init(store, cfg, activate_adaln),
+            .cfg = cfg,
+        };
+    }
+
+    pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
+        self.token_refiner.deinit(allocator);
+        allocator.free(self.blocks);
+    }
+
+    pub fn textPrep(self: Model) TextPrep {
+        return .{
+            .condition_proj = self.condition_proj,
+            .token_refiner = self.token_refiner,
+        };
+    }
+
+    pub fn patchEmbed(self: Model) PatchEmbed {
+        return .{
+            .video_proj = self.video_proj,
+            .audio_proj = self.audio_proj,
+            .hidden_size = self.cfg.hidden_size,
+            .seq = 0,
+        };
+    }
+
+    pub fn finishCore(self: Model) FinishCore {
+        return .{
+            .norm = self.final_layer.norm,
+            .video_out = self.final_layer.video_out,
+            .audio_out = self.final_layer.audio_out,
+        };
+    }
+
+    pub fn applyBackend(self: *Model, dit_kind: policy.AttnKind, refiner_kind: policy.AttnKind) void {
+        for (self.blocks) |*block| block.attn.attn_kind = dit_kind;
+        for (self.token_refiner.blocks) |*block| block.attn.attn_kind = refiner_kind;
+    }
+};
+
+pub const TextPrep = struct {
+    condition_proj: zml.nn.Linear,
+    token_refiner: TokenRefiner,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
+        zml.nn.Linear.unloadBuffers(&self.condition_proj);
+        TokenRefiner.unloadBuffers(&self.token_refiner, allocator);
+    }
+};
+
+pub const PatchEmbed = struct {
+    video_proj: zml.nn.Linear,
+    audio_proj: zml.nn.Linear,
+    hidden_size: i64,
+    seq: i64 = 0,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(PatchEmbed)) void {
+        zml.nn.Linear.unloadBuffers(&self.video_proj);
+        zml.nn.Linear.unloadBuffers(&self.audio_proj);
+    }
+};
+
+pub const FinishCore = struct {
+    norm: RmsNorm,
+    video_out: zml.nn.Linear,
+    audio_out: zml.nn.Linear,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(FinishCore)) void {
+        RmsNorm.unloadBuffers(&self.norm);
+        zml.nn.Linear.unloadBuffers(&self.video_out);
+        zml.nn.Linear.unloadBuffers(&self.audio_out);
+    }
+};
+
+pub const TextPrepInput = struct {
+    model: TextPrep,
+    text: zml.Tensor,
+};
+
+pub const TextPrepOutput = struct {
+    text: zml.Tensor,
+};
+
+pub fn prepareText(input: TextPrepInput) TextPrepOutput {
+    const self = input.model;
+    var text = self.condition_proj.forward(input.text.convert(self.condition_proj.weight.dtype())).rename(.{ .dout = .d });
+    text = self.token_refiner.forward(text.convert(self.token_refiner.final_norm.weight.dtype()));
+    return .{ .text = text };
+}
+
+pub const RopeModel = struct {
+    rope_freq_dim: i64,
+    rope_theta: f32,
+    out_dtype: zml.DataType,
+};
+
+pub const RopeInput = struct {
+    model: RopeModel,
+    position_ids: zml.Tensor,
+};
+
+pub const RopeOutput = struct {
+    cos: zml.Tensor,
+    sin: zml.Tensor,
+};
+
+pub fn prepareRope(input: RopeInput) RopeOutput {
+    const cos, const sin = mmRope(input.position_ids, input.model.rope_freq_dim, input.model.rope_theta);
+    return .{
+        .cos = cos.convert(input.model.out_dtype),
+        .sin = sin.convert(input.model.out_dtype),
+    };
+}
+
+pub const PatchInput = struct {
+    model: PatchEmbed,
+    video: zml.Tensor,
+    audio: zml.Tensor,
+    text: zml.Tensor,
+    video_indices: zml.Tensor,
+    audio_indices: zml.Tensor,
+    text_indices: zml.Tensor,
+};
+
+pub const PatchOutput = struct {
+    hidden: zml.Tensor,
+};
+
+pub fn embedPatches(input: PatchInput) PatchOutput {
+    const self = input.model;
+    const video = self.video_proj.forward(input.video.convert(self.video_proj.weight.dtype())).rename(.{ .dout = .d });
+    const audio = self.audio_proj.forward(input.audio.convert(self.audio_proj.weight.dtype())).rename(.{ .dout = .d });
+    const text = input.text;
+    const batch = text.dim(.b);
+    var hidden = zml.Tensor.zeroes(zml.Shape.init(.{ .b = batch, .s = self.seq, .d = self.hidden_size }, text.dtype()));
+    hidden = hidden.scatterSlices(.{ .s = input.text_indices.withTags(.{.s}) }, text, .{ .update_fn = zml.Tensor.ScatterOpts.override });
+    hidden = hidden.scatterSlices(.{ .s = input.video_indices.withTags(.{.s}) }, video.convert(text.dtype()), .{ .update_fn = zml.Tensor.ScatterOpts.override });
+    hidden = hidden.scatterSlices(.{ .s = input.audio_indices.withTags(.{.s}) }, audio.convert(text.dtype()), .{ .update_fn = zml.Tensor.ScatterOpts.override });
+    return .{ .hidden = hidden.withPartitioning(.{ .d = .replicated }) };
+}
+
+pub const TembInput = struct {
+    model: TimeEmbedder,
+    timestep: zml.Tensor,
+    freq_dim: i64,
+};
+
+pub const TembOutput = struct {
+    temb: zml.Tensor,
+};
+
+pub fn prepareTemb(input: TembInput) TembOutput {
+    return .{ .temb = input.model.forward(input.timestep, input.freq_dim) };
+}
+
+pub const AdaLnPrep = struct {
+    adaln: AdaLn,
+    steps: i64,
+    slots: i64,
+};
+
+pub const AdaLnPrepInput = struct {
+    model: AdaLnPrep,
+    temb: zml.Tensor,
+};
+
+pub const AdaLnPrepOutput = struct {
+    table: zml.Tensor,
+};
+
+pub fn prepareAdaln(input: AdaLnPrepInput) AdaLnPrepOutput {
+    const raw = input.model.adaln.forward(input.temb);
+    return .{ .table = raw.splitAxis(.n, .{ .t = input.model.steps, .n = input.model.slots }) };
+}
+
+pub const ScatterInput = struct {
+    hidden: zml.Tensor,
+    values: zml.Tensor,
+    indices: zml.Tensor,
+};
+
+pub const ScatterOutput = struct {
+    hidden: zml.Tensor,
+};
+
+pub fn scatterRows(input: ScatterInput) ScatterOutput {
+    const hidden = input.hidden.scatterSlices(
+        .{ .s = input.indices.withTags(.{.s}) },
+        input.values.convert(input.hidden.dtype()),
+        .{ .update_fn = zml.Tensor.ScatterOpts.override },
+    );
+    return .{ .hidden = hidden };
+}
+
+pub const FinishInput = struct {
+    model: FinishCore,
+    hidden: zml.Tensor,
+    table: zml.Tensor,
+    step: zml.Tensor,
+    timestep_indices: zml.Tensor,
+    video_indices: zml.Tensor,
+    audio_indices: zml.Tensor,
+};
+
+pub const FinishOutput = struct {
+    video: zml.Tensor,
+    audio: zml.Tensor,
+};
+
+fn modulateRows(norm: RmsNorm, hidden: zml.Tensor, mods: zml.Tensor, timestep_indices: zml.Tensor) zml.Tensor {
+    const n = norm.forward(hidden.withPartitioning(.{ .d = .replicated }), .d);
+    const selected = mods.gather(.{ .n = timestep_indices }, .{});
+    const parts = selected.chunkExact(.k, 2);
+    const shift = parts[0].squeeze(.k);
+    const scale = parts[1].squeeze(.k);
+    const one = zml.Tensor.scalar(1.0, n.dtype());
+    return n.mul(one.add(scale.convert(n.dtype()).broad(n.shape()))).add(shift.convert(n.dtype()).broad(n.shape()));
+}
+
+pub fn finish(input: FinishInput) FinishOutput {
+    const self = input.model;
+    const mods = input.table.gather(.{ .t = input.step }, .{});
+    const video_h = input.hidden.gather(.{ .s = input.video_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
+    const audio_h = input.hidden.gather(.{ .s = input.audio_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
+    const video_t = input.timestep_indices.gather(.{ .s = input.video_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
+    const audio_t = input.timestep_indices.gather(.{ .s = input.audio_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
+    const video_m = modulateRows(self.norm, video_h, mods, video_t);
+    const audio_m = modulateRows(self.norm, audio_h, mods, audio_t);
+    return .{
+        .video = self.video_out.forward(video_m.convert(self.video_out.weight.dtype())),
+        .audio = self.audio_out.forward(audio_m.convert(self.audio_out.weight.dtype())),
+    };
+}
+
+pub const LoadedModel = struct {
+    inner: Model,
+    cfg: Config,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+        const cfg = try config_mod.loadDitConfig(allocator, io, repo);
+        log.info("dit: {d} layers hidden={d} heads={d} text_dim={d}", .{
+            cfg.num_layers,
+            cfg.hidden_size,
+            cfg.num_attention_heads,
+            cfg.text_dim,
+        });
+        return .{
+            .inner = try .init(allocator, store, cfg),
+            .cfg = cfg,
+        };
+    }
+
+    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
+        self.inner.deinit(allocator);
+    }
+
+    pub fn loadCore(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        index: usize,
+        progress: *std.Progress.Node,
+        loader: ?*zml.io.Loader,
+    ) !zml.Bufferized(BlockCore) {
+        const core = self.inner.blocks[index].corePart();
+        return weights.load(allocator, io, platform, store, shardings, BlockCore, &core, progress, loader);
+    }
+
+    pub fn loadAdaln(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        index: usize,
+        progress: *std.Progress.Node,
+        loader: ?*zml.io.Loader,
+    ) !zml.Bufferized(AdaLn) {
+        return weights.load(allocator, io, platform, store, shardings, AdaLn, &self.inner.blocks[index].adaln, progress, loader);
+    }
+
+    pub fn loadTextPrep(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(TextPrep) {
+        const part = self.inner.textPrep();
+        return weights.load(allocator, io, platform, store, shardings, TextPrep, &part, progress, null);
+    }
+
+    pub fn loadPatchEmbed(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(PatchEmbed) {
+        const part = self.inner.patchEmbed();
+        return weights.load(allocator, io, platform, store, shardings, PatchEmbed, &part, progress, null);
+    }
+
+    pub fn loadTimeEmbedder(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(TimeEmbedder) {
+        return weights.load(allocator, io, platform, store, shardings, TimeEmbedder, &self.inner.time_embedder, progress, null);
+    }
+
+    pub fn loadFinishCore(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(FinishCore) {
+        const part = self.inner.finishCore();
+        return weights.load(allocator, io, platform, store, shardings, FinishCore, &part, progress, null);
+    }
+
+    pub fn loadFinalAdaln(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(AdaLn) {
+        return weights.load(allocator, io, platform, store, shardings, AdaLn, &self.inner.final_layer.adaln, progress, null);
+    }
+};
