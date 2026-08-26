@@ -1193,7 +1193,8 @@ test rope {
     var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    const x_values: [5][4]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5 });
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
