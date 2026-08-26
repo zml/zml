@@ -52,15 +52,87 @@ pub fn coverCropBox(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) struct { w: 
     return .{ .w = rw, .h = rh, .x = x, .y = y };
 }
 
-fn sinc(x: f32) f32 {
-    if (x == 0) return 1.0;
+/// Pillow `lanczos_filter`: `-3 <= x < 3`, `sinc(x)*sinc(x/3)`.
+fn sincFilter(x: f64) f64 {
+    if (x == 0.0) return 1.0;
     const px = std.math.pi * x;
     return @sin(px) / px;
 }
 
-fn lanczos3(x: f32) f32 {
-    if (x <= -3.0 or x >= 3.0) return 0;
-    return sinc(x) * sinc(x / 3.0);
+fn lanczosFilter(x: f64) f64 {
+    if (x < -3.0 or x >= 3.0) return 0.0;
+    return sincFilter(x) * sincFilter(x / 3.0);
+}
+
+/// Pillow `Resample.c` 8bpc path: Q22 weights, uint8 after each 1-D pass.
+const lanczos_precision_bits: u5 = 22;
+
+fn clip8(ss: i64) u8 {
+    const v = ss >> lanczos_precision_bits;
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return @intCast(v);
+}
+
+fn quantizeLanczosCoeff(w: f64) i32 {
+    const scaled = w * @as(f64, @floatFromInt(@as(i32, 1) << lanczos_precision_bits));
+    if (w < 0) return @intFromFloat(-0.5 + scaled);
+    return @intFromFloat(0.5 + scaled);
+}
+
+const LanczosAxis = struct {
+    xmin: []u32,
+    n: []u32,
+    k: []i32,
+    ksize: u32,
+
+    fn deinit(self: LanczosAxis, allocator: std.mem.Allocator) void {
+        allocator.free(self.xmin);
+        allocator.free(self.n);
+        allocator.free(self.k);
+    }
+};
+
+fn precomputeLanczos(allocator: std.mem.Allocator, in_size: u32, out_size: u32) !LanczosAxis {
+    const scale = @as(f64, @floatFromInt(in_size)) / @as(f64, @floatFromInt(out_size));
+    const filterscale = @max(1.0, scale);
+    const support = 3.0 * filterscale;
+    const inv = 1.0 / filterscale;
+    const ksize: u32 = @as(u32, @intFromFloat(@ceil(support))) * 2 + 1;
+    const xmin = try allocator.alloc(u32, out_size);
+    errdefer allocator.free(xmin);
+    const n = try allocator.alloc(u32, out_size);
+    errdefer allocator.free(n);
+    const k = try allocator.alloc(i32, @as(usize, out_size) * ksize);
+    errdefer allocator.free(k);
+    @memset(k, 0);
+    const tmp = try allocator.alloc(f64, ksize);
+    defer allocator.free(tmp);
+    var xx: u32 = 0;
+    while (xx < out_size) : (xx += 1) {
+        const center = (@as(f64, @floatFromInt(xx)) + 0.5) * scale;
+        var x0: i32 = @intFromFloat(center - support + 0.5);
+        if (x0 < 0) x0 = 0;
+        var x1: i32 = @intFromFloat(center + support + 0.5);
+        if (x1 > @as(i32, @intCast(in_size))) x1 = @intCast(in_size);
+        const count: u32 = @intCast(x1 - x0);
+        xmin[xx] = @intCast(x0);
+        n[xx] = count;
+        var ww: f64 = 0;
+        var t: u32 = 0;
+        while (t < count) : (t += 1) {
+            const w = lanczosFilter((@as(f64, @floatFromInt(t + xmin[xx])) - center + 0.5) * inv);
+            tmp[t] = w;
+            ww += w;
+        }
+        const row = k[@as(usize, xx) * ksize ..];
+        t = 0;
+        while (t < count) : (t += 1) {
+            const w = if (ww != 0) tmp[t] / ww else tmp[t];
+            row[t] = quantizeLanczosCoeff(w);
+        }
+    }
+    return .{ .xmin = xmin, .n = n, .k = k, .ksize = ksize };
 }
 
 /// PIL/torch `_upsample_bicubic2d_aa` Keys cubic. Official Qwen2VL Fast (`antialias=True`) uses a=-0.5.
@@ -72,42 +144,33 @@ fn bicubicKeysAa(x: f64) f64 {
     return 0;
 }
 
-fn resize1dLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, horizontal: bool) ![]u8 {
-    const out_w = if (horizontal) dst_w else src_w;
-    const out_h = if (horizontal) src_h else dst_w;
+fn resize1dLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_len: u32, horizontal: bool) ![]u8 {
+    const in_size: u32 = if (horizontal) src_w else src_h;
+    const axis = try precomputeLanczos(allocator, in_size, dst_len);
+    defer axis.deinit(allocator);
+    const out_w = if (horizontal) dst_len else src_w;
+    const out_h = if (horizontal) src_h else dst_len;
     const out = try allocator.alloc(u8, @as(usize, out_w) * out_h * 3);
-    const src_len: u32 = if (horizontal) src_w else src_h;
-    const dst_len: u32 = dst_w;
-    const scale = @as(f32, @floatFromInt(src_len)) / @as(f32, @floatFromInt(dst_len));
-    const filterscale = @max(1.0, scale);
-    const support = 3.0 * filterscale;
-
+    const bias: i64 = 1 << (lanczos_precision_bits - 1);
     var dy: u32 = 0;
     while (dy < out_h) : (dy += 1) {
         var dx: u32 = 0;
         while (dx < out_w) : (dx += 1) {
-            const dst_i: f32 = @floatFromInt(if (horizontal) dx else dy);
-            const center = (dst_i + 0.5) * @as(f32, @floatFromInt(src_len)) / @as(f32, @floatFromInt(dst_len));
-            const xmin = @as(i32, @intFromFloat(@floor(center - support)));
-            const xmax = @as(i32, @intFromFloat(@ceil(center + support)));
-            var acc = [3]f32{ 0, 0, 0 };
-            var wsum: f32 = 0;
-            var xi = xmin;
-            while (xi < xmax) : (xi += 1) {
-                const src_pos = std.math.clamp(xi, 0, @as(i32, @intCast(src_len - 1)));
-                const weight = lanczos3(((@as(f32, @floatFromInt(src_pos)) + 0.5) - center) / filterscale);
-                if (weight == 0) continue;
-                wsum += weight;
-                const sx: u32 = if (horizontal) @intCast(src_pos) else dx;
-                const sy: u32 = if (horizontal) dy else @intCast(src_pos);
+            const i: u32 = if (horizontal) dx else dy;
+            const origin = axis.xmin[i];
+            const count = axis.n[i];
+            const kk = axis.k[@as(usize, i) * axis.ksize ..];
+            var acc = [3]i64{ bias, bias, bias };
+            var t: u32 = 0;
+            while (t < count) : (t += 1) {
+                const sx: u32 = if (horizontal) origin + t else dx;
+                const sy: u32 = if (horizontal) dy else origin + t;
                 const si = (@as(usize, sy) * src_w + sx) * 3;
-                inline for (0..3) |c| acc[c] += weight * @as(f32, @floatFromInt(src[si + c]));
+                const kv: i64 = kk[t];
+                inline for (0..3) |c| acc[c] += kv * src[si + c];
             }
             const di = (@as(usize, dy) * out_w + dx) * 3;
-            if (wsum == 0) wsum = 1;
-            inline for (0..3) |c| {
-                out[di + c] = @intFromFloat(std.math.clamp(@round(acc[c] / wsum), 0, 255));
-            }
+            inline for (0..3) |c| out[di + c] = clip8(acc[c]);
         }
     }
     return out;
