@@ -798,11 +798,27 @@ pub fn partialSoftmax(self: zml.Tensor, axis: anytype) PartialSoftmax {
 }
 
 pub const Mla = struct {
+    pub const ValueMode = enum {
+        /// Values are the non-RoPE prefix of the cached key (GLM-style MLA).
+        latent,
+        /// Values are the complete cached key, including its RoPE suffix
+        /// (DeepSeek V4-style MLA).
+        latent_and_rope,
+    };
+
     pub const Options = struct {
         rope_rank: i64,
+        value_mode: ValueMode = .latent,
         scale: ?f32 = null,
-        /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 16.
+        /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 128.
         num_kv_splits: ?u8 = null,
+
+        pub fn valueRank(self: @This(), qk_rank: i64) i64 {
+            return switch (self.value_mode) {
+                .latent => qk_rank - self.rope_rank,
+                .latent_and_rope => qk_rank,
+            };
+        }
     };
 
     fn stablehlo_pagedSparseAttention(q: zml.Tensor, kv: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, opts: Mla.Options) zml.Tensor {
@@ -836,9 +852,13 @@ pub const Mla = struct {
             .{},
             .{ .end = topk.dim(.topk) },
         });
-        return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
+        const selected_values = selected_kv.slice1d(.hd, .{ .end = opts.valueRank(q.dim(.hd)) });
+        return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
 
+    /// Computes sparse MLA scores over the complete cached key. The output is
+    /// either its dense non-RoPE prefix or the complete cached value, according
+    /// to `opts.value_mode`.
     pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
         const latent_kv = switch (kv_cache) {
             .latent => |latent_kv| latent_kv,
@@ -943,6 +963,7 @@ test "use mla kernel" {
         .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
     );
     defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
+    try std.testing.expect(output_d.shape().eql(q_shape.set(.hd, 64)));
 }
 
 test "execute stablehlo mla kernel" {
@@ -968,10 +989,13 @@ test "execute stablehlo mla kernel" {
 
     var q_data: [1][16][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&q_data), 0);
+    for (&q_data[0]) |*head| head[64] = 1;
     var kv_data: [2][16][1][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&kv_data), 0);
-    for (&kv_data[1][0][0]) |*value| value.* = 10;
-    for (&kv_data[1][1][0]) |*value| value.* = 11;
+    @memset(kv_data[1][0][0][0..64], 10);
+    @memset(kv_data[1][1][0][0..64], 20);
+    kv_data[1][0][0][64] = 0;
+    kv_data[1][1][0][64] = 2;
     var sink_data: [16]f32 = undefined;
     for (&sink_data) |*value| value.* = -std.math.inf(f32);
     const topk_data: [1][2]i32 = .{.{ 0, 1 }};
@@ -1007,7 +1031,7 @@ test "execute stablehlo mla kernel" {
         std.testing.allocator,
         std.testing.io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64 } },
+        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64, .scale = 1 } },
         .{},
     );
     defer exe.deinit();
@@ -1020,4 +1044,12 @@ test "execute stablehlo mla kernel" {
         .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
     );
     defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
+
+    const output_shape = q_shape.set(.hd, 64);
+    var expected_data: [1][16][64]f32 = undefined;
+    const exp_two = @exp(@as(f32, 2));
+    const expected_value = (10 + 20 * exp_two) / (1 + exp_two);
+    for (&expected_data[0]) |*head| @memset(head, expected_value);
+    const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(&expected_data));
+    try zml.testing.expectClose(std.testing.io, expected, output_d, .{ .absolute_tolerance = 0.001, .relative_tolerance = 0.001 });
 }

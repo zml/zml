@@ -193,3 +193,10 @@ zig_test(
     name = "test",
     deps = ["//zml"],
 )
+
+zig_test(
+    name = "sparse_mla_test",
+    main = "sparse_mla_test.zig",
+    tags = ["no_ci"],
+    deps = ["//zml"],
+)
