@@ -147,8 +147,8 @@ pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset
         .{ k, v }
     else
         .{
-            k.dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = token_offset, .len = 1 } }),
-            v.dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = token_offset, .len = 1 } }),
+            k.slice(.k, .dynSingle(token_offset)),
+            v.slice(.k, .dynSingle(token_offset)),
         };
 
     // Concatenate q/k/v and metadata into a single byte buffer on the GPU.

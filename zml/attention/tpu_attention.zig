@@ -118,8 +118,8 @@ pub const mosaic_tpu = struct {
     }
 
     fn activeSequenceCount(query_start_len: zml.Tensor) zml.Tensor {
-        const start = query_start_len.slice1d(.b, .{ .end = query_start_len.dim(.b) - 1 });
-        const end = query_start_len.slice1d(.b, .{ .start = 1 });
+        const start = query_start_len.slice(.b, .{ .end = query_start_len.dim(.b) - 1 });
+        const end = query_start_len.slice(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
             .cmp(.GT, .zeroes(query_lens.shape()))
@@ -144,7 +144,7 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention cannot restore output from head_dim {} to {}",
             .{ restored.dim(.hd), q_template.dim(.hd) },
         );
-        return restored.slice1d(.hd, .{ .end = q_template.dim(.hd) });
+        return restored.slice(.hd, .{ .end = q_template.dim(.hd) });
     }
 
     inline fn alignQueryHeadDimForKernel(q: zml.Tensor, target_head_dim: i64) zml.Tensor {

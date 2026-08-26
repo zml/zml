@@ -269,8 +269,8 @@ pub const KvCache = union(enum) {
     ) [2]zml.Tensor {
         return switch (self) {
             .split => |split| .{
-                split.k.dynamicSlice1d(split.k.axis(.page), .{ .start = page_index, .len = 1 }).squeeze(.page),
-                split.v.dynamicSlice1d(split.k.axis(.page), .{ .start = page_index, .len = 1 }).squeeze(.page),
+                split.k.slice(split.k.axis(.page), .dynSingle(page_index)),
+                split.v.slice(split.k.axis(.page), .dynSingle(page_index)),
             },
             .dense, .latent => @panic("TODO"),
         };
@@ -600,15 +600,15 @@ const AttentionLoop = struct {
 
     pub fn cond(self: While, state: State) zml.Tensor {
         const has_more_sequences = state.seq_id.cmp(.LT, .scalar(self.parameters.seq_lens.count(), .i32));
-        const query_start = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 });
-        const query_end = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state.seq_id.addConstant(1), .len = 1 });
+        const query_start = self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id));
+        const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id.addConstant(1)));
         const has_queries = query_start.cmp(.LT, query_end).asScalar();
         return has_more_sequences.logical(.AND, has_queries);
     }
 
     pub fn body(self: While, state_: State) State {
-        const query_start = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state_.seq_id, .len = 1 });
-        const query_end = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state_.seq_id.addConstant(1), .len = 1 });
+        const query_start = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id));
+        const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id.addConstant(1)));
         const seq_num_queries_: zml.Tensor = .asScalar(.sub(query_end, query_start));
         const page_size_: u32 = @intCast(self.kv_cache.split.k.dim(.k_chunk));
 
@@ -628,7 +628,7 @@ const AttentionLoop = struct {
                     const num_slots: u32 = page_size;
 
                     // seq_lens includes the current queries; subtracting their count gives the context length.
-                    const seq_len = while_body.parameters.seq_lens.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 }).asScalar();
+                    const seq_len = while_body.parameters.seq_lens.slice(0, .dynSingle(state.seq_id));
                     const q_offset = seq_len.sub(if_ctx.seq_num_queries).add(state.q_page_idx.scale(page_size));
                     const next_k_offset = state.k_page_idx.addConstant(1).scale(page_size);
 
@@ -649,7 +649,7 @@ const AttentionLoop = struct {
                     const num_slots: u32 = 1;
 
                     // A decode query is the final token in seq_len, so its zero-based offset is seq_len - 1.
-                    const seq_len = while_body.parameters.seq_lens.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 }).asScalar();
+                    const seq_len = while_body.parameters.seq_lens.slice(0, .dynSingle(state.seq_id)).asScalar();
                     const q_offset = seq_len.sub(if_ctx.seq_num_queries);
                     const next_k_offset = state.k_page_idx.addConstant(1).scale(page_size);
 
@@ -672,12 +672,12 @@ const AttentionLoop = struct {
 
     pub fn attentionOnePage(self: While, state: State, q_offset: zml.Tensor, q_chunk: u32, page_size: u32) PartialSoftmax {
         const k_offset = state.k_page_idx.scale(page_size);
-        const active_q = self.q.dynamicSlice1d(self.q.axis(.b), .{ .start = state.slot_id, .len = q_chunk });
+        const active_q = self.q.slice(self.q.axis(.b), .dyn(state.slot_id, q_chunk));
 
-        const active_k_page_id = self.parameters.block_table.dynamicSlice(.{
-            .b = zml.Tensor.DynSlice{ .start = state.seq_id, .len = 1 },
-            .p = zml.Tensor.DynSlice{ .start = state.k_page_idx, .len = 1 },
-        }).asScalar();
+        const active_k_page_id = self.parameters.block_table.slices(
+            .{ .b, .p },
+            &.{ .dynSingle(state.seq_id), .dynSingle(state.k_page_idx) },
+        );
         const active_k, const active_v = self.kv_cache.getPage(active_k_page_id);
 
         const dtype = self.q.dtype();
@@ -831,11 +831,7 @@ pub const Mla = struct {
         const scores_sink = zml.Tensor.concatenate(&.{ scores, sink_.convert(scores.dtype()) }, .kv);
 
         const attn_weights = scores_sink.softmax(.kv);
-        const attn_weights_non_sink = attn_weights.slice(&.{
-            .{},
-            .{},
-            .{ .end = topk.dim(.topk) },
-        });
+        const attn_weights_non_sink = attn_weights.slice(-1, .{ .end = topk.dim(.topk) });
         return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
     }
 
