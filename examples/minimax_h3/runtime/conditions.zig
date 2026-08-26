@@ -359,6 +359,30 @@ pub fn prepare(
                 break :blk try vision.runVideo(allocator, io, platform, &compiled_v.?, &loaded_vision, &vision_cache, src, vis_frames, item.h, item.w);
             } else try vision.runImage(allocator, io, platform, &compiled_v.?, &loaded_vision, &vision_cache, item.rgb, item.h, item.w);
             defer encoded.deinit(allocator);
+            if (try session_mod.openDumpDir(io)) |dump_dir| {
+                defer dump_dir.close(io);
+                try session_mod.dumpHostF32(io, dump_dir, "vision_merged", encoded.merged, &.{
+                    @intCast(encoded.merged.len / hidden_dim),
+                    @intCast(hidden_dim),
+                });
+                for (encoded.deepstack, 0..) |d, di| {
+                    if (d.len == 0) continue;
+                    var name_buf: [32]u8 = undefined;
+                    const name = try std.fmt.bufPrint(&name_buf, "vision_deepstack_{d}", .{di});
+                    try session_mod.dumpHostF32(io, dump_dir, name, d, &.{
+                        @intCast(d.len / hidden_dim),
+                        @intCast(hidden_dim),
+                    });
+                }
+                if (!is_video) {
+                    const patched = try vision.patchifyRgb(allocator, item.rgb, item.h, item.w, vcfg);
+                    defer allocator.free(patched.patches);
+                    try session_mod.dumpHostF32(io, dump_dir, "vision_patches", patched.patches, &.{
+                        @intCast(patched.seq),
+                        vcfg.patchIn(),
+                    });
+                }
+            }
             try merged_all.appendSlice(allocator, encoded.merged);
             const block_tokens = item.merged;
             const n_blocks: usize = if (is_video) item.temporal else 1;

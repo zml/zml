@@ -96,7 +96,7 @@ For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 MiniMax-H3 generates video and audio together. Use `//examples/minimax_h3`. See [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md).
 
 ```
-bazel run //examples/minimax_h3:h3_tests
+bazel test //examples/minimax_h3:test
 bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3
 ```
 
