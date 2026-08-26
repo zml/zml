@@ -20,26 +20,39 @@ test "ROCm GLM sparse MLA decode geometry" {
         try std.fmt.parseInt(usize, std.mem.span(value), 10)
     else
         1;
+    const sequence_count = std.math.divCeil(usize, query_count, 2) catch unreachable;
+    const all_invalid = std.c.getenv("ZML_SPARSE_MLA_ALL_INVALID") != null;
+    const generic_shape = std.c.getenv("ZML_SPARSE_MLA_GENERIC_SHAPE") != null;
+    const num_heads: usize = if (std.c.getenv("ZML_SPARSE_MLA_HEADS")) |value|
+        try std.fmt.parseInt(usize, std.mem.span(value), 10)
+    else if (generic_shape)
+        6
+    else
+        16;
+    const latent_rank: usize = if (generic_shape) 384 else 512;
+    const rope_rank: usize = if (generic_shape) 48 else 64;
+    const qk_rank = latent_rank + rope_rank;
 
     var parameters = Parameters.init(.fromBackend(.{
         .backend = .triton,
         .is_prefill = false,
-        .batch_size = @intCast(query_count),
+        .batch_size = @intCast(sequence_count),
         .seq_len = 2048,
         .max_num_pages = 128,
         .max_token_count = @intCast(query_count),
-        .num_heads = 16,
+        .num_heads = @intCast(num_heads),
         .num_kv_heads = 1,
-        .head_dim = 576,
+        .head_dim = @intCast(qk_rank),
         .max_seqlen_q = 1,
     }));
     parameters.triton.block_table = replicated(parameters.triton.block_table);
     parameters.triton.seq_lens = replicated(parameters.triton.seq_lens);
     parameters.triton.query_start_len = replicated(parameters.triton.query_start_len);
 
-    const q_shape = zml.Shape.init(.{ .q = query_count, .h = 16, .hd = 576 }, .bf16).withReplicatedPartitioning();
-    const kv_shape = zml.Shape.init(.{ .page = 128, .k_chunk = 16, .hkv = 1, .hd = 576 }, .bf16).withReplicatedPartitioning();
-    const sink_shape = zml.Shape.init(.{ .h = 16 }, .f32).withReplicatedPartitioning();
+    const q_shape = zml.Shape.init(.{ .q = query_count, .h = num_heads, .hd = qk_rank }, .bf16).withReplicatedPartitioning();
+    const kv_shape = zml.Shape.init(.{ .page = 128, .k_chunk = 16, .hkv = 1, .hd = qk_rank }, .bf16).withReplicatedPartitioning();
+    const output_shape = q_shape.set(.hd, @intCast(latent_rank));
+    const sink_shape = zml.Shape.init(.{ .h = num_heads }, .f32).withReplicatedPartitioning();
     const topk_shape = zml.Shape.init(.{ .q = query_count, .topk = 2048 }, .i32).withReplicatedPartitioning();
     const tokens_pos_shape = zml.Shape.init(.{ .q = query_count }, .i32).withReplicatedPartitioning();
 
@@ -54,25 +67,28 @@ test "ROCm GLM sparse MLA decode geometry" {
     @memset(q_data, zml.floats.BFloat16.fromF32(0));
     const kv_data = try allocator.alloc(zml.floats.BFloat16, kv_shape.count());
     defer allocator.free(kv_data);
-    @memset(kv_data, zml.floats.BFloat16.fromF32(1));
+    for (kv_data, 0..) |*value, i| {
+        const dim = i % qk_rank;
+        value.* = zml.floats.BFloat16.fromF32(if (dim < latent_rank) 1 else 17);
+    }
     const sink_data = try allocator.alloc(f32, sink_shape.count());
     defer allocator.free(sink_data);
-    @memset(sink_data, -std.math.inf(f32));
+    @memset(sink_data, if (all_invalid) 0 else -std.math.inf(f32));
     const topk_data = try allocator.alloc(i32, topk_shape.count());
     defer allocator.free(topk_data);
-    for (topk_data, 0..) |*position, i| position.* = @intCast(i % 2048);
+    for (topk_data, 0..) |*position, i| position.* = if (all_invalid or i % 17 == 0) -2 else @intCast(i % 2048);
     const tokens_pos_data = try allocator.alloc(i32, query_count);
     defer allocator.free(tokens_pos_data);
     @memset(tokens_pos_data, 2047);
-    const block_table = try allocator.alloc(i32, query_count * 128);
+    const block_table = try allocator.alloc(i32, sequence_count * 128);
     defer allocator.free(block_table);
     for (block_table, 0..) |*physical_page, i| physical_page.* = @intCast(i % 128);
-    const seq_lens = try allocator.alloc(i32, query_count);
+    const seq_lens = try allocator.alloc(i32, sequence_count);
     defer allocator.free(seq_lens);
     @memset(seq_lens, 2048);
-    const query_start_len = try allocator.alloc(i32, query_count + 1);
+    const query_start_len = try allocator.alloc(i32, sequence_count + 1);
     defer allocator.free(query_start_len);
-    for (query_start_len, 0..) |*query_start, i| query_start.* = @intCast(i);
+    for (query_start_len, 0..) |*query_start, i| query_start.* = @intCast(@min(i * 2, query_count));
 
     var parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
         .block_table = try .fromBytes(io, platform, parameters.triton.block_table.shape(), .replicated, std.mem.sliceAsBytes(block_table)),
@@ -104,7 +120,7 @@ test "ROCm GLM sparse MLA decode geometry" {
         allocator,
         io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64, .num_kv_splits = num_splits } },
+        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)), .num_kv_splits = num_splits } },
         .{},
     );
     defer exe.deinit();
@@ -118,12 +134,56 @@ test "ROCm GLM sparse MLA decode geometry" {
             .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
         );
         if (iterations == 1) {
-            const expected_data = try allocator.alloc(zml.floats.BFloat16, q_shape.count());
+            const expected_data = try allocator.alloc(zml.floats.BFloat16, output_shape.count());
             defer allocator.free(expected_data);
-            @memset(expected_data, zml.floats.BFloat16.fromF32(1));
-            const expected = zml.Slice.init(q_shape, std.mem.sliceAsBytes(expected_data));
+            @memset(expected_data, zml.floats.BFloat16.fromF32(if (all_invalid) 0 else 1));
+            const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(expected_data));
             try zml.testing.expectClose(io, expected, output, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01 });
         }
         output.deinit();
+    }
+
+    if (iterations == 1 and query_count <= 4) {
+        const stable_parameters = Parameters.init(.fromBackend(.{
+            .backend = .stablehlo,
+            .is_prefill = false,
+            .batch_size = @intCast(sequence_count),
+            .seq_len = 2048,
+            .max_num_pages = 128,
+            .max_token_count = @intCast(query_count),
+            .num_heads = @intCast(num_heads),
+            .num_kv_heads = 1,
+            .head_dim = @intCast(qk_rank),
+            .max_seqlen_q = 1,
+        }));
+        var stable_parameters_d: zml.Bufferized(Parameters) = .{ .stablehlo = .{
+            .block_table = try .fromBytes(io, platform, stable_parameters.stablehlo.block_table.shape(), .replicated, std.mem.sliceAsBytes(block_table)),
+            .seq_lens = try .fromBytes(io, platform, stable_parameters.stablehlo.seq_lens.shape(), .replicated, std.mem.sliceAsBytes(seq_lens)),
+            .query_start_len = try .fromBytes(io, platform, stable_parameters.stablehlo.query_start_len.shape(), .replicated, std.mem.sliceAsBytes(query_start_len)),
+        } };
+        defer zml.Buffer.deinitAll(Parameters, &stable_parameters_d);
+
+        var stable_exe = try platform.compileFn(
+            allocator,
+            io,
+            Mla.pagedSparseAttention,
+            .{ stable_parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)) } },
+            .{},
+        );
+        defer stable_exe.deinit();
+        var stable_output = try zml.testing.autoCall(
+            allocator,
+            io,
+            &stable_exe,
+            Mla.pagedSparseAttention,
+            .{ stable_parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+        );
+        defer stable_output.deinit();
+
+        const expected_data = try allocator.alloc(zml.floats.BFloat16, output_shape.count());
+        defer allocator.free(expected_data);
+        @memset(expected_data, zml.floats.BFloat16.fromF32(if (all_invalid) 0 else 1));
+        const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(expected_data));
+        try zml.testing.expectClose(io, expected, stable_output, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01 });
     }
 }

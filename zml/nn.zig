@@ -4,6 +4,7 @@ const std = @import("std");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+const block_fp8 = @import("fp8.zig");
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
@@ -109,7 +110,7 @@ pub const QuantScheme = enum {
     /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
     /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
     fp8_per_channel,
-    /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+    /// f8e4m3fn values, one bf16 or f32 scale per 128x128 tile. The DeepSeek-style FP8 that model
     /// vendors publish themselves, under `weight_scale_inv`.
     fp8_block128,
     /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
@@ -121,6 +122,8 @@ pub const QuantScheme = enum {
 
         const n = weight.dim(0);
         const k = if (isPackedFp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+        const n_blocks = std.math.divCeil(i64, n, 128) catch unreachable;
+        const k_blocks = std.math.divCeil(i64, k, 128) catch unreachable;
 
         return switch (self) {
             .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
@@ -136,10 +139,10 @@ pub const QuantScheme = enum {
                 (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                 scale.count() > 1 and scale.rank() == 2 and
                 scale.dim(0) == n and scale.dim(1) == 1,
-            .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+            .fp8_block128 => weight.dtype() == .f8e4m3fn and
+                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                 scale.count() > 1 and scale.rank() == 2 and
-                @rem(n, 128) == 0 and @rem(k, 128) == 0 and
-                scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+                scale.dim(0) == n_blocks and scale.dim(1) == k_blocks,
         };
     }
 
@@ -221,6 +224,16 @@ test "QuantScheme.classify" {
     try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
         .init(.{ .dout = 5120, .d = 6144 }, .f8e4m3fn),
         .init(.{ .dout = 40, .sc = 48 }, .bf16),
+    ));
+
+    // GLM 5.2 uses f32 scales and permits a partial final 128-row tile.
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 2048, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 16, .sc = 48 }, .f32),
+    ));
+    try expect(@as(?QuantScheme, .fp8_block128), QuantScheme.classify(
+        .init(.{ .dout = 576, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 5, .sc = 48 }, .f32),
     ));
 
     // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
@@ -393,6 +406,7 @@ pub fn scaledDot(
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
         res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -414,6 +428,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -423,6 +438,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_shape._partitioning.set(res_shape.rank() - 1, rhs.shape().partition(r));
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
@@ -433,6 +449,21 @@ pub fn scaledDot(
         rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
     else
         rhs_scale;
+
+    const platform = zml.module.CompilationContext.current().platform;
+    const block128 = rhs.dtype() == .f8e4m3fn and rhs.rank() == 2 and
+        rhs_scale.rank() == 2 and
+        rhs_scale.dim(0) == std.math.divCeil(i64, rhs.dim(0), 128) catch unreachable and
+        rhs_scale.dim(1) == std.math.divCeil(i64, rhs.dim(1), 128) catch unreachable;
+    if (platform.target == .rocm and block128 and dot_axes.contracting.len == 1 and
+        dot_axes.batching.len == 0 and lhs.axis(-1) == dot_axes.contracting.get(0)[0] and
+        rhs.axis(-1) == dot_axes.contracting.get(0)[1])
+    {
+        return switch (block_fp8.Backend.selected()) {
+            .triton => block_fp8.tritonBlockScaledDot(lhs, rhs, rhs_scale, res_shape),
+            .ck => block_fp8.ckBlockScaledDot(lhs, rhs, rhs_scale, res_shape),
+        };
+    }
 
     const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
