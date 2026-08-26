@@ -22,16 +22,15 @@ test "ROCm GLM sparse MLA decode geometry" {
         1;
     const sequence_count = std.math.divCeil(usize, query_count, 2) catch unreachable;
     const all_invalid = std.c.getenv("ZML_SPARSE_MLA_ALL_INVALID") != null;
-    const generic_shape = std.c.getenv("ZML_SPARSE_MLA_GENERIC_SHAPE") != null;
+    const dsv4_value = std.c.getenv("ZML_SPARSE_MLA_DSV4_VALUE") != null;
     const num_heads: usize = if (std.c.getenv("ZML_SPARSE_MLA_HEADS")) |value|
         try std.fmt.parseInt(usize, std.mem.span(value), 10)
-    else if (generic_shape)
-        6
     else
         16;
-    const latent_rank: usize = if (generic_shape) 384 else 512;
-    const rope_rank: usize = if (generic_shape) 48 else 64;
-    const qk_rank = latent_rank + rope_rank;
+    const value_rank: usize = 512;
+    const rope_rank: usize = 64;
+    const qk_rank: usize = if (dsv4_value) value_rank else value_rank + rope_rank;
+    const value_mode: Mla.ValueMode = if (dsv4_value) .latent_and_rope else .latent;
 
     var parameters = Parameters.init(.fromBackend(.{
         .backend = .triton,
@@ -51,7 +50,7 @@ test "ROCm GLM sparse MLA decode geometry" {
 
     const q_shape = zml.Shape.init(.{ .q = query_count, .h = num_heads, .hd = qk_rank }, .bf16).withReplicatedPartitioning();
     const kv_shape = zml.Shape.init(.{ .page = 128, .k_chunk = 16, .hkv = 1, .hd = qk_rank }, .bf16).withReplicatedPartitioning();
-    const output_shape = q_shape.set(.hd, @intCast(latent_rank));
+    const output_shape = q_shape.set(.hd, @intCast(value_rank));
     const sink_shape = zml.Shape.init(.{ .h = num_heads }, .f32).withReplicatedPartitioning();
     const topk_shape = zml.Shape.init(.{ .q = query_count, .topk = 2048 }, .i32).withReplicatedPartitioning();
     const tokens_pos_shape = zml.Shape.init(.{ .q = query_count }, .i32).withReplicatedPartitioning();
@@ -69,7 +68,7 @@ test "ROCm GLM sparse MLA decode geometry" {
     defer allocator.free(kv_data);
     for (kv_data, 0..) |*value, i| {
         const dim = i % qk_rank;
-        value.* = zml.floats.BFloat16.fromF32(if (dim < latent_rank) 1 else 17);
+        value.* = zml.floats.BFloat16.fromF32(if (dim < qk_rank - rope_rank) 1 else 17);
     }
     const sink_data = try allocator.alloc(f32, sink_shape.count());
     defer allocator.free(sink_data);
@@ -120,7 +119,7 @@ test "ROCm GLM sparse MLA decode geometry" {
         allocator,
         io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)), .num_kv_splits = num_splits } },
+        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)), .value_mode = value_mode, .num_kv_splits = num_splits } },
         .{},
     );
     defer exe.deinit();
@@ -136,7 +135,11 @@ test "ROCm GLM sparse MLA decode geometry" {
         if (iterations == 1) {
             const expected_data = try allocator.alloc(zml.floats.BFloat16, output_shape.count());
             defer allocator.free(expected_data);
-            @memset(expected_data, zml.floats.BFloat16.fromF32(if (all_invalid) 0 else 1));
+            for (expected_data, 0..) |*value, i| {
+                const dim = i % value_rank;
+                const expected_value: f32 = if (all_invalid) 0 else if (dsv4_value and dim >= value_rank - rope_rank) 17 else 1;
+                value.* = zml.floats.BFloat16.fromF32(expected_value);
+            }
             const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(expected_data));
             try zml.testing.expectClose(io, expected, output, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01 });
         }
@@ -167,7 +170,7 @@ test "ROCm GLM sparse MLA decode geometry" {
             allocator,
             io,
             Mla.pagedSparseAttention,
-            .{ stable_parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)) } },
+            .{ stable_parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = @as(i64, @intCast(rope_rank)), .value_mode = value_mode } },
             .{},
         );
         defer stable_exe.deinit();
@@ -182,7 +185,11 @@ test "ROCm GLM sparse MLA decode geometry" {
 
         const expected_data = try allocator.alloc(zml.floats.BFloat16, output_shape.count());
         defer allocator.free(expected_data);
-        @memset(expected_data, zml.floats.BFloat16.fromF32(if (all_invalid) 0 else 1));
+        for (expected_data, 0..) |*value, i| {
+            const dim = i % value_rank;
+            const expected_value: f32 = if (all_invalid) 0 else if (dsv4_value and dim >= value_rank - rope_rank) 17 else 1;
+            value.* = zml.floats.BFloat16.fromF32(expected_value);
+        }
         const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(expected_data));
         try zml.testing.expectClose(io, expected, stable_output, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01 });
     }

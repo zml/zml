@@ -225,7 +225,8 @@ pub const FixedBufferPool = struct {
 
 pub const DynamicBufferPool = struct {
     const Node = struct { next: ?*Node };
-    const alignment: std.mem.Alignment = .of(Node);
+    const transparent_huge_page_size = 2 * 1024 * 1024;
+    const alignment: std.mem.Alignment = .fromByteUnits(transparent_huge_page_size);
 
     block_size: usize,
     max_blocks: usize,
@@ -237,6 +238,7 @@ pub const DynamicBufferPool = struct {
     condition: std.Io.Condition = .init,
 
     pub fn init(max_blocks: usize, block_size: usize) DynamicBufferPool {
+        std.debug.assert(block_size % transparent_huge_page_size == 0);
         return .{
             .block_size = block_size,
             .max_blocks = max_blocks,
@@ -268,6 +270,14 @@ pub const DynamicBufferPool = struct {
 
                 errdefer _ = self.in_flight.fetchSub(1, .release);
                 const buffer = try arena.allocator().alignedAlloc(u8, alignment, self.block_size);
+                std.posix.madvise(buffer.ptr, buffer.len, std.posix.MADV.HUGEPAGE) catch |err| {
+                    log.warn("MADV_HUGEPAGE failed for DMA buffer at 0x{x} ({Bi:.2}): {s}", .{
+                        @intFromPtr(buffer.ptr),
+                        buffer.len,
+                        @errorName(err),
+                    });
+                };
+
                 return @alignCast(buffer);
             }
 

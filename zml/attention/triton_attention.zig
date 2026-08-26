@@ -723,10 +723,13 @@ pub const paged = struct {
     }
 
     fn pagedSparseMlaKernel(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, paged_opts: PagedSparseMlaOptions) zml.Tensor {
-        const rope_rank: i64 = @intCast(paged_opts.rope_rank);
-        const latent_rank: i64 = @intCast(paged_opts.qk_rank - paged_opts.rope_rank);
+        const value_rank: i64 = @intCast(paged_opts.value_rank);
+        const rope_rank: i64 = if (paged_opts.value_rank == paged_opts.qk_rank) 0 else @intCast(paged_opts.rope_rank);
+        stdx.debug.assert(std.math.isPowerOfTwo(paged_opts.value_rank), "sparse MLA value rank ({}) must be a power of two", .{paged_opts.value_rank});
+        stdx.debug.assert(rope_rank == 0 or std.math.isPowerOfTwo(@as(usize, @intCast(rope_rank))), "sparse MLA separate RoPE rank ({}) must be a power of two", .{rope_rank});
+        stdx.debug.assert(value_rank + rope_rank == paged_opts.qk_rank, "sparse MLA expects either a full-width value or adjacent value/RoPE regions, got qk={} value={} rope={}", .{ paged_opts.qk_rank, value_rank, rope_rank });
 
-        const out_shape = q.shape().set(.hd, latent_rank);
+        const out_shape = q.shape().set(.hd, value_rank);
 
         const q_strides = q.shape().computeElementStrides().constSlice();
         const out_strides = out_shape.computeElementStrides().constSlice();
@@ -754,8 +757,8 @@ pub const paged = struct {
             .block_m = @intCast(launch.block_m),
             .topk_count = topk.dim(.topk),
             .rope_rank = rope_rank,
-            .latent_rank = latent_rank,
-            .rope_offset = latent_rank,
+            .value_rank = value_rank,
+            .rope_offset = value_rank,
             .tile_size = @intCast(launch.tile_size),
             .num_splits = @intCast(launch.num_splits),
             .use_attn_sink = use_sink,
@@ -808,7 +811,7 @@ pub const paged = struct {
         const partials = mla_kernels.Kernel3D.call(
             kernel_3d_inputs,
             .{
-                .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), num_splits, latent_rank }, .f32),
+                .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), num_splits, value_rank }, .f32),
                 .partial_lse = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), num_splits }, .f32),
             },
             .{
@@ -829,13 +832,13 @@ pub const paged = struct {
                     .input_lse = partials.partial_lse,
                 },
                 .{
-                    .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), grouped_splits, latent_rank }, .f32),
+                    .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), grouped_splits, value_rank }, .f32),
                     .partial_lse = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), grouped_splits }, .f32),
                 },
                 .{
                     .cfg = .{
                         .num_query_heads = @intCast(paged_opts.num_heads),
-                        .latent_rank = latent_rank,
+                        .value_rank = value_rank,
                         .num_input_splits = num_splits,
                         .num_output_splits = grouped_splits,
                     },
@@ -863,7 +866,7 @@ pub const paged = struct {
                     .sink_dtype = triton.from(sink_.dtype()),
                     .o_dtype = triton.from(q.dtype()),
                     .num_query_heads = @intCast(paged_opts.num_heads),
-                    .latent_rank = latent_rank,
+                    .value_rank = value_rank,
                     .num_splits = reduce_num_splits,
                     .use_attn_sink = use_sink,
                 },
@@ -928,6 +931,7 @@ pub const paged = struct {
 
     pub const PagedSparseMlaOptions = struct {
         qk_rank: usize,
+        value_rank: usize,
         num_heads: usize,
         block_size: usize,
         rope_rank: usize,
@@ -938,7 +942,7 @@ pub const paged = struct {
     };
 
     pub fn pagedSparseMla(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
-        const output_shape = q.shape().set(.hd, q.dim(.hd) - opts.rope_rank);
+        const output_shape = q.shape().set(.hd, opts.valueRank(q.dim(.hd)));
         return zml.ops.manualComputation(
             .{
                 q,
@@ -975,6 +979,7 @@ pub const paged = struct {
                     const num_heads: usize = @intCast(q_.dim(.h));
                     const paged_opts: PagedSparseMlaOptions = .{
                         .qk_rank = @intCast(q_.dim(.hd)),
+                        .value_rank = @intCast(ctx_.opts.valueRank(q_.dim(.hd))),
                         .num_heads = num_heads,
                         .block_size = @intCast(kv_cache_.dim(.k_chunk)),
                         .rope_rank = @intCast(ctx_.opts.rope_rank),
@@ -1067,21 +1072,22 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     compilation.pushBlock(block);
     defer compilation.popBlock();
 
-    const q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 432 }, .bf16));
-    const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 432 }, .bf16));
+    const q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 576 }, .bf16));
+    const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 576 }, .bf16));
     const sink = zml.Tensor.zeroes(zml.Shape.init(.{ .h = 6 }, .bf16));
     const topk = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .topk = 32 }, .i32));
     const two_d_opts: paged.PagedSparseMlaOptions = .{
-        .qk_rank = 432,
+        .qk_rank = 576,
+        .value_rank = 512,
         .num_heads = 6,
         .block_size = 1,
-        .rope_rank = 48,
+        .rope_rank = 64,
         .scale = null,
         .total_q_blocks = 1,
         .num_kv_splits = 1,
         .all_decode = true,
     };
-    const output_shape = q.shape().set(.hd, 384);
+    const output_shape = q.shape().set(.hd, 512);
 
     const two_d = paged.pagedSparseMlaKernel(q, kv, sink, topk, two_d_opts);
     try std.testing.expect(two_d.shape().eql(output_shape));
@@ -1092,4 +1098,20 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     const three_d = paged.pagedSparseMlaKernel(q, kv, sink, topk, three_d_opts);
     try std.testing.expect(three_d.shape().eql(output_shape));
     try std.testing.expect(three_d.value().owner().verify());
+
+    const dsv4_q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 512 }, .bf16));
+    const dsv4_kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 512 }, .bf16));
+    var dsv4_opts = two_d_opts;
+    dsv4_opts.qk_rank = 512;
+    dsv4_opts.value_rank = 512;
+    const dsv4_output_shape = dsv4_q.shape();
+
+    const dsv4_two_d = paged.pagedSparseMlaKernel(dsv4_q, dsv4_kv, sink, topk, dsv4_opts);
+    try std.testing.expect(dsv4_two_d.shape().eql(dsv4_output_shape));
+    try std.testing.expect(dsv4_two_d.value().owner().verify());
+
+    dsv4_opts.num_kv_splits = 2;
+    const dsv4_three_d = paged.pagedSparseMlaKernel(dsv4_q, dsv4_kv, sink, topk, dsv4_opts);
+    try std.testing.expect(dsv4_three_d.shape().eql(dsv4_output_shape));
+    try std.testing.expect(dsv4_three_d.value().owner().verify());
 }

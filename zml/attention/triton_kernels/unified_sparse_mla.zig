@@ -20,7 +20,7 @@ pub const Config = struct {
     topk_count: i64 = 32,
     block_m: i64 = 16,
     rope_rank: i64 = 64,
-    latent_rank: i64 = 512,
+    value_rank: i64 = 512,
     rope_offset: i64 = 512,
     tile_size: i64 = 16,
     num_splits: i64 = 1,
@@ -176,9 +176,7 @@ fn kernelUnifiedAttentionSparseMla(
     const BLOCK_M: i64 = config.block_m;
     const BLOCK_SIZE: i64 = config.block_size;
     const ROPE_RANK: i64 = config.rope_rank;
-    const ROPE_RANK_PADDED: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(ROPE_RANK)));
-    const LATENT_RANK: i64 = config.latent_rank;
-    const LATENT_RANK_PADDED: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(LATENT_RANK)));
+    const VALUE_RANK: i64 = config.value_rank;
     const ROPE_OFFSET: i64 = config.rope_offset;
     const TILE_SIZE: i64 = config.tile_size;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
@@ -195,11 +193,11 @@ fn kernelUnifiedAttentionSparseMla(
     const head_ind = q_block_global_idx.rem(@as(i32, @intCast(NUM_HEAD_BLOCKS)));
 
     const offs_h = k.arange(0, BLOCK_M, .i32).add(head_ind.mul(@as(i32, @intCast(BLOCK_M))));
-    const offs_latent = k.arange(0, LATENT_RANK_PADDED, .i32);
-    const latent_mask = offs_latent.lt(@as(i32, @intCast(LATENT_RANK)));
-    const offs_rope_local = k.arange(0, ROPE_RANK_PADDED, .i32);
-    const rope_mask = offs_rope_local.lt(@as(i32, @intCast(ROPE_RANK)));
-    const offs_rope = offs_rope_local.add(@as(i32, @intCast(ROPE_OFFSET)));
+    const offs_value = k.arange(0, VALUE_RANK, .i32);
+    const offs_rope: ?Value = if (ROPE_RANK > 0)
+        k.arange(ROPE_OFFSET, ROPE_OFFSET + ROPE_RANK, .i32)
+    else
+        null;
     const offs_t = k.arange(0, TILE_SIZE, .i32);
 
     const query_offset_0 = k.splat(q_ind, &.{BLOCK_M});
@@ -208,25 +206,25 @@ fn kernelUnifiedAttentionSparseMla(
 
     const qo0_2d = query_offset_0.expandDims(1).mul(query_stride_0);
     const qo1_2d = query_offset_1.expandDims(1).mul(query_stride_1);
-    const q_rope_offset = qo0_2d.add(qo1_2d).add(offs_rope.expandDims(0));
-    const q_rope_mask = head_mask.expandDims(1).bitAnd(rope_mask.expandDims(0));
-    const Q_rope = k.loadOpts(query_ptr.addPtr(q_rope_offset), .{
-        .mask = q_rope_mask,
-        .other = k.zeros(&.{ BLOCK_M, ROPE_RANK_PADDED }, config.q_dtype),
-        .cache_modifier = if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none,
-    });
+    const Q_rope: ?Value = if (ROPE_RANK > 0) blk: {
+        const q_rope_offset = qo0_2d.add(qo1_2d).add(offs_rope.?.expandDims(0));
+        break :blk k.loadOpts(query_ptr.addPtr(q_rope_offset), .{
+            .mask = head_mask.expandDims(1),
+            .other = k.zeros(&.{ BLOCK_M, ROPE_RANK }, config.q_dtype),
+            .cache_modifier = if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none,
+        });
+    } else null;
 
-    const q_latent_offset = qo0_2d.add(qo1_2d).add(offs_latent.expandDims(0));
-    const q_latent_mask = head_mask.expandDims(1).bitAnd(latent_mask.expandDims(0));
-    const Q_latent = k.loadOpts(query_ptr.addPtr(q_latent_offset), .{
-        .mask = q_latent_mask,
-        .other = k.zeros(&.{ BLOCK_M, LATENT_RANK_PADDED }, config.q_dtype),
+    const q_value_offset = qo0_2d.add(qo1_2d).add(offs_value.expandDims(0));
+    const Q_value = k.loadOpts(query_ptr.addPtr(q_value_offset), .{
+        .mask = head_mask.expandDims(1),
+        .other = k.zeros(&.{ BLOCK_M, VALUE_RANK }, config.q_dtype),
         .cache_modifier = if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none,
     });
 
     const m_init = k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
     const l_init = k.full(&.{BLOCK_M}, 0.0, .f32);
-    const acc_init = k.zeros(&.{ BLOCK_M, LATENT_RANK_PADDED }, .f32);
+    const acc_init = k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32);
 
     var loop = k.openFor(0, TILES_PER_SPLIT, 1, .{ m_init, l_init, acc_init });
     {
@@ -256,29 +254,30 @@ fn kernelUnifiedAttentionSparseMla(
         const physical_block_idx_t = physical_block_idx.expandDims(0);
         const cache_block_offsets = physical_block_idx_t.to(.i64).mul(stride_cache_0);
         const cache_block_ptrs = kv_cache_ptr.addPtr(cache_block_offsets);
-        const k_rope_dim_offsets = offs_rope.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
-        const k_rope_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ ROPE_RANK_PADDED, TILE_SIZE })
-            .addPtr(k.broadcastTo(k_rope_dim_offsets, &.{ ROPE_RANK_PADDED, TILE_SIZE }));
         const slot_t = slot.expandDims(0);
         const cache_slot_offsets = slot_t.to(.i64).mul(stride_cache_1);
-        const K_rope = k.loadOpts(k_rope_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ ROPE_RANK_PADDED, TILE_SIZE })), .{
-            .mask = rope_mask.expandDims(1).bitAnd(valid_t.expandDims(0)),
-            .other = k.zeros(&.{ ROPE_RANK_PADDED, TILE_SIZE }, config.kv_dtype),
+        if (ROPE_RANK > 0) {
+            const k_rope_dim_offsets = offs_rope.?.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
+            const k_rope_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ ROPE_RANK, TILE_SIZE })
+                .addPtr(k.broadcastTo(k_rope_dim_offsets, &.{ ROPE_RANK, TILE_SIZE }));
+            const K_rope = k.loadOpts(k_rope_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ ROPE_RANK, TILE_SIZE })), .{
+                .mask = valid_t.expandDims(0),
+                .other = k.zeros(&.{ ROPE_RANK, TILE_SIZE }, config.kv_dtype),
+                .cache_modifier = if (config.all_decode) .cg else .none,
+            });
+            S = S.add(scale.mul(k.dot(Q_rope.?, K_rope, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
+        }
+
+        const k_value_dim_offsets = offs_value.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
+        const k_value_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ VALUE_RANK, TILE_SIZE })
+            .addPtr(k.broadcastTo(k_value_dim_offsets, &.{ VALUE_RANK, TILE_SIZE }));
+        const K_value = k.loadOpts(k_value_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ VALUE_RANK, TILE_SIZE })), .{
+            .mask = valid_t.expandDims(0),
+            .other = k.zeros(&.{ VALUE_RANK, TILE_SIZE }, config.kv_dtype),
             .cache_modifier = if (config.all_decode) .cg else .none,
         });
-        S = S.add(scale.mul(k.dot(Q_rope, K_rope, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
 
-        const k_latent_dim_offsets = offs_latent.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
-        const k_latent_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ LATENT_RANK_PADDED, TILE_SIZE })
-            .addPtr(k.broadcastTo(k_latent_dim_offsets, &.{ LATENT_RANK_PADDED, TILE_SIZE }));
-        const k_latent_mask = latent_mask.expandDims(1).bitAnd(valid_t.expandDims(0));
-        const K_latent = k.loadOpts(k_latent_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ LATENT_RANK_PADDED, TILE_SIZE })), .{
-            .mask = k_latent_mask,
-            .other = k.zeros(&.{ LATENT_RANK_PADDED, TILE_SIZE }, config.kv_dtype),
-            .cache_modifier = if (config.all_decode) .cg else .none,
-        });
-
-        S = S.add(scale.mul(k.dot(Q_latent, K_latent, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
+        S = S.add(scale.mul(k.dot(Q_value, K_value, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
 
         const keep_mask = head_mask.expandDims(1)
             .bitAnd(valid_t.expandDims(0));
@@ -293,8 +292,8 @@ fn kernelUnifiedAttentionSparseMla(
         const acc_scaled = acc.mul(alpha.expandDims(1));
         const new_L = L.mul(alpha).add(l_j);
 
-        const V_latent = k.trans(K_latent, &.{ 1, 0 });
-        const new_acc = k.dot(P.to(config.kv_dtype), V_latent, acc_scaled);
+        const V = k.trans(K_value, &.{ 1, 0 });
+        const new_acc = k.dot(P.to(config.kv_dtype), V, acc_scaled);
 
         loop.yield(.{ m_j, new_L, new_acc });
     }
@@ -324,26 +323,26 @@ fn kernelUnifiedAttentionSparseMla(
     const has_value = L.gt(0.0);
     const safe_l = k.where(has_value, L, k.full(&.{BLOCK_M}, 1.0, .f32));
     const one_over_l = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(safe_l.expandDims(1));
-    acc = acc.mul(k.broadcastTo(one_over_l, &.{ BLOCK_M, LATENT_RANK_PADDED }));
+    acc = acc.mul(k.broadcastTo(one_over_l, &.{ BLOCK_M, VALUE_RANK }));
     acc = k.where(
         has_value.expandDims(1),
         acc,
-        k.zeros(&.{ BLOCK_M, LATENT_RANK_PADDED }, .f32),
+        k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32),
     );
 
     if (three_d) {
         // Compiler-managed workspace layouts are [query, head, split, value]
         // and [query, head, split], both in f32.
-        const partial_out_token_stride: i64 = NUM_QUERY_HEADS * NUM_SPLITS * LATENT_RANK;
-        const partial_out_head_stride: i64 = NUM_SPLITS * LATENT_RANK;
+        const partial_out_token_stride: i64 = NUM_QUERY_HEADS * NUM_SPLITS * VALUE_RANK;
+        const partial_out_head_stride: i64 = NUM_SPLITS * VALUE_RANK;
         const partial_out_offset = q_ind.to(.i64).mul(partial_out_token_stride)
             .add(offs_h.expandDims(1).to(.i64).mul(partial_out_head_stride))
-            .add(split_idx.to(.i64).mul(LATENT_RANK))
-            .add(offs_latent.expandDims(0).to(.i64));
+            .add(split_idx.to(.i64).mul(VALUE_RANK))
+            .add(offs_value.expandDims(0).to(.i64));
         k.storeOpts(
             output_ptr.addPtr(partial_out_offset),
             acc,
-            .{ .mask = head_mask.expandDims(1).bitAnd(latent_mask.expandDims(0)) },
+            .{ .mask = head_mask.expandDims(1) },
         );
 
         const partial_lse_token_stride: i64 = NUM_QUERY_HEADS * NUM_SPLITS;
@@ -365,17 +364,17 @@ fn kernelUnifiedAttentionSparseMla(
 
     const output_offsets = query_offset_0.expandDims(1).mul(output_stride_0)
         .add(query_offset_1.expandDims(1).mul(output_stride_1))
-        .add(offs_latent.expandDims(0));
+        .add(offs_value.expandDims(0));
     k.storeOpts(
         output_ptr.addPtr(output_offsets),
         acc.to(config.o_dtype),
-        .{ .mask = head_mask.expandDims(1).bitAnd(latent_mask.expandDims(0)) },
+        .{ .mask = head_mask.expandDims(1) },
     );
 }
 
 const Reduce3DPartialsCfg = struct {
     num_query_heads: i64,
-    latent_rank: i64,
+    value_rank: i64,
     num_input_splits: i64,
     num_output_splits: i64,
 };
@@ -403,10 +402,8 @@ fn runReduce3DPartials(b: *tri.Builder, cfg: Reduce3DPartialsCfg) tri.FinishErro
     const head_idx = head_group_idx.div(@as(i32, @intCast(cfg.num_output_splits)));
     const group_idx = head_group_idx.rem(@as(i32, @intCast(cfg.num_output_splits)));
     const splits_per_group = @divExact(cfg.num_input_splits, cfg.num_output_splits);
-    const LATENT_RANK_PADDED: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(cfg.latent_rank)));
     const offs_s = b.arange(0, splits_per_group, .i32);
-    const offs_d = b.arange(0, LATENT_RANK_PADDED, .i32);
-    const latent_mask = offs_d.lt(@as(i32, @intCast(cfg.latent_rank)));
+    const offs_d = b.arange(0, cfg.value_rank, .i32);
     const group_start = group_idx.to(.i64).mul(splits_per_group);
 
     const input_lse_token_stride = cfg.num_query_heads * cfg.num_input_splits;
@@ -421,37 +418,31 @@ fn runReduce3DPartials(b: *tri.Builder, cfg: Reduce3DPartialsCfg) tri.FinishErro
     const split_weights = b.exp(input_lse.sub(safe_max));
     const denominator = b.sumOpts(split_weights, .{ .axis = 0 });
 
-    const input_output_token_stride = cfg.num_query_heads * cfg.num_input_splits * cfg.latent_rank;
-    const input_output_head_stride = cfg.num_input_splits * cfg.latent_rank;
+    const input_output_token_stride = cfg.num_query_heads * cfg.num_input_splits * cfg.value_rank;
+    const input_output_head_stride = cfg.num_input_splits * cfg.value_rank;
     const input_output_base = query_idx.to(.i64).mul(input_output_token_stride)
         .add(head_idx.to(.i64).mul(input_output_head_stride))
-        .add(group_start.mul(cfg.latent_rank));
+        .add(group_start.mul(cfg.value_rank));
     const input_output_offset = b.broadcastTo(
-        input_output_base.add(offs_s.expandDims(1).to(.i64).mul(cfg.latent_rank)),
-        &.{ splits_per_group, LATENT_RANK_PADDED },
-    ).add(b.broadcastTo(offs_d.expandDims(0).to(.i64), &.{ splits_per_group, LATENT_RANK_PADDED }));
-    const input_output = b.loadOpts(
-        a.input_ptr.addPtr(input_output_offset),
-        .{
-            .mask = b.broadcastTo(latent_mask.expandDims(0), &.{ splits_per_group, LATENT_RANK_PADDED }),
-            .other = b.zeros(&.{ splits_per_group, LATENT_RANK_PADDED }, .f32),
-        },
-    );
+        input_output_base.add(offs_s.expandDims(1).to(.i64).mul(cfg.value_rank)),
+        &.{ splits_per_group, cfg.value_rank },
+    ).add(b.broadcastTo(offs_d.expandDims(0).to(.i64), &.{ splits_per_group, cfg.value_rank }));
+    const input_output = b.load(a.input_ptr.addPtr(input_output_offset));
     const numerator = b.sumOpts(input_output.mul(split_weights.expandDims(1)), .{ .axis = 0 });
     const safe_denominator = b.where(denominator.gt(0.0), denominator, b.liftAs(1.0, .f32));
     const output = b.where(
         has_value,
         numerator.div(safe_denominator),
-        b.zeros(&.{LATENT_RANK_PADDED}, .f32),
+        b.zeros(&.{cfg.value_rank}, .f32),
     );
 
-    const output_token_stride = cfg.num_query_heads * cfg.num_output_splits * cfg.latent_rank;
-    const output_head_stride = cfg.num_output_splits * cfg.latent_rank;
+    const output_token_stride = cfg.num_query_heads * cfg.num_output_splits * cfg.value_rank;
+    const output_head_stride = cfg.num_output_splits * cfg.value_rank;
     const output_offset = query_idx.to(.i64).mul(output_token_stride)
         .add(head_idx.to(.i64).mul(output_head_stride))
-        .add(group_idx.to(.i64).mul(cfg.latent_rank))
+        .add(group_idx.to(.i64).mul(cfg.value_rank))
         .add(offs_d.to(.i64));
-    b.storeOpts(a.partial_output_ptr.addPtr(output_offset), output, .{ .mask = latent_mask });
+    b.store(a.partial_output_ptr.addPtr(output_offset), output);
 
     const output_lse_offset = query_idx.to(.i64).mul(cfg.num_query_heads * cfg.num_output_splits)
         .add(head_idx.to(.i64).mul(cfg.num_output_splits))
@@ -468,7 +459,7 @@ const Reduce3DCfg = struct {
     sink_dtype: DType = .f32,
     o_dtype: DType = .bf16,
     num_query_heads: i64 = 32,
-    latent_rank: i64 = 512,
+    value_rank: i64 = 512,
     num_splits: i64 = 1,
     use_attn_sink: bool = false,
 };
@@ -500,10 +491,8 @@ fn runReduce3D(b: *tri.Builder, cfg: Reduce3DCfg) tri.FinishError!void {
     const output_stride_1 = b.load(a.output_stride_1_ptr);
     const query_idx = b.programId(.x);
     const head_idx = b.programId(.y);
-    const LATENT_RANK_PADDED: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(cfg.latent_rank)));
     const offs_s = b.arange(0, cfg.num_splits, .i32);
-    const offs_d = b.arange(0, LATENT_RANK_PADDED, .i32);
-    const latent_mask = offs_d.lt(@as(i32, @intCast(cfg.latent_rank)));
+    const offs_d = b.arange(0, cfg.value_rank, .i32);
 
     const partial_lse_token_stride: i64 = cfg.num_query_heads * cfg.num_splits;
     const partial_lse_offset = query_idx.to(.i64).mul(partial_lse_token_stride)
@@ -525,21 +514,15 @@ fn runReduce3D(b: *tri.Builder, cfg: Reduce3DCfg) tri.FinishError!void {
         b.liftAs(0.0, .f32);
     const denominator = b.sumOpts(split_weights, .{ .axis = 0 }).add(sink_weight);
 
-    const partial_out_token_stride: i64 = cfg.num_query_heads * cfg.num_splits * cfg.latent_rank;
-    const partial_out_head_stride: i64 = cfg.num_splits * cfg.latent_rank;
+    const partial_out_token_stride: i64 = cfg.num_query_heads * cfg.num_splits * cfg.value_rank;
+    const partial_out_head_stride: i64 = cfg.num_splits * cfg.value_rank;
     const partial_out_base = query_idx.to(.i64).mul(partial_out_token_stride)
         .add(head_idx.to(.i64).mul(partial_out_head_stride));
     const partial_out_offset = b.broadcastTo(
-        partial_out_base.add(offs_s.expandDims(1).to(.i64).mul(cfg.latent_rank)),
-        &.{ cfg.num_splits, LATENT_RANK_PADDED },
-    ).add(b.broadcastTo(offs_d.expandDims(0).to(.i64), &.{ cfg.num_splits, LATENT_RANK_PADDED }));
-    const partial_output = b.loadOpts(
-        a.partial_output_ptr.addPtr(partial_out_offset),
-        .{
-            .mask = b.broadcastTo(latent_mask.expandDims(0), &.{ cfg.num_splits, LATENT_RANK_PADDED }),
-            .other = b.zeros(&.{ cfg.num_splits, LATENT_RANK_PADDED }, .f32),
-        },
-    );
+        partial_out_base.add(offs_s.expandDims(1).to(.i64).mul(cfg.value_rank)),
+        &.{ cfg.num_splits, cfg.value_rank },
+    ).add(b.broadcastTo(offs_d.expandDims(0).to(.i64), &.{ cfg.num_splits, cfg.value_rank }));
+    const partial_output = b.load(a.partial_output_ptr.addPtr(partial_out_offset));
     const weighted_output = partial_output.mul(split_weights.expandDims(1));
     const numerator = b.sumOpts(weighted_output, .{ .axis = 0 });
     const safe_denominator = b.where(
@@ -550,15 +533,11 @@ fn runReduce3D(b: *tri.Builder, cfg: Reduce3DCfg) tri.FinishError!void {
     const output = b.where(
         has_value,
         numerator.div(safe_denominator),
-        b.zeros(&.{LATENT_RANK_PADDED}, .f32),
+        b.zeros(&.{cfg.value_rank}, .f32),
     );
 
     const output_offset = query_idx.to(.i64).mul(output_stride_0)
         .add(head_idx.to(.i64).mul(output_stride_1))
         .add(offs_d.to(.i64));
-    b.storeOpts(
-        a.output_ptr.addPtr(output_offset),
-        output.to(cfg.o_dtype),
-        .{ .mask = latent_mask },
-    );
+    b.store(a.output_ptr.addPtr(output_offset), output.to(cfg.o_dtype));
 }

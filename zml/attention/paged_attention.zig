@@ -798,11 +798,27 @@ pub fn partialSoftmax(self: zml.Tensor, axis: anytype) PartialSoftmax {
 }
 
 pub const Mla = struct {
+    pub const ValueMode = enum {
+        /// Values are the non-RoPE prefix of the cached key (GLM-style MLA).
+        latent,
+        /// Values are the complete cached key, including its RoPE suffix
+        /// (DeepSeek V4-style MLA).
+        latent_and_rope,
+    };
+
     pub const Options = struct {
         rope_rank: i64,
+        value_mode: ValueMode = .latent,
         scale: ?f32 = null,
         /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 128.
         num_kv_splits: ?u8 = null,
+
+        pub fn valueRank(self: @This(), qk_rank: i64) i64 {
+            return switch (self.value_mode) {
+                .latent => qk_rank - self.rope_rank,
+                .latent_and_rope => qk_rank,
+            };
+        }
     };
 
     fn stablehlo_pagedSparseAttention(q: zml.Tensor, kv: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, opts: Mla.Options) zml.Tensor {
@@ -836,13 +852,13 @@ pub const Mla = struct {
             .{},
             .{ .end = topk.dim(.topk) },
         });
-        const latent_rank = q.dim(.hd) - opts.rope_rank;
-        const selected_values = selected_kv.slice1d(.hd, .{ .end = latent_rank });
+        const selected_values = selected_kv.slice1d(.hd, .{ .end = opts.valueRank(q.dim(.hd)) });
         return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
 
-    /// Computes sparse MLA scores over the full latent-plus-RoPE key width and
-    /// returns only the dense latent value prefix, with width `q.hd - rope_rank`.
+    /// Computes sparse MLA scores over the complete cached key. The output is
+    /// either its dense non-RoPE prefix or the complete cached value, according
+    /// to `opts.value_mode`.
     pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
         const latent_kv = switch (kv_cache) {
             .latent => |latent_kv| latent_kv,
