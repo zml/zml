@@ -90,9 +90,10 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         defer ctx.popBlock();
 
         const scope = ctx.currentScope();
+        const arena = scope.arena.allocator();
         inline for (0..input_tensors.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + input_tensors.len) catch unreachable;
+            scope.id_to_argument.put(arena, args[i].left.id, block.argument(i)) catch @panic("OOM");
+            scope.id_to_argument.put(arena, args[i].right.id, block.argument(i + input_tensors.len)) catch @panic("OOM");
         }
 
         var reduced_values: [input_tensors.len]*const mlir.Value = undefined;
@@ -102,14 +103,10 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         } else {
             var reduced = @call(.auto, func, args);
             var reduced_tensors: [input_tensors.len]Tensor = undefined;
-            meta.collectBuf((struct {
-                pub fn cb(t: Tensor) Tensor {
-                    return t;
-                }
-            }).cb, {}, &reduced, &reduced_tensors);
+            meta.collectBuf(stdx.meta.identity, {}, &reduced, &reduced_tensors);
 
-            inline for (0..input_tensors.len) |i| {
-                reduced_values[i] = reduced_tensors[i].value();
+            for (reduced_values, reduced_tensors) |*vi, ti| {
+                vi.* = ti.value();
             }
         }
 
@@ -208,11 +205,10 @@ pub const ReduceArgs = struct {
 };
 
 pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-    defer arena.deinit();
+    const compiler = CompilationContext.current();
+    const mlir_ctx = compiler.mlir_ctx;
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
-
+    // Note: inputs and inits are infered to be tuple of ReduceArgs
     const reduce_block, var result = b: {
         const ArgsTypes: [inits.len]type = @splat(ReduceArgs);
         const ArgsType = std.meta.Tuple(&ArgsTypes);
@@ -231,13 +227,14 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        CompilationContext.current().pushBlock(reduce_block);
-        defer CompilationContext.current().popBlock();
+        compiler.pushBlock(reduce_block);
+        defer compiler.popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = compiler.currentScope();
+        const arena = scope.arena.allocator();
         inline for (0..inits.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
+            scope.id_to_argument.put(arena, args[i].left.id, reduce_block.argument(i)) catch @panic("OOM");
+            scope.id_to_argument.put(arena, args[i].right.id, reduce_block.argument(i + inits.len)) catch @panic("OOM");
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -247,13 +244,12 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(reduce_block);
+        const block_result = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx));
+        _ = block_result.appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
     var input_values: [inputs.len]*const mlir.Value = undefined;
-    inline for (0..inputs.len) |i| {
-        input_values[i] = inputs[i].value();
-    }
+    inline for (0..inputs.len) |i| input_values[i] = inputs[i].value();
 
     var init_values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inits.len) |i| init_values[i] = inits[i].value();
@@ -267,7 +263,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(compiler.currentScope().block);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -293,7 +289,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
             mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
             .unknown(mlir_ctx),
-        ).appendTo(CompilationContext.current().currentScope().block);
+        ).appendTo(compiler.currentScope().block);
 
         result[i] = Tensor._result(reduced_shape, broad_op.result(0));
     }
@@ -320,10 +316,8 @@ pub fn ReduceWindowFn(N: comptime_int) type {
 }
 
 pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func: *const ReduceWindowFn(N)) [N]Tensor {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-    defer arena.deinit();
-
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const compiler = CompilationContext.current();
+    const mlir_ctx = compiler.mlir_ctx;
 
     const reduce_block, var result = b: {
         const Args = @Tuple(&@as([N]type, @splat(ReduceArgs)));
@@ -342,13 +336,14 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        CompilationContext.current().pushBlock(reduce_block);
-        defer CompilationContext.current().popBlock();
+        compiler.pushBlock(reduce_block);
+        defer compiler.popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = compiler.currentScope();
+        const arena = scope.arena.allocator();
         inline for (0..N) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + N) catch unreachable;
+            scope.id_to_argument.put(arena, args[i].left.id, reduce_block.argument(i)) catch @panic("OOM");
+            scope.id_to_argument.put(arena, args[i].right.id, reduce_block.argument(i + N)) catch @panic("OOM");
         }
 
         var result = @call(.auto, func, args);
@@ -386,7 +381,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(compiler.currentScope().block);
 
     inline for (0..result.len) |i| {
         result[i] = Tensor.fromMlirValue(reduce_op.result(i)).withTags(inputs[i].shape());
@@ -401,10 +396,8 @@ pub const SortArgs = struct {
 };
 
 pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-    defer arena.deinit();
-
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const compiler = CompilationContext.current();
+    const mlir_ctx = compiler.mlir_ctx;
 
     const sort_block = b: {
         const ArgsTypes: [inputs.len]type = @splat(SortArgs);
@@ -424,13 +417,14 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         const sort_block = mlir.Block.init(&block_types, &block_locs);
         errdefer sort_block.deinit();
 
-        CompilationContext.current().pushBlock(sort_block);
-        defer CompilationContext.current().popBlock();
+        compiler.pushBlock(sort_block);
+        defer compiler.popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = compiler.currentScope();
+        const arena = scope.arena.allocator();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, 2 * i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, 2 * i + 1) catch unreachable;
+            scope.id_to_argument.put(arena, args[i].left.id, sort_block.argument(2 * i)) catch @panic("OOM");
+            scope.id_to_argument.put(arena, args[i].right.id, sort_block.argument(2 * i + 1)) catch @panic("OOM");
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -454,7 +448,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(compiler.currentScope().block);
 
     var result: [inputs.len]Tensor = undefined;
     inline for (0..inputs.len) |i| {
@@ -521,7 +515,7 @@ pub fn @"while"(
         const scope = comp.currentScope();
         scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.id_to_argument.putAssumeCapacity(input.id, block.argument(i));
         }
 
         const cond: Tensor = captured_context.cond(initial_state);
@@ -542,7 +536,7 @@ pub fn @"while"(
         const scope = comp.currentScope();
         scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.id_to_argument.putAssumeCapacity(input.id, block.argument(i));
         }
 
         const result: While.State = captured_context.body(initial_state);
@@ -1151,8 +1145,8 @@ pub fn scatter(
 
         const scope = CompilationContext.current().currentScope();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].input.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].update.id, i + inputs.len) catch unreachable;
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].input.id, update_block.argument(i)) catch @panic("OOM");
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].update.id, update_block.argument(i + inputs.len)) catch @panic("OOM");
         }
 
         var result = @call(.auto, func, args ++ context);

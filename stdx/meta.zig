@@ -187,3 +187,12 @@ pub fn Tail(comptime Tuple: type) type {
         else => @compileError("Tail works on tuple type"),
     };
 }
+
+/// The identity function: x -> x
+pub fn identity(T: type) fn (T) T {
+    return struct {
+        fn id(x: T) T {
+            return x;
+        }
+    }.id;
+}

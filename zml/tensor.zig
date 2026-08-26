@@ -312,8 +312,8 @@ pub const Tensor = struct {
     ///
     /// This will fail if used outside of a compilation context.
     pub fn value(self: Tensor) *const mlir.Value {
-        if (CompilationContext.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
-            return CompilationContext.current().currentScope().block.argument(argument_index);
+        if (CompilationContext.current().currentScope().id_to_argument.get(self.id)) |v| {
+            return v;
         } else if (self._value) |v| {
             return v;
         } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
@@ -329,13 +329,11 @@ pub const Tensor = struct {
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = CompilationContext.current();
         const scope = compilation_context.currentScope();
-        if (scope.id_to_argument.get(origin.id)) |argument_index| {
-            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-            gop.value_ptr.* = argument_index;
-        } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+        if (scope.id_to_donation.get(origin.id)) |origin_donation| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
             gop.value_ptr.* = origin_donation;
         }
+
         return self;
     }
 
@@ -349,7 +347,7 @@ pub const Tensor = struct {
         const right = Tensor.init(.{ 2, 6 }, .f32);
 
         const Local = struct {
-            pub fn memcopy(x: Tensor, y: Tensor) Tensor {
+            fn memcopy(x: Tensor, y: Tensor) Tensor {
                 return x.addConstant(1).reuseBuffer(y);
             }
         };

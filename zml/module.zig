@@ -71,7 +71,7 @@ const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 pub const CompilationContext = struct {
     pub const Scope = struct {
         block: *mlir.Block,
-        id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
+        id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, *const mlir.Value),
         id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
         id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
         id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
@@ -532,10 +532,13 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
             const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
-            _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
+            const value = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
             const gop = ctx_.compilation_context.currentScope().id_to_argument.getOrPut(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id) catch unreachable;
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
-            gop.value_ptr.* = ctx_.current_argument_id;
+            gop.value_ptr.* = value;
+
+            ctx_.compilation_context.currentScope().id_to_donation.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch @panic("OOM");
+
             ctx_.current_argument_id += 1;
         }
     }.cb, &context, &args);
