@@ -302,6 +302,11 @@ fn encodeText(
             try scatterVisionHidden(allocator, io, platform, &hidden, merged, extras.vision_spans, hidden_dim);
         }
         log.info("encoder: scattered vision spans={d}", .{extras.vision_spans.len});
+        if (try openDumpDir(io)) |dir| {
+            var dump = dir;
+            defer dump.close(io);
+            try dumpBuffer(allocator, io, dump, "encoder_embed", &hidden);
+        }
     }
 
     const pos = try allocator.alloc(f32, seq * 3);
@@ -390,6 +395,15 @@ fn encodeText(
         });
         hidden.deinit();
         hidden = next;
+        if (layer_i < 4) {
+            if (try openDumpDir(io)) |dir| {
+                var dump = dir;
+                defer dump.close(io);
+                var name_buf: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buf, "encoder_layer_{d}", .{layer_i});
+                try dumpBuffer(allocator, io, dump, name, &hidden);
+            }
+        }
     }
     log.info("encoder: ok tokens={d} layers={d} [{f}]", .{ tokens.len, n_layers, encode_start.untilNow(io, .awake) });
     if (try openDumpDir(io)) |dir| {
