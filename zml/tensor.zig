@@ -2089,20 +2089,6 @@ pub const Tensor = struct {
         return if (idx < 0) self.dim(axis_) + idx else idx;
     }
 
-    pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
-        return self.slice(axis_, .single(i));
-    }
-
-    pub fn choose(self: Tensor, offsets: anytype) Tensor {
-        const off, const tags = Shape.parseDimensions(offsets);
-        var singleton_slices: [constants.MAX_RANK]Slice = @splat(.full);
-        for (off.constSlice(), tags.constSlice()) |o, t| {
-            const ax = self.axis(t);
-            singleton_slices[ax] = .single(o);
-        }
-        return self.slices(singleton_slices[0..self.rank()]);
-    }
-
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
@@ -3125,7 +3111,7 @@ pub const Tensor = struct {
 
             pub fn _scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
                 return self.scatterSlices(
-                    .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
+                    .{ .c = coords.slice(.coord, .single(0)), .b = coords.slice(.coord, .single(1)) },
                     updates,
                     .{ .update_fn = ScatterOpts.increment },
                 );

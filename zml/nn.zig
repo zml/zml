@@ -1584,7 +1584,7 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeLinear1d(out, ax, d, child_opt);
     }
@@ -1651,7 +1651,7 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeCubic1d(out, ax, d, child_opt);
     }
