@@ -184,8 +184,8 @@ pub const Metadata = union(Backend) {
 };
 
 pub const Options = struct {
-    activation_threshold: ?f32,
-    quant_scheme: ?zml.nn.QuantScheme,
+    activation_threshold: ?f32 = null,
+    quant_scheme: ?zml.nn.QuantScheme = null,
 };
 
 pub fn forwardMoe(
@@ -427,8 +427,8 @@ pub fn forwardMoe(
                     topk_ids,
                     topk_weights,
                     weights_gate_up,
-                    scales_gate_up,
                     weights_down,
+                    scales_gate_up,
                     scales_down,
                 },
                 input.shape(),
@@ -459,7 +459,7 @@ pub fn forwardMoe(
                         const local_output = triton.fusedExpertsImpl(
                             sharded_inputs[0],
                             sharded_inputs[3],
-                            sharded_inputs[5],
+                            sharded_inputs[4],
                             sharded_inputs[2],
                             sharded_inputs[1],
                             .{},
@@ -467,7 +467,7 @@ pub fn forwardMoe(
                                 .activation = ctx.activation,
                                 .global_num_experts = ctx.global_num_experts,
                                 .expert_map = expert_map,
-                                .w1_scale = sharded_inputs[4],
+                                .w1_scale = sharded_inputs[5],
                                 .w2_scale = sharded_inputs[6],
                                 .w1_bias = ctx.bias_gate_up,
                                 .w2_bias = ctx.bias_down,
