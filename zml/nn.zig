@@ -1594,8 +1594,8 @@ test resizeBilinear {
     defer comp.deactivate();
 
     const block = @import("mlir").Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     inline for (.{
         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
@@ -1661,8 +1661,8 @@ test resizeBicubic {
     defer comp.deactivate();
 
     const block = @import("mlir").Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     inline for (.{
         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },

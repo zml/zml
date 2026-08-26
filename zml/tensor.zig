@@ -313,8 +313,9 @@ pub const Tensor = struct {
     ///
     /// This will fail if used outside of a Compiler context.
     pub fn value(self: Tensor) *const mlir.Value {
-        if (Compiler.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
-            return Compiler.current().currentScope().block.argument(argument_index);
+        const scope = Compiler.current().currentScope();
+        if (scope.id_to_argument.get(self.id)) |argument_index| {
+            return scope.block.argument(argument_index);
         } else if (self._value) |v| {
             return v;
         } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
@@ -350,7 +351,7 @@ pub const Tensor = struct {
         const right = Tensor.init(.{ 2, 6 }, .f32);
 
         const Local = struct {
-            pub fn memcopy(x: Tensor, y: Tensor) Tensor {
+            fn memcopy(x: Tensor, y: Tensor) Tensor {
                 return x.addConstant(1).reuseBuffer(y);
             }
         };
@@ -2754,8 +2755,8 @@ pub const Tensor = struct {
             defer comp.deactivate();
 
             const block = mlir.Block.init(&.{}, &.{});
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
@@ -2906,8 +2907,8 @@ pub const Tensor = struct {
             defer comp.deactivate();
 
             const block = mlir.Block.init(&.{}, &.{});
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{}, .{ ._ = 0 }, .{ .a = 10 } },
@@ -3132,8 +3133,8 @@ pub const Tensor = struct {
 
             const block = mlir.Block.init(&.{}, &.{});
             defer block.deinit();
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             const idx = Local._idx;
 
@@ -3671,8 +3672,8 @@ pub const Tensor = struct {
 
         const block = mlir.Block.init(&.{}, &.{});
         defer block.deinit();
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         inline for (.{
             .{ .{ .a = 12 }, .a, 3, .{ .a = 4 } },
@@ -3724,8 +3725,8 @@ pub const Tensor = struct {
 
         const block = mlir.Block.init(&.{}, &.{});
         defer block.deinit();
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         inline for (.{
             .{ .{ .a = 10 }, .a, 3, .{ .a = 3 }, .{ .a = 1 } },

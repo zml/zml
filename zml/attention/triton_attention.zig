@@ -1045,8 +1045,8 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     defer compilation.deactivate();
 
     const block = @import("mlir").Block.init(&.{}, &.{});
-    compilation.pushBlock(block);
-    defer compilation.popBlock();
+    const scope = compilation.pushBlock(block);
+    defer scope.pop();
 
     const q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 576 }, .bf16));
     const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 576 }, .bf16));

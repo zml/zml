@@ -88,6 +88,7 @@ pub const Error = std.mem.Allocator.Error ||
     error{MissingDeviceInTile};
 
 pub const Scope = struct {
+    compiler: *Compiler,
     block: *mlir.Block,
     id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
     id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
@@ -95,9 +96,10 @@ pub const Scope = struct {
     id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
     arena: std.heap.ArenaAllocator,
 
-    pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
-        const arena: std.heap.ArenaAllocator = .init(allocator);
+    pub fn initFromBlock(compiler: *Compiler, block: *mlir.Block) Scope {
+        const arena: std.heap.ArenaAllocator = .init(compiler.allocator);
         return .{
+            .compiler = compiler,
             .block = block,
             .id_to_argument = .empty,
             .id_to_donation = .empty,
@@ -107,8 +109,16 @@ pub const Scope = struct {
         };
     }
 
-    pub fn deinit(self: *Scope) void {
-        self.arena.deinit();
+    pub fn pop(self: *Scope) void {
+        const compiler = self.compiler;
+        std.debug.assert(self == compiler.currentScope());
+        var arena = self.arena;
+        _ = compiler.scopes.pop();
+        arena.deinit();
+    }
+
+    pub fn registerTensorAsBlockArgument(scope: *Scope, id: Tensor.Id, arg_id: usize) void {
+        scope.id_to_argument.put(scope.arena.allocator(), id, arg_id) catch @panic("OOM");
     }
 };
 
@@ -168,9 +178,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
 
 pub fn deinit(self: *Compiler) void {
     if (_current == self) _current = null;
-    for (self.scopes.slice()) |*scope| {
-        scope.deinit();
-    }
+    std.debug.assert(self.scopes.len == 0);
     self.mlir_pass_manager.deinit();
     self.module.deinit();
     self.mlir_ctx.deinit();
@@ -199,16 +207,10 @@ pub fn currentScope(self: *Compiler) *Scope {
     return &self.scopes.slice()[self.scopes.len - 1];
 }
 
-pub fn pushBlock(self: *Compiler, block: *mlir.Block) void {
-    const scope = Scope.initFromBlock(self.allocator, block);
+pub fn pushBlock(self: *Compiler, block: *mlir.Block) *Scope {
+    const scope = Scope.initFromBlock(self, block);
     self.scopes.appendAssumeCapacity(scope);
-}
-
-pub fn popBlock(self: *Compiler) void {
-    var maybe_popped_scope = self.scopes.pop();
-    if (maybe_popped_scope) |*popped| {
-        popped.deinit();
-    }
+    return self.currentScope();
 }
 
 pub fn nextChannelId(self: *Compiler) i64 {
@@ -420,9 +422,8 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     const block = mlir.Block.init(&.{}, &.{});
     errdefer block.deinit();
 
-    compiler.pushBlock(block);
-    defer compiler.popBlock();
-    const fn_scope: *Scope = compiler.currentScope();
+    const fn_scope: *Scope = compiler.pushBlock(block);
+    defer fn_scope.pop();
 
     var input_info = try collectInputInfo(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
