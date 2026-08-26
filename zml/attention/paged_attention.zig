@@ -14,6 +14,7 @@ test {
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
+    std.testing.refAllDecls(KvCache);
 }
 
 pub const Backend = enum {
@@ -246,11 +247,11 @@ pub const KvCache = union(enum) {
             },
             .dense => @panic("TODO"),
             .latent => |latent_kv| .{
-                .latent = latent_kv.scatterSlices(.{
+                .latent = latent_kv.scatterSlices(
                     .{ .page = page_index, .k_chunk = offset },
                     new_k,
                     .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                }).reuseBuffer(self.latent),
+                ).reuseBuffer(self.latent),
             },
         };
 
