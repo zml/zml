@@ -1,4 +1,4 @@
-// Load weights, draft IR, encode, compile, denoise, VAE, mux.
+// Load weights, encode, compile, denoise, VAE, mux.
 
 // --- core/checkpoint.zig ---
 pub const checkpoint = struct {
@@ -19,7 +19,7 @@ pub const checkpoint = struct {
     pub fn inspect(keys: []const []const u8) Report {
         return .{
             .has_adaln_proj = hasKey(keys, "adaln_proj.linear.weight"),
-            .has_time = hasKey(keys, "time_embedder.proj_in.weight") or hasKey(keys, "adaln_t_table"),
+            .has_time = hasKey(keys, "time_embedder.proj_in.weight") or hasKey(keys, "time_embedder.linear_1.weight") or hasKey(keys, "adaln_t_table"),
         };
     }
 
@@ -347,6 +347,7 @@ pub const request = struct {
                 if (req.first_image.len != 0 or req.last_image.len != 0) return error.Ref2vaRejectsKeyframes;
             },
         }
+        if (std.mem.trim(u8, req.prompt, " \t\r\n").len == 0) return error.IntentEmpty;
         try validateRefs(req.refs);
     }
 
@@ -375,6 +376,7 @@ pub const request = struct {
                 },
             }
         }
+        if (n_aud != 0 and n_img == 0 and n_vid == 0) return error.AudioRefNeedsVisual;
     }
 
     pub fn refsToManifest(allocator: std.mem.Allocator, refs: []const Reference) ![]u8 {
@@ -407,30 +409,6 @@ pub const request = struct {
         }
         try out.appendSlice(allocator, "]");
         return out.toOwnedSlice(allocator);
-    }
-
-    pub fn groupRefs(allocator: std.mem.Allocator, refs: []const Reference) ![]Reference {
-        const out = try allocator.alloc(Reference, refs.len);
-        var n: usize = 0;
-        for (refs) |r| {
-            if (r.kind == .image) {
-                out[n] = r;
-                n += 1;
-            }
-        }
-        for (refs) |r| {
-            if (r.kind == .video or r.kind == .video_audio) {
-                out[n] = r;
-                n += 1;
-            }
-        }
-        for (refs) |r| {
-            if (r.kind == .audio) {
-                out[n] = r;
-                n += 1;
-            }
-        }
-        return out;
     }
 
     pub fn hasAudio(refs: []const Reference) bool {
@@ -587,984 +565,6 @@ pub const memory = struct {
     }
 };
 
-// --- ir/grid.zig ---
-pub const grid = struct {
-    const std = @import("std");
-
-    const config = @import("model.zig").config;
-
-    pub const min_shot_ms: u32 = 1500;
-    pub const min_shot_floor_s: f32 = 1.2;
-    pub const seconds_per_shot: f32 = 3.4;
-    pub const max_shots: u32 = 4;
-    pub const max_ref_files = config.max_ref_files;
-    pub const max_ref_images = config.max_ref_images;
-    pub const max_ref_videos = config.max_ref_videos;
-    pub const max_ref_audios = config.max_ref_audios;
-
-    pub const instruction_openings = [_][]const u8{
-        "For the target video, at 0.00 seconds",
-        "How the reference pictures align with the target video",
-    };
-
-    pub fn framesFor(duration_s: f32) u32 {
-        return config.alignFrameCount(config.frameCount(duration_s));
-    }
-
-    pub fn effectiveSeconds(duration_s: f32) f32 {
-        return @as(f32, @floatFromInt(framesFor(duration_s))) / config.video_fps;
-    }
-
-    pub fn isOnGrid(duration_s: f32) bool {
-        const n = config.frameCount(duration_s);
-        const snapped = config.alignFrameCount(n);
-        return snapped == n and @abs((@as(f32, @floatFromInt(n)) / config.video_fps) - duration_s) <= 0.0006;
-    }
-
-    pub fn sSs(duration_s: f32) f32 {
-        const x = effectiveSeconds(duration_s) * 100.0;
-        const n = @floor(x);
-        return (if (x - n >= 0.5) n + 1.0 else n) / 100.0;
-    }
-
-    pub fn msToTimestamp(ms: u32) [12]u8 {
-        var buf: [12]u8 = undefined;
-        const total_s = ms / 1000;
-        const milli = ms % 1000;
-        const minutes = total_s / 60;
-        const seconds = total_s % 60;
-        _ = std.fmt.bufPrint(&buf, "{d:0>2}:{d:0>2}.{d:0>3}", .{ minutes, seconds, milli }) catch unreachable;
-        return buf;
-    }
-
-    pub fn parseTimestamp(text: []const u8) ?f32 {
-        if (text.len < 9) return null;
-        const mm = std.fmt.parseInt(u32, text[0..2], 10) catch return null;
-        if (text[2] != ':') return null;
-        const ss = std.fmt.parseInt(u32, text[3..5], 10) catch return null;
-        if (text[5] != '.') return null;
-        const mmm = std.fmt.parseInt(u32, text[6..9], 10) catch return null;
-        return @as(f32, @floatFromInt(mm * 60 + ss)) + @as(f32, @floatFromInt(mmm)) / 1000.0;
-    }
-
-    pub fn shotCount(duration_s: f32, variant: config.Variant, pinned: ?u32) u32 {
-        if (pinned) |n| return @max(1, n);
-        if (variant == .fl2va) return 1;
-        const seconds = effectiveSeconds(duration_s);
-        var n: u32 = @intFromFloat(@round(seconds / seconds_per_shot));
-        n = @max(1, @min(max_shots, n));
-        while (n > 1 and (seconds * 1000.0) / @as(f32, @floatFromInt(n)) < @as(f32, @floatFromInt(min_shot_ms))) {
-            n -= 1;
-        }
-        return n;
-    }
-
-    pub fn cutBounds(duration_s: f32, n_shots: u32) [5]u32 {
-        var bounds: [5]u32 = .{0} ** 5;
-        const total_ms: u32 = @intFromFloat(@round(effectiveSeconds(duration_s) * 1000.0));
-        bounds[0] = 0;
-        var i: u32 = 1;
-        while (i < n_shots) : (i += 1) {
-            const raw = @as(f32, @floatFromInt(total_ms)) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n_shots));
-            const rounded: u32 = @intFromFloat(@round(raw / 100.0) * 100.0);
-            bounds[i] = @max(bounds[i - 1] + min_shot_ms, rounded);
-        }
-        bounds[n_shots] = total_ms;
-        var j: u32 = n_shots - 1;
-        while (j > 0) : (j -= 1) {
-            if (bounds[j] + min_shot_ms > bounds[j + 1]) {
-                bounds[j] = bounds[j + 1] - min_shot_ms;
-            }
-            if (j == 1) break;
-        }
-        return bounds;
-    }
-
-    pub fn instructionLine(allocator: std.mem.Allocator, variant: config.Variant, last_shot: u32, duration_s: f32, n_pictures: u32, last_only: bool) ![]u8 {
-        const mark = sSs(duration_s);
-        return switch (variant) {
-            .t2va => allocator.dupe(u8, ""),
-            .ref2va => allocator.dupe(u8, ""),
-            .fl2va => if (n_pictures == 1 and last_only)
-                std.fmt.allocPrint(allocator, "How the reference pictures align with the target video — Picture 1 (from Shot {d}) aligns with the {d:.2}-second mark of the target video.", .{ last_shot, mark })
-            else if (n_pictures == 1)
-                allocator.dupe(u8, "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video.")
-            else
-                std.fmt.allocPrint(allocator, "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot {d}) aligns with the {d:.2}-second mark of the target video.", .{ last_shot, mark }),
-        };
-    }
-
-    pub fn startsWithInstruction(line: []const u8) bool {
-        for (instruction_openings) |open| {
-            if (std.mem.startsWith(u8, line, open)) return true;
-        }
-        return false;
-    }
-};
-
-// --- ir/draft.zig ---
-pub const draft = struct {
-    const std = @import("std");
-
-    const config = @import("model.zig").config;
-
-    pub const Role = enum {
-        frame_anchor_first,
-        frame_anchor_last,
-        subject,
-        environment,
-        style,
-        storyboard,
-        structure,
-        edit_source,
-        continuation_source,
-        placed_subject,
-        replacement_subject,
-        voice_timbre,
-        bgm,
-        music_style,
-        beat_reference,
-        sfx,
-
-        pub fn isAudioRef(self: Role) bool {
-            return self == .voice_timbre or self == .sfx or self == .music_style or self == .beat_reference;
-        }
-
-        pub fn isSwap(self: Role) bool {
-            return self == .placed_subject or self == .replacement_subject;
-        }
-    };
-
-    pub const ManifestEntry = struct {
-        kind: []const u8,
-        label: []const u8,
-        path: []const u8,
-        role: Role,
-        paired_with: ?[]const u8 = null,
-        characterisation: []const u8 = "",
-    };
-
-    pub const SubjectPlan = struct {
-        label: []const u8,
-        sources: []const []const u8,
-        descriptor: []const u8,
-        attributes: []const []const u8 = &.{},
-        retention: []const u8 = "fully_preserved",
-        appears_in: []const u32 = &.{},
-        retention_note: []const u8 = "",
-        taken_over_by: ?[]const u8 = null,
-    };
-
-    pub const CameraMove = struct {
-        type: []const u8,
-        amplitude: ?[]const u8 = null,
-        speed: ?[]const u8 = null,
-
-        pub fn phrase(self: CameraMove, allocator: std.mem.Allocator) ![]u8 {
-            const verb = cameraVerb(self.type);
-            var aw: std.Io.Writer.Allocating = .init(allocator);
-            errdefer aw.deinit();
-            try aw.writer.print("The camera {s}", .{verb});
-            if (self.amplitude) |amp| try aw.writer.print(" with {s} amplitude", .{amp});
-            if (self.speed) |spd| try aw.writer.print(" at {s} speed", .{spd});
-            return aw.toOwnedSlice();
-        }
-    };
-
-    pub const ShotPlan = struct {
-        n: u32,
-        start_ms: u32,
-        end_ms: u32,
-        camera: CameraMove,
-        subjects: []const []const u8 = &.{},
-        body: []const u8 = "",
-        word_target: u32 = 120,
-    };
-
-    pub const Plan = struct {
-        variant: config.Variant,
-        duration_s: f32,
-        manifest: []const ManifestEntry,
-        subjects: []const SubjectPlan,
-        shots: []const ShotPlan,
-        task_types: []const []const u8,
-        style_phrase: []const u8,
-        summary: []const u8,
-        ambient: []const u8,
-        music: []const u8,
-    };
-
-    pub const DraftAsset = struct {
-        kind: []const u8,
-        path: []const u8,
-        role: ?[]const u8 = null,
-        paired_video_path: ?[]const u8 = null,
-        note: []const u8 = "",
-    };
-
-    const draft_camera = [_]CameraMove{
-        .{ .type = "Push In", .amplitude = "small", .speed = "slow" },
-        .{ .type = "Truck Right", .amplitude = "small", .speed = "slow" },
-        .{ .type = "Static Shot", .amplitude = null, .speed = null },
-        .{ .type = "Pull Out", .amplitude = "small", .speed = "slow" },
-    };
-    const maximal_camera = [_]CameraMove{
-        .{ .type = "Push In", .amplitude = "large", .speed = "fast" },
-        .{ .type = "Truck Right", .amplitude = "large", .speed = "fast" },
-        .{ .type = "Pull Out", .amplitude = "large", .speed = "fast" },
-        .{ .type = "Tilt Up", .amplitude = "large", .speed = "fast" },
-    };
-    const assertive_camera = [_]CameraMove{
-        .{ .type = "Push In", .amplitude = "large", .speed = null },
-        .{ .type = "Truck Right", .amplitude = "large", .speed = null },
-        .{ .type = "Static Shot", .amplitude = null, .speed = null },
-        .{ .type = "Pull Out", .amplitude = "large", .speed = null },
-    };
-
-    const task_order = [_][]const u8{
-        "keyframe completion",
-        "reference generation",
-        "video editing",
-        "video continuation",
-        "audio reuse",
-        "audio reference",
-    };
-
-    pub fn parseRole(text: []const u8) ?Role {
-        return std.meta.stringToEnum(Role, text);
-    }
-
-    pub fn defaultRole(kind: []const u8, stated: ?[]const u8) Role {
-        if (stated) |s| {
-            if (parseRole(s)) |r| return r;
-        }
-        return switch (kind[0]) {
-            'i' => .subject,
-            'v' => .subject,
-            else => .sfx,
-        };
-    }
-
-    pub fn buildManifest(allocator: std.mem.Allocator, assets: []const DraftAsset) ![]ManifestEntry {
-        var images: std.ArrayList(DraftAsset) = .empty;
-        defer images.deinit(allocator);
-        var videos: std.ArrayList(DraftAsset) = .empty;
-        defer videos.deinit(allocator);
-        var audios: std.ArrayList(DraftAsset) = .empty;
-        defer audios.deinit(allocator);
-        for (assets) |a| {
-            switch (a.kind[0]) {
-                'i' => try images.append(allocator, a),
-                'v' => try videos.append(allocator, a),
-                else => try audios.append(allocator, a),
-            }
-        }
-        std.mem.sort(DraftAsset, images.items, {}, struct {
-            fn less(_: void, a: DraftAsset, b: DraftAsset) bool {
-                return anchorRank(a) < anchorRank(b);
-            }
-        }.less);
-
-        var out: std.ArrayList(ManifestEntry) = .empty;
-        errdefer out.deinit(allocator);
-        var n_pic: u32 = 0;
-        var n_vid: u32 = 0;
-        var n_aud: u32 = 0;
-        var n_standalone: u32 = 0;
-        for (images.items) |a| {
-            n_pic += 1;
-            try out.append(allocator, .{
-                .kind = "image",
-                .label = try std.fmt.allocPrint(allocator, "<Picture {d}>", .{n_pic}),
-                .path = a.path,
-                .role = defaultRole(a.kind, a.role),
-                .characterisation = a.note,
-            });
-        }
-        for (videos.items) |v| {
-            n_vid += 1;
-            if (pairedAudio(audios.items, v.path)) |snd| {
-                n_aud += 1;
-                try out.append(allocator, .{
-                    .kind = "audio",
-                    .label = try std.fmt.allocPrint(allocator, "<Audio {d}>", .{n_aud}),
-                    .path = snd.path,
-                    .role = defaultRole(snd.kind, snd.role),
-                    .paired_with = try std.fmt.allocPrint(allocator, "<Video {d}>", .{n_vid}),
-                    .characterisation = snd.note,
-                });
-            }
-            try out.append(allocator, .{
-                .kind = "video",
-                .label = try std.fmt.allocPrint(allocator, "<Video {d}>", .{n_vid}),
-                .path = v.path,
-                .role = defaultRole(v.kind, v.role),
-                .characterisation = v.note,
-            });
-        }
-        for (audios.items) |a| {
-            if (a.paired_video_path != null) continue;
-            n_aud += 1;
-            n_standalone += 1;
-            try out.append(allocator, .{
-                .kind = "audio",
-                .label = try std.fmt.allocPrint(allocator, "<Audio {d}>", .{n_aud}),
-                .path = a.path,
-                .role = defaultRole(a.kind, a.role),
-                .characterisation = a.note,
-            });
-        }
-        return out.toOwnedSlice(allocator);
-    }
-
-    pub fn deriveTaskTypes(allocator: std.mem.Allocator, manifest: []const ManifestEntry) ![]const []const u8 {
-        var flags = [_]bool{false} ** task_order.len;
-        var has_audio = false;
-        var has_bgm = false;
-        var has_audio_ref = false;
-        for (manifest) |m| {
-            if (m.kind[0] == 'a') has_audio = true;
-            if (m.role == .bgm) has_bgm = true;
-            if (m.role.isAudioRef()) has_audio_ref = true;
-            if (m.role == .frame_anchor_first or m.role == .frame_anchor_last) flags[0] = true;
-            if (m.role == .subject or m.role == .environment or m.role == .style or m.role == .storyboard or m.role == .structure or m.role == .voice_timbre or m.role.isSwap()) flags[1] = true;
-            if (m.role == .edit_source) flags[2] = true;
-            if (m.role == .continuation_source) flags[3] = true;
-        }
-        if (has_audio and has_bgm) flags[4] = true;
-        if (has_audio and has_audio_ref) flags[5] = true;
-        var out: std.ArrayList([]const u8) = .empty;
-        errdefer out.deinit(allocator);
-        for (task_order, flags) |name, on| {
-            if (on) try out.append(allocator, name);
-        }
-        if (out.items.len == 0) try out.append(allocator, "reference generation");
-        return out.toOwnedSlice(allocator);
-    }
-
-    pub fn buildPlan(
-        allocator: std.mem.Allocator,
-        variant: config.Variant,
-        duration_s: f32,
-        intent: []const u8,
-        assets: []const DraftAsset,
-        style_phrase: []const u8,
-        magnitude: []const u8,
-        pinned_shots: ?u32,
-    ) !Plan {
-        const manifest = try buildManifest(allocator, assets);
-        var subjects: std.ArrayList(SubjectPlan) = .empty;
-        errdefer subjects.deinit(allocator);
-        var n_subj: u32 = 0;
-        for (manifest) |m| {
-            if (m.kind[0] == 'a') continue;
-            if (m.role == .storyboard or m.role == .style or m.role == .structure) continue;
-            n_subj += 1;
-            const desc = try std.fmt.allocPrint(allocator, "the attached {s}", .{m.kind});
-            const sources = try allocator.alloc([]const u8, 1);
-            sources[0] = m.label;
-            try subjects.append(allocator, .{
-                .label = try std.fmt.allocPrint(allocator, "<Subject {d}>", .{n_subj}),
-                .sources = sources,
-                .descriptor = desc,
-                .retention = markerFor(m.role),
-                .retention_note = try std.fmt.allocPrint(allocator, "{s} is retained", .{desc}),
-            });
-        }
-
-        var n = grid.shotCount(duration_s, variant, pinned_shots);
-        for (manifest) |m| {
-            if (m.role == .edit_source or m.role == .continuation_source) n = 1;
-        }
-        const bounds = grid.cutBounds(duration_s, n);
-        const rotation = cameraRotation(magnitude);
-        const shots = try allocator.alloc(ShotPlan, n);
-        const subj_labels = try allocator.alloc([]const u8, subjects.items.len);
-        for (subjects.items, subj_labels) |s, *l| l.* = s.label;
-        const total_words: u32 = switch (variant) {
-            .ref2va => 400,
-            .fl2va => 380,
-            .t2va => 330,
-        };
-        const total_ms = bounds[n];
-        var i: u32 = 0;
-        while (i < n) : (i += 1) {
-            const start = bounds[i];
-            const end = bounds[i + 1];
-            const share = if (total_ms == 0) 1.0 else @as(f32, @floatFromInt(end - start)) / @as(f32, @floatFromInt(total_ms));
-            shots[i] = .{
-                .n = i + 1,
-                .start_ms = start,
-                .end_ms = end,
-                .camera = rotation[i % rotation.len],
-                .subjects = subj_labels,
-                .word_target = @max(90, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(total_words)) * share)))),
-            };
-        }
-        for (subjects.items) |*s| {
-            const appears = try allocator.alloc(u32, n);
-            var k: u32 = 0;
-            while (k < n) : (k += 1) appears[k] = k + 1;
-            s.appears_in = appears;
-        }
-
-        const style = if (style_phrase.len != 0) style_phrase else styleFromIntent(intent);
-        const tasks = try deriveTaskTypes(allocator, manifest);
-        const summary = if (subj_labels.len != 0)
-            try std.fmt.allocPrint(allocator, "The target video shows {s} in the scene described by the request.", .{try joinLabels(allocator, subj_labels)})
-        else
-            try allocator.dupe(u8, "The target video shows the scene described by the request.");
-
-        var plan: Plan = .{
-            .variant = variant,
-            .duration_s = duration_s,
-            .manifest = manifest,
-            .subjects = try subjects.toOwnedSlice(allocator),
-            .shots = shots,
-            .task_types = tasks,
-            .style_phrase = style,
-            .summary = summary,
-            .ambient = "Room tone continues throughout the video.",
-            .music = "N/A",
-        };
-        try fillShotBodies(allocator, &plan, intent);
-        return plan;
-    }
-
-    pub fn render(allocator: std.mem.Allocator, plan: Plan) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        const w = &aw.writer;
-        if (plan.variant == .ref2va) {
-            try w.writeAll("subject_definitions:\n");
-            try writeDefinitions(allocator, w, plan);
-            try w.writeAll("\n\nsummary:\n");
-            const tasks = try joinTasks(allocator, plan.task_types);
-            defer allocator.free(tasks);
-            try w.print("[{s}] {s}", .{ tasks, plan.summary });
-            try w.writeAll("\n\nretention_analysis:\n");
-            try writeRetention(allocator, w, plan);
-            try w.writeAll("\n\ndetailed_description:\n");
-            try writeDescription(allocator, w, plan);
-            try w.print("\n\noverall_soundscape:\n{s}\n\nnon_diegetic_music:\n{s}\n", .{ plan.ambient, plan.music });
-        } else {
-            const n_pic = countKind(plan.manifest, 'i');
-            const last_only = n_pic == 1 and lastOnly(plan.manifest);
-            const last_shot = if (plan.shots.len != 0) plan.shots[plan.shots.len - 1].n else 1;
-            const line = try grid.instructionLine(allocator, plan.variant, last_shot, plan.duration_s, n_pic, last_only);
-            defer allocator.free(line);
-            if (line.len != 0) {
-                try w.writeAll(line);
-                try w.writeAll("\n\n");
-            }
-            try w.writeAll("integrated_multimodal_description: ");
-            try writeDescription(allocator, w, plan);
-            try w.print("\n\noverall_soundscape: {s}\n\nnon_diegetic_music: {s}\n", .{ plan.ambient, plan.music });
-        }
-        return aw.toOwnedSlice();
-    }
-
-    fn fillShotBodies(allocator: std.mem.Allocator, plan: *Plan, intent: []const u8) !void {
-        const shots = @constCast(plan.shots);
-        for (shots) |*shot| {
-            shot.body = try draftBody(allocator, plan.*, shot.*, intent);
-        }
-    }
-
-    fn draftBody(allocator: std.mem.Allocator, plan: Plan, shot: ShotPlan, intent: []const u8) ![]u8 {
-        const cam = try shot.camera.phrase(allocator);
-        defer allocator.free(cam);
-        const trimmed = std.mem.trim(u8, intent, " \t\r\n");
-        if (plan.variant == .fl2va and shot.n == 1) {
-            const n_pic = countKind(plan.manifest, 'i');
-            const last_only = n_pic == 1 and lastOnly(plan.manifest);
-            if (n_pic == 1 and last_only) {
-                return std.fmt.allocPrint(allocator, "The shot develops continuously until the composition of Picture 1 at the end. {s}. {s}.", .{ lowerFirst(trimmed), cam });
-            }
-            if (n_pic == 1) {
-                return std.fmt.allocPrint(allocator, "The shot opens in the composition established by Picture 1. {s}. {s}.", .{ lowerFirst(trimmed), cam });
-            }
-            return std.fmt.allocPrint(allocator, "The shot opens in the composition established by Picture 1. Across the shot, {s}. {s}. The framing narrows toward the pose, spacing and composition established by Picture 2, which the shot settles into at the end.", .{ lowerFirst(trimmed), cam });
-        }
-        if (shot.n == 1) {
-            if (plan.variant == .ref2va and plan.subjects.len != 0) {
-                return std.fmt.allocPrint(allocator, "The frame holds {s}. {s}. Across the shot, {s}.", .{ plan.subjects[0].label, cam, lowerFirst(trimmed) });
-            }
-            return std.fmt.allocPrint(allocator, "The frame holds the scene described as: {s}. {s}.", .{ trimmed, cam });
-        }
-        const ts = grid.msToTimestamp(shot.start_ms);
-        _ = ts;
-        if (plan.variant == .ref2va and plan.subjects.len != 0) {
-            return std.fmt.allocPrint(allocator, "The shot cuts to {s}, still in frame. {s}.", .{ plan.subjects[0].label, cam });
-        }
-        return std.fmt.allocPrint(allocator, "The shot cuts to another view of the same scene. {s}.", .{cam});
-    }
-
-    fn writeDescription(allocator: std.mem.Allocator, w: anytype, plan: Plan) !void {
-        _ = allocator;
-        const prefix = std.mem.trim(u8, plan.style_phrase, " \t.,");
-        for (plan.shots, 0..) |shot, i| {
-            if (i != 0) {
-                if (plan.variant == .ref2va) try w.writeAll("\n") else try w.writeAll(" ");
-            }
-            if (shot.n == 1) {
-                if (plan.variant == .ref2va) {
-                    try w.writeAll(styleSentence(prefix));
-                    try w.writeAll("\n");
-                    try w.print("[Shot 1] {s}", .{shot.body});
-                } else if (prefix.len != 0) {
-                    try w.print("[Shot 1] {s}, ", .{prefix});
-                    try writeLowerFirst(w, shot.body);
-                } else {
-                    try w.print("[Shot 1] {s}", .{shot.body});
-                }
-            } else {
-                const ts = grid.msToTimestamp(shot.start_ms);
-                try w.print("[Shot {d}] At {s}, ", .{ shot.n, ts[0..9] });
-                try writeLowerFirst(w, shot.body);
-            }
-        }
-    }
-
-    fn writeDefinitions(allocator: std.mem.Allocator, w: anytype, plan: Plan) !void {
-        var first = true;
-        for (plan.subjects) |s| {
-            if (!first) try w.writeAll("\n");
-            first = false;
-            const src = try joinLabels(allocator, s.sources);
-            defer allocator.free(src);
-            try w.print("{s} is {s} in {s}.", .{ s.label, s.descriptor, src });
-        }
-        for (plan.manifest) |m| {
-            if (m.role == .storyboard) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} is a storyboard reference for [Shot 1], defining their viewpoint, subject placement, and shot order.", .{m.label});
-            } else if (m.role == .style) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} is the style and composition reference for the target video, defining its medium, line, palette, shading and composition.", .{m.label});
-            } else if (m.role == .structure) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} is the source video providing the camera movement and cutting rhythm for the target video.", .{m.label});
-            } else if (m.role == .edit_source) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} is the source video for the target video edit.", .{m.label});
-            } else if (m.role == .continuation_source) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} is the source video the target video continues from.", .{m.label});
-            } else if (m.kind[0] == 'a') {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                const detail = if (m.characterisation.len != 0) m.characterisation else "containing a spoken vocal layer";
-                try w.print("{s} is a sound-texture reference for the target video — {s}.", .{ m.label, detail });
-            }
-        }
-        if (first) {
-            try w.writeAll("<Subject 1> is the scene described by the request.");
-        }
-    }
-
-    fn writeRetention(allocator: std.mem.Allocator, w: anytype, plan: Plan) !void {
-        var first = true;
-        for (plan.subjects) |s| {
-            if (!first) try w.writeAll("\n");
-            first = false;
-            const appears = try shotList(allocator, s.appears_in);
-            defer allocator.free(appears);
-            try w.print("{s} (appears in {s}): {s} - {s}.", .{ s.label, appears, s.retention, s.retention_note });
-        }
-        for (plan.manifest) |m| {
-            if (m.role == .frame_anchor_first) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} ([Shot 1] first frame): fully_preserved - the composition, subject placement and lighting of the opening frame are held.", .{m.label});
-            } else if (m.role == .frame_anchor_last) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                const last = if (plan.shots.len != 0) plan.shots[plan.shots.len - 1].n else 1;
-                try w.print("{s} ([Shot {d}] last frame): fully_preserved - the final composition and subject placement are reached.", .{ m.label, last });
-            } else if (m.role == .storyboard) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} (storyboard reference): weak_reference - the viewpoint, subject placement and shot order are followed, while the drawing itself is not reproduced.", .{m.label});
-            } else if (m.role == .style) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} (style and composition): weak_reference - the target video adheres to the reference's aesthetic, while its contents are not reproduced.", .{m.label});
-            } else if (m.role == .structure) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} (camera movement and cutting rhythm): weak_reference - the camera moves and edit timing are followed, while the video's contents are not reproduced.", .{m.label});
-            } else if (m.role == .edit_source) {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                try w.print("{s} (source video editing): fully_preserved - the original framing, lighting and setting are maintained while the edit is applied.", .{m.label});
-            } else if (m.kind[0] == 'a') {
-                if (!first) try w.writeAll("\n");
-                first = false;
-                const marker = if (m.role == .bgm) "partially_copy" else "reference";
-                try w.print("{s}: {s} - its sound texture is referenced, not copied as the final track.", .{ m.label, marker });
-            }
-        }
-        if (first) {
-            try w.writeAll("<Subject 1> (appears in [Shot 1]): fully_preserved - the requested scene is retained.");
-        }
-    }
-
-    fn cameraVerb(type_name: []const u8) []const u8 {
-        const pairs = [_]struct { k: []const u8, v: []const u8 }{
-            .{ .k = "Zoom In", .v = "zooms in" },
-            .{ .k = "Zoom Out", .v = "zooms out" },
-            .{ .k = "Push In", .v = "pushes in" },
-            .{ .k = "Pull Out", .v = "pulls out" },
-            .{ .k = "Pan Left", .v = "pans left" },
-            .{ .k = "Pan Right", .v = "pans right" },
-            .{ .k = "Truck Left", .v = "trucks left" },
-            .{ .k = "Truck Right", .v = "trucks right" },
-            .{ .k = "Tilt Up", .v = "tilts up" },
-            .{ .k = "Tilt Down", .v = "tilts down" },
-            .{ .k = "Pedestal Up", .v = "rises on a pedestal move" },
-            .{ .k = "Pedestal Down", .v = "lowers on a pedestal move" },
-            .{ .k = "Arc Shot", .v = "arcs around the subject" },
-            .{ .k = "Tracking Shot", .v = "tracks with the subject" },
-            .{ .k = "Static Shot", .v = "holds a static shot" },
-            .{ .k = "Shake Slightly", .v = "shakes slightly" },
-            .{ .k = "Shake Strongly", .v = "shakes strongly" },
-            .{ .k = "POV", .v = "takes the subject's point of view" },
-            .{ .k = "Roll Clockwise", .v = "rolls clockwise" },
-            .{ .k = "Roll Counterclockwise", .v = "rolls counterclockwise" },
-        };
-        for (pairs) |p| {
-            if (std.mem.eql(u8, p.k, type_name)) return p.v;
-        }
-        return type_name;
-    }
-
-    fn cameraRotation(magnitude: []const u8) []const CameraMove {
-        if (std.mem.eql(u8, magnitude, "maximal")) return &maximal_camera;
-        if (std.mem.eql(u8, magnitude, "assertive")) return &assertive_camera;
-        return &draft_camera;
-    }
-
-    fn markerFor(role: Role) []const u8 {
-        return switch (role) {
-            .continuation_source => "partially_preserved",
-            .style, .storyboard, .structure => "weak_reference",
-            else => "fully_preserved",
-        };
-    }
-
-    fn styleFromIntent(intent: []const u8) []const u8 {
-        const low_terms = [_][]const u8{ "anime", "manga", "3d", "cgi", "watercolor", "watercolour", "stop-motion" };
-        const lower = intent;
-        for (low_terms) |t| {
-            if (containsIgnoreCase(lower, t)) {
-                if (std.mem.eql(u8, t, "anime") or std.mem.eql(u8, t, "manga")) return "anime, cinematic";
-                if (std.mem.eql(u8, t, "3d") or std.mem.eql(u8, t, "cgi")) return "3D CG, cinematic";
-                if (std.mem.eql(u8, t, "watercolor") or std.mem.eql(u8, t, "watercolour")) return "watercolour, cinematic";
-                if (std.mem.eql(u8, t, "stop-motion")) return "stop-motion, cinematic";
-            }
-        }
-        return "Live-action, cinematic";
-    }
-
-    fn styleSentence(phrase: []const u8) []const u8 {
-        const trimmed = std.mem.trim(u8, phrase, " \t.,");
-        if (trimmed.len == 0) return "The target video is in live-action style.";
-        if (std.ascii.eqlIgnoreCase(trimmed, "Live-action, cinematic"))
-            return "The target video is in live-action style, cinematic.";
-        if (std.ascii.eqlIgnoreCase(trimmed, "Live-action"))
-            return "The target video is in live-action style.";
-        return "The target video is in live-action style, cinematic.";
-    }
-
-    fn lowerFirst(text: []const u8) []const u8 {
-        return text;
-    }
-
-    fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
-        if (needle.len > hay.len) return false;
-        var i: usize = 0;
-        while (i + needle.len <= hay.len) : (i += 1) {
-            if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
-        }
-        return false;
-    }
-
-    fn countKind(manifest: []const ManifestEntry, first: u8) u32 {
-        var n: u32 = 0;
-        for (manifest) |m| {
-            if (m.kind[0] == first) n += 1;
-        }
-        return n;
-    }
-
-    fn lastOnly(manifest: []const ManifestEntry) bool {
-        var last = false;
-        var first = false;
-        for (manifest) |m| {
-            if (m.role == .frame_anchor_first) first = true;
-            if (m.role == .frame_anchor_last) last = true;
-        }
-        return last and !first;
-    }
-
-    fn pairedAudio(audios: []const DraftAsset, video_path: []const u8) ?DraftAsset {
-        for (audios) |a| {
-            if (a.paired_video_path) |p| {
-                if (std.mem.eql(u8, p, video_path)) return a;
-            }
-        }
-        return null;
-    }
-
-    fn anchorRank(a: DraftAsset) u8 {
-        const role = a.role orelse return 2;
-        if (std.mem.eql(u8, role, "frame_anchor_first")) return 0;
-        if (std.mem.eql(u8, role, "frame_anchor_last")) return 1;
-        return 2;
-    }
-
-    fn joinTasks(allocator: std.mem.Allocator, labels: []const []const u8) ![]u8 {
-        if (labels.len == 0) return allocator.dupe(u8, "");
-        if (labels.len == 1) return allocator.dupe(u8, labels[0]);
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        for (labels, 0..) |l, i| {
-            if (i != 0) try aw.writer.writeAll(" + ");
-            try aw.writer.writeAll(l);
-        }
-        return aw.toOwnedSlice();
-    }
-
-    fn joinLabels(allocator: std.mem.Allocator, labels: []const []const u8) ![]u8 {
-        if (labels.len == 0) return allocator.dupe(u8, "");
-        if (labels.len == 1) return allocator.dupe(u8, labels[0]);
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        for (labels, 0..) |l, i| {
-            if (i != 0) try aw.writer.writeAll(", ");
-            try aw.writer.writeAll(l);
-        }
-        return aw.toOwnedSlice();
-    }
-
-    fn writeLowerFirst(w: anytype, text: []const u8) !void {
-        if (text.len == 0) return;
-        if (text[0] >= 'A' and text[0] <= 'Z') {
-            try w.writeByte(text[0] + 32);
-            try w.writeAll(text[1..]);
-        } else {
-            try w.writeAll(text);
-        }
-    }
-
-    fn shotList(allocator: std.mem.Allocator, shots: []const u32) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        errdefer aw.deinit();
-        for (shots, 0..) |n, i| {
-            if (i != 0) try aw.writer.writeAll(", ");
-            try aw.writer.print("[Shot {d}]", .{n});
-        }
-        return aw.toOwnedSlice();
-    }
-};
-
-// --- ir/compile.zig ---
-pub const ir = struct {
-    const std = @import("std");
-
-    const config = @import("model.zig").config;
-
-    const log = std.log.scoped(.minimax_h3_ir);
-
-    pub const Creativity = enum {
-        restrained,
-        balanced,
-        bold,
-        extreme,
-
-        pub fn magnitude(self: Creativity) []const u8 {
-            return switch (self) {
-                .restrained => "plain",
-                .balanced => "measured",
-                .bold => "assertive",
-                .extreme => "maximal",
-            };
-        }
-    };
-
-    pub const Asset = struct {
-        kind: []const u8,
-        path: []const u8,
-        role: ?[]const u8 = null,
-        paired_video_path: ?[]const u8 = null,
-    };
-
-    pub const Request = struct {
-        prompt: []const u8,
-        variant: config.Variant = .t2va,
-        duration_s: f32 = 5.0,
-        aspect: []const u8 = "16:9",
-        image: []const u8 = "",
-        last_image: []const u8 = "",
-        refs: []const u8 = "",
-        creativity: Creativity = .balanced,
-        shots: ?u32 = null,
-    };
-
-    pub const Brief = struct {
-        text: []u8,
-
-        pub fn deinit(self: Brief, allocator: std.mem.Allocator) void {
-            allocator.free(self.text);
-        }
-    };
-
-    pub fn alreadyCompiled(prompt: []const u8) bool {
-        return std.mem.indexOf(u8, prompt, "integrated_multimodal_description:") != null or
-            std.mem.indexOf(u8, prompt, "detailed_description:") != null;
-    }
-
-    pub fn effectiveSeconds(duration_s: f32) f32 {
-        return grid.effectiveSeconds(duration_s);
-    }
-
-    pub fn shotCount(duration_s: f32, variant: config.Variant) u32 {
-        return grid.shotCount(duration_s, variant, null);
-    }
-
-    pub fn checkCapacity(assets: []const Asset) !void {
-        if (assets.len > grid.max_ref_files) return error.TooManyRefs;
-        var n_img: u32 = 0;
-        var n_vid: u32 = 0;
-        var n_aud: u32 = 0;
-        for (assets) |asset| {
-            switch (asset.kind[0]) {
-                'i' => n_img += 1,
-                'v' => n_vid += 1,
-                else => n_aud += 1,
-            }
-        }
-        if (n_img > grid.max_ref_images) return error.TooManyRefImages;
-        if (n_vid > grid.max_ref_videos) return error.TooManyRefVideos;
-        if (n_aud > grid.max_ref_audios) return error.TooManyRefAudios;
-    }
-
-    pub fn checkRequest(req: Request) !void {
-        if (std.mem.trim(u8, req.prompt, " \t\r\n").len == 0) return error.IntentEmpty;
-        if (req.duration_s <= 0) return error.DurationInvalid;
-        const aspect = std.mem.trim(u8, req.aspect, " \t");
-        if (std.mem.indexOfScalar(u8, aspect, ':') == null and std.mem.indexOfAny(u8, aspect, "xX") == null)
-            return error.AspectInvalid;
-        if (req.shots) |n| {
-            if (n < 1 or n > grid.max_shots) return error.ShotsInvalid;
-            const floor = @as(f32, @floatFromInt(n)) * @as(f32, @floatFromInt(grid.min_shot_ms)) / 1000.0;
-            if (req.duration_s < floor) return error.ShotsDoNotFit;
-        }
-    }
-
-    pub fn collectAssets(allocator: std.mem.Allocator, req: Request) ![]Asset {
-        var out: std.ArrayList(Asset) = .empty;
-        errdefer out.deinit(allocator);
-        switch (req.variant) {
-            .t2va => {},
-            .fl2va => {
-                if (req.image.len != 0)
-                    try out.append(allocator, .{ .kind = "image", .path = req.image, .role = "frame_anchor_first" });
-                if (req.last_image.len != 0)
-                    try out.append(allocator, .{ .kind = "image", .path = req.last_image, .role = "frame_anchor_last" });
-            },
-            .ref2va => {
-                var it = std.mem.splitScalar(u8, req.refs, ',');
-                var pending_video: ?[]const u8 = null;
-                while (it.next()) |part| {
-                    const path = std.mem.trim(u8, part, " \t");
-                    if (path.len == 0) continue;
-                    switch (media.guessKind(path)) {
-                        .image => try out.append(allocator, .{ .kind = "image", .path = path }),
-                        .video => {
-                            if (pending_video) |prev|
-                                try out.append(allocator, .{ .kind = "video", .path = prev });
-                            pending_video = path;
-                        },
-                        .audio, .video_audio => {
-                            if (pending_video) |prev| {
-                                try out.append(allocator, .{ .kind = "video", .path = prev });
-                                try out.append(allocator, .{
-                                    .kind = "audio",
-                                    .path = path,
-                                    .paired_video_path = prev,
-                                });
-                                pending_video = null;
-                            } else {
-                                try out.append(allocator, .{ .kind = "audio", .path = path });
-                            }
-                        },
-                    }
-                }
-                if (pending_video) |prev|
-                    try out.append(allocator, .{ .kind = "video", .path = prev });
-            },
-        }
-        return out.toOwnedSlice(allocator);
-    }
-
-    pub fn promptingGuidance(allocator: std.mem.Allocator, req: Request) ![]u8 {
-        if (alreadyCompiled(req.prompt)) return allocator.dupe(u8, req.prompt);
-        return renderDraft(allocator, req);
-    }
-
-    pub fn compile(allocator: std.mem.Allocator, req: Request) !Brief {
-        if (alreadyCompiled(req.prompt)) {
-            return .{ .text = try allocator.dupe(u8, req.prompt) };
-        }
-        try checkRequest(req);
-        const assets = try collectAssets(allocator, req);
-        defer allocator.free(assets);
-        try checkCapacity(assets);
-        const brief = try compileDraft(allocator, req);
-        log.info("ir: draft chars={d} variant={s}", .{ brief.text.len, @tagName(req.variant) });
-        return brief;
-    }
-
-    fn compileDraft(allocator: std.mem.Allocator, req: Request) !Brief {
-        return .{ .text = try renderDraft(allocator, req) };
-    }
-
-    fn renderDraft(allocator: std.mem.Allocator, req: Request) ![]u8 {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const assets = try collectAssets(a, req);
-        const draft_assets = try a.alloc(draft.DraftAsset, assets.len);
-        for (assets, draft_assets) |asset, *da| {
-            da.* = .{
-                .kind = asset.kind,
-                .path = asset.path,
-                .role = asset.role,
-                .paired_video_path = asset.paired_video_path,
-            };
-        }
-        const plan = try draft.buildPlan(
-            a,
-            req.variant,
-            req.duration_s,
-            req.prompt,
-            draft_assets,
-            "",
-            req.creativity.magnitude(),
-            req.shots,
-        );
-        const text = try draft.render(a, plan);
-        return allocator.dupe(u8, text);
-    }
-};
-
 // --- conditioning/geom.zig ---
 pub const cond_geom = struct {
     const std = @import("std");
@@ -1578,13 +578,15 @@ pub const cond_geom = struct {
         return @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(value)) / @as(f32, @floatFromInt(multiple))))) * multiple);
     }
 
-    /// Aspect-preserving, down only, to the generation pixel area.
+    /// Official ref2va image geometry: short edge 2048, snap-32, upscale allowed, no area cap.
     pub fn refImageSize(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) error{InvalidAspect}!Size {
+        _ = canvas_w;
+        _ = canvas_h;
         if (src_w == 0 or src_h == 0) return error.InvalidAspect;
         const ratio = @as(f32, @floatFromInt(src_w)) / @as(f32, @floatFromInt(src_h));
         if (ratio < config.min_aspect or ratio > config.max_aspect) return error.InvalidAspect;
-        const src_area = @as(f32, @floatFromInt(src_w)) * @as(f32, @floatFromInt(src_h));
-        const scale = @min(1.0, @sqrt(@as(f32, @floatFromInt(canvas_w)) * @as(f32, @floatFromInt(canvas_h)) / src_area));
+        const short = @min(src_w, src_h);
+        const scale = @as(f32, @floatFromInt(config.reference_image_short_edge)) / @as(f32, @floatFromInt(short));
         const multiple = config.canvas_multiple;
         const w = @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(src_w)) * scale / @as(f32, @floatFromInt(multiple))))) * multiple);
         const h = @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(src_h)) * scale / @as(f32, @floatFromInt(multiple))))) * multiple);
@@ -1630,17 +632,40 @@ pub const cond_geom = struct {
         return sinc(x) * sinc(x / 3.0);
     }
 
-    fn resize1d(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, horizontal: bool) ![]u8 {
-        const dst_h = src_h;
+    /// Torchvision Keys cubic, a=-0.75. Official Qwen2VL Fast processor.
+    fn bicubicKeys(x: f32) f32 {
+        const a = -0.75;
+        const ax = @abs(x);
+        if (ax <= 1.0) return ((a + 2.0) * ax - (a + 3.0)) * ax * ax + 1.0;
+        if (ax < 2.0) return ((a * ax - 5.0 * a) * ax + 8.0 * a) * ax - 4.0 * a;
+        return 0;
+    }
+
+    const ResizeKernel = enum { lanczos3, bicubic };
+
+    fn kernelWeight(kernel: ResizeKernel, x: f32) f32 {
+        return switch (kernel) {
+            .lanczos3 => lanczos3(x),
+            .bicubic => bicubicKeys(x),
+        };
+    }
+
+    fn kernelSupport(kernel: ResizeKernel) f32 {
+        return switch (kernel) {
+            .lanczos3 => 3.0,
+            .bicubic => 2.0,
+        };
+    }
+
+    fn resize1d(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, horizontal: bool, kernel: ResizeKernel) ![]u8 {
         const out_w = if (horizontal) dst_w else src_w;
         const out_h = if (horizontal) src_h else dst_w;
-        _ = dst_h;
         const out = try allocator.alloc(u8, @as(usize, out_w) * out_h * 3);
         const src_len: u32 = if (horizontal) src_w else src_h;
-        const dst_len: u32 = if (horizontal) dst_w else dst_w;
+        const dst_len: u32 = dst_w;
         const scale = @as(f32, @floatFromInt(src_len)) / @as(f32, @floatFromInt(dst_len));
         const filterscale = @max(1.0, scale);
-        const support = 3.0 * filterscale;
+        const support = kernelSupport(kernel) * filterscale;
 
         var dy: u32 = 0;
         while (dy < out_h) : (dy += 1) {
@@ -1655,7 +680,7 @@ pub const cond_geom = struct {
                 var xi = xmin;
                 while (xi < xmax) : (xi += 1) {
                     const src_pos = std.math.clamp(xi, 0, @as(i32, @intCast(src_len - 1)));
-                    const weight = lanczos3(((@as(f32, @floatFromInt(src_pos)) + 0.5) - center) / filterscale);
+                    const weight = kernelWeight(kernel, ((@as(f32, @floatFromInt(src_pos)) + 0.5) - center) / filterscale);
                     if (weight == 0) continue;
                     wsum += weight;
                     const sx: u32 = if (horizontal) @intCast(src_pos) else dx;
@@ -1673,12 +698,20 @@ pub const cond_geom = struct {
         return out;
     }
 
-    pub fn resizeLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
+    fn resizeKernel(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, kernel: ResizeKernel) ![]u8 {
         std.debug.assert(src.len == @as(usize, src_w) * src_h * 3);
         if (src_w == dst_w and src_h == dst_h) return allocator.dupe(u8, src);
-        const mid = try resize1d(allocator, src, src_w, src_h, dst_w, true);
+        const mid = try resize1d(allocator, src, src_w, src_h, dst_w, true, kernel);
         defer allocator.free(mid);
-        return resize1d(allocator, mid, dst_w, src_h, dst_h, false);
+        return resize1d(allocator, mid, dst_w, src_h, dst_h, false, kernel);
+    }
+
+    pub fn resizeLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
+        return resizeKernel(allocator, src, src_w, src_h, dst_w, dst_h, .lanczos3);
+    }
+
+    pub fn resizeBicubic(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
+        return resizeKernel(allocator, src, src_w, src_h, dst_w, dst_h, .bicubic);
     }
 
     pub fn cropRgb(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, x: u32, y: u32, dst_w: u32, dst_h: u32) ![]u8 {
@@ -2355,6 +1388,10 @@ pub const media = struct {
         return geom.resizeLanczos(allocator, src, src_w, src_h, dst_w, dst_h);
     }
 
+    pub fn resizeRgbBicubic(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
+        return geom.resizeBicubic(allocator, src, src_w, src_h, dst_w, dst_h);
+    }
+
     pub fn ppmSize(io: std.Io, path: []const u8) !Size {
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
@@ -2453,38 +1490,67 @@ pub const media = struct {
         has_audio: bool = false,
     };
 
-    pub fn probeVideo(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !struct { w: u32, h: u32, fps: f32, has_audio: bool } {
+    pub const VideoMeta = struct { w: u32, h: u32, fps: f32, has_audio: bool };
+
+    pub fn parseFfmpegProbe(text: []const u8) !VideoMeta {
+        const video = std.mem.indexOf(u8, text, "Video:") orelse return error.VideoLoadFailed;
+        const rest = text[video..];
+        const size = findWxH(rest) orelse return error.VideoLoadFailed;
+        const fps = findFps(rest) orelse return error.VideoLoadFailed;
+        return .{
+            .w = size.w,
+            .h = size.h,
+            .fps = fps,
+            .has_audio = std.mem.indexOf(u8, text, "Audio:") != null,
+        };
+    }
+
+    fn findWxH(text: []const u8) ?struct { w: u32, h: u32 } {
+        var i: usize = 0;
+        while (i + 3 < text.len) : (i += 1) {
+            if (!std.ascii.isDigit(text[i])) continue;
+            const x = std.mem.indexOfScalarPos(u8, text, i + 1, 'x') orelse return null;
+            if (x == i) continue;
+            var end = x + 1;
+            while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+            if (end == x + 1) continue;
+            const w = std.fmt.parseInt(u32, text[i..x], 10) catch continue;
+            const h = std.fmt.parseInt(u32, text[x + 1 .. end], 10) catch continue;
+            if (w > 0 and h > 0) return .{ .w = w, .h = h };
+        }
+        return null;
+    }
+
+    fn findFps(text: []const u8) ?f32 {
+        const needle = " fps";
+        if (std.mem.indexOf(u8, text, needle)) |at| {
+            var start = at;
+            while (start > 0 and (std.ascii.isDigit(text[start - 1]) or text[start - 1] == '.')) start -= 1;
+            if (start < at) {
+                if (std.fmt.parseFloat(f32, text[start..at])) |v| {
+                    if (v > 0) return v;
+                } else |_| {}
+            }
+        }
+        if (std.mem.indexOf(u8, text, " tbr")) |at| {
+            var start = at;
+            while (start > 0 and (std.ascii.isDigit(text[start - 1]) or text[start - 1] == '.')) start -= 1;
+            if (start < at) {
+                if (std.fmt.parseFloat(f32, text[start..at])) |v| {
+                    if (v > 0) return v;
+                } else |_| {}
+            }
+        }
+        return null;
+    }
+
+    pub fn probeVideo(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !VideoMeta {
         const result = runFfmpeg(allocator, io, &.{
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,avg_frame_rate",
-            "-of",
-            "csv=p=0",
-            path,
+            ffmpeg_bin, "-hide_banner", "-i", path,
         }) catch return error.FfmpegMissing;
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
-        switch (result.term) {
-            .exited => |code| if (code != 0) return error.VideoLoadFailed,
-            else => return error.VideoLoadFailed,
-        }
-        var it = std.mem.splitScalar(u8, std.mem.trim(u8, result.stdout, " \r\n"), ',');
-        const w = try std.fmt.parseInt(u32, it.next() orelse return error.VideoLoadFailed, 10);
-        const h = try std.fmt.parseInt(u32, it.next() orelse return error.VideoLoadFailed, 10);
-        const rate = it.next() orelse return error.VideoLoadFailed;
-        const fps = parseRate(rate) orelse return error.VideoLoadFailed;
-
-        const audio = runFfmpeg(allocator, io, &.{
-            "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
-        }) catch return .{ .w = w, .h = h, .fps = fps, .has_audio = false };
-        defer allocator.free(audio.stdout);
-        defer allocator.free(audio.stderr);
-        const has_audio = std.mem.indexOf(u8, audio.stdout, "audio") != null;
-        return .{ .w = w, .h = h, .fps = fps, .has_audio = has_audio };
+        return parseFfmpegProbe(result.stderr);
     }
 
     fn parseRate(text: []const u8) ?f32 {
@@ -2832,6 +1898,7 @@ pub const ckpt = struct {
             errdefer enc_src.deinit(allocator, io);
             var visual_src = try resolveComponent(allocator, io, search, .{
                 .official = "video_vae",
+                .aliases = &.{ "visual_vae", "vae" },
                 .scan = "vae",
                 .needles = &.{ "video", "vae" },
                 .missing = error.VaeMissing,
@@ -2985,13 +2052,44 @@ pub const ckpt = struct {
             log.info("weights: {s}", .{name});
             return zml.safetensors.fetchRegistry(allocator, io, src.dir, file);
         }
-        return .fromRepo(allocator, io, src.dir);
+        for (weight_entrypoints) |name| {
+            if (src.dir.openFile(io, name, .{ .mode = .read_only })) |file| {
+                defer file.close(io);
+                log.info("weights: {s}", .{name});
+                return zml.safetensors.fetchRegistry(allocator, io, src.dir, file);
+            } else |_| {}
+        }
+        return error.FileNotFound;
     }
 
     fn fileInDir(io: std.Io, dir: std.Io.Dir, name: []const u8) bool {
         const file = dir.openFile(io, name, .{ .mode = .read_only }) catch return false;
         file.close(io);
         return true;
+    }
+
+    /// Official HF dumps use either Transformers (`model.safetensors*`) or
+    /// Diffusers (`diffusion_pytorch_model*`) names. Empty task folders such as
+    /// `FL2VA/transformer` exist and must not win over the real shard dir.
+    pub const weight_entrypoints = [_][]const u8{
+        "model.safetensors.index.json",
+        "model.safetensors",
+        "diffusion_pytorch_model.safetensors.index.json",
+        "diffusion_pytorch_model.safetensors",
+    };
+
+    fn dirHasWeights(io: std.Io, dir: std.Io.Dir) bool {
+        for (weight_entrypoints) |name| {
+            if (fileInDir(io, dir, name)) return true;
+        }
+        return false;
+    }
+
+    fn takeWeightedDir(io: std.Io, dir: ?std.Io.Dir) ?std.Io.Dir {
+        const opened = dir orelse return null;
+        if (dirHasWeights(io, opened)) return opened;
+        opened.close(io);
+        return null;
     }
 
     fn resolveDit(
@@ -3031,6 +2129,7 @@ pub const ckpt = struct {
 
     const ComponentSpec = struct {
         official: []const u8,
+        aliases: []const []const u8 = &.{},
         scan: []const u8,
         needles: []const []const u8,
         missing: anyerror,
@@ -3045,17 +2144,24 @@ pub const ckpt = struct {
         if (openShared(io, search.task, search.repo, spec.official)) |dir| {
             return .{ .dir = dir, .dir_owned = true, .file = null };
         }
+        for (spec.aliases) |name| {
+            if (openShared(io, search.task, search.repo, name)) |dir| {
+                return .{ .dir = dir, .dir_owned = true, .file = null };
+            }
+        }
         const src = (try scanIn(allocator, io, search, spec.scan, spec.needles, false)) orelse return spec.missing;
         return src;
     }
 
     fn openOfficialDit(io: std.Io, search: Search, variant: config.Variant) ?std.Io.Dir {
-        if (openOptionalDir(io, search.task, "transformer")) |dir| return dir;
+        // Official dump has no Ref2VA/. openTaskDir then falls back to the repo, so
+        // task/transformer is the fl2va DiT and must not win for ref2va.
         return switch (variant.taskFamily()) {
-            .ref2va => openOptionalDir(io, search.repo, "transformer_ref") orelse
-                openNestedDir(io, search.repo, config.taskDirName(.ref2va), "transformer"),
-            .fl2va => openOptionalDir(io, search.repo, "transformer") orelse
-                openNestedDir(io, search.repo, config.taskDirName(.fl2va), "transformer"),
+            .ref2va => takeWeightedDir(io, openOptionalDir(io, search.repo, "transformer_ref")) orelse
+                takeWeightedDir(io, openNestedDir(io, search.repo, config.taskDirName(.ref2va), "transformer")),
+            .fl2va => takeWeightedDir(io, openOptionalDir(io, search.task, "transformer")) orelse
+                takeWeightedDir(io, openOptionalDir(io, search.repo, "transformer")) orelse
+                takeWeightedDir(io, openNestedDir(io, search.repo, config.taskDirName(.fl2va), "transformer")),
         };
     }
 
@@ -3858,8 +2964,6 @@ pub const conditions = struct {
             },
         );
         try request_mod.validateRefs(refs);
-        const ordered = try request_mod.groupRefs(allocator, refs);
-        defer allocator.free(ordered);
         const VisualItem = struct {
             kind: packing.ReferenceKind,
             path: []const u8,
@@ -3912,7 +3016,7 @@ pub const conditions = struct {
             if (first_image.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = first_image, .keyframe_index = 0 });
             if (last_image.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = last_image, .keyframe_index = 1 });
         } else {
-            for (ordered) |ref| {
+            for (refs) |ref| {
                 switch (ref.kind) {
                     .image => {
                         const vidx: i32 = @intCast(visuals.items.len);
@@ -4169,14 +3273,15 @@ pub const conditions = struct {
                 null;
             defer if (a_bufs) |*b| audio_vae.EncoderModel.unloadBuffers(b);
 
+            const tile = encodeTileSize(visuals.items, vae.official_visual.tile_px);
             var compiled_e = try pipeline.compileEncode(
                 allocator,
                 io,
                 platform,
                 if (v_loaded) |m| m.inner else null,
                 if (a_loaded) |m| m.inner else null,
-                vae.official_visual.tile_px,
-                vae.official_visual.tile_px,
+                tile.h,
+                tile.w,
                 hasVideo(visuals.items),
                 if (max_audio_samples == 0) hop else max_audio_samples,
                 shardings,
@@ -4205,6 +3310,24 @@ pub const conditions = struct {
 
         const conds = try encode_mod.packConditions(allocator, encoded_visuals[0..n_vis], encoded_audios[0..n_aud_enc], blocks.items, patch);
         errdefer conds.deinit(allocator);
+        if (try session.openDumpDir(io)) |dump_dir| {
+            defer dump_dir.close(io);
+            if (n_vis != 0) {
+                const v0 = encoded_visuals[0];
+                try session.dumpHostF32(io, dump_dir, "condition_latents", v0.thwc, &.{
+                    @intCast(v0.latent_t),
+                    @intCast(v0.latent_h),
+                    @intCast(v0.latent_w),
+                    24,
+                });
+            }
+            if (conds.video_patches.len != 0) {
+                try session.dumpHostF32(io, dump_dir, "condition_rows_clean", conds.video_patches, &.{
+                    @intCast(conds.video_patches.len / 96),
+                    96,
+                });
+            }
+        }
         for (encoded_visuals[0..n_vis]) |v| v.deinit(allocator);
         allocator.free(encoded_visuals);
         for (encoded_audios[0..n_aud_enc]) |a| a.deinit(allocator);
@@ -4255,6 +3378,18 @@ pub const conditions = struct {
             if (item.kind != .audio) n += 1;
         }
         return n;
+    }
+
+    fn encodeTileSize(items: anytype, tile_px: u32) struct { h: u32, w: u32 } {
+        var max_h: u32 = 0;
+        var max_w: u32 = 0;
+        for (items) |item| {
+            if (item.kind == .audio) continue;
+            max_h = @max(max_h, item.h);
+            max_w = @max(max_w, item.w);
+        }
+        if (max_h == 0) return .{ .h = tile_px, .w = tile_px };
+        return .{ .h = @min(tile_px, max_h), .w = @min(tile_px, max_w) };
     }
 };
 
@@ -4842,7 +3977,7 @@ pub const decode = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        compiled: *const pipeline.VaeCompiled,
+        compiled: *pipeline.VaeCompiled,
         loaded: *const audio_vae.LoadedModel,
         store: *zml.io.TensorStore,
         shardings: []const zml.Sharding,
@@ -4862,7 +3997,8 @@ pub const decode = struct {
         var bufs = try loaded.loadBuffers(allocator, io, platform, store, shardings, progress);
         defer audio_vae.Model.unloadBuffers(&bufs, allocator);
         done(io, clock, "audio: loaded", .{});
-        var runner = try zml.FnExe(audio_vae.decode).Runner(.{.model}).init(&compiled.audio, allocator, .{ .model = bufs });
+        const audio_exe: *zml.FnExe(audio_vae.decode) = if (compiled.audio) |*exe| exe else return error.AudioDecodeMissing;
+        var runner = try zml.FnExe(audio_vae.decode).Runner(.{.model}).init(audio_exe, allocator, .{ .model = bufs });
         defer runner.deinit(allocator);
 
         var latent_buf = try bufferFromItems(io, platform, .init(.{
@@ -5432,7 +4568,7 @@ pub const pipeline = struct {
         embed: zml.FnExe(visual_vae.embed),
         block: zml.FnExe(visual_vae.TransformerBlock.forward),
         finish: zml.FnExe(visual_vae.finish),
-        audio: zml.FnExe(audio_vae.decode),
+        audio: ?zml.FnExe(audio_vae.decode) = null,
         tile: visual_vae.TileShape,
         tile_batch: u32 = 1,
         partition_b: bool = false,
@@ -5441,7 +4577,7 @@ pub const pipeline = struct {
             self.embed.deinit();
             self.block.deinit();
             self.finish.deinit();
-            self.audio.deinit();
+            if (self.audio) |*exe| exe.deinit();
         }
     };
 
@@ -5475,7 +4611,22 @@ pub const pipeline = struct {
         }});
     }
 
-    fn compileAudioDecode(ctx: CompileCtx, audio: audio_vae.Model, geo: Geometry) !zml.FnExe(audio_vae.decode) {
+    pub fn compileAudioDecode(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        audio: audio_vae.Model,
+        geo: Geometry,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.FnExe(audio_vae.decode) {
+        const ctx: CompileCtx = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .shardings = shardings,
+            .progress = progress,
+        };
         return compileLogged(audio_vae.decode, "minimax_h3_audio_decode", ctx, .{.{
             .model = audio,
             .latents = .init(.{ .b = 2, .c = audio.cfg.latent_channels, .t = geo.audio_t }, .f32),
@@ -5487,7 +4638,6 @@ pub const pipeline = struct {
         io: std.Io,
         platform: *const zml.Platform,
         visual: visual_vae.Model,
-        audio: audio_vae.Model,
         geo: Geometry,
         tile_batch: u32,
         shardings: sharding_mod.Shardings,
@@ -5508,7 +4658,7 @@ pub const pipeline = struct {
         // Off: `embed` rebuilds `.b` without `.model`, so outputs stay `[batch,…]`
         // while a sharded block/finish would expect `[batch/tp,…]`.
         const partition_b = false;
-        var node = progress.start("Compiling MiniMax-H3 VAE", 4);
+        var node = progress.start("Compiling MiniMax-H3 VAE", 3);
         defer node.end();
 
         log.info("compile VAE: start tile={d}x{d}x{d} audio_t={d} batch={d} shard_b={}", .{
@@ -5526,8 +4676,6 @@ pub const pipeline = struct {
         errdefer if (block_f.cancel(io)) |exe| exe.deinit() else |_| {};
         var finish_f = try io.concurrent(compileVaeFinish, .{ ctx, visual, seq, batch, partition_b });
         errdefer if (finish_f.cancel(io)) |exe| exe.deinit() else |_| {};
-        var audio_f = try io.concurrent(compileAudioDecode, .{ ctx, audio, geo });
-        errdefer if (audio_f.cancel(io)) |exe| exe.deinit() else |_| {};
 
         const embed_exe = try embed_f.await(io);
         errdefer embed_exe.deinit();
@@ -5535,8 +4683,6 @@ pub const pipeline = struct {
         errdefer block_exe.deinit();
         const finish_exe = try finish_f.await(io);
         errdefer finish_exe.deinit();
-        const audio_exe = try audio_f.await(io);
-        errdefer audio_exe.deinit();
 
         log.info("Compiled MiniMax-H3 VAE tile={d}x{d}x{d} audio_t={d} [{f}]", .{
             tile.latent_t,
@@ -5550,7 +4696,6 @@ pub const pipeline = struct {
             .embed = embed_exe,
             .block = block_exe,
             .finish = finish_exe,
-            .audio = audio_exe,
             .tile = tile,
             .tile_batch = batch,
             .partition_b = partition_b,
@@ -5939,7 +5084,7 @@ pub const session = struct {
         return if (path.len == 0) null else path;
     }
 
-    fn openDumpDir(io: std.Io) !?std.Io.Dir {
+    pub fn openDumpDir(io: std.Io) !?std.Io.Dir {
         const path = envPath("H3_LAYER_DUMP") orelse return null;
         try std.Io.Dir.cwd().createDirPath(io, path);
         if (std.fs.path.isAbsolute(path)) return try std.Io.Dir.openDirAbsolute(io, path, .{});
@@ -5968,7 +5113,7 @@ pub const session = struct {
         try writeDumpBytes(io, dir, path, buf[0..used]);
     }
 
-    fn dumpHostF32(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []const f32, dims: []const i64) !void {
+    pub fn dumpHostF32(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []const f32, dims: []const i64) !void {
         var path_buf: [160]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}.f32", .{name});
         try writeDumpBytes(io, dir, path, std.mem.sliceAsBytes(values));
@@ -6060,7 +5205,14 @@ pub const session = struct {
         var token_buf = try bufferFromItems(io, platform, token_shape, tokens);
         defer token_buf.deinit();
         const encode_start: std.Io.Timestamp = .now(io, .awake);
-        log.info("encoder: start tokens={d} layers={d} prefetch={d}", .{ tokens.len, loaded.inner.layers.len, policy.enc_prefetch });
+        const n_layers = loaded.inner.layers.len;
+        const layer_bytes: u64 = if (n_layers == 0) 0 else weights.modelBytes(&loaded.inner.layers[0]);
+        const n_keep = policy.encKeepLayers(config.minDeviceBytes(platform), layer_bytes, @intCast(n_layers));
+        const keep_all = n_keep == n_layers and n_layers > 0;
+        log.info(
+            "encoder: start tokens={d} layers={d} keep={d} prefetch={d} layer={d}MiB",
+            .{ tokens.len, n_layers, n_keep, policy.enc_prefetch, layer_bytes / (1024 * 1024) },
+        );
         var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
         defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
         var embed_runner = try zml.FnExe(encoder.EmbedTokens.forward).Runner(.{.embedding}).init(&compiled.encode_embed, allocator, .{
@@ -6078,8 +5230,6 @@ pub const session = struct {
         while (loaders_ready < prefetch) : (loaders_ready += 1) {
             loaders[loaders_ready] = try weights.initLoader(allocator, platform);
         }
-
-        const n_layers = loaded.inner.layers.len;
         const EncFut = @TypeOf(try io.concurrent(loadEncoderLayer, .{
             allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
         }));
@@ -6158,20 +5308,46 @@ pub const session = struct {
         var zero_delta = try bufferFromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), zeros);
         defer zero_delta.deinit();
 
+        var kept = try allocator.alloc(?zml.Bufferized(encoder.TransformerLayer), if (keep_all) n_layers else 0);
+        defer {
+            for (kept) |*slot| {
+                if (slot.*) |*bufs| encoder.TransformerLayer.unloadBuffers(bufs);
+            }
+            allocator.free(kept);
+        }
+        if (keep_all) {
+            var fill_i: usize = 0;
+            while (fill_i < n_layers) : (fill_i += 1) {
+                const slot = fill_i % prefetch;
+                kept[fill_i] = try futs[slot].?.await(io);
+                futs[slot] = null;
+                if (fill_i + prefetch < n_layers) {
+                    futs[slot] = try io.concurrent(loadEncoderLayer, .{
+                        allocator, io, platform, loaded, store, shardings, fill_i + prefetch, progress, &loaders[slot],
+                    });
+                }
+            }
+        }
+
         const LayerRunner = zml.FnExe(encoder.TransformerLayer.forward).Runner(.{.layer});
         var layer_runner: ?LayerRunner = null;
         defer if (layer_runner) |*r| r.deinit(allocator);
         var layer_i: usize = 0;
         while (layer_i < n_layers) : (layer_i += 1) {
-            const slot = layer_i % prefetch;
-            var layer_bufs = try futs[slot].?.await(io);
-            futs[slot] = null;
-            defer encoder.TransformerLayer.unloadBuffers(&layer_bufs);
-            if (layer_i + prefetch < n_layers) {
-                futs[slot] = try io.concurrent(loadEncoderLayer, .{
-                    allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
-                });
-            }
+            var streamed: ?zml.Bufferized(encoder.TransformerLayer) = null;
+            defer if (streamed) |*bufs| encoder.TransformerLayer.unloadBuffers(bufs);
+            const layer_bufs = if (keep_all) kept[layer_i].? else blk: {
+                const slot = layer_i % prefetch;
+                const bufs = try futs[slot].?.await(io);
+                futs[slot] = null;
+                if (layer_i + prefetch < n_layers) {
+                    futs[slot] = try io.concurrent(loadEncoderLayer, .{
+                        allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
+                    });
+                }
+                streamed = bufs;
+                break :blk bufs;
+            };
             if (layer_runner) |*r| {
                 weights.rebake(r, .{ .layer = layer_bufs });
             } else {
@@ -6240,7 +5416,7 @@ pub const session = struct {
             geo.latent_h,
             geo.latent_w,
             loaded.inner.cfg.patch_size,
-            true,
+            false,
         );
         errdefer allocator.free(video);
         var audio = try noise.drawAudio(allocator, &gen, cond.audio_patches, geo.audio_dim, geo.audio_t);
@@ -6282,6 +5458,12 @@ pub const session = struct {
             try dumpHostU32(io, dir, "text_indices", host.text_indices, &.{@intCast(text_len)});
             try dumpHostU32(io, dir, "adaln_indices", host.adaln_indices, &.{@intCast(seq)});
             try dumpHostU32(io, dir, "timestep_indices", host.timestep_indices, &.{@intCast(seq)});
+            const tags = try allocator.alloc(u32, layout.token_tags.len);
+            defer allocator.free(tags);
+            for (layout.token_tags, tags) |tag, *dst| dst.* = tag;
+            try dumpHostU32(io, dir, "token_tags", tags, &.{@intCast(seq)});
+            try dumpHostF32(io, dir, "timesteps", schedules.video.timesteps, &.{@intCast(schedules.video.timesteps.len)});
+            try dumpHostF32(io, dir, "audio_timesteps", schedules.audio.timesteps, &.{@intCast(schedules.audio.timesteps.len)});
         }
 
         var text_bufs = try loaded.loadTextPrep(allocator, io, platform, store, shardings, progress);
@@ -6563,11 +5745,6 @@ pub const session = struct {
                 });
                 hidden.deinit();
                 hidden = next;
-                if (step_i == 0) if (dump_dir) |dir| {
-                    var name_buf: [32]u8 = undefined;
-                    const name = try std.fmt.bufPrint(&name_buf, "step0_block_{d:0>2}", .{i});
-                    try dumpBuffer(allocator, io, dir, name, &hidden);
-                };
             }
 
             var video_out: zml.Buffer = undefined;
@@ -6702,7 +5879,7 @@ pub const session = struct {
         schedules: scheduler_mod.DualSchedule,
         cond: DenoiseCond,
         seed: u64,
-        brief: []const u8,
+        prompt: []const u8,
         out: []const u8,
     };
 
@@ -6712,7 +5889,7 @@ pub const session = struct {
         platform: *const zml.Platform,
         models: *ckpt.Bundle,
         compiled: *const pipeline.Compiled,
-        compiled_vae: *const pipeline.VaeCompiled,
+        compiled_vae: *pipeline.VaeCompiled,
         shardings: []const zml.Sharding,
         progress: *std.Progress.Node,
         req: Request,
@@ -6724,8 +5901,28 @@ pub const session = struct {
         else
             try std.Io.Dir.cwd().openDir(io, dest.dir, .{});
         defer if (!dest.isCwd()) out_dir.close(io);
-        try writeText(io, out_dir, "prompt.txt", req.brief);
-        log.info("stream: encode prefetch={d} vae_window={d}", .{ policy.enc_prefetch, policy.vae_load_window });
+        try writeText(io, out_dir, "prompt.txt", req.prompt);
+        const enc_layers: u32 = @intCast(models.enc.inner.layers.len);
+        const enc_layer_bytes: u64 = if (enc_layers == 0) 0 else weights.modelBytes(&models.enc.inner.layers[0]);
+        const enc_keep = policy.encKeepLayers(config.minDeviceBytes(platform), enc_layer_bytes, enc_layers);
+        log.info(
+            "stream: encode keep={d}/{d} prefetch={d} vae_window={d}",
+            .{ enc_keep, enc_layers, policy.enc_prefetch, policy.vae_load_window },
+        );
+
+        var audio_f = try io.concurrent(pipeline.compileAudioDecode, .{
+            allocator,
+            io,
+            platform,
+            models.audio.inner,
+            req.target,
+            shardings,
+            progress,
+        });
+        var audio_taken = false;
+        errdefer if (!audio_taken) {
+            if (audio_f.cancel(io)) |exe| exe.deinit() else |_| {}
+        };
 
         var text = try encodeText(
             allocator,
@@ -6785,6 +5982,8 @@ pub const session = struct {
             progress,
         );
         defer allocator.free(rgb);
+        compiled_vae.audio = try audio_f.await(io);
+        audio_taken = true;
         const wav = try decode.decodeAudio(
             allocator,
             io,

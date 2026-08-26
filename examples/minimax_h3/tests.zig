@@ -14,7 +14,6 @@ const multistep_mod = model.multistep;
 const config = model.config;
 const dit = model.dit;
 const geom = generate.cond_geom;
-const ir = generate.ir;
 const media = generate.media;
 const noise = model.noise;
 const packing = model.packing;
@@ -48,6 +47,7 @@ pub fn main() !void {
     try testPackingFl2va(allocator);
     try testPackingRef2va(allocator);
     try testEncodeVideoLatentT();
+    try testOfficialVaeNativeTile(allocator);
     try testVisionSpatial();
     try testPatchify(allocator);
     try testNchwToThwc();
@@ -56,9 +56,7 @@ pub fn main() !void {
     try testMmRopeHost();
     try testOfficialSpatialGrid();
     try testOfficialRotateHalf();
-    try testPromptingGuidance(allocator);
-    try testOpenH3irAssets(allocator);
-    try testIrPipeline(allocator);
+    try testOfficialVisionRope(allocator);
     try testCanvasPresets();
     try testAudioRefGuard();
     try testVaeTiling(allocator);
@@ -82,11 +80,13 @@ pub fn main() !void {
     try testMemoryPlan(allocator);
     try testResample(allocator);
     try testMediaErrors();
+    try testFfmpegProbe();
     try testOutputTarget();
     try testExportVideo(allocator);
     try testRowMask();
     try testOfficialPin();
     try testTokenizerRelpaths();
+    try testWeightEntrypoints();
     try testConvrotMarker();
     try testRefSize();
     try testGroupRefs(allocator);
@@ -153,6 +153,7 @@ fn testConfig() !void {
 
 fn testCli() !void {
     try config.checkDuration(5);
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(4));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(3));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(16));
 }
@@ -471,7 +472,7 @@ fn testPackingFl2va(allocator: std.mem.Allocator) !void {
         .condition_videos = &last,
     });
     defer last_layout.deinit(allocator);
-    const last_t = 2.0 + packing.videoDuration(2) - config.frame_rescale;
+    const last_t: f32 = @floatCast(2.0 + packing.videoDuration(2) - (5.0 / 3.0));
     try std.testing.expectApproxEqAbs(last_t, last_layout.positions[last_layout.video_indices[0]].t, 1e-5);
     try std.testing.expect(last_layout.positions[last_layout.video_indices[0]].t > first_layout.positions[first_layout.video_indices[0]].t);
 }
@@ -500,6 +501,10 @@ fn testPackingRef2va(allocator: std.mem.Allocator) !void {
     defer layout.deinit(allocator);
     try std.testing.expect(layout.video_indices.len > config.videoTokenCount(2, 4, 4, .{ 1, 2, 2 }));
     try std.testing.expect(layout.seqLen() > 3);
+    // Image ref occupies one integer rotary slot. Target T is text_len+1, not max placed T.
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), layout.positions[layout.video_indices[0]].t, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), layout.positions[layout.target_audio_start].t, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), layout.positions[layout.target_video_start].t, 1e-5);
 
     const audios = [_]packing.ConditionAudio{.{ .latent_t = 3 }};
     const av_refs = [_]packing.ReferenceBlock{.{
@@ -533,6 +538,21 @@ fn testEncodeVideoLatentT() !void {
         config.videoLatentFrames(config.alignFrameCount(120)),
         vae.encodeVideoLatentT(vae.official_visual, 120),
     );
+}
+
+fn testOfficialVaeNativeTile(allocator: std.mem.Allocator) !void {
+    const spec = vae.official_visual;
+    const y = try vae.splitTiles(allocator, 128, spec.tile_px, spec.tile_overlap_px, spec.spatial);
+    defer y.deinit(allocator);
+    const x = try vae.splitTiles(allocator, 224, spec.tile_px, spec.tile_overlap_px, spec.spatial);
+    defer x.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), y.starts.len);
+    try std.testing.expectEqual(@as(u32, 128), y.lengths[0]);
+    try std.testing.expectEqual(@as(usize, 1), x.starts.len);
+    try std.testing.expectEqual(@as(u32, 224), x.lengths[0]);
+    try std.testing.expectEqual(@as(u32, 128), @min(spec.tile_px, @as(u32, 128)));
+    try std.testing.expectEqual(@as(u32, 224), @min(spec.tile_px, @as(u32, 224)));
+    try std.testing.expectEqual(@as(u32, 256), @min(spec.tile_px, @as(u32, 768)));
 }
 
 fn testVisionSpatial() !void {
@@ -632,6 +652,15 @@ fn testOfficialSpatialGrid() !void {
     try std.testing.expectApproxEqAbs(@as(f32, 8.0), axis[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 16.0), axis[2], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 24.0), axis[3], 1e-6);
+
+    // Official 1344×768 canvas: latent 48×84, width axis after f32 cast of f64 linspace.
+    var wide: [42]f32 = undefined;
+    const w_axis = packing.spatialAxis(84, @sqrt(@as(f64, 48 * 84)), &wide);
+    try std.testing.expectEqual(@as(usize, 42), w_axis.len);
+    try std.testing.expectApproxEqAbs(@as(f32, -5.16601038), w_axis[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -4.15810537), w_axis[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.15019989), w_axis[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.14229465), w_axis[3], 1e-6);
 }
 
 fn testOfficialRotateHalf() !void {
@@ -646,134 +675,25 @@ fn testOfficialRotateHalf() !void {
     try std.testing.expectEqualSlices(f32, &rotated, &out);
 }
 
-fn testPromptingGuidance(allocator: std.mem.Allocator) !void {
-    const brief = try ir.promptingGuidance(allocator, .{
-        .prompt = "a lighthouse keeper lights the lamp",
-        .variant = .t2va,
-        .duration_s = 5,
-    });
-    defer allocator.free(brief);
-    try std.testing.expect(std.mem.indexOf(u8, brief, "integrated_multimodal_description:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, brief, "overall_soundscape:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, brief, "non_diegetic_music:") != null);
-    try std.testing.expect(ir.alreadyCompiled(brief));
+fn testOfficialVisionRope(allocator: std.mem.Allocator) !void {
+    const head_dim: u32 = 72;
+    const rope = try vision.visionRope(allocator, 2, 2, head_dim);
+    defer allocator.free(rope.cos);
+    defer allocator.free(rope.sin);
+    try std.testing.expectEqual(@as(usize, 4 * head_dim), rope.cos.len);
 
-    const passthrough = try ir.promptingGuidance(allocator, .{
-        .prompt = brief,
-        .variant = .t2va,
-    });
-    defer allocator.free(passthrough);
-    try std.testing.expectEqualStrings(brief, passthrough);
-
-    const fl = try ir.promptingGuidance(allocator, .{
-        .prompt = "a lighthouse keeper lights the lamp",
-        .variant = .fl2va,
-        .duration_s = 5,
-    });
-    defer allocator.free(fl);
-    try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fl, "Picture 2") != null);
-
-    const one = try ir.promptingGuidance(allocator, .{
-        .prompt = "a lighthouse keeper lights the lamp",
-        .variant = .fl2va,
-        .duration_s = 5,
-        .image = "first.png",
-    });
-    defer allocator.free(one);
-    try std.testing.expect(std.mem.indexOf(u8, one, "Picture 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, one, "Picture 2") == null);
-
-    const ref = try ir.promptingGuidance(allocator, .{
-        .prompt = "a lighthouse keeper lights the lamp",
-        .variant = .ref2va,
-        .duration_s = 5,
-        .refs = "face.png,clip.mp4",
-    });
-    defer allocator.free(ref);
-    try std.testing.expect(std.mem.indexOf(u8, ref, "subject_definitions:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ref, "retention_analysis:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ref, "<Picture 1>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ref, "<Video 1>") != null);
-}
-
-fn testOpenH3irAssets(allocator: std.mem.Allocator) !void {
-    const fl = try ir.collectAssets(allocator, .{
-        .prompt = "x",
-        .variant = .fl2va,
-        .image = "first.png",
-        .last_image = "last.png",
-    });
-    defer allocator.free(fl);
-    try std.testing.expectEqual(@as(usize, 2), fl.len);
-    try std.testing.expectEqualStrings("frame_anchor_first", fl[0].role.?);
-    try std.testing.expectEqualStrings("frame_anchor_last", fl[1].role.?);
-
-    const refs = try ir.collectAssets(allocator, .{
-        .prompt = "x",
-        .variant = .ref2va,
-        .refs = "face.png,clip.mp4,bed.wav,alone.wav",
-    });
-    defer allocator.free(refs);
-    try std.testing.expectEqual(@as(usize, 4), refs.len);
-    try std.testing.expectEqualStrings("image", refs[0].kind);
-    try std.testing.expectEqualStrings("video", refs[1].kind);
-    try std.testing.expectEqualStrings("audio", refs[2].kind);
-    try std.testing.expectEqualStrings("clip.mp4", refs[2].paired_video_path.?);
-    try std.testing.expectEqualStrings("audio", refs[3].kind);
-    try std.testing.expect(refs[3].paired_video_path == null);
-}
-
-fn testIrPipeline(allocator: std.mem.Allocator) !void {
-    try std.testing.expectEqual(@as(u32, 2), ir.shotCount(5.17, .t2va));
-    try std.testing.expectEqual(@as(u32, 1), ir.shotCount(5.17, .fl2va));
-    try std.testing.expectEqual(@as(u32, 3), ir.shotCount(10, .t2va));
-    try std.testing.expectEqual(@as(u32, 4), ir.shotCount(13, .t2va));
-    try std.testing.expectEqual(@as(u32, 3), ir.shotCount(10, .ref2va));
-    try std.testing.expectApproxEqAbs(@as(f32, 5.17), ir.effectiveSeconds(5.0), 0.005);
-
-    var over: [10]ir.Asset = undefined;
-    for (&over) |*asset| asset.* = .{ .kind = "image", .path = "x.png" };
-    try std.testing.expectError(error.TooManyRefImages, ir.checkCapacity(&over));
-    const files = [_]ir.Asset{.{ .kind = "image", .path = "x.png" }} ** 12 ++ [_]ir.Asset{.{ .kind = "video", .path = "y.mp4" }};
-    try std.testing.expectError(error.TooManyRefs, ir.checkCapacity(&files));
-
-    const compiled = try ir.compile(allocator, .{
-        .prompt = "waves at dusk",
-        .variant = .t2va,
-        .duration_s = 5,
-    });
-    defer compiled.deinit(allocator);
-    try std.testing.expect(ir.alreadyCompiled(compiled.text));
-    const ten = try ir.compile(allocator, .{
-        .prompt = "waves at dusk",
-        .variant = .t2va,
-        .duration_s = 10,
-    });
-    defer ten.deinit(allocator);
-    const fifteen = try ir.compile(allocator, .{
-        .prompt = "waves at dusk",
-        .variant = .t2va,
-        .duration_s = 15,
-    });
-    defer fifteen.deinit(allocator);
-    const last_only = try ir.compile(allocator, .{
-        .prompt = "waves at dusk",
-        .variant = .fl2va,
-        .duration_s = 4,
-        .last_image = "last.png",
-    });
-    defer last_only.deinit(allocator);
-    try std.testing.expect(std.mem.indexOf(u8, last_only.text, "4.46-second") != null);
-    try std.testing.expectError(error.TooManyRefImages, ir.compile(allocator, .{
-        .prompt = "x",
-        .variant = .ref2va,
-        .refs = "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png",
-    }));
-    try std.testing.expectError(error.IntentEmpty, ir.compile(allocator, .{
-        .prompt = "   ",
-        .variant = .t2va,
-    }));
+    const half: u32 = head_dim / 2;
+    const n_freq: u32 = half / 2;
+    const hpos: f32 = 1;
+    const wpos: f32 = 1;
+    const freq0 = 1.0;
+    const freq1 = 1.0 / std.math.pow(f32, 10000.0, 2.0 / @as(f32, @floatFromInt(half)));
+    const row = 3 * head_dim;
+    try std.testing.expectApproxEqAbs(@cos(hpos * freq0), rope.cos[row], 1e-6);
+    try std.testing.expectApproxEqAbs(@cos(hpos * freq1), rope.cos[row + 1], 1e-6);
+    try std.testing.expectApproxEqAbs(@cos(wpos * freq0), rope.cos[row + n_freq], 1e-6);
+    try std.testing.expectApproxEqAbs(rope.cos[row], rope.cos[row + half], 1e-6);
+    try std.testing.expectApproxEqAbs(rope.sin[row + 1], rope.sin[row + half + 1], 1e-6);
 }
 
 fn testCanvasPresets() !void {
@@ -932,8 +852,8 @@ fn testGeomHost(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("1.2", geom.formatSeconds1(1.25, &buf));
 
     const ref = try geom.refImageSize(2048, 2048, 640, 352);
-    try std.testing.expectEqual(@as(u32, 480), ref.w);
-    try std.testing.expectEqual(@as(u32, 480), ref.h);
+    try std.testing.expectEqual(@as(u32, 2048), ref.w);
+    try std.testing.expectEqual(@as(u32, 2048), ref.h);
     try std.testing.expectError(error.InvalidAspect, geom.refImageSize(100, 10, 640, 352));
 
     const box = geom.coverCropBox(100, 50, 32, 32);
@@ -1047,6 +967,7 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(packing.ReferenceKind.video_audio, parsed[1].kind);
 
     try request_mod.validate(.{ .prompt = "hi", .variant = .t2va });
+    try std.testing.expectError(error.IntentEmpty, request_mod.validate(.{ .prompt = "   ", .variant = .t2va }));
     try std.testing.expectError(error.T2vaRejectsMedia, request_mod.validate(.{
         .prompt = "hi",
         .variant = .t2va,
@@ -1058,9 +979,14 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     }));
     const audio_only = try request_mod.refsFromComma(allocator, "a.wav");
     defer request_mod.freeRefs(allocator, audio_only, false);
-    try request_mod.validateRefs(audio_only);
+    try std.testing.expectError(error.AudioRefNeedsVisual, request_mod.validateRefs(audio_only));
+    const too_many = try request_mod.refsFromComma(allocator, "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png");
+    defer request_mod.freeRefs(allocator, too_many, false);
+    try std.testing.expectError(error.TooManyRefImages, request_mod.validateRefs(too_many));
     try std.testing.expectEqual(config.Variant.t2va, try request_mod.inferVariant("", "", &.{}));
     try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "", &.{}));
+    try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("", "a.png", &.{}));
+    try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "b.png", &.{}));
     try std.testing.expectEqual(config.Variant.ref2va, try request_mod.inferVariant("", "", refs));
     try std.testing.expectError(error.Ref2vaRejectsKeyframes, request_mod.inferVariant("a.png", "", refs));
     const csv = try request_mod.refsToCsv(allocator, parsed);
@@ -1093,6 +1019,15 @@ fn testCheckpoint() !void {
     try std.testing.expect(checkpoint.inspect(&rank8).has_adaln_proj);
     try std.testing.expect(checkpoint.inspect(&rank8).has_time);
     try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&rank8)) == null);
+
+    const official = [_][]const u8{
+        "proj_in.weight",
+        "time_embedder.linear_1.weight",
+        "transformer_blocks.0.adaln_proj.linear.weight",
+    };
+    try std.testing.expect(checkpoint.inspect(&official).has_adaln_proj);
+    try std.testing.expect(checkpoint.inspect(&official).has_time);
+    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&official)) == null);
 
     try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"fl2va"}));
     try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_ref2va_fp8_scaled.safetensors", &.{"ref2va"}));
@@ -1224,6 +1159,20 @@ fn testMediaErrors() !void {
     try std.testing.expectError(error.BadWav, media.parseWavHeader("not a wav"));
 }
 
+fn testFfmpegProbe() !void {
+    const sample =
+        \\Input #0, mov, from 'clip.mp4':
+        \\  Stream #0:0: Video: h264 (High), yuv420p, 320x180, 24 fps, 24 tbr, 12288 tbn
+        \\  Stream #0:1: Audio: aac, 48000 Hz, stereo
+    ;
+    const meta = try media.parseFfmpegProbe(sample);
+    try std.testing.expectEqual(@as(u32, 320), meta.w);
+    try std.testing.expectEqual(@as(u32, 180), meta.h);
+    try std.testing.expectEqual(@as(f32, 24), meta.fps);
+    try std.testing.expect(meta.has_audio);
+    try std.testing.expectError(error.VideoLoadFailed, media.parseFfmpegProbe("no streams"));
+}
+
 fn testOutputTarget() !void {
     const def = media.Output.parse("");
     try std.testing.expectEqualStrings("output", def.dir);
@@ -1309,6 +1258,13 @@ fn testTokenizerRelpaths() !void {
     try std.testing.expectEqualStrings("tokenizer.json", repo.tokenizer_relpaths[3]);
 }
 
+fn testWeightEntrypoints() !void {
+    try std.testing.expectEqual(@as(usize, 4), repo.weight_entrypoints.len);
+    try std.testing.expectEqualStrings("model.safetensors.index.json", repo.weight_entrypoints[0]);
+    try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors.index.json", repo.weight_entrypoints[2]);
+    try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors", repo.weight_entrypoints[3]);
+}
+
 fn testConvrotMarker() !void {
     try std.testing.expectEqual(@as(?u32, 256), try zml.safetensors.convrotGroupFromMarker(
         "{\"format\":\"int8_tensorwise\",\"convrot\":true,\"convrot_groupsize\":256}",
@@ -1324,11 +1280,14 @@ fn testConvrotMarker() !void {
 
 fn testRefSize() !void {
     const match = try geom.refImageSize(2048, 2048, 640, 352);
-    try std.testing.expectEqual(@as(u32, 480), match.w);
-    try std.testing.expectEqual(@as(u32, 480), match.h);
-    const no_up = try geom.refImageSize(256, 256, 640, 352);
-    try std.testing.expectEqual(@as(u32, 256), no_up.w);
-    try std.testing.expectEqual(@as(u32, 256), no_up.h);
+    try std.testing.expectEqual(@as(u32, 2048), match.w);
+    try std.testing.expectEqual(@as(u32, 2048), match.h);
+    const up = try geom.refImageSize(256, 256, 640, 352);
+    try std.testing.expectEqual(@as(u32, 2048), up.w);
+    try std.testing.expectEqual(@as(u32, 2048), up.h);
+    const wide = try geom.refImageSize(1920, 1080, 224, 128);
+    try std.testing.expectEqual(@as(u32, 3648), wide.w);
+    try std.testing.expectEqual(@as(u32, 2048), wide.h);
     const small_vid = try geom.videoCanvas(320, 180);
     try std.testing.expect(small_vid.w <= 320 + 32);
     var ts: [3]f32 = undefined;
@@ -1340,11 +1299,9 @@ fn testRefSize() !void {
 fn testGroupRefs(allocator: std.mem.Allocator) !void {
     const src = try request_mod.refsFromComma(allocator, "a.wav, b.png, c.mp4");
     defer request_mod.freeRefs(allocator, src, false);
-    const grouped = try request_mod.groupRefs(allocator, src);
-    defer allocator.free(grouped);
-    try std.testing.expectEqual(packing.ReferenceKind.image, grouped[0].kind);
-    try std.testing.expectEqual(packing.ReferenceKind.video, grouped[1].kind);
-    try std.testing.expectEqual(packing.ReferenceKind.audio, grouped[2].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.audio, src[0].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.image, src[1].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.video, src[2].kind);
 }
 
 fn testPixelCrc(allocator: std.mem.Allocator) !void {
@@ -1358,6 +1315,15 @@ fn testPixelCrc(allocator: std.mem.Allocator) !void {
     const crop = try geom.coverCropLanczos(allocator, &src, 2, 2, 2, 2);
     defer allocator.free(crop);
     try std.testing.expectEqual(@as(usize, 12), crop.len);
+    const same = try geom.resizeBicubic(allocator, &src, 2, 2, 2, 2);
+    defer allocator.free(same);
+    try std.testing.expectEqualSlices(u8, &src, same);
+    const up = try geom.resizeBicubic(allocator, &src, 2, 2, 4, 4);
+    defer allocator.free(up);
+    const up2 = try geom.resizeBicubic(allocator, &src, 2, 2, 4, 4);
+    defer allocator.free(up2);
+    try std.testing.expectEqual(std.hash.Crc32.hash(up), std.hash.Crc32.hash(up2));
+    try std.testing.expect(std.hash.Crc32.hash(up) != std.hash.Crc32.hash(a));
 }
 
 fn testRngReset(allocator: std.mem.Allocator) !void {
@@ -1605,6 +1571,46 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 40), policy_mod.ditKeepBlocks(40, 50));
     try std.testing.expectEqual(@as(u32, 0), policy_mod.ditKeepBlocks(0, 50));
     try std.testing.expectEqual(@as(u32, 3), policy_mod.ditKeepBlocks(2, 3));
+    const gib: u64 = 1024 * 1024 * 1024;
+    const enc_layer: u64 = gib;
+    try std.testing.expectEqual(@as(u32, 0), policy_mod.encKeepLayers(24 * gib, enc_layer, 50));
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(284 * gib, enc_layer, 50));
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(0, enc_layer, 50));
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(48 * gib, 0, 50));
+    try std.testing.expectEqual(@as(u32, 0), policy_mod.encKeepLayers(48 * gib, enc_layer, 0));
+    const gb300 = policy_mod.decide(.{
+        .target = .cuda,
+        .seq = 8632,
+        .hidden = 5376,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .steps = 9,
+        .dtype = .bf16,
+        .device_bytes = 284 * gib,
+        .tp = 4,
+        .devices = 4,
+        .block_core_bytes = 1300 * 1024 * 1024,
+        .dtype_bytes = 2,
+    });
+    try std.testing.expectEqual(@as(u32, 50), gb300.resident_blocks);
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(gb300.resident_blocks, 50));
+    const unreported = policy_mod.decide(.{
+        .target = .cuda,
+        .seq = 8632,
+        .hidden = 5376,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .steps = 9,
+        .dtype = .bf16,
+        .device_bytes = 0,
+        .tp = 4,
+        .devices = 4,
+        .block_core_bytes = 1300 * 1024 * 1024,
+        .dtype_bytes = 2,
+    });
+    try std.testing.expectEqual(@as(u32, 50), unreported.resident_blocks);
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(0, 1, 100, 2));
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
