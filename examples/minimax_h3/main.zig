@@ -7,7 +7,6 @@ const generate = @import("generate.zig");
 
 const conditions = generate.conditions;
 const config = @import("model.zig").config;
-const ir = generate.ir;
 const memory = generate.memory;
 const pipeline = generate.pipeline;
 const repo = generate.ckpt;
@@ -48,7 +47,7 @@ const Args = struct {
         \\   --image=<path>      First frame
         \\   --last-image=<path> Last frame
         \\   --refs=<paths>      Comma-separated images, videos, audio
-        \\   --duration=<sec>    4–15 (default: 5)
+        \\   --duration=<sec>    5–15 (default: 5)
         \\   --ratio=<aspect>    21:9 | 16:9 | 4:3 | 1:1 | 3:4 | 9:16
         \\   --canvas=<size>     auto | tiny | preview | full (auto: 768p or 640×352)
         \\   --seed=<n>          RNG seed
@@ -58,6 +57,12 @@ const Args = struct {
     ;
 };
 
+fn officialPrompt(text: []const u8) []const u8 {
+    var end = text.len;
+    while (end > 0 and text[end - 1] == '\n') end -= 1;
+    return text[0..end];
+}
+
 fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
     log.err(fmt, args);
     return err;
@@ -66,11 +71,12 @@ fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
 fn rejectUser(err: anyerror) anyerror {
     return switch (err) {
         error.UnknownAspect => reject(err, "unknown --ratio (21:9|16:9|4:3|1:1|3:4|9:16)", .{}),
-        error.InvalidDuration => reject(err, "--duration must be 4–15", .{}),
+        error.InvalidDuration => reject(err, "--duration must be 5–15", .{}),
+        error.AudioRefNeedsVisual => reject(err, "audio --refs need at least one image or video", .{}),
         error.Ref2vaRejectsKeyframes => reject(err, "pass --image/--last-image or --refs, not both", .{}),
         error.FullCanvasTooLarge => reject(err, "--canvas=full needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
         error.ConditionedPreviewTooLarge => reject(err, "preview + media needs --canvas=tiny under {d} GiB", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
-        error.Ref2vaTransformerMissing => reject(err, "ref2va needs Ref2VA/transformer", .{}),
+        error.Ref2vaTransformerMissing => reject(err, "ref2va needs transformer_ref/", .{}),
         error.TransformerMissing => reject(err, "transformer weights not found", .{}),
         error.AmbiguousDit => reject(err, "multiple transformer files match; pass --dit=<file>", .{}),
         error.EncoderMissing => reject(err, "text_encoder not found", .{}),
@@ -84,6 +90,8 @@ fn rejectUser(err: anyerror) anyerror {
         error.TooManyRefVideos => reject(err, "too many reference videos (max 3)", .{}),
         error.TooManyRefAudios => reject(err, "too many reference audios (max 3)", .{}),
         error.IntentEmpty => reject(err, "needs a non-empty --prompt", .{}),
+        error.Fl2vaNeedsImage => reject(err, "fl2va needs --image and/or --last-image", .{}),
+        error.Ref2vaNeedsRefs => reject(err, "ref2va needs --refs", .{}),
         else => err,
     };
 }
@@ -106,6 +114,16 @@ pub fn main(init: std.process.Init) !void {
     const refs = try request.refsFromComma(allocator, args.refs);
     defer request.freeRefs(allocator, refs, false);
     const variant = request.inferVariant(args.image, args.last_image, refs) catch |err| return rejectUser(err);
+    const encode_prompt = officialPrompt(args.prompt);
+    request.validate(.{
+        .variant = variant,
+        .prompt = encode_prompt,
+        .duration_s = args.duration,
+        .aspect = args.ratio,
+        .first_image = args.image,
+        .last_image = args.last_image,
+        .refs = refs,
+    }) catch |err| return rejectUser(err);
     const paths: repo.Open = .{
         .model = args.model,
         .dit = args.dit,
@@ -133,6 +151,8 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{
         .cpu = .{ .device_count = 1 },
         .physical_mesh = .{ .custom = sharding.physicalMesh },
+        // Grow to what the run uses. Default BFC preallocate grabs 90% of every GPU.
+        .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     });
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
@@ -145,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
     const px = config.pixelSize(args.ratio, canvas.short_side);
     const frames = config.alignFrameCount(config.frameCount(args.duration));
     log.info(
-        "run model={s} variant={s} canvas={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d}",
+        "run model={s} variant={s} canvas={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} device={d}GiB",
         .{
             args.model,
             @tagName(variant),
@@ -158,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
             @tagName(platform.target),
             shardings.model.numPartitionsForLogicalAxis(.model),
             platform.devices.len,
+            device_bytes / (1024 * 1024 * 1024),
         },
     );
 
@@ -178,17 +199,6 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
-    var brief = ir.compile(allocator, .{
-        .prompt = args.prompt,
-        .variant = variant,
-        .duration_s = args.duration,
-        .aspect = @tagName(args.ratio),
-        .image = args.image,
-        .last_image = args.last_image,
-        .refs = args.refs,
-    }) catch |err| return rejectUser(err);
-    defer brief.deinit(allocator);
-
     var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, args.model, &progress) catch |err| return rejectUser(err);
     defer tokenizer.deinit();
     var tok_enc = try tokenizer.encoder();
@@ -200,13 +210,13 @@ pub fn main(init: std.process.Init) !void {
             .first_image = args.image,
             .last_image = args.last_image,
             .refs = refs,
-            .prompt = brief.text,
+            .prompt = encode_prompt,
             .geo = geo,
             .models = &models,
             .shardings = shardings,
         })
     else
-        try conditions.tokenize(allocator, &tok_enc, brief.text);
+        try conditions.tokenize(allocator, &tok_enc, encode_prompt);
     defer encoded.deinit(allocator);
 
     const geo_work = if (hasMedia(args))
@@ -308,7 +318,6 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         models.visual.inner,
-        models.audio.inner,
         geo_work,
         mem.tile_batch,
         shardings,
@@ -330,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
             .audio_patches = encoded.conds.audio_patches,
         },
         .seed = args.seed,
-        .brief = brief.text,
+        .prompt = encode_prompt,
         .out = args.out,
     });
 }

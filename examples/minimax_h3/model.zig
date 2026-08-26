@@ -32,6 +32,8 @@ pub const config = struct {
     pub const qwen_video_fps: f32 = 2.0;
     pub const canvas_multiple: u32 = 32;
     pub const canvas_max_pixels: u32 = 768 * 1344;
+    /// Official `reference_image_short_edge`. Upscale allowed, no area cap.
+    pub const reference_image_short_edge: u32 = 2048;
     pub const min_aspect: f32 = 0.25;
     pub const max_aspect: f32 = 4.0;
     pub const max_ref_files: u32 = 12;
@@ -41,7 +43,7 @@ pub const config = struct {
     pub const visual_encode_seed: u64 = 42;
 
     pub const PosteriorPolicy = enum { sample_seed42, mean };
-    pub const posterior: PosteriorPolicy = .mean;
+    pub const posterior: PosteriorPolicy = .sample_seed42;
 
     pub const Variant = enum {
         t2va,
@@ -260,7 +262,7 @@ pub const config = struct {
     pub const full_canvas_min_device_bytes: u64 = 40 * 1024 * 1024 * 1024;
 
     pub fn checkDuration(seconds: f32) !void {
-        if (seconds < 4.0 or seconds > 15.0) return error.InvalidDuration;
+        if (seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
     }
 
     /// FL2VA and Ref2VA at preview or larger need this budget; otherwise `--canvas=tiny`.
@@ -491,10 +493,22 @@ pub const policy = struct {
         return 4;
     }
 
-    /// Encode is a single pass: extra resident layers do not help. Hide H2D behind compute.
+    /// Encode is a single pass: extra resident layers do not help when weights
+    /// come from disk. Hide H2D behind compute on the stream path.
     pub const enc_prefetch: u32 = 4;
     /// Visual VAE keeps every block after the first fill; only the fill is parallel.
     pub const vae_load_window: u32 = 8;
+
+    /// Keep every encoder layer when they fit. Unreported `device_bytes` (0)
+    /// matches `memory.planWith`: treat as unlimited.
+    pub fn encKeepLayers(device_bytes: u64, layer_bytes: u64, layers: u32) u32 {
+        if (layers == 0) return 0;
+        if (layer_bytes == 0 or device_bytes == 0) return layers;
+        const budget = device_bytes * 85 / 100;
+        const need = layer_bytes * layers;
+        if (need <= budget) return layers;
+        return 0;
+    }
 
     /// Keep the DiT tail on-device when it is one group or less. Reloading
     /// those blocks every step costs more than the 1–2 GiB they occupy.
@@ -553,7 +567,7 @@ pub const policy = struct {
         const collective = act / 4;
         const reserved = act + scratch + collective + tables;
         const budget = if (args.device_bytes == 0)
-            0
+            std.math.maxInt(u64)
         else
             args.device_bytes * 85 / 100;
         const headroom = budget -| reserved;
@@ -791,36 +805,40 @@ pub const packing = struct {
     };
 
     const video_spans = [_]u32{ 1, 4, 4, 4, 4 };
+    const frame_rescale_f64: f64 = 5.0 / 3.0;
 
-    pub fn videoSpan(frame: u32) f32 {
-        return config.frame_rescale * @as(f32, @floatFromInt(video_spans[frame % video_spans.len]));
+    /// Official builds the rotary grid in float64 (`np.linspace`, pairwise
+    /// frame spans) and only casts to f32 at the rope. Match that path.
+    pub fn videoSpan(frame: u32) f64 {
+        return frame_rescale_f64 * @as(f64, @floatFromInt(video_spans[frame % video_spans.len]));
     }
 
-    fn guideStartT(text_len: u32, frame: i32, frames: u32, duration: f32) f32 {
-        const base: f32 = @floatFromInt(text_len);
+    fn guideStartT(text_len: u32, frame: i32, frames: u32, duration: f64) f64 {
+        const base: f64 = @floatFromInt(text_len);
         if (frames == 0) return base;
         const last: i64 = @as(i64, frames) - 1;
         const idx: i64 = if (frame < 0) last + 1 + frame else frame;
         const clamped: u32 = @intCast(std.math.clamp(idx, 0, last));
         if (clamped == 0) return base;
-        if (clamped == @as(u32, @intCast(last))) return base + duration - config.frame_rescale;
-        const frac = @as(f32, @floatFromInt(clamped)) / @as(f32, @floatFromInt(last));
+        if (clamped == @as(u32, @intCast(last))) return base + duration - frame_rescale_f64;
+        const frac = @as(f64, @floatFromInt(clamped)) / @as(f64, @floatFromInt(last));
         return base + frac * duration;
     }
 
-    pub fn videoDuration(latent_t: u32) f32 {
-        var total: f32 = 0;
+    pub fn videoDuration(latent_t: u32) f64 {
+        var total: f64 = 0;
         for (0..latent_t) |t| total += videoSpan(@intCast(t));
         return total;
     }
 
-    pub fn spatialAxis(dim: u32, sqrt_area: f32, out: []f32) []f32 {
+    pub fn spatialAxis(dim: u32, sqrt_area: f64, out: []f32) []f32 {
         const count = dim / 2;
         std.debug.assert(out.len >= count);
-        const ratio = @as(f32, @floatFromInt(dim)) / sqrt_area;
-        const step = ratio / @as(f32, @floatFromInt(count));
+        const ratio = @as(f64, @floatFromInt(dim)) / sqrt_area;
+        const left = (1.0 - ratio) / 2.0;
+        const step = ratio / @as(f64, @floatFromInt(count));
         for (0..count) |i| {
-            out[i] = (@as(f32, @floatFromInt(i)) * step + (1.0 - ratio) * 0.5) * 32.0;
+            out[i] = @floatCast((left + @as(f64, @floatFromInt(i)) * step) * 32.0);
         }
         return out[0..count];
     }
@@ -919,18 +937,18 @@ pub const packing = struct {
         h_axis: []const f32,
         w_axis: []const f32,
         latent_t: u32,
-        start_t: f32,
+        start_t: f64,
         time_row: u32,
         kind: SegmentKind,
         source_index: i32,
-    ) !struct { start: u32, end: u32, cursor: f32 } {
+    ) !struct { start: u32, end: u32, cursor: f64 } {
         const start = b.row();
         var cursor = start_t;
         for (0..latent_t) |t| {
             for (h_axis) |h| {
                 for (w_axis) |w| {
                     const idx = b.row();
-                    try b.appendRow(.{ .t = cursor, .h = h, .w = w }, .video, time_row);
+                    try b.appendRow(.{ .t = @floatCast(cursor), .h = h, .w = w }, .video, time_row);
                     try b.video_indices.append(b.allocator, idx);
                 }
             }
@@ -949,7 +967,7 @@ pub const packing = struct {
     fn appendAudioRows(
         b: *Builder,
         length: u32,
-        cursor: f32,
+        cursor: f64,
         w_low: f32,
         w_high: f32,
         time_row: u32,
@@ -961,7 +979,11 @@ pub const packing = struct {
         for (widths) |w| {
             for (0..length) |t| {
                 const idx = b.row();
-                try b.appendRow(.{ .t = cursor + @as(f32, @floatFromInt(t)), .h = 0, .w = w }, .audio, time_row);
+                try b.appendRow(.{
+                    .t = @floatCast(cursor + @as(f64, @floatFromInt(t))),
+                    .h = 0,
+                    .w = w,
+                }, .audio, time_row);
                 try b.audio_indices.append(b.allocator, idx);
             }
         }
@@ -979,7 +1001,7 @@ pub const packing = struct {
         var b = Builder.init(allocator);
         errdefer b.deinit();
 
-        const sqrt_area = @sqrt(@as(f32, @floatFromInt(args.latent_h * args.latent_w)));
+        const sqrt_area = @sqrt(@as(f64, @floatFromInt(args.latent_h * args.latent_w)));
         var h_buf: [256]f32 = undefined;
         var w_buf: [256]f32 = undefined;
         const h_axis = spatialAxis(args.latent_h, sqrt_area, &h_buf);
@@ -994,27 +1016,27 @@ pub const packing = struct {
 
         try appendText(&b, args.text_len, args.text_tags, video_time);
 
+        var rotary_time: f64 = @floatFromInt(args.text_len);
         if (args.references.len == 0) {
             const duration = videoDuration(args.latent_t);
             for (args.condition_videos, 0..) |cond, index| {
                 var ch_buf: [256]f32 = undefined;
                 var cw_buf: [256]f32 = undefined;
-                const area = @sqrt(@as(f32, @floatFromInt(cond.latent_h * cond.latent_w)));
+                const area = @sqrt(@as(f64, @floatFromInt(cond.latent_h * cond.latent_w)));
                 const ch = spatialAxis(cond.latent_h, area, &ch_buf);
                 const cw = spatialAxis(cond.latent_w, area, &cw_buf);
                 const is_first = cond.keyframe_index == 0;
                 const keyframe_t = if (cond.guide_frame) |gf|
                     guideStartT(args.text_len, gf, args.pixel_frames, duration)
                 else if (is_first)
-                    @as(f32, @floatFromInt(args.text_len))
+                    @as(f64, @floatFromInt(args.text_len))
                 else
-                    @as(f32, @floatFromInt(args.text_len)) + duration - config.frame_rescale;
+                    @as(f64, @floatFromInt(args.text_len)) + duration - frame_rescale_f64;
                 _ = try appendVideoGrid(&b, ch, cw, cond.latent_t, keyframe_t, cond_time, .condition_video, @intCast(index));
             }
         } else {
-            var cursor: f32 = @floatFromInt(args.text_len);
             for (args.references) |block| {
-                var block_end = cursor;
+                var block_end = rotary_time;
                 if (block.kind == .audio or block.kind == .video_audio) {
                     if (block.audio_index < 0) return error.MissingReferenceAudio;
                     const audio = args.condition_audios[@intCast(block.audio_index)];
@@ -1023,49 +1045,43 @@ pub const packing = struct {
                     if (block.video_index >= 0) {
                         const video = args.condition_videos[@intCast(block.video_index)];
                         var cw_buf: [256]f32 = undefined;
-                        const area = @sqrt(@as(f32, @floatFromInt(video.latent_h * video.latent_w)));
+                        const area = @sqrt(@as(f64, @floatFromInt(video.latent_h * video.latent_w)));
                         const cw = spatialAxis(video.latent_w, area, &cw_buf);
                         w_low = cw[0];
                         w_high = cw[cw.len - 1];
                     }
-                    _ = try appendAudioRows(&b, audio.latent_t, cursor, w_low, w_high, audio_cond_time, .condition_audio, block.audio_index);
-                    block_end = @max(block_end, cursor + @as(f32, @floatFromInt(audio.latent_t)));
+                    _ = try appendAudioRows(&b, audio.latent_t, rotary_time, w_low, w_high, audio_cond_time, .condition_audio, block.audio_index);
+                    block_end = @max(block_end, rotary_time + @as(f64, @floatFromInt(audio.latent_t)));
                 }
                 if (block.kind != .audio) {
                     if (block.video_index < 0) return error.MissingReferenceVideo;
                     const video = args.condition_videos[@intCast(block.video_index)];
                     var ch_buf: [256]f32 = undefined;
                     var cw_buf: [256]f32 = undefined;
-                    const area = @sqrt(@as(f32, @floatFromInt(video.latent_h * video.latent_w)));
+                    const area = @sqrt(@as(f64, @floatFromInt(video.latent_h * video.latent_w)));
                     const ch = spatialAxis(video.latent_h, area, &ch_buf);
                     const cw = spatialAxis(video.latent_w, area, &cw_buf);
-                    const placed = try appendVideoGrid(&b, ch, cw, video.latent_t, cursor, cond_time, .condition_video, block.video_index);
+                    const placed = try appendVideoGrid(&b, ch, cw, video.latent_t, rotary_time, cond_time, .condition_video, block.video_index);
                     block_end = if (block.kind == .image)
-                        @max(block_end, cursor + 1.0)
+                        @max(block_end, rotary_time + 1.0)
                     else
                         @max(block_end, placed.cursor);
                 }
-                cursor = block_end;
+                rotary_time = block_end;
             }
-        }
-
-        var cursor: f32 = @floatFromInt(args.text_len);
-        if (args.references.len != 0) {
-            cursor = 0;
-            for (b.positions.items) |pos| cursor = @max(cursor, pos.t);
         }
 
         const audio = try appendAudioRows(
             &b,
             args.audio_t,
-            cursor,
+            rotary_time,
             w_axis[0],
             w_axis[w_axis.len - 1],
             audio_time,
             .target_audio,
             -1,
         );
-        const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, cursor, video_time, .target_video, -1);
+        const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, rotary_time, video_time, .target_video, -1);
 
         return b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
     }
@@ -2302,7 +2318,7 @@ pub const vision = struct {
     pub fn patchifyRgb(allocator: std.mem.Allocator, rgb: []const u8, src_h: u32, src_w: u32, cfg: Config) !struct { patches: []f32, grid: Grid, seq: u32 } {
         const media = @import("generate.zig").media;
         const size = chooseGrid(cfg, src_h, src_w, false);
-        const resized = try media.resizeRgb(allocator, rgb, src_w, src_h, size.w, size.h);
+        const resized = try media.resizeRgbBicubic(allocator, rgb, src_w, src_h, size.w, size.h);
         defer allocator.free(resized);
         const patch: u32 = @intCast(cfg.patch_size);
         const merge: u32 = @intCast(cfg.spatial_merge_size);
@@ -2365,7 +2381,7 @@ pub const vision = struct {
         var f: u32 = 0;
         while (f < even) : (f += 1) {
             const src_f = if (f < frames) f else frames - 1;
-            const frame = try media.resizeRgb(allocator, rgb[src_f * plane ..][0..plane], src_w, src_h, size.w, size.h);
+            const frame = try media.resizeRgbBicubic(allocator, rgb[src_f * plane ..][0..plane], src_w, src_h, size.w, size.h);
             defer allocator.free(frame);
             @memcpy(stacked[f * resized_plane ..][0..resized_plane], frame);
         }
@@ -2457,6 +2473,7 @@ pub const vision = struct {
     pub fn visionRope(allocator: std.mem.Allocator, gh: u32, gw: u32, head_dim: u32) !struct { cos: []f32, sin: []f32 } {
         const seq = gh * gw;
         const half = head_dim / 2;
+        const n_freq = half / 2;
         const cos = try allocator.alloc(f32, seq * head_dim);
         errdefer allocator.free(cos);
         const sin = try allocator.alloc(f32, seq * head_dim);
@@ -2472,16 +2489,23 @@ pub const vision = struct {
                     while (dj < merge) : (dj += 1) {
                         const hpos: f32 = @floatFromInt(ih + di);
                         const wpos: f32 = @floatFromInt(iw + dj);
-                        var f: u32 = 0;
-                        while (f < half) : (f += 1) {
-                            const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(f)) / @as(f32, @floatFromInt(half)));
-                            const ang = if (f < half / 2) hpos * freq else wpos * freq;
-                            const c = @cos(ang);
-                            const s = @sin(ang);
-                            cos[row * head_dim + f] = c;
-                            cos[row * head_dim + half + f] = c;
-                            sin[row * head_dim + f] = s;
-                            sin[row * head_dim + half + f] = s;
+                        var i: u32 = 0;
+                        while (i < n_freq) : (i += 1) {
+                            const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(i * 2)) / @as(f32, @floatFromInt(half)));
+                            const ang_h = hpos * freq;
+                            const ang_w = wpos * freq;
+                            const ch = @cos(ang_h);
+                            const sh = @sin(ang_h);
+                            const cw = @cos(ang_w);
+                            const sw = @sin(ang_w);
+                            cos[row * head_dim + i] = ch;
+                            cos[row * head_dim + n_freq + i] = cw;
+                            cos[row * head_dim + half + i] = ch;
+                            cos[row * head_dim + half + n_freq + i] = cw;
+                            sin[row * head_dim + i] = sh;
+                            sin[row * head_dim + n_freq + i] = sw;
+                            sin[row * head_dim + half + i] = sh;
+                            sin[row * head_dim + half + n_freq + i] = sw;
                         }
                         row += 1;
                     }
@@ -2811,11 +2835,22 @@ pub const dit = struct {
     const SwiGlu = struct {
         fc1: zml.nn.Linear,
         fc2: zml.nn.Linear,
+        /// Official Diffusers `SwiGLU` chunks `(value, gate)`. Custom `fc1` chunks `(gate, value)`.
+        value_first: bool = false,
 
         pub fn init(store: zml.io.TensorStore.View) SwiGlu {
+            const in_part = .{ .dout = .model, .d = .replicated };
+            const out_part = .{ .dout = .replicated, .d = .model };
+            if (store.getShape("fc1.weight") != null) {
+                return .{
+                    .fc1 = linear(store, "fc1.weight", null, in_part, .replicated),
+                    .fc2 = linear(store, "fc2.weight", null, out_part, .replicated),
+                };
+            }
             return .{
-                .fc1 = linear(store, "fc1.weight", null, .{ .dout = .model, .d = .replicated }, .replicated),
-                .fc2 = linear(store, "fc2.weight", null, .{ .dout = .replicated, .d = .model }, .replicated),
+                .fc1 = linear(store, "net.0.proj.weight", null, in_part, .replicated),
+                .fc2 = linear(store, "net.2.weight", null, out_part, .replicated),
+                .value_first = true,
             };
         }
 
@@ -2826,13 +2861,17 @@ pub const dit = struct {
 
         pub fn forward(self: SwiGlu, x: zml.Tensor) zml.Tensor {
             const uv = self.fc1.forward(x);
-            const gate, const value = uv.chunkExact(-1, 2);
-            return self.fc2.forward(gate.silu().mul(value).rename(.{ .dout = .d }));
+            const a, const b = uv.chunkExact(-1, 2);
+            const gated = if (self.value_first) b.silu().mul(a) else a.silu().mul(b);
+            return self.fc2.forward(gated.rename(.{ .dout = .d }));
         }
     };
 
     const Attention = struct {
-        qkv: zml.nn.Linear,
+        qkv: ?zml.nn.Linear = null,
+        q: ?zml.nn.Linear = null,
+        k: ?zml.nn.Linear = null,
+        v: ?zml.nn.Linear = null,
         out: zml.nn.Linear,
         q_norm: RmsNorm,
         k_norm: RmsNorm,
@@ -2843,32 +2882,74 @@ pub const dit = struct {
         pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
             const qkv_part = .{ .dout = .model, .d = .replicated };
             const out_part = .{ .dout = .replicated, .d = .model };
+            const q_norm = RmsNorm.init(
+                store.withPrefix(if (store.hasKey("q_norm")) "q_norm" else "norm_q"),
+                .{.hd},
+                cfg.qk_norm_eps,
+            );
+            const k_norm = RmsNorm.init(
+                store.withPrefix(if (store.hasKey("k_norm")) "k_norm" else "norm_k"),
+                .{.hd},
+                cfg.qk_norm_eps,
+            );
+            if (store.getShape("qkv_proj.weight") != null) {
+                return .{
+                    .qkv = linear(store, "qkv_proj.weight", null, qkv_part, .replicated),
+                    .out = linear(store, "out_proj.weight", null, out_part, .replicated),
+                    .q_norm = q_norm,
+                    .k_norm = k_norm,
+                    .num_heads = cfg.num_attention_heads,
+                    .head_dim = cfg.attention_head_dim,
+                };
+            }
             return .{
-                .qkv = linear(store, "qkv_proj.weight", null, qkv_part, .replicated),
-                .out = linear(store, "out_proj.weight", null, out_part, .replicated),
-                .q_norm = .init(store.withPrefix("q_norm"), .{.hd}, cfg.qk_norm_eps),
-                .k_norm = .init(store.withPrefix("k_norm"), .{.hd}, cfg.qk_norm_eps),
+                .q = linear(store, "to_q.weight", null, qkv_part, .replicated),
+                .k = linear(store, "to_k.weight", null, qkv_part, .replicated),
+                .v = linear(store, "to_v.weight", null, qkv_part, .replicated),
+                .out = linear(store, "to_out.0.weight", null, out_part, .replicated),
+                .q_norm = q_norm,
+                .k_norm = k_norm,
                 .num_heads = cfg.num_attention_heads,
                 .head_dim = cfg.attention_head_dim,
             };
         }
 
         pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-            zml.nn.Linear.unloadBuffers(&self.qkv);
+            if (self.qkv) |*layer| zml.nn.Linear.unloadBuffers(layer);
+            if (self.q) |*layer| zml.nn.Linear.unloadBuffers(layer);
+            if (self.k) |*layer| zml.nn.Linear.unloadBuffers(layer);
+            if (self.v) |*layer| zml.nn.Linear.unloadBuffers(layer);
             zml.nn.Linear.unloadBuffers(&self.out);
             RmsNorm.unloadBuffers(&self.q_norm);
             RmsNorm.unloadBuffers(&self.k_norm);
         }
 
+        fn projectQkv(self: Attention, x: zml.Tensor) struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } {
+            if (self.qkv) |qkv| {
+                // Fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
+                const split = qkv.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
+                    .withPartitioning(.{ .h = .model });
+                const parts = split.chunkExact(.p, 3);
+                return .{
+                    .q = parts[0].squeeze(.p),
+                    .k = parts[1].squeeze(.p),
+                    .v = parts[2].squeeze(.p),
+                };
+            }
+            const heads = .{ .h = self.num_heads, .hd = self.head_dim };
+            return .{
+                .q = self.q.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+                .k = self.k.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+                .v = self.v.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            };
+        }
+
         pub fn forward(self: Attention, x: zml.Tensor, rotary: ?struct { zml.Tensor, zml.Tensor }) zml.Tensor {
             const x_qkv = x.withPartitioning(.{ .d = .replicated });
-            // Fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
-            const split = self.qkv.forward(x_qkv).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
-                .withPartitioning(.{ .h = .model });
-            const parts = split.chunkExact(.p, 3);
-            var q = parts[0].squeeze(.p);
-            var k = parts[1].squeeze(.p);
-            const v = parts[2].squeeze(.p);
+            const qk = projectQkv(self, x_qkv);
+            var q = qk.q;
+            var k = qk.k;
+            const v = qk.v;
 
             q = self.q_norm.forward(q, .hd);
             k = self.k_norm.forward(k, .hd);
@@ -2928,6 +3009,13 @@ pub const dit = struct {
                 return .{
                     .proj_in = linear(prefix, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
                     .proj_out = linear(prefix, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
+                };
+            }
+            if (store.getShape("time_embedder.linear_1.weight") != null) {
+                const prefix = store.withPrefix("time_embedder");
+                return .{
+                    .proj_in = linear(prefix, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
+                    .proj_out = linear(prefix, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
                 };
             }
             if (store.maybeCreateTensor("adaln_t_table", .{ .t, .d }, .replicated)) |table| {
@@ -3159,7 +3247,7 @@ pub const dit = struct {
 
         pub fn init(store: zml.io.TensorStore.View, cfg: Config, activate_adaln: bool) TransformerBlock {
             const attn_store = store.withPrefix("attn");
-            const mlp_store = store.withPrefix("mlp");
+            const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
             const adaln_store = store.withPrefix("adaln_proj");
             return .{
                 .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
@@ -3198,7 +3286,7 @@ pub const dit = struct {
 
         pub fn init(store: zml.io.TensorStore.View, cfg: Config) TokenRefinerBlock {
             const attn_store = store.withPrefix("attn");
-            const mlp_store = store.withPrefix("mlp");
+            const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
             return .{
                 .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
                 .attn = .init(attn_store, cfg),
@@ -3226,7 +3314,7 @@ pub const dit = struct {
         final_norm: RmsNorm,
 
         pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !TokenRefiner {
-            const block_store = store.withPrefix("blocks");
+            const block_store = store.withPrefix(if (store.hasKey("refiner_blocks")) "refiner_blocks" else "blocks");
             const blocks = try allocator.alloc(TokenRefinerBlock, @intCast(cfg.num_refiner_layers));
             errdefer allocator.free(blocks);
             for (blocks, 0..) |*block, i| {
@@ -3264,11 +3352,20 @@ pub const dit = struct {
         audio_out: zml.nn.Linear,
 
         pub fn init(store: zml.io.TensorStore.View, cfg: Config, activate_adaln: bool) FinalLayer {
+            if (store.hasKey("final_layer")) {
+                const layer = store.withPrefix("final_layer");
+                return .{
+                    .norm = .init(layer.withPrefix("norm"), .{.d}, cfg.final_norm_eps),
+                    .adaln = .init(layer.withPrefix("adaln_proj"), cfg.hidden_size, 2, 1, activate_adaln),
+                    .video_out = linear(layer, "video_out.weight", "video_out.bias", .replicated, .replicated),
+                    .audio_out = linear(layer, "audio_out.weight", "audio_out.bias", .replicated, .replicated),
+                };
+            }
             return .{
-                .norm = .init(store.withPrefix("norm"), .{.d}, cfg.final_norm_eps),
-                .adaln = .init(store.withPrefix("adaln_proj"), cfg.hidden_size, 2, 1, activate_adaln),
-                .video_out = linear(store, "video_out.weight", "video_out.bias", .replicated, .replicated),
-                .audio_out = linear(store, "audio_out.weight", "audio_out.bias", .replicated, .replicated),
+                .norm = .init(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
+                .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size, 2, 1, activate_adaln),
+                .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
+                .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
             };
         }
 
@@ -3291,7 +3388,7 @@ pub const dit = struct {
         cfg: Config,
 
         pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !Model {
-            const blocks_store = store.withPrefix("blocks");
+            const blocks_store = store.withPrefix(if (store.hasKey("transformer_blocks")) "transformer_blocks" else "blocks");
             const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.num_layers));
             errdefer allocator.free(blocks);
 
@@ -3304,14 +3401,27 @@ pub const dit = struct {
                 block.* = .init(blocks_store.withLayer(i), cfg, activate_adaln);
             }
 
+            const video_proj = if (store.getShape("proj_in.weight") != null)
+                linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated)
+            else
+                linear(store, "video_patch_proj.weight", "video_patch_proj.bias", .replicated, .replicated);
+            const audio_proj = if (store.getShape("audio_proj_in.weight") != null)
+                linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated)
+            else
+                linear(store, "audio_patch_proj.weight", "audio_patch_proj.bias", .replicated, .replicated);
+            const condition_proj = if (store.getShape("context_embedder.weight") != null)
+                linear(store, "context_embedder.weight", "context_embedder.bias", .replicated, .replicated)
+            else
+                linear(store, "condition_proj.weight", "condition_proj.bias", .replicated, .replicated);
+
             return .{
-                .video_proj = linear(store, "video_patch_proj.weight", "video_patch_proj.bias", .replicated, .replicated),
-                .audio_proj = linear(store, "audio_patch_proj.weight", "audio_patch_proj.bias", .replicated, .replicated),
-                .condition_proj = linear(store, "condition_proj.weight", "condition_proj.bias", .replicated, .replicated),
+                .video_proj = video_proj,
+                .audio_proj = audio_proj,
+                .condition_proj = condition_proj,
                 .time_embedder = time_embedder,
                 .token_refiner = token_refiner,
                 .blocks = blocks,
-                .final_layer = FinalLayer.init(store.withPrefix("final_layer"), cfg, activate_adaln),
+                .final_layer = FinalLayer.init(store, cfg, activate_adaln),
                 .cfg = cfg,
             };
         }
