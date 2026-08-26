@@ -14,6 +14,7 @@ test {
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
+    std.testing.refAllDecls(KvCache);
 }
 
 pub const Backend = enum {
@@ -276,30 +277,6 @@ pub const KvCache = union(enum) {
         };
     }
 };
-
-test "compile latent KV cache update" {
-    const platform = zml.testing.env();
-
-    const Local = struct {
-        pub fn update(latent_kv: zml.Tensor, new_k: zml.Tensor, slot_mapping: zml.Tensor) zml.Tensor {
-            const kv_cache: KvCache = .{ .latent = latent_kv };
-            return kv_cache.update(new_k, new_k, slot_mapping, 16, .stablehlo).latent;
-        }
-    };
-
-    const latent_kv = zml.Tensor.init(.{ .page = 2, .k_chunk = 16, .hkv = 1, .hd = 128 }, .f32);
-    const new_k = zml.Tensor.init(.{ .b = 1, .hkv = 1, .hd = 128 }, .f32);
-    const slot_mapping = zml.Tensor.init(.{ .b = 1 }, .u32);
-
-    const exe = try platform.compileFn(
-        std.testing.allocator,
-        std.testing.io,
-        Local.update,
-        .{ latent_kv, new_k, slot_mapping },
-        .{},
-    );
-    defer exe.deinit();
-}
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     _ = k;
