@@ -89,10 +89,10 @@ pub const Error = std.mem.Allocator.Error ||
 
 pub const Scope = struct {
     block: *mlir.Block,
-    id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
-    id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
-    id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
-    id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
+    id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
+    id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
+    id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
+    id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
     arena: std.heap.ArenaAllocator,
 
     pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {

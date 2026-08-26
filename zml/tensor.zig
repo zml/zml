@@ -23,9 +23,10 @@ test {
 }
 
 pub const Tensor = struct {
-    var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
+    pub const Id = enum(u64) { _ };
+    var current_id: std.atomic.Value(u64) = .init(1);
 
-    id: usize,
+    id: Tensor.Id,
     auto_broadcast: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
@@ -36,8 +37,12 @@ pub const Tensor = struct {
         return .fromShape(.init(shape_like, dt));
     }
 
+    fn nextTensorId() Id {
+        return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
+    }
+
     pub fn fromShape(shape_: Shape) Tensor {
-        return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
+        return .{ .id = nextTensorId(), ._shape = shape_ };
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -73,11 +78,7 @@ pub const Tensor = struct {
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
-        const res: Tensor = .{
-            ._shape = sh,
-            ._value = val,
-            .id = Tensor.current_id.fetchAdd(1, .seq_cst),
-        };
+        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
 
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
@@ -105,7 +106,7 @@ pub const Tensor = struct {
         sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
         sh._partitioning.appendNTimes(.unknown, n) catch unreachable;
 
-        return .{ ._shape = sh, ._value = val, .id = Tensor.current_id.fetchAdd(1, .seq_cst) };
+        return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
     }
 
     /// Returns the dimension of axis 'axis_'.
