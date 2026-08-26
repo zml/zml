@@ -30,7 +30,7 @@ bazel run -c opt --@rules_zig//zig/settings:mode=release_fast //examples/minimax
 
 `--image` / `--last-image` select fl2va. `--refs` selects ref2va.
 
-CPU / Metal / oneAPI default to the preview canvas. CUDA BFC grows with use (`preallocate=false`); it does not reserve 90% of every GPU at start.
+Default is official 768p: `--size=1344x768 --steps=30 --duration=5`. CUDA BFC grows with use (`preallocate=false`); it does not reserve 90% of every GPU at start. Tensor-parallel degree follows visible GPU count (1, 2, 4, or 8).
 
 ## Options
 
@@ -38,9 +38,13 @@ CPU / Metal / oneAPI default to the preview canvas. CUDA BFC grows with use (`pr
 - `--dit=<path>`: Swap only the transformer. Leave empty to use `transformer/` (t2va/fl2va) or `transformer_ref/` (ref2va).
 - `--prompt`, `--image`, `--last-image`, `--refs`
 - `--duration` 5–15 (default 5)
-- `--ratio` `21:9` `16:9` `4:3` `1:1` `3:4` `9:16`
-- `--canvas=auto|tiny|preview|full` — `auto` is 768p at ≥40 GiB/device, else 640×352
+- `--size=WxH` (default `1344x768`, snap-32, area ≤ 768×1344)
+- `--steps` (default 30)
 - `--seed`, `--out`
+
+## Layout
+
+`main.zig` handles the CLI. `core/` holds config, checkpoint checks, load policy, requests, sharding, and buffer helpers. Graphs live in `model/` and `vae/`. Prompt assembly and ref sizing live in `conditioning/`. Runtime load, compile, generate, and media I/O live in `runtime/`. Tests sit in `tests/` by subsystem.
 
 Muxing needs `ffmpeg` on `PATH`.
 

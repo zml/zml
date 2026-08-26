@@ -3,18 +3,16 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
-const generate = @import("generate.zig");
-
-const conditions = generate.conditions;
-const config = @import("model.zig").config;
-const memory = generate.memory;
-const pipeline = generate.pipeline;
-const repo = generate.ckpt;
-const request = generate.request;
-const session = generate.session;
-const sharding = generate.sharding;
-const policy = @import("model.zig").policy;
-const weights = @import("model.zig").weights;
+const conditions = @import("runtime/conditions.zig");
+const config = @import("core/config.zig");
+const memory = @import("core/memory.zig");
+const pipeline = @import("runtime/pipeline.zig");
+const policy = @import("core/policy.zig");
+const repo = @import("runtime/repository.zig");
+const request = @import("core/request.zig");
+const session = @import("runtime/session.zig");
+const sharding = @import("core/sharding.zig");
+const weights = @import("core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -29,8 +27,8 @@ const Args = struct {
     last_image: []const u8 = "",
     refs: []const u8 = "",
     duration: f32 = 5.0,
-    ratio: config.Aspect = .@"16:9",
-    canvas: config.Canvas = .auto,
+    size: []const u8 = config.default_size,
+    steps: u32 = config.default_steps,
     seed: u64 = 0,
     out: []const u8 = "output",
     dit: []const u8 = "",
@@ -48,20 +46,14 @@ const Args = struct {
         \\   --last-image=<path> Last frame
         \\   --refs=<paths>      Comma-separated images, videos, audio
         \\   --duration=<sec>    5–15 (default: 5)
-        \\   --ratio=<aspect>    21:9 | 16:9 | 4:3 | 1:1 | 3:4 | 9:16
-        \\   --canvas=<size>     auto | tiny | preview | full (auto: 768p or 640×352)
+        \\   --size=<WxH>        Pixels (default: 1344x768)
+        \\   --steps=<n>         Denoise steps (default: 30)
         \\   --seed=<n>          RNG seed
         \\   --out=<path>        Directory or .mp4 (default: output/)
         \\   --dit=<path>        Transformer weights (size / quant). Encoder and VAE stay with --model
         \\
     ;
 };
-
-fn officialPrompt(text: []const u8) []const u8 {
-    var end = text.len;
-    while (end > 0 and text[end - 1] == '\n') end -= 1;
-    return text[0..end];
-}
 
 fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
     log.err(fmt, args);
@@ -70,12 +62,13 @@ fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
 
 fn rejectUser(err: anyerror) anyerror {
     return switch (err) {
-        error.UnknownAspect => reject(err, "unknown --ratio (21:9|16:9|4:3|1:1|3:4|9:16)", .{}),
+        error.InvalidSize => reject(err, "--size must be WxH (example 1344x768)", .{}),
+        error.InvalidAspect => reject(err, "--size aspect must be between 1:4 and 4:1", .{}),
+        error.SizeTooLarge => reject(err, "--size area exceeds 768×1344 or needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
         error.InvalidDuration => reject(err, "--duration must be 5–15", .{}),
+        error.TooFewSteps => reject(err, "--steps must be >= 2", .{}),
         error.AudioRefNeedsVisual => reject(err, "audio --refs need at least one image or video", .{}),
         error.Ref2vaRejectsKeyframes => reject(err, "pass --image/--last-image or --refs, not both", .{}),
-        error.FullCanvasTooLarge => reject(err, "--canvas=full needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
-        error.ConditionedPreviewTooLarge => reject(err, "preview + media needs --canvas=tiny under {d} GiB", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
         error.Ref2vaTransformerMissing => reject(err, "ref2va needs transformer_ref/", .{}),
         error.TransformerMissing => reject(err, "transformer weights not found", .{}),
         error.AmbiguousDit => reject(err, "multiple transformer files match; pass --dit=<file>", .{}),
@@ -111,15 +104,15 @@ pub fn main(init: std.process.Init) !void {
 
     const args = stdx.flags.parse(init.minimal.args, Args);
     config.checkDuration(args.duration) catch |err| return rejectUser(err);
+    config.checkSteps(args.steps) catch |err| return rejectUser(err);
+    const px = config.parseSize(args.size) catch |err| return rejectUser(err);
     const refs = try request.refsFromComma(allocator, args.refs);
     defer request.freeRefs(allocator, refs, false);
     const variant = request.inferVariant(args.image, args.last_image, refs) catch |err| return rejectUser(err);
-    const encode_prompt = officialPrompt(args.prompt);
+    const encode_prompt = std.mem.trimEnd(u8, args.prompt, "\n");
     request.validate(.{
         .variant = variant,
         .prompt = encode_prompt,
-        .duration_s = args.duration,
-        .aspect = args.ratio,
         .first_image = args.image,
         .last_image = args.last_image,
         .refs = refs,
@@ -158,22 +151,19 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const device_bytes = config.minDeviceBytes(platform);
-    const canvas = config.canvasForTarget(platform.target, args.canvas, device_bytes);
-    config.checkCanvas(args.canvas, variant, canvas.short_side, device_bytes) catch |err| return rejectUser(err);
+    config.checkDeviceForSize(px.w, px.h, device_bytes) catch |err| return rejectUser(err);
 
     const shardings: sharding.Shardings = try .init(platform);
-    const px = config.pixelSize(args.ratio, canvas.short_side);
     const frames = config.alignFrameCount(config.frameCount(args.duration));
     log.info(
-        "run model={s} variant={s} canvas={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} device={d}GiB",
+        "run model={s} variant={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} device={d}GiB",
         .{
             args.model,
             @tagName(variant),
-            @tagName(args.canvas),
             px.w,
             px.h,
             frames,
-            canvas.steps,
+            args.steps,
             args.seed,
             @tagName(platform.target),
             shardings.model.numPartitionsForLogicalAxis(.model),
@@ -189,9 +179,9 @@ pub fn main(init: std.process.Init) !void {
     const opts: pipeline.Options = .{
         .variant = variant,
         .duration_s = args.duration,
-        .aspect = args.ratio,
-        .short_side = canvas.short_side,
-        .steps = canvas.steps,
+        .width = px.w,
+        .height = px.h,
+        .steps = args.steps,
         .seed = args.seed,
     };
     const geo = pipeline.Geometry.init(opts, models.dit.cfg);
@@ -219,10 +209,7 @@ pub fn main(init: std.process.Init) !void {
         try conditions.tokenize(allocator, &tok_enc, encode_prompt);
     defer encoded.deinit(allocator);
 
-    const geo_work = if (hasMedia(args))
-        geo.withConditions(encoded.conds.target_video_offset, encoded.conds.target_audio_offset)
-    else
-        geo;
+    const geo_work = geo.withConditions(encoded.conds.target_video_offset, encoded.conds.target_audio_offset);
     const extras = encoded.extras();
     const text_len: u32 = @intCast(encoded.tokens.len);
     log.info("prompt tokens={d} refs={d} cond_video={d} cond_audio={d}", .{
@@ -243,12 +230,28 @@ pub fn main(init: std.process.Init) !void {
         encoded.conds.references,
     );
     defer packed_run.deinit(allocator);
-    pipeline.describe(opts, geo_work, packed_run.layout);
+    log.info(
+        "layout {s} {d}x{d} {d} frames ({d:.1}s) latents {d}x{d}x{d} audio_t={d} seq={d} steps={d} seed={d}",
+        .{
+            @tagName(opts.variant),
+            geo_work.pixel_w,
+            geo_work.pixel_h,
+            geo_work.frames,
+            opts.duration_s,
+            geo_work.latent_t,
+            geo_work.latent_h,
+            geo_work.latent_w,
+            geo_work.audio_t,
+            packed_run.layout.seqLen(),
+            opts.steps,
+            opts.seed,
+        },
+    );
 
     const core0 = models.dit.inner.blocks[0].corePart();
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
-    const mem = memory.planWith(.{
+    const mem = memory.plan(.{
         .geo = geo_work,
         .layout = packed_run.layout,
         .hidden = models.dit.cfg.hidden_size,
@@ -339,6 +342,7 @@ pub fn main(init: std.process.Init) !void {
             .audio_patches = encoded.conds.audio_patches,
         },
         .seed = args.seed,
+        .resident_blocks = mem.resident_blocks,
         .prompt = encode_prompt,
         .out = args.out,
     });
