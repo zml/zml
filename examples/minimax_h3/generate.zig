@@ -4268,6 +4268,7 @@ pub const decode = struct {
     const vae = @import("vae.zig").geom;
     const visual_vae = @import("vae.zig").visual;
     const weights = @import("model.zig").weights;
+    const policy = @import("model.zig").policy;
 
     const log = std.log.scoped(.minimax_h3_decode);
 
@@ -4326,7 +4327,7 @@ pub const decode = struct {
         }
     };
 
-    const load_window: usize = 4;
+    const load_window: usize = policy.vae_load_window;
 
     fn loadVisualEmbed(
         allocator: std.mem.Allocator,
@@ -5932,6 +5933,78 @@ pub const session = struct {
         }
     }
 
+    fn envPath(name: [:0]const u8) ?[]const u8 {
+        const raw = std.c.getenv(name) orelse return null;
+        const path = std.mem.span(raw);
+        return if (path.len == 0) null else path;
+    }
+
+    fn openDumpDir(io: std.Io) !?std.Io.Dir {
+        const path = envPath("H3_LAYER_DUMP") orelse return null;
+        try std.Io.Dir.cwd().createDirPath(io, path);
+        if (std.fs.path.isAbsolute(path)) return try std.Io.Dir.openDirAbsolute(io, path, .{});
+        return try std.Io.Dir.cwd().openDir(io, path, .{});
+    }
+
+    fn writeDumpBytes(io: std.Io, dir: std.Io.Dir, name: []const u8, bytes: []const u8) !void {
+        const file = try dir.createFile(io, name, .{});
+        defer file.close(io);
+        var writer = file.writer(io, &.{});
+        try writer.interface.writeAll(bytes);
+    }
+
+    fn writeDumpShape(io: std.Io, dir: std.Io.Dir, name: []const u8, dims: []const i64) !void {
+        var buf: [128]u8 = undefined;
+        var used: usize = 0;
+        for (dims, 0..) |d, i| {
+            const part = if (i == 0)
+                try std.fmt.bufPrint(buf[used..], "{d}", .{d})
+            else
+                try std.fmt.bufPrint(buf[used..], " {d}", .{d});
+            used += part.len;
+        }
+        var path_buf: [160]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}.shape", .{name});
+        try writeDumpBytes(io, dir, path, buf[0..used]);
+    }
+
+    fn dumpHostF32(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []const f32, dims: []const i64) !void {
+        var path_buf: [160]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}.f32", .{name});
+        try writeDumpBytes(io, dir, path, std.mem.sliceAsBytes(values));
+        try writeDumpShape(io, dir, name, dims);
+    }
+
+    fn dumpHostU32(io: std.Io, dir: std.Io.Dir, name: []const u8, values: []const u32, dims: []const i64) !void {
+        var path_buf: [160]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}.u32", .{name});
+        try writeDumpBytes(io, dir, path, std.mem.sliceAsBytes(values));
+        try writeDumpShape(io, dir, name, dims);
+    }
+
+    fn dumpBuffer(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        dir: std.Io.Dir,
+        name: []const u8,
+        buf: *zml.Buffer,
+    ) !void {
+        const slice = try buf.toSliceAlloc(allocator, io);
+        defer slice.free(allocator);
+        const out = try allocator.alloc(f32, slice.shape.count());
+        defer allocator.free(out);
+        switch (slice.shape.dtype()) {
+            .f32 => @memcpy(out, slice.items(f32)),
+            .bf16 => {
+                const src = slice.items(zml.floats.BFloat16);
+                for (out, src) |*d, s| d.* = s.toF32();
+            },
+            else => return error.UnsupportedEmbedDtype,
+        }
+        try dumpHostF32(io, dir, name, out, slice.shape.dims());
+        log.info("dump {s} {any}", .{ name, slice.shape.dims() });
+    }
+
     pub const VisionSpan = struct {
         start: u32,
         tokens: u32,
@@ -5987,7 +6060,7 @@ pub const session = struct {
         var token_buf = try bufferFromItems(io, platform, token_shape, tokens);
         defer token_buf.deinit();
         const encode_start: std.Io.Timestamp = .now(io, .awake);
-        log.info("encoder: start tokens={d} layers={d}", .{ tokens.len, loaded.inner.layers.len });
+        log.info("encoder: start tokens={d} layers={d} prefetch={d}", .{ tokens.len, loaded.inner.layers.len, policy.enc_prefetch });
         var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
         defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
         var embed_runner = try zml.FnExe(encoder.EmbedTokens.forward).Runner(.{.embedding}).init(&compiled.encode_embed, allocator, .{
@@ -5995,25 +6068,31 @@ pub const session = struct {
         });
         defer embed_runner.deinit(allocator);
 
-        var loaders = [2]zml.io.Loader{
-            try weights.initLoader(allocator, platform),
-            try weights.initLoader(allocator, platform),
-        };
-        defer loaders[0].deinit();
-        defer loaders[1].deinit();
+        const prefetch = policy.enc_prefetch;
+        var loaders: [prefetch]zml.io.Loader = undefined;
+        var loaders_ready: u32 = 0;
+        defer {
+            var k: u32 = 0;
+            while (k < loaders_ready) : (k += 1) loaders[k].deinit();
+        }
+        while (loaders_ready < prefetch) : (loaders_ready += 1) {
+            loaders[loaders_ready] = try weights.initLoader(allocator, platform);
+        }
 
         const n_layers = loaded.inner.layers.len;
         const EncFut = @TypeOf(try io.concurrent(loadEncoderLayer, .{
             allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
         }));
-        var current_f: ?EncFut = if (n_layers > 0) try io.concurrent(loadEncoderLayer, .{
-            allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
-        }) else null;
-        var next_f: ?EncFut = if (n_layers > 1) try io.concurrent(loadEncoderLayer, .{
-            allocator, io, platform, loaded, store, shardings, @as(usize, 1), progress, &loaders[1],
-        }) else null;
-        errdefer cancelEnc(&current_f, io);
-        errdefer cancelEnc(&next_f, io);
+        var futs: [prefetch]?EncFut = .{null} ** prefetch;
+        errdefer {
+            for (&futs) |*f| cancelEnc(f, io);
+        }
+        var spawned: usize = 0;
+        while (spawned < prefetch and spawned < n_layers) : (spawned += 1) {
+            futs[spawned] = try io.concurrent(loadEncoderLayer, .{
+                allocator, io, platform, loaded, store, shardings, spawned, progress, &loaders[spawned],
+            });
+        }
 
         var hidden: zml.Buffer = undefined;
         embed_runner.run(io, .{
@@ -6084,13 +6163,15 @@ pub const session = struct {
         defer if (layer_runner) |*r| r.deinit(allocator);
         var layer_i: usize = 0;
         while (layer_i < n_layers) : (layer_i += 1) {
-            var layer_bufs = try current_f.?.await(io);
-            current_f = null;
+            const slot = layer_i % prefetch;
+            var layer_bufs = try futs[slot].?.await(io);
+            futs[slot] = null;
             defer encoder.TransformerLayer.unloadBuffers(&layer_bufs);
-            current_f = next_f;
-            next_f = if (layer_i + 2 < n_layers) try io.concurrent(loadEncoderLayer, .{
-                allocator, io, platform, loaded, store, shardings, layer_i + 2, progress, &loaders[(layer_i + 2) % 2],
-            }) else null;
+            if (layer_i + prefetch < n_layers) {
+                futs[slot] = try io.concurrent(loadEncoderLayer, .{
+                    allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
+                });
+            }
             if (layer_runner) |*r| {
                 weights.rebake(r, .{ .layer = layer_bufs });
             } else {
@@ -6116,6 +6197,12 @@ pub const session = struct {
             hidden = next;
         }
         log.info("encoder: ok tokens={d} layers={d} [{f}]", .{ tokens.len, n_layers, encode_start.untilNow(io, .awake) });
+        if (try openDumpDir(io)) |dir| {
+            var dump = dir;
+            defer dump.close(io);
+            try dumpBuffer(allocator, io, dump, "prompt_embeds", &hidden);
+            try dumpHostU32(io, dump, "tokens", tokens, &.{@intCast(tokens.len)});
+        }
         return hidden;
     }
 
@@ -6161,6 +6248,13 @@ pub const session = struct {
         if (video.len != geo.video_tokens * geo.video_patch_dim) return error.VideoNoiseSize;
         if (audio.len != geo.audio_tokens * geo.audio_dim) return error.AudioNoiseSize;
 
+        var dump_dir = try openDumpDir(io);
+        defer if (dump_dir) |*d| d.close(io);
+        if (dump_dir) |dir| {
+            try dumpHostF32(io, dir, "video_noise", video, &.{ 1, @intCast(geo.video_tokens), @intCast(geo.video_patch_dim) });
+            try dumpHostF32(io, dir, "audio_noise", audio, &.{ 1, @intCast(geo.audio_tokens), @intCast(geo.audio_dim) });
+        }
+
         const video_shape = zml.Shape.init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32);
         const audio_shape = zml.Shape.init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32);
         const seq = layout.seqLen();
@@ -6181,6 +6275,14 @@ pub const session = struct {
         defer adaln_buf.deinit();
         var time_idx = try bufferFromItems(io, platform, .init(.{ .s = seq }, .u32), host.timestep_indices);
         defer time_idx.deinit();
+        if (dump_dir) |dir| {
+            try dumpHostF32(io, dir, "positions", host.positions, &.{ @intCast(seq), 3 });
+            try dumpHostU32(io, dir, "video_indices", host.video_indices, &.{@intCast(geo.video_tokens)});
+            try dumpHostU32(io, dir, "audio_indices", host.audio_indices, &.{@intCast(geo.audio_tokens)});
+            try dumpHostU32(io, dir, "text_indices", host.text_indices, &.{@intCast(text_len)});
+            try dumpHostU32(io, dir, "adaln_indices", host.adaln_indices, &.{@intCast(seq)});
+            try dumpHostU32(io, dir, "timestep_indices", host.timestep_indices, &.{@intCast(seq)});
+        }
 
         var text_bufs = try loaded.loadTextPrep(allocator, io, platform, store, shardings, progress);
         defer dit.TextPrep.unloadBuffers(&text_bufs, allocator);
@@ -6249,12 +6351,13 @@ pub const session = struct {
             .block_core_bytes = core_bytes / @max(1, tp),
             .dtype_bytes = policy.dtypeBytes(loaded.inner.blocks[0].norm1.weight.dtype()),
         });
-        const n_resident = @min(decision.resident_blocks, @as(u32, @intCast(n_blocks)));
+        const n_resident = policy.ditKeepBlocks(decision.resident_blocks, @intCast(n_blocks));
         const group_size = @max(1, @min(compiled.group_size, n_resident));
         log.info(
-            "denoise: prepare blocks={d} resident={d} group={d} attn={s} core={d}MiB tables={d}MiB",
+            "denoise: prepare blocks={d} resident={d} keep={d} group={d} attn={s} core={d}MiB tables={d}MiB",
             .{
                 n_blocks,
+                decision.resident_blocks,
                 n_resident,
                 group_size,
                 @tagName(decision.attention),
@@ -6356,7 +6459,7 @@ pub const session = struct {
         defer if (group_layers.len != 0) allocator.free(group_layers);
         var group_tables: []zml.Buffer = &.{};
         defer if (group_tables.len != 0) allocator.free(group_tables);
-        const use_group = compiled.block_group != null and group_size > 1 and group_size == compiled.group_size;
+        const use_group = dump_dir == null and compiled.block_group != null and group_size > 1 and group_size == compiled.group_size;
         if (use_group) {
             group_layers = try allocator.alloc(zml.Bufferized(dit.BlockCore), group_size);
             group_tables = try allocator.alloc(zml.Buffer, group_size);
@@ -6400,6 +6503,7 @@ pub const session = struct {
                 .opts = .{ .wait = true },
             });
             defer hidden.deinit();
+            if (step_i == 0) if (dump_dir) |dir| try dumpBuffer(allocator, io, dir, "step0_embed", &hidden);
 
             var i: usize = 0;
             if (use_group) {
@@ -6459,6 +6563,11 @@ pub const session = struct {
                 });
                 hidden.deinit();
                 hidden = next;
+                if (step_i == 0) if (dump_dir) |dir| {
+                    var name_buf: [32]u8 = undefined;
+                    const name = try std.fmt.bufPrint(&name_buf, "step0_block_{d:0>2}", .{i});
+                    try dumpBuffer(allocator, io, dir, name, &hidden);
+                };
             }
 
             var video_out: zml.Buffer = undefined;
@@ -6475,6 +6584,10 @@ pub const session = struct {
                 .opts = .{ .wait = true },
                 .outputs = .{ .video = &video_out, .audio = &audio_out },
             });
+            if (step_i == 0) if (dump_dir) |dir| {
+                try dumpBuffer(allocator, io, dir, "step0_video_vel", &video_out);
+                try dumpBuffer(allocator, io, dir, "step0_audio_vel", &audio_out);
+            };
             defer video_out.deinit();
             defer audio_out.deinit();
 
@@ -6612,6 +6725,7 @@ pub const session = struct {
             try std.Io.Dir.cwd().openDir(io, dest.dir, .{});
         defer if (!dest.isCwd()) out_dir.close(io);
         try writeText(io, out_dir, "prompt.txt", req.brief);
+        log.info("stream: encode prefetch={d} vae_window={d}", .{ policy.enc_prefetch, policy.vae_load_window });
 
         var text = try encodeText(
             allocator,

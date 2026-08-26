@@ -14,6 +14,7 @@ const repo = generate.ckpt;
 const request = generate.request;
 const session = generate.session;
 const sharding = generate.sharding;
+const policy = @import("model.zig").policy;
 const weights = @import("model.zig").weights;
 
 const log = std.log.scoped(.minimax_h3);
@@ -257,7 +258,7 @@ pub fn main(init: std.process.Init) !void {
         return rejectUser(error.MemoryPlanUnsafe);
     }
     log.info(
-        "memory peak={d}MiB act={d}MiB block={d}MiB scores={d}MiB fa2={d}MiB tables={d}MiB resident={d} group={d} tile_batch={d} attn={s}",
+        "memory peak={d}MiB act={d}MiB block={d}MiB scores={d}MiB fa2={d}MiB tables={d}MiB resident={d} keep={d} group={d} tile_batch={d} attn={s}",
         .{
             mem.peak_bytes / (1024 * 1024),
             mem.activation_bytes / (1024 * 1024),
@@ -266,6 +267,7 @@ pub fn main(init: std.process.Init) !void {
             mem.fa2_scratch_bytes / (1024 * 1024),
             mem.adaln_table_bytes / (1024 * 1024),
             mem.resident_blocks,
+            policy.ditKeepBlocks(mem.resident_blocks, @intCast(models.dit.cfg.num_layers)),
             mem.group_size,
             mem.tile_batch,
             @tagName(mem.attention),

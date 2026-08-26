@@ -491,6 +491,19 @@ pub const policy = struct {
         return 4;
     }
 
+    /// Encode is a single pass: extra resident layers do not help. Hide H2D behind compute.
+    pub const enc_prefetch: u32 = 4;
+    /// Visual VAE keeps every block after the first fill; only the fill is parallel.
+    pub const vae_load_window: u32 = 8;
+
+    /// Keep the DiT tail on-device when it is one group or less. Reloading
+    /// those blocks every step costs more than the 1–2 GiB they occupy.
+    pub fn ditKeepBlocks(resident: u32, layers: u32) u32 {
+        if (resident >= layers) return layers;
+        if (resident + groupSize(resident) >= layers) return layers;
+        return resident;
+    }
+
     pub fn tileBatch(tile_count: u32, tile_act_bytes: u64, headroom: u64, devices: u32) u32 {
         if (tile_count == 0) return 1;
         const fit: u32 = if (tile_act_bytes == 0)

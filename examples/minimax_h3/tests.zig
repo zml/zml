@@ -1598,6 +1598,13 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expect(policy_mod.groupSize(0) == 1);
     try std.testing.expect(policy_mod.groupSize(2) == 2);
     try std.testing.expect(policy_mod.groupSize(8) == 4);
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.enc_prefetch);
+    try std.testing.expectEqual(@as(u32, 8), policy_mod.vae_load_window);
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(46, 50));
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(50, 50));
+    try std.testing.expectEqual(@as(u32, 40), policy_mod.ditKeepBlocks(40, 50));
+    try std.testing.expectEqual(@as(u32, 0), policy_mod.ditKeepBlocks(0, 50));
+    try std.testing.expectEqual(@as(u32, 3), policy_mod.ditKeepBlocks(2, 3));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(0, 1, 100, 2));
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
