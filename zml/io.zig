@@ -25,7 +25,7 @@ const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
-    id_to_sources: std.AutoHashMapUnmanaged(usize, []*safetensors.Tensor),
+    id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, []*safetensors.Tensor),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
@@ -44,7 +44,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
-    fn putSourcesNoClobber(self: *TensorStore, id: usize, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
+    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
@@ -85,7 +85,7 @@ pub const TensorStore = struct {
         return sources[0].reader(io, buffer, .{});
     }
 
-    pub fn getSourcesById(self: *const TensorStore, id: usize) ?[]*safetensors.Tensor {
+    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?[]*safetensors.Tensor {
         return self.id_to_sources.get(id);
     }
 
