@@ -153,7 +153,7 @@ pub const Shape = struct {
     pub const AxesArray = stdx.BoundedArray(u3, constants.MAX_RANK);
     pub const PartitionArray = stdx.BoundedArray(PartitionSpec, constants.MAX_RANK);
 
-    const UnknownTags: TagsArray = .{ .len = 0, .buffer = [_]Tag{TagUnknown} ** constants.MAX_RANK };
+    const UnknownTags: TagsArray = .{ .len = 0, .buffer = @splat(TagUnknown) };
 
     _dtype: DataType,
     _dims: DimsArray = .empty,
@@ -1636,7 +1636,7 @@ pub const Shape = struct {
     pub fn iterator(self: Shape) MultiDimIterator {
         return .{
             .shape = self,
-            .current_coords = .{0} ** Shape.MAX_RANK,
+            .current_coords = @splat(0),
             .flat_index = 0,
         };
     }
