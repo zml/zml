@@ -733,8 +733,8 @@ pub fn compileVision(
     const block_exe = try compileLogged(vision.VisionBlock.forward, "minimax_h3_vision_block", ctx, .{.{
         .layer = model.blocks[0],
         .hidden = .init(.{ .b = 1, .s = seq, .d = cfg.hidden_size }, dt),
-        .cos = .init(.{ .s = seq, .hd = cfg.headDim() }, dt),
-        .sin = .init(.{ .s = seq, .hd = cfg.headDim() }, dt),
+        .cos = .init(.{ .s = seq, .hd = cfg.headDim() }, .f32),
+        .sin = .init(.{ .s = seq, .hd = cfg.headDim() }, .f32),
     }});
     errdefer block_exe.deinit();
     const merger_exe = try compileLogged(vision.Merger.forward, "minimax_h3_vision_merger", ctx, .{.{
