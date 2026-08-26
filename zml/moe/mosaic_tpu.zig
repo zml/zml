@@ -150,14 +150,14 @@ fn alignSortedRowsByGroup(rows: Tensor, expert_ids_sorted: Tensor, group_sizes: 
     const group_ends = group_sizes.cumulativeSum(.expert);
     const group_starts = Tensor.concatenate(&.{
         Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
-        group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+        group_ends.slice(.expert, .{ .end = num_groups - 1 }),
     }, .expert);
 
     const padded_group_sizes = group_sizes.addConstant(tile_m - 1).divByConst(tile_m).mul(Tensor.scalar(tile_m, .i32));
     const padded_group_ends = padded_group_sizes.cumulativeSum(.expert);
     const padded_group_starts = Tensor.concatenate(&.{
         Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
-        padded_group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+        padded_group_ends.slice(.expert, .{ .end = num_groups - 1 }),
     }, .expert);
 
     const logical_positions = Tensor.arange(.{ .end = rows.dim(.token) }, .i32).withTags(.{.token});
@@ -261,13 +261,13 @@ pub fn callGmmEp(
         },
     ).out;
 
-    return out.slice1d(.out, .{ .end = out_n });
+    return out.slice(.out, .{ .end = out_n });
 }
 
 fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
 
     return switch (mode) {
         .silu => gate.silu().mul(up),
