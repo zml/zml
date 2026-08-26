@@ -5,9 +5,49 @@ const zml = @import("zml");
 const buffers = @import("../core/buffers.zig");
 const config_mod = @import("../core/config.zig");
 const geometry = @import("../conditioning/geometry.zig");
+const vision_conv = @import("vision_conv.zig");
+const vision_sdpa = @import("vision_sdpa.zig");
 const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_vision);
+
+const dump_blocks = [_]u32{ 0, 7, 8, 15, 16, 23, 24, 26 };
+
+fn dumpEnvPath() ?[]const u8 {
+    const raw = std.c.getenv("H3_LAYER_DUMP") orelse return null;
+    const path = std.mem.span(raw);
+    return if (path.len == 0) null else path;
+}
+
+fn dumpHostF32(io: std.Io, name: []const u8, values: []const f32, dims: []const i64) !void {
+    const path = dumpEnvPath() orelse return;
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    var dir = if (std.fs.path.isAbsolute(path))
+        try std.Io.Dir.openDirAbsolute(io, path, .{})
+    else
+        try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    var file_buf: [160]u8 = undefined;
+    const file_name = try std.fmt.bufPrint(&file_buf, "{s}.f32", .{name});
+    const file = try dir.createFile(io, file_name, .{});
+    defer file.close(io);
+    var writer = file.writer(io, &.{});
+    try writer.interface.writeAll(std.mem.sliceAsBytes(values));
+    var shape_buf: [128]u8 = undefined;
+    var used: usize = 0;
+    for (dims, 0..) |d, i| {
+        const part = if (i == 0)
+            try std.fmt.bufPrint(shape_buf[used..], "{d}", .{d})
+        else
+            try std.fmt.bufPrint(shape_buf[used..], " {d}", .{d});
+        used += part.len;
+    }
+    const shape_name = try std.fmt.bufPrint(&file_buf, "{s}.shape", .{name});
+    const shape_file = try dir.createFile(io, shape_name, .{});
+    defer shape_file.close(io);
+    var shape_writer = shape_file.writer(io, &.{});
+    try shape_writer.interface.writeAll(shape_buf[0..used]);
+}
 
 pub const VISION_START: u32 = 151652;
 pub const VISION_END: u32 = 151653;
@@ -136,14 +176,59 @@ const LayerNorm = struct {
     }
 };
 
+/// Official merger `nn.GELU()` is erf, not `gelu_pytorch_tanh`.
+fn geluErf(x: zml.Tensor) zml.Tensor {
+    const x_f = x.convert(.f32);
+    const z = x_f.scale(std.math.sqrt(0.5));
+    return x_f.mul(erfApprox(z).addConstant(1)).scale(0.5).convert(x.dtype());
+}
+
+fn erfApprox(x: zml.Tensor) zml.Tensor {
+    const x_f = x.convert(.f32);
+    const ax = x_f.abs();
+    const t = ax.scale(0.3275911).addConstant(1).powByConst(-1);
+    var poly = t.scale(1.061405429).addConstant(-1.453152027);
+    poly = t.mul(poly).addConstant(1.421413741);
+    poly = t.mul(poly).addConstant(-0.284496736);
+    poly = t.mul(poly).addConstant(0.254829592);
+    poly = t.mul(poly);
+    const erfc = poly.mul(ax.mul(ax).negate().exp());
+    return x_f.sign().mul(erfc.negate().addConstant(1));
+}
+
 fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-    const half = @divExact(x.dim(-1), 2);
-    const x1 = x.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x.slice1d(-1, .{ .start = half, .end = x.dim(-1) });
+    const x_f = x.convert(.f32);
+    const half = @divExact(x_f.dim(-1), 2);
+    const x1 = x_f.slice1d(-1, .{ .start = 0, .end = half });
+    const x2 = x_f.slice1d(-1, .{ .start = half, .end = x_f.dim(-1) });
     const rotated = zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-    const c = cos.broad(x.shape());
-    const s = sin.broad(x.shape());
-    return x.mul(c).add(rotated.mul(s));
+    const c = cos.convert(.f32).broad(x_f.shape());
+    const s = sin.convert(.f32).broad(x_f.shape());
+    return x_f.mul(c).add(rotated.mul(s)).convert(x.dtype());
+}
+
+/// Official visual is Blackwell flash SDPA at native head_dim=72. FA2 pad-96 and
+/// full-seq f32 softmax both seed merger row 1189 from the current embed.
+fn visionAttn(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, head_dim: i64) zml.Tensor {
+    const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+    switch (q.dtype()) {
+        .bf16, .f16 => return vision_sdpa.forward(q, k, v, scale),
+        else => {
+            const scores = q.dot(k, .hd).scale(scale).convert(.f32).softmax(.k).convert(q.dtype());
+            return scores.dot(v, .k).transpose(q.shape());
+        },
+    }
+}
+
+pub const AttnProbeInput = struct {
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+};
+pub const AttnProbeOutput = struct { o: zml.Tensor };
+
+pub fn probeAttn(input: AttnProbeInput) AttnProbeOutput {
+    return .{ .o = visionAttn(input.q, input.k, input.v, input.q.dim(.hd)) };
 }
 
 pub const VisionBlock = struct {
@@ -198,7 +283,10 @@ pub const VisionBlock = struct {
         const v = parts[2].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim });
         q = applyRotary(q, input.cos, input.sin);
         k = applyRotary(k, input.cos, input.sin);
-        const attn = zml.nn.sdpa(q.rename(.{ .s = .q }), k.rename(.{ .s = .k }), v.rename(.{ .s = .k }), .{}).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
+        const q_s = q.rename(.{ .s = .q });
+        const k_s = k.rename(.{ .s = .k });
+        const v_s = v.rename(.{ .s = .k });
+        const attn = visionAttn(q_s, k_s, v_s, self.head_dim).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         const x1 = residual.add(asLinear(self.proj, attn).rename(.{ .dout = .d }));
         const ff = asLinear(self.fc2, asLinear(self.fc1, self.norm2.forward(x1)).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .hidden = x1.add(ff).reuseBuffer(input.hidden) };
@@ -253,7 +341,7 @@ pub const Merger = struct {
             x = self.norm.forward(x);
             x = x.splitAxis(.s, .{ .s = grouped, .m = self.merge }).merge(.{ .d = .{ .m, .d } });
         }
-        x = asLinear(self.fc2, asLinear(self.fc1, x).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+        x = asLinear(self.fc2, geluErf(asLinear(self.fc1, x)).rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .tokens = x };
     }
 };
@@ -297,8 +385,13 @@ pub const EmbedInput = struct {
 };
 pub const EmbedOutput = struct { hidden: zml.Tensor };
 
+pub fn register(platform: *const zml.Platform) !void {
+    try vision_conv.register(platform);
+    try vision_sdpa.register(platform);
+}
+
 pub fn embed(input: EmbedInput) EmbedOutput {
-    const tokens = asLinear(input.model.proj, input.patches.withPartialTags(.{ .b, .s, .d })).rename(.{ .dout = .d });
+    const tokens = vision_conv.forward(input.model.proj, input.patches.withPartialTags(.{ .b, .s, .d }));
     return .{ .hidden = tokens.add(input.pos.convert(tokens.dtype())) };
 }
 
@@ -603,6 +696,19 @@ pub fn interpolatePos(allocator: std.mem.Allocator, table: []const f32, table_si
     return out;
 }
 
+/// Official `Qwen3VLVisionRotaryEmbedding` CPU f32 `inv_freq` for head_dim=72.
+/// `std.math.pow(f32)` differs by 1 ulp and splits merger rows.
+const official_inv_freq_hd72 = [_]u32{
+    0x3f800000, 0x3f1977cc, 0x3eb800d6, 0x3e5c9d35, 0x3e044133, 0x3d9e91b6,
+    0x3d3e1e95, 0x3ce3f280, 0x3c88a69b, 0x3c23d70a, 0x3bc47060, 0x3b6b8631,
+    0x3b0d3169, 0x3aa94938, 0x3a4af7f3, 0x39f35a5c, 0x3991e2e1, 0x392ee9bf,
+};
+
+fn visionInvFreq(i: u32, half: u32) f32 {
+    if (half == 36 and i < official_inv_freq_hd72.len) return @bitCast(official_inv_freq_hd72[i]);
+    return 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(i * 2)) / @as(f32, @floatFromInt(half)));
+}
+
 pub fn visionRope(allocator: std.mem.Allocator, gh: u32, gw: u32, head_dim: u32) !struct { cos: []f32, sin: []f32 } {
     const seq = gh * gw;
     const half = head_dim / 2;
@@ -624,7 +730,9 @@ pub fn visionRope(allocator: std.mem.Allocator, gh: u32, gw: u32, head_dim: u32)
                     const wpos: f32 = @floatFromInt(iw + dj);
                     var i: u32 = 0;
                     while (i < n_freq) : (i += 1) {
-                        const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(i * 2)) / @as(f32, @floatFromInt(half)));
+                        // Official encoder keeps rotary `inv_freq` in f32. `visual.to(bf16)`
+                        // (dump_vision) casts it and was the IMAGE_PAD vel gap.
+                        const freq = visionInvFreq(i, half);
                         const ang_h = hpos * freq;
                         const ang_w = wpos * freq;
                         const ch = @cos(ang_h);
@@ -759,10 +867,19 @@ fn runPatches(
         .opts = .{ .wait = true },
     });
     defer hidden.deinit();
+    if (dumpEnvPath() != null) {
+        try dumpHostF32(io, "vision_patches", patches, &.{ @intCast(seq), @intCast(loaded.cfg.patchIn()) });
+        try dumpHostF32(io, "vision_pos", pos, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
+        try dumpHostF32(io, "vision_rope_cos", rope_cos, &.{ @intCast(seq), @intCast(loaded.cfg.headDim()) });
+        try dumpHostF32(io, "vision_rope_sin", rope_sin, &.{ @intCast(seq), @intCast(loaded.cfg.headDim()) });
+        const embed_host = try buffers.toF32(allocator, io, hidden);
+        defer allocator.free(embed_host);
+        try dumpHostF32(io, "vision_embed", embed_host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
+    }
 
-    var cos_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, hidden.shape().dtype()), rope_cos);
+    var cos_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_cos);
     defer cos_buf.deinit();
-    var sin_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, hidden.shape().dtype()), rope_sin);
+    var sin_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_sin);
     defer sin_buf.deinit();
 
     var deepstack: [3][]f32 = .{ &.{}, &.{}, &.{} };
@@ -788,14 +905,23 @@ fn runPatches(
         });
         hidden.deinit();
         hidden = next;
+        if (dumpEnvPath() != null) {
+            for (dump_blocks) |want| {
+                if (block_i != want) continue;
+                const host = try buffers.toF32(allocator, io, hidden);
+                defer allocator.free(host);
+                var name_buf: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buf, "vision_block_{d}", .{block_i});
+                try dumpHostF32(io, name, host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
+            }
+        }
         if (ds_i < 3 and @as(i64, @intCast(block_i)) == loaded.cfg.deepstack_visual_indexes[ds_i]) {
             var ds_run = try zml.FnExe(Merger.forward).Runner(.{.model}).init(&compiled.deepstack, allocator, .{ .model = cache.deepstack[ds_i] });
             defer ds_run.deinit(allocator);
             var tokens: zml.Buffer = undefined;
             ds_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &tokens }, .opts = .{ .wait = true } });
             defer tokens.deinit();
-            const host = try buffers.toF32(allocator, io, tokens);
-            deepstack[ds_i] = host;
+            deepstack[ds_i] = try buffers.toF32(allocator, io, tokens);
             ds_i += 1;
         }
     }
@@ -804,6 +930,11 @@ fn runPatches(
     var merged_buf: zml.Buffer = undefined;
     merge_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &merged_buf }, .opts = .{ .wait = true } });
     defer merged_buf.deinit();
+    if (dumpEnvPath() != null) {
+        const hidden_host = try buffers.toF32(allocator, io, hidden);
+        defer allocator.free(hidden_host);
+        try dumpHostF32(io, "vision_hidden", hidden_host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
+    }
     const merged = try buffers.toF32(allocator, io, merged_buf);
     log.info("vision: ok merged={d} [{f}]", .{ merged.len, vision_start.untilNow(io, .awake) });
     return .{

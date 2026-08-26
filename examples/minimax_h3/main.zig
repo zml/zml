@@ -12,6 +12,7 @@ const repo = @import("runtime/repository.zig");
 const request = @import("core/request.zig");
 const session = @import("runtime/session.zig");
 const sharding = @import("core/sharding.zig");
+const vision = @import("model/vision.zig");
 const weights = @import("core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
@@ -32,6 +33,7 @@ const Args = struct {
     seed: u64 = 0,
     out: []const u8 = "output",
     dit: []const u8 = "",
+    vision_only: bool = false,
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
@@ -51,6 +53,7 @@ const Args = struct {
         \\   --seed=<n>          RNG seed
         \\   --out=<path>        Directory or .mp4 (default: output/)
         \\   --dit=<path>        Transformer weights (size / quant). Encoder and VAE stay with --model
+        \\   --vision-only       Encode vision / conditions, then exit (no DiT)
         \\
     ;
 };
@@ -148,6 +151,7 @@ pub fn main(init: std.process.Init) !void {
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     });
     defer platform.deinit(allocator, io);
+    try vision.register(platform);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const device_bytes = config.minDeviceBytes(platform);
@@ -247,6 +251,11 @@ pub fn main(init: std.process.Init) !void {
             opts.seed,
         },
     );
+
+    if (args.vision_only) {
+        log.info("vision-only: done tokens={d}", .{text_len});
+        return;
+    }
 
     const core0 = models.dit.inner.blocks[0].corePart();
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
