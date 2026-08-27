@@ -44,7 +44,7 @@ Default is official 768p: `--size=1344x768 --steps=30 --duration=5`. CUDA BFC gr
 
 ## Layout
 
-`main.zig` handles the CLI. `core/` holds config, checkpoint checks, load policy, requests, sharding, and buffer helpers. Graphs live in `model/` and `vae/`. Prompt assembly and ref sizing live in `conditioning/`. Runtime load, compile, generate, and media I/O live in `runtime/`. Tests sit in `tests/` by subsystem.
+`main.zig` handles the CLI. `core/` holds config, memory policy, requests, sharding, and weight/buffer helpers. Graphs live in `model/` and `vae/`. Prompt assembly and ref sizing live in `conditioning/`. Runtime load, compile, generate, and media I/O live in `runtime/` (including checkpoint discovery). Tests sit in `tests/` by subsystem.
 
 Muxing needs `ffmpeg` on `PATH`.
 

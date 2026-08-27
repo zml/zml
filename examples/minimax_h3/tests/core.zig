@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const checkpoint = @import("../core/checkpoint.zig");
 const memory_mod = @import("../core/memory.zig");
 const policy_mod = @import("../core/policy.zig");
 const config = @import("../core/config.zig");
@@ -22,7 +21,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testCanvasPresets();
     try testRequest(allocator);
     try testCheckpoint();
-    try testManifestRoundTrip(allocator);
     try testMemoryPlan(allocator);
     try testOfficialPin();
     try testTokenizerRelpaths();
@@ -290,15 +288,8 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 2), refs.len);
     try std.testing.expectEqual(packing.ReferenceKind.image, refs[0].kind);
     try std.testing.expectEqual(packing.ReferenceKind.video_audio, refs[1].kind);
-    try std.testing.expect(request_mod.hasAudio(refs));
-
-    const manifest =
-        \\[{"kind":"image","path":"x.png"},{"kind":"video","path":"y.mp4","soundtrack":"z.wav"}]
-    ;
-    const parsed = try request_mod.refsFromManifest(allocator, manifest);
-    defer request_mod.freeRefs(allocator, parsed, true);
-    try std.testing.expectEqual(@as(usize, 2), parsed.len);
-    try std.testing.expectEqual(packing.ReferenceKind.video_audio, parsed[1].kind);
+    try std.testing.expectEqualStrings("clip.mp4", refs[1].path);
+    try std.testing.expectEqualStrings("bed.wav", refs[1].soundtrack);
 
     try request_mod.validate(.{ .prompt = "hi", .variant = .t2va });
     try std.testing.expectError(error.IntentEmpty, request_mod.validate(.{ .prompt = "   ", .variant = .t2va }));
@@ -323,9 +314,6 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "b.png", &.{}));
     try std.testing.expectEqual(config.Variant.ref2va, try request_mod.inferVariant("", "", refs));
     try std.testing.expectError(error.Ref2vaRejectsKeyframes, request_mod.inferVariant("a.png", "", refs));
-    const csv = try request_mod.refsToCsv(allocator, parsed);
-    defer allocator.free(csv);
-    try std.testing.expectEqualStrings("x.png,y.mp4,z.wav", csv);
 }
 fn testCheckpoint() !void {
     const full = [_][]const u8{
@@ -334,55 +322,44 @@ fn testCheckpoint() !void {
         "blocks.0.adaln_proj.linear.weight",
         "final_layer.adaln_proj.linear.weight",
     };
-    try std.testing.expect(checkpoint.inspect(&full).has_adaln_proj);
-    try std.testing.expect(checkpoint.inspect(&full).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&full)) == null);
+    try std.testing.expect(repo.inspect(&full).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&full).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&full)) == null);
 
     const table_only = [_][]const u8{ "adaln_t_table", "video_patch_proj.weight" };
-    try std.testing.expect(!checkpoint.inspect(&table_only).has_adaln_proj);
-    try std.testing.expect(checkpoint.inspect(&table_only).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&table_only)) != null);
+    try std.testing.expect(!repo.inspect(&table_only).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&table_only).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&table_only)) != null);
 
     const no_time = [_][]const u8{"blocks.0.adaln_proj.linear.weight"};
-    try std.testing.expect(checkpoint.inspect(&no_time).has_adaln_proj);
-    try std.testing.expect(!checkpoint.inspect(&no_time).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&no_time)) != null);
+    try std.testing.expect(repo.inspect(&no_time).has_adaln_proj);
+    try std.testing.expect(!repo.inspect(&no_time).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
 
     const rank8 = [_][]const u8{ "adaln_t_table", "blocks.0.adaln_proj.linear.weight" };
-    try std.testing.expect(checkpoint.inspect(&rank8).has_adaln_proj);
-    try std.testing.expect(checkpoint.inspect(&rank8).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&rank8)) == null);
+    try std.testing.expect(repo.inspect(&rank8).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&rank8).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&rank8)) == null);
 
     const official = [_][]const u8{
         "proj_in.weight",
         "time_embedder.linear_1.weight",
         "transformer_blocks.0.adaln_proj.linear.weight",
     };
-    try std.testing.expect(checkpoint.inspect(&official).has_adaln_proj);
-    try std.testing.expect(checkpoint.inspect(&official).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&official)) == null);
+    try std.testing.expect(repo.inspect(&official).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&official).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&official)) == null);
 
-    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"fl2va"}));
-    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_ref2va_fp8_scaled.safetensors", &.{"ref2va"}));
-    try std.testing.expect(!checkpoint.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"ref2va"}));
-    try std.testing.expect(!checkpoint.safetensorsContains("notes.txt", &.{"fl2va"}));
-    try std.testing.expect(checkpoint.safetensorsContains("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", &.{}));
-    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_video_vae_fp16.safetensors", &.{ "video", "vae" }));
-    try std.testing.expect(checkpoint.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "audio", "vae" }));
-    try std.testing.expect(!checkpoint.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "video", "vae" }));
-    try std.testing.expect(checkpoint.isBundleLeaf("text_encoders"));
-    try std.testing.expect(!checkpoint.isBundleLeaf("transformer"));
-}
-fn testManifestRoundTrip(allocator: std.mem.Allocator) !void {
-    const src = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
-    defer request_mod.freeRefs(allocator, src, false);
-    const json = try request_mod.refsToManifest(allocator, src);
-    defer allocator.free(json);
-    const back = try request_mod.refsFromManifest(allocator, json);
-    defer request_mod.freeRefs(allocator, back, true);
-    try std.testing.expectEqual(src.len, back.len);
-    try std.testing.expectEqual(src[0].kind, back[0].kind);
-    try std.testing.expectEqual(src[1].kind, back[1].kind);
+    try std.testing.expect(repo.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"fl2va"}));
+    try std.testing.expect(repo.safetensorsContains("minimax_h3_ref2va_fp8_scaled.safetensors", &.{"ref2va"}));
+    try std.testing.expect(!repo.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"ref2va"}));
+    try std.testing.expect(!repo.safetensorsContains("notes.txt", &.{"fl2va"}));
+    try std.testing.expect(repo.safetensorsContains("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", &.{}));
+    try std.testing.expect(repo.safetensorsContains("minimax_h3_video_vae_fp16.safetensors", &.{ "video", "vae" }));
+    try std.testing.expect(repo.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "audio", "vae" }));
+    try std.testing.expect(!repo.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "video", "vae" }));
+    try std.testing.expect(repo.isBundleLeaf("text_encoders"));
+    try std.testing.expect(!repo.isBundleLeaf("transformer"));
 }
 fn testMemoryPlan(allocator: std.mem.Allocator) !void {
     const geo: pipeline.Geometry = .{
@@ -478,12 +455,12 @@ fn testGroupRefs(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(packing.ReferenceKind.video, src[2].kind);
 }
 fn testSchemaFixtures() !void {
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&.{})) != null);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
 
     const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale", "adaln_t_table" };
-    try std.testing.expect(checkpoint.inspect(&int8).has_adaln_proj);
-    try std.testing.expect(checkpoint.inspect(&int8).has_time);
-    try std.testing.expect(checkpoint.refuseReason(checkpoint.inspect(&int8)) == null);
+    try std.testing.expect(repo.inspect(&int8).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&int8).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&int8)) == null);
 }
 fn testAttentionPolicy() !void {
     const short = policy_mod.selectAttention(.{
@@ -495,7 +472,7 @@ fn testAttentionPolicy() !void {
         .causal = false,
         .tp = 2,
     });
-    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, short);
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, short);
 
     const long = policy_mod.selectAttention(.{
         .target = .cuda,
@@ -506,9 +483,9 @@ fn testAttentionPolicy() !void {
         .causal = false,
         .tp = 2,
     });
-    try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, long);
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, long);
 
-    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
         .target = .cpu,
         .dtype = .bf16,
         .head_dim = 128,
@@ -517,7 +494,7 @@ fn testAttentionPolicy() !void {
         .causal = false,
         .tp = 1,
     }));
-    try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
         .target = .cuda,
         .dtype = .f32,
         .head_dim = 128,
@@ -528,7 +505,7 @@ fn testAttentionPolicy() !void {
     }));
 
     for ([_]u32{ 1, 2, 4, 8 }) |tp| {
-        try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, policy_mod.selectAttention(.{
+        try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, policy_mod.selectAttention(.{
             .target = .cuda,
             .dtype = .bf16,
             .head_dim = 128,
@@ -537,7 +514,7 @@ fn testAttentionPolicy() !void {
             .causal = false,
             .tp = tp,
         }));
-        try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+        try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
             .target = .cuda,
             .dtype = .bf16,
             .head_dim = 128,
@@ -546,7 +523,7 @@ fn testAttentionPolicy() !void {
             .causal = false,
             .tp = tp,
         }));
-        try std.testing.expectEqual(policy_mod.AttnKind.vanilla, policy_mod.selectAttention(.{
+        try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
             .target = .cuda,
             .dtype = .bf16,
             .head_dim = 128,
@@ -555,7 +532,20 @@ fn testAttentionPolicy() !void {
             .causal = false,
             .tp = tp,
         }));
+        try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 7440,
+            .causal = false,
+            .tp = tp,
+            .flash = .cuda_fa3,
+        }));
     }
+    try std.testing.expect(policy_mod.isFlash(.cuda_fa2));
+    try std.testing.expect(policy_mod.isFlash(.cuda_fa3));
+    try std.testing.expect(!policy_mod.isFlash(.vanilla));
 }
 fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     const geo: pipeline.Geometry = .{
@@ -611,9 +601,24 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .head_dim = 128,
         .layers = 50,
     });
-    try std.testing.expectEqual(policy_mod.AttnKind.cuda_fa2, fa2.attention);
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, fa2.attention);
     try std.testing.expect(fa2.fa2_scratch_bytes > 0);
     try std.testing.expect(fa2.fa2_scratch_bytes < fa2.score_bytes);
+    const fa3 = memory_mod.plan(.{
+        .geo = geo,
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 9,
+        .device_bytes = 48 * 1024 * 1024 * 1024,
+        .tp = 2,
+        .target = .cuda,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .flash = .cuda_fa3,
+    });
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, fa3.attention);
+    try std.testing.expectEqual(fa2.fa2_scratch_bytes, fa3.fa2_scratch_bytes);
     try std.testing.expect(fa2.adaln_table_bytes > 0);
     try std.testing.expect(policy_mod.groupSize(0) == 1);
     try std.testing.expect(policy_mod.groupSize(2) == 2);

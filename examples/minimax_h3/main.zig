@@ -267,6 +267,7 @@ pub fn main(init: std.process.Init) !void {
         .target = platform.target,
         .block_core_bytes = weights.modelBytes(&core0) / @max(1, tp),
         .devices = @intCast(platform.devices.len),
+        .flash = .auto(platform),
     });
     if (!mem.safe) {
         log.err("{s} (peak {d} MiB)", .{ mem.reason, mem.peak_bytes / (1024 * 1024) });

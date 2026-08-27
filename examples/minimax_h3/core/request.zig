@@ -7,8 +7,6 @@ pub const Reference = struct {
     kind: packing.ReferenceKind,
     path: []const u8,
     soundtrack: []const u8 = "",
-    source_fps: f32 = 0,
-    source_rate: u32 = 0,
 };
 
 pub const Request = struct {
@@ -27,20 +25,6 @@ pub fn inferVariant(first_image: []const u8, last_image: []const u8, refs: []con
     }
     if (has_keyframes) return .fl2va;
     return .t2va;
-}
-
-pub fn refsToCsv(allocator: std.mem.Allocator, refs: []const Reference) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    for (refs, 0..) |r, i| {
-        if (i != 0) try out.append(allocator, ',');
-        try out.appendSlice(allocator, r.path);
-        if (r.soundtrack.len != 0) {
-            try out.append(allocator, ',');
-            try out.appendSlice(allocator, r.soundtrack);
-        }
-    }
-    return out.toOwnedSlice(allocator);
 }
 
 pub fn splitComma(allocator: std.mem.Allocator, text: []const u8) ![][]const u8 {
@@ -89,31 +73,6 @@ fn guessKind(path: []const u8) packing.ReferenceKind {
     if (std.ascii.eqlIgnoreCase(ext, ".mp4") or std.ascii.eqlIgnoreCase(ext, ".mov") or std.ascii.eqlIgnoreCase(ext, ".mkv") or std.ascii.eqlIgnoreCase(ext, ".webm"))
         return .video;
     return .image;
-}
-
-const ManifestEntry = struct {
-    kind: []const u8,
-    path: []const u8,
-    soundtrack: []const u8 = "",
-    fps: f32 = 0,
-    sample_rate: u32 = 0,
-};
-
-pub fn refsFromManifest(allocator: std.mem.Allocator, bytes: []const u8) ![]Reference {
-    const parsed = try std.json.parseFromSlice([]ManifestEntry, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    const out = try allocator.alloc(Reference, parsed.value.len);
-    for (parsed.value, out) |entry, *dst| {
-        const kind = parseKind(entry.kind) orelse return error.UnknownRefKind;
-        dst.* = .{
-            .kind = if (kind == .video and entry.soundtrack.len != 0) .video_audio else kind,
-            .path = try allocator.dupe(u8, entry.path),
-            .soundtrack = try allocator.dupe(u8, entry.soundtrack),
-            .source_fps = entry.fps,
-            .source_rate = entry.sample_rate,
-        };
-    }
-    return out;
 }
 
 pub fn freeRefs(allocator: std.mem.Allocator, refs: []Reference, owned_strings: bool) void {
@@ -171,51 +130,4 @@ pub fn validateRefs(refs: []const Reference) !void {
         }
     }
     if (n_aud != 0 and n_img == 0 and n_vid == 0) return error.AudioRefNeedsVisual;
-}
-
-pub fn refsToManifest(allocator: std.mem.Allocator, refs: []const Reference) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "[");
-    for (refs, 0..) |r, i| {
-        if (i != 0) try out.appendSlice(allocator, ",");
-        try out.appendSlice(allocator, "{\"kind\":\"");
-        try out.appendSlice(allocator, @tagName(r.kind));
-        try out.appendSlice(allocator, "\",\"path\":\"");
-        try out.appendSlice(allocator, r.path);
-        try out.appendSlice(allocator, "\"");
-        if (r.soundtrack.len != 0) {
-            try out.appendSlice(allocator, ",\"soundtrack\":\"");
-            try out.appendSlice(allocator, r.soundtrack);
-            try out.appendSlice(allocator, "\"");
-        }
-        if (r.source_fps != 0) {
-            var buf: [32]u8 = undefined;
-            const fps = try std.fmt.bufPrint(&buf, ",\"fps\":{d}", .{r.source_fps});
-            try out.appendSlice(allocator, fps);
-        }
-        if (r.source_rate != 0) {
-            var buf: [32]u8 = undefined;
-            const rate = try std.fmt.bufPrint(&buf, ",\"sample_rate\":{d}", .{r.source_rate});
-            try out.appendSlice(allocator, rate);
-        }
-        try out.appendSlice(allocator, "}");
-    }
-    try out.appendSlice(allocator, "]");
-    return out.toOwnedSlice(allocator);
-}
-
-pub fn hasAudio(refs: []const Reference) bool {
-    for (refs) |r| {
-        if (r.kind == .audio or r.kind == .video_audio or r.soundtrack.len != 0) return true;
-    }
-    return false;
-}
-
-fn parseKind(text: []const u8) ?packing.ReferenceKind {
-    if (std.mem.eql(u8, text, "image")) return .image;
-    if (std.mem.eql(u8, text, "video")) return .video;
-    if (std.mem.eql(u8, text, "audio")) return .audio;
-    if (std.mem.eql(u8, text, "video_audio")) return .video_audio;
-    return null;
 }

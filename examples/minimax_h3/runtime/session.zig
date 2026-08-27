@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const buffers = @import("../core/buffers.zig");
 const repository = @import("repository.zig");
 const config = @import("../core/config.zig");
 const decode = @import("decode.zig");
@@ -17,7 +16,6 @@ const presentation = @import("../conditioning/presentation.zig");
 const scheduler_mod = @import("../model/scheduler.zig");
 const vision = @import("../model/vision.zig");
 const weights = @import("../core/weights.zig");
-const multistep = @import("../model/multistep.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -66,45 +64,6 @@ const Latents = struct {
     }
 };
 
-fn scatterVisionHidden(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    hidden: *zml.Buffer,
-    merged: []const f32,
-    spans: []const presentation.VisionSpan,
-    hidden_dim: u32,
-) !void {
-    const slice = try hidden.toSliceAlloc(allocator, io);
-    defer slice.free(allocator);
-    var off: usize = 0;
-    switch (hidden.shape().dtype()) {
-        .f32 => {
-            const host = slice.items(f32);
-            for (spans) |span| {
-                const n = @as(usize, span.tokens) * hidden_dim;
-                @memcpy(host[@as(usize, span.start) * hidden_dim ..][0..n], merged[off..][0..n]);
-                off += n;
-            }
-        },
-        .bf16 => {
-            const host = slice.items(zml.floats.BFloat16);
-            for (spans) |span| {
-                const n = @as(usize, span.tokens) * hidden_dim;
-                var i: usize = 0;
-                while (i < n) : (i += 1) {
-                    host[@as(usize, span.start) * hidden_dim + i] = .fromF32(merged[off + i]);
-                }
-                off += n;
-            }
-        },
-        else => return error.UnsupportedEmbedDtype,
-    }
-    const replacement = try zml.Buffer.fromBytes(io, platform, slice.shape, .replicated, slice.constData());
-    hidden.deinit();
-    hidden.* = replacement;
-}
-
 fn scalarU32(io: std.Io, platform: *const zml.Platform, value: u32) !zml.Buffer {
     var item: u32 = value;
     return zml.Buffer.fromBytes(io, platform, .init(.{}, .u32), .replicated, std.mem.asBytes(&item));
@@ -139,7 +98,7 @@ fn encodeText(
     const head_dim: u32 = @intCast(loaded.cfg.head_dim);
 
     const token_shape = zml.Shape.init(.{ .b = 1, .s = tokens.len }, .u32);
-    var token_buf = try buffers.fromItems(io, platform, token_shape, tokens);
+    var token_buf = try weights.fromItems(io, platform, token_shape, tokens);
     defer token_buf.deinit();
     const encode_start: std.Io.Timestamp = .now(io, .awake);
     const n_layers = loaded.inner.layers.len;
@@ -190,35 +149,32 @@ fn encodeText(
     errdefer hidden.deinit();
 
     if (extras.vision_merged) |merged| {
-        if (compiled.encode_scatter) |*scatter_exe| {
-            const n_vis: u32 = @intCast(@divExact(merged.len, hidden_dim));
-            const idx = try allocator.alloc(u32, n_vis);
-            defer allocator.free(idx);
-            var off: usize = 0;
-            for (extras.vision_spans) |span| {
-                var t: u32 = 0;
-                while (t < span.tokens) : (t += 1) {
-                    idx[off] = span.start + t;
-                    off += 1;
-                }
+        const scatter_exe = if (compiled.encode_scatter) |*exe| exe else return error.VisionScatterUncompiled;
+        const n_vis: u32 = @intCast(@divExact(merged.len, hidden_dim));
+        const idx = try allocator.alloc(u32, n_vis);
+        defer allocator.free(idx);
+        var off: usize = 0;
+        for (extras.vision_spans) |span| {
+            var t: u32 = 0;
+            while (t < span.tokens) : (t += 1) {
+                idx[off] = span.start + t;
+                off += 1;
             }
-            var val_buf = try buffers.fromItems(io, platform, .init(.{ .b = 1, .s = n_vis, .d = hidden_dim }, .f32), merged);
-            defer val_buf.deinit();
-            var idx_buf = try buffers.fromItems(io, platform, .init(.{ .s = n_vis }, .u32), idx);
-            defer idx_buf.deinit();
-            var scatter_runner = try zml.FnExe(dit.scatterRows).Runner(.{}).init(scatter_exe, allocator, .{});
-            defer scatter_runner.deinit(allocator);
-            var next: zml.Buffer = undefined;
-            scatter_runner.run(io, .{
-                .inputs = .{ .hidden = hidden, .values = val_buf, .indices = idx_buf },
-                .outputs = .{ .hidden = &next },
-                .opts = .{ .wait = true },
-            });
-            hidden.deinit();
-            hidden = next;
-        } else {
-            try scatterVisionHidden(allocator, io, platform, &hidden, merged, extras.vision_spans, hidden_dim);
         }
+        var val_buf = try weights.fromItems(io, platform, .init(.{ .b = 1, .s = n_vis, .d = hidden_dim }, .f32), merged);
+        defer val_buf.deinit();
+        var idx_buf = try weights.fromItems(io, platform, .init(.{ .s = n_vis }, .u32), idx);
+        defer idx_buf.deinit();
+        var scatter_runner = try zml.FnExe(dit.scatterRows).Runner(.{}).init(scatter_exe, allocator, .{});
+        defer scatter_runner.deinit(allocator);
+        var next: zml.Buffer = undefined;
+        scatter_runner.run(io, .{
+            .inputs = .{ .hidden = hidden, .values = val_buf, .indices = idx_buf },
+            .outputs = .{ .hidden = &next },
+            .opts = .{ .wait = true },
+        });
+        hidden.deinit();
+        hidden = next;
         log.info("encoder: scattered vision spans={d}", .{extras.vision_spans.len});
     }
 
@@ -234,15 +190,15 @@ fn encodeText(
     const sin = try allocator.alloc(f32, seq * head_dim);
     defer allocator.free(sin);
     vision.hostInterleavedMrope(pos, seq, head_dim, loaded.cfg.rope_theta, loaded.cfg.mrope_section, cos, sin);
-    var cos_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = head_dim }, loaded.inner.embed_tokens.weight.dtype()), cos);
+    var cos_buf = try weights.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = head_dim }, loaded.inner.embed_tokens.weight.dtype()), cos);
     defer cos_buf.deinit();
-    var sin_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = head_dim }, loaded.inner.embed_tokens.weight.dtype()), sin);
+    var sin_buf = try weights.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = head_dim }, loaded.inner.embed_tokens.weight.dtype()), sin);
     defer sin_buf.deinit();
 
     const zeros = try allocator.alloc(f32, seq * hidden_dim);
     defer allocator.free(zeros);
     @memset(zeros, 0);
-    var zero_delta = try buffers.fromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), zeros);
+    var zero_delta = try weights.fromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), zeros);
     defer zero_delta.deinit();
 
     var kept = try allocator.alloc(?zml.Bufferized(encoder.TransformerLayer), if (keep_all) n_layers else 0);
@@ -295,7 +251,7 @@ fn encodeText(
         defer if (owned_delta) |*b| b.deinit();
         const delta = if (layer_i < 3) blk: {
             if (extras.deepstack[layer_i]) |host| {
-                owned_delta = try buffers.fromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), host);
+                owned_delta = try weights.fromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), host);
                 break :blk owned_delta.?;
             }
             break :blk zero_delta;
@@ -386,17 +342,17 @@ fn denoise(
         packing.writeAdalnIndices(all_adaln[i * seq ..][0..seq], tidx, layout.token_tags);
     }
 
-    var pos_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq, .ax = 3 }, .f32), host.positions);
+    var pos_buf = try weights.fromItems(io, platform, .init(.{ .s = seq, .ax = 3 }, .f32), host.positions);
     defer pos_buf.deinit();
-    var video_idx = try buffers.fromItems(io, platform, .init(.{ .s = geo.video_tokens }, .u32), host.video_indices);
+    var video_idx = try weights.fromItems(io, platform, .init(.{ .s = geo.video_tokens }, .u32), host.video_indices);
     defer video_idx.deinit();
-    var audio_idx = try buffers.fromItems(io, platform, .init(.{ .s = geo.audio_tokens }, .u32), host.audio_indices);
+    var audio_idx = try weights.fromItems(io, platform, .init(.{ .s = geo.audio_tokens }, .u32), host.audio_indices);
     defer audio_idx.deinit();
-    var text_idx = try buffers.fromItems(io, platform, .init(.{ .s = text_len }, .u32), host.text_indices);
+    var text_idx = try weights.fromItems(io, platform, .init(.{ .s = text_len }, .u32), host.text_indices);
     defer text_idx.deinit();
-    var adaln_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[0..seq]);
+    var adaln_buf = try weights.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[0..seq]);
     defer adaln_buf.deinit();
-    var time_idx = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[0..seq]);
+    var time_idx = try weights.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[0..seq]);
     defer time_idx.deinit();
 
     var text_bufs = try loaded.loadTextPrep(allocator, io, platform, store, shardings, progress);
@@ -423,7 +379,7 @@ fn denoise(
     defer cos.deinit();
     defer sin.deinit();
 
-    var flat_buf = try buffers.fromItems(io, platform, .init(.{ .n = flat_n }, .f32), flat_t);
+    var flat_buf = try weights.fromItems(io, platform, .init(.{ .n = flat_n }, .f32), flat_t);
     defer flat_buf.deinit();
 
     var time_bufs = try loaded.loadTimeEmbedder(allocator, io, platform, store, shardings, progress);
@@ -554,14 +510,14 @@ fn denoise(
         group_tables = try allocator.alloc(zml.Buffer, group_size);
     }
 
-    var apply_v = try zml.FnExe(multistep.apply).Runner(.{}).init(&compiled.apply_video, allocator, .{});
+    var apply_v = try zml.FnExe(scheduler_mod.apply).Runner(.{}).init(&compiled.apply_video, allocator, .{});
     defer apply_v.deinit(allocator);
-    var apply_a = try zml.FnExe(multistep.apply).Runner(.{}).init(&compiled.apply_audio, allocator, .{});
+    var apply_a = try zml.FnExe(scheduler_mod.apply).Runner(.{}).init(&compiled.apply_audio, allocator, .{});
     defer apply_a.deinit(allocator);
 
-    var video_buf = try buffers.fromItems(io, platform, video_shape, video);
+    var video_buf = try weights.fromItems(io, platform, video_shape, video);
     defer video_buf.deinit();
-    var audio_buf = try buffers.fromItems(io, platform, audio_shape, audio);
+    var audio_buf = try weights.fromItems(io, platform, audio_shape, audio);
     defer audio_buf.deinit();
 
     const denoise_start: std.Io.Timestamp = .now(io, .awake);
@@ -577,9 +533,9 @@ fn denoise(
         const audio_t = schedules.audio.timesteps[step_i];
         if (step_i != 0) {
             adaln_buf.deinit();
-            adaln_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[step_i * seq ..][0..seq]);
+            adaln_buf = try weights.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[step_i * seq ..][0..seq]);
             time_idx.deinit();
-            time_idx = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[step_i * seq ..][0..seq]);
+            time_idx = try weights.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[step_i * seq ..][0..seq]);
         }
         var step_buf = try scalarU32(io, platform, @intCast(step_i));
         defer step_buf.deinit();

@@ -16,7 +16,7 @@ pub const Plan = struct {
     score_bytes: u64,
     fa2_scratch_bytes: u64,
     adaln_table_bytes: u64,
-    attention: policy.AttnKind,
+    attention: zml.attention.Backend,
     resident_blocks: u32,
     group_size: u32,
     tile_batch: u32,
@@ -43,6 +43,7 @@ pub const Opts = struct {
     devices: u32 = 1,
     tile_count: u32 = 0,
     tile_act_bytes: u64 = 0,
+    flash: zml.attention.Backend = .cuda_fa2,
 };
 
 pub fn plan(opts: Opts) Plan {
@@ -74,13 +75,14 @@ pub fn plan(opts: Opts) Plan {
         .dtype_bytes = dtype_bytes,
         .tile_count = tiles,
         .tile_act_bytes = tile_act,
+        .flash = opts.flash,
     });
     const host = (@as(u64, opts.geo.video_tokens) + opts.geo.audio_tokens) * 4 * 4;
     const block = if (opts.block_core_bytes == 0)
         streamed_block_bytes / @max(1, opts.tp)
     else
         opts.block_core_bytes;
-    const attn_scratch = if (decision.attention == .cuda_fa2) decision.fa2_scratch_bytes else decision.score_bytes;
+    const attn_scratch = if (policy.isFlash(decision.attention)) decision.fa2_scratch_bytes else decision.score_bytes;
     const peak = decision.activation_bytes + host + block * 2 + attn_scratch + decision.adaln_table_bytes;
     const budget = if (opts.device_bytes == 0) std.math.maxInt(u64) else opts.device_bytes * policy.safety_numer / policy.safety_denom;
     const full_floor = config.full_canvas_min_device_bytes;

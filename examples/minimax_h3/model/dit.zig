@@ -3,7 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 
 const config_mod = @import("../core/config.zig");
-const policy = @import("../core/policy.zig");
 const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
@@ -80,7 +79,7 @@ const Attention = struct {
     k_norm: RmsNorm,
     num_heads: i64,
     head_dim: i64,
-    attn_kind: policy.AttnKind = .vanilla,
+    attn_backend: zml.attention.Backend = .vanilla,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
         const qkv_part = .{ .dout = .model, .d = .replicated };
@@ -163,10 +162,8 @@ const Attention = struct {
         const q_s = q.rename(.{ .s = .q });
         const k_s = k.rename(.{ .s = .k });
         const v_s = v.rename(.{ .s = .k });
-        const attn = switch (self.attn_kind) {
-            .cuda_fa2 => zml.attention.flashattn.fa2.dense(q_s, k_s, v_s, .{ .is_causal = false }),
-            .vanilla => zml.nn.sdpa(q_s, k_s, v_s, .{}),
-        }.rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
+        const attn = zml.attention.dense(q_s, k_s, v_s, self.attn_backend, .{ .is_causal = false })
+            .rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         return self.out.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
     }
 };
@@ -658,9 +655,9 @@ pub const Model = struct {
         };
     }
 
-    pub fn applyBackend(self: *Model, dit_kind: policy.AttnKind, refiner_kind: policy.AttnKind) void {
-        for (self.blocks) |*block| block.attn.attn_kind = dit_kind;
-        for (self.token_refiner.blocks) |*block| block.attn.attn_kind = refiner_kind;
+    pub fn applyBackend(self: *Model, dit_kind: zml.attention.Backend, refiner_kind: zml.attention.Backend) void {
+        for (self.blocks) |*block| block.attn.attn_backend = dit_kind;
+        for (self.token_refiner.blocks) |*block| block.attn.attn_backend = refiner_kind;
     }
 };
 
