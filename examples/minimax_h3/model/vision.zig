@@ -288,7 +288,9 @@ pub const VisionBlock = struct {
         const v_s = v.rename(.{ .s = .k });
         const attn = visionAttn(q_s, k_s, v_s, self.head_dim).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         const x1 = residual.add(asLinear(self.proj, attn).rename(.{ .dout = .d }));
-        const ff = asLinear(self.fc2, asLinear(self.fc1, self.norm2.forward(x1)).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+        const h = asLinear(self.fc1, self.norm2.forward(x1));
+        // Official `gelu_pytorch_tanh` is f32. bf16 `x³` loses bits over 27 layers.
+        const ff = asLinear(self.fc2, h.convert(.f32).gelu().convert(h.dtype()).rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .hidden = x1.add(ff).reuseBuffer(input.hidden) };
     }
 };
