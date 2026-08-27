@@ -9,27 +9,7 @@ const log = std.log.scoped(.minimax_h3_encoder);
 
 pub const Config = config_mod.EncoderConfig;
 
-const RmsNorm = struct {
-    weight: zml.Tensor,
-    eps: f32,
-
-    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{
-            .weight = store.createTensor("weight", .{.d}, .replicated),
-            .eps = eps,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
-    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
-        const x = input.withPartialTags(.{.d});
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
-    }
-};
+const RmsNorm = zml.nn.RmsNorm;
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, partitions: anytype) zml.nn.Linear {
     return .fromStore(store, weight_name, null, partitions, .replicated, .d);
@@ -72,7 +52,6 @@ const SelfAttn = struct {
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
-    rope_opts: zml.nn.RopeOpts,
     attn_backend: zml.attention.Backend = .vanilla,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) SelfAttn {
@@ -81,15 +60,11 @@ const SelfAttn = struct {
             .k_proj = linear(store, "k_proj.weight", .{ .dout = .model }),
             .v_proj = linear(store, "v_proj.weight", .{ .dout = .model }),
             .o_proj = linear(store, "o_proj.weight", .{ .d = .model }),
-            .q_norm = .init(store.withPrefix("q_norm"), cfg.rms_norm_eps),
-            .k_norm = .init(store.withPrefix("k_norm"), cfg.rms_norm_eps),
+            .q_norm = .init(store.withPrefix("q_norm"), .{.hd}, cfg.rms_norm_eps),
+            .k_norm = .init(store.withPrefix("k_norm"), .{.hd}, cfg.rms_norm_eps),
             .num_heads = cfg.num_attention_heads,
             .num_kv_heads = cfg.num_key_value_heads,
             .head_dim = cfg.head_dim,
-            .rope_opts = .{
-                .layout = .real_im_pass,
-                .scaling = .{ .default = .{ .rope_theta = cfg.rope_theta } },
-            },
         };
     }
 
@@ -108,10 +83,10 @@ const SelfAttn = struct {
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
         var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
 
-        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        q = applyRotary(q, cos, sin);
-        k = applyRotary(k, cos, sin);
+        q = self.q_norm.forward(q);
+        k = self.k_norm.forward(k);
+        q = zml.nn.applyRotary(q, cos, sin);
+        k = zml.nn.applyRotary(k, cos, sin);
 
         const q_s = q.rename(.{ .s = .q });
         const k_s = k.rename(.{ .s = .k });
@@ -121,14 +96,6 @@ const SelfAttn = struct {
         return self.o_proj.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
     }
 };
-
-fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-    const half = @divExact(x.dim(.hd), 2);
-    const x1 = x.slice1d(.hd, .{ .start = 0, .end = half });
-    const x2 = x.slice1d(.hd, .{ .start = half, .end = x.dim(.hd) });
-    const rotated = zml.Tensor.concatenate(&.{ x2.negate(), x1 }, .hd);
-    return x.mul(cos.broad(x.shape())).add(rotated.mul(sin.broad(x.shape())));
-}
 
 pub const TransformerLayer = struct {
     input_layernorm: RmsNorm,
@@ -150,9 +117,9 @@ pub const TransformerLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TransformerLayer {
         return .{
-            .input_layernorm = .init(store.withPrefix("input_layernorm"), cfg.rms_norm_eps),
+            .input_layernorm = .init(store.withPrefix("input_layernorm"), .{.d}, cfg.rms_norm_eps),
             .self_attn = .init(store.withPrefix("self_attn"), cfg),
-            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), cfg.rms_norm_eps),
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), .{.d}, cfg.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp")),
         };
     }

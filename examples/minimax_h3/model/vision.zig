@@ -104,36 +104,8 @@ fn asLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     return out.forward(x.convert(out.weight.dtype()));
 }
 
-const LayerNorm = struct {
-    weight: zml.Tensor,
-    bias: ?zml.Tensor,
-
-    pub fn init(store: zml.io.TensorStore.View) LayerNorm {
-        return .{
-            .weight = store.createTensor("weight", .{.d}, .replicated),
-            .bias = store.maybeCreateTensor("bias", .{.d}, .replicated),
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
-        self.weight.deinit();
-        if (self.bias) |*b| b.deinit();
-    }
-
-    pub fn forward(self: LayerNorm, x: zml.Tensor) zml.Tensor {
-        return (zml.nn.LayerNorm{ .weight = self.weight, .bias = self.bias, .eps = 1e-6 }).forward(x);
-    }
-};
-
 fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-    const x_f = x.convert(.f32);
-    const half = @divExact(x_f.dim(-1), 2);
-    const x1 = x_f.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x_f.slice1d(-1, .{ .start = half, .end = x_f.dim(-1) });
-    const rotated = zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-    const c = cos.convert(.f32).broad(x_f.shape());
-    const s = sin.convert(.f32).broad(x_f.shape());
-    return x_f.mul(c).add(rotated.mul(s)).convert(x.dtype());
+    return zml.nn.applyRotary(x.convert(.f32), cos.convert(.f32), sin.convert(.f32)).convert(x.dtype());
 }
 
 /// Tiled SDPA. Head dim is 72 (FA2 wants a multiple of 8 near 128) and full-canvas
@@ -147,10 +119,10 @@ fn visionAttn(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, head_dim: i64) zml.Te
 }
 
 pub const VisionBlock = struct {
-    norm1: LayerNorm,
+    norm1: zml.nn.LayerNorm,
     qkv: zml.nn.Linear,
     proj: zml.nn.Linear,
-    norm2: LayerNorm,
+    norm2: zml.nn.LayerNorm,
     fc1: zml.nn.Linear,
     fc2: zml.nn.Linear,
     num_heads: i64,
@@ -168,10 +140,10 @@ pub const VisionBlock = struct {
         const attn = store.withPrefix("attn");
         const mlp = store.withPrefix("mlp");
         return .{
-            .norm1 = .init(store.withPrefix("norm1")),
+            .norm1 = .fromStore(store.withPrefix("norm1"), "weight", "bias", .replicated, 1e-6),
             .qkv = linear(attn, "qkv.weight", "qkv.bias"),
             .proj = linear(attn, "proj.weight", "proj.bias"),
-            .norm2 = .init(store.withPrefix("norm2")),
+            .norm2 = .fromStore(store.withPrefix("norm2"), "weight", "bias", .replicated, 1e-6),
             .fc1 = linear(mlp, "linear_fc1.weight", "linear_fc1.bias"),
             .fc2 = linear(mlp, "linear_fc2.weight", "linear_fc2.bias"),
             .num_heads = cfg.num_heads,
@@ -180,10 +152,10 @@ pub const VisionBlock = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(VisionBlock)) void {
-        LayerNorm.unloadBuffers(&self.norm1);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm1);
         zml.nn.Linear.unloadBuffers(&self.qkv);
         zml.nn.Linear.unloadBuffers(&self.proj);
-        LayerNorm.unloadBuffers(&self.norm2);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm2);
         zml.nn.Linear.unloadBuffers(&self.fc1);
         zml.nn.Linear.unloadBuffers(&self.fc2);
     }
@@ -218,7 +190,7 @@ pub const EmbedModel = struct {
 };
 
 pub const Merger = struct {
-    norm: LayerNorm,
+    norm: zml.nn.LayerNorm,
     fc1: zml.nn.Linear,
     fc2: zml.nn.Linear,
     merge: i64,
@@ -232,7 +204,7 @@ pub const Merger = struct {
 
     pub fn init(store: zml.io.TensorStore.View, merge: i64, postshuffle: bool) Merger {
         return .{
-            .norm = .init(store.withPrefix("norm")),
+            .norm = .fromStore(store.withPrefix("norm"), "weight", "bias", .replicated, 1e-6),
             .fc1 = linear(store, "linear_fc1.weight", "linear_fc1.bias"),
             .fc2 = linear(store, "linear_fc2.weight", "linear_fc2.bias"),
             .merge = merge,
@@ -241,7 +213,7 @@ pub const Merger = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Merger)) void {
-        LayerNorm.unloadBuffers(&self.norm);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm);
         zml.nn.Linear.unloadBuffers(&self.fc1);
         zml.nn.Linear.unloadBuffers(&self.fc2);
     }

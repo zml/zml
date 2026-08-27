@@ -9,26 +9,7 @@ const log = std.log.scoped(.minimax_h3);
 
 pub const Config = config_mod.Config;
 
-const RmsNorm = struct {
-    weight: zml.Tensor,
-    eps: f32,
-
-    pub fn init(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) RmsNorm {
-        return .{
-            .weight = store.createTensor("weight", tagz, .replicated),
-            .eps = eps,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
-    pub fn forward(self: RmsNorm, input: zml.Tensor, axis: anytype) zml.Tensor {
-        const normalized = zml.nn.rmsNorm(input, axis, self.eps);
-        return normalized.mul(self.weight.convert(input.dtype()).broad(input.shape()));
-    }
-};
+const RmsNorm = zml.nn.RmsNorm;
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
     return .fromStore(store, weight_name, bias_name, partitions, bias_partitions, .d);
@@ -110,11 +91,11 @@ const Attention = struct {
         var k = qk.k;
         const v = qk.v;
 
-        q = self.q_norm.forward(q, .hd);
-        k = self.k_norm.forward(k, .hd);
+        q = self.q_norm.forward(q);
+        k = self.k_norm.forward(k);
         if (rotary) |pe| {
-            q = applyRotary(q, pe[0], pe[1]);
-            k = applyRotary(k, pe[0], pe[1]);
+            q = zml.nn.applyRotary(q, pe[0], pe[1]);
+            k = zml.nn.applyRotary(k, pe[0], pe[1]);
         }
         const q_s = q.rename(.{ .s = .q });
         const k_s = k.rename(.{ .s = .k });
@@ -124,23 +105,6 @@ const Attention = struct {
         return self.out.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
     }
 };
-
-fn rotateHalf(x: zml.Tensor) zml.Tensor {
-    const half = @divExact(x.dim(-1), 2);
-    const x1 = x.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x.slice1d(-1, .{ .start = half, .end = x.dim(-1) });
-    return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-}
-
-fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-    const rotary_dim = cos.dim(-1);
-    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
-    const x_pass = x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) });
-    const cos_x = cos.rename(.{ .f = .hd }).broad(x_rot.shape());
-    const sin_x = sin.rename(.{ .f = .hd }).broad(x_rot.shape());
-    const rotated = x_rot.mul(cos_x).add(rotateHalf(x_rot).mul(sin_x));
-    return zml.Tensor.concatenate(&.{ rotated, x_pass }, -1);
-}
 
 pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) struct { zml.Tensor, zml.Tensor } {
     const pos = position_ids.convert(.f32).withPartialTags(.{ .s, .ax });
@@ -152,7 +116,7 @@ pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) str
     const parts = freqs.chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
     const emb = zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
-    return .{ emb.cos(), emb.sin() };
+    return .{ emb.cos().rename(.{ .f = .hd }), emb.sin().rename(.{ .f = .hd }) };
 }
 
 pub const TimeEmbedder = struct {
@@ -267,13 +231,13 @@ pub const BlockCore = struct {
         const gate_mlp = parts[5].squeeze(.k);
 
         const residual0 = input.hidden.withPartitioning(.{ .d = .replicated });
-        const n1 = self.norm1.forward(residual0, .d);
+        const n1 = self.norm1.forward(residual0);
         const one = zml.Tensor.scalar(1.0, n1.dtype());
         const attn_in = n1.mul(one.add(scale_msa.convert(n1.dtype()).broad(n1.shape()))).add(shift_msa.convert(n1.dtype()).broad(n1.shape()));
         const attn_out = self.attn.forward(attn_in, .{ input.cos, input.sin });
         const x1 = residual0.add(gate_msa.convert(attn_out.dtype()).broad(attn_out.shape()).mul(attn_out)).withPartitioning(.{ .d = .replicated });
 
-        const n2 = self.norm2.forward(x1, .d);
+        const n2 = self.norm2.forward(x1);
         const mlp_in = n2.mul(one.add(scale_mlp.convert(n2.dtype()).broad(n2.shape()))).add(shift_mlp.convert(n2.dtype()).broad(n2.shape()));
         const mlp_out = self.mlp.forward(mlp_in).rename(.{ .dout = .d });
         const x2 = x1.add(gate_mlp.convert(mlp_out.dtype()).broad(mlp_out.shape()).mul(mlp_out)).withPartitioning(.{ .d = .replicated });
@@ -409,8 +373,8 @@ const TokenRefinerBlock = struct {
 
     pub fn forward(self: TokenRefinerBlock, x: zml.Tensor) zml.Tensor {
         const residual = x.withPartitioning(.{ .d = .replicated });
-        const x1 = residual.add(self.attn.forward(self.norm1.forward(residual, .d), null));
-        return x1.add(self.mlp.forward(self.norm2.forward(x1, .d)).rename(.{ .dout = .d })).withPartitioning(.{ .d = .replicated }).reuseBuffer(x);
+        const x1 = residual.add(self.attn.forward(self.norm1.forward(residual), null));
+        return x1.add(self.mlp.forward(self.norm2.forward(x1)).rename(.{ .dout = .d })).withPartitioning(.{ .d = .replicated }).reuseBuffer(x);
     }
 };
 
@@ -446,7 +410,7 @@ const TokenRefiner = struct {
         for (self.blocks) |block| {
             hidden = block.forward(hidden);
         }
-        return self.final_norm.forward(hidden, .d);
+        return self.final_norm.forward(hidden);
     }
 };
 
@@ -717,7 +681,7 @@ pub const FinishOutput = struct {
 };
 
 fn modulateRows(norm: RmsNorm, hidden: zml.Tensor, mods: zml.Tensor, timestep_indices: zml.Tensor) zml.Tensor {
-    const n = norm.forward(hidden.withPartitioning(.{ .d = .replicated }), .d);
+    const n = norm.forward(hidden.withPartitioning(.{ .d = .replicated }));
     const selected = mods.gather(.{ .n = timestep_indices }, .{});
     const parts = selected.chunkExact(.k, 2);
     const shift = parts[0].squeeze(.k);

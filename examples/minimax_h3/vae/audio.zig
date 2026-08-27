@@ -566,7 +566,7 @@ const GeGluMlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) GeGluMlp {
         return .{
-            .norm = .init(store.withPrefix("norm")),
+            .norm = .fromStore(store.withPrefix("norm"), "weight", "bias", .replicated, 1e-5),
             .w0 = conv1x1(store.withPrefix("w0")),
             .w1 = conv1x1(store.withPrefix("w1")),
             .w2 = conv1x1(store.withPrefix("w2")),
@@ -586,26 +586,7 @@ const GeGluMlp = struct {
     }
 };
 
-const LayerNormEnc = struct {
-    weight: zml.Tensor,
-    bias: ?zml.Tensor,
-
-    pub fn init(store: zml.io.TensorStore.View) LayerNormEnc {
-        return .{
-            .weight = store.createTensor("weight", .{.d}, .replicated),
-            .bias = store.maybeCreateTensor("bias", .{.d}, .replicated),
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(LayerNormEnc)) void {
-        self.weight.deinit();
-        if (self.bias) |*b| b.deinit();
-    }
-
-    pub fn forward(self: LayerNormEnc, x: zml.Tensor) zml.Tensor {
-        return (zml.nn.LayerNorm{ .weight = self.weight, .bias = self.bias, .eps = 1e-5 }).forward(x);
-    }
-};
+const LayerNormEnc = zml.nn.LayerNorm;
 
 const CausalAttn = struct {
     qkv: zml.nn.Linear,
@@ -652,12 +633,7 @@ const CausalAttn = struct {
         const q = parts[0].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .q });
         const k = parts[1].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .k });
         const v = parts[2].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .k });
-        const q_i = zml.Tensor.arange(.{ .end = seq }, .f32).withTags(.{.q});
-        const k_i = zml.Tensor.arange(.{ .end = seq }, .f32).withTags(.{.k});
-        const neg = zml.Tensor.scalar(-1.0e9, .f32);
-        const zero = zml.Tensor.scalar(0.0, .f32);
-        const qk = zml.Shape.init(.{ .q = seq, .k = seq }, .f32);
-        const mask = q_i.broad(qk).cmp(.GE, k_i.broad(qk)).select(zero, neg);
+        const mask = zml.nn.causalAttnMask(.{ .q = seq, .k = seq }, .f32, null);
         var attn = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask }).rename(.{ .q = .s });
         attn = attn.mean(.h).squeeze(.h);
         const pool = @divExact(self.head_dim, self.out_dim);
@@ -676,11 +652,11 @@ const AttnProjection = struct {
 
     pub fn init(store: zml.io.TensorStore.View, in_dim: i64, out_dim: i64) AttnProjection {
         return .{
-            .norm1 = .init(store.withPrefix("norm1")),
+            .norm1 = .fromStore(store.withPrefix("norm1"), "weight", "bias", .replicated, 1e-5),
             .attn = .init(store.withPrefix("attn"), in_dim, out_dim, 8),
             .proj = conv1x1(store.withPrefix("proj")),
-            .norm3 = .init(store.withPrefix("norm3")),
-            .norm2 = .init(store.withPrefix("norm2")),
+            .norm3 = .fromStore(store.withPrefix("norm3"), "weight", "bias", .replicated, 1e-5),
+            .norm2 = .fromStore(store.withPrefix("norm2"), "weight", "bias", .replicated, 1e-5),
             .mlp = .init(store.withPrefix("mlp")),
         };
     }
