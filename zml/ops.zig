@@ -81,7 +81,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             block_types[i + input_tensors.len] = mlirx.Type.rankedTensor(mlir_ctx, scalar_shape);
         }
 
-        const block_locs: [2 * input_tensors.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * input_tensors.len]*const mlir.Location = @splat(Tensor.currentLocation());
 
         const block = mlir.Block.init(&block_types, &block_locs);
         errdefer block.deinit();
@@ -113,7 +113,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             }
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &reduced_values, .unknown(mlir_ctx)).appendTo(block);
+        _ = dialects.stablehlo.returns(mlir_ctx, &reduced_values, Tensor.currentLocation()).appendTo(block);
         break :b block;
     };
 
@@ -148,6 +148,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         reducer_block,
         replica_groups_attr,
         channel_handle_attr,
+        Tensor.currentLocation(),
     ).appendTo(ctx.currentScope().block);
 
     return switch (@typeInfo(@TypeOf(inputs))) {
@@ -197,7 +198,7 @@ pub fn partitionId() Tensor {
     const ctx = CompilationContext.current();
     const op = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.partition_id", .{
         .results = .{ .flat = &.{mlirx.Type.rankedTensor(ctx.mlir_ctx, Shape.scalar(.u32))} },
-        .location = .unknown(ctx.mlir_ctx),
+        .location = Tensor.currentLocation(),
     }).appendTo(ctx.currentScope().block);
     return Tensor._result(.init(.{}, .u32), op.result(0));
 }
@@ -227,7 +228,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             block_types[i + inits.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
-        const block_locs: [2 * inits.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * inits.len]*const mlir.Location = @splat(Tensor.currentLocation());
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
@@ -247,7 +248,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(reduce_block);
+        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, Tensor.currentLocation()).appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
     var input_values: [inputs.len]*const mlir.Value = undefined;
@@ -266,7 +267,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             .named(mlir_ctx, "dimensions", .denseArray(mlir_ctx, .i64, axes_)),
         },
         .verify = true,
-        .location = .unknown(mlir_ctx),
+        .location = Tensor.currentLocation(),
     }).appendTo(CompilationContext.current().currentScope().block);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
@@ -292,7 +293,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             reduce_op.result(i),
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
             mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
-            .unknown(mlir_ctx),
+            Tensor.currentLocation(),
         ).appendTo(CompilationContext.current().currentScope().block);
 
         result[i] = Tensor._result(reduced_shape, broad_op.result(0));
@@ -338,7 +339,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
             block_types[i + N] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
-        const block_locs: [2 * N]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * N]*const mlir.Location = @splat(Tensor.currentLocation());
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
@@ -358,7 +359,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(reduce_block);
+        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, Tensor.currentLocation()).appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
     var input_values: [inputs.len]*const mlir.Value = undefined;
@@ -385,7 +386,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
             )),
         },
         .verify = true,
-        .location = .unknown(mlir_ctx),
+        .location = Tensor.currentLocation(),
     }).appendTo(CompilationContext.current().currentScope().block);
 
     inline for (0..result.len) |i| {
@@ -420,7 +421,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
             block_types[2 * i + 1] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
-        const block_locs: [2 * inputs.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * inputs.len]*const mlir.Location = @splat(Tensor.currentLocation());
         const sort_block = mlir.Block.init(&block_types, &block_locs);
         errdefer sort_block.deinit();
 
@@ -435,7 +436,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
 
         var result = @call(.auto, func, args ++ context);
 
-        _ = dialects.stablehlo.return_(mlir_ctx, result.value(), .unknown(mlir_ctx)).appendTo(sort_block);
+        _ = dialects.stablehlo.return_(mlir_ctx, result.value(), Tensor.currentLocation()).appendTo(sort_block);
         break :b sort_block;
     };
 
@@ -453,7 +454,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
             .named(mlir_ctx, "is_stable", .boolean(mlir_ctx, is_stable)),
         },
         .verify = true,
-        .location = .unknown(mlir_ctx),
+        .location = Tensor.currentLocation(),
     }).appendTo(CompilationContext.current().currentScope().block);
 
     var result: [inputs.len]Tensor = undefined;
@@ -482,7 +483,7 @@ pub fn @"while"(
     const allocator = arena.allocator();
 
     const mlir_ctx = comp.mlir_ctx;
-    const location = mlir.Location.unknown(mlir_ctx);
+    const location = Tensor.currentLocation();
 
     // Force to materialize tensor.value() before we push a new scope.
     var captured_context: While = undefined;
@@ -690,7 +691,7 @@ pub fn @"if"(
     }.capture, arena.allocator(), {}, if_captures, &blkctx) catch unreachable;
 
     const mlir_ctx = CompilationContext.current().mlir_ctx;
-    const loc: *const mlir.Location = .unknown(mlir_ctx);
+    const loc: *const mlir.Location = Tensor.currentLocation();
 
     const true_branch, const true_branch_block = b: {
         const block = mlir.Block.init(&.{}, &.{});
@@ -781,7 +782,7 @@ pub fn if2(
     const allocator = arena.allocator();
 
     const mlir_ctx = CompilationContext.current().mlir_ctx;
-    const loc: *const mlir.Location = .unknown(mlir_ctx);
+    const loc: *const mlir.Location = Tensor.currentLocation();
 
     const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_true) catch @panic("OOM");
     defer allocator.free(true_values);
@@ -927,7 +928,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
             .result_layouts = &results_layouts,
             .output_operand_aliases = opts.output_operand_aliases,
         },
-        .unknown(mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(CompilationContext.current().currentScope().block);
 
     var outputs_: [outputs.len]Tensor = undefined;
@@ -1029,7 +1030,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
                 .named(mlir_ctx, "backend_config", .string(mlir_ctx, compiled_backend_config)),
             },
         },
-        .unknown(mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(ctx.currentScope().block);
 
     var outputs_: [outputs.len]Tensor = undefined;
@@ -1142,7 +1143,7 @@ pub fn scatter(
             block_types[i + inputs.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].update.shape());
         }
 
-        const block_locs: [2 * inputs.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * inputs.len]*const mlir.Location = @splat(Tensor.currentLocation());
         const update_block = mlir.Block.init(&block_types, &block_locs);
         errdefer update_block.deinit();
 
@@ -1162,7 +1163,7 @@ pub fn scatter(
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(update_block);
+        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, Tensor.currentLocation()).appendTo(update_block);
         break :b .{ update_block, result };
     };
 
@@ -1230,7 +1231,7 @@ pub fn scatter(
             .indices_are_sorted = opts.indices_are_sorted,
             .unique_indices = opts.indices_are_unique,
         },
-        .unknown(mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(CompilationContext.current().currentScope().block);
 
     inline for (0..result.len) |i| {
@@ -1543,7 +1544,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
             .index_vector_dim = indices.axis(.coord),
             .indices_are_sorted = opts.indices_are_sorted,
         },
-        .unknown(mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(CompilationContext.current().currentScope().block);
 
     const mlir_shape = Tensor.fromMlirValue(gather_op.result(0)).shape();
@@ -1771,7 +1772,7 @@ pub fn composite(
 
         for (inputs, 0..) |t, i| {
             block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, t.shape());
-            block_locs[i] = mlir.Location.unknown(mlir_ctx);
+            block_locs[i] = Tensor.currentLocation();
         }
 
         const block = mlir.Block.init(block_types, block_locs);
@@ -1796,14 +1797,14 @@ pub fn composite(
                 rvals[i] = t.value();
             }
 
-            _ = dialects.func.returns(mlir_ctx, rvals, .unknown(mlir_ctx)).appendTo(block);
+            _ = dialects.func.returns(mlir_ctx, rvals, Tensor.currentLocation()).appendTo(block);
         }
         ctx.popBlock();
 
         _ = dialects.func.func(mlir_ctx, .{
             .name = decomp_name,
             .block = block,
-            .location = .unknown(mlir_ctx),
+            .location = Tensor.currentLocation(),
             .visibility = .private,
             .verify = false,
         }).appendTo(ctx.module.body());
@@ -1829,7 +1830,7 @@ pub fn composite(
             .composite_attributes = opts.composite_attributes,
             .version = opts.version,
         },
-        .unknown(mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(ctx.currentScope().block);
 
     const out_tensors = ctx.alloc(Tensor, outputs.len);
@@ -2020,7 +2021,7 @@ fn manualComputationInternal(
             const block_locs = allocator.alloc(*const mlir.Location, inputs.len) catch unreachable;
             for (local_input_shapes, 0..) |input_shape, i| {
                 block_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, input_shape);
-                block_locs[i] = mlir.Location.unknown(ctx.mlir_ctx);
+                block_locs[i] = Tensor.currentLocation();
             }
 
             const parent_block = ctx.currentScope().block;
@@ -2053,7 +2054,7 @@ fn manualComputationInternal(
             _ = mlir.Operation.make(ctx.mlir_ctx, "sdy.return", .{
                 .operands = .{ .flat = local_output_values },
                 .verify = false,
-                .location = .unknown(ctx.mlir_ctx),
+                .location = Tensor.currentLocation(),
             }).appendTo(manual_block);
 
             const global_result_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
@@ -2071,7 +2072,7 @@ fn manualComputationInternal(
                     .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr),
                 },
                 .verify = true,
-                .location = .unknown(ctx.mlir_ctx),
+                .location = Tensor.currentLocation(),
             }).appendTo(parent_block);
 
             const outputs_ = allocator.alloc(Tensor, outputs.len) catch unreachable;
@@ -2109,7 +2110,7 @@ fn manualComputationInternal(
                             .named(ctx.mlir_ctx, "mhlo.sharding", .string(ctx.mlir_ctx, manual_sharding)),
                         },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    Tensor.currentLocation(),
                 ).appendTo(ctx.currentScope().block);
                 local_input_values[i] = full_to_shard.result(0);
             }
@@ -2150,7 +2151,7 @@ fn manualComputationInternal(
                             .named(ctx.mlir_ctx, "mhlo.sharding", output_shardings[i]),
                         },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    Tensor.currentLocation(),
                 ).appendTo(ctx.currentScope().block);
                 global_values[i] = shard_to_full.result(0);
             }
@@ -2159,7 +2160,7 @@ fn manualComputationInternal(
                 ctx.mlir_ctx,
                 global_values,
                 global_types,
-                .unknown(ctx.mlir_ctx),
+                Tensor.currentLocation(),
             ).appendTo(ctx.currentScope().block);
 
             const outputs_ = allocator.alloc(Tensor, outputs.len) catch unreachable;
@@ -2555,7 +2556,7 @@ pub fn typedCustomCall(
             .output_operand_aliases = opts.output_operand_aliases orelse &.{},
             .additional_attributes = customCallAdditionalAttributes(ctx, opts),
         },
-        .unknown(ctx.mlir_ctx),
+        Tensor.currentLocation(),
     ).appendTo(ctx.currentScope().block);
 
     if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {

@@ -52,6 +52,16 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
+pub const location = struct {
+    pub fn push(comptime fmt: []const u8, args: anytype) void {
+        module.CompilationContext.current().pushLocation(fmt, args);
+    }
+
+    pub fn pop() void {
+        module.CompilationContext.current().popLocation();
+    }
+};
+
 test "zml" {
     std.testing.refAllDecls(@This());
 }

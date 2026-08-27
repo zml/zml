@@ -383,7 +383,7 @@ pub const mosaic_tpu = struct {
                 .additional_attributes = args.additional_attributes,
                 .output_operand_aliases = args.aliases,
             },
-            .unknown(cur.mlir_ctx),
+            Tensor.currentLocation(),
         ).appendTo(cur.currentScope().block);
     }
 };

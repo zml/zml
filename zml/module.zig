@@ -107,6 +107,10 @@ pub const CompilationContext = struct {
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
 
+    source_location_buffer: []u8,
+    source_location_len: usize,
+    source_location_stack: std.ArrayListUnmanaged(usize),
+
     channel_id: i64 = 0,
 
     composite_id: i64 = 0,
@@ -146,6 +150,10 @@ pub const CompilationContext = struct {
 
         const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
 
+        const source_location_buffer = arena.allocator().alloc(u8, 4096) catch @panic("OOM");
+
+        const source_location_stack = std.ArrayListUnmanaged(usize).initCapacity(arena.allocator(), 128) catch @panic("OOM");
+
         return .{
             .allocator = allocator,
             .io = io,
@@ -156,6 +164,9 @@ pub const CompilationContext = struct {
             .module = module,
             .platform = platform,
             .partitioning = partitioning,
+            .source_location_buffer = source_location_buffer,
+            .source_location_len = 0,
+            .source_location_stack = source_location_stack,
         };
     }
 
@@ -226,7 +237,48 @@ pub const CompilationContext = struct {
     pub fn allocPrint(self: *CompilationContext, comptime fmt: []const u8, args: anytype) []u8 {
         return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
     }
+
+    pub fn pushLocation(self: *CompilationContext, comptime fmt: []const u8, args: anytype) void {
+        self.source_location_buffer[self.source_location_len] = '/';
+        self.source_location_len += 1;
+        const written = std.fmt.bufPrint(self.source_location_buffer[self.source_location_len..], fmt, args) catch @panic("OOM");
+        self.source_location_stack.appendAssumeCapacity(written.len + 1);
+        self.source_location_len += written.len;
+    }
+
+    pub fn popLocation(self: *CompilationContext) void {
+        const popped = self.source_location_stack.pop() orelse @panic("No location to pop");
+        self.source_location_len -= popped;
+    }
+
+    pub fn location(self: *CompilationContext) []const u8 {
+        return self.source_location_buffer[0..self.source_location_len];
+    }
+
+    pub fn currentLocation(self: *CompilationContext) *const mlir.Location {
+        const current_location = self.location();
+        return if (current_location.len == 0)
+            .unknown(self.mlir_ctx)
+        else
+            mlir.Location.unknown(self.mlir_ctx).named(self.mlir_ctx, current_location);
+    }
 };
+
+test "source location stack" {
+    const platform = @import("testing.zig").env();
+    var ctx: CompilationContext = .init(std.testing.allocator, std.testing.io, platform, .{});
+    defer ctx.deinit();
+
+    try std.testing.expectEqualStrings("", ctx.location());
+    ctx.pushLocation("layer_{d}", .{1});
+    try std.testing.expectEqualStrings("/layer_1", ctx.location());
+    ctx.pushLocation("forward", .{});
+    try std.testing.expectEqualStrings("/layer_1/forward", ctx.location());
+    ctx.popLocation();
+    try std.testing.expectEqualStrings("/layer_1", ctx.location());
+    ctx.popLocation();
+    try std.testing.expectEqualStrings("", ctx.location());
+}
 
 pub fn Compiler(comptime func: anytype) type {
     return struct {
@@ -307,7 +359,10 @@ pub fn compile(
     defer arena.deinit();
 
     const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compilation_context.module, compilation_context.partitioning, opts);
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation().fmt(.{
+        .debug_info = true,
+        .debug_info_pretty_form = false,
+    })});
 
     const exe = try Exe.init(
         allocator,
@@ -346,7 +401,7 @@ fn addPartitionerOperations(ctx: *CompilationContext) !void {
                         .named(mlir_ctx, "sym_name", .string(mlir_ctx, name)),
                         .named(mlir_ctx, "mesh", mesh_attr),
                     },
-                    .location = .unknown(mlir_ctx),
+                    .location = ctx.currentLocation(),
                     .verify = false,
                 });
 
@@ -490,7 +545,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 
-    const module = mlir.Module.init(.unknown(compilation_context.mlir_ctx));
+    const module = mlir.Module.init(compilation_context.currentLocation());
     errdefer module.deinit();
 
     const block = mlir.Block.init(&.{}, &.{});
@@ -509,7 +564,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
             const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
-            _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
+            _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, ctx_.compilation_context.currentLocation());
             const gop = ctx_.compilation_context.currentScope().id_to_argument.getOrPut(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id) catch unreachable;
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
             gop.value_ptr.* = ctx_.current_argument_id;
@@ -554,7 +609,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
             ),
         ));
     }
-    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, compilation_context.currentLocation()).appendTo(compilation_context.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, input_info.memory_kinds, 0..) |shape, sharding, maybe_memory_kind, i| {
         const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
@@ -591,7 +646,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
         .block = compilation_context.currentScope().block,
-        .location = .unknown(compilation_context.mlir_ctx),
+        .location = compilation_context.currentLocation(),
         .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
         .results_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, output_attributes),
         .verify = false,
