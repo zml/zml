@@ -118,39 +118,6 @@ fn convLinear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name
     );
 }
 
-const LayerNorm = struct {
-    weight: zml.Tensor,
-    bias: ?zml.Tensor,
-    eps: f32,
-    rms: bool = false,
-
-    pub fn init(store: zml.io.TensorStore.View, eps: f32, rms: bool) LayerNorm {
-        return .{
-            .weight = store.createTensor("weight", .{.d}, .replicated),
-            .bias = if (rms) null else store.maybeCreateTensor("bias", .{.d}, .replicated),
-            .eps = eps,
-            .rms = rms,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
-        self.weight.deinit();
-        if (self.bias) |*bias| bias.deinit();
-    }
-
-    pub fn forward(self: LayerNorm, x: zml.Tensor) zml.Tensor {
-        if (self.rms) {
-            const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-            return normalized.mul(self.weight.convert(x.dtype()).broad(normalized.shape()));
-        }
-        return (zml.nn.LayerNorm{
-            .weight = self.weight,
-            .bias = self.bias,
-            .eps = self.eps,
-        }).forward(x);
-    }
-};
-
 const SwiGlu = struct {
     w1: zml.nn.Linear,
     w2: zml.nn.Linear,
@@ -218,8 +185,8 @@ const Attention = struct {
         const v = qkv.v;
         q = zml.nn.rmsNorm(q, .hd, self.eps);
         k = zml.nn.rmsNorm(k, .hd, self.eps);
-        q = applyRotary(q, cos, sin);
-        k = applyRotary(k, cos, sin);
+        q = zml.nn.applyRotary(q, cos, sin);
+        k = zml.nn.applyRotary(k, cos, sin);
         const attn = zml.nn.sdpa(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
@@ -229,23 +196,6 @@ const Attention = struct {
         return applyLinear(self.out, attn).rename(.{ .dout = .d });
     }
 };
-
-fn rotateHalf(x: zml.Tensor) zml.Tensor {
-    const half = @divExact(x.dim(-1), 2);
-    const x1 = x.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x.slice1d(-1, .{ .start = half, .end = x.dim(-1) });
-    return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-}
-
-fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-    const rotary_dim = cos.dim(-1);
-    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
-    const x_pass = x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) });
-    const cos_x = cos.rename(.{ .f = .hd }).broad(x_rot.shape());
-    const sin_x = sin.rename(.{ .f = .hd }).broad(x_rot.shape());
-    const rotated = x_rot.mul(cos_x).add(rotateHalf(x_rot).mul(sin_x));
-    return zml.Tensor.concatenate(&.{ rotated, x_pass }, -1);
-}
 
 pub fn vitRope(position_ids: zml.Tensor, rotary_dim: i64, theta: f32) struct { zml.Tensor, zml.Tensor } {
     const n_dim: i64 = 3;
@@ -258,14 +208,14 @@ pub fn vitRope(position_ids: zml.Tensor, rotary_dim: i64, theta: f32) struct { z
     const parts = freqs.chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
     const emb = zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
-    return .{ emb.cos(), emb.sin() };
+    return .{ emb.cos().rename(.{ .f = .hd }), emb.sin().rename(.{ .f = .hd }) };
 }
 
 pub const TransformerBlock = struct {
-    norm1: LayerNorm,
+    norm1: zml.nn.RmsNorm,
     attn: Attention,
     scale1: zml.Tensor,
-    norm2: LayerNorm,
+    norm2: zml.nn.RmsNorm,
     ff: SwiGlu,
     scale2: zml.Tensor,
 
@@ -280,24 +230,24 @@ pub const TransformerBlock = struct {
         hidden: zml.Tensor,
     };
 
-    pub fn init(store: zml.io.TensorStore.View, cfg: Config, rms: bool) TransformerBlock {
+    pub fn init(store: zml.io.TensorStore.View, cfg: Config) TransformerBlock {
         const attn_store = store.withPrefix("attn");
         const ff_store = store.withPrefix("ff");
         return .{
-            .norm1 = .init(store.withPrefix("norm1"), cfg.decoder_norm_eps, rms),
+            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.decoder_norm_eps),
             .attn = .init(attn_store, cfg),
             .scale1 = store.createTensor("scale1", .{.d}, .replicated),
-            .norm2 = .init(store.withPrefix("norm2"), cfg.decoder_norm_eps, rms),
+            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.decoder_norm_eps),
             .ff = .init(ff_store),
             .scale2 = store.createTensor("scale2", .{.d}, .replicated),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerBlock)) void {
-        LayerNorm.unloadBuffers(&self.norm1);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm1);
         Attention.unloadBuffers(&self.attn);
         self.scale1.deinit();
-        LayerNorm.unloadBuffers(&self.norm2);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm2);
         SwiGlu.unloadBuffers(&self.ff);
         self.scale2.deinit();
     }
@@ -326,12 +276,12 @@ pub const EmbedModel = struct {
 };
 
 pub const FinishModel = struct {
-    norm_out: LayerNorm,
+    norm_out: zml.nn.LayerNorm,
     proj_out: zml.nn.Linear,
     cfg: Config,
 
     pub fn unloadBuffers(self: *zml.Bufferized(FinishModel)) void {
-        LayerNorm.unloadBuffers(&self.norm_out);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm_out);
         zml.nn.Linear.unloadBuffers(&self.proj_out);
     }
 };
@@ -347,7 +297,7 @@ pub const Model = struct {
         const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.decoder_num_layers));
         errdefer allocator.free(blocks);
         const block_store = dec.withPrefix("transformer_blocks");
-        for (blocks, 0..) |*block, i| block.* = .init(block_store.withLayer(i), cfg, true);
+        for (blocks, 0..) |*block, i| block.* = .init(block_store.withLayer(i), cfg);
 
         const post = store.withPrefix("post_quant_conv");
         return .{
@@ -359,7 +309,7 @@ pub const Model = struct {
             },
             .blocks = blocks,
             .finish = .{
-                .norm_out = .init(dec.withPrefix("norm_out"), cfg.decoder_norm_eps, false),
+                .norm_out = .fromStore(dec.withPrefix("norm_out"), "weight", "bias", .replicated, cfg.decoder_norm_eps),
                 .proj_out = linear(dec.withPrefix("proj_out"), "weight", "bias"),
                 .cfg = cfg,
             },
