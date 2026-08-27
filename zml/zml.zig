@@ -20,6 +20,7 @@ pub const constants = @import("constants.zig");
 pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
+pub const distributed = @import("distributed.zig");
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const FnExe = exe.FnExe;
