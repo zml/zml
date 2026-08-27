@@ -49,12 +49,6 @@ pub const ReferenceBlock = struct {
 /// AdaLN / time-embed table capacity. Official fills it with
 /// `torch.unique(row_times, sorted=True)` (at most 4 distinct values).
 pub const timestep_slot_count: u32 = 4;
-pub const TimeSlot = enum(u32) {
-    video = 0,
-    audio = 1,
-    visual_cond = 2,
-    audio_cond = 3,
-};
 
 pub fn timestepValues(video_t: f32, audio_t: f32) [timestep_slot_count]f32 {
     return .{
@@ -63,24 +57,6 @@ pub fn timestepValues(video_t: f32, audio_t: f32) [timestep_slot_count]f32 {
         @max(video_t, config.visual_cond_timestep),
         @max(audio_t, 1.0),
     };
-}
-
-/// `mask[i] != 0` keeps the row on `slot`; otherwise the row is unchanged.
-pub fn applyRowMask(timestep_indices: []u32, mask: []const u8, slot: u32) void {
-    const n = @min(timestep_indices.len, mask.len);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (mask[i] != 0) timestep_indices[i] = slot;
-    }
-}
-
-pub fn writeTimesteps(out: []f32, video_t: f32, audio_t: f32) void {
-    const values = timestepValues(video_t, audio_t);
-    const n = @min(out.len, values.len);
-    @memcpy(out[0..n], values[0..n]);
-    if (n > 0) {
-        for (n..out.len) |i| out[i] = values[n - 1];
-    }
 }
 
 pub fn padUnique(out: []f32, unique: []const f32) void {
@@ -298,10 +274,10 @@ const Builder = struct {
         return @intCast(self.positions.items.len);
     }
 
-    fn appendRow(self: *Builder, pos: Position, tag: Modality, time_row: u32) !void {
+    fn appendRow(self: *Builder, pos: Position, tag: Modality) !void {
         try self.positions.append(self.allocator, pos);
         try self.token_tags.append(self.allocator, @intFromEnum(tag));
-        try self.timestep_indices.append(self.allocator, time_row);
+        try self.timestep_indices.append(self.allocator, 0);
     }
 
     fn finish(self: *Builder, target_video: struct { start: u32, end: u32 }, target_audio: struct { start: u32, end: u32 }) !Layout {
@@ -322,7 +298,7 @@ const Builder = struct {
     }
 };
 
-fn appendText(b: *Builder, text_len: u32, text_tags: []const u8, time_row: u32) !void {
+fn appendText(b: *Builder, text_len: u32, text_tags: []const u8) !void {
     const start = b.row();
     var run_start: u32 = 0;
     var current: u8 = if (text_tags.len == 0) @intFromEnum(Modality.text) else text_tags[0];
@@ -337,7 +313,7 @@ fn appendText(b: *Builder, text_len: u32, text_tags: []const u8, time_row: u32) 
             run_start = @intCast(i);
             current = tag;
         }
-        try b.appendRow(.{ .t = @floatFromInt(i), .h = 0, .w = 0 }, @enumFromInt(tag), time_row);
+        try b.appendRow(.{ .t = @floatFromInt(i), .h = 0, .w = 0 }, @enumFromInt(tag));
         try b.text_indices.append(b.allocator, start + @as(u32, @intCast(i)));
     }
     try b.segments.append(b.allocator, .{
@@ -353,7 +329,6 @@ fn appendVideoGrid(
     w_axis: []const f32,
     latent_t: u32,
     start_t: f64,
-    time_row: u32,
     kind: SegmentKind,
     source_index: i32,
 ) !struct { start: u32, end: u32, cursor: f64 } {
@@ -363,7 +338,7 @@ fn appendVideoGrid(
         for (h_axis) |h| {
             for (w_axis) |w| {
                 const idx = b.row();
-                try b.appendRow(.{ .t = @floatCast(cursor), .h = h, .w = w }, .video, time_row);
+                try b.appendRow(.{ .t = @floatCast(cursor), .h = h, .w = w }, .video);
                 try b.video_indices.append(b.allocator, idx);
             }
         }
@@ -385,7 +360,6 @@ fn appendAudioRows(
     cursor: f64,
     w_low: f32,
     w_high: f32,
-    time_row: u32,
     kind: SegmentKind,
     source_index: i32,
 ) !struct { start: u32, end: u32 } {
@@ -398,7 +372,7 @@ fn appendAudioRows(
                 .t = @floatCast(cursor + @as(f64, @floatFromInt(t))),
                 .h = 0,
                 .w = w,
-            }, .audio, time_row);
+            }, .audio);
             try b.audio_indices.append(b.allocator, idx);
         }
     }
@@ -422,14 +396,9 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
     const h_axis = spatialAxis(args.latent_h, sqrt_area, &h_buf);
     const w_axis = spatialAxis(args.latent_w, sqrt_area, &w_buf);
 
-    const times = timestepValues(args.video_t, args.audio_t_noise);
-    try b.timesteps.appendSlice(b.allocator, &times);
-    const video_time = @intFromEnum(TimeSlot.video);
-    const audio_time = @intFromEnum(TimeSlot.audio);
-    const cond_time = @intFromEnum(TimeSlot.visual_cond);
-    const audio_cond_time = @intFromEnum(TimeSlot.audio_cond);
+    try b.timesteps.appendSlice(b.allocator, &[_]f32{ 0, 0, 0, 0 });
 
-    try appendText(&b, args.text_len, args.text_tags, video_time);
+    try appendText(&b, args.text_len, args.text_tags);
 
     var rotary_time: f64 = @floatFromInt(args.text_len);
     if (args.references.len == 0) {
@@ -447,7 +416,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
                 @as(f64, @floatFromInt(args.text_len))
             else
                 @as(f64, @floatFromInt(args.text_len)) + duration - frame_rescale_f64;
-            _ = try appendVideoGrid(&b, ch, cw, cond.latent_t, keyframe_t, cond_time, .condition_video, @intCast(index));
+            _ = try appendVideoGrid(&b, ch, cw, cond.latent_t, keyframe_t, .condition_video, @intCast(index));
         }
     } else {
         for (args.references) |block| {
@@ -465,7 +434,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
                     w_low = cw[0];
                     w_high = cw[cw.len - 1];
                 }
-                _ = try appendAudioRows(&b, audio.latent_t, rotary_time, w_low, w_high, audio_cond_time, .condition_audio, block.audio_index);
+                _ = try appendAudioRows(&b, audio.latent_t, rotary_time, w_low, w_high, .condition_audio, block.audio_index);
                 block_end = @max(block_end, rotary_time + @as(f64, @floatFromInt(audio.latent_t)));
             }
             if (block.kind != .audio) {
@@ -476,7 +445,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
                 const area = @sqrt(@as(f64, @floatFromInt(video.latent_h * video.latent_w)));
                 const ch = spatialAxis(video.latent_h, area, &ch_buf);
                 const cw = spatialAxis(video.latent_w, area, &cw_buf);
-                const placed = try appendVideoGrid(&b, ch, cw, video.latent_t, rotary_time, cond_time, .condition_video, block.video_index);
+                const placed = try appendVideoGrid(&b, ch, cw, video.latent_t, rotary_time, .condition_video, block.video_index);
                 block_end = if (block.kind == .image)
                     @max(block_end, rotary_time + 1.0)
                 else
@@ -492,17 +461,16 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
         rotary_time,
         w_axis[0],
         w_axis[w_axis.len - 1],
-        audio_time,
         .target_audio,
         -1,
     );
-    const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, rotary_time, video_time, .target_video, -1);
+    const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, rotary_time, .target_video, -1);
 
     var layout = try b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
     errdefer layout.deinit(allocator);
     const row_ts = try allocator.alloc(f32, layout.seqLen());
     defer allocator.free(row_ts);
-    // Official `torch.unique(..., sorted=True)` — not TimeSlot order.
+    // Official `torch.unique(..., sorted=True)`.
     _ = writeRowPlan(layout, args.video_t, args.audio_t_noise, row_ts, layout.timestep_indices, layout.timesteps);
     return layout;
 }

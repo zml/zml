@@ -622,12 +622,6 @@ pub fn partitionsVaeBatch(batch: u32, tp: u32) bool {
     return batch > 1 and tp > 1 and batch % tp == 0;
 }
 
-pub fn adalnIndices(allocator: std.mem.Allocator, layout: packing.Layout) ![]u32 {
-    const out = try allocator.alloc(u32, layout.seqLen());
-    packing.writeAdalnIndices(out, layout.timestep_indices, layout.token_tags);
-    return out;
-}
-
 pub const EncodeCompiled = struct {
     visual_t1: ?zml.FnExe(visual_enc.encode) = null,
     visual_clip: ?zml.FnExe(visual_enc.encode) = null,

@@ -6,7 +6,6 @@ const config = @import("../core/config.zig");
 const dit = @import("../model/dit.zig");
 const noise = @import("../model/noise.zig");
 const packing = @import("../model/packing.zig");
-const pipeline = @import("../runtime/pipeline.zig");
 const scheduler = @import("../model/scheduler.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
@@ -23,7 +22,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOfficialRotateHalf();
     try testTorchNoise(allocator);
     try testMultistepSampler();
-    try testRowMask();
     try testRngReset(allocator);
     try testTableCoord();
     try testHostFwht();
@@ -125,9 +123,7 @@ fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 0), a.timestep_indices[a.target_audio_start]);
     try std.testing.expectEqual(@as(u32, 0), b.timestep_indices[b.target_video_start]);
     try std.testing.expectEqual(@as(u32, 1), b.timestep_indices[b.target_audio_start]);
-    var buf: [4]f32 = undefined;
-    packing.writeTimesteps(&buf, 0.1, 0.2);
-    try std.testing.expectEqualSlices(f32, &late, &buf);
+    try std.testing.expectEqualSlices(f32, &late, &packing.timestepValues(0.1, 0.2));
 }
 fn testOfficialRowTimesteps(allocator: std.mem.Allocator) !void {
     const videos = [_]packing.ConditionVideo{.{
@@ -374,12 +370,6 @@ fn testMultistepSampler() !void {
     multistep_mod.eulerStep(&sig, &ts, 1, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
-fn testRowMask() !void {
-    var idx = [_]u32{ 0, 1, 2 };
-    const mask = [_]u8{ 1, 0, 1 };
-    packing.applyRowMask(&idx, &mask, 3);
-    try std.testing.expectEqualSlices(u32, &.{ 3, 1, 3 }, &idx);
-}
 fn testRngReset(allocator: std.mem.Allocator) !void {
     const conds = [_]packing.ConditionVideo{.{ .latent_t = 1, .latent_h = 2, .latent_w = 2 }};
     const clean = [_]f32{0} ** 96;
@@ -455,8 +445,9 @@ fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
         .audio_t_noise = 0.6,
     });
     defer layout.deinit(allocator);
-    const idx = try pipeline.adalnIndices(allocator, layout);
+    const idx = try allocator.alloc(u32, layout.seqLen());
     defer allocator.free(idx);
+    packing.writeAdalnIndices(idx, layout.timestep_indices, layout.token_tags);
     try std.testing.expectEqual(layout.seqLen(), idx.len);
     try std.testing.expectEqual(layout.adalnIndex(0), idx[0]);
     try std.testing.expectEqual(@as(u32, 1), idx[0] % 3);
