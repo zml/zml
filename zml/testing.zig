@@ -285,7 +285,11 @@ pub const CompareOpts = struct {
             std.debug.assert(left.len == right.len);
 
             for (left, right) |l, r| {
-                self.count_close += if (l == r) 1 else 0;
+                switch (@typeInfo(T)) {
+                    .int, .float => self.count_close += if (l == r) 1 else 0,
+                    .vector => |vec| self.count_close += @popCount(@as(@Int(.unsigned, vec.len), @bitCast(l == r))),
+                    else => @panic("cmpIntSlices expect int or vector of int"),
+                }
             }
             self.processed_count += left.len;
         }

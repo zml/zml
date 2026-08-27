@@ -7,8 +7,8 @@ const C128 = std.math.Complex(f64);
 
 pub const DataType = enum(u8) {
     bool,
-    // Note: the support of the float8 is a bit spotty, f8e4m3b11fnuz seems to be the most supported one on Cuda.
     f4e2m1,
+    // Note: the support of the float8 is a bit spotty, f8e4m3b11fnuz seems to be the most supported one on Cuda.
     f8e3m4,
     f8e4m3,
     f8e4m3b11fnuz,
@@ -151,6 +151,7 @@ pub const DataType = enum(u8) {
 
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
+            .bool => 8, // In PJRT/stablehlo bool always occupy a full byte
             inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }

@@ -500,22 +500,7 @@ pub const Shape = struct {
 
     /// Total size in bytes needed to represent this shape on host
     pub fn byteSize(self: Shape) usize {
-        return self.dtype().sizeOf() * self.count();
-    }
-
-    /// Total size in bytes needed to represent this shape on device
-    /// https://github.com/openxla/xla/blob/0f7240cad3fa14b52a809ac1f4a351a9edfc541e/xla/primitive_util.h#L807
-    pub fn deviceByteSize(self: Shape) usize {
-        const bits_per_element: usize = switch (self.dtype()) {
-            .bool => 8,
-            else => self.dtype().bitSizeOf(),
-        };
-
-        return std.math.divCeil(
-            usize,
-            self.count() * bits_per_element,
-            8,
-        ) catch unreachable;
+        return std.math.divCeil(usize, self.count() * self.dtype().bitSizeOf(), 8) catch unreachable;
     }
 
     /// Compares the two shapes described, ignoring tagging.
@@ -1639,6 +1624,22 @@ pub const Shape = struct {
             .current_coords = @splat(0),
             .flat_index = 0,
         };
+    }
+
+    /// Generate the packed shape visible to PJRT
+    pub fn packedShape(sh: Shape) Shape {
+        const bit_size = sh.dtype().bitSizeOf();
+        if (bit_size >= 8) return sh;
+
+        const items_per_byte = @divExact(8, bit_size);
+        var res: Shape = sh.setDim(-1, @divExact(sh.dim(-1), items_per_byte));
+        res._dtype = .u8;
+        return res;
+    }
+
+    test packedShape {
+        const x: Shape = .init(.{ 4, 8 }, .u2);
+        try expectEqualShapes(.init(.{ 4, 2 }, .u8), x.packedShape());
     }
 };
 
