@@ -239,7 +239,7 @@ pub const Slice = struct {
         slice: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{slice});
+        return writer.print("Slice({f})@0x{x} [mut={}, off={d}, strides={any}]", .{ slice.shape, @intFromPtr(slice.bytes.ptr), slice.mutable, slice.offset_bytes, slice.byte_strides.slice() });
     }
 
     pub fn formatNumber(slice: Slice, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
@@ -381,6 +381,32 @@ test "slice expectClose compares dense and strided slices" {
     try std.testing.expect(!strided.isContiguous());
     try testing.expectClose(std.testing.io, dense, strided, .exact_match);
     try testing.expectClose(std.testing.io, strided, dense, .exact_match);
+}
+
+test "slice expectClose applies close fraction across strided slices" {
+    const testing = @import("testing.zig");
+
+    const dense_data: [2][2]f32 = .{
+        .{ 1, 2 },
+        .{ 5, 6 },
+    };
+    const strided_data: [2][4]f32 = .{
+        .{ 1, 3, 99, 98 },
+        .{ 5, 6, 97, 96 },
+    };
+
+    const dense = Slice.init(.init(.{ 2, 2 }, .f32), std.mem.asBytes(&dense_data));
+    const storage = Slice.init(.init(.{ 2, 4 }, .f32), std.mem.asBytes(&strided_data));
+    const strided = storage.subSlice(1, 0, 2);
+    const opts: testing.CompareOpts = .{
+        .absolute_tolerance = 0,
+        .relative_tolerance = 0,
+        .minimum_close_fraction = 0.75,
+    };
+
+    try std.testing.expect(!strided.isContiguous());
+    try testing.expectClose(std.testing.io, dense, strided, opts);
+    try testing.expectClose(std.testing.io, strided, dense, opts);
 }
 
 test "slice pretty print rank 3" {

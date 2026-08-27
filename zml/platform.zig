@@ -360,6 +360,14 @@ pub const Platform = struct {
         }
 
         switch (target) {
+            .rocm => if (zml.fp8.Backend.selected() == .ck) {
+                zml.fp8.ck.load(io) catch |err| {
+                    log.err("Failed to load CK block-FP8 kernels: {}", .{err});
+                    return err;
+                };
+                try zml.fp8.ck.register(platform);
+                try zml.fp8.ck.registerMoe(platform);
+            },
             .cuda => {
                 zml.attention.flashattn.load(arena, io) catch {
                     log.warn("Failed to load flashattn", .{});

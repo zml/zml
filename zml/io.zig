@@ -290,7 +290,7 @@ pub const Loader = struct {
         pub const default: Opts = .{
             .parallelism = 1,
             .dma_chunks = 2,
-            .dma_chunk_size = 4096,
+            .dma_chunk_size = 2 << 20,
         };
         parallelism: usize,
         dma_chunks: usize,
@@ -580,8 +580,8 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .cuda, .oneapi, .rocm => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
+            .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
@@ -1401,7 +1401,7 @@ const DirectMemoryWriterDeviceTest = struct {
         write_mode: WriteMode = .stream_remaining,
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
-        pool_chunk_size: usize = 1 << 20,
+        pool_chunk_size: usize = 2 << 20,
     };
 
     allocator: std.mem.Allocator,

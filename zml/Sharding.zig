@@ -791,7 +791,7 @@ pub const PhysicalMesh = struct {
                 if (coord_placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
             }
 
-            var axis_sizes = [_]usize{1} ** MAX_MESH_RANK;
+            var axis_sizes: [MAX_MESH_RANK]usize = @splat(1);
             for (0..rank) |ax_i| {
                 var max_coord: usize = 0;
                 for (placements) |coord_placement| {
@@ -1025,7 +1025,7 @@ pub const PhysicalMesh = struct {
             });
         }
 
-        var coords_buf: [MAX_MESH_RANK]usize = [_]usize{0} ** MAX_MESH_RANK;
+        var coords_buf: [MAX_MESH_RANK]usize = @splat(0);
         var next_device: usize = 0;
 
         const Node = struct {

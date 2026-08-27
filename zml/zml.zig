@@ -23,6 +23,7 @@ pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const FnExe = exe.FnExe;
 pub const floats = @import("floats.zig");
+pub const fp8 = @import("fp8.zig");
 pub const io = @import("io.zig");
 pub const kernel = @import("kernel.zig");
 pub const logo = @import("logo.zig");

@@ -143,6 +143,31 @@ fn selectSparseMlaLaunchConfig(
         };
     }
 
+    // gfx942 has 304 CUs. The generic rounds-times-tiles estimate misses the
+    // cost of the hierarchical reduction and the wave boundaries for GLM's
+    // 16-head, top-2048 sparse decode. These choices are measured across both
+    // decode batches and the large token-batch executable, not just q=1.
+    if (cu_count_ >= 300 and cu_count_ <= 320 and num_heads == 16 and topk_count == 2048) {
+        var num_splits: usize = if (query_count <= 3)
+            128
+        else if (query_count == 4)
+            64
+        else if (query_count <= 9)
+            32
+        else if (query_count <= 128)
+            64
+        else
+            8;
+        num_splits = @min(num_splits, max_splits);
+        return .{
+            .block_m = block_m,
+            .tile_size = tile_size,
+            .num_tiles = num_tiles,
+            .num_splits = num_splits,
+            .direct_programs = direct_programs,
+        };
+    }
+
     var best_splits: usize = 1;
     var best_cost: usize = std.math.maxInt(usize);
     const candidates = [_]usize{ 1, 2, 4, 8, 16, 32, 64, 128 };
@@ -1099,6 +1124,23 @@ test "sparse MLA launch selection derives GB300 decode splits from shapes" {
 
     const full = selectSparseMlaLaunchConfig(1, 64, 128, 152, null, tuning);
     try std.testing.expectEqual(@as(usize, 4), full.num_splits);
+}
+
+test "sparse MLA launch selection uses measured gfx942 GLM ranges" {
+    const cases = [_]struct { queries: usize, splits: usize }{
+        .{ .queries = 1, .splits = 128 },
+        .{ .queries = 3, .splits = 128 },
+        .{ .queries = 4, .splits = 64 },
+        .{ .queries = 8, .splits = 32 },
+        .{ .queries = 16, .splits = 64 },
+        .{ .queries = 120, .splits = 64 },
+        .{ .queries = 256, .splits = 8 },
+        .{ .queries = 768, .splits = 8 },
+    };
+    for (cases) |case| {
+        const launch = selectSparseMlaLaunchConfig(case.queries, 16, 2048, 304, null, .{});
+        try std.testing.expectEqual(case.splits, launch.num_splits);
+    }
 }
 
 test "sparse MLA emits 2D and 3D Triton kernels" {

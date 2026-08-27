@@ -96,6 +96,8 @@ zig_library(
         "dtype.zig",
         "exe.zig",
         "floats.zig",
+        "fp8.zig",
+        "fp8/ck.zig",
         "io.zig",
         "kernel.zig",
         "logo.zig",
@@ -128,6 +130,12 @@ zig_library(
     data = [
         "moe/triton_kernels/config.json",
     ] + select({
+        "//platforms:rocm.enabled": [
+            "//platforms/rocm/ck_fp8:aiter_moe_gfx942",
+            "//platforms/rocm/ck_fp8:libzml_ck_fp8",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "//platforms:neuron.enabled": [
             "//zml/attention/nki:attention_kernel",
         ],
@@ -191,6 +199,13 @@ zig_library(
 
 zig_test(
     name = "test",
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "fp8_test",
+    main = "fp8_test.zig",
+    tags = ["no_ci"],
     deps = ["//zml"],
 )
 
