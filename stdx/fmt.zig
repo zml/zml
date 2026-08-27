@@ -37,15 +37,32 @@ pub fn formatFloat(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer)
         .float => value,
         else => @compileError("formatFloat expects a float, got: " ++ @typeName(@TypeOf(value))),
     };
-    return writer.printFloat(x, spec);
+    switch (@typeInfo(@TypeOf(x))) {
+        .float => try writer.printFloat(x, spec),
+        // Handle F4.toF32() being a [2]f32
+        .array => inline for (0.., x) |i, xi| {
+            try writer.printFloat(xi, spec);
+            if (i < x.len - 1) try writer.writeByte(',');
+        },
+        else => @compileError("formatFloat expects a float, got: " ++ @typeName(@TypeOf(value))),
+    }
 }
 
 pub fn formatInt(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    switch (@typeInfo(@TypeOf(value))) {
-        .int => {},
+    return switch (@typeInfo(@TypeOf(value))) {
+        .int => try writer.printInt(value, spec.mode.base().?, spec.case, .{ .alignment = spec.alignment, .fill = spec.fill }),
+        .vector => {
+            const vector = @typeInfo(@TypeOf(value)).vector;
+            const array: [vector.len]vector.child = value;
+            for (&array, 0..) |elem, i| {
+                try writer.printInt(elem, spec.mode.base().?, spec.case, .{ .alignment = spec.alignment, .fill = spec.fill });
+                if (i < array.len - 1) {
+                    try writer.writeAll(", ");
+                }
+            }
+        },
         else => @compileError("formatInt expects an int, got: " ++ @typeName(@TypeOf(value))),
-    }
-    return writer.printInt(value, spec.mode.base().?, spec.case, .{ .alignment = spec.alignment, .fill = spec.fill });
+    };
 }
 
 pub fn formatComplex(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
