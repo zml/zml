@@ -196,8 +196,8 @@ pub const DenseOpts = struct {
 
 /// Dense attention (causal or bidirectional). FA2 / FA3 on CUDA when selected;
 /// `zml.nn.sdpa` is the fallback for every other backend.
-pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, parameters: Parameters, opts: DenseOpts) zml.Tensor {
-    return switch (parameters) {
+pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
+    return switch (backend) {
         .vanilla, .attnd, .nki, .metal_fa => blk: {
             const mask = if (opts.is_causal)
                 zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
@@ -352,12 +352,11 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
     const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
     for (backends) |backend| {
         if (!backend.isAvailable(platform)) continue;
-        const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,
             io,
             dense,
-            .{ tensors.q, tensors.k, tensors.v, parameters, DenseOpts{ .is_causal = is_causal } },
+            .{ tensors.q, tensors.k, tensors.v, backend, DenseOpts{ .is_causal = is_causal } },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "dense_attention_{t}", .{backend}),
                 .shardings = shardings,
