@@ -559,7 +559,7 @@ const EncoderBlock = struct {
 };
 
 const GeGluMlp = struct {
-    norm: LayerNormEnc,
+    norm: zml.nn.LayerNorm,
     w0: zml.nn.Linear,
     w1: zml.nn.Linear,
     w2: zml.nn.Linear,
@@ -574,7 +574,7 @@ const GeGluMlp = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(GeGluMlp)) void {
-        LayerNormEnc.unloadBuffers(&self.norm);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm);
         zml.nn.Linear.unloadBuffers(&self.w0);
         zml.nn.Linear.unloadBuffers(&self.w1);
         zml.nn.Linear.unloadBuffers(&self.w2);
@@ -585,8 +585,6 @@ const GeGluMlp = struct {
         return self.w2.forward(self.w0.forward(n).gelu().mul(self.w1.forward(n)).rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };
-
-const LayerNormEnc = zml.nn.LayerNorm;
 
 const CausalAttn = struct {
     qkv: zml.nn.Linear,
@@ -643,11 +641,11 @@ const CausalAttn = struct {
 };
 
 const AttnProjection = struct {
-    norm1: LayerNormEnc,
+    norm1: zml.nn.LayerNorm,
     attn: CausalAttn,
     proj: zml.nn.Linear,
-    norm3: LayerNormEnc,
-    norm2: LayerNormEnc,
+    norm3: zml.nn.LayerNorm,
+    norm2: zml.nn.LayerNorm,
     mlp: GeGluMlp,
 
     pub fn init(store: zml.io.TensorStore.View, in_dim: i64, out_dim: i64) AttnProjection {
@@ -662,11 +660,11 @@ const AttnProjection = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(AttnProjection)) void {
-        LayerNormEnc.unloadBuffers(&self.norm1);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm1);
         CausalAttn.unloadBuffers(&self.attn);
         zml.nn.Linear.unloadBuffers(&self.proj);
-        LayerNormEnc.unloadBuffers(&self.norm3);
-        LayerNormEnc.unloadBuffers(&self.norm2);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm3);
+        zml.nn.LayerNorm.unloadBuffers(&self.norm2);
         GeGluMlp.unloadBuffers(&self.mlp);
     }
 
