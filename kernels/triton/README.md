@@ -13,7 +13,7 @@ Two layers define the surface:
   `Builder.open` / `Builder.init` take an `*mlir.Context` — pass them a
   `zml.kernel.triton.newContext()` (a throwaway context with the dialects the
   DSL emits), `defer ctx.deinit()` once you have the IR string. Not a
-  `Compilation`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
+  `zml.Compiler`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
   (a registered `llvm` dialect makes XLA:TPU choke).
 - **High layer** — `zml.kernel.triton.Kernel(Config, spec)`: the declarative
   kernel form. Bundles a config type, a typed spec literal (name + named

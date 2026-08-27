@@ -56,7 +56,7 @@ pub const module = struct {
     pub const CompileError = Compiler.Error;
     pub const CompilationOptions = Compiler.Options;
 
-    /// Deprecated, use `platform.compile` or `zml.Compiler.compile`
+    /// Deprecated, use `platform.compileFn` or `zml.Compiler.compile`
     pub fn compile(
         allocator: std.mem.Allocator,
         io_: std.Io,
