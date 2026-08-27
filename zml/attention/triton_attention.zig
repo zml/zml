@@ -147,7 +147,9 @@ fn selectSparseMlaLaunchConfig(
     // cost of the hierarchical reduction and the wave boundaries for GLM's
     // 16-head, top-2048 sparse decode. These choices are measured across both
     // decode batches and the large token-batch executable, not just q=1.
-    if (cu_count_ >= 300 and cu_count_ <= 320 and num_heads == 16 and topk_count == 2048) {
+    if (cu_count_ >= 300 and cu_count_ <= 320 and num_heads == 16 and
+        (topk_count == 2048 or topk_count == 2176))
+    {
         var num_splits: usize = if (query_count <= 3)
             128
         else if (query_count == 4)
@@ -1140,6 +1142,8 @@ test "sparse MLA launch selection uses measured gfx942 GLM ranges" {
     for (cases) |case| {
         const launch = selectSparseMlaLaunchConfig(case.queries, 16, 2048, 304, null, .{});
         try std.testing.expectEqual(case.splits, launch.num_splits);
+        const pooled_launch = selectSparseMlaLaunchConfig(case.queries, 16, 2176, 304, null, .{});
+        try std.testing.expectEqual(case.splits, pooled_launch.num_splits);
     }
 }
 

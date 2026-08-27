@@ -22,6 +22,7 @@ const log = std.log.scoped(.moe_triton);
 pub const Options = struct {
     inplace: bool = false,
     activation: Parameters.ActivationMode = .silu,
+    activation_limit: f32 = std.math.inf(f32),
     apply_router_weight_on_input: bool = false,
     use_fp8_w8a8: bool = false,
     use_int8_w8a8: bool = false,
@@ -52,6 +53,7 @@ pub const Options = struct {
 pub const Parameters = struct {
     num_experts_per_tok: u32,
     activation: ActivationMode,
+    activation_limit: f32,
 
     pub const ActivationMode = enum {
         silu,
@@ -62,12 +64,14 @@ pub const Parameters = struct {
     pub const InitOptions = struct {
         num_experts_per_tok: u32,
         activation: ActivationMode,
+        activation_limit: f32 = std.math.inf(f32),
     };
 
     pub fn init(opts: InitOptions) Parameters {
         return .{
             .num_experts_per_tok = opts.num_experts_per_tok,
             .activation = opts.activation,
+            .activation_limit = opts.activation_limit,
         };
     }
 };
@@ -109,10 +113,15 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
 }
 
-fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
+fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_limit: f32) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    var gate = x.slice1d(.out, .{ .end = mid });
+    var up = x.slice1d(.out, .{ .start = mid });
+    if (std.math.isFinite(activation_limit)) {
+        const limit = Tensor.scalar(activation_limit, x.dtype());
+        gate = Tensor.select(gate.cmp(.GT, limit), limit, gate);
+        up = up.clamp(limit.negate(), limit);
+    }
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
@@ -129,6 +138,7 @@ fn ckFusedExpertsImpl(
     opts: Options,
 ) !Tensor {
     if (opts.activation != .silu) return error.UnsupportedActivation;
+    if (std.math.isFinite(opts.activation_limit)) return error.UnsupportedActivationLimit;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedBias;
     const w1_scale = (opts.w1_scale orelse return error.MissingWeightScale).convert(.f32);
     const w2_scale = (opts.w2_scale orelse return error.MissingWeightScale).convert(.f32);
@@ -337,9 +347,9 @@ pub fn fusedExpertsImpl(
     const activated_quant, const a2_scale = if (rocm_block_fp8 and
         options.activation == .silu and
         down.dtype() == .f8e4m3fnuz)
-        siluAndQuantizePerTokenGroupFp8(first_out, 128, true)
+        siluAndQuantizePerTokenGroupFp8(first_out, 128, true, options.activation_limit)
     else blk: {
-        const activated = applyActivation(first_out, options.activation);
+        const activated = applyActivation(first_out, options.activation, options.activation_limit);
         var quantized = activated;
         var scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
         if (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz) {
@@ -476,8 +486,10 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     else
         num_assignments + num_experts * (block_size_m - 1);
     const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
-    const warp_size: i64 = 32;
-    const padded_num_experts = (std.math.divCeil(i64, num_experts, warp_size) catch unreachable) * warp_size;
+    // Triton ranges (and the histogram result built over this range) must have a
+    // power-of-two width.  Rounding only to a warp multiple breaks models such
+    // as GLM-5.3, which has 288 experts.
+    const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(num_experts)));
     const sort_block_size: i64 = 256;
     const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 
@@ -601,7 +613,7 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool) struct { Ten
     return .{ outs.y_q, outs.y_s };
 }
 
-fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool) struct { Tensor, Tensor } {
+fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, activation_limit: f32) struct { Tensor, Tensor } {
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 SwiGLU input, got {f}", .{x.shape()});
     const output_columns = @divExact(x.dim(1), 2);
     stdx.debug.assert(@mod(output_columns, group_size) == 0, "SwiGLU output width must be divisible by group size {d}, got {d}", .{ group_size, output_columns });
@@ -626,6 +638,7 @@ fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool) struc
                 .block = @intCast(group_size),
                 .fp8_min = -fp8_max,
                 .fp8_max = fp8_max,
+                .activation_limit = activation_limit,
             },
             .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
             .num_stages = 1,

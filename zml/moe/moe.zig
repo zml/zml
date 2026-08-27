@@ -426,6 +426,7 @@ pub fn forwardMoe(
                         input.shape(),
                         .{
                             .activation = parameters.triton.activation,
+                            .activation_limit = parameters.triton.activation_limit,
                             .global_num_experts = global_num_experts,
                         },
                         (struct {
@@ -439,6 +440,7 @@ pub fn forwardMoe(
                                     .{},
                                     .{
                                         .activation = ctx.activation,
+                                        .activation_limit = ctx.activation_limit,
                                         .global_num_experts = ctx.global_num_experts,
                                         .w1_scale = sharded_inputs[5],
                                         .w2_scale = sharded_inputs[6],
@@ -458,6 +460,7 @@ pub fn forwardMoe(
                     input.shape(),
                     .{
                         .activation = parameters.triton.activation,
+                        .activation_limit = parameters.triton.activation_limit,
                         .global_num_experts = global_num_experts,
                     },
                     (struct {
@@ -471,6 +474,7 @@ pub fn forwardMoe(
                                 .{},
                                 .{
                                     .activation = ctx.activation,
+                                    .activation_limit = ctx.activation_limit,
                                     .global_num_experts = ctx.global_num_experts,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
@@ -503,6 +507,7 @@ pub fn forwardMoe(
                         input.shape(),
                         .{
                             .activation = parameters.triton.activation,
+                            .activation_limit = parameters.triton.activation_limit,
                             .global_num_experts = global_num_experts,
                             .bias_gate_up = bias_gate_up,
                             .bias_down = bias_down,
@@ -528,6 +533,7 @@ pub fn forwardMoe(
                                     .{},
                                     .{
                                         .activation = ctx.activation,
+                                        .activation_limit = ctx.activation_limit,
                                         .global_num_experts = ctx.global_num_experts,
                                         .expert_map = expert_map,
                                         .w1_scale = sharded_inputs[5],
@@ -548,6 +554,7 @@ pub fn forwardMoe(
                     input.shape(),
                     .{
                         .activation = parameters.triton.activation,
+                        .activation_limit = parameters.triton.activation_limit,
                         .global_num_experts = global_num_experts,
                         .scales_gate_up = scales_gate_up,
                         .bias_gate_up = bias_gate_up,
@@ -578,6 +585,7 @@ pub fn forwardMoe(
                                 .{},
                                 .{
                                     .activation = ctx.activation,
+                                    .activation_limit = ctx.activation_limit,
                                     .global_num_experts = ctx.global_num_experts,
                                     .expert_map = expert_map,
                                     .w1_scale = ctx.scales_gate_up,
@@ -602,6 +610,7 @@ pub fn forwardMoe(
                 triton_metadata,
                 .{
                     .activation = parameters.triton.activation,
+                    .activation_limit = parameters.triton.activation_limit,
                     .global_num_experts = weights_gate_up.dim(.expert),
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,

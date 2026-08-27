@@ -132,6 +132,7 @@ pub const SiluAndQuantizePerTokenGroupFp8 = struct {
         block: usize,
         fp8_min: f32,
         fp8_max: f32,
+        activation_limit: f32,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "silu_and_quantize_per_token_group_fp8",
@@ -158,8 +159,12 @@ pub const SiluAndQuantizePerTokenGroupFp8 = struct {
         const gate_offset = row.mul(input_columns).add(group.mul(block));
         const up_offset = gate_offset.add(output_columns);
 
-        const gate = b.load(a.x_ptr.addPtr(gate_offset.add(cols))).to(.f32);
-        const up = b.load(a.x_ptr.addPtr(up_offset.add(cols))).to(.f32);
+        var gate = b.load(a.x_ptr.addPtr(gate_offset.add(cols))).to(.f32);
+        var up = b.load(a.x_ptr.addPtr(up_offset.add(cols))).to(.f32);
+        if (std.math.isFinite(cfg.activation_limit)) {
+            gate = gate.minimum(cfg.activation_limit);
+            up = up.maximum(-cfg.activation_limit).minimum(cfg.activation_limit);
+        }
         const sigmoid = b.ones(&.{block}, .f32).add(b.exp(b.negf(gate)));
         const activated = gate.div(sigmoid).mul(up);
         const absmax = b.max(b.absf(activated)).maximum(@as(f32, 1e-6));
