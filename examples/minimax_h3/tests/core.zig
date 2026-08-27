@@ -679,4 +679,7 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expect(!pipeline.partitionsVaeBatch(6, 1));
     try std.testing.expect(!pipeline.partitionsVaeBatch(5, 2));
     try std.testing.expect(!pipeline.partitionsVaeBatch(1, 2));
+    try std.testing.expect(pipeline.partitionsVaeBatch(28, 2));
+    try std.testing.expect(pipeline.partitionsVaeBatch(28, 4));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(28, 8));
 }

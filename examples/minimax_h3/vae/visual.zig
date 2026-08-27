@@ -460,18 +460,23 @@ fn conv1x1(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
         .convert(x.dtype());
 }
 
+/// Linear, broadcast, and concatenate drop `.b = .model`. Re-apply so a
+/// data-parallel tile batch stays sharded through block and finish.
+fn withModelBatch(like: zml.Tensor, t: zml.Tensor) zml.Tensor {
+    return if (like.shape().partition(.b).eql(.init(.model)))
+        t.withPartitioning(.{ .b = .model })
+    else
+        t;
+}
+
 pub fn embed(input: EmbedInput) EmbedOutput {
     const self = input.model;
     const x = input.latents.withPartialTags(.{ .b, .s, .d });
     const quantized = conv1x1(self.post_quant, x).rename(.{ .dout = .d });
-    const tokens = applyLinear(self.proj, quantized).rename(.{ .dout = .d });
-    const registers = self.register_tokens.convert(tokens.dtype()).broad(zml.Shape.init(.{
-        .b = tokens.dim(.b),
-        .s = self.register_tokens.dim(.s),
-        .d = tokens.dim(.d),
-    }, tokens.dtype()));
-    const cls = zml.Tensor.zeroes(zml.Shape.init(.{ .b = tokens.dim(.b), .s = 1, .d = tokens.dim(.d) }, tokens.dtype()));
-    const hidden = zml.Tensor.concatenate(&.{ tokens, registers, cls }, .s);
+    const tokens = withModelBatch(x, applyLinear(self.proj, quantized).rename(.{ .dout = .d }));
+    const registers = self.register_tokens.convert(tokens.dtype()).broad(tokens.shape().setDim(.s, self.register_tokens.dim(.s)));
+    const cls = zml.Tensor.zeroes(tokens.shape().setDim(.s, 1));
+    const hidden = withModelBatch(x, zml.Tensor.concatenate(&.{ tokens, registers, cls }, .s));
     const cos, const sin = vitRope(input.position_ids, self.cfg.rotaryDim(), self.cfg.decoder_rope_theta);
     return .{
         .hidden = hidden,
