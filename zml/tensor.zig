@@ -1242,9 +1242,10 @@ pub const Tensor = struct {
         var x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
         const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f4_xla.free(std.testing.allocator);
+        const x_f4_items = x_f4_xla.items(floats.Float4E2M1.Packed);
 
-        errdefer std.log.warn("convert(f32 -> f4e2m1) failed !\ninput f32:\n{d}\nzml.floats computed:\n{d}\nxla computed:\n{f}", .{ stdx.fmt.slice(&x_f32), stdx.fmt.slice(&x_f4), x_f4_xla });
-        try std.testing.expectEqualSlices(u8, @ptrCast(&x_f4), x_f4_xla.constData());
+        errdefer std.log.warn("convert(f32 -> f4e2m1) failed !\ninput f32:\n{d}\nzml.floats computed:\n{d}\nxla computed:\n{d}", .{ stdx.fmt.slice(&x_f32), stdx.fmt.slice(&x_f4), x_f4_xla });
+        try std.testing.expectEqualSlices(floats.Float4E2M1.Packed, &x_f4, x_f4_items);
     }
 
     test "convert f32 -> f8e3m4" {
@@ -1277,25 +1278,19 @@ pub const Tensor = struct {
         try std.testing.expectEqualSlices(u8, @ptrCast(&x_f8e3), x_f8e3_xla.constData());
     }
 
-    test "convert u2x4 -> u8" {
+    test "convert u2 -> u8" {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
         const x_u2: [2]@Vector(4, u2) = .{ .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 } };
         std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
         const x_u8: [8]u8 = .{ 0, 1, 2, 3, 3, 2, 1, 0 };
 
-        const Local = struct {
-            fn fwd(x_u2x4: Tensor) Tensor {
-                return x_u2x4.convert(.u8);
-            }
-        };
-
         const x_u2_t: Tensor = .init(.{8}, .u2);
         const exe = try zml.module.compile(
             std.testing.allocator,
             std.testing.io,
-            Local.fwd,
-            .{x_u2_t},
+            Tensor.convert,
+            .{ x_u2_t, .u8 },
             platform,
             .{},
         );
@@ -1312,24 +1307,18 @@ pub const Tensor = struct {
         try std.testing.expectEqualSlices(u8, &x_u8, x_u8_xla.constData());
     }
 
-    test "convert f4e2m1x2 -> f32" {
+    test "convert f4e2m1 -> f32" {
         const floats = @import("floats.zig");
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
         const x_f4_packed = [_]floats.Float4E2M1.Packed{ .fromF32(0, 0.5), .fromF32(1, 1.5), .fromF32(2, 3), .fromF32(4, 6) };
 
-        const Local = struct {
-            fn fwd(x_f4_x2: Tensor) Tensor {
-                return x_f4_x2.convert(.f32);
-            }
-        };
-
         const x_t: Tensor = .init(.{x_f4_packed.len * 2}, .f4e2m1);
         const exe = try zml.module.compile(
             std.testing.allocator,
             std.testing.io,
-            Local.fwd,
-            .{x_t},
+            Tensor.convert,
+            .{ x_t, .f32 },
             platform,
             .{},
         );
@@ -1338,7 +1327,7 @@ pub const Tensor = struct {
         var x_f4_d: zml.Buffer = try .fromBytes(std.testing.io, platform, x_t.shape(), .replicated, @ptrCast(&x_f4_packed));
         defer x_f4_d.deinit();
 
-        var x_f32_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{x_f4_d});
+        var x_f32_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_f4_d});
         const x_f32_h = try x_f32_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f32_h.free(std.testing.allocator);
 

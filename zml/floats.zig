@@ -514,6 +514,12 @@ pub const Float4E2M1 = packed struct(u4) {
         pub fn toF32(xy: Packed) [2]f32 {
             return .{ xy.x.toF32(), xy.y.toF32() };
         }
+
+        pub fn formatNumber(xy: Packed, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+            try xy.x.formatNumber(w, n);
+            w.writeByte(',');
+            try xy.y.formatNumber(w, n);
+        }
     };
 };
 

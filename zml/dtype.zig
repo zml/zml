@@ -136,9 +136,22 @@ pub const DataType = enum(u8) {
         return @FieldType(Value, @tagName(dtype));
     }
 
+    pub fn toPackedZigType(comptime dtype: DataType) type {
+        return switch (dtype) {
+            .bool => bool,
+            .i2, .i4, .u2, .u4 => |dt| @Vector(8 / dt.bitSizeOf(), @FieldType(Value, @tagName(dtype))),
+            .f4e2m1 => floats.Float4E2M1.Packed,
+            else => {
+                const T = @FieldType(Value, @tagName(dtype));
+                if (@bitSizeOf(T) < 8) @compileLog("Forgot type !", T);
+                return T;
+            },
+        };
+    }
+
     pub fn isSignedInt(dtype: DataType) bool {
         return switch (dtype) {
-            .i4, .i8, .i16, .i32, .i64 => true,
+            .i2, .i4, .i8, .i16, .i32, .i64 => true,
             else => false,
         };
     }
