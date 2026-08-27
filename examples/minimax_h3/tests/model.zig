@@ -14,6 +14,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testTimestepEmbedding();
     try testPackingT2va(allocator);
     try testPackingTimestepSlots(allocator);
+    try testOfficialRowTimesteps(allocator);
     try testPackingFl2va(allocator);
     try testPackingRef2va(allocator);
     try testNchwToThwc();
@@ -119,11 +120,79 @@ fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
         .audio_t_noise = 0.2,
     });
     defer b.deinit(allocator);
-    try std.testing.expectEqualSlices(u32, a.timestep_indices, b.timestep_indices);
     try std.testing.expectEqualSlices(u32, a.video_indices, b.video_indices);
+    try std.testing.expectEqual(@as(u32, 1), a.timestep_indices[a.target_video_start]);
+    try std.testing.expectEqual(@as(u32, 0), a.timestep_indices[a.target_audio_start]);
+    try std.testing.expectEqual(@as(u32, 0), b.timestep_indices[b.target_video_start]);
+    try std.testing.expectEqual(@as(u32, 1), b.timestep_indices[b.target_audio_start]);
     var buf: [4]f32 = undefined;
     packing.writeTimesteps(&buf, 0.1, 0.2);
     try std.testing.expectEqualSlices(f32, &late, &buf);
+}
+fn testOfficialRowTimesteps(allocator: std.mem.Allocator) !void {
+    const videos = [_]packing.ConditionVideo{.{
+        .latent_t = 1,
+        .latent_h = 4,
+        .latent_w = 4,
+    }};
+    const refs = [_]packing.ReferenceBlock{.{
+        .kind = .image,
+        .video_index = 0,
+    }};
+    const layout = try packing.build(allocator, .{
+        .text_len = 3,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.0,
+        .audio_t_noise = 0.0,
+        .condition_videos = &videos,
+        .references = &refs,
+    });
+    defer layout.deinit(allocator);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), layout.timesteps[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.999), layout.timesteps[1], 1e-6);
+    try std.testing.expectEqual(@as(u32, 0), layout.timestep_indices[0]);
+    try std.testing.expectEqual(@as(u32, 0), layout.timestep_indices[layout.target_video_start]);
+    try std.testing.expectEqual(@as(u32, 0), layout.timestep_indices[layout.target_audio_start]);
+    try std.testing.expectEqual(@as(u32, 1), layout.timestep_indices[layout.video_indices[0]]);
+
+    const row_ts = try allocator.alloc(f32, layout.seqLen());
+    defer allocator.free(row_ts);
+    const idx = try allocator.alloc(u32, layout.seqLen());
+    defer allocator.free(idx);
+    var unique: [4]f32 = undefined;
+    const n = packing.writeRowPlan(layout, 0.04, 0.143, row_ts, idx, &unique);
+    try std.testing.expectEqual(@as(u32, 3), n);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.04), unique[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.143), unique[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.999), unique[2], 1e-6);
+    try std.testing.expectEqual(@as(u32, 0), idx[layout.target_video_start]);
+    try std.testing.expectEqual(@as(u32, 1), idx[layout.target_audio_start]);
+    try std.testing.expectEqual(@as(u32, 2), idx[layout.video_indices[0]]);
+
+    const audios = [_]packing.ConditionAudio{.{ .latent_t = 2 }};
+    const av_refs = [_]packing.ReferenceBlock{.{
+        .kind = .video_audio,
+        .video_index = 0,
+        .audio_index = 0,
+    }};
+    const av = try packing.build(allocator, .{
+        .text_len = 3,
+        .latent_t = 2,
+        .latent_h = 4,
+        .latent_w = 4,
+        .audio_t = 2,
+        .video_t = 0.0,
+        .audio_t_noise = 0.0,
+        .condition_videos = &videos,
+        .condition_audios = &audios,
+        .references = &av_refs,
+    });
+    defer av.deinit(allocator);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), av.timesteps[2], 1e-6);
+    try std.testing.expectEqual(@as(u32, 2), av.timestep_indices[av.audio_indices[0]]);
 }
 fn testPackingFl2va(allocator: std.mem.Allocator) !void {
     const first = [_]packing.ConditionVideo{.{

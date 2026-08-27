@@ -46,8 +46,8 @@ pub const ReferenceBlock = struct {
     audio_index: i32 = -1,
 };
 
-/// Fixed AdaLN / time-embed slots. Distinct rows stay valid when video and
-/// condition times diverge; equal values still produce equal `temb` rows.
+/// AdaLN / time-embed table capacity. Official fills it with
+/// `torch.unique(row_times, sorted=True)` (at most 4 distinct values).
 pub const timestep_slot_count: u32 = 4;
 pub const TimeSlot = enum(u32) {
     video = 0,
@@ -83,6 +83,85 @@ pub fn writeTimesteps(out: []f32, video_t: f32, audio_t: f32) void {
     }
 }
 
+pub fn padUnique(out: []f32, unique: []const f32) void {
+    if (out.len == 0 or unique.len == 0) return;
+    const n = @min(out.len, unique.len);
+    @memcpy(out[0..n], unique[0..n]);
+    for (n..out.len) |i| out[i] = unique[n - 1];
+}
+
+fn sortAscending(values: []f32) void {
+    var i: usize = 1;
+    while (i < values.len) : (i += 1) {
+        const key = values[i];
+        var j: usize = i;
+        while (j > 0 and values[j - 1] > key) : (j -= 1) {
+            values[j] = values[j - 1];
+        }
+        values[j] = key;
+    }
+}
+
+/// `torch.unique(..., sorted=True)` over the distinct row times (at most 4).
+pub fn uniqueSorted(values: []const f32, out: *[timestep_slot_count]f32) u32 {
+    var n: u32 = 0;
+    for (values) |v| {
+        var seen = false;
+        for (out[0..n]) |u| {
+            if (u == v) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        if (n >= timestep_slot_count) std.debug.panic("too many unique timesteps", .{});
+        out[n] = v;
+        n += 1;
+    }
+    sortAscending(out[0..n]);
+    return n;
+}
+
+fn indexOfEqual(values: []const f32, needle: f32) u32 {
+    for (values, 0..) |v, i| {
+        if (v == needle) return @intCast(i);
+    }
+    std.debug.panic("timestep missing from unique set", .{});
+}
+
+pub fn fillRowTimesteps(layout: Layout, video_t: f32, audio_t: f32, out: []f32) void {
+    std.debug.assert(out.len == layout.seqLen());
+    const cond_v = layout.conditionVideoRows();
+    const cond_a = layout.conditionAudioRows();
+    @memset(out, video_t);
+    for (layout.video_indices[0..cond_v]) |idx| out[idx] = @max(video_t, config.visual_cond_timestep);
+    for (layout.audio_indices[cond_a..]) |idx| out[idx] = audio_t;
+    for (layout.audio_indices[0..cond_a]) |idx| out[idx] = 1.0;
+}
+
+pub fn writeRowPlan(
+    layout: Layout,
+    video_t: f32,
+    audio_t: f32,
+    row_ts: []f32,
+    timestep_indices: []u32,
+    unique_out: []f32,
+) u32 {
+    fillRowTimesteps(layout, video_t, audio_t, row_ts);
+    var unique: [timestep_slot_count]f32 = undefined;
+    const n = uniqueSorted(row_ts, &unique);
+    padUnique(unique_out, unique[0..n]);
+    for (timestep_indices, row_ts) |*idx, t| idx.* = indexOfEqual(unique[0..n], t);
+    return n;
+}
+
+pub fn writeAdalnIndices(out: []u32, timestep_indices: []const u32, token_tags: []const u8) void {
+    std.debug.assert(out.len == timestep_indices.len and out.len == token_tags.len);
+    for (out, timestep_indices, token_tags) |*a, t, tag| {
+        a.* = t * @as(u32, @intCast(config.modality_count)) + tag;
+    }
+}
+
 pub const Layout = struct {
     positions: []Position,
     token_tags: []u8,
@@ -114,6 +193,14 @@ pub const Layout = struct {
 
     pub fn adalnIndex(self: Layout, row: usize) u32 {
         return self.timestep_indices[row] * @as(u32, @intCast(config.modality_count)) + self.token_tags[row];
+    }
+
+    pub fn conditionVideoRows(self: Layout) u32 {
+        return @intCast(self.video_indices.len - (self.target_video_end - self.target_video_start));
+    }
+
+    pub fn conditionAudioRows(self: Layout) u32 {
+        return @intCast(self.audio_indices.len - (self.target_audio_end - self.target_audio_start));
     }
 };
 
@@ -411,7 +498,13 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
     );
     const video = try appendVideoGrid(&b, h_axis, w_axis, args.latent_t, rotary_time, video_time, .target_video, -1);
 
-    return b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
+    var layout = try b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
+    errdefer layout.deinit(allocator);
+    const row_ts = try allocator.alloc(f32, layout.seqLen());
+    defer allocator.free(row_ts);
+    // Official `torch.unique(..., sorted=True)` — not TimeSlot order.
+    _ = writeRowPlan(layout, args.video_t, args.audio_t_noise, row_ts, layout.timestep_indices, layout.timesteps);
+    return layout;
 }
 
 /// Video noise is `(C, T, H, W)`. Patchify consumes `{t,h,w,c}`.

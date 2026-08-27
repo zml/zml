@@ -624,7 +624,7 @@ pub fn partitionsVaeBatch(batch: u32, tp: u32) bool {
 
 pub fn adalnIndices(allocator: std.mem.Allocator, layout: packing.Layout) ![]u32 {
     const out = try allocator.alloc(u32, layout.seqLen());
-    for (out, 0..) |*v, i| v.* = layout.adalnIndex(i);
+    packing.writeAdalnIndices(out, layout.timestep_indices, layout.token_tags);
     return out;
 }
 
@@ -780,7 +780,7 @@ pub fn pack(
     const schedules = try scheduler_mod.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
     errdefer schedules.deinit(allocator);
     const video_t = schedules.video.timesteps[0];
-    const audio_t = 1.0 - scheduler_mod.timeShiftSigma(1.0 - video_t, opts.video_shift, opts.audio_shift);
+    const audio_t = schedules.audio.timesteps[0];
     const layout = try packing.build(allocator, .{
         .text_len = text_len,
         .latent_t = geo.latent_t,
