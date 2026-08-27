@@ -77,6 +77,12 @@ fn testSharding(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(32));
     try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(64));
     try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(5));
+    try std.testing.expectEqual(@as(usize, 2), sharding_mod.tensorParallelDegree(3));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(6));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(7));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelMax(56, 64, 8));
+    try std.testing.expectEqual(@as(usize, 6), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 6));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 8));
     try std.testing.expect(sharding_mod.officialHeadsOk(1));
     try std.testing.expect(sharding_mod.officialHeadsOk(2));
     try std.testing.expect(sharding_mod.officialHeadsOk(4));
@@ -588,7 +594,6 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .dtype = .bf16,
         .device_bytes = 284 * gib,
         .tp = 4,
-        .devices = 4,
         .block_core_bytes = 1300 * 1024 * 1024,
         .dtype_bytes = 2,
     });
@@ -605,7 +610,6 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .dtype = .bf16,
         .device_bytes = 0,
         .tp = 4,
-        .devices = 4,
         .block_core_bytes = 1300 * 1024 * 1024,
         .dtype_bytes = 2,
     });
@@ -614,6 +618,24 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(5, 1, 100, 2));
+    try std.testing.expectEqual(@as(u32, 3), policy_mod.tileBatch(5, 1, 100, 3));
+    const leftover_tiles = policy_mod.decide(.{
+        .target = .cpu,
+        .seq = 64,
+        .hidden = 256,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 2,
+        .steps = 2,
+        .dtype = .bf16,
+        .device_bytes = 0,
+        .tp = 2,
+        .block_core_bytes = 1,
+        .dtype_bytes = 2,
+        .tile_count = 5,
+        .tile_act_bytes = 1,
+    });
+    try std.testing.expectEqual(@as(u32, 4), leftover_tiles.tile_batch);
     try std.testing.expect(fa2.tile_batch >= 1);
     try std.testing.expect(pipeline.partitionsVaeBatch(6, 2));
     try std.testing.expect(!pipeline.partitionsVaeBatch(6, 1));

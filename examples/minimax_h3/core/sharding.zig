@@ -6,15 +6,25 @@ const config = @import("config.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
-/// Largest tensor-parallel degree that divides DiT heads (56), encoder heads (64), and GQA KV heads (8).
-pub const tensor_parallel_max: usize = 8;
+fn gcdU64(a: u64, b: u64) u64 {
+    var x = a;
+    var y = b;
+    while (y != 0) {
+        const t = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
 
-pub fn tensorParallelDegree(device_count: usize) usize {
-    if (device_count == 0) return 0;
-    if (device_count >= tensor_parallel_max) return tensor_parallel_max;
-    if (device_count >= 4) return 4;
-    if (device_count >= 2) return 2;
-    return 1;
+fn gcdPos(a: i64, b: i64) u64 {
+    return gcdU64(@intCast(@max(a, 0)), @intCast(@max(b, 0)));
+}
+
+/// Largest even head-split: every attention head count must divide by the degree.
+pub fn tensorParallelMax(dit_heads: i64, enc_heads: i64, kv_heads: i64) usize {
+    const g = gcdU64(gcdPos(dit_heads, enc_heads), @intCast(@max(kv_heads, 0)));
+    return if (g == 0) 1 else @intCast(g);
 }
 
 pub fn tensorParallelHeadsOk(degree: i64, dit_heads: i64, enc_heads: i64, kv_heads: i64) bool {
@@ -24,10 +34,35 @@ pub fn tensorParallelHeadsOk(degree: i64, dit_heads: i64, enc_heads: i64, kv_hea
         @rem(kv_heads, degree) == 0;
 }
 
-pub fn officialHeadsOk(degree: i64) bool {
+/// Largest `d ≤ device_count` that splits DiT heads, encoder heads, and KV heads evenly.
+/// Leftover-fit / replication is slower than dropping idle ranks (3 cards → TP=2).
+pub fn tensorParallelDegreeFor(device_count: usize, dit_heads: i64, enc_heads: i64, kv_heads: i64) usize {
+    if (device_count == 0) return 0;
+    var d = @min(device_count, tensorParallelMax(dit_heads, enc_heads, kv_heads));
+    while (d > 1) : (d -= 1) {
+        if (tensorParallelHeadsOk(@intCast(d), dit_heads, enc_heads, kv_heads)) return d;
+    }
+    return 1;
+}
+
+pub fn officialHeadCounts() struct { dit: i64, enc: i64, kv: i64 } {
     const dit = config.Config.official();
     const enc = config.EncoderConfig{};
-    return tensorParallelHeadsOk(degree, dit.num_attention_heads, enc.num_attention_heads, enc.num_key_value_heads);
+    return .{
+        .dit = dit.num_attention_heads,
+        .enc = enc.num_attention_heads,
+        .kv = enc.num_key_value_heads,
+    };
+}
+
+pub fn tensorParallelDegree(device_count: usize) usize {
+    const h = officialHeadCounts();
+    return tensorParallelDegreeFor(device_count, h.dit, h.enc, h.kv);
+}
+
+pub fn officialHeadsOk(degree: i64) bool {
+    const h = officialHeadCounts();
+    return tensorParallelHeadsOk(degree, h.dit, h.enc, h.kv);
 }
 
 pub fn tensorParallelPrimaryAxis(target: zml.Target) zml.Sharding.PhysicalAxisTag {
@@ -60,22 +95,21 @@ pub fn tensorParallelStrategy(mesh: *const zml.Sharding.PhysicalMesh) error{Inva
     return strategy;
 }
 
-/// Use all devices when the count is a legal H3 TP degree. Larger power-of-two
-/// meshes (16/32/64) keep the first 8 so head-parallel TP stays exact.
 pub fn physicalMesh(
     allocator: std.mem.Allocator,
     target: zml.Target,
     devices: []const zml.platform.Device,
 ) anyerror!zml.Sharding.PhysicalMesh {
     if (devices.len == 0) return error.MissingDevices;
-    const degree = tensorParallelDegree(devices.len);
+    const h = officialHeadCounts();
+    const degree = tensorParallelDegreeFor(devices.len, h.dit, h.enc, h.kv);
     if (degree == 0 or degree > devices.len) return error.MissingDevices;
     if (degree == devices.len) {
         return zml.Sharding.PhysicalMesh.auto(allocator, target, devices);
     }
     log.warn(
-        "H3 tensor parallel uses {d} of {d} devices (DiT 56 heads and encoder GQA 8 require degree 1, 2, 4, or 8)",
-        .{ degree, devices.len },
+        "tensor parallel uses {d} of {d} devices (largest even split of dit={d} enc={d} kv={d} heads)",
+        .{ degree, devices.len, h.dit, h.enc, h.kv },
     );
     return tensorParallelLine(allocator, target, devices[0..degree]);
 }
@@ -115,10 +149,11 @@ pub const Shardings = struct {
             strategy,
         );
         const degree = model.numPartitionsForLogicalAxis(.model);
-        if (!officialHeadsOk(degree)) {
+        const h = officialHeadCounts();
+        if (!tensorParallelHeadsOk(degree, h.dit, h.enc, h.kv)) {
             log.err(
-                "H3 tensor parallel degree {d} does not divide DiT heads 56, encoder heads 64, and GQA KV heads 8. Use 1, 2, 4, or 8 devices.",
-                .{degree},
+                "tensor parallel degree {d} does not divide dit={d} enc={d} kv={d} heads",
+                .{ degree, h.dit, h.enc, h.kv },
             );
             return error.IncompatibleSharding;
         }

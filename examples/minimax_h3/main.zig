@@ -272,7 +272,6 @@ pub fn main(init: std.process.Init) !void {
         .dtype = dit_dt,
         .target = platform.target,
         .block_core_bytes = weights.modelBytes(&core0) / @max(1, tp),
-        .devices = @intCast(platform.devices.len),
         .flash = .auto(platform),
     });
     if (!mem.safe) {

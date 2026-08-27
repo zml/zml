@@ -101,16 +101,16 @@ pub fn ditKeepBlocks(resident: u32, layers: u32) u32 {
     return resident;
 }
 
-pub fn tileBatch(tile_count: u32, tile_act_bytes: u64, headroom: u64, devices: u32) u32 {
+pub fn tileBatch(tile_count: u32, tile_act_bytes: u64, headroom: u64, partitions: u32) u32 {
     if (tile_count == 0) return 1;
     const fit: u32 = if (tile_act_bytes == 0)
         tile_count
     else
         @intCast(@min(@as(u64, tile_count), @max(@as(u64, 1), headroom / tile_act_bytes)));
-    const dev = @max(1, devices);
-    if (dev == 1) return @max(1, fit);
-    if (fit < dev) return 1;
-    return (fit / dev) * dev;
+    const part = @max(1, partitions);
+    if (part == 1) return @max(1, fit);
+    if (fit < part) return 1;
+    return (fit / part) * part;
 }
 
 pub fn decide(args: struct {
@@ -124,7 +124,6 @@ pub fn decide(args: struct {
     dtype: zml.DataType,
     device_bytes: u64,
     tp: u32,
-    devices: u32,
     block_core_bytes: u64,
     dtype_bytes: u32,
     tile_count: u32 = 1,
@@ -162,7 +161,7 @@ pub fn decide(args: struct {
     else
         @intCast(@min(@as(u64, args.layers), headroom / per_core));
     const group = groupSize(resident);
-    const tiles = tileBatch(args.tile_count, args.tile_act_bytes, headroom / 4, @max(1, args.devices));
+    const tiles = tileBatch(args.tile_count, args.tile_act_bytes, headroom / 4, @max(1, args.tp));
     return .{
         .attention = attn,
         .resident_blocks = resident,

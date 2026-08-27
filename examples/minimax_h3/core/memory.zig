@@ -62,7 +62,6 @@ pub const Opts = struct {
     dtype: zml.DataType = .bf16,
     target: zml.Target = .cpu,
     block_core_bytes: u64 = 0,
-    devices: u32 = 1,
     flash: zml.attention.Backend = .cuda_fa2,
 };
 
@@ -87,7 +86,6 @@ pub fn plan(opts: Opts) Plan {
         .dtype = opts.dtype,
         .device_bytes = opts.device_bytes,
         .tp = opts.tp,
-        .devices = opts.devices,
         .block_core_bytes = if (opts.block_core_bytes == 0)
             streamed_block_bytes / @max(1, opts.tp)
         else
