@@ -69,6 +69,7 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
+    hidden_buf: *zml.Buffer,
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
@@ -163,26 +164,25 @@ pub const KernelRunner = struct {
 };
 
 pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zml.Buffer) void {
-    var hidden_buffer: zml.Buffer = undefined;
     runner.embed.run(args.io, .{
         .inputs = .{
             .tokens = args.tokens_buf.*,
+            .hidden = args.hidden_buf.*,
         },
-        .outputs = .{ .hidden = &hidden_buffer },
+        .outputs = .{ .hidden = args.hidden_buf },
     });
-    defer hidden_buffer.deinit();
 
     for (runner.layers, kv_cache_index_buffers) |*layer, kv_cache_index_buffer| {
         layer.run(args.io, .{
             .inputs = .{
-                .hidden = hidden_buffer,
+                .hidden = args.hidden_buf.*,
                 .token_index = args.token_index_buf.*,
                 .kv_cache = args.kv_cache_buffers.*,
                 .kv_cache_index = kv_cache_index_buffer,
                 .attention_metadata = args.attention_metadata_buffers.*,
             },
             .outputs = .{
-                .hidden = &hidden_buffer,
+                .hidden = args.hidden_buf,
                 .kv_cache = args.kv_cache_buffers,
             },
         });
@@ -190,12 +190,14 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
 
     runner.sample.run(args.io, .{
         .inputs = .{
-            .hidden = hidden_buffer,
+            .hidden = args.hidden_buf.*,
             .tokens = args.tokens_buf.*,
+            .token_index = args.token_index_buf.*,
             .rng = args.rng_buffers.*,
         },
         .outputs = .{
             .tokens = args.tokens_buf,
+            .token_index = args.token_index_buf,
             .rng = args.rng_buffers,
         },
     });
@@ -212,7 +214,7 @@ fn compileKernel(
     phase: Phase,
     progress: *std.Progress.Node,
 ) !KernelExe {
-    const embed = try compileEmbed(allocator, io, platform, llama_model.model.embed_tokens, parameters, seqlen, phase, progress);
+    const embed = try compileEmbed(allocator, io, platform, llama_model, parameters, seqlen, phase, progress);
     errdefer embed.deinit();
     const layer = try compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress);
     errdefer layer.deinit();
@@ -225,7 +227,7 @@ fn compileEmbed(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    embed_tokens: zml.nn.TokenEmbedding,
+    llama_model: model.Model,
     parameters: CompilationOptions,
     seqlen: usize,
     phase: Phase,
@@ -239,13 +241,18 @@ fn compileEmbed(
     defer phase.logCompileDone(log, "embed_tokens", io, from);
 
     const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
+    const hidden: zml.Tensor = .fromShape(zml.Shape.init(
+        .{ .s = seqlen, .d = llama_model.config.hidden_size },
+        llama_model.model.embed_tokens.weight.dtype(),
+    ).withPartitioning(.{ .d = .replicated }));
 
     return zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, platform, .{
         .shardings = &parameters.shardings.all(),
         .program_name = phase.programName("llama", "embed_tokens"),
     }, .{.{
-        .embedding = .{ .embed_tokens = embed_tokens },
+        .embedding = .{ .embed_tokens = llama_model.model.embed_tokens },
         .tokens = tokens,
+        .hidden = hidden,
     }});
 }
 
@@ -324,9 +331,10 @@ fn compileSample(
         .shardings = &parameters.shardings.all(),
         .program_name = phase.programName("llama", "lm_head"),
     }, .{.{
-        .lm_head = model.LmHead.init(llama_model),
+        .lm_head = model.LmHead.init(llama_model, phase == .decode),
         .hidden = hidden,
         .tokens = tokens,
+        .token_index = parameters.token_index,
         .rng = parameters.rng,
     }});
 }

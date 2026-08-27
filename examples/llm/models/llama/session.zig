@@ -13,7 +13,9 @@ pub const Session = struct {
     prefill: inference.KernelRunner,
     decode: inference.KernelRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
-    token_index_buffers: []zml.Buffer,
+    prefill_hidden_buffer: zml.Buffer,
+    decode_hidden_buffer: zml.Buffer,
+    prefill_token_index_buffer: zml.Buffer,
     kv_cache_index_buffers: []zml.Buffer,
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -34,18 +36,26 @@ pub const Session = struct {
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
-        const token_index_buffers = try allocator.alloc(zml.Buffer, compiled_model.params.seqlen);
-        errdefer allocator.free(token_index_buffers);
-        var initialized_token_index_buffers: usize = 0;
-        errdefer {
-            for (token_index_buffers[0..initialized_token_index_buffers]) |*token_index_buffer| {
-                token_index_buffer.deinit();
-            }
-        }
-        for (token_index_buffers, 0..) |*token_index_buffer, i| {
-            token_index_buffer.* = try zml.Buffer.scalar(io, platform, i, .u32);
-            initialized_token_index_buffers = i + 1;
-        }
+        var prefill_hidden_buffer = try zml.Buffer.uninitialized(
+            io,
+            platform,
+            compiled_model.prefill.embed.raw.output_shapes[0],
+            compiled_model.prefill.embed.raw.output_shardings[0],
+            .{},
+        );
+        errdefer prefill_hidden_buffer.deinit();
+
+        var decode_hidden_buffer = try zml.Buffer.uninitialized(
+            io,
+            platform,
+            compiled_model.decode.embed.raw.output_shapes[0],
+            compiled_model.decode.embed.raw.output_shardings[0],
+            .{},
+        );
+        errdefer decode_hidden_buffer.deinit();
+
+        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
+        errdefer prefill_token_index_buffer.deinit();
 
         const conversation_id: u64 = @bitCast(std.Io.Clock.now(.real, io).toMicroseconds());
 
@@ -74,7 +84,9 @@ pub const Session = struct {
             .prefill = prefill,
             .decode = decode,
             .kv_cache_buffers = kv_cache_buffers,
-            .token_index_buffers = token_index_buffers,
+            .prefill_hidden_buffer = prefill_hidden_buffer,
+            .decode_hidden_buffer = decode_hidden_buffer,
+            .prefill_token_index_buffer = prefill_token_index_buffer,
             .kv_cache_index_buffers = kv_cache_index_buffers,
             .rng_buffers = rng_buffers,
             .tokenizer = tokenizer,
@@ -88,10 +100,9 @@ pub const Session = struct {
         self.prefill.deinit(self.allocator);
         self.decode.deinit(self.allocator);
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
-        for (self.token_index_buffers) |*token_index_buffer| {
-            token_index_buffer.deinit();
-        }
-        self.allocator.free(self.token_index_buffers);
+        self.prefill_hidden_buffer.deinit();
+        self.decode_hidden_buffer.deinit();
+        self.prefill_token_index_buffer.deinit();
         for (self.kv_cache_index_buffers) |*buffer| buffer.deinit();
         self.allocator.free(self.kv_cache_index_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
@@ -169,7 +180,8 @@ pub const Session = struct {
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
-            .token_index_buf = &self.token_index_buffers[0],
+            .hidden_buf = &self.prefill_hidden_buffer,
+            .token_index_buf = &self.prefill_token_index_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
@@ -189,6 +201,14 @@ pub const Session = struct {
         var last_token_id: u32 = self.last_generated_token;
         var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), .replicated, @ptrCast(&last_token_id));
         defer current_token_buffer.deinit();
+
+        // Keep one donated token-index allocation for the whole decode turn.
+        // Passing a different scalar buffer at every step multiplies command
+        // buffer address specializations by layers times generated tokens.
+        // The loop appends last_token_id before the first decode call, so the
+        // first index is one past the current list length.
+        var token_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len + 1, .u32);
+        defer token_index_buffer.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
@@ -213,7 +233,8 @@ pub const Session = struct {
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .hidden_buf = &self.decode_hidden_buffer,
+                .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,

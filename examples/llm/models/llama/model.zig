@@ -194,7 +194,7 @@ pub const Model = struct {
     }
 
     fn lmHead(self: Model) LmHead {
-        return .init(self);
+        return .init(self, false);
     }
 
     /// Predicts the token at `token_index` position.
@@ -225,6 +225,7 @@ pub const Model = struct {
             .lm_head = self.lmHead(),
             .hidden = out,
             .tokens = tokens,
+            .token_index = token_index,
             .rng = rng,
         });
 
@@ -312,6 +313,7 @@ pub const EmbedTokens = struct {
     pub const Input = struct {
         embedding: EmbedTokens,
         tokens: zml.Tensor,
+        hidden: zml.Tensor,
     };
 
     pub const Output = struct {
@@ -322,7 +324,8 @@ pub const EmbedTokens = struct {
         const tokens = input.tokens.withPartialTags(.{.s});
         return .{ .hidden = input.embedding.embed_tokens.forward(tokens)
             .withPartialTags(.{.d})
-            .withPartitioning(.{ .d = .replicated }) };
+            .withPartitioning(.{ .d = .replicated })
+            .reuseBuffer(input.hidden) };
     }
 };
 
@@ -331,13 +334,15 @@ pub const LmHead = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     norm: RmsNorm,
     gen_opts: zml.nn.SamplingStrategy,
+    advance_token_index: bool,
 
-    pub fn init(mdl: Model) LmHead {
+    pub fn init(mdl: Model, advance_token_index: bool) LmHead {
         return .{
             .lm_head = mdl.lm_head,
             .embed_tokens = mdl.model.embed_tokens,
             .norm = mdl.model.norm,
             .gen_opts = mdl.gen_opts,
+            .advance_token_index = advance_token_index,
         };
     }
 
@@ -345,11 +350,13 @@ pub const LmHead = struct {
         lm_head: LmHead,
         hidden: zml.Tensor,
         tokens: zml.Tensor,
+        token_index: zml.Tensor,
         rng: zml.Tensor.Rng,
     };
 
     pub const Output = struct {
         tokens: zml.Tensor,
+        token_index: zml.Tensor,
         rng: zml.Tensor.Rng,
     };
 
@@ -370,7 +377,15 @@ pub const LmHead = struct {
             logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
-        return .{ .tokens = next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), .rng = new_rng };
+        const next_token_index = if (self.advance_token_index)
+            input.token_index.addConstant(1)
+        else
+            input.token_index;
+        return .{
+            .tokens = next_tokens.convert(tokens.dtype()).reuseBuffer(tokens),
+            .token_index = next_token_index.reuseBuffer(input.token_index),
+            .rng = new_rng,
+        };
     }
 };
 
