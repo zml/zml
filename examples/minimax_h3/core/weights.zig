@@ -39,13 +39,6 @@ pub fn modelBytes(model: anytype) u64 {
     return ctx.n;
 }
 
-/// Rebind a compiled runner to the next streamed layer. `bake` is incremental;
-/// reset the count or the previous layer stays bound.
-pub fn rebake(runner: anytype, next: anytype) void {
-    runner.args.baked_count = 0;
-    runner.args.bake(next);
-}
-
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,

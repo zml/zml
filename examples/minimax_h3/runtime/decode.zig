@@ -273,7 +273,7 @@ fn runVisualBatch(
 
     var i: usize = 0;
     while (i < cache.blocks.len) : (i += 1) {
-        weights.rebake(&runners.block, .{ .layer = cache.blocks[i] });
+        runners.block.rebake(.{ .layer = cache.blocks[i] });
         var next: zml.Buffer = undefined;
         t = .now(io, .awake);
         runners.block.run(io, .{

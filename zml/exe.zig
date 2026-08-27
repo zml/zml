@@ -451,6 +451,12 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
+                /// `bake` is incremental; reset the count or the previous prefix stays bound.
+                pub fn rebake(self: *RunnerSelf, baked: BakedInput) void {
+                    self.args.baked_count = 0;
+                    self.args.bake(baked);
+                }
+
                 pub fn run(self: *RunnerSelf, io: std.Io, call: struct {
                     inputs: NonBakedInput,
                     outputs: Output,

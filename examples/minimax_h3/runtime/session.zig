@@ -242,7 +242,7 @@ fn encodeText(
             break :blk bufs;
         };
         if (layer_runner) |*r| {
-            weights.rebake(r, .{ .layer = layer_bufs });
+            r.rebake(.{ .layer = layer_bufs });
         } else {
             layer_runner = try LayerRunner.init(&compiled.encode_layer, allocator, .{ .layer = layer_bufs });
         }
@@ -440,7 +440,7 @@ fn denoise(
         const adaln_loader = &loaders[block_i % 2];
         const adaln_bufs = try loaded.loadAdaln(allocator, io, platform, store, shardings, block_i, progress, adaln_loader);
         if (adaln_runner) |*r| {
-            weights.rebake(r, .{ .model = .{ .adaln = adaln_bufs } });
+            r.rebake(.{ .model = .{ .adaln = adaln_bufs } });
             if (prev_adaln) |*a| dit.AdaLn.unloadBuffers(a);
         } else {
             adaln_runner = try AdaLnRunner.init(&compiled.prepare_adaln, allocator, .{ .model = .{ .adaln = adaln_bufs } });
@@ -563,7 +563,7 @@ fn denoise(
                     group_tables[g] = tables[i + g];
                 }
                 if (group_runner) |*r| {
-                    weights.rebake(r, .{ .group = .{ .layers = group_layers } });
+                    r.rebake(.{ .group = .{ .layers = group_layers } });
                 } else if (compiled.block_group) |*exe| {
                     group_runner = try GroupRunner.init(exe, allocator, .{ .group = .{ .layers = group_layers } });
                 } else unreachable;
@@ -603,7 +603,7 @@ fn denoise(
                 break :blk owned_core.?;
             };
             if (block_runner) |*r| {
-                weights.rebake(r, .{ .layer = core });
+                r.rebake(.{ .layer = core });
             } else {
                 block_runner = try BlockRunner.init(&compiled.block, allocator, .{ .layer = core });
             }

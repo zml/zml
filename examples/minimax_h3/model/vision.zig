@@ -762,7 +762,7 @@ fn runPatches(
     var block_i: usize = 0;
     while (block_i < n_blocks) : (block_i += 1) {
         if (block_runner) |*r| {
-            weights.rebake(r, .{ .layer = cache.blocks[block_i] });
+            r.rebake(.{ .layer = cache.blocks[block_i] });
         } else {
             block_runner = try BlockRunner.init(&compiled.block, allocator, .{ .layer = cache.blocks[block_i] });
         }
