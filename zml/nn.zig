@@ -79,7 +79,7 @@ pub const Linear = struct {
         var lhs_scale: ?Tensor = null;
         var undo: ?Tensor = null;
 
-        const platform = zml.module.CompilationContext.current().platform;
+        const platform = zml.Compiler.current().platform;
         if (q.scheme.activationQuant()) |aq| {
             if (aq.supportedOn(platform)) {
                 const quantized = aq.apply(lhs, igs, self.tag);
@@ -434,7 +434,7 @@ pub fn scaledDot(
     else
         rhs_scale;
 
-    const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
+    const mlir_ctx = zml.Compiler.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
         .array(mlir_ctx, &.{
             .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
@@ -873,7 +873,7 @@ pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: R
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
 pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
-    const allocator = zml.module.CompilationContext.current().allocator;
+    const allocator = zml.Compiler.current().allocator;
     const N_half: u32 = @intCast(@divExact(N, 2));
     const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
 
@@ -1595,7 +1595,7 @@ test resizeBilinear {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1662,7 +1662,7 @@ test resizeBicubic {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

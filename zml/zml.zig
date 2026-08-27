@@ -15,6 +15,7 @@ pub const tokenizer = @import("zml/tokenizer");
 
 pub const attention = @import("attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
+pub const Compiler = @import("Compiler.zig");
 pub const constants = @import("constants.zig");
 pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
@@ -30,9 +31,6 @@ pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
-pub const module = @import("module.zig");
-pub const CompilationOptions = module.CompilationOptions;
-pub const Compiler = module.Compiler;
 pub const moe = @import("moe/moe.zig");
 pub const nn = @import("nn.zig");
 pub const ops = @import("ops.zig");

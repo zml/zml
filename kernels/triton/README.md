@@ -13,7 +13,7 @@ Two layers define the surface:
   `Builder.open` / `Builder.init` take an `*mlir.Context` — pass them a
   `zml.kernel.triton.newContext()` (a throwaway context with the dialects the
   DSL emits), `defer ctx.deinit()` once you have the IR string. Not a
-  `CompilationContext`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
+  `Compilation`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
   (a registered `llvm` dialect makes XLA:TPU choke).
 - **High layer** — `zml.kernel.triton.Kernel(Config, spec)`: the declarative
   kernel form. Bundles a config type, a typed spec literal (name + named
@@ -195,7 +195,7 @@ pub fn forward(self: Model, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
 ```
 
 `call` is a thin wrapper over `Kernel.emit(...)` + `zml.ops.triton(...)`.
-It must be called from inside a `CompilationContext` (i.e., during
+It must be called from inside a `Compilation` (i.e., during
 `zml.module.compile(...)`) — `emit` builds the TTIR string in its own
 throwaway context; `zml.ops.triton(...)` drops the `stablehlo.custom_call`
 into the model's context. For offline tools, `Kernel.emit(allocator, cfg)`
@@ -1010,7 +1010,7 @@ builder and call `b.declareArgs(spec)` mid-stream — that's exactly what
 `zml.kernel.triton.Kernel(...)` does internally.
 
 Pass these constructors a `zml.kernel.triton.newContext()`, not a
-`CompilationContext`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
+`Compilation`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
 string. `Kernel.emit` does this for you, which is why it takes no context.
 
 Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.

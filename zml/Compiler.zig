@@ -22,9 +22,29 @@ const Sharding = @import("Sharding.zig");
 const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
-const zml_module = @This();
-const log = std.log.scoped(.@"zml/module");
+const Compiler = @This();
+const log = std.log.scoped(.@"zml/compiler");
 
+allocator: std.mem.Allocator,
+io: std.Io,
+arena: std.heap.ArenaAllocator,
+
+mlir_registry: *mlir.DialectRegistry,
+mlir_ctx: *mlir.Context,
+mlir_pass_manager: *mlir.PassManager,
+module: *mlir.Module,
+platform: *const Platform,
+partitioning: Sharding.Partitioning,
+
+mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
+
+scopes: stdx.BoundedArray(Scope, 16) = .empty,
+manual_computation_depth: usize = 0,
+
+channel_id: i64 = 0,
+composite_id: i64 = 0,
+
+threadlocal var _current: ?*Compiler = null;
 var mlir_global_init_mutex: std.Io.Mutex = .init;
 var mlir_global_registry: ?*mlir.DialectRegistry = null;
 
@@ -46,7 +66,8 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
 
     return mlir_global_registry.?;
 }
-pub const CompilationOptions = struct {
+
+pub const Options = struct {
     shardings: []const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
@@ -59,7 +80,7 @@ pub const CompilationOptions = struct {
 };
 
 /// Errors surfaced while lowering and compiling a ZML program.
-pub const CompileError = std.mem.Allocator.Error ||
+pub const Error = std.mem.Allocator.Error ||
     std.Io.Writer.Error ||
     mlir.Error ||
     upb.SerializeError ||
@@ -68,199 +89,175 @@ pub const CompileError = std.mem.Allocator.Error ||
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
-pub const CompilationContext = struct {
-    pub const Scope = struct {
-        block: *mlir.Block,
-        id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
-        id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
-        id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
-        id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
-        arena: std.heap.ArenaAllocator,
-
-        pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
-            const arena: std.heap.ArenaAllocator = .init(allocator);
-            return .{
-                .block = block,
-                .id_to_argument = .empty,
-                .id_to_donation = .empty,
-                .id_to_output_memory_kind = .empty,
-                .id_to_input_memory_kind = .empty,
-                .arena = arena,
-            };
-        }
-
-        pub fn deinit(self: *Scope) void {
-            self.arena.deinit();
-        }
-    };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
+pub const Scope = struct {
+    block: *mlir.Block,
+    id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
+    id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
+    id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
+    id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
     arena: std.heap.ArenaAllocator,
 
-    mlir_registry: *mlir.DialectRegistry,
-    mlir_ctx: *mlir.Context,
-    mlir_pass_manager: *mlir.PassManager,
-    module: *mlir.Module,
-    platform: *const Platform,
-    partitioning: Sharding.Partitioning,
-
-    mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
-
-    scopes: stdx.BoundedArray(Scope, 16) = .empty,
-    manual_computation_depth: usize = 0,
-
-    channel_id: i64 = 0,
-
-    composite_id: i64 = 0,
-
-    threadlocal var _current: ?*CompilationContext = null;
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        const mlir_registry = mlirRegistry(io);
-        var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
-        mlir_ctx.loadAllAvailableDialects();
-
-        const module = mlir.Module.init(.unknown(mlir_ctx));
-        module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
-
-        const pass_manager = mlir.PassManager.init(mlir_ctx);
-        {
-            var opm = pass_manager.asOpPassManager();
-            const passes: []const []const u8 = &.{
-                "canonicalize",
-                "cse",
-                "canonicalize",
-            };
-            for (passes) |pass| {
-                opm.addPipeline(pass) catch unreachable;
-            }
-        }
-
-        var mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type) = .initUndefined();
-        {
-            for (0.., &mlir_known_types.values) |i, *mlir_type| {
-                mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @enumFromInt(i));
-            }
-        }
-
-        // Ensure replicated sharding is always included as a fallback option.
-        var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
-        var needs_replicated: bool = true;
-        for (opts.shardings) |sharding| {
-            if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
-            shardings.appendAssumeCapacity(sharding.resolve(platform));
-        }
-        if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
-
-        const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
-
+    pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
+        const arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
-            .allocator = allocator,
-            .io = io,
+            .block = block,
+            .id_to_argument = .empty,
+            .id_to_donation = .empty,
+            .id_to_output_memory_kind = .empty,
+            .id_to_input_memory_kind = .empty,
             .arena = arena,
-            .mlir_registry = mlir_registry,
-            .mlir_ctx = mlir_ctx,
-            .mlir_pass_manager = pass_manager,
-            .mlir_known_types = mlir_known_types,
-            .module = module,
-            .platform = platform,
-            .partitioning = partitioning,
         };
     }
 
-    pub fn deinit(self: *CompilationContext) void {
-        if (_current == self) _current = null;
-        for (self.scopes.slice()) |*scope| {
-            scope.deinit();
-        }
-        self.mlir_pass_manager.deinit();
-        self.module.deinit();
-        self.mlir_ctx.deinit();
+    pub fn deinit(self: *Scope) void {
         self.arena.deinit();
-    }
-
-    pub fn activate(self: *CompilationContext) void {
-        std.debug.assert(_current == null);
-        _current = self;
-    }
-
-    pub fn deactivate(self: *CompilationContext) void {
-        _ = self;
-        _current = null;
-    }
-
-    pub fn current() *CompilationContext {
-        return _current.?;
-    }
-
-    pub fn currentOrNull() ?*CompilationContext {
-        return _current;
-    }
-
-    pub fn currentScope(self: *CompilationContext) *Scope {
-        return &self.scopes.slice()[self.scopes.len - 1];
-    }
-
-    pub fn pushBlock(self: *CompilationContext, block: *mlir.Block) void {
-        const scope = Scope.initFromBlock(self.allocator, block);
-        self.scopes.appendAssumeCapacity(scope);
-    }
-
-    pub fn popBlock(self: *CompilationContext) void {
-        var maybe_popped_scope = self.scopes.pop();
-        if (maybe_popped_scope) |*popped| {
-            popped.deinit();
-        }
-    }
-
-    pub fn nextChannelId(self: *CompilationContext) i64 {
-        self.channel_id += 1;
-        return self.channel_id;
-    }
-
-    pub fn nextCompositeId(self: *CompilationContext) i64 {
-        self.composite_id += 1;
-        return self.composite_id;
-    }
-
-    pub fn mlirType(self: *const CompilationContext, dt: DataType) *const mlir.Type {
-        return self.mlir_known_types.get(dt);
-    }
-
-    pub fn dtype(self: *const CompilationContext, mlir_type: *const mlir.Type) DataType {
-        @setRuntimeSafety(false);
-        for (0.., &self.mlir_known_types.values) |i, known_type| {
-            if (known_type == mlir_type) return @enumFromInt(i);
-        }
-        std.debug.panic("Can't convert unknown mlir type to dtype: {f}", .{mlir_type});
-    }
-
-    pub fn abortOOM(self: *CompilationContext) noreturn {
-        _ = self;
-        @panic("OOM");
-    }
-
-    pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
-        return self.arena.allocator().alloc(T, n) catch self.abortOOM();
-    }
-
-    pub fn allocPrint(self: *CompilationContext, comptime fmt: []const u8, args: anytype) []u8 {
-        return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
     }
 };
 
-pub fn Compiler(comptime func: anytype) type {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) Compiler {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    const mlir_registry = mlirRegistry(io);
+    var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
+    mlir_ctx.loadAllAvailableDialects();
+
+    const module = mlir.Module.init(.unknown(mlir_ctx));
+    module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
+
+    const pass_manager = mlir.PassManager.init(mlir_ctx);
+    {
+        var opm = pass_manager.asOpPassManager();
+        const passes: []const []const u8 = &.{
+            "canonicalize",
+            "cse",
+            "canonicalize",
+        };
+        for (passes) |pass| {
+            opm.addPipeline(pass) catch unreachable;
+        }
+    }
+
+    var mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type) = .initUndefined();
+    {
+        for (0.., &mlir_known_types.values) |i, *mlir_type| {
+            mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @enumFromInt(i));
+        }
+    }
+
+    // Ensure replicated sharding is always included as a fallback option.
+    var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
+    var needs_replicated: bool = true;
+    for (opts.shardings) |sharding| {
+        if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
+        shardings.appendAssumeCapacity(sharding.resolve(platform));
+    }
+    if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
+
+    const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
+
+    return .{
+        .allocator = allocator,
+        .io = io,
+        .arena = arena,
+        .mlir_registry = mlir_registry,
+        .mlir_ctx = mlir_ctx,
+        .mlir_pass_manager = pass_manager,
+        .mlir_known_types = mlir_known_types,
+        .module = module,
+        .platform = platform,
+        .partitioning = partitioning,
+    };
+}
+
+pub fn deinit(self: *Compiler) void {
+    if (_current == self) _current = null;
+    for (self.scopes.slice()) |*scope| {
+        scope.deinit();
+    }
+    self.mlir_pass_manager.deinit();
+    self.module.deinit();
+    self.mlir_ctx.deinit();
+    self.arena.deinit();
+}
+
+pub fn activate(self: *Compiler) void {
+    std.debug.assert(_current == null);
+    _current = self;
+}
+
+pub fn deactivate(self: *Compiler) void {
+    _ = self;
+    _current = null;
+}
+
+pub fn current() *Compiler {
+    return _current.?;
+}
+
+pub fn currentOrNull() ?*Compiler {
+    return _current;
+}
+
+pub fn currentScope(self: *Compiler) *Scope {
+    return &self.scopes.slice()[self.scopes.len - 1];
+}
+
+pub fn pushBlock(self: *Compiler, block: *mlir.Block) void {
+    const scope = Scope.initFromBlock(self.allocator, block);
+    self.scopes.appendAssumeCapacity(scope);
+}
+
+pub fn popBlock(self: *Compiler) void {
+    var maybe_popped_scope = self.scopes.pop();
+    if (maybe_popped_scope) |*popped| {
+        popped.deinit();
+    }
+}
+
+pub fn nextChannelId(self: *Compiler) i64 {
+    self.channel_id += 1;
+    return self.channel_id;
+}
+
+pub fn nextCompositeId(self: *Compiler) i64 {
+    self.composite_id += 1;
+    return self.composite_id;
+}
+
+pub fn mlirType(self: *const Compiler, dt: DataType) *const mlir.Type {
+    return self.mlir_known_types.get(dt);
+}
+
+pub fn dtype(self: *const Compiler, mlir_type: *const mlir.Type) DataType {
+    @setRuntimeSafety(false);
+    for (0.., &self.mlir_known_types.values) |i, known_type| {
+        if (known_type == mlir_type) return @enumFromInt(i);
+    }
+    std.debug.panic("Can't convert unknown mlir type to dtype: {f}", .{mlir_type});
+}
+
+pub fn abortOOM(self: *Compiler) noreturn {
+    _ = self;
+    @panic("OOM");
+}
+
+pub fn alloc(self: *Compiler, T: type, n: usize) []T {
+    return self.arena.allocator().alloc(T, n) catch self.abortOOM();
+}
+
+pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8 {
+    return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
+}
+
+pub fn Typed(comptime func: anytype) type {
     return struct {
         pub fn compile(
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
-            opts: CompilationOptions,
+            opts: Options,
             args: std.meta.ArgsTuple(@TypeOf(func)),
-        ) CompileError!Exe {
-            return zml_module.compile(allocator, io, func, args, platform, opts);
+        ) Error!Exe {
+            return Compiler.compile(allocator, io, func, args, platform, opts);
         }
     };
 }
@@ -271,10 +268,10 @@ pub fn compile(
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
     platform: *const Platform,
-    opts: CompilationOptions,
-) CompileError!Exe {
+    opts: Options,
+) Error!Exe {
     // TODO: Here we have somewhat of a requirement
-    // Emitting MLIR requires to have the compilation context available at all times using `CompilationContext.current()`.
+    // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
     //
     // I think the correct implementation would be to dispatch `emitMlir` to a thread pool, then wait for the result
@@ -292,36 +289,36 @@ pub fn compile(
     var span = tracer.Span.start(span_name);
     defer span.end();
 
-    var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
-    defer compilation_context.deinit();
+    var compiler: Compiler = .init(allocator, st_io.io(), platform, opts);
+    defer compiler.deinit();
 
-    const result = emitMlir(&compilation_context, func, args) catch |err| switch (err) {
+    const result = emitMlir(&compiler, func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
-    defer result.output_info.deinit(compilation_context.allocator);
-    defer result.input_info.deinit(compilation_context.allocator);
+    defer result.output_info.deinit(compiler.allocator);
+    defer result.input_info.deinit(compiler.allocator);
 
-    try addPartitionerOperations(&compilation_context);
+    try addPartitionerOperations(&compiler);
 
-    _ = result.func.appendTo(compilation_context.module.body());
+    _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compilation_context.partitioning.numPartitions();
-    const num_replicas = compilation_context.partitioning.numReplicas();
-    const num_devices = compilation_context.partitioning.numDevices();
+    const num_partitions = compiler.partitioning.numPartitions();
+    const num_replicas = compiler.partitioning.numReplicas();
+    const num_devices = compiler.partitioning.numDevices();
 
-    compilation_context.module.operation().setAttributeByName(
+    compiler.module.operation().setAttributeByName(
         "mhlo.num_partitions",
-        .int(compilation_context.mlir_ctx, .i32, num_partitions),
+        .int(compiler.mlir_ctx, .i32, num_partitions),
     );
-    compilation_context.module.operation().setAttributeByName(
+    compiler.module.operation().setAttributeByName(
         "mhlo.num_replicas",
-        .int(compilation_context.mlir_ctx, .i32, num_replicas),
+        .int(compiler.mlir_ctx, .i32, num_replicas),
     );
 
-    compilation_context.mlir_pass_manager.runOnOp(compilation_context.module.operation()) catch |err| switch (err) {
+    compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
         error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compilation_context.module.operation()});
+            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compiler.module.operation()});
             @panic("ZML generated invalid mlir. Please open a bug report");
         },
     };
@@ -329,8 +326,8 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compilation_context.module, compilation_context.partitioning, opts);
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
         allocator,
@@ -348,7 +345,7 @@ pub fn compile(
     return exe;
 }
 
-fn addPartitionerOperations(ctx: *CompilationContext) !void {
+fn addPartitionerOperations(ctx: *Compiler) !void {
     const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
@@ -509,31 +506,31 @@ fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context,
     return res;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
-    var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
+fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
+    var arena = std.heap.ArenaAllocator.init(compiler.allocator);
     defer arena.deinit();
 
-    const module = mlir.Module.init(.unknown(compilation_context.mlir_ctx));
+    const module = mlir.Module.init(.unknown(compiler.mlir_ctx));
     errdefer module.deinit();
 
     const block = mlir.Block.init(&.{}, &.{});
     errdefer block.deinit();
 
-    compilation_context.pushBlock(block);
-    defer compilation_context.popBlock();
+    compiler.pushBlock(block);
+    defer compiler.popBlock();
 
     const LocalContext = struct {
-        compilation_context: *CompilationContext,
+        compiler: *Compiler,
         current_argument_id: usize = 0,
     };
     var context: LocalContext = .{
-        .compilation_context = compilation_context,
+        .compiler = compiler,
     };
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
-            _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
-            const gop = ctx_.compilation_context.currentScope().id_to_argument.getOrPut(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id) catch unreachable;
+            const mlir_type = mlirx.Type.rankedTensor(ctx_.compiler.mlir_ctx, tensor.shape());
+            _ = ctx_.compiler.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compiler.mlir_ctx));
+            const gop = ctx_.compiler.currentScope().id_to_argument.getOrPut(ctx_.compiler.currentScope().arena.allocator(), tensor.id) catch unreachable;
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
             gop.value_ptr.* = ctx_.current_argument_id;
             ctx_.current_argument_id += 1;
@@ -541,21 +538,21 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }.cb, &context, &args);
 
     const output_info, const input_info = b: {
-        compilation_context.activate();
-        defer compilation_context.deactivate();
+        compiler.activate();
+        defer compiler.deactivate();
 
         const result = @call(.auto, func, args);
 
-        const input_info = try collectInputInfo(compilation_context.allocator, compilation_context.partitioning, &args);
-        errdefer input_info.deinit(compilation_context.allocator);
+        const input_info = try collectInputInfo(compiler.allocator, compiler.partitioning, &args);
+        errdefer input_info.deinit(compiler.allocator);
 
-        const output_info = try collectOutputInfo(compilation_context.allocator, compilation_context.partitioning, &result);
-        errdefer output_info.deinit(compilation_context.allocator);
+        const output_info = try collectOutputInfo(compiler.allocator, compiler.partitioning, &result);
+        errdefer output_info.deinit(compiler.allocator);
 
         break :b .{ output_info, input_info };
     };
-    errdefer input_info.deinit(compilation_context.allocator);
-    errdefer output_info.deinit(compilation_context.allocator);
+    errdefer input_info.deinit(compiler.allocator);
+    errdefer output_info.deinit(compiler.allocator);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
     @memset(input_attributes, .empty);
@@ -564,59 +561,59 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     @memset(output_attributes, .empty);
 
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
-        input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", .int(compilation_context.mlir_ctx, .i32, index)));
+        input_attributes[argument_index].appendAssumeCapacity(.named(compiler.mlir_ctx, "tf.aliasing_output", .int(compiler.mlir_ctx, .i32, index)));
     };
     for (output_info.output_memory_kinds, 0..) |output_memory_kind, index| {
         if (output_memory_kind == .device) continue;
         output_attributes[index].appendAssumeCapacity(.named(
-            compilation_context.mlir_ctx,
+            compiler.mlir_ctx,
             "mhlo.memory_kind",
             .string(
-                compilation_context.mlir_ctx,
-                compilation_context.platform.memoryKind(output_memory_kind),
+                compiler.mlir_ctx,
+                compiler.platform.memoryKind(output_memory_kind),
             ),
         ));
     }
-    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+    _ = dialects.func.returns(compiler.mlir_ctx, output_info.values, .unknown(compiler.mlir_ctx)).appendTo(compiler.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, input_info.memory_kinds, 0..) |shape, sharding, maybe_memory_kind, i| {
-        const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
-        const name = switch (compilation_context.partitioning.partitioner) {
+        const attr = try compiler.partitioning.tensorShardingAttr(compiler.arena.allocator(), compiler.mlir_ctx, shape, sharding);
+        const name = switch (compiler.partitioning.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
 
-        input_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
+        input_attributes[i].appendAssumeCapacity(.named(compiler.mlir_ctx, name, attr));
 
         if (maybe_memory_kind) |memory_kind| {
             if (memory_kind == .device) continue;
             input_attributes[i].appendAssumeCapacity(.named(
-                compilation_context.mlir_ctx,
+                compiler.mlir_ctx,
                 "mhlo.memory_kind",
                 .string(
-                    compilation_context.mlir_ctx,
-                    compilation_context.platform.memoryKind(memory_kind),
+                    compiler.mlir_ctx,
+                    compiler.platform.memoryKind(memory_kind),
                 ),
             ));
         }
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
-        const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
-        const name = switch (compilation_context.partitioning.partitioner) {
+        const attr = try compiler.partitioning.tensorShardingAttr(compiler.arena.allocator(), compiler.mlir_ctx, shape, sharding);
+        const name = switch (compiler.partitioning.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
 
-        output_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
+        output_attributes[i].appendAssumeCapacity(.named(compiler.mlir_ctx, name, attr));
     }
 
-    const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
+    const mlir_func = dialects.func.func(compiler.mlir_ctx, .{
         .name = "main",
-        .block = compilation_context.currentScope().block,
-        .location = .unknown(compilation_context.mlir_ctx),
-        .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
-        .results_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, output_attributes),
+        .block = compiler.currentScope().block,
+        .location = .unknown(compiler.mlir_ctx),
+        .args_attributes = try finalizeAttributeList(arena.allocator(), compiler.mlir_ctx, input_attributes),
+        .results_attributes = try finalizeAttributeList(arena.allocator(), compiler.mlir_ctx, output_attributes),
         .verify = false,
     });
 
@@ -649,7 +646,7 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: CompilationOptions) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: Options) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);

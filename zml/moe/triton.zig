@@ -643,7 +643,7 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
-    const compilation_context = zml.module.CompilationContext.current();
+    const compilation_context = zml.Compiler.current();
     const io = compilation_context.io;
     const allocator = compilation_context.allocator;
 
@@ -1243,8 +1243,8 @@ fn runGemm(
 }
 
 fn applySwiGlu(input: zml.Tensor, activation_limit: ?f32) zml.Tensor {
-    var gate = input.slice1d(.dout, .{ .start = 0, .step = 2 });
-    var up = input.slice1d(.dout, .{ .start = 1, .step = 2 });
+    var gate = input.slice(.dout, .{ .start = 0, .step = 2 });
+    var up = input.slice(.dout, .{ .start = 1, .step = 2 });
 
     if (activation_limit) |limit| {
         const threshold = zml.Tensor.scalar(limit, .f32);

@@ -99,7 +99,7 @@ zig_library(
         "mem.zig",
         "meta.zig",
         "mlirx.zig",
-        "module.zig",
+        "Compiler.zig",
         "moe/cutlass_flashinfer.zig",
         "moe/metal.zig",
         "moe/moe.zig",

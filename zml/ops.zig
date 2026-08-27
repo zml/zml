@@ -9,7 +9,7 @@ const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("mem.zig").Bufferized;
-const CompilationContext = @import("module.zig").CompilationContext;
+const Compiler = @import("Compiler.zig");
 const constants = @import("constants.zig");
 const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
 const DataType = @import("dtype.zig").DataType;
@@ -22,7 +22,7 @@ const Tensor = @import("tensor.zig").Tensor;
 pub const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
 
     const InputsT = @TypeOf(inputs);
@@ -194,7 +194,7 @@ fn AllReduceReturnType(comptime InputsT: type) type {
 }
 
 pub fn partitionId() Tensor {
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     const op = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.partition_id", .{
         .results = .{ .flat = &.{mlirx.Type.rankedTensor(ctx.mlir_ctx, Shape.scalar(.u32))} },
         .location = .unknown(ctx.mlir_ctx),
@@ -208,10 +208,10 @@ pub const ReduceArgs = struct {
 };
 
 pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
 
     const reduce_block, var result = b: {
         const ArgsTypes: [inits.len]type = @splat(ReduceArgs);
@@ -231,10 +231,10 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        CompilationContext.current().pushBlock(reduce_block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(reduce_block);
+        defer Compiler.current().popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = Compiler.current().currentScope();
         inline for (0..inits.len) |i| {
             scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
             scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
@@ -267,7 +267,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(Compiler.current().currentScope().block);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -293,7 +293,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
             mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
             .unknown(mlir_ctx),
-        ).appendTo(CompilationContext.current().currentScope().block);
+        ).appendTo(Compiler.current().currentScope().block);
 
         result[i] = Tensor._result(reduced_shape, broad_op.result(0));
     }
@@ -320,10 +320,10 @@ pub fn ReduceWindowFn(N: comptime_int) type {
 }
 
 pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func: *const ReduceWindowFn(N)) [N]Tensor {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
 
     const reduce_block, var result = b: {
         const Args = @Tuple(&@as([N]type, @splat(ReduceArgs)));
@@ -342,10 +342,10 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        CompilationContext.current().pushBlock(reduce_block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(reduce_block);
+        defer Compiler.current().popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = Compiler.current().currentScope();
         inline for (0..N) |i| {
             scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
             scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + N) catch unreachable;
@@ -386,7 +386,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(Compiler.current().currentScope().block);
 
     inline for (0..result.len) |i| {
         result[i] = Tensor.fromMlirValue(reduce_op.result(i)).withTags(inputs[i].shape());
@@ -401,10 +401,10 @@ pub const SortArgs = struct {
 };
 
 pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
 
     const sort_block = b: {
         const ArgsTypes: [inputs.len]type = @splat(SortArgs);
@@ -424,10 +424,10 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         const sort_block = mlir.Block.init(&block_types, &block_locs);
         errdefer sort_block.deinit();
 
-        CompilationContext.current().pushBlock(sort_block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(sort_block);
+        defer Compiler.current().popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = Compiler.current().currentScope();
         inline for (0..inputs.len) |i| {
             scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, 2 * i) catch unreachable;
             scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, 2 * i + 1) catch unreachable;
@@ -454,7 +454,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+    }).appendTo(Compiler.current().currentScope().block);
 
     var result: [inputs.len]Tensor = undefined;
     inline for (0..inputs.len) |i| {
@@ -475,7 +475,7 @@ pub fn @"while"(
     context: While,
     initial_state: While.State,
 ) While.State {
-    const comp = CompilationContext.current();
+    const comp = Compiler.current();
 
     var arena = std.heap.ArenaAllocator.init(comp.allocator);
     defer arena.deinit();
@@ -676,7 +676,7 @@ pub fn @"if"(
 
     stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
 
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
     const allocator = arena.allocator();
@@ -689,15 +689,15 @@ pub fn @"if"(
         }
     }.capture, arena.allocator(), {}, if_captures, &blkctx) catch unreachable;
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
     const loc: *const mlir.Location = .unknown(mlir_ctx);
 
     const true_branch, const true_branch_block = b: {
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(block);
+        defer Compiler.current().popBlock();
 
         const result = blkctx.onTrue();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
@@ -710,8 +710,8 @@ pub fn @"if"(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(block);
+        defer Compiler.current().popBlock();
 
         const result = blkctx.onFalse();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
@@ -730,7 +730,7 @@ pub fn @"if"(
         .verify = false,
         .location = loc,
     });
-    _ = op.appendTo(CompilationContext.current().currentScope().block);
+    _ = op.appendTo(Compiler.current().currentScope().block);
 
     return fromMlirOperationWithTags(op, true_branch);
 }
@@ -775,12 +775,12 @@ pub fn if2(
 ) @TypeOf(on_true) {
     stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
 
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
     const allocator = arena.allocator();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
     const loc: *const mlir.Location = .unknown(mlir_ctx);
 
     const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_true) catch @panic("OOM");
@@ -789,8 +789,8 @@ pub fn if2(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(block);
+        defer Compiler.current().popBlock();
         _ = dialects.stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
         break :b block;
     };
@@ -801,8 +801,8 @@ pub fn if2(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(block);
+        defer Compiler.current().popBlock();
 
         _ = dialects.stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
         break :b block;
@@ -815,7 +815,7 @@ pub fn if2(
         .location = loc,
         .verify = false,
     });
-    _ = op.appendTo(CompilationContext.current().currentScope().block);
+    _ = op.appendTo(Compiler.current().currentScope().block);
 
     return fromMlirOperationWithTags(op, on_true);
 }
@@ -881,8 +881,8 @@ pub const TritonOps = struct {
 
 /// Generate an MLIR call to the given member function with the given tensors.
 pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]Tensor {
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    const mlir_ctx = Compiler.current().mlir_ctx;
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
     var values: [inputs.len]*const mlir.Value = undefined;
@@ -928,7 +928,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
             .output_operand_aliases = opts.output_operand_aliases,
         },
         .unknown(mlir_ctx),
-    ).appendTo(CompilationContext.current().currentScope().block);
+    ).appendTo(Compiler.current().currentScope().block);
 
     var outputs_: [outputs.len]Tensor = undefined;
     inline for (outputs, 0..) |output, i| {
@@ -952,7 +952,7 @@ pub const NeuronNkiOps = struct {
 /// This API is Neuron-only: the source is compiled to an
 /// `AwsNeuronCustomNativeKernel` backend config while emitting the graph.
 pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs.len]Tensor {
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     switch (ctx.platform.target) {
         .neuron => {},
         .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => {
@@ -1123,10 +1123,10 @@ pub fn scatter(
     context: anytype,
     opts: Tensor.ScatterOpts,
 ) stdx.meta.FnReturn(func) {
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
     defer arena.deinit();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
 
     const update_block, var result = b: {
         const ArgsTypes: [inputs.len]type = @splat(ScatterArgs);
@@ -1146,10 +1146,10 @@ pub fn scatter(
         const update_block = mlir.Block.init(&block_types, &block_locs);
         errdefer update_block.deinit();
 
-        CompilationContext.current().pushBlock(update_block);
-        defer CompilationContext.current().popBlock();
+        Compiler.current().pushBlock(update_block);
+        defer Compiler.current().popBlock();
 
-        const scope = CompilationContext.current().currentScope();
+        const scope = Compiler.current().currentScope();
         inline for (0..inputs.len) |i| {
             scope.id_to_argument.put(scope.arena.allocator(), args[i].input.id, i) catch unreachable;
             scope.id_to_argument.put(scope.arena.allocator(), args[i].update.id, i + inputs.len) catch unreachable;
@@ -1231,7 +1231,7 @@ pub fn scatter(
             .unique_indices = opts.indices_are_unique,
         },
         .unknown(mlir_ctx),
-    ).appendTo(CompilationContext.current().currentScope().block);
+    ).appendTo(Compiler.current().currentScope().block);
 
     inline for (0..result.len) |i| {
         result[i] = Tensor._result(inputs[i].shape(), op.result(i));
@@ -1343,7 +1343,7 @@ test scatterConfig {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1437,7 +1437,7 @@ pub const GatherAxisKind = enum { batching, offset, collapsed, indices };
 pub const GatherOpts = struct { indices_are_sorted: bool = false };
 
 pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = Compiler.current().mlir_ctx;
 
     stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
     for (idx_axes, 0..) |a, i| {
@@ -1544,7 +1544,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
             .indices_are_sorted = opts.indices_are_sorted,
         },
         .unknown(mlir_ctx),
-    ).appendTo(CompilationContext.current().currentScope().block);
+    ).appendTo(Compiler.current().currentScope().block);
 
     const mlir_shape = Tensor.fromMlirValue(gather_op.result(0)).shape();
     stdx.debug.assert(mlir_shape.eql(res_shape), "gather expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
@@ -1565,7 +1565,7 @@ pub const LoweringCompatibility = struct {
     /// splats too early, which can perturb later indexed-update lowering. A
     /// scalar optimization barrier preserves the source-level broadcast shape.
     pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
-        switch (CompilationContext.current().platform.target) {
+        switch (Compiler.current().platform.target) {
             .neuron => {},
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return null,
         }
@@ -1584,7 +1584,7 @@ pub const LoweringCompatibility = struct {
     /// keeping the active rows unchanged. Related upstream Neuron report:
     /// https://github.com/aws-neuron/aws-neuron-sdk/issues/1335.
     pub fn preserveGatherFillSemantics(indices: []Tensor) void {
-        switch (CompilationContext.current().platform.target) {
+        switch (Compiler.current().platform.target) {
             .neuron => {},
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return,
         }
@@ -1596,7 +1596,7 @@ pub const LoweringCompatibility = struct {
     /// Preserve scatter drop semantics before backend indirect-memory lowering.
     /// Same as above but for scatter drop semantics.
     pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
-        const active_lanes: ?Tensor = switch (CompilationContext.current().platform.target) {
+        const active_lanes: ?Tensor = switch (Compiler.current().platform.target) {
             .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => null,
         };
@@ -1704,7 +1704,7 @@ pub const CustomCallOptions = struct {
     compute_on_host: bool = false,
 };
 
-fn customCallAdditionalAttributes(ctx: *CompilationContext, opts: CustomCallOptions) []const mlir.NamedAttribute {
+fn customCallAdditionalAttributes(ctx: *Compiler, opts: CustomCallOptions) []const mlir.NamedAttribute {
     if (!opts.compute_on_host or ctx.platform.target == .cpu) return &.{};
 
     const frontend_attributes = mlir.Attribute.dict(ctx.mlir_ctx, &.{
@@ -1760,7 +1760,7 @@ pub fn composite(
     context: anytype,
     opts: CompositeOpts,
 ) []Tensor {
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
 
     const decomp_name = ctx.allocPrint("{s}.impl_{d}", .{ name, ctx.nextCompositeId() });
@@ -1989,7 +1989,7 @@ fn manualComputationInternal(
     const BodyInputsT = stdx.meta.FnParam(body_fn, 2);
     const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 3);
 
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     const allocator = ctx.arena.allocator();
 
     const input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
@@ -2464,7 +2464,7 @@ pub fn typedCustomCall(
     const Output = @TypeOf(output);
     const Attributes = @TypeOf(attributes);
 
-    const ctx = CompilationContext.current();
+    const ctx = Compiler.current();
     const allocator = ctx.arena.allocator();
 
     stdx.debug.assert(!opts.has_side_effect or ctx.manual_computation_depth > 0, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
@@ -2622,7 +2622,7 @@ test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
