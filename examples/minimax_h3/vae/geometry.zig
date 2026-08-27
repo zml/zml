@@ -137,6 +137,198 @@ pub fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min
     return .{ .starts = starts, .lengths = lengths, .overlaps = overlaps };
 }
 
+fn nchwTileN(channels: u32, t: u32, h: u32, w: u32) usize {
+    return @as(usize, channels) * t * h * w;
+}
+
+fn nchwIndex(c: u32, t: u32, y: u32, x: u32, tt: u32, h: u32, w: u32) usize {
+    return ((((c * tt + t) * h) + y) * w) + x;
+}
+
+/// Official `_blend` along H (`dim=-2`): `b[y] = a[tail+y]*(1-y/E) + b[y]*(y/E)`.
+fn blendH(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32) void {
+    const e = @min(h, extent);
+    if (e == 0) return;
+    const ef: f32 = @floatFromInt(e);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        var ti: u32 = 0;
+        while (ti < t) : (ti += 1) {
+            var y: u32 = 0;
+            while (y < e) : (y += 1) {
+                const wb = @as(f32, @floatFromInt(y)) / ef;
+                const wa = 1.0 - wb;
+                const ay = h - e + y;
+                var x: u32 = 0;
+                while (x < w) : (x += 1) {
+                    const ai = nchwIndex(c, ti, ay, x, t, h, w);
+                    const bi = nchwIndex(c, ti, y, x, t, h, w);
+                    b[bi] = a[ai] * wa + b[bi] * wb;
+                }
+            }
+        }
+    }
+}
+
+/// Official `_blend` along W (`dim=-1`).
+fn blendW(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32) void {
+    const e = @min(w, extent);
+    if (e == 0) return;
+    const ef: f32 = @floatFromInt(e);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        var ti: u32 = 0;
+        while (ti < t) : (ti += 1) {
+            var y: u32 = 0;
+            while (y < h) : (y += 1) {
+                var x: u32 = 0;
+                while (x < e) : (x += 1) {
+                    const wb = @as(f32, @floatFromInt(x)) / ef;
+                    const wa = 1.0 - wb;
+                    const ai = nchwIndex(c, ti, y, w - e + x, t, h, w);
+                    const bi = nchwIndex(c, ti, y, x, t, h, w);
+                    b[bi] = a[ai] * wa + b[bi] * wb;
+                }
+            }
+        }
+    }
+}
+
+pub fn copyNchwCrop(
+    dst: []f32,
+    dst_h: u32,
+    dst_w: u32,
+    out_y: u32,
+    out_x: u32,
+    src: []const f32,
+    src_h: u32,
+    src_w: u32,
+    use_h: u32,
+    use_w: u32,
+    channels: u32,
+    t: u32,
+) void {
+    std.debug.assert(out_y + use_h <= dst_h and out_x + use_w <= dst_w);
+    std.debug.assert(use_h <= src_h and use_w <= src_w);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        var ti: u32 = 0;
+        while (ti < t) : (ti += 1) {
+            var y: u32 = 0;
+            while (y < use_h) : (y += 1) {
+                const si = nchwIndex(c, ti, y, 0, t, src_h, src_w);
+                const di = nchwIndex(c, ti, out_y + y, out_x, t, dst_h, dst_w);
+                @memcpy(dst[di..][0..use_w], src[si..][0..use_w]);
+            }
+        }
+    }
+}
+
+/// Official `_stitch_tiles`: blend each tile with the *original* neighbor tiles,
+/// crop the outgoing overlap, concatenate. Canvas bilinear is not the same.
+pub const NchwStitcher = struct {
+    acc: []f32,
+    prev_row: []f32,
+    curr_row: []f32,
+    work: []f32,
+    channels: u32,
+    t: u32,
+    acc_h: u32,
+    acc_w: u32,
+    tile_h: u32,
+    tile_w: u32,
+    n_y: u32,
+    n_x: u32,
+    y_overlaps: []u32,
+    x_overlaps: []u32,
+    out_y: u32,
+    out_x: u32,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        acc: []f32,
+        channels: u32,
+        t: u32,
+        acc_h: u32,
+        acc_w: u32,
+        tile_h: u32,
+        tile_w: u32,
+        n_y: u32,
+        n_x: u32,
+        y_overlaps: []const u32,
+        x_overlaps: []const u32,
+    ) !NchwStitcher {
+        std.debug.assert(n_y >= 1 and n_x >= 1);
+        std.debug.assert(y_overlaps.len + 1 == n_y);
+        std.debug.assert(x_overlaps.len + 1 == n_x);
+        const tile_n = nchwTileN(channels, t, tile_h, tile_w);
+        const y_ov = try allocator.dupe(u32, y_overlaps);
+        errdefer allocator.free(y_ov);
+        const x_ov = try allocator.dupe(u32, x_overlaps);
+        errdefer allocator.free(x_ov);
+        const prev_row = try allocator.alloc(f32, n_x * tile_n);
+        errdefer allocator.free(prev_row);
+        const curr_row = try allocator.alloc(f32, n_x * tile_n);
+        errdefer allocator.free(curr_row);
+        const work = try allocator.alloc(f32, tile_n);
+        return .{
+            .acc = acc,
+            .prev_row = prev_row,
+            .curr_row = curr_row,
+            .work = work,
+            .channels = channels,
+            .t = t,
+            .acc_h = acc_h,
+            .acc_w = acc_w,
+            .tile_h = tile_h,
+            .tile_w = tile_w,
+            .n_y = n_y,
+            .n_x = n_x,
+            .y_overlaps = y_ov,
+            .x_overlaps = x_ov,
+            .out_y = 0,
+            .out_x = 0,
+        };
+    }
+
+    pub fn deinit(self: *NchwStitcher, allocator: std.mem.Allocator) void {
+        allocator.free(self.prev_row);
+        allocator.free(self.curr_row);
+        allocator.free(self.work);
+        allocator.free(self.y_overlaps);
+        allocator.free(self.x_overlaps);
+    }
+
+    fn tileN(self: NchwStitcher) usize {
+        return nchwTileN(self.channels, self.t, self.tile_h, self.tile_w);
+    }
+
+    pub fn push(self: *NchwStitcher, yi: u32, xi: u32, tile: []const f32) void {
+        const n = self.tileN();
+        std.debug.assert(yi < self.n_y and xi < self.n_x);
+        std.debug.assert(tile.len >= n);
+        @memcpy(self.curr_row[xi * n ..][0..n], tile[0..n]);
+        @memcpy(self.work[0..n], tile[0..n]);
+        if (yi > 0) {
+            blendH(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1]);
+        }
+        if (xi > 0) {
+            blendW(self.curr_row[(xi - 1) * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.x_overlaps[xi - 1]);
+        }
+        const use_h = if (yi + 1 < self.n_y) self.tile_h - self.y_overlaps[yi] else self.tile_h;
+        const use_w = if (xi + 1 < self.n_x) self.tile_w - self.x_overlaps[xi] else self.tile_w;
+        copyNchwCrop(self.acc, self.acc_h, self.acc_w, self.out_y, self.out_x, self.work, self.tile_h, self.tile_w, use_h, use_w, self.channels, self.t);
+        self.out_x += use_w;
+        if (xi + 1 == self.n_x) {
+            const tmp = self.prev_row;
+            self.prev_row = self.curr_row;
+            self.curr_row = tmp;
+            self.out_y += use_h;
+            self.out_x = 0;
+        }
+    }
+};
+
 pub fn decodeTileLatent(spec: VisualSpec, latent_h: u32, latent_w: u32) struct { h: u32, w: u32 } {
     const tile_lat = spec.tile_px / spec.spatial;
     return .{

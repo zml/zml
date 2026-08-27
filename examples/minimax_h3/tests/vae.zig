@@ -11,6 +11,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testUnpackPatches(allocator);
     try testVaeGeometry();
     try testVaeTiling(allocator);
+    try testOfficialStitch(allocator);
     try testVitCoords();
     try testImagenet();
     try testSnake();
@@ -76,6 +77,37 @@ fn testVaeTiling(allocator: std.mem.Allocator) !void {
     defer many.deinit(allocator);
     try std.testing.expect(many.count() >= 3);
     try std.testing.expectEqual(@as(u32, 0), many.starts[0]);
+}
+fn testOfficialStitch(allocator: std.mem.Allocator) !void {
+    var tiles: [4 * 16]f32 = undefined;
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        const yi: f32 = @floatFromInt(i / 2);
+        const xi: f32 = @floatFromInt(i % 2);
+        var k: usize = 0;
+        while (k < 16) : (k += 1) {
+            tiles[i * 16 + k] = @as(f32, @floatFromInt(k)) + 100.0 * yi + 10.0 * xi;
+        }
+    }
+    var acc: [36]f32 = undefined;
+    @memset(&acc, 0);
+    const y_ov = [_]u32{2};
+    const x_ov = [_]u32{2};
+    var stitcher = try vae.NchwStitcher.init(allocator, &acc, 1, 1, 6, 6, 4, 4, 2, 2, &y_ov, &x_ov);
+    defer stitcher.deinit(allocator);
+    stitcher.push(0, 0, tiles[0..16]);
+    stitcher.push(0, 1, tiles[16..32]);
+    stitcher.push(1, 0, tiles[32..48]);
+    stitcher.push(1, 1, tiles[48..64]);
+    const want = [_]f32{
+        0.0, 1.0, 2.0, 7.0, 12.0, 13.0,
+        4.0, 5.0, 6.0, 11.0, 16.0, 17.0,
+        8.0, 9.0, 102.0, 61.0, 20.0, 21.0,
+        58.0, 59.0, 106.0, 88.0, 70.0, 71.0,
+        108.0, 109.0, 110.0, 115.0, 120.0, 121.0,
+        112.0, 113.0, 114.0, 119.0, 124.0, 125.0,
+    };
+    try std.testing.expectEqualSlices(f32, &want, &acc);
 }
 fn testVitCoords() !void {
     var buf: [4]f32 = undefined;

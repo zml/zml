@@ -395,11 +395,11 @@ pub fn decodeVideo(
         const n_tiles: u32 = @intCast(y_plan.count() * x_plan.count());
         const tile_lats = try allocator.alloc(f32, n_tiles * tile_n);
         defer allocator.free(tile_lats);
-        const jobs = try allocator.alloc(struct { y0: u32, x0: u32, ylen: u32, xlen: u32, yi: usize, xi: usize }, n_tiles);
+        const jobs = try allocator.alloc(struct { yi: usize, xi: usize }, n_tiles);
         defer allocator.free(jobs);
         var job_i: usize = 0;
-        for (y_plan.starts, y_plan.lengths, 0..) |y0, ylen, yi| {
-            for (x_plan.starts, x_plan.lengths, 0..) |x0, xlen, xi| {
+        for (y_plan.starts, y_plan.lengths, 0..) |y0, _, yi| {
+            for (x_plan.starts, x_plan.lengths, 0..) |x0, _, xi| {
                 copyLatentTile(
                     padded,
                     padded_t,
@@ -412,7 +412,7 @@ pub fn decodeVideo(
                     tile,
                     tile_lats[job_i * tile_n ..][0..tile_n],
                 );
-                jobs[job_i] = .{ .y0 = y0, .x0 = x0, .ylen = ylen, .xlen = xlen, .yi = yi, .xi = xi };
+                jobs[job_i] = .{ .yi = yi, .xi = xi };
                 job_i += 1;
             }
         }
@@ -421,6 +421,23 @@ pub fn decodeVideo(
         const clip = try allocator.alloc(f32, 3 * clip_t * geo.pixel_h * geo.pixel_w);
         defer allocator.free(clip);
         @memset(clip, 0);
+        const tile_px_h = tile.latent_h * spec.spatial;
+        const tile_px_w = tile.latent_w * spec.spatial;
+        var stitcher = try vae.NchwStitcher.init(
+            allocator,
+            clip,
+            3,
+            clip_t,
+            geo.pixel_h,
+            geo.pixel_w,
+            tile_px_h,
+            tile_px_w,
+            @intCast(y_plan.count()),
+            @intCast(x_plan.count()),
+            y_plan.overlaps,
+            x_plan.overlaps,
+        );
+        defer stitcher.deinit(allocator);
 
         const batch = @max(1, compiled.tile_batch);
         const packed_lat = try allocator.alloc(f32, batch * tile_n);
@@ -451,9 +468,7 @@ pub fn decodeVideo(
                     3,
                 );
                 defer allocator.free(pix);
-                const blend_y: u32 = if (job.yi == 0) 0 else y_plan.overlaps[job.yi - 1];
-                const blend_x: u32 = if (job.xi == 0) 0 else x_plan.overlaps[job.xi - 1];
-                pasteNchw(clip, clip_t, geo.pixel_h, geo.pixel_w, pix, clip_t, job.ylen, job.xlen, job.y0, job.x0, blend_y, blend_x);
+                stitcher.push(@intCast(job.yi), @intCast(job.xi), pix);
             }
             off += take;
         }
@@ -519,62 +534,6 @@ pub fn decodeVideo(
     vae.denormImagenetRgb(out);
     log.info("visual decode: ok frames={d} [{f}]", .{ out_frames, decode_start.untilNow(io, .awake) });
     return out;
-}
-
-fn pasteNchw(
-    dst: []f32,
-    dst_t: u32,
-    dst_h: u32,
-    dst_w: u32,
-    src: []const f32,
-    src_t: u32,
-    src_h: u32,
-    src_w: u32,
-    y0: u32,
-    x0: u32,
-    blend_y: u32,
-    blend_x: u32,
-) void {
-    const copy_t = @min(dst_t, src_t);
-    const copy_h = @min(src_h, dst_h - y0);
-    const copy_w = @min(src_w, dst_w - x0);
-    if (blend_y == 0 and blend_x == 0) {
-        var c: u32 = 0;
-        while (c < 3) : (c += 1) {
-            var t: u32 = 0;
-            while (t < copy_t) : (t += 1) {
-                var y: u32 = 0;
-                while (y < copy_h) : (y += 1) {
-                    const si = (((c * src_t + t) * src_h + y) * src_w);
-                    const di = (((c * dst_t + t) * dst_h + (y0 + y)) * dst_w + x0);
-                    @memcpy(dst[di..][0..copy_w], src[si..][0..copy_w]);
-                }
-            }
-        }
-        return;
-    }
-    var c: u32 = 0;
-    while (c < 3) : (c += 1) {
-        var t: u32 = 0;
-        while (t < copy_t) : (t += 1) {
-            var y: u32 = 0;
-            while (y < copy_h) : (y += 1) {
-                var x: u32 = 0;
-                while (x < copy_w) : (x += 1) {
-                    const si = (((c * src_t + t) * src_h + y) * src_w + x);
-                    const di = (((c * dst_t + t) * dst_h + (y0 + y)) * dst_w + (x0 + x));
-                    var w: f32 = 1.0;
-                    if (blend_y > 0 and y < blend_y) {
-                        w *= @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(blend_y));
-                    }
-                    if (blend_x > 0 and x < blend_x) {
-                        w *= @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(blend_x));
-                    }
-                    dst[di] = dst[di] * (1.0 - w) + src[si] * w;
-                }
-            }
-        }
-    }
 }
 
 pub fn decodeAudio(
