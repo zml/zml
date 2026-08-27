@@ -143,6 +143,9 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("s3", s3_vfs.io());
 
     const io = vfs.io();
+    const model_repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    const heads = repo.peekHeadCounts(allocator, io, model_repo, variant, paths) catch |err| return rejectUser(err);
+    sharding.preparePhysicalMesh(heads);
 
     //
     // Platform
@@ -158,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     const device_bytes = config.minDeviceBytes(platform);
     config.checkDeviceForSize(px.w, px.h, device_bytes) catch |err| return rejectUser(err);
 
-    const shardings: sharding.Shardings = try .init(platform);
+    const shardings: sharding.Shardings = try .init(platform, heads);
     const frames = config.alignFrameCount(config.frameCount(args.duration));
     log.info(
         "run model={s} variant={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} device={d}GiB",
@@ -180,7 +183,6 @@ pub fn main(init: std.process.Init) !void {
     //
     // Load the model
     //
-    const model_repo = try zml.safetensors.resolveModelRepo(io, args.model);
     var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings, paths) catch |err| return rejectUser(err);
     defer models.deinit(allocator, io);
 

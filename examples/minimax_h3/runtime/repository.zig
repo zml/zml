@@ -426,3 +426,27 @@ pub fn refuseReason(report: Report) ?[]const u8 {
     if (!report.has_time) return "time_embedder missing; not a recognized H3 DiT";
     return null;
 }
+
+/// Read DiT/encoder `config.json` so the physical mesh can even-split the real head counts.
+pub fn peekHeadCounts(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    repo_dir: std.Io.Dir,
+    variant: config.Variant,
+    opts: Open,
+) !sharding.HeadCounts {
+    const task = try config.openTaskDir(io, repo_dir, variant);
+    defer if (task.owned) task.dir.close(io);
+    const search: Search = .{ .repo = repo_dir, .task = task.dir };
+    var dit_src = try resolveDit(allocator, io, search, variant, opts);
+    defer dit_src.deinit(allocator, io);
+    var enc_src = try resolveComponent(io, search, "text_encoder", error.EncoderMissing);
+    defer enc_src.deinit(allocator, io);
+    const dit_cfg = try config.loadDitConfig(allocator, io, dit_src.dir);
+    const enc_cfg = try config.loadEncoderConfig(allocator, io, enc_src.dir);
+    return .{
+        .dit = dit_cfg.num_attention_heads,
+        .enc = enc_cfg.num_attention_heads,
+        .kv = enc_cfg.num_key_value_heads,
+    };
+}

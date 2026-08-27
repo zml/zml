@@ -57,7 +57,7 @@ pub const VisualCache = struct {
     }
 };
 
-const load_window: usize = policy.vae_load_window;
+const load_window_cap: usize = policy.vae_load_window;
 
 fn loadVisualEmbed(
     allocator: std.mem.Allocator,
@@ -116,6 +116,7 @@ pub fn loadVisualCache(
     n_blocks: usize,
     progress: *std.Progress.Node,
 ) !VisualCache {
+    const load_window = policy.vaeLoadWindow(@intCast(n_blocks));
     log.info("visual cache: load embed + finish + {d} blocks (window={d})", .{ n_blocks, load_window });
     var embed_f = try io.concurrent(loadVisualEmbed, .{ allocator, io, platform, loaded, store, shardings, progress });
     var embed_taken = false;
@@ -141,7 +142,7 @@ pub fn loadVisualCache(
         for (blocks[0..filled]) |*block| visual_vae.TransformerBlock.unloadBuffers(block);
     }
 
-    var loaders: [load_window]zml.io.Loader = undefined;
+    var loaders: [load_window_cap]zml.io.Loader = undefined;
     var ready: usize = 0;
     defer for (loaders[0..ready]) |*loader| loader.deinit();
     while (ready < load_window) : (ready += 1) {
@@ -151,7 +152,7 @@ pub fn loadVisualCache(
     var start: usize = 0;
     while (start < n_blocks) {
         const batch = @min(load_window, n_blocks - start);
-        var futs: [load_window]@TypeOf(try io.concurrent(loadVisualBlock, .{
+        var futs: [load_window_cap]@TypeOf(try io.concurrent(loadVisualBlock, .{
             allocator, io, platform, loaded, store, shardings, start, progress, &loaders[0],
         })) = undefined;
         var spawned: usize = 0;

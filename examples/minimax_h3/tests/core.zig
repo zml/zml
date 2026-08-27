@@ -83,6 +83,14 @@ fn testSharding(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelMax(56, 64, 8));
     try std.testing.expectEqual(@as(usize, 6), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 6));
     try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 8));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelMax(64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(16, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(32, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(20, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 1), sharding_mod.tensorParallelMax(0, 64, 8));
+    sharding_mod.preparePhysicalMesh(.{ .dit = 64, .enc = 64, .kv = 16 });
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(16));
+    sharding_mod.preparePhysicalMesh(sharding_mod.officialHeadCounts());
     try std.testing.expect(sharding_mod.officialHeadsOk(1));
     try std.testing.expect(sharding_mod.officialHeadsOk(2));
     try std.testing.expect(sharding_mod.officialHeadsOk(4));
@@ -152,12 +160,12 @@ fn testSharding(allocator: std.mem.Allocator) !void {
         try std.testing.expectEqual(sharding_mod.tensorParallelPrimaryAxis(.neuron), strategy.bindings.get(0).physical.get(0));
         try std.testing.expectEqualSlices(
             zml.Sharding.PhysicalAxisTag,
-            &.{ .link, .link_x, .link_y, .link_z },
+            &.{ .link, .link_x, .link_y },
             strategy.folding.get(0).sources.constSlice(),
         );
         const data = try zml.Sharding.Data.init("model", &neuron, .mesh(.{ .model = .high_bandwidth }), strategy);
-        try std.testing.expectEqual(@as(i64, 16), data.numPartitionsForLogicalAxis(.model));
-        try std.testing.expect(!sharding_mod.officialHeadsOk(16));
+        try std.testing.expectEqual(@as(i64, 8), data.numPartitionsForLogicalAxis(.model));
+        try std.testing.expect(sharding_mod.officialHeadsOk(8));
     }
 
     {
@@ -174,15 +182,22 @@ fn testSharding(allocator: std.mem.Allocator) !void {
 
     {
         var cuda16 = try testMesh(arena, .cuda, &.{.link}, &.{16});
-        const strategy = try sharding_mod.tensorParallelStrategy(&cuda16);
-        const data = try zml.Sharding.Data.init("model", &cuda16, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectError(error.IncompatibleSharding, sharding_mod.tensorParallelStrategy(&cuda16));
+        try std.testing.expectError(
+            error.IncompatibleSharding,
+            sharding_mod.tensorParallelStrategyFor(&cuda16, 56, 64, 8),
+        );
+    }
+
+    {
+        var cuda16 = try testMesh(arena, .cuda, &.{.link}, &.{16});
+        const strategy = try sharding_mod.tensorParallelStrategyFor(&cuda16, 64, 64, 16);
+        const data = try zml.Sharding.Data.init("wide", &cuda16, .mesh(.{ .model = .high_bandwidth }), strategy);
         try std.testing.expectEqual(@as(i64, 16), data.numPartitionsForLogicalAxis(.model));
         const mesh_shard: zml.Sharding = .{ .data = &data };
-        const heads = zml.Shape.init(.{ .h = 56 }, .bf16).withPartitioning(.{ .h = .model });
-        try std.testing.expectError(error.IncompatibleSharding, mesh_shard.placement(heads));
-        const q = zml.Shape.init(.{ .dout = 7168 }, .bf16).withPartitioning(.{ .dout = .model });
-        const q_pl = try mesh_shard.placement(q);
-        try std.testing.expectEqual(@as(i64, 448), q_pl.shape.dim(.dout));
+        const heads = zml.Shape.init(.{ .h = 64 }, .bf16).withPartitioning(.{ .h = .model });
+        const h_pl = try mesh_shard.placement(heads);
+        try std.testing.expectEqual(@as(i64, 4), h_pl.shape.dim(.h));
     }
 }
 fn testMesh(
@@ -571,6 +586,11 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expect(policy_mod.groupSize(8) == 4);
     try std.testing.expectEqual(@as(u32, 4), policy_mod.enc_prefetch);
     try std.testing.expectEqual(@as(u32, 8), policy_mod.vae_load_window);
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.encPrefetch(1));
+    try std.testing.expectEqual(@as(u32, 2), policy_mod.encPrefetch(2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.encPrefetch(50));
+    try std.testing.expectEqual(@as(u32, 3), policy_mod.vaeLoadWindow(3));
+    try std.testing.expectEqual(@as(u32, 8), policy_mod.vaeLoadWindow(32));
     try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(46, 50));
     try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(50, 50));
     try std.testing.expectEqual(@as(u32, 40), policy_mod.ditKeepBlocks(40, 50));

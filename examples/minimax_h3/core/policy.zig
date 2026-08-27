@@ -68,17 +68,28 @@ pub fn adalnTableBytes(steps: u32, hidden: i64, layers: i64, dtype_bytes: u32) u
     return per_block * @as(u64, @intCast(@max(layers, 0))) + final;
 }
 
-pub fn groupSize(resident: u32) u32 {
-    if (resident <= 1) return 1;
-    if (resident < 4) return resident;
-    return 4;
-}
-
+pub const compile_group_cap: u32 = 4;
 /// Encode is a single pass: extra resident layers do not help when weights
 /// come from disk. Hide H2D behind compute on the stream path.
 pub const enc_prefetch: u32 = 4;
 /// Visual VAE keeps every block after the first fill; only the fill is parallel.
 pub const vae_load_window: u32 = 8;
+
+pub fn groupSize(resident: u32) u32 {
+    if (resident <= 1) return 1;
+    return @min(resident, compile_group_cap);
+}
+
+pub fn encPrefetch(layers: u32) u32 {
+    if (layers <= 1) return 1;
+    return @min(layers, enc_prefetch);
+}
+
+pub fn vaeLoadWindow(blocks: u32) u32 {
+    if (blocks <= 1) return 1;
+    return @min(blocks, vae_load_window);
+}
+
 pub const safety_numer: u64 = 85;
 pub const safety_denom: u64 = 100;
 

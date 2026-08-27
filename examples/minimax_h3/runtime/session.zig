@@ -107,7 +107,7 @@ fn encodeText(
     const keep_all = n_keep == n_layers and n_layers > 0;
     log.info(
         "encoder: start tokens={d} layers={d} keep={d} prefetch={d} layer={d}MiB",
-        .{ tokens.len, n_layers, n_keep, policy.enc_prefetch, layer_bytes / (1024 * 1024) },
+        .{ tokens.len, n_layers, n_keep, policy.encPrefetch(@intCast(n_layers)), layer_bytes / (1024 * 1024) },
     );
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
@@ -116,8 +116,8 @@ fn encodeText(
     });
     defer embed_runner.deinit(allocator);
 
-    const prefetch = policy.enc_prefetch;
-    var loaders: [prefetch]zml.io.Loader = undefined;
+    const prefetch = policy.encPrefetch(@intCast(n_layers));
+    var loaders: [policy.enc_prefetch]zml.io.Loader = undefined;
     var loaders_ready: u32 = 0;
     defer {
         var k: u32 = 0;
@@ -129,7 +129,7 @@ fn encodeText(
     const EncFut = @TypeOf(try io.concurrent(loadEncoderLayer, .{
         allocator, io, platform, loaded, store, shardings, @as(usize, 0), progress, &loaders[0],
     }));
-    var futs: [prefetch]?EncFut = .{null} ** prefetch;
+    var futs: [policy.enc_prefetch]?EncFut = .{null} ** policy.enc_prefetch;
     errdefer {
         for (&futs) |*f| cancelEnc(f, io);
     }
