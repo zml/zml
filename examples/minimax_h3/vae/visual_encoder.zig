@@ -14,18 +14,8 @@ pub const layers_per_block: usize = 2;
 pub const norm_groups: i64 = 32;
 pub const norm_eps: f32 = 1e-6;
 
-fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
-    var buffer: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch return 5;
-    return if (store.store.getShape(key)) |shape| shape.rank() else 5;
-}
-
 fn convWeight(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
-    return switch (tensorRank(store, name)) {
-        5 => store.createTensor(name, .{ .co, .ci, .kt, .kh, .kw }, .replicated),
-        4 => store.createTensor(name, .{ .co, .ci, .kh, .kw }, .replicated),
-        else => store.createTensor(name, .{ .co, .ci, .k }, .replicated),
-    };
+    return store.createTensor(name, .{ .co, .ci, .kt, .kh, .kw }, .replicated);
 }
 
 fn unloadConv(weight: *zml.Buffer, bias: *?zml.Buffer) void {
@@ -114,11 +104,7 @@ const CausalConv3d = struct {
         y = reflectPadBoth(y, .h, self.spatial_pad);
         y = reflectPadBoth(y, .w, self.spatial_pad);
         y = causalPadT(y, self.temporal_pad);
-        var w = self.weight.convert(.f32);
-        if (w.rank() < 5) {
-            while (w.rank() < 5) w = w.appendAxes(.{.kt});
-        }
-        w = w.withPartialTags(.{ .co, .ci, .kt, .kh, .kw });
+        const w = self.weight.convert(.f32).withPartialTags(.{ .co, .ci, .kt, .kh, .kw });
         y = y.conv3d(w, .{
             .window_strides = &.{ self.stride_t, self.stride_hw, self.stride_hw },
         });
@@ -163,8 +149,6 @@ const Resnet = struct {
             .conv2 = .init(store.withPrefix("conv2"), 1, 1, 1, 2),
             .shortcut = if (store.hasKey("conv_shortcut.weight"))
                 .init(store.withPrefix("conv_shortcut"), 1, 1, 0, 0)
-            else if (store.hasKey("nin_shortcut.weight"))
-                .init(store.withPrefix("nin_shortcut"), 1, 1, 0, 0)
             else
                 null,
         };
@@ -219,19 +203,12 @@ const DownBlock = struct {
     downsample: ?Downsample,
 
     pub fn init(store: zml.io.TensorStore.View, temporal_factor: i64, spatial_factor: i64) DownBlock {
-        const blocks = store.withPrefix(if (store.hasKey("resnets.0.norm1.weight")) "resnets" else "block");
+        const blocks = store.withPrefix("resnets");
         return .{
             .block0 = .init(blocks.withLayer(0)),
             .block1 = .init(blocks.withLayer(1)),
             .downsample = if (temporal_factor * spatial_factor > 1)
-                .init(
-                    if (store.hasKey("downsamplers.0.conv.weight"))
-                        store.withPrefix("downsamplers").withLayer(0)
-                    else
-                        store.withPrefix("downsample"),
-                    temporal_factor,
-                    spatial_factor,
-                )
+                .init(store.withPrefix("downsamplers").withLayer(0), temporal_factor, spatial_factor)
             else
                 null,
         };
@@ -268,7 +245,7 @@ pub const Model = struct {
     pub fn init(store: zml.io.TensorStore.View) Model {
         const root = store;
         const enc = encoderView(root);
-        const down_root = enc.withPrefix(if (enc.hasKey("down_blocks.0.resnets.0.norm1.weight")) "down_blocks" else "down");
+        const down_root = enc.withPrefix("down_blocks");
         var downs: [6]DownBlock = undefined;
         for (&downs, 0..) |*block, i| {
             block.* = .init(down_root.withLayer(i), temporal_downsample[i], spatial_downsample[i]);
