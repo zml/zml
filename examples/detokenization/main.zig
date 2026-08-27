@@ -389,28 +389,24 @@ pub fn buildGemmaDataset(zml_handler: *Zml_handler) !void {
     for (prompt_file_names.items, 0..) |prompt_file_name, prompt_index| {
         zml_handler.mem.start(0);
 
-        {
-            std.log.info("***** [{d}/{d}] Read prompt: {s}", .{ prompt_index + 1, prompt_file_names.items.len, prompt_file_name });
-            const prompt_file = try prompts_dir.openFile(zml_handler.local_io, prompt_file_name, .{ .mode = .read_only });
-            defer prompt_file.close(zml_handler.local_io);
-            var prompt_reader = prompt_file.reader(zml_handler.local_io, &.{});
-            const prompt_text = try prompt_reader.interface.readAlloc(zml_handler.allocator, try prompt_file.length(zml_handler.local_io));
-            defer zml_handler.allocator.free(prompt_text);
+        std.log.info("***** [{d}/{d}] Read prompt: {s}", .{ prompt_index + 1, prompt_file_names.items.len, prompt_file_name });
+        const prompt_file = try prompts_dir.openFile(zml_handler.local_io, prompt_file_name, .{ .mode = .read_only });
+        defer prompt_file.close(zml_handler.local_io);
+        var prompt_reader = prompt_file.reader(zml_handler.local_io, &.{});
+        const prompt_text = try prompt_reader.interface.readAlloc(zml_handler.allocator, try prompt_file.length(zml_handler.local_io));
+        defer zml_handler.allocator.free(prompt_text);
 
-            std.log.info("***** Tokenize prompt", .{});
-            const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, prompt_text);
-            defer zml_handler.allocator.free(prompt);
+        std.log.info("***** Tokenize prompt", .{});
+        const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, prompt_text);
+        defer zml_handler.allocator.free(prompt);
 
-            std.log.info("***** Generate text", .{});
-            var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
-            defer generation_result.deinit(zml_handler.allocator);
-            if (zml_handler.args.export_activations) {
-                if (generation_result.activations) |*activations| {
-                    const output_file_name = try std.fmt.allocPrint(zml_handler.allocator, "{s}.safetensors", .{std.fs.path.stem(prompt_file_name)});
-                    defer zml_handler.allocator.free(output_file_name);
-                    try gemma_inference.exportActivations(zml_handler, output_file_name, llm.config, activations);
-                }
-            }
+        std.log.info("***** Generate text", .{});
+        var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
+        defer generation_result.deinit(zml_handler.allocator);
+        if (generation_result.activations) |*activations| {
+            const output_file_name = try std.fmt.allocPrint(zml_handler.allocator, "{s}.safetensors", .{std.fs.path.stem(prompt_file_name)});
+            defer zml_handler.allocator.free(output_file_name);
+            try gemma_inference.exportActivations(zml_handler, output_file_name, llm.config, activations);
         }
 
         try llm.resetKvCache(zml_handler);
