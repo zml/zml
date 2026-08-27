@@ -257,7 +257,7 @@ pub fn Typed(comptime func: anytype) type {
             opts: Options,
             args: std.meta.ArgsTuple(@TypeOf(func)),
         ) Error!Exe {
-            return Compiler.compile(allocator, io, func, args, platform, opts);
+            return Compiler.compile(io, allocator, platform, func, args, opts);
         }
     };
 }

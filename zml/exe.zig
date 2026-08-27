@@ -411,7 +411,7 @@ pub fn FnExe(comptime function_: anytype) type {
             opts: Compiler.Options,
             args: std.meta.ArgsTuple(@TypeOf(function_)),
         ) Compiler.Error!Self {
-            return .{ .raw = try Compiler.Typed(function_).compile(allocator, io, platform, opts, args) };
+            return .{ .raw = try Compiler.Typed(function_).compile(io, allocator, platform, opts, args) };
         }
 
         pub fn deinit(self: *const Self) void {

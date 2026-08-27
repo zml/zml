@@ -50,7 +50,12 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
+/// Deprecated, use `zml.Compiler` instead
 pub const module = struct {
+    pub const CompilationContext = Compiler;
+    pub const CompileError = Compiler.Error;
+    pub const CompilationOptions = Compiler.Options;
+
     /// Deprecated, use `platform.compile` or `zml.Compiler.compile`
     pub fn compile(
         allocator: std.mem.Allocator,
