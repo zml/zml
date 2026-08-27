@@ -5,7 +5,6 @@ const zml = @import("zml");
 const config = @import("config.zig");
 const packing = @import("../model/packing.zig");
 const policy = @import("policy.zig");
-const pipeline = @import("../runtime/pipeline.zig");
 const vae = @import("../vae/geometry.zig");
 
 pub const Plan = struct {
@@ -27,8 +26,32 @@ pub const Plan = struct {
 /// Bytes reserved for one streamed transformer block.
 pub const streamed_block_bytes: u64 = 768 * 1024 * 1024;
 
+/// Geometry needed by the memory estimator. Keep this independent from the
+/// runtime pipeline so core policy does not depend on orchestration code.
+pub const Geometry = struct {
+    pixel_w: u32,
+    pixel_h: u32,
+    latent_t: u32,
+    latent_h: u32,
+    latent_w: u32,
+    video_tokens: u32,
+    audio_tokens: u32,
+
+    pub fn init(geo: anytype) Geometry {
+        return .{
+            .pixel_w = geo.pixel_w,
+            .pixel_h = geo.pixel_h,
+            .latent_t = geo.latent_t,
+            .latent_h = geo.latent_h,
+            .latent_w = geo.latent_w,
+            .video_tokens = geo.video_tokens,
+            .audio_tokens = geo.audio_tokens,
+        };
+    }
+};
+
 pub const Opts = struct {
-    geo: pipeline.Geometry,
+    geo: Geometry,
     layout: packing.Layout,
     hidden: i64,
     steps: u32,

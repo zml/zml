@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
     const mem = memory.plan(.{
-        .geo = geo_work,
+        .geo = .init(geo_work),
         .layout = packed_run.layout,
         .hidden = models.dit.cfg.hidden_size,
         .steps = @intCast(packed_run.schedules.video.stepCount()),

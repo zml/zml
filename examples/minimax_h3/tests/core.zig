@@ -347,7 +347,7 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
     });
     defer layout.deinit(allocator);
     const tiny = memory_mod.plan(.{
-        .geo = geo,
+        .geo = .init(geo),
         .layout = layout,
         .hidden = 256,
         .steps = 4,
@@ -362,7 +362,7 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
         break :blk g;
     };
     const full = memory_mod.plan(.{
-        .geo = huge_geo,
+        .geo = .init(huge_geo),
         .layout = layout,
         .hidden = 5376,
         .steps = 30,
@@ -515,7 +515,7 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     defer layout.deinit(allocator);
     const seq = layout.seqLen();
     const sdpa = memory_mod.plan(.{
-        .geo = geo,
+        .geo = .init(geo),
         .layout = layout,
         .hidden = 5376,
         .steps = 9,
@@ -530,7 +530,7 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expect(policy_mod.sdpaScoreBytes(7440, 56, 1) > 10 * 1024 * 1024 * 1024);
 
     const fa2 = memory_mod.plan(.{
-        .geo = geo,
+        .geo = .init(geo),
         .layout = layout,
         .hidden = 5376,
         .steps = 9,
@@ -545,7 +545,7 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expect(fa2.fa2_scratch_bytes > 0);
     try std.testing.expect(fa2.fa2_scratch_bytes < fa2.score_bytes);
     const fa3 = memory_mod.plan(.{
-        .geo = geo,
+        .geo = .init(geo),
         .layout = layout,
         .hidden = 5376,
         .steps = 9,
