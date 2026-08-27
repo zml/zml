@@ -94,13 +94,11 @@ fn weightRank(store: zml.io.TensorStore.View, weight_name: []const u8) u8 {
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
     if (weightRank(store, weight_name) != 5)
         return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
-    var layer: zml.nn.Linear = .init(
+    return .init(
         store.createTensor(weight_name, .{ .dout, .d, .kt, .kh, .kw }, .replicated),
         if (bias_name) |n| store.maybeCreateTensor(n, .{.dout}, .replicated) else null,
         .d,
     );
-    layer.attachQuant(store, weight_name);
-    return layer;
 }
 
 fn asLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {

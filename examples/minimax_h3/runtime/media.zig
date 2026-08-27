@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-const config = @import("../core/config.zig");
 const geom = @import("../conditioning/geometry.zig");
 const vae = @import("../vae/geometry.zig");
 
@@ -432,17 +431,6 @@ pub fn probeVideo(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !V
     return parseFfmpegProbe(result.stderr);
 }
 
-fn parseRate(text: []const u8) ?f32 {
-    const trimmed = std.mem.trim(u8, text, " \r\n");
-    if (std.mem.indexOfScalar(u8, trimmed, '/')) |slash| {
-        const num = std.fmt.parseFloat(f32, trimmed[0..slash]) catch return null;
-        const den = std.fmt.parseFloat(f32, trimmed[slash + 1 ..]) catch return null;
-        if (den == 0) return null;
-        return num / den;
-    }
-    return std.fmt.parseFloat(f32, trimmed) catch null;
-}
-
 pub fn loadVideoNative(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !VideoClip {
     const meta = try probeVideo(allocator, io, path);
     var scratch = try Scratch.init(allocator);
@@ -497,37 +485,6 @@ pub fn loadVideoNative(allocator: std.mem.Allocator, io: std.Io, path: []const u
         .fps = meta.fps,
         .has_audio = meta.has_audio,
     };
-}
-
-pub fn loadVideoRgb(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    path: []const u8,
-    dst_w: u32,
-    dst_h: u32,
-    frames: u32,
-) !struct { rgb: []u8, frames: u32, w: u32, h: u32 } {
-    const clip = try loadVideoNative(allocator, io, path);
-    defer allocator.free(clip.rgb);
-    const indices = try geom.resampleFrameIndices(clip.frames, clip.fps, config.video_fps, allocator);
-    defer allocator.free(indices);
-    const keep = @min(frames, @as(u32, @intCast(indices.len)));
-    const plane = @as(usize, dst_w) * dst_h * 3;
-    const src_plane = @as(usize, clip.w) * clip.h * 3;
-    const out = try allocator.alloc(u8, keep * plane);
-    errdefer allocator.free(out);
-    var i: u32 = 0;
-    while (i < keep) : (i += 1) {
-        const src_i = indices[i];
-        const src = clip.rgb[src_i * src_plane ..][0..src_plane];
-        const rgb = if (clip.w == dst_w and clip.h == dst_h)
-            try allocator.dupe(u8, src)
-        else
-            try geom.resizeLanczos(allocator, src, clip.w, clip.h, dst_w, dst_h);
-        defer allocator.free(rgb);
-        @memcpy(out[i * plane ..][0..plane], rgb);
-    }
-    return .{ .rgb = out, .frames = keep, .w = dst_w, .h = dst_h };
 }
 
 pub fn rgbVideoToNchwImagenet(allocator: std.mem.Allocator, rgb: []const u8, frames: u32, height: u32, width: u32) ![]f32 {

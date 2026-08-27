@@ -234,13 +234,6 @@ pub const TensorStore = struct {
             return tensor;
         }
 
-        /// Hadamard group from `TensorRegistry.ingestConvrotMarkers`. 0 if unset.
-        pub fn convrotGroup(self: View, stem: []const u8) u32 {
-            var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", stem });
-            return self.store.registry.convrot_group.get(key) orelse 0;
-        }
-
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });

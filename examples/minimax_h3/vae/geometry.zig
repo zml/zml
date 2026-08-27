@@ -398,15 +398,10 @@ pub fn sampleVisualPosteriorNchw(
     t: u32,
     h: u32,
     w: u32,
-    policy: config.PosteriorPolicy,
 ) ![]f32 {
     const spatial = @as(usize, t) * h * w;
     std.debug.assert(moments_nchw.len >= spatial * 48);
     const out = try allocator.alloc(f32, spatial * 24);
-    if (policy == .mean) {
-        @memcpy(out, moments_nchw[0..out.len]);
-        return out;
-    }
     var gen = noise.Generator.init(config.visual_encode_seed);
     const eps = try allocator.alloc(f32, out.len);
     defer allocator.free(eps);

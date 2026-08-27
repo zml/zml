@@ -509,10 +509,7 @@ pub const LoadedModel = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         var parsed_root = try config_mod.parseOptional(FileConfig, allocator, io, repo, "config.json");
         defer if (parsed_root) |*parsed| parsed.deinit();
-        var parsed_source = try config_mod.parseOptional(FileConfig, allocator, io, repo, "source/config.json");
-        defer if (parsed_source) |*parsed| parsed.deinit();
         var cfg = Config.official();
-        if (parsed_source) |parsed| parsed.value.overlay(&cfg);
         if (parsed_root) |parsed| parsed.value.overlay(&cfg);
         log.info("visual vae: {d} layers latent_c={d} tile={d} mean0={d:.3} std0={d:.3}", .{
             cfg.decoder_num_layers,

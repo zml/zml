@@ -251,10 +251,6 @@ pub fn cropRgb(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h:
     return out;
 }
 
-pub fn stretchLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
-    return resizeLanczos(allocator, src, src_w, src_h, dst_w, dst_h);
-}
-
 pub fn coverCropLanczos(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) ![]u8 {
     const box = coverCropBox(src_w, src_h, dst_w, dst_h);
     const resized = try resizeLanczos(allocator, src, src_w, src_h, box.w, box.h);
@@ -333,20 +329,6 @@ pub fn fillVideoConditionIndices(frames: u32, fps: f32, sample_fps: f32, out: []
     return n;
 }
 
-pub fn fillBlockTimestamps(sample_count: u32, sample_fps: f32, temporal_patch: u32, out: []f32) u32 {
-    const padded = sample_count + (temporal_patch - (sample_count % temporal_patch)) % temporal_patch;
-    const blocks = padded / temporal_patch;
-    std.debug.assert(out.len >= blocks);
-    var i: u32 = 0;
-    while (i < blocks) : (i += 1) {
-        const a = @as(f32, @floatFromInt(i * temporal_patch)) / sample_fps;
-        const last_idx = @min(sample_count - 1, (i + 1) * temporal_patch - 1);
-        const b = @as(f32, @floatFromInt(last_idx)) / sample_fps;
-        out[i] = (a + b) / 2;
-    }
-    return blocks;
-}
-
 /// One decimal place, round half to even.
 pub fn formatSeconds1(value: f32, buf: []u8) []const u8 {
     const scaled = @as(f64, value) * 10.0;
@@ -411,15 +393,6 @@ pub fn resampleLinear(allocator: std.mem.Allocator, stereo: []const f32, src_rat
             const a1 = stereo[@as(usize, hi) * 2 + c];
             out[@as(usize, i) * 2 + c] = a0 * (1 - a) + a1 * a;
         }
-    }
-    return out;
-}
-
-pub fn monoToStereo(allocator: std.mem.Allocator, mono: []const f32) ![]f32 {
-    const out = try allocator.alloc(f32, mono.len * 2);
-    for (mono, 0..) |s, i| {
-        out[i * 2] = s;
-        out[i * 2 + 1] = s;
     }
     return out;
 }

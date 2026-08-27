@@ -346,7 +346,6 @@ pub fn main(init: std.process.Init) !void {
         },
         .seed = args.seed,
         .resident_blocks = mem.resident_blocks,
-        .prompt = encode_prompt,
         .out = args.out,
     });
 }

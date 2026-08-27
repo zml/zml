@@ -165,9 +165,6 @@ fn testGeomHost(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 2), geom.fillVideoConditionIndices(24, 24, 2, &qidx));
     try std.testing.expectEqual(@as(u32, 0), qidx[0]);
     try std.testing.expectEqual(@as(u32, 12), qidx[1]);
-    var ts: [1]f32 = undefined;
-    try std.testing.expectEqual(@as(u32, 1), geom.fillBlockTimestamps(2, 2, 2, &ts));
-    try std.testing.expectApproxEqAbs(@as(f32, 0.25), ts[0], 1e-6);
 }
 const StubEnc = struct {
     pub fn encodeAlloc(_: @This(), allocator: std.mem.Allocator, text: []const u8) ![]u32 {
@@ -281,9 +278,9 @@ fn testRefSize() !void {
 }
 fn testPixelCrc(allocator: std.mem.Allocator) !void {
     const src = [_]u8{ 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255 };
-    const a = try geom.stretchLanczos(allocator, &src, 2, 2, 4, 4);
+    const a = try geom.resizeLanczos(allocator, &src, 2, 2, 4, 4);
     defer allocator.free(a);
-    const b = try geom.stretchLanczos(allocator, &src, 2, 2, 4, 4);
+    const b = try geom.resizeLanczos(allocator, &src, 2, 2, 4, 4);
     defer allocator.free(b);
     try std.testing.expectEqual(std.hash.Crc32.hash(a), std.hash.Crc32.hash(b));
     try std.testing.expectEqual(@as(usize, 48), a.len);

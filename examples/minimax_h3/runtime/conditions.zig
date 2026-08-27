@@ -111,7 +111,6 @@ pub fn prepare(
         kind: packing.ReferenceKind,
         path: []const u8,
         keyframe_index: i32 = 0,
-        guide_frame: ?i32 = null,
         rgb: []u8 = &.{},
         qwen_rgb: []u8 = &.{},
         frames: u32 = 1,
@@ -432,13 +431,11 @@ pub fn prepare(
 
         for (visuals.items) |item| {
             if (item.kind == .audio) continue;
-            const policy = config_mod.posterior;
             encoded_visuals[n_vis] = if (item.kind == .video or item.kind == .video_audio)
-                try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.frames, item.h, item.w, policy)
+                try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.frames, item.h, item.w)
             else
-                try encode_mod.encodeKeyframe(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w, policy);
+                try encode_mod.encodeKeyframe(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
             encoded_visuals[n_vis].keyframe_index = item.keyframe_index;
-            encoded_visuals[n_vis].guide_frame = item.guide_frame;
             n_vis += 1;
         }
         for (audios.items, encoded_audios) |item, *out| {

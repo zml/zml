@@ -25,7 +25,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOfficialPin();
     try testTokenizerRelpaths();
     try testWeightEntrypoints();
-    try testConvrotMarker();
     try testGroupRefs(allocator);
     try testSchemaFixtures();
     try testAttentionPolicy();
@@ -50,7 +49,6 @@ fn testConfig() !void {
         .latents_dim = 24,
         .audio_latents_dim = 32,
         .timestep_input_dim = 256,
-        .time_embed_hidden_size = 5376,
         .rope_inv_freq_len = 16,
     };
     aliased = aliased.resolve();
@@ -328,7 +326,7 @@ fn testCheckpoint() !void {
 
     const table_only = [_][]const u8{ "adaln_t_table", "video_patch_proj.weight" };
     try std.testing.expect(!repo.inspect(&table_only).has_adaln_proj);
-    try std.testing.expect(repo.inspect(&table_only).has_time);
+    try std.testing.expect(!repo.inspect(&table_only).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&table_only)) != null);
 
     const no_time = [_][]const u8{"blocks.0.adaln_proj.linear.weight"};
@@ -336,7 +334,7 @@ fn testCheckpoint() !void {
     try std.testing.expect(!repo.inspect(&no_time).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
 
-    const rank8 = [_][]const u8{ "adaln_t_table", "blocks.0.adaln_proj.linear.weight" };
+    const rank8 = [_][]const u8{ "time_embedder.linear_1.weight", "blocks.0.adaln_proj.linear.weight" };
     try std.testing.expect(repo.inspect(&rank8).has_adaln_proj);
     try std.testing.expect(repo.inspect(&rank8).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&rank8)) == null);
@@ -435,18 +433,6 @@ fn testWeightEntrypoints() !void {
     try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors.index.json", repo.weight_entrypoints[2]);
     try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors", repo.weight_entrypoints[3]);
 }
-fn testConvrotMarker() !void {
-    try std.testing.expectEqual(@as(?u32, 256), try zml.safetensors.convrotGroupFromMarker(
-        "{\"format\":\"int8_tensorwise\",\"convrot\":true,\"convrot_groupsize\":256}",
-    ));
-    try std.testing.expectEqual(@as(?u32, 0), try zml.safetensors.convrotGroupFromMarker("{\"format\":\"int8_tensorwise\"}"));
-    try std.testing.expectEqual(@as(?u32, 0), try zml.safetensors.convrotGroupFromMarker(
-        "{\"format\":\"nvfp4\",\"full_precision_matrix_mult\":true}",
-    ));
-    try std.testing.expectError(error.UnsupportedConvrotGroup, zml.safetensors.convrotGroupFromMarker(
-        "{\"convrot\":true,\"convrot_groupsize\":64}",
-    ));
-}
 fn testGroupRefs(allocator: std.mem.Allocator) !void {
     const src = try request_mod.refsFromComma(allocator, "a.wav, b.png, c.mp4");
     defer request_mod.freeRefs(allocator, src, false);
@@ -457,7 +443,7 @@ fn testGroupRefs(allocator: std.mem.Allocator) !void {
 fn testSchemaFixtures() !void {
     try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
 
-    const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale", "adaln_t_table" };
+    const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale", "time_embedder.linear_1.weight" };
     try std.testing.expect(repo.inspect(&int8).has_adaln_proj);
     try std.testing.expect(repo.inspect(&int8).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&int8)) == null);
