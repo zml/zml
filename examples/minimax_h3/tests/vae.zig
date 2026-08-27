@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const zml = @import("zml");
+
 const audio_vae = @import("../vae/audio.zig");
 const config = @import("../core/config.zig");
 const vae = @import("../vae/geometry.zig");
@@ -20,6 +22,21 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testTokenDrop();
     try testAudioRowBct();
     try testPosterior(allocator);
+    try testVaeEmbedBatchShapes();
+}
+
+/// `embed` builds register/cls/concat shapes with `setDim` on the token batch.
+fn testVaeEmbedBatchShapes() !void {
+    const tokens = zml.Shape.init(.{ .b = 8, .s = 10, .d = 16 }, .bf16).withPartitioning(.{ .b = .model });
+    const registers = tokens.setDim(.s, 4);
+    const cls = tokens.setDim(.s, 1);
+    const hidden = tokens.setDim(.s, tokens.dim(.s) + registers.dim(.s) + cls.dim(.s));
+    try std.testing.expect(tokens.partition(.b).eql(.init(.model)));
+    try std.testing.expect(registers.partition(.b).eql(.init(.model)));
+    try std.testing.expect(cls.partition(.b).eql(.init(.model)));
+    try std.testing.expect(hidden.partition(.b).eql(.init(.model)));
+    try std.testing.expect(!zml.Shape.init(.{ .b = 8, .s = 15, .d = 16 }, .bf16).partition(.b).eql(.init(.model)));
+    try std.testing.expectEqual(@as(i64, 15), hidden.dim(.s));
 }
 
 fn testEncodeVideoLatentT() !void {

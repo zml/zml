@@ -573,9 +573,8 @@ pub fn compileVae(
     const registers: u32 = @intCast(visual.cfg.decoder_num_register_tokens);
     const seq = tile.seq(registers);
     const batch = @max(1, tile_batch);
-    // Off: `embed` rebuilds `.b` without `.model`, so outputs stay `[batch,…]`
-    // while a sharded block/finish would expect `[batch/tp,…]`.
-    const partition_b = false;
+    const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
+    const partition_b = partitionsVaeBatch(batch, tp);
     var node = progress.start("Compiling MiniMax-H3 VAE", 3);
     defer node.end();
 
@@ -620,6 +619,7 @@ pub fn compileVae(
     };
 }
 
+/// Data-parallel `.b` only when every rank gets the same tile count.
 pub fn partitionsVaeBatch(batch: u32, tp: u32) bool {
     return batch > 1 and tp > 1 and batch % tp == 0;
 }
