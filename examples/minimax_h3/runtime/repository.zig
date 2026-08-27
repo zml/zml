@@ -42,7 +42,6 @@ pub const Bundle = struct {
     enc_src: FileSource,
     visual_src: FileSource,
     audio_src: FileSource,
-    visual_source: ?std.Io.Dir,
 
     dit_registry: *zml.safetensors.TensorRegistry,
     dit_store: zml.io.TensorStore,
@@ -98,10 +97,6 @@ pub const Bundle = struct {
         });
         errdefer audio_src.deinit(allocator, io);
 
-        var visual_source = if (visual_src.file == null) openOptionalDir(io, visual_src.dir, "source") else null;
-        errdefer if (visual_source) |*dir| dir.close(io);
-        const visual_weights = visual_source orelse visual_src.dir;
-
         const dit_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(dit_registry);
         dit_registry.* = try openRegistry(allocator, io, dit_src);
@@ -119,11 +114,7 @@ pub const Bundle = struct {
 
         const visual_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(visual_registry);
-        visual_registry.* = try openRegistry(allocator, io, .{
-            .dir = visual_weights,
-            .dir_owned = false,
-            .file = visual_src.file,
-        });
+        visual_registry.* = try openRegistry(allocator, io, visual_src);
         errdefer visual_registry.deinit();
         var visual_store: zml.io.TensorStore = .fromRegistry(allocator, visual_registry);
         errdefer visual_store.deinit();
@@ -156,7 +147,6 @@ pub const Bundle = struct {
             .enc_src = enc_src,
             .visual_src = visual_src,
             .audio_src = audio_src,
-            .visual_source = visual_source,
             .dit_registry = dit_registry,
             .dit_store = dit_store,
             .enc_registry = enc_registry,
@@ -189,7 +179,6 @@ pub const Bundle = struct {
         self.dit_store.deinit();
         self.dit_registry.deinit();
         allocator.destroy(self.dit_registry);
-        if (self.visual_source) |*dir| dir.close(io);
         self.audio_src.deinit(allocator, io);
         self.visual_src.deinit(allocator, io);
         self.enc_src.deinit(allocator, io);
@@ -232,10 +221,7 @@ fn openRegistry(
     io: std.Io,
     src: FileSource,
 ) !zml.safetensors.TensorRegistry {
-    var registry = try fetchRegistry(allocator, io, src);
-    errdefer registry.deinit();
-    try registry.ingestConvrotMarkers(io);
-    return registry;
+    return fetchRegistry(allocator, io, src);
 }
 
 fn fetchRegistry(
@@ -590,13 +576,13 @@ fn hasKey(keys: []const []const u8, suffix: []const u8) bool {
 pub fn inspect(keys: []const []const u8) Report {
     return .{
         .has_adaln_proj = hasKey(keys, "adaln_proj.linear.weight"),
-        .has_time = hasKey(keys, "time_embedder.proj_in.weight") or hasKey(keys, "time_embedder.linear_1.weight") or hasKey(keys, "adaln_t_table"),
+        .has_time = hasKey(keys, "time_embedder.proj_in.weight") or hasKey(keys, "time_embedder.linear_1.weight"),
     };
 }
 
 pub fn refuseReason(report: Report) ?[]const u8 {
     if (!report.has_adaln_proj) return "AdaLN projection weights missing; not a recognized H3 DiT";
-    if (!report.has_time) return "neither time_embedder nor adaln_t_table; not a recognized H3 DiT";
+    if (!report.has_time) return "time_embedder missing; not a recognized H3 DiT";
     return null;
 }
 

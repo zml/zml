@@ -896,9 +896,3 @@ pub const LoadedModel = struct {
         return buffers;
     }
 };
-
-pub fn snake(x: f32, alpha: f32) f32 {
-    const a = alpha + 1e-9;
-    const s = @sin(alpha * x);
-    return x + (1.0 / a) * (s * s);
-}

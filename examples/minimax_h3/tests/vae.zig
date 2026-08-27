@@ -16,7 +16,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOfficialStitch(allocator);
     try testVitCoords();
     try testImagenet();
-    try testSnake();
     try testOfficialAudioLatents();
     try testOfficialVisualLatents();
     try testTokenDrop();
@@ -139,11 +138,6 @@ fn testImagenet() !void {
     vae.denormImagenetRgb(&px);
     try std.testing.expectApproxEqAbs(vae.imagenet_mean[0], px[0], 1e-5);
 }
-fn testSnake() !void {
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), audio_vae.snake(0, 1), 1e-6);
-    const y = audio_vae.snake(1.0, 1.0);
-    try std.testing.expect(y > 1.0);
-}
 fn testOfficialAudioLatents() !void {
     const cfg = audio_vae.Config.official();
     try std.testing.expectEqualSlices(f32, &audio_vae.official_latents_mean, &cfg.latents_mean);
@@ -179,14 +173,10 @@ fn testPosterior(allocator: std.mem.Allocator) !void {
     var moments: [48]f32 = undefined;
     @memset(moments[0..24], 1.0);
     @memset(moments[24..], 0.0);
-    const mean = try vae.sampleVisualPosteriorNchw(allocator, &moments, 1, 1, 1, .mean);
-    defer allocator.free(mean);
-    try std.testing.expectEqualSlices(f32, moments[0..24], mean);
-
-    const a = try vae.sampleVisualPosteriorNchw(allocator, &moments, 1, 1, 1, .sample_seed42);
+    const a = try vae.sampleVisualPosteriorNchw(allocator, &moments, 1, 1, 1);
     defer allocator.free(a);
-    const b = try vae.sampleVisualPosteriorNchw(allocator, &moments, 1, 1, 1, .sample_seed42);
+    const b = try vae.sampleVisualPosteriorNchw(allocator, &moments, 1, 1, 1);
     defer allocator.free(b);
     try std.testing.expectEqualSlices(f32, a, b);
-    try std.testing.expect(!std.mem.eql(f32, a, mean));
+    try std.testing.expect(!std.mem.eql(f32, a, moments[0..24]));
 }

@@ -303,7 +303,6 @@ fn denoise(
         geo.latent_h,
         geo.latent_w,
         loaded.inner.cfg.patch_size,
-        false,
     );
     errdefer allocator.free(video);
     var audio = try noise.drawAudio(allocator, &gen, cond.audio_patches, geo.audio_dim, geo.audio_t);
@@ -783,7 +782,6 @@ pub const Generate = struct {
     cond: DenoiseCond,
     seed: u64,
     resident_blocks: u32,
-    prompt: []const u8,
     out: []const u8,
 };
 
@@ -805,7 +803,6 @@ pub fn generate(
     else
         try std.Io.Dir.cwd().openDir(io, dest.dir, .{});
     defer if (!dest.isCwd()) out_dir.close(io);
-    try writeText(io, out_dir, "prompt.txt", req.prompt);
     var audio_f = try io.concurrent(pipeline.compileAudioDecode, .{
         allocator,
         io,
@@ -934,13 +931,4 @@ pub fn generate(
     );
     defer allocator.free(wav);
     try decode.writeOutputs(allocator, io, out_dir, dest.dir, dest.mp4_name, req.target, rgb, wav);
-}
-
-fn writeText(io: std.Io, dir: std.Io.Dir, name: []const u8, text: []const u8) !void {
-    const file = try dir.createFile(io, name, .{});
-    defer file.close(io);
-    var writer = file.writer(io, &.{});
-    try writer.interface.writeAll(text);
-    if (text.len == 0 or text[text.len - 1] != '\n')
-        try writer.interface.writeByte('\n');
 }

@@ -15,7 +15,6 @@ pub const visual_temporal: u32 = 4;
 pub const visual_clip_length: u32 = 17;
 pub const visual_latents_per_chunk: u32 = 5;
 pub const visual_cond_timestep: f32 = 0.999;
-pub const frame_rescale: f32 = 5.0 / 3.0;
 pub const default_short_side: u32 = 768;
 pub const default_size: []const u8 = "1344x768";
 pub const default_steps: u32 = 30;
@@ -36,9 +35,6 @@ pub const max_ref_images: u32 = 9;
 pub const max_ref_videos: u32 = 3;
 pub const max_ref_audios: u32 = 3;
 pub const visual_encode_seed: u64 = 42;
-
-pub const PosteriorPolicy = enum { sample_seed42, mean };
-pub const posterior: PosteriorPolicy = .sample_seed42;
 
 pub const Variant = enum {
     t2va,
@@ -93,9 +89,6 @@ pub const Config = struct {
     text_dim: i64 = 5120,
     freq_dim: i64 = 256,
     timestep_input_dim: ?i64 = null,
-    time_embed_hidden_dim: i64 = 5376,
-    time_embed_hidden_size: ?i64 = null,
-    time_embed_dim: i64 = 2688,
     rope_freq_dim: i64 = 16,
     rope_inv_freq_len: ?i64 = null,
     rope_theta: f32 = 10000.0,
@@ -110,7 +103,6 @@ pub const Config = struct {
         if (self.latents_dim) |n| out.in_channels = n;
         if (self.audio_latents_dim) |n| out.audio_in_channels = n;
         if (self.timestep_input_dim) |n| out.freq_dim = n;
-        if (self.time_embed_hidden_size) |n| out.time_embed_hidden_dim = n;
         if (self.rope_inv_freq_len) |n| out.rope_freq_dim = n;
         return out;
     }

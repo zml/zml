@@ -162,7 +162,6 @@ pub fn drawVideo(
     latent_h: u32,
     latent_w: u32,
     patch: [3]i64,
-    reset_before_target: bool,
 ) ![]f32 {
     const channels: u32 = 24;
     const row_w = @as(usize, channels) * @as(usize, @intCast(patch[0] * patch[1] * patch[2]));
@@ -188,8 +187,6 @@ pub fn drawVideo(
         }
         off += noise_rows.len;
     }
-
-    if (reset_before_target) gen.reset();
 
     const nchw = try nchwRandn(allocator, gen, channels, latent_t, latent_h, latent_w);
     defer allocator.free(nchw);

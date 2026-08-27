@@ -789,7 +789,6 @@ pub fn pack(
         .condition_audios = audios,
         .references = references,
         .text_tags = text_tags,
-        .pixel_frames = geo.frames,
     });
     return .{ .layout = layout, .schedules = schedules };
 }

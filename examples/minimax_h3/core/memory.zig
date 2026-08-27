@@ -41,8 +41,6 @@ pub const Opts = struct {
     target: zml.Target = .cpu,
     block_core_bytes: u64 = 0,
     devices: u32 = 1,
-    tile_count: u32 = 0,
-    tile_act_bytes: u64 = 0,
     flash: zml.attention.Backend = .cuda_fa2,
 };
 
@@ -50,12 +48,12 @@ pub fn plan(opts: Opts) Plan {
     const seq: u64 = opts.layout.seqLen();
     const dtype_bytes = policy.dtypeBytes(opts.dtype);
     const spec = vae.official_visual;
-    const tiles = if (opts.tile_count != 0) opts.tile_count else vae.tileCount(opts.geo.pixel_h, spec.tile_px, spec.tile_overlap_px, spec.spatial) *
+    const tiles = vae.tileCount(opts.geo.pixel_h, spec.tile_px, spec.tile_overlap_px, spec.spatial) *
         vae.tileCount(opts.geo.pixel_w, spec.tile_px, spec.tile_overlap_px, spec.spatial);
     const tile_lat = vae.decodeTileLatent(spec, opts.geo.latent_h, opts.geo.latent_w);
     const tile_t = vae.decodeClipTokens(spec, opts.geo.latent_t);
     const tile_seq = @as(u64, tile_t) * tile_lat.h * tile_lat.w + 5;
-    const tile_act = if (opts.tile_act_bytes != 0) opts.tile_act_bytes else tile_seq * 2048 * dtype_bytes * 8;
+    const tile_act = tile_seq * 2048 * dtype_bytes * 8;
     const decision = policy.decide(.{
         .target = opts.target,
         .seq = seq,

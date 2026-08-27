@@ -30,8 +30,6 @@ pub const ConditionVideo = struct {
     latent_w: u32,
     /// 0 = first frame, last frame otherwise. Ignored for Ref2VA.
     keyframe_index: i32 = 0,
-    /// When set, place this condition at that pixel frame (negative from the end).
-    guide_frame: ?i32 = null,
 };
 
 pub const ConditionAudio = struct {
@@ -192,7 +190,6 @@ pub const BuildArgs = struct {
     condition_audios: []const ConditionAudio = &.{},
     references: []const ReferenceBlock = &.{},
     text_tags: []const u8 = &.{},
-    pixel_frames: u32 = 0,
 };
 
 const video_spans = [_]u32{ 1, 4, 4, 4, 4 };
@@ -202,18 +199,6 @@ const frame_rescale_f64: f64 = 5.0 / 3.0;
 /// frame spans) and only casts to f32 at the rope. Match that path.
 pub fn videoSpan(frame: u32) f64 {
     return frame_rescale_f64 * @as(f64, @floatFromInt(video_spans[frame % video_spans.len]));
-}
-
-fn guideStartT(text_len: u32, frame: i32, frames: u32, duration: f64) f64 {
-    const base: f64 = @floatFromInt(text_len);
-    if (frames == 0) return base;
-    const last: i64 = @as(i64, frames) - 1;
-    const idx: i64 = if (frame < 0) last + 1 + frame else frame;
-    const clamped: u32 = @intCast(std.math.clamp(idx, 0, last));
-    if (clamped == 0) return base;
-    if (clamped == @as(u32, @intCast(last))) return base + duration - frame_rescale_f64;
-    const frac = @as(f64, @floatFromInt(clamped)) / @as(f64, @floatFromInt(last));
-    return base + frac * duration;
 }
 
 pub fn videoDuration(latent_t: u32) f64 {
@@ -410,9 +395,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
             const ch = spatialAxis(cond.latent_h, area, &ch_buf);
             const cw = spatialAxis(cond.latent_w, area, &cw_buf);
             const is_first = cond.keyframe_index == 0;
-            const keyframe_t = if (cond.guide_frame) |gf|
-                guideStartT(args.text_len, gf, args.pixel_frames, duration)
-            else if (is_first)
+            const keyframe_t = if (is_first)
                 @as(f64, @floatFromInt(args.text_len))
             else
                 @as(f64, @floatFromInt(args.text_len)) + duration - frame_rescale_f64;

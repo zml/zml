@@ -165,9 +165,8 @@ fn momentsToLatentThwc(
     w: u32,
     mean: []const f32,
     stddev: []const f32,
-    policy: config_mod.PosteriorPolicy,
 ) ![]f32 {
-    const sampled = try vae.sampleVisualPosteriorNchw(allocator, moments_nchw, t, h, w, policy);
+    const sampled = try vae.sampleVisualPosteriorNchw(allocator, moments_nchw, t, h, w);
     defer allocator.free(sampled);
     const out = try vae.nchwToThwc(allocator, sampled, 24, t, h, w);
     vae.applyLatentNorm(out, 24, mean, stddev, false);
@@ -180,7 +179,6 @@ pub const VisualLatent = struct {
     latent_h: u32,
     latent_w: u32,
     keyframe_index: i32 = 0,
-    guide_frame: ?i32 = null,
 
     pub fn deinit(self: VisualLatent, allocator: std.mem.Allocator) void {
         allocator.free(self.thwc);
@@ -197,7 +195,6 @@ pub fn encodeKeyframe(
     pixels_nchw: []const f32,
     height: u32,
     width: u32,
-    policy: config_mod.PosteriorPolicy,
 ) !VisualLatent {
     const moments = try runVisualClip(allocator, io, platform, compiled, bufs, pixels_nchw, 1, height, width);
     defer allocator.free(moments);
@@ -205,7 +202,7 @@ pub fn encodeKeyframe(
     const lw = width / 16;
     log.info("visual encode keyframe {d}x{d} -> latent 1x{d}x{d}", .{ width, height, lh, lw });
     return .{
-        .thwc = try momentsToLatentThwc(allocator, moments, 1, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std, policy),
+        .thwc = try momentsToLatentThwc(allocator, moments, 1, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
         .latent_t = 1,
         .latent_h = lh,
         .latent_w = lw,
@@ -223,7 +220,6 @@ pub fn encodeVideo(
     frames: u32,
     height: u32,
     width: u32,
-    policy: config_mod.PosteriorPolicy,
 ) !VisualLatent {
     const spec = vae.official_visual;
     const pad = (spec.clip_length - (frames % spec.clip_length)) % spec.clip_length;
@@ -282,7 +278,7 @@ pub fn encodeVideo(
         encode_start.untilNow(io, .awake),
     });
     return .{
-        .thwc = try momentsToLatentThwc(allocator, kept, keep_t, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std, policy),
+        .thwc = try momentsToLatentThwc(allocator, kept, keep_t, lh, lw, &loaded.cfg.latents_mean, &loaded.cfg.latents_std),
         .latent_t = keep_t,
         .latent_h = lh,
         .latent_w = lw,
@@ -400,7 +396,6 @@ pub fn packConditions(
             .latent_h = v.latent_h,
             .latent_w = v.latent_w,
             .keyframe_index = v.keyframe_index,
-            .guide_frame = v.guide_frame,
         };
         vlen += config_mod.videoTokenCount(v.latent_t, v.latent_h, v.latent_w, patch) * patchDim(patch);
     }
