@@ -9,6 +9,10 @@ pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const ActivationMode = enum {
     silu,
     relu,
