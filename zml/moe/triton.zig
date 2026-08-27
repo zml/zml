@@ -1000,7 +1000,16 @@ fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
     const num_routes = std.math.mul(u32, num_tokens, topk) catch std.math.maxInt(u32);
     var config = getBestTokenBucketConfig(num_routes);
 
-    if (num_tokens <= 32 and num_routes <= 256 and num_experts <= 64) {
+    // Decode-sized routing otherwise produces too little parallel work. Use
+    // small M tiles and recover occupancy by splitting the K reduction.
+    if (num_routes <= 8) {
+        config.block_m = 4;
+        config.block_n = 64;
+        config.block_k = 64;
+        config.group_m = 1;
+        config.num_warps = 4;
+        config.num_stages = 4;
+    } else if (num_tokens <= 32 and num_routes <= 256 and num_experts <= 64) {
         config.block_m = 16;
         config.block_n = 256;
         config.block_k = 128;
@@ -1036,6 +1045,12 @@ fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
 
 fn tokenDistance(a: u32, b: u32) u32 {
     return if (a >= b) a - b else b - a;
+}
+
+test "A16W4 selects split-K tiles for decode-sized routing" {
+    try std.testing.expectEqual(@as(u32, 4), getBestConfig(1, 4, 32).block_m);
+    try std.testing.expectEqual(@as(u32, 4), getBestConfig(2, 4, 32).block_m);
+    try std.testing.expect(getBestConfig(3, 4, 32).block_m >= 8);
 }
 
 const Fp4Routing = struct {
@@ -1198,6 +1213,7 @@ fn runGemm(
         .BLOCK_M = block_m,
         .BLOCK_N = block_n,
         .BLOCK_K = block_k,
+        .GROUP_M = @intCast(opts.group_m),
     };
 
     var y = if (opts.block_m < 8) blk: {
@@ -1212,6 +1228,7 @@ fn runGemm(
                 .TileExperts = opts.routing.tile_experts,
                 .TileStarts = opts.routing.tile_starts,
                 .TileEnds = opts.routing.tile_ends,
+                .NumMTiles = scalarI64(opts.routing.grid_m),
                 .N = scalarI64(n),
                 .K = scalarI64(contract_k),
                 .stride_am = scalarI64(contract_k),
@@ -1236,8 +1253,9 @@ fn runGemm(
                     .BLOCK_N = block_n,
                     .BLOCK_K = block_k,
                     .SPLIT_K = split_k,
+                    .GROUP_M = @intCast(opts.group_m),
                 },
-                .grid = .{ @intCast(opts.routing.grid_m), @intCast(grid_n), split_k },
+                .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, split_k },
                 .num_warps = @intCast(opts.num_warps),
                 .num_stages = @intCast(opts.num_stages),
                 .output_operand_aliases = .{ .C = .CInit },
@@ -1251,6 +1269,7 @@ fn runGemm(
             .TileExperts = opts.routing.tile_experts,
             .TileStarts = opts.routing.tile_starts,
             .TileEnds = opts.routing.tile_ends,
+            .NumMTiles = scalarI64(opts.routing.grid_m),
             .N = scalarI64(n),
             .K = scalarI64(contract_k),
             .stride_am = scalarI64(contract_k),
@@ -1267,7 +1286,7 @@ fn runGemm(
         .{ .C = raw_output_shape },
         .{
             .cfg = cfg,
-            .grid = .{ @intCast(opts.routing.grid_m), @intCast(grid_n), 1 },
+            .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
             .num_warps = @intCast(opts.num_warps),
             .num_stages = @intCast(opts.num_stages),
         },

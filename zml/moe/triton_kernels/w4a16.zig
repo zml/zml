@@ -13,6 +13,7 @@ pub const Cfg = struct {
     BLOCK_M: i32 = 16,
     BLOCK_N: i32 = 128,
     BLOCK_K: i32 = 64,
+    GROUP_M: i32 = 1,
 };
 
 pub const Kernel = tri.Kernel(Cfg, .{
@@ -20,10 +21,11 @@ pub const Kernel = tri.Kernel(Cfg, .{
     .inputs = &.{
         "A",           "B",          "Scales",
         "TileExperts", "TileStarts", "TileEnds",
-        "N",           "K",          "stride_am",
-        "stride_ak",   "stride_be",  "stride_bk",
-        "stride_bn",   "stride_se",  "stride_sk",
-        "stride_sn",   "stride_cm",  "stride_cn",
+        "NumMTiles",   "N",          "K",
+        "stride_am",   "stride_ak",  "stride_be",
+        "stride_bk",   "stride_bn",  "stride_se",
+        "stride_sk",   "stride_sn",  "stride_cm",
+        "stride_cn",
     },
     .outputs = &.{"C"},
     .run = run,
@@ -40,6 +42,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         .TileExperts = .{ .ptr = .i32 },
         .TileStarts = .{ .ptr = .i64 },
         .TileEnds = .{ .ptr = .i64 },
+        .NumMTiles_ptr = .{ .ptr = .i64 },
         .N_ptr = .{ .ptr = .i64 },
         .K_ptr = .{ .ptr = .i64 },
         .stride_am_ptr = .{ .ptr = .i64 },
@@ -55,6 +58,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         .C = .{ .ptr = cfg.c_dtype },
     });
 
+    const num_m_tiles = b.load(a.NumMTiles_ptr);
     const N = b.load(a.N_ptr);
     const K = b.load(a.K_ptr);
     const stride_am = b.load(a.stride_am_ptr);
@@ -72,8 +76,15 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
     const BLOCK_N: i64 = cfg.BLOCK_N;
     const BLOCK_K: i64 = cfg.BLOCK_K;
 
-    const pid_m = b.programId(.x);
-    const pid_n = b.programId(.y);
+    // Group adjacent M tiles before sweeping N so programs reuse the same
+    // expert's weight tiles from L2.
+    const pid = b.programId(.x).to(.i64);
+    const num_pid_n = N.cdiv(cfg.BLOCK_N);
+    const group_width = b.liftAs(cfg.GROUP_M, .i64).mul(num_pid_n);
+    const group_id = pid.div(group_width);
+    const group_size = num_m_tiles.sub(group_id.mul(cfg.GROUP_M)).minimum(cfg.GROUP_M);
+    const pid_m = group_id.mul(cfg.GROUP_M).add(pid.rem(group_size));
+    const pid_n = pid.rem(group_width).div(group_size);
 
     const expert = b.load(a.TileExperts.addPtr(pid_m));
     const m_start = b.load(a.TileStarts.addPtr(pid_m));
@@ -114,35 +125,25 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         a_ptrs_init, b_ptrs_init, scale_ptrs_init, acc_init,
     });
     {
-        const k = loop.iv;
         const a_ptrs = loop.carried[0];
         const b_ptrs = loop.carried[1];
         const scale_ptrs = loop.carried[2];
         const acc = loop.carried[3];
 
-        const k_offsets = k.add(offs_k);
-        const packed_k_offsets = k.div(@as(i64, 2)).add(offs_k_packed);
-        const scale_k_offsets = k.div(@as(i64, 32)).add(offs_k_scale);
-
-        const a_m_mask = offs_m_col.lt(m_end);
-        const a_k_mask = b.expandDims(k_offsets, 0).lt(K);
-        const a_mask = a_m_mask.bitAnd(a_k_mask);
+        // The caller requires K to be an exact multiple of BLOCK_K.
+        const a_mask = b.broadcastTo(offs_m_col.lt(m_end), &.{ BLOCK_M, BLOCK_K });
         const a_val = b.loadOpts(a_ptrs, .{
             .mask = a_mask,
             .other = b.zeros(&.{ BLOCK_M, BLOCK_K }, cfg.a_dtype),
         });
 
-        const b_k_mask = b.expandDims(packed_k_offsets, 1).lt(K.div(@as(i64, 2)));
-        const b_n_mask = offs_n_row.lt(N);
-        const b_mask = b_k_mask.bitAnd(b_n_mask);
+        const b_mask = b.broadcastTo(offs_n_row.lt(N), &.{ @divExact(BLOCK_K, 2), BLOCK_N });
         const b_val = b.loadOpts(b_ptrs, .{
             .mask = b_mask,
             .other = b.zeros(&.{ @divExact(BLOCK_K, 2), BLOCK_N }, cfg.w_dtype),
         });
 
-        const scale_n_mask = offs_n_col.lt(N);
-        const scale_k_mask = b.expandDims(scale_k_offsets, 0).lt(K.div(@as(i64, 32)));
-        const scale_mask = scale_n_mask.bitAnd(scale_k_mask);
+        const scale_mask = b.broadcastTo(offs_n_col.lt(N), &.{ BLOCK_N, @divExact(BLOCK_K, 32) });
         const scales = b.loadOpts(scale_ptrs, .{
             .mask = scale_mask,
             .other = b.full(&.{ BLOCK_N, @divExact(BLOCK_K, 32) }, 127, cfg.scale_dtype),
@@ -176,7 +177,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
 }
 
 test "emit routed W4A16 kernel" {
-    const ttir = try Kernel.emit(std.testing.allocator, .{});
+    const ttir = try Kernel.emit(std.testing.allocator, .{ .GROUP_M = 16 });
     defer std.testing.allocator.free(ttir);
     try std.testing.expect(std.mem.indexOf(u8, ttir, "_w4a16_gemm_kernel_ptr") != null);
 }
