@@ -1029,6 +1029,30 @@ fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
     return configForTokenBucket(best_num_tokens);
 }
 
+fn getCuCount() usize {
+    const platform = zml.module.CompilationContext.current().platform;
+    if (platform.devices.len == 0) return 1;
+    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
+    if (attribute.int64 <= 0) return 1;
+    return @intCast(attribute.int64);
+}
+
+fn selectFp4SplitK(num_k_tiles: i64, direct_programs: i64, cu_count_: usize) i32 {
+    if (num_k_tiles < 2 or direct_programs <= 0) return 1;
+
+    const cu_count: i64 = @intCast(@max(cu_count_, 1));
+    // Skinny decode GEMMs need several resident programs per CU to hide the
+    // latency of streaming expert weights. Cap the workspace/reduction cost.
+    const target_programs = cu_count * 4;
+    const max_split_k: i32 = 8;
+    if (direct_programs >= target_programs) return 1;
+
+    const required_splits = std.math.divCeil(i64, target_programs, direct_programs) catch unreachable;
+    var split_k: i32 = 1;
+    while (split_k < max_split_k and @as(i64, split_k) * 2 <= num_k_tiles and split_k < required_splits) split_k *= 2;
+    return split_k;
+}
+
 fn tokenDistance(a: u32, b: u32) u32 {
     return if (a >= b) a - b else b - a;
 }
@@ -1175,6 +1199,8 @@ fn runGemm(
     // TODO: update the kernel to support uneven K.
     if (@mod(contract_k, block_k) != 0) return error.InvalidShape;
     const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
+    const direct_programs = opts.routing.grid_m * grid_n;
+    const split_k = selectFp4SplitK(@divExact(contract_k, block_k), direct_programs, getCuCount());
     const has_gammas = opts.gammas != null;
     const gathered_input = if (opts.gather) |gather| blk: {
         const token_ids = gather.divByConst(opts.routing.gather_divisor).withTags(.{.route});
@@ -1193,13 +1219,17 @@ fn runGemm(
         .BLOCK_M = block_m,
         .BLOCK_N = block_n,
         .BLOCK_K = block_k,
-        .SPLIT_K = 1,
+        .SPLIT_K = split_k,
         .GROUP_M = @intCast(opts.group_m),
         .num_warps = @intCast(opts.num_warps),
         .num_stages = @intCast(opts.num_stages),
     };
 
-    var y = a16w4_kernel.Kernel.call(
+    const partial_shape = if (split_k == 1)
+        raw_output_shape
+    else
+        zml.Shape.init(.{ @as(i64, split_k), raw_output_shape.dim(0), n }, .f32);
+    const partials = a16w4_kernel.Kernel.call(
         .{
             .a_ptr = gathered_input,
             .wp_ptr = weights,
@@ -1218,17 +1248,48 @@ fn runGemm(
             .stride_se_ptr = scalarI64(n * scale_k),
             .stride_sk_ptr = scalarI64(1),
             .stride_sn_ptr = scalarI64(scale_k),
+            .stride_cs_ptr = scalarI64(@intCast(raw_output_shape.count())),
             .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
             .stride_cn_ptr = scalarI64(1),
         },
-        .{ .c = raw_output_shape },
+        .{ .c = partial_shape },
         .{
             .cfg = cfg,
-            .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
+            .grid = .{ @intCast(direct_programs), split_k, 1 },
             .num_warps = @intCast(opts.num_warps),
             .num_stages = @intCast(opts.num_stages),
         },
     ).c;
+    var y = if (split_k == 1)
+        partials
+    else
+        a16w4_kernel.Reduce.call(
+            .{
+                .partial_ptr = partials,
+                .tile_mstart_ptr = opts.routing.tile_starts,
+                .tile_mend_ptr = opts.routing.tile_ends,
+                .NUM_M_TILES_ptr = scalarI64(opts.routing.grid_m),
+                .N_ptr = scalarI64(n),
+                .stride_ps_ptr = scalarI64(@intCast(raw_output_shape.count())),
+                .stride_pm_ptr = scalarI64(n),
+                .stride_pn_ptr = scalarI64(1),
+                .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
+                .stride_cn_ptr = scalarI64(1),
+            },
+            .{ .c = raw_output_shape },
+            .{
+                .cfg = .{
+                    .c_dtype = zml.kernel.triton.from(raw_output_shape.dtype()),
+                    .BLOCK_M = block_m,
+                    .BLOCK_N = block_n,
+                    .SPLIT_K = split_k,
+                    .GROUP_M = @intCast(opts.group_m),
+                },
+                .grid = .{ @intCast(direct_programs), 1, 1 },
+                .num_warps = @intCast(opts.num_warps),
+                .num_stages = 1,
+            },
+        ).c;
 
     if (opts.apply_swiglu) {
         y = applySwiGlu(y.convert(.f32), opts.activation_limit).convert(opts.output_shape.dtype());
@@ -1264,4 +1325,14 @@ fn packedByteDtype(dt: zml.DataType) zml.kernel.triton.DType {
 
 fn scalarI64(v: i64) zml.Tensor {
     return zml.Tensor.constant(.{ .i64 = v }).reshape(.{1});
+}
+
+test "MXFP4 split-K launch selection" {
+    try std.testing.expectEqual(@as(i32, 1), selectFp4SplitK(1, 1, 132));
+    try std.testing.expectEqual(@as(i32, 8), selectFp4SplitK(48, 64, 132));
+    try std.testing.expectEqual(@as(i32, 4), selectFp4SplitK(48, 200, 132));
+    try std.testing.expectEqual(@as(i32, 2), selectFp4SplitK(48, 300, 132));
+    try std.testing.expectEqual(@as(i32, 1), selectFp4SplitK(48, 528, 132));
+    try std.testing.expectEqual(@as(i32, 2), selectFp4SplitK(2, 1, 132));
+    try std.testing.expectEqual(@as(i32, 4), selectFp4SplitK(6, 1, 132));
 }

@@ -38,6 +38,7 @@ pub const Kernel = tri.Kernel(Cfg, .{
         "stride_se_ptr",
         "stride_sk_ptr",
         "stride_sn_ptr",
+        "stride_cs_ptr",
         "stride_cm_ptr",
         "stride_cn_ptr",
     },
@@ -66,9 +67,10 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         .stride_se_ptr = .{ .ptr = .i64 },
         .stride_sk_ptr = .{ .ptr = .i64 },
         .stride_sn_ptr = .{ .ptr = .i64 },
+        .stride_cs_ptr = .{ .ptr = .i64 },
         .stride_cm_ptr = .{ .ptr = .i64 },
         .stride_cn_ptr = .{ .ptr = .i64 },
-        .c_ptr = .{ .ptr = cfg.c_dtype },
+        .c_ptr = .{ .ptr = if (cfg.SPLIT_K == 1) cfg.c_dtype else .f32 },
     });
 
     const NUM_M_TILES = b.load(a.NUM_M_TILES_ptr);
@@ -82,6 +84,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
     const stride_se = b.load(a.stride_se_ptr);
     const stride_sk = b.load(a.stride_sk_ptr);
     const stride_sn = b.load(a.stride_sn_ptr);
+    const stride_cs = b.load(a.stride_cs_ptr);
     const stride_cm = b.load(a.stride_cm_ptr);
     const stride_cn = b.load(a.stride_cn_ptr);
 
@@ -178,12 +181,128 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
 
     const c_rows = offs_m.expandDims(1);
     const c_row_offsets = c_rows.mul(stride_cm);
-    const c_ptrs_col = a.c_ptr.addPtr(c_row_offsets);
+    const c_split_base = if (cfg.SPLIT_K == 1)
+        a.c_ptr
+    else
+        a.c_ptr.addPtr(pid_k_i64.mul(stride_cs));
+    const c_ptrs_col = c_split_base.addPtr(c_row_offsets);
     const c_cols = offs_n.expandDims(0);
     const c_col_offsets = c_cols.mul(stride_cn);
     const c_ptrs_base = b.broadcastTo(c_ptrs_col, &.{ cfg.BLOCK_M, cfg.BLOCK_N });
     const c_col_offsets_full = b.broadcastTo(c_col_offsets, &.{ cfg.BLOCK_M, cfg.BLOCK_N });
     const c_ptrs = c_ptrs_base.addPtr(c_col_offsets_full);
     const c_mask = m_mask.expandDims(1).bitAnd(n_mask.expandDims(0));
-    b.storeOpts(c_ptrs, loop.results[0].to(.bf16), .{ .mask = c_mask });
+    b.storeOpts(
+        c_ptrs,
+        loop.results[0].to(if (cfg.SPLIT_K == 1) cfg.c_dtype else .f32),
+        .{ .mask = c_mask },
+    );
+}
+
+pub const ReduceCfg = struct {
+    c_dtype: tri.DType = .bf16,
+    BLOCK_M: i32 = 16,
+    BLOCK_N: i32 = 64,
+    SPLIT_K: i32 = 1,
+    GROUP_M: i32 = 1,
+};
+
+pub const Reduce = tri.Kernel(ReduceCfg, .{
+    .name = "_gemm_a16mxfp4_reduce_split_k",
+    .inputs = &.{
+        "partial_ptr",
+        "tile_mstart_ptr",
+        "tile_mend_ptr",
+        "NUM_M_TILES_ptr",
+        "N_ptr",
+        "stride_ps_ptr",
+        "stride_pm_ptr",
+        "stride_pn_ptr",
+        "stride_cm_ptr",
+        "stride_cn_ptr",
+    },
+    .outputs = &.{"c"},
+    .run = runReduce,
+});
+
+fn runReduce(b: *tri.Builder, cfg: ReduceCfg) tri.FinishError!void {
+    std.debug.assert(cfg.SPLIT_K > 1);
+
+    const a = try b.declareArgs(.{
+        .partial_ptr = .{ .ptr = .f32 },
+        .tile_mstart_ptr = .{ .ptr = .i64 },
+        .tile_mend_ptr = .{ .ptr = .i64 },
+        .NUM_M_TILES_ptr = .{ .ptr = .i64 },
+        .N_ptr = .{ .ptr = .i64 },
+        .stride_ps_ptr = .{ .ptr = .i64 },
+        .stride_pm_ptr = .{ .ptr = .i64 },
+        .stride_pn_ptr = .{ .ptr = .i64 },
+        .stride_cm_ptr = .{ .ptr = .i64 },
+        .stride_cn_ptr = .{ .ptr = .i64 },
+        .c_ptr = .{ .ptr = cfg.c_dtype },
+    });
+
+    const NUM_M_TILES = b.load(a.NUM_M_TILES_ptr);
+    const N_val = b.load(a.N_ptr);
+    const stride_ps = b.load(a.stride_ps_ptr);
+    const stride_pm = b.load(a.stride_pm_ptr);
+    const stride_pn = b.load(a.stride_pn_ptr);
+    const stride_cm = b.load(a.stride_cm_ptr);
+    const stride_cn = b.load(a.stride_cn_ptr);
+
+    const pid = b.programId(.x);
+    const num_pid_n = N_val.cdiv(cfg.BLOCK_N);
+    const width = b.liftAs(cfg.GROUP_M, .i64).mul(num_pid_n);
+    const pid_i64 = pid.to(.i64);
+    const group_id = pid_i64.div(width);
+    const group_size = NUM_M_TILES.sub(group_id.mul(cfg.GROUP_M)).minimum(cfg.GROUP_M);
+    const pid_m = group_id.mul(cfg.GROUP_M).add(pid_i64.rem(group_size));
+    const pid_n = pid_i64.rem(width).div(group_size);
+
+    const m_start = b.load(a.tile_mstart_ptr.addPtr(pid_m));
+    const m_end = b.load(a.tile_mend_ptr.addPtr(pid_m));
+    const offs_s = b.arange(0, cfg.SPLIT_K, .i32);
+    const offs_m = m_start.add(b.arange(0, cfg.BLOCK_M, .i32));
+    const offs_n = pid_n.mul(cfg.BLOCK_N).add(b.arange(0, cfg.BLOCK_N, .i32));
+
+    const split_offsets = b.broadcastTo(
+        offs_s.expandDims(1).expandDims(2).to(.i64).mul(stride_ps),
+        &.{ cfg.SPLIT_K, cfg.BLOCK_M, cfg.BLOCK_N },
+    );
+    const row_offsets = b.broadcastTo(
+        offs_m.expandDims(0).expandDims(2).mul(stride_pm),
+        &.{ cfg.SPLIT_K, cfg.BLOCK_M, cfg.BLOCK_N },
+    );
+    const col_offsets = b.broadcastTo(
+        offs_n.expandDims(0).expandDims(0).mul(stride_pn),
+        &.{ cfg.SPLIT_K, cfg.BLOCK_M, cfg.BLOCK_N },
+    );
+    const partials = b.load(a.partial_ptr.addPtr(split_offsets.add(row_offsets).add(col_offsets)));
+    const output = b.sumOpts(partials, .{ .axis = 0 });
+
+    const c_rows = offs_m.expandDims(1);
+    const c_cols = offs_n.expandDims(0);
+    const c_ptrs = b.broadcastTo(a.c_ptr.addPtr(c_rows.mul(stride_cm)), &.{ cfg.BLOCK_M, cfg.BLOCK_N })
+        .addPtr(b.broadcastTo(c_cols.mul(stride_cn), &.{ cfg.BLOCK_M, cfg.BLOCK_N }));
+    const c_mask = offs_m.lt(m_end).expandDims(1).bitAnd(offs_n.lt(N_val).expandDims(0));
+    b.storeOpts(c_ptrs, output.to(cfg.c_dtype), .{ .mask = c_mask });
+}
+
+test "A16W4 split-K kernels emit valid TTIR" {
+    const partial_ir = try Kernel.emit(std.testing.allocator, .{
+        .BLOCK_M = 16,
+        .BLOCK_N = 64,
+        .BLOCK_K = 128,
+        .SPLIT_K = 4,
+    });
+    defer std.testing.allocator.free(partial_ir);
+    try std.testing.expect(std.mem.indexOf(u8, partial_ir, "_gemm_a16mxfp4") != null);
+
+    const reduce_ir = try Reduce.emit(std.testing.allocator, .{
+        .BLOCK_M = 16,
+        .BLOCK_N = 64,
+        .SPLIT_K = 4,
+    });
+    defer std.testing.allocator.free(reduce_ir);
+    try std.testing.expect(std.mem.indexOf(u8, reduce_ir, "_gemm_a16mxfp4_reduce_split_k") != null);
 }
