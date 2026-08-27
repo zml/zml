@@ -69,7 +69,8 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
     if (num_devices <= 1) return inputs;
 
     const reducer_block = b: {
-        var args: std.meta.Tuple(&[1]type{ReduceArgs} ** input_tensors.len) = undefined;
+        const ArgsTypes: [input_tensors.len]type = @splat(ReduceArgs);
+        var args: std.meta.Tuple(&ArgsTypes) = undefined;
         var block_types: [2 * input_tensors.len]*const mlir.Type = undefined;
 
         inline for (0..input_tensors.len) |i| {
@@ -213,7 +214,8 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     const mlir_ctx = CompilationContext.current().mlir_ctx;
 
     const reduce_block, var result = b: {
-        const ArgsType = std.meta.Tuple(&[1]type{ReduceArgs} ** inits.len);
+        const ArgsTypes: [inits.len]type = @splat(ReduceArgs);
+        const ArgsType = std.meta.Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inits.len]*const mlir.Type = undefined;
 
@@ -405,7 +407,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
     const mlir_ctx = CompilationContext.current().mlir_ctx;
 
     const sort_block = b: {
-        const ArgsType = std.meta.Tuple(&[1]type{SortArgs} ** inputs.len);
+        const ArgsTypes: [inputs.len]type = @splat(SortArgs);
+        const ArgsType = std.meta.Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 
@@ -1126,7 +1129,8 @@ pub fn scatter(
     const mlir_ctx = CompilationContext.current().mlir_ctx;
 
     const update_block, var result = b: {
-        const ArgsType = std.meta.Tuple(&[1]type{ScatterArgs} ** inputs.len);
+        const ArgsTypes: [inputs.len]type = @splat(ScatterArgs);
+        const ArgsType = std.meta.Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 

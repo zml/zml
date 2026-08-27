@@ -188,8 +188,8 @@ pub const Linear = struct {
     }
 };
 
-pub const nvfp4_block_size = 16;
-pub const mx_block_size = 32;
+const nvfp4_block_size = 16;
+const mx_block_size = 32;
 
 pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
@@ -223,7 +223,7 @@ pub const QuantScheme = enum {
                 scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
             .mxfp8 => weight.dtype() == .f8e4m3fn and isMxScale(scale) and
                 scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
-            .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
+            .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .i8 or weight.dtype() == .f4e2m1) and
                 isMxScale(scale) and
                 scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
             .fp8_per_tensor => weight.dtype() == .f8e4m3fn and scale.count() == 1,
@@ -278,7 +278,7 @@ pub const ActivationQuant = enum {
 };
 
 pub fn isPackedFp4(scheme: ?QuantScheme, weight_dtype: DataType) bool {
-    return (scheme == .nvfp4 or scheme == .mxfp4) and weight_dtype == .u8;
+    return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
 }
 
 fn isMxScale(scale: Shape) bool {
@@ -396,6 +396,11 @@ test "QuantScheme.classify" {
     // an e8m0 scale per 32 -- so K = 2 * 2560 = 5120 and 5120 / 32 = 160.
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .u8)));
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0)));
+    // DeepSeek V4 stores the same packed FP4 bits in signed bytes.
+    try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(
+        .init(.{ .dout = 2048, .kw = 2048 }, .i8),
+        .init(.{ .dout = 2048, .sc = 128 }, .f8e8m0),
+    ));
     // Native (unpacked) f4e2m1, K no longer halved.
     try expect(@as(?QuantScheme, .mxfp4), QuantScheme.classify(
         .init(.{ .dout = 17408, .d = 5120 }, .f4e2m1),
@@ -494,7 +499,7 @@ test "fwhtAlong H16 and H256 are involutions" {
 /// which is merged with the unpacked pair and renamed to `k_tag`. Group-size agnostic:
 /// NVFP4 (16) and MXFP4 (32) share this packing.
 pub fn unpackFp4(w: Tensor, k_tag: anytype) Tensor {
-    stdx.debug.assert(w.dtype() == .u8, "unpackFp4 expects packed u8 weights, got {}", .{w.dtype()});
+    stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
     return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ .kw, .bitcast } })
         .renameTag(.kb, Shape.toTag(k_tag));
@@ -1411,7 +1416,8 @@ test rope {
     var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    const x_values: [5][4]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5 });
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});

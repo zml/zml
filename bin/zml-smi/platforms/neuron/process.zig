@@ -42,7 +42,7 @@ fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer
 
         const apps = if (apps_result.ptr) |ptr| ptr[0..apps_result.count] else continue;
 
-        var total_us_per_core: [c.MAX_NC_PER_DEVICE]u64 = .{0} ** c.MAX_NC_PER_DEVICE;
+        var total_us_per_core: [c.MAX_NC_PER_DEVICE]u64 = @splat(0);
 
         for (apps) |*app| {
             if (app.pid <= 0) {
