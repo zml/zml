@@ -11,44 +11,6 @@ const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_vision);
 
-const dump_blocks = [_]u32{ 0, 7, 8, 15, 16, 23, 24, 26 };
-
-fn dumpEnvPath() ?[]const u8 {
-    const raw = std.c.getenv("H3_LAYER_DUMP") orelse return null;
-    const path = std.mem.span(raw);
-    return if (path.len == 0) null else path;
-}
-
-fn dumpHostF32(io: std.Io, name: []const u8, values: []const f32, dims: []const i64) !void {
-    const path = dumpEnvPath() orelse return;
-    try std.Io.Dir.cwd().createDirPath(io, path);
-    var dir = if (std.fs.path.isAbsolute(path))
-        try std.Io.Dir.openDirAbsolute(io, path, .{})
-    else
-        try std.Io.Dir.cwd().openDir(io, path, .{});
-    defer dir.close(io);
-    var file_buf: [160]u8 = undefined;
-    const file_name = try std.fmt.bufPrint(&file_buf, "{s}.f32", .{name});
-    const file = try dir.createFile(io, file_name, .{});
-    defer file.close(io);
-    var writer = file.writer(io, &.{});
-    try writer.interface.writeAll(std.mem.sliceAsBytes(values));
-    var shape_buf: [128]u8 = undefined;
-    var used: usize = 0;
-    for (dims, 0..) |d, i| {
-        const part = if (i == 0)
-            try std.fmt.bufPrint(shape_buf[used..], "{d}", .{d})
-        else
-            try std.fmt.bufPrint(shape_buf[used..], " {d}", .{d});
-        used += part.len;
-    }
-    const shape_name = try std.fmt.bufPrint(&file_buf, "{s}.shape", .{name});
-    const shape_file = try dir.createFile(io, shape_name, .{});
-    defer shape_file.close(io);
-    var shape_writer = shape_file.writer(io, &.{});
-    try shape_writer.interface.writeAll(shape_buf[0..used]);
-}
-
 pub const VISION_START: u32 = 151652;
 pub const VISION_END: u32 = 151653;
 pub const IMAGE_PAD: u32 = 151655;
@@ -211,24 +173,10 @@ fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
 /// full-seq f32 softmax both seed merger row 1189 from the current embed.
 fn visionAttn(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, head_dim: i64) zml.Tensor {
     const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-    switch (q.dtype()) {
-        .bf16, .f16 => return vision_sdpa.forward(q, k, v, scale),
-        else => {
-            const scores = q.dot(k, .hd).scale(scale).convert(.f32).softmax(.k).convert(q.dtype());
-            return scores.dot(v, .k).transpose(q.shape());
-        },
-    }
-}
-
-pub const AttnProbeInput = struct {
-    q: zml.Tensor,
-    k: zml.Tensor,
-    v: zml.Tensor,
-};
-pub const AttnProbeOutput = struct { o: zml.Tensor };
-
-pub fn probeAttn(input: AttnProbeInput) AttnProbeOutput {
-    return .{ .o = visionAttn(input.q, input.k, input.v, input.q.dim(.hd)) };
+    return switch (q.dtype()) {
+        .bf16, .f16 => vision_sdpa.forward(q, k, v, scale),
+        else => zml.nn.sdpa(q, k, v, .{}),
+    };
 }
 
 pub const VisionBlock = struct {
@@ -732,8 +680,7 @@ pub fn visionRope(allocator: std.mem.Allocator, gh: u32, gw: u32, head_dim: u32)
                     const wpos: f32 = @floatFromInt(iw + dj);
                     var i: u32 = 0;
                     while (i < n_freq) : (i += 1) {
-                        // Official encoder keeps rotary `inv_freq` in f32. `visual.to(bf16)`
-                        // (dump_vision) casts it and was the IMAGE_PAD vel gap.
+                        // Official encoder keeps rotary `inv_freq` in f32.
                         const freq = visionInvFreq(i, half);
                         const ang_h = hpos * freq;
                         const ang_w = wpos * freq;
@@ -869,15 +816,6 @@ fn runPatches(
         .opts = .{ .wait = true },
     });
     defer hidden.deinit();
-    if (dumpEnvPath() != null) {
-        try dumpHostF32(io, "vision_patches", patches, &.{ @intCast(seq), @intCast(loaded.cfg.patchIn()) });
-        try dumpHostF32(io, "vision_pos", pos, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
-        try dumpHostF32(io, "vision_rope_cos", rope_cos, &.{ @intCast(seq), @intCast(loaded.cfg.headDim()) });
-        try dumpHostF32(io, "vision_rope_sin", rope_sin, &.{ @intCast(seq), @intCast(loaded.cfg.headDim()) });
-        const embed_host = try buffers.toF32(allocator, io, hidden);
-        defer allocator.free(embed_host);
-        try dumpHostF32(io, "vision_embed", embed_host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
-    }
 
     var cos_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_cos);
     defer cos_buf.deinit();
@@ -907,16 +845,6 @@ fn runPatches(
         });
         hidden.deinit();
         hidden = next;
-        if (dumpEnvPath() != null) {
-            for (dump_blocks) |want| {
-                if (block_i != want) continue;
-                const host = try buffers.toF32(allocator, io, hidden);
-                defer allocator.free(host);
-                var name_buf: [32]u8 = undefined;
-                const name = try std.fmt.bufPrint(&name_buf, "vision_block_{d}", .{block_i});
-                try dumpHostF32(io, name, host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
-            }
-        }
         if (ds_i < 3 and @as(i64, @intCast(block_i)) == loaded.cfg.deepstack_visual_indexes[ds_i]) {
             var ds_run = try zml.FnExe(Merger.forward).Runner(.{.model}).init(&compiled.deepstack, allocator, .{ .model = cache.deepstack[ds_i] });
             defer ds_run.deinit(allocator);
@@ -932,11 +860,6 @@ fn runPatches(
     var merged_buf: zml.Buffer = undefined;
     merge_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &merged_buf }, .opts = .{ .wait = true } });
     defer merged_buf.deinit();
-    if (dumpEnvPath() != null) {
-        const hidden_host = try buffers.toF32(allocator, io, hidden);
-        defer allocator.free(hidden_host);
-        try dumpHostF32(io, "vision_hidden", hidden_host, &.{ @intCast(seq), @intCast(loaded.cfg.hidden_size) });
-    }
     const merged = try buffers.toF32(allocator, io, merged_buf);
     log.info("vision: ok merged={d} [{f}]", .{ merged.len, vision_start.untilNow(io, .awake) });
     return .{

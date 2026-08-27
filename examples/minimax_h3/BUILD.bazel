@@ -4,10 +4,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "minimax_h3",
-    srcs = glob(
-        ["**/*.zig"],
-        exclude = ["vision_probe.zig"],
-    ),
+    srcs = glob(["**/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -15,26 +12,8 @@ zig_binary(
 
 zig_binary(
     name = "h3_tests",
-    srcs = glob(
-        ["**/*.zig"],
-        exclude = ["vision_probe.zig"],
-    ),
+    srcs = glob(["**/*.zig"]),
     main = "tests.zig",
-    visibility = ["//visibility:public"],
-    deps = ["//zml"],
-)
-
-zig_binary(
-    name = "vision_probe",
-    srcs = glob(
-        ["**/*.zig"],
-        exclude = [
-            "main.zig",
-            "tests.zig",
-            "vision_probe.zig",
-        ],
-    ),
-    main = "vision_probe.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
@@ -51,6 +30,5 @@ build_test(
     targets = [
         ":minimax_h3",
         ":h3_tests",
-        ":vision_probe",
     ],
 )
