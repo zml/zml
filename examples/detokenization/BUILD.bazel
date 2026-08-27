@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "detokenization",
@@ -8,6 +8,7 @@ zig_binary(
         "gemma/base.zig",
         "gemma/gemma.zig",
         "gemma/inference.zig",
+        "gemma/rotated.zig",
         "graph.zig",
         "inference.zig",
         "kmeans.zig",

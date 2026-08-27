@@ -413,7 +413,7 @@ const EmbeddingRotation = struct {
     q: zml.Tensor,
 
     fn init(store: zml.io.TensorStore.View) !EmbeddingRotation {
-        const q = store.createTensor("Q", .{ .q_out, .q_in }, .replicated);
+        const q = store.createTensor("weights", .{ .q_out, .q_in }, .replicated);
         if (q.dim(.q_out) != q_size or q.dim(.q_in) != q_size) return error.InvalidRotationShape;
         return .{ .q = q };
     }
@@ -480,7 +480,6 @@ const EmbeddingRotation = struct {
 
 pub const RotatedGemma = struct {
     embed_tokens: zml.nn.TokenEmbedding,
-    rotation: EmbeddingRotation,
     layers: []TransformerLayer,
     norm: RmsNorm,
     embed_scale: f32,
@@ -489,15 +488,13 @@ pub const RotatedGemma = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation_config: GenerationConfig) !RotatedGemma {
         if (config.hidden_size != EmbeddingRotation.hidden_size) return error.UnsupportedRotatedHiddenSize;
-        const rotation: EmbeddingRotation = try .init(store.root());
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(@intCast(i), store.withPrefix("model.language_model.layers").withLayer(i), config, rotation);
+            layer.* = try .init(@intCast(i), store.withPrefix("model.language_model.layers").withLayer(i), config);
         }
         return .{
             .embed_tokens = .{ .weight = store.createTensor("model.language_model.embed_tokens.weight", .{ .voc, .d }, .replicated) },
-            .rotation = rotation,
             .layers = layers,
             .norm = .init(store.withPrefix("model.language_model.norm"), config),
             .embed_scale = @sqrt(@as(f32, @floatFromInt(config.hidden_size))),
@@ -531,7 +528,6 @@ pub const RotatedGemma = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(RotatedGemma), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
-        EmbeddingRotation.unloadBuffers(&self.rotation);
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
@@ -551,7 +547,8 @@ pub const RotatedGemma = struct {
 
     pub fn embedTokens(self: RotatedGemma, tokens: zml.Tensor) zml.Tensor {
         const embeddings = self.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d}).scale(self.embed_scale);
-        return self.rotation.forward(embeddings);
+        return embeddings;
+        //return self.rotation.forward(embeddings);
     }
 
     pub const SelectEmbedsParams = struct {
@@ -579,7 +576,8 @@ pub const RotatedGemma = struct {
     pub fn computeLogits(self: RotatedGemma, embed: zml.Tensor) zml.Tensor {
         // The residual stream is rotated, but the tied embedding/lm-head matrix
         // and the learned final RMS coefficients remain in the original basis.
-        const normalized_embed = self.norm.forwardF32(self.rotation.inverseF32(embed)).convert(embed.dtype());
+        const normalized_embed = self.norm.forwardF32(embed).convert(embed.dtype());
+        //const normalized_embed = self.norm.forwardF32(self.rotation.inverseF32(embed)).convert(embed.dtype());
         var logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(normalized_embed, .d).convert(.f32);
         if (self.final_logit_softcapping) |softcap| {
             logits = logits.divByConst(softcap).tanh().scale(softcap);
@@ -621,9 +619,11 @@ const TransformerLayer = struct {
     post_ff_norm: RmsNorm,
     mlp_layer: MlpLayer,
     layer_scalar: zml.Tensor,
-    rotation: EmbeddingRotation,
+    up_rot: EmbeddingRotation,
+    gate_rot: EmbeddingRotation,
+    down_rot: EmbeddingRotation,
 
-    pub fn init(id_: u8, store: zml.io.TensorStore.View, config: Config, rotation: EmbeddingRotation) !TransformerLayer {
+    pub fn init(id_: u8, store: zml.io.TensorStore.View, config: Config) !TransformerLayer {
         return .{
             .input_norm = .init(store.withPrefix("input_layernorm"), config),
             .att_layer = try .init(store.withPrefix("self_attn"), id_, config),
@@ -632,7 +632,9 @@ const TransformerLayer = struct {
             .post_ff_norm = .init(store.withPrefix("post_feedforward_layernorm"), config),
             .mlp_layer = try .init(store.withPrefix("mlp")),
             .layer_scalar = store.createTensor("layer_scalar", .{.scalar}, .replicated),
-            .rotation = rotation,
+            .up_rot = try .init(store.withPrefix("mlp.up_rot"), config),
+            .gate_rot = try .init(store.withPrefix("mlp.gate_rot"), config),
+            .down_rot = try .init(store.withPrefix("mlp.down_rot"), config),
         };
     }
 
@@ -697,28 +699,25 @@ const TransformerLayer = struct {
         activation_cache: ?ActivationCache,
         collect_activations: bool,
     ) struct { zml.Tensor, KvCache, ?ActivationCache } {
-        const rotation = self.rotation;
-        
-        // The residual stream enters and leaves each layer in the rotated
-        // basis. Attention remains entirely in the original embedding basis.
-        const input_norm = self.input_norm.forwardF32(rotation.inverseF32(x)).convert(x.dtype());
+        // attention stays in the original space
+        const input_norm = self.input_norm.forward(x);
         const attn = self.att_layer.forward(input_norm, token_index, kv_cache, layer_index);
-        const attention_projection = rotation.forwardF32(self.post_att_norm.forwardF32(attn.output)).convert(x.dtype());
+        const attention_projection = self.post_att_norm.forward(attn.output);
         const x_after_attn = x.add(attention_projection);
 
-        // Learned RMS coefficients are defined in the original basis. The MLP
-        // input returns to the rotated basis because Q^-1 has been fused into
-        // the up/gate weights in the reformulated checkpoint.
-        const pre_ff_norm = rotation.forwardF32(self.pre_ff_norm.forwardF32(rotation.inverseF32(x_after_attn))).convert(x.dtype());
-        const mlp = self.mlp_layer.forward(pre_ff_norm);
-
-        // The down projection already produces a rotated-space vector. Apply
-        // the learned post-FF RMS and scalar in the original basis, rotate the
-        // update, then add it to the rotated residual stream.
-        const post_ff_update = rotation.forwardF32(
-            self.post_ff_norm.forwardF32(rotation.inverseF32(mlp.output)).mul(self.layer_scalar.asScalar().convert(.f32)),
-        ).convert(x.dtype());
-        const out = x_after_attn.add(post_ff_update);
+        // MLP does x <- x + RMS(MLP(RMS(x)))
+        // we formulate the MLP in the transformed space:
+        // y <- transform(RMS(x)) // now in up-transformed space
+        // z <- transform(RMS(x)) // now in gate-transformed space
+        const pre_ff_norm = self.pre_ff_norm.forwardF32(x_after_attn);
+        const y = self.up_rot.forwardF32(pre_ff_norm).convert(x.dtype());
+        const z = self.gate_rot.forwardF32(pre_ff_norm).convert(x.dtype());
+        // mlp <- MLP(y) // in transformed space
+        const mlp = self.mlp_layer.forward(y, z);
+        // formulate back to OG space to compute RMS
+        const mlp_og = self.down_rot.inverseF32(mlp.output);
+        const mlp_normalized = self.post_ff_norm.forwardF32(mlp_og).convert(x.dtype());
+        const out = x_after_attn.add(mlp_normalized).mul(self.layer_scalar.asScalar());
 
         const updated_activation_cache: ?ActivationCache = if (collect_activations) blk: {
             const cache = activation_cache orelse unreachable;
@@ -886,9 +885,9 @@ const MlpLayer = struct {
         geglu: zml.Tensor,
     };
 
-    pub fn forward(self: MlpLayer, input: zml.Tensor) Output {
-        const up_projection = input.dot(self.up_proj, .d);
-        const gate_projection = input.dot(self.gate_proj, .d);
+    pub fn forward(self: MlpLayer, input_up: zml.Tensor, input_gate: zml.Tensor) Output {
+        const up_projection = input_up.dot(self.up_proj, .d);
+        const gate_projection = input_gate.dot(self.gate_proj, .d);
         const activation = gate_projection.gelu().mul(up_projection);
         const output = activation.dot(self.down_proj, .d_out);
         return .{

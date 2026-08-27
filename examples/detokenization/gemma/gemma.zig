@@ -63,7 +63,7 @@ pub const Gemma_handler = struct {
         };
 
         const options: Options = .{
-            .seq_len = 2048,
+            .seq_len = 1024,
             .hidden_size = config.hidden_size,
             .intermediate_size = config.intermediate_size,
             .voc_size = config.vocab_size,

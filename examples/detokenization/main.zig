@@ -16,6 +16,7 @@ const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
 const quantization = @import("quantization.zig");
+
 const productq = @import("productq.zig");
 const attention = @import("attention.zig");
 
@@ -101,7 +102,7 @@ pub const Zml_handler = struct {
     pub fn tic(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
         target.init = std.Io.Timestamp.now(self.io, .awake);
     }
-    
+
     pub fn ticLog(self: *Zml_handler) void {
         self.timers.timer.init = std.Io.Timestamp.now(self.io, .awake);
     }
@@ -117,7 +118,7 @@ pub const Zml_handler = struct {
         const end = std.Io.Timestamp.now(self.io, .awake);
         const start: std.Io.Timestamp = self.timers.timer.init;
         const duration = std.Io.Timestamp.durationTo(start, end);
-        std.log.info("{s}: {d:.3}us", .{s, @as(f64, @floatFromInt(duration.nanoseconds)) / 1e3});
+        std.log.info("{s}: {d:.3}us", .{ s, @as(f64, @floatFromInt(duration.nanoseconds)) / 1e3 });
     }
 
     pub fn reset(_: *Zml_handler, target: *Timing_handler.Field_timer) void {
@@ -338,9 +339,10 @@ pub fn main(init: std.process.Init) !void {
     //try attention.runTests(&zml_handler);
     //try attention.runBenchs(&zml_handler);
 
-    try runRotatedGemma(&zml_handler);
-    try runGemma(&zml_handler);
-    
+    try buildGemmaDataset(&zml_handler);
+    //try runRotatedGemma(&zml_handler);
+    //try runGemma(&zml_handler);
+
     zml_handler.timers.print();
 }
 
@@ -349,6 +351,72 @@ const bench_qjl = false;
 const bench_int = false;
 const bench_pq = false;
 const bench_misc = false;
+
+pub fn buildGemmaDataset(zml_handler: *Zml_handler) !void {
+    std.log.info("***** Init Gemma handler", .{});
+    var llm = try Gemma_handler.init(zml_handler, zml_handler.uris.gemma, true);
+    defer llm.deinit(zml_handler.allocator);
+
+    const file_uri_prefix = "file://";
+    if (!std.mem.startsWith(u8, zml_handler.uris.gemma, file_uri_prefix)) return error.NonLocalGemmaPath;
+    const model_path = zml_handler.uris.gemma[file_uri_prefix.len..];
+    const prompts_path = try std.fmt.allocPrint(zml_handler.allocator, "{s}/prompts", .{model_path});
+    defer zml_handler.allocator.free(prompts_path);
+
+    var prompts_dir = try std.Io.Dir.openDir(.cwd(), zml_handler.local_io, prompts_path, .{ .iterate = true });
+    defer prompts_dir.close(zml_handler.local_io);
+
+    var prompt_file_names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (prompt_file_names.items) |name| zml_handler.allocator.free(name);
+        prompt_file_names.deinit(zml_handler.allocator);
+    }
+
+    var prompt_files = prompts_dir.iterate();
+    while (try prompt_files.next(zml_handler.local_io)) |entry| {
+        if (entry.kind != .file or !std.mem.eql(u8, std.fs.path.extension(entry.name), ".txt")) continue;
+        const name = try zml_handler.allocator.dupe(u8, entry.name);
+        errdefer zml_handler.allocator.free(name);
+        try prompt_file_names.append(zml_handler.allocator, name);
+    }
+    std.mem.sort([]u8, prompt_file_names.items, {}, struct {
+        fn lessThan(_: void, lhs: []u8, rhs: []u8) bool {
+            return std.mem.lessThan(u8, lhs, rhs);
+        }
+    }.lessThan);
+
+    std.log.info("***** Found {d} Gemma prompts", .{prompt_file_names.items.len});
+    for (prompt_file_names.items, 0..) |prompt_file_name, prompt_index| {
+        zml_handler.mem.start(0);
+
+        {
+            std.log.info("***** [{d}/{d}] Read prompt: {s}", .{ prompt_index + 1, prompt_file_names.items.len, prompt_file_name });
+            const prompt_file = try prompts_dir.openFile(zml_handler.local_io, prompt_file_name, .{ .mode = .read_only });
+            defer prompt_file.close(zml_handler.local_io);
+            var prompt_reader = prompt_file.reader(zml_handler.local_io, &.{});
+            const prompt_text = try prompt_reader.interface.readAlloc(zml_handler.allocator, try prompt_file.length(zml_handler.local_io));
+            defer zml_handler.allocator.free(prompt_text);
+
+            std.log.info("***** Tokenize prompt", .{});
+            const prompt = try gemma_inference.tokenizePrompt(zml_handler, llm.tokenizer, prompt_text);
+            defer zml_handler.allocator.free(prompt);
+
+            std.log.info("***** Generate text", .{});
+            var generation_result = try gemma_inference.generateText(zml_handler, &llm, prompt);
+            defer generation_result.deinit(zml_handler.allocator);
+            if (zml_handler.args.export_activations) {
+                if (generation_result.activations) |*activations| {
+                    const output_file_name = try std.fmt.allocPrint(zml_handler.allocator, "{s}.safetensors", .{std.fs.path.stem(prompt_file_name)});
+                    defer zml_handler.allocator.free(output_file_name);
+                    try gemma_inference.exportActivations(zml_handler, output_file_name, llm.config, activations);
+                }
+            }
+        }
+
+        try llm.resetKvCache(zml_handler);
+        zml_handler.mem.check(0);
+    }
+}
 
 pub fn runGemma(zml_handler: *Zml_handler) !void {
     std.log.info("***** Init Gemma handler", .{});
