@@ -41,6 +41,13 @@ const scale_suffixes = [_][]const u8{ "weight_scale", "weight_scale_inv" };
 const global_scale_suffixes = [_][]const u8{ "weight_global_scale", "weight_scale_2" };
 const input_scale_suffixes = [_][]const u8{ "input_scale", "pre_quant_scale" };
 
+fn mayHaveQuantScale(dt: DataType) bool {
+    return switch (dt) {
+        .i4, .i8, .u4, .u8, .f4e2m1, .f8e3m4, .f8e4m3, .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .f8e8m0 => true,
+        else => false,
+    };
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -97,6 +104,7 @@ pub const Linear = struct {
     }
 
     pub fn attachQuant(self: *Linear, store: zml.io.TensorStore.View, weight_name: []const u8) void {
+        if (!mayHaveQuantScale(self.weight.dtype())) return;
         const stem = weightStem(weight_name);
         var buf: [256]u8 = undefined;
         const found = firstSibling(store, &buf, stem, &scale_suffixes) orelse return;
@@ -104,17 +112,22 @@ pub const Linear = struct {
             log.warn("ignoring scale {s}: shape {f} does not match weight {f}", .{ found.key, found.shape, self.weight.shape() });
             return;
         };
-        const scales = if (found.shape.rank() == 0)
-            store.createTensor(found.key, .{}, .replicated)
-        else
-            store.createTensor(found.key, .{ .dout, .sc }, .replicated);
+        const scales = switch (found.shape.rank()) {
+            0 => store.createTensor(found.key, .{}, .replicated),
+            1 => store.createTensor(found.key, .{.dout}, .replicated),
+            else => store.createTensor(found.key, .{ .dout, .sc }, .replicated),
+        };
 
         var gbuf: [256]u8 = undefined;
         const global = firstSibling(store, &gbuf, stem, &global_scale_suffixes);
         var ibuf: [256]u8 = undefined;
         const input = firstSibling(store, &ibuf, stem, &input_scale_suffixes);
 
-        const convrot_group = if (scheme == .int8_per_channel) store.convrotGroup(stem) else 0;
+        const marked = if (scheme == .int8_per_channel) store.convrotGroup(stem) else 0;
+        const convrot_group = convrotGroupIfFits(self.weight.shape(), marked);
+        if (marked > 0 and convrot_group == 0) {
+            log.warn("ignoring ConvRot group {d} on {s}: contraction is not a multiple", .{ marked, weight_name });
+        }
 
         self.quant = .{
             .scheme = scheme,
@@ -212,6 +225,14 @@ pub const QuantScheme = enum {
     int8_per_channel,
 
     pub fn accepts(self: QuantScheme, weight: Shape, scale: Shape) bool {
+        if (self == .int8_per_channel) {
+            if (weight.rank() < 2) return false;
+            const n = weight.dim(0);
+            return (weight.dtype() == .i8 or weight.dtype() == .u8) and
+                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
+                scale.rank() >= 1 and scale.dim(0) == n and
+                (scale.rank() == 1 or scale.dim(1) == 1);
+        }
         if (weight.rank() != 2) return false;
 
         const n = weight.dim(0);
@@ -235,9 +256,7 @@ pub const QuantScheme = enum {
                 scale.count() > 1 and scale.rank() == 2 and
                 @rem(n, 128) == 0 and @rem(k, 128) == 0 and
                 scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
-            .int8_per_channel => (weight.dtype() == .i8 or weight.dtype() == .u8) and
-                (scale.dtype() == .bf16 or scale.dtype() == .f32) and
-                scale.dim(0) == n and (scale.rank() == 1 or scale.dim(1) == 1),
+            .int8_per_channel => unreachable,
         };
     }
 
@@ -312,6 +331,15 @@ pub fn fwhtAlong(x: Tensor, axis: anytype, comptime group: u32) Tensor {
     return y.scale(scale).reshape(y.shape().mergeAxis(k_tag, .{ .wh_g, .wh_h }));
 }
 
+fn convrotGroupIfFits(weight: Shape, group: u32) u32 {
+    if (group == 0 or weight.rank() < 2) return 0;
+    var k: i64 = 1;
+    var i: u8 = 1;
+    while (i < weight.rank()) : (i += 1) k *= weight.dim(i);
+    if (k <= 0 or @rem(k, @as(i64, group)) != 0) return 0;
+    return group;
+}
+
 fn applyConvrot(x: Tensor, tag: Shape.Tag, group: u32) Tensor {
     return switch (group) {
         4 => fwhtAlong(x, tag, 4),
@@ -364,6 +392,19 @@ test "QuantScheme.classify" {
     try expect(@as(?QuantScheme, .int8_per_channel), QuantScheme.classify(
         .init(.{ .dout = 64, .d = 128 }, .i8),
         .init(.{ .dout = 64, .sc = 1 }, .f32),
+    ));
+    try expect(@as(?QuantScheme, .int8_per_channel), QuantScheme.classify(
+        .init(.{ .dout = 1280, .d = 3, .kt = 2, .kh = 14, .kw = 14 }, .i8),
+        .init(.{ .dout = 1280 }, .f32),
+    ));
+    try expect(@as(?QuantScheme, null), QuantScheme.classify(
+        .init(.{ .dout = 1280, .d = 3, .kt = 2, .kh = 14, .kw = 14 }, .bf16),
+        .init(.{ .dout = 1280 }, .f32),
+    ));
+    try std.testing.expectEqual(@as(u32, 256), convrotGroupIfFits(.init(.{ .dout = 64, .d = 512 }, .i8), 256));
+    try std.testing.expectEqual(@as(u32, 0), convrotGroupIfFits(
+        .init(.{ .dout = 1280, .d = 3, .kt = 2, .kh = 14, .kw = 14 }, .i8),
+        256,
     ));
 
     // RadixArk/Muse-Glimmer-NVFP4: ModelOpt's MIXED_PRECISION recipe, whose MXFP8 half
@@ -702,11 +743,13 @@ pub const TokenEmbedding = struct {
         weight_name: []const u8,
         partitions: anytype,
     ) TokenEmbedding {
+        const weight = store.createTensor(weight_name, .{ .voc, .d }, partitions);
+        if (!mayHaveQuantScale(weight.dtype())) return .{ .weight = weight };
         const stem = weightStem(weight_name);
         var buf: [256]u8 = undefined;
         const scale = firstSibling(store, &buf, stem, &scale_suffixes);
         return .{
-            .weight = store.createTensor(weight_name, .{ .voc, .d }, partitions),
+            .weight = weight,
             .scales = if (scale) |s|
                 store.createTensor(s.key, .{ .voc, .sc }, .{ .voc = .replicated, .sc = .replicated })
             else
