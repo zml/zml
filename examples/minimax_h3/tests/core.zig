@@ -43,19 +43,6 @@ fn testConfig() !void {
     try std.testing.expectEqual(@as(i64, 96768), cfg.adalnOutFeatures());
     try std.testing.expectEqual(@as(i64, 10752), cfg.finalAdalnOutFeatures());
 
-    var aliased: config.Config = .{
-        .token_refiner_num_layers = 2,
-        .ffn_hidden_size = 14336,
-        .latents_dim = 24,
-        .audio_latents_dim = 32,
-        .timestep_input_dim = 256,
-        .rope_inv_freq_len = 16,
-    };
-    aliased = aliased.resolve();
-    try std.testing.expectEqual(@as(i64, 2), aliased.num_refiner_layers);
-    try std.testing.expectEqual(@as(i64, 24), aliased.in_channels);
-    try std.testing.expectEqual(@as(i64, 16), aliased.rope_freq_dim);
-
     try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.t2va.taskFamily());
     try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.fl2va.taskFamily());
     try std.testing.expectEqual(config.TaskFamily.ref2va, config.Variant.ref2va.taskFamily());
@@ -314,31 +301,6 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.Ref2vaRejectsKeyframes, request_mod.inferVariant("a.png", "", refs));
 }
 fn testCheckpoint() !void {
-    const full = [_][]const u8{
-        "video_patch_proj.weight",
-        "time_embedder.proj_in.weight",
-        "blocks.0.adaln_proj.linear.weight",
-        "final_layer.adaln_proj.linear.weight",
-    };
-    try std.testing.expect(repo.inspect(&full).has_adaln_proj);
-    try std.testing.expect(repo.inspect(&full).has_time);
-    try std.testing.expect(repo.refuseReason(repo.inspect(&full)) == null);
-
-    const table_only = [_][]const u8{ "adaln_t_table", "video_patch_proj.weight" };
-    try std.testing.expect(!repo.inspect(&table_only).has_adaln_proj);
-    try std.testing.expect(!repo.inspect(&table_only).has_time);
-    try std.testing.expect(repo.refuseReason(repo.inspect(&table_only)) != null);
-
-    const no_time = [_][]const u8{"blocks.0.adaln_proj.linear.weight"};
-    try std.testing.expect(repo.inspect(&no_time).has_adaln_proj);
-    try std.testing.expect(!repo.inspect(&no_time).has_time);
-    try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
-
-    const rank8 = [_][]const u8{ "time_embedder.linear_1.weight", "blocks.0.adaln_proj.linear.weight" };
-    try std.testing.expect(repo.inspect(&rank8).has_adaln_proj);
-    try std.testing.expect(repo.inspect(&rank8).has_time);
-    try std.testing.expect(repo.refuseReason(repo.inspect(&rank8)) == null);
-
     const official = [_][]const u8{
         "proj_in.weight",
         "time_embedder.linear_1.weight",
@@ -348,16 +310,15 @@ fn testCheckpoint() !void {
     try std.testing.expect(repo.inspect(&official).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&official)) == null);
 
-    try std.testing.expect(repo.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"fl2va"}));
-    try std.testing.expect(repo.safetensorsContains("minimax_h3_ref2va_fp8_scaled.safetensors", &.{"ref2va"}));
-    try std.testing.expect(!repo.safetensorsContains("minimax_h3_fl2va_pruned_int8.safetensors", &.{"ref2va"}));
-    try std.testing.expect(!repo.safetensorsContains("notes.txt", &.{"fl2va"}));
-    try std.testing.expect(repo.safetensorsContains("qwen3vl_32b_minimax_h3_int8_convrot.safetensors", &.{}));
-    try std.testing.expect(repo.safetensorsContains("minimax_h3_video_vae_fp16.safetensors", &.{ "video", "vae" }));
-    try std.testing.expect(repo.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "audio", "vae" }));
-    try std.testing.expect(!repo.safetensorsContains("minimax_h3_audio_vae_fp32.safetensors", &.{ "video", "vae" }));
-    try std.testing.expect(repo.isBundleLeaf("text_encoders"));
-    try std.testing.expect(!repo.isBundleLeaf("transformer"));
+    const table_only = [_][]const u8{ "adaln_t_table", "proj_in.weight" };
+    try std.testing.expect(!repo.inspect(&table_only).has_adaln_proj);
+    try std.testing.expect(!repo.inspect(&table_only).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&table_only)) != null);
+
+    const no_time = [_][]const u8{"transformer_blocks.0.adaln_proj.linear.weight"};
+    try std.testing.expect(repo.inspect(&no_time).has_adaln_proj);
+    try std.testing.expect(!repo.inspect(&no_time).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
 }
 fn testMemoryPlan(allocator: std.mem.Allocator) !void {
     const geo: pipeline.Geometry = .{
@@ -421,11 +382,9 @@ fn testOfficialPin() !void {
     );
 }
 fn testTokenizerRelpaths() !void {
-    try std.testing.expectEqual(@as(usize, 4), repo.tokenizer_relpaths.len);
+    try std.testing.expectEqual(@as(usize, 2), repo.tokenizer_relpaths.len);
     try std.testing.expectEqualStrings("tokenizer/tokenizer.json", repo.tokenizer_relpaths[0]);
-    try std.testing.expectEqualStrings("processor/tokenizer.json", repo.tokenizer_relpaths[1]);
-    try std.testing.expectEqualStrings("text_encoder/tokenizer.json", repo.tokenizer_relpaths[2]);
-    try std.testing.expectEqualStrings("tokenizer.json", repo.tokenizer_relpaths[3]);
+    try std.testing.expectEqualStrings("tokenizer.json", repo.tokenizer_relpaths[1]);
 }
 fn testWeightEntrypoints() !void {
     try std.testing.expectEqual(@as(usize, 4), repo.weight_entrypoints.len);
@@ -442,11 +401,6 @@ fn testGroupRefs(allocator: std.mem.Allocator) !void {
 }
 fn testSchemaFixtures() !void {
     try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
-
-    const int8 = [_][]const u8{ "blocks.0.adaln_proj.linear.weight", "weight_scale", "time_embedder.linear_1.weight" };
-    try std.testing.expect(repo.inspect(&int8).has_adaln_proj);
-    try std.testing.expect(repo.inspect(&int8).has_time);
-    try std.testing.expect(repo.refuseReason(repo.inspect(&int8)) == null);
 }
 fn testAttentionPolicy() !void {
     const short = policy_mod.selectAttention(.{

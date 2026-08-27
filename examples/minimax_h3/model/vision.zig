@@ -4,7 +4,6 @@ const zml = @import("zml");
 
 const config_mod = @import("../core/config.zig");
 const geometry = @import("../conditioning/geometry.zig");
-const vision_conv = @import("vision_conv.zig");
 const vision_sdpa = @import("vision_sdpa.zig");
 const weights = @import("../core/weights.zig");
 
@@ -77,23 +76,18 @@ const FileConfig = struct {
 };
 
 fn visionView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    if (store.hasKey("model.visual.patch_embed.proj.weight")) return store.withPrefix("model.visual");
-    return store;
+    return store.withPrefix("model.visual");
 }
 
 pub fn ready(store: zml.io.TensorStore.View) bool {
     return store.hasKey("model.visual.patch_embed.proj.weight");
 }
 
-fn weightRank(store: zml.io.TensorStore.View, weight_name: []const u8) u8 {
-    var buffer: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", weight_name }) catch return 2;
-    return if (store.store.getShape(key)) |s| s.rank() else 2;
+fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
+    return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
 }
 
-fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
-    if (weightRank(store, weight_name) != 5)
-        return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
+fn conv3dLinear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
     return .init(
         store.createTensor(weight_name, .{ .dout, .d, .kt, .kh, .kw }, .replicated),
         if (bias_name) |n| store.maybeCreateTensor(n, .{.dout}, .replicated) else null,
@@ -105,8 +99,6 @@ fn asLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     var out = lin;
     if (out.weight.rank() == 5) {
         out.weight = out.weight.merge(.{ .d = .{ .d, .kt, .kh, .kw } });
-    } else {
-        while (out.weight.rank() > 2) out.weight = out.weight.squeeze(-1);
     }
     out.weight = out.weight.withTags(.{ .dout, .d });
     return out.forward(x.convert(out.weight.dtype()));
@@ -129,9 +121,7 @@ const LayerNorm = struct {
     }
 
     pub fn forward(self: LayerNorm, x: zml.Tensor) zml.Tensor {
-        const weight = self.weight.convert(.f32);
-        const bias = if (self.bias) |b| b.convert(.f32) else null;
-        return (zml.nn.LayerNorm{ .weight = weight, .bias = bias, .eps = 1e-6 }).forward(x.convert(.f32)).convert(x.dtype());
+        return (zml.nn.LayerNorm{ .weight = self.weight, .bias = self.bias, .eps = 1e-6 }).forward(x);
     }
 };
 
@@ -146,8 +136,8 @@ fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
     return x_f.mul(c).add(rotated.mul(s)).convert(x.dtype());
 }
 
-/// Official visual is Blackwell flash SDPA at native head_dim=72. FA2 pad-96 and
-/// full-seq f32 softmax both seed merger row 1189 from the current embed.
+/// Tiled SDPA. Head dim is 72 (FA2 wants a multiple of 8 near 128) and full-canvas
+/// seq is thousands of patches, so `zml.nn.sdpa` materializes S² scores.
 fn visionAttn(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, head_dim: i64) zml.Tensor {
     const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
     return switch (q.dtype()) {
@@ -214,8 +204,7 @@ pub const VisionBlock = struct {
         const attn = visionAttn(q_s, k_s, v_s, self.head_dim).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         const x1 = residual.add(asLinear(self.proj, attn).rename(.{ .dout = .d }));
         const h = asLinear(self.fc1, self.norm2.forward(x1));
-        // Official `gelu_pytorch_tanh` is f32. bf16 `x³` loses bits over 27 layers.
-        const ff = asLinear(self.fc2, h.convert(.f32).gelu().convert(h.dtype()).rename(.{ .dout = .d })).rename(.{ .dout = .d });
+        const ff = asLinear(self.fc2, h.gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .hidden = x1.add(ff).reuseBuffer(input.hidden) };
     }
 };
@@ -269,8 +258,7 @@ pub const Merger = struct {
             x = x.splitAxis(.s, .{ .s = grouped, .m = self.merge }).merge(.{ .d = .{ .m, .d } });
         }
         const h = asLinear(self.fc1, x);
-        // Official `nn.GELU()` is erf in f32.
-        x = asLinear(self.fc2, h.convert(.f32).geluErf().convert(h.dtype()).rename(.{ .dout = .d })).rename(.{ .dout = .d });
+        x = asLinear(self.fc2, h.geluErf().rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .tokens = x };
     }
 };
@@ -293,7 +281,7 @@ pub const Model = struct {
         const ds = store.withPrefix("deepstack_merger_list");
         for (&deepstack, 0..) |*m, i| m.* = .init(ds.withLayer(i), cfg.mergeUnit(), true);
         return .{
-            .embed = .{ .proj = linear(store.withPrefix("patch_embed.proj"), "weight", "bias") },
+            .embed = .{ .proj = conv3dLinear(store.withPrefix("patch_embed.proj"), "weight", "bias") },
             .blocks = blocks,
             .merger = .init(store.withPrefix("merger"), cfg.mergeUnit(), false),
             .deepstack = deepstack,
@@ -315,12 +303,11 @@ pub const EmbedInput = struct {
 pub const EmbedOutput = struct { hidden: zml.Tensor };
 
 pub fn register(platform: *const zml.Platform) !void {
-    try vision_conv.register(platform);
     try vision_sdpa.register(platform);
 }
 
 pub fn embed(input: EmbedInput) EmbedOutput {
-    const tokens = vision_conv.forward(input.model.proj, input.patches.withPartialTags(.{ .b, .s, .d }));
+    const tokens = asLinear(input.model.proj, input.patches.withPartialTags(.{ .b, .s, .d }));
     return .{ .hidden = tokens.add(input.pos.convert(tokens.dtype())) };
 }
 
@@ -625,16 +612,7 @@ pub fn interpolatePos(allocator: std.mem.Allocator, table: []const f32, table_si
     return out;
 }
 
-/// Official `Qwen3VLVisionRotaryEmbedding` CPU f32 `inv_freq` for head_dim=72.
-/// `std.math.pow(f32)` differs by 1 ulp and splits merger rows.
-const official_inv_freq_hd72 = [_]u32{
-    0x3f800000, 0x3f1977cc, 0x3eb800d6, 0x3e5c9d35, 0x3e044133, 0x3d9e91b6,
-    0x3d3e1e95, 0x3ce3f280, 0x3c88a69b, 0x3c23d70a, 0x3bc47060, 0x3b6b8631,
-    0x3b0d3169, 0x3aa94938, 0x3a4af7f3, 0x39f35a5c, 0x3991e2e1, 0x392ee9bf,
-};
-
 fn visionInvFreq(i: u32, half: u32) f32 {
-    if (half == 36 and i < official_inv_freq_hd72.len) return @bitCast(official_inv_freq_hd72[i]);
     return 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(i * 2)) / @as(f32, @floatFromInt(half)));
 }
 

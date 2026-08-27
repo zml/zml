@@ -76,39 +76,22 @@ pub const Config = struct {
     hidden_size: i64 = 5376,
     num_layers: i64 = 50,
     num_refiner_layers: i64 = 2,
-    token_refiner_num_layers: ?i64 = null,
     num_attention_heads: i64 = 56,
     attention_head_dim: i64 = 128,
     ffn_dim: i64 = 14336,
-    ffn_hidden_size: ?i64 = null,
     in_channels: i64 = 24,
-    latents_dim: ?i64 = null,
     audio_in_channels: i64 = 32,
-    audio_latents_dim: ?i64 = null,
     patch_size: [3]i64 = .{ 1, 2, 2 },
     text_dim: i64 = 5120,
     freq_dim: i64 = 256,
-    timestep_input_dim: ?i64 = null,
     rope_freq_dim: i64 = 16,
-    rope_inv_freq_len: ?i64 = null,
     rope_theta: f32 = 10000.0,
     norm_eps: f32 = 1e-5,
     qk_norm_eps: f32 = 1e-5,
     final_norm_eps: f32 = 1e-5,
 
-    pub fn resolve(self: Config) Config {
-        var out = self;
-        if (self.token_refiner_num_layers) |n| out.num_refiner_layers = n;
-        if (self.ffn_hidden_size) |n| out.ffn_dim = n;
-        if (self.latents_dim) |n| out.in_channels = n;
-        if (self.audio_latents_dim) |n| out.audio_in_channels = n;
-        if (self.timestep_input_dim) |n| out.freq_dim = n;
-        if (self.rope_inv_freq_len) |n| out.rope_freq_dim = n;
-        return out;
-    }
-
     pub fn official() Config {
-        return (Config{}).resolve();
+        return .{};
     }
 
     pub fn videoPatchDim(self: Config) i64 {
@@ -272,7 +255,7 @@ pub fn parseOptional(comptime T: type, allocator: std.mem.Allocator, io: std.Io,
 pub fn loadDitConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !Config {
     const parsed = try parseOptional(Config, allocator, io, dir, "config.json") orelse return Config.official();
     defer parsed.deinit();
-    return parsed.value.resolve();
+    return parsed.value;
 }
 
 pub fn loadEncoderConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !EncoderConfig {

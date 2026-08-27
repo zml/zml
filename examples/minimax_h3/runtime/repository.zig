@@ -31,7 +31,6 @@ pub const FileSource = struct {
 
 const Search = struct {
     repo: std.Io.Dir,
-    extra: ?std.Io.Dir,
     task: std.Io.Dir,
 };
 
@@ -68,33 +67,15 @@ pub const Bundle = struct {
         const task = try config.openTaskDir(io, repo, variant);
         errdefer if (task.owned) task.dir.close(io);
 
-        var extra = openBundleRoot(io, opts.model);
-        defer if (extra) |*dir| dir.close(io);
-        const search: Search = .{ .repo = repo, .extra = extra, .task = task.dir };
+        const search: Search = .{ .repo = repo, .task = task.dir };
 
         var dit_src = try resolveDit(allocator, io, search, variant, opts);
         errdefer dit_src.deinit(allocator, io);
-        var enc_src = try resolveComponent(allocator, io, search, .{
-            .official = "text_encoder",
-            .scan = "text_encoders",
-            .needles = &.{},
-            .missing = error.EncoderMissing,
-        });
+        var enc_src = try resolveComponent(io, search, "text_encoder", error.EncoderMissing);
         errdefer enc_src.deinit(allocator, io);
-        var visual_src = try resolveComponent(allocator, io, search, .{
-            .official = "video_vae",
-            .aliases = &.{ "visual_vae", "vae" },
-            .scan = "vae",
-            .needles = &.{ "video", "vae" },
-            .missing = error.VaeMissing,
-        });
+        var visual_src = try resolveComponent(io, search, "vae", error.VaeMissing);
         errdefer visual_src.deinit(allocator, io);
-        var audio_src = try resolveComponent(allocator, io, search, .{
-            .official = "audio_vae",
-            .scan = "vae",
-            .needles = &.{ "audio", "vae" },
-            .missing = error.VaeMissing,
-        });
+        var audio_src = try resolveComponent(io, search, "audio_vae", error.VaeMissing);
         errdefer audio_src.deinit(allocator, io);
 
         const dit_registry = try allocator.create(zml.safetensors.TensorRegistry);
@@ -282,58 +263,35 @@ fn resolveDit(
     variant: config.Variant,
     opts: Open,
 ) !FileSource {
-    if (opts.dit.len != 0)
-        return openFilePath(allocator, io, search, opts.dit, &.{"diffusion_models"}) catch
-            return error.TransformerMissing;
-    if (std.mem.endsWith(u8, opts.model, ".safetensors")) {
-        return .{
-            .dir = search.repo,
-            .dir_owned = false,
-            .file = try allocator.dupe(u8, std.fs.path.basename(opts.model)),
-        };
-    }
+    if (opts.dit.len != 0) return openDitOverride(allocator, io, opts.dit);
     if (openOfficialDit(io, search, variant)) |dir| {
         return .{ .dir = dir, .dir_owned = true, .file = null };
     }
-    const needles: []const []const u8 = switch (variant.taskFamily()) {
-        .fl2va => &.{"fl2va"},
-        .ref2va => &.{"ref2va"},
-    };
-    const missing: anyerror = if (variant.taskFamily() == .ref2va)
+    return if (variant.taskFamily() == .ref2va)
         error.Ref2vaTransformerMissing
     else
         error.TransformerMissing;
-    return takeScan(
-        scanIn(allocator, io, search, "diffusion_models", needles, true),
-        missing,
-        error.AmbiguousDit,
-    );
 }
 
-const ComponentSpec = struct {
-    official: []const u8,
-    aliases: []const []const u8 = &.{},
-    scan: []const u8,
-    needles: []const []const u8,
-    missing: anyerror,
-};
-
-fn resolveComponent(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    search: Search,
-    spec: ComponentSpec,
-) !FileSource {
-    if (openShared(io, search.task, search.repo, spec.official)) |dir| {
+fn resolveComponent(io: std.Io, search: Search, official: []const u8, missing: anyerror) !FileSource {
+    if (openShared(io, search.task, search.repo, official)) |dir| {
         return .{ .dir = dir, .dir_owned = true, .file = null };
     }
-    for (spec.aliases) |name| {
-        if (openShared(io, search.task, search.repo, name)) |dir| {
-            return .{ .dir = dir, .dir_owned = true, .file = null };
-        }
+    return missing;
+}
+
+fn openDitOverride(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !FileSource {
+    const dir = zml.safetensors.resolveModelRepo(io, path) catch return error.TransformerMissing;
+    if (std.mem.endsWith(u8, path, ".safetensors") or std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+        const name = allocator.dupe(u8, std.fs.path.basename(path)) catch |err| {
+            dir.close(io);
+            return err;
+        };
+        return .{ .dir = dir, .dir_owned = true, .file = name };
     }
-    const src = (try scanIn(allocator, io, search, spec.scan, spec.needles, false)) orelse return spec.missing;
-    return src;
+    if (dirHasWeights(io, dir)) return .{ .dir = dir, .dir_owned = true, .file = null };
+    dir.close(io);
+    return error.TransformerMissing;
 }
 
 fn openOfficialDit(io: std.Io, search: Search, variant: config.Variant) ?std.Io.Dir {
@@ -348,122 +306,8 @@ fn openOfficialDit(io: std.Io, search: Search, variant: config.Variant) ?std.Io.
     };
 }
 
-fn openFilePath(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    search: Search,
-    path: []const u8,
-    folders: []const []const u8,
-) !FileSource {
-    const base = std.fs.path.basename(path);
-    if (std.fs.path.dirname(path) != null and (std.mem.indexOfScalar(u8, path, '/') != null or std.mem.indexOfScalar(u8, path, '\\') != null)) {
-        const dir = try zml.safetensors.resolveModelRepo(io, path);
-        return .{ .dir = dir, .dir_owned = true, .file = try allocator.dupe(u8, base) };
-    }
-    if (fileInDir(io, search.repo, base)) {
-        return .{ .dir = search.repo, .dir_owned = false, .file = try allocator.dupe(u8, base) };
-    }
-    if (try fileInFolders(allocator, io, search.repo, base, folders)) |src| return src;
-    if (search.extra) |root| {
-        if (try fileInFolders(allocator, io, root, base, folders)) |src| return src;
-    }
-    return error.FileNotFound;
-}
-
-fn takeScan(result: anytype, missing: anyerror, ambiguous: anyerror) !FileSource {
-    const src = result catch |err| switch (err) {
-        error.AmbiguousWeights => return ambiguous,
-        else => |e| return e,
-    };
-    return src orelse return missing;
-}
-
-fn fileInFolders(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    root: std.Io.Dir,
-    base: []const u8,
-    folders: []const []const u8,
-) !?FileSource {
-    for (folders) |folder| {
-        if (openOptionalDir(io, root, folder)) |dir| {
-            if (fileInDir(io, dir, base)) {
-                return .{ .dir = dir, .dir_owned = true, .file = try allocator.dupe(u8, base) };
-            }
-            dir.close(io);
-        }
-    }
-    return null;
-}
-
-fn scanIn(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    search: Search,
-    folder: []const u8,
-    needles: []const []const u8,
-    unique: bool,
-) !?FileSource {
-    if (try scanFolder(allocator, io, search.repo, folder, needles, unique)) |src| return src;
-    if (search.extra) |root| {
-        if (try scanFolder(allocator, io, root, folder, needles, unique)) |src| return src;
-    }
-    return null;
-}
-
-fn scanFolder(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    root: std.Io.Dir,
-    folder: []const u8,
-    needles: []const []const u8,
-    unique: bool,
-) !?FileSource {
-    const dir = root.openDir(io, folder, .{ .iterate = true }) catch return null;
-    if (scanFilename(allocator, io, dir, needles, unique)) |name| {
-        if (name) |found| return .{ .dir = dir, .dir_owned = true, .file = found };
-        dir.close(io);
-        return null;
-    } else |err| {
-        dir.close(io);
-        return err;
-    }
-}
-
-fn scanFilename(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    dir: std.Io.Dir,
-    needles: []const []const u8,
-    unique: bool,
-) !?[]u8 {
-    var it = dir.iterate();
-    var found: ?[]u8 = null;
-    errdefer if (found) |name| allocator.free(name);
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!safetensorsContains(entry.name, needles)) continue;
-        if (found != null) {
-            if (unique) return error.AmbiguousWeights;
-            continue;
-        }
-        found = try allocator.dupe(u8, entry.name);
-    }
-    return found;
-}
-
-fn openBundleRoot(io: std.Io, model_path: []const u8) ?std.Io.Dir {
-    if (!std.mem.endsWith(u8, model_path, ".safetensors")) return null;
-    const parent = std.fs.path.dirname(model_path) orelse return null;
-    if (!isBundleLeaf(std.fs.path.basename(parent))) return null;
-    const root = std.fs.path.dirname(parent) orelse ".";
-    return std.Io.Dir.openDir(.cwd(), io, root, .{}) catch null;
-}
-
 pub const tokenizer_relpaths = [_][]const u8{
     "tokenizer/tokenizer.json",
-    "processor/tokenizer.json",
-    "text_encoder/tokenizer.json",
     "tokenizer.json",
 };
 
@@ -516,12 +360,9 @@ fn readTokenizerAny(
     repo: std.Io.Dir,
     model_path: []const u8,
 ) ![]u8 {
-    var extra = openBundleRoot(io, model_path);
-    defer if (extra) |*dir| dir.close(io);
-
-    const nearby = [_]?std.Io.Dir{ task_dir, repo, extra };
-    for (nearby) |maybe| {
-        const dir = maybe orelse continue;
+    _ = model_path;
+    const nearby = [_]std.Io.Dir{ task_dir, repo };
+    for (nearby) |dir| {
         if (readTokenizer(allocator, io, dir)) |bytes| return bytes else |err| switch (err) {
             error.MissingTokenizer => {},
             else => return err,
@@ -576,7 +417,7 @@ fn hasKey(keys: []const []const u8, suffix: []const u8) bool {
 pub fn inspect(keys: []const []const u8) Report {
     return .{
         .has_adaln_proj = hasKey(keys, "adaln_proj.linear.weight"),
-        .has_time = hasKey(keys, "time_embedder.proj_in.weight") or hasKey(keys, "time_embedder.linear_1.weight"),
+        .has_time = hasKey(keys, "time_embedder.linear_1.weight"),
     };
 }
 
@@ -584,31 +425,4 @@ pub fn refuseReason(report: Report) ?[]const u8 {
     if (!report.has_adaln_proj) return "AdaLN projection weights missing; not a recognized H3 DiT";
     if (!report.has_time) return "time_embedder missing; not a recognized H3 DiT";
     return null;
-}
-
-pub const bundle_leaves = [_][]const u8{ "diffusion_models", "text_encoders", "vae" };
-
-fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
-    if (hay.len < needle.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= hay.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(hay[i..][0..needle.len], needle)) return true;
-    }
-    return false;
-}
-
-/// `needles` are all required (AND). Empty `needles` matches any `.safetensors` file.
-pub fn safetensorsContains(name: []const u8, needles: []const []const u8) bool {
-    if (!std.mem.endsWith(u8, name, ".safetensors")) return false;
-    for (needles) |needle| {
-        if (!containsIgnoreCase(name, needle)) return false;
-    }
-    return true;
-}
-
-pub fn isBundleLeaf(name: []const u8) bool {
-    for (bundle_leaves) |leaf| {
-        if (std.mem.eql(u8, name, leaf)) return true;
-    }
-    return false;
 }

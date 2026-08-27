@@ -37,22 +37,13 @@ fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[
 const SwiGlu = struct {
     fc1: zml.nn.Linear,
     fc2: zml.nn.Linear,
-    /// Official Diffusers `SwiGLU` chunks `(value, gate)`. Custom `fc1` chunks `(gate, value)`.
-    value_first: bool = false,
 
     pub fn init(store: zml.io.TensorStore.View) SwiGlu {
         const in_part = .{ .dout = .model, .d = .replicated };
         const out_part = .{ .dout = .replicated, .d = .model };
-        if (store.getShape("fc1.weight") != null) {
-            return .{
-                .fc1 = linear(store, "fc1.weight", null, in_part, .replicated),
-                .fc2 = linear(store, "fc2.weight", null, out_part, .replicated),
-            };
-        }
         return .{
             .fc1 = linear(store, "net.0.proj.weight", null, in_part, .replicated),
             .fc2 = linear(store, "net.2.weight", null, out_part, .replicated),
-            .value_first = true,
         };
     }
 
@@ -63,17 +54,15 @@ const SwiGlu = struct {
 
     pub fn forward(self: SwiGlu, x: zml.Tensor) zml.Tensor {
         const uv = self.fc1.forward(x);
-        const a, const b = uv.chunkExact(-1, 2);
-        const gated = if (self.value_first) b.silu().mul(a) else a.silu().mul(b);
-        return self.fc2.forward(gated.rename(.{ .dout = .d }));
+        const value, const gate = uv.chunkExact(-1, 2);
+        return self.fc2.forward(gate.silu().mul(value).rename(.{ .dout = .d }));
     }
 };
 
 const Attention = struct {
-    qkv: ?zml.nn.Linear = null,
-    q: ?zml.nn.Linear = null,
-    k: ?zml.nn.Linear = null,
-    v: ?zml.nn.Linear = null,
+    q: zml.nn.Linear,
+    k: zml.nn.Linear,
+    v: zml.nn.Linear,
     out: zml.nn.Linear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
@@ -84,65 +73,33 @@ const Attention = struct {
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
         const qkv_part = .{ .dout = .model, .d = .replicated };
         const out_part = .{ .dout = .replicated, .d = .model };
-        const q_norm = RmsNorm.init(
-            store.withPrefix(if (store.hasKey("q_norm")) "q_norm" else "norm_q"),
-            .{.hd},
-            cfg.qk_norm_eps,
-        );
-        const k_norm = RmsNorm.init(
-            store.withPrefix(if (store.hasKey("k_norm")) "k_norm" else "norm_k"),
-            .{.hd},
-            cfg.qk_norm_eps,
-        );
-        if (store.getShape("qkv_proj.weight") != null) {
-            return .{
-                .qkv = linear(store, "qkv_proj.weight", null, qkv_part, .replicated),
-                .out = linear(store, "out_proj.weight", null, out_part, .replicated),
-                .q_norm = q_norm,
-                .k_norm = k_norm,
-                .num_heads = cfg.num_attention_heads,
-                .head_dim = cfg.attention_head_dim,
-            };
-        }
         return .{
             .q = linear(store, "to_q.weight", null, qkv_part, .replicated),
             .k = linear(store, "to_k.weight", null, qkv_part, .replicated),
             .v = linear(store, "to_v.weight", null, qkv_part, .replicated),
             .out = linear(store, "to_out.0.weight", null, out_part, .replicated),
-            .q_norm = q_norm,
-            .k_norm = k_norm,
+            .q_norm = .init(store.withPrefix("norm_q"), .{.hd}, cfg.qk_norm_eps),
+            .k_norm = .init(store.withPrefix("norm_k"), .{.hd}, cfg.qk_norm_eps),
             .num_heads = cfg.num_attention_heads,
             .head_dim = cfg.attention_head_dim,
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-        if (self.qkv) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.q) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.k) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.v) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        zml.nn.Linear.unloadBuffers(&self.q);
+        zml.nn.Linear.unloadBuffers(&self.k);
+        zml.nn.Linear.unloadBuffers(&self.v);
         zml.nn.Linear.unloadBuffers(&self.out);
         RmsNorm.unloadBuffers(&self.q_norm);
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
     fn projectQkv(self: Attention, x: zml.Tensor) struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } {
-        if (self.qkv) |qkv| {
-            // Fused `qkv_proj` is `(heads, 3, head_dim)`: per-head `[Q|K|V]`.
-            const split = qkv.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .p = 3, .hd = self.head_dim })
-                .withPartitioning(.{ .h = .model });
-            const parts = split.chunkExact(.p, 3);
-            return .{
-                .q = parts[0].squeeze(.p),
-                .k = parts[1].squeeze(.p),
-                .v = parts[2].squeeze(.p),
-            };
-        }
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
         return .{
-            .q = self.q.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
-            .k = self.k.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
-            .v = self.v.?.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            .q = self.q.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            .k = self.k.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
+            .v = self.v.forward(x).splitAxis(.dout, heads).withPartitioning(.{ .h = .model }),
         };
     }
 
@@ -203,21 +160,11 @@ pub const TimeEmbedder = struct {
     proj_out: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) TimeEmbedder {
-        if (store.getShape("time_embedder.proj_in.weight") != null) {
-            const prefix = store.withPrefix("time_embedder");
-            return .{
-                .proj_in = linear(prefix, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
-                .proj_out = linear(prefix, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
-            };
-        }
-        if (store.getShape("time_embedder.linear_1.weight") != null) {
-            const prefix = store.withPrefix("time_embedder");
-            return .{
-                .proj_in = linear(prefix, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
-                .proj_out = linear(prefix, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
-            };
-        }
-        std.debug.panic("DiT has no time_embedder", .{});
+        const prefix = store.withPrefix("time_embedder");
+        return .{
+            .proj_in = linear(prefix, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
+            .proj_out = linear(prefix, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
+        };
     }
 
     pub fn outDim(self: TimeEmbedder) i64 {
@@ -405,7 +352,7 @@ pub const TransformerBlock = struct {
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TransformerBlock {
         const attn_store = store.withPrefix("attn");
-        const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
+        const mlp_store = store.withPrefix("ff");
         const adaln_store = store.withPrefix("adaln_proj");
         return .{
             .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
@@ -444,7 +391,7 @@ const TokenRefinerBlock = struct {
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TokenRefinerBlock {
         const attn_store = store.withPrefix("attn");
-        const mlp_store = store.withPrefix(if (store.hasKey("mlp")) "mlp" else "ff");
+        const mlp_store = store.withPrefix("ff");
         return .{
             .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
             .attn = .init(attn_store, cfg),
@@ -472,7 +419,7 @@ const TokenRefiner = struct {
     final_norm: RmsNorm,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !TokenRefiner {
-        const block_store = store.withPrefix(if (store.hasKey("refiner_blocks")) "refiner_blocks" else "blocks");
+        const block_store = store.withPrefix("refiner_blocks");
         const blocks = try allocator.alloc(TokenRefinerBlock, @intCast(cfg.num_refiner_layers));
         errdefer allocator.free(blocks);
         for (blocks, 0..) |*block, i| {
@@ -510,15 +457,6 @@ const FinalLayer = struct {
     audio_out: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) FinalLayer {
-        if (store.hasKey("final_layer")) {
-            const layer = store.withPrefix("final_layer");
-            return .{
-                .norm = .init(layer.withPrefix("norm"), .{.d}, cfg.final_norm_eps),
-                .adaln = .init(layer.withPrefix("adaln_proj"), cfg.hidden_size, 2, 1),
-                .video_out = linear(layer, "video_out.weight", "video_out.bias", .replicated, .replicated),
-                .audio_out = linear(layer, "audio_out.weight", "audio_out.bias", .replicated, .replicated),
-            };
-        }
         return .{
             .norm = .init(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
             .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size, 2, 1),
@@ -546,7 +484,7 @@ pub const Model = struct {
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !Model {
-        const blocks_store = store.withPrefix(if (store.hasKey("transformer_blocks")) "transformer_blocks" else "blocks");
+        const blocks_store = store.withPrefix("transformer_blocks");
         const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.num_layers));
         errdefer allocator.free(blocks);
 
@@ -558,18 +496,9 @@ pub const Model = struct {
             block.* = .init(blocks_store.withLayer(i), cfg);
         }
 
-        const video_proj = if (store.getShape("proj_in.weight") != null)
-            linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated)
-        else
-            linear(store, "video_patch_proj.weight", "video_patch_proj.bias", .replicated, .replicated);
-        const audio_proj = if (store.getShape("audio_proj_in.weight") != null)
-            linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated)
-        else
-            linear(store, "audio_patch_proj.weight", "audio_patch_proj.bias", .replicated, .replicated);
-        const condition_proj = if (store.getShape("context_embedder.weight") != null)
-            linear(store, "context_embedder.weight", "context_embedder.bias", .replicated, .replicated)
-        else
-            linear(store, "condition_proj.weight", "condition_proj.bias", .replicated, .replicated);
+        const video_proj = linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated);
+        const audio_proj = linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated);
+        const condition_proj = linear(store, "context_embedder.weight", "context_embedder.bias", .replicated, .replicated);
 
         return .{
             .video_proj = video_proj,

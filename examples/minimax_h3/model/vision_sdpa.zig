@@ -12,8 +12,7 @@ const Input = struct {
 const Output = struct { o: zml.Shape };
 const Attrs = struct { scale: f32 };
 
-/// Tiled online-softmax (Flash-style). FA2 pad-96 and full-seq f32 softmax both
-/// seed merger row 1189 on this embed; official SDPA is Blackwell flash at hd=72.
+/// Tiled online-softmax. Native head_dim=72; full-seq `zml.nn.sdpa` is S².
 const SdpaCall = zml.ops.CustomCall(Input, Output, Attrs, sdpaFfi, .{
     .name = "h3$vision_sdpa",
     .sharding_aware = false,

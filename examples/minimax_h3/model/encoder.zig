@@ -232,16 +232,8 @@ fn embedTokens(store: zml.io.TensorStore.View) zml.nn.TokenEmbedding {
     return .fromStore(store, "embed_tokens.weight", .{ .voc = .replicated, .d = .model });
 }
 
-const embed_roots = [_]struct { key: []const u8, prefix: []const u8 }{
-    .{ .key = "model.language_model.embed_tokens.weight", .prefix = "model.language_model" },
-    .{ .key = "model.embed_tokens.weight", .prefix = "model" },
-};
-
 fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
-    for (embed_roots) |root| {
-        if (store.hasKey(root.key)) return store.withPrefix(root.prefix);
-    }
-    return store;
+    return store.withPrefix("model.language_model");
 }
 
 pub const LoadedModel = struct {

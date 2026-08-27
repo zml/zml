@@ -61,22 +61,20 @@ pub const Config = struct {
 
 const FileConfig = struct {
     latent_channels: ?i64 = null,
-    vae_latent_channels: ?i64 = null,
     latent_dim: ?i64 = null,
     encoder_dim: ?i64 = null,
     decoder_dim: ?i64 = null,
-    sample_rate: ?u32 = null,
     sampling_rate: ?u32 = null,
     latents_mean: ?[]const f32 = null,
     latents_std: ?[]const f32 = null,
 
     fn resolve(self: FileConfig) Config {
         var out = Config.official();
-        if (self.latent_channels orelse self.vae_latent_channels) |v| out.latent_channels = v;
+        if (self.latent_channels) |v| out.latent_channels = v;
         if (self.latent_dim) |v| out.latent_dim = v;
         if (self.encoder_dim) |v| out.encoder_dim = v;
         if (self.decoder_dim) |v| out.decoder_dim = v;
-        if (self.sample_rate orelse self.sampling_rate) |v| out.sample_rate = v;
+        if (self.sampling_rate) |v| out.sample_rate = v;
         if (self.latents_mean) |mean| {
             for (0..@min(mean.len, out.latents_mean.len)) |i| out.latents_mean[i] = mean[i];
         }
@@ -93,41 +91,7 @@ fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
     return if (store.store.getShape(key)) |shape| shape.rank() else 2;
 }
 
-fn pick(store: zml.io.TensorStore.View, names: []const []const u8, tagz: anytype) zml.Tensor {
-    for (names) |name| {
-        if (store.hasKey(name)) return store.createTensor(name, tagz, .replicated);
-    }
-    return store.createTensor(names[0], tagz, .replicated);
-}
-
-fn firstKey(store: zml.io.TensorStore.View, names: []const []const u8) []const u8 {
-    for (names) |name| {
-        if (store.hasKey(name)) return name;
-    }
-    return names[0];
-}
-
-fn pickByRank(store: zml.io.TensorStore.View, names: []const []const u8) zml.Tensor {
-    const name = firstKey(store, names);
-    return switch (tensorRank(store, name)) {
-        5 => store.createTensor(name, .{ .co, .ci, .k, .unused_a, .unused_b }, .replicated),
-        3 => store.createTensor(name, .{ .co, .ci, .k }, .replicated),
-        2 => store.createTensor(name, .{ .co, .ci }, .replicated),
-        else => store.createTensor(name, .{.co}, .replicated),
-    };
-}
-
-fn pickTranspose(store: zml.io.TensorStore.View, names: []const []const u8) zml.Tensor {
-    const name = firstKey(store, names);
-    return switch (tensorRank(store, name)) {
-        3 => store.createTensor(name, .{ .ci, .co, .k }, .replicated),
-        2 => store.createTensor(name, .{ .ci, .co }, .replicated),
-        else => store.createTensor(name, .{.ci}, .replicated),
-    };
-}
-
-fn pickChannel(store: zml.io.TensorStore.View, names: []const []const u8) zml.Tensor {
-    const name = firstKey(store, names);
+fn pickChannel(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
     return switch (tensorRank(store, name)) {
         3 => store.createTensor(name, .{ .unused_a, .c, .unused_b }, .replicated),
         2 => store.createTensor(name, .{ .unused_a, .c }, .replicated),
@@ -165,33 +129,23 @@ fn padRepeatT(x: zml.Tensor, low: i64, high: i64) zml.Tensor {
     return y;
 }
 
-fn maybe(store: zml.io.TensorStore.View, names: []const []const u8, tagz: anytype) ?zml.Tensor {
-    for (names) |name| {
-        if (store.hasKey(name)) return store.createTensor(name, tagz, .replicated);
-    }
-    return null;
-}
-
 fn unloadOpt(t: *?zml.Buffer) void {
     if (t.*) |*buf| buf.deinit();
 }
 
-fn fusedKernel(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("weight") and !store.hasKey("weight_v");
-}
-
-fn loadWn(store: zml.io.TensorStore.View, comptime transpose: bool) struct { v: zml.Tensor, g: ?zml.Tensor } {
-    const fused = fusedKernel(store);
-    const names: []const []const u8 = if (fused) &.{"weight"} else &.{"weight_v"};
+fn loadWn(store: zml.io.TensorStore.View, comptime transpose: bool) struct { v: zml.Tensor, g: zml.Tensor } {
     return .{
-        .v = if (transpose) pickTranspose(store, names) else pickByRank(store, names),
-        .g = if (fused) null else pickByRank(store, &.{"weight_g"}),
+        .v = if (transpose)
+            store.createTensor("weight_v", .{ .ci, .co, .k }, .replicated)
+        else
+            store.createTensor("weight_v", .{ .co, .ci, .k }, .replicated),
+        .g = store.createTensor("weight_g", .{ .co, .ci, .k }, .replicated),
     };
 }
 
 const WNConv1d = struct {
     weight_v: zml.Tensor,
-    weight_g: ?zml.Tensor,
+    weight_g: zml.Tensor,
     bias: ?zml.Tensor,
     stride: i64,
     dilation: i64,
@@ -202,7 +156,7 @@ const WNConv1d = struct {
         return .{
             .weight_v = wn.v,
             .weight_g = wn.g,
-            .bias = maybe(store, &.{"bias"}, .{.co}),
+            .bias = store.maybeCreateTensor("bias", .{.co}, .replicated),
             .stride = stride,
             .dilation = dilation,
             .padding = padding,
@@ -211,17 +165,15 @@ const WNConv1d = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(WNConv1d)) void {
         self.weight_v.deinit();
-        unloadOpt(&self.weight_g);
+        self.weight_g.deinit();
         unloadOpt(&self.bias);
     }
 
     pub fn forward(self: WNConv1d, x: zml.Tensor) zml.Tensor {
         const v = self.weight_v.convert(.f32).withPartialTags(.{ .co, .ci, .k });
-        const fused = if (self.weight_g) |g| blk: {
-            const gs = squeezeToTag(g, .co);
-            const sq = squeezeToTag(v.mul(v).sum(.k).sum(.ci), .co).addConstant(1e-9);
-            break :blk v.mul(gs.mul(sq.rsqrt()).broad(v.shape()));
-        } else v;
+        const gs = squeezeToTag(self.weight_g.convert(.f32), .co);
+        const sq = squeezeToTag(v.mul(v).sum(.k).sum(.ci), .co).addConstant(1e-9);
+        const fused = v.mul(gs.mul(sq.rsqrt()).broad(v.shape()));
         var y = x.convert(.f32).withPartialTags(.{ .b, .c, .t }).conv1d(fused, .{
             .window_strides = self.stride,
             .rhs_dilation = self.dilation,
@@ -234,7 +186,7 @@ const WNConv1d = struct {
 
 const TransposeConv = struct {
     weight_v: zml.Tensor,
-    weight_g: ?zml.Tensor,
+    weight_g: zml.Tensor,
     bias: ?zml.Tensor,
     stride: i64,
     kernel: i64,
@@ -245,7 +197,7 @@ const TransposeConv = struct {
         return .{
             .weight_v = wn.v,
             .weight_g = wn.g,
-            .bias = maybe(inner, &.{"bias"}, .{.co}),
+            .bias = inner.maybeCreateTensor("bias", .{.co}, .replicated),
             .stride = stride,
             .kernel = kernel,
         };
@@ -253,17 +205,15 @@ const TransposeConv = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransposeConv)) void {
         self.weight_v.deinit();
-        unloadOpt(&self.weight_g);
+        self.weight_g.deinit();
         unloadOpt(&self.bias);
     }
 
     pub fn forward(self: TransposeConv, x: zml.Tensor) zml.Tensor {
         const v = self.weight_v.convert(.f32).withPartialTags(.{ .ci, .co, .k });
-        const kernel = if (self.weight_g) |g| blk: {
-            const gs = squeezeToTag(g, .ci);
-            const sq = squeezeToTag(v.mul(v).sum(.k).sum(.co), .ci).addConstant(1e-9);
-            break :blk v.mul(gs.mul(sq.rsqrt()).broad(v.shape()));
-        } else v;
+        const gs = squeezeToTag(self.weight_g.convert(.f32), .ci);
+        const sq = squeezeToTag(v.mul(v).sum(.k).sum(.co), .ci).addConstant(1e-9);
+        const kernel = v.mul(gs.mul(sq.rsqrt()).broad(v.shape()));
         // Reverse along `k`: this conv is conv_transpose1d.
         const fused = kernel.reverse(.{.k});
         const official_pad = @divFloor(self.kernel - self.stride, 2);
@@ -289,8 +239,8 @@ const SnakeBeta = struct {
     pub fn init(store: zml.io.TensorStore.View) SnakeBeta {
         const act = store.withPrefix("act");
         return .{
-            .alpha = pickChannel(act, &.{"alpha"}),
-            .beta = pickChannel(act, &.{"beta"}),
+            .alpha = pickChannel(act, "alpha"),
+            .beta = pickChannel(act, "beta"),
         };
     }
 
@@ -324,8 +274,8 @@ const Activation1d = struct {
     pub fn init(store: zml.io.TensorStore.View) Activation1d {
         return .{
             .act = .init(store),
-            .up_filter = pick(store, &.{ "upsample.filter", "upsample.lowpass.filter" }, .{ .co, .ci, .k }),
-            .down_filter = pick(store, &.{ "downsample.lowpass.filter", "downsample.filter" }, .{ .co, .ci, .k }),
+            .up_filter = store.createTensor("upsample.filter", .{ .co, .ci, .k }, .replicated),
+            .down_filter = store.createTensor("downsample.lowpass.filter", .{ .co, .ci, .k }, .replicated),
         };
     }
 
@@ -413,7 +363,6 @@ const AMPBlock = struct {
 
 fn conv1x1(store: zml.io.TensorStore.View) zml.nn.Linear {
     const weight = switch (tensorRank(store, "weight")) {
-        5 => store.createTensor("weight", .{ .dout, .d, .kt, .kh, .kw }, .replicated),
         3 => store.createTensor("weight", .{ .dout, .d, .k }, .replicated),
         else => store.createTensor("weight", .{ .dout, .d }, .replicated),
     };
@@ -526,7 +475,7 @@ const Snake1d = struct {
     alpha: zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) Snake1d {
-        return .{ .alpha = pickChannel(store, &.{ "alpha", "act.alpha" }) };
+        return .{ .alpha = pickChannel(store, "alpha") };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Snake1d)) void {
@@ -654,7 +603,7 @@ const LayerNormEnc = struct {
     }
 
     pub fn forward(self: LayerNormEnc, x: zml.Tensor) zml.Tensor {
-        return (zml.nn.LayerNorm{ .weight = self.weight, .bias = self.bias, .eps = 1e-5 }).forward(x.convert(.f32)).convert(x.dtype());
+        return (zml.nn.LayerNorm{ .weight = self.weight, .bias = self.bias, .eps = 1e-5 }).forward(x);
     }
 };
 
@@ -673,7 +622,7 @@ const CausalAttn = struct {
             .qkv = conv1x1(store.withPrefix("qkv")),
             .q_bias = store.createTensor("q_bias", .{.d}, .replicated),
             .v_bias = store.createTensor("v_bias", .{.d}, .replicated),
-            .k_bias = pick(store, &.{ "zero_k_bias", "k_bias" }, .{.d}),
+            .k_bias = store.createTensor("zero_k_bias", .{.d}, .replicated),
             .proj = conv1x1(store.withPrefix("proj")),
             .num_heads = num_heads,
             .head_dim = @divExact(in_dim, num_heads),
@@ -754,13 +703,11 @@ const AttnProjection = struct {
 };
 
 pub fn decodeReady(store: zml.io.TensorStore.View) bool {
-    return store.hasKey("dec_in_proj.weight") and
-        (store.hasKey("decoder.conv_pre.weight_v") or store.hasKey("decoder.conv_pre.weight"));
+    return store.hasKey("dec_in_proj.weight") and store.hasKey("decoder.conv_pre.weight_v");
 }
 
 pub fn encodeReady(store: zml.io.TensorStore.View) bool {
-    return (store.hasKey("encoder.block.0.weight_v") or store.hasKey("encoder.block.0.weight")) and
-        store.hasKey("mean_proj.weight");
+    return store.hasKey("encoder.block.0.weight_v") and store.hasKey("mean_proj.weight");
 }
 
 pub const EncoderModel = struct {

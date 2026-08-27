@@ -8,7 +8,7 @@ const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_vae);
 
-/// Per-channel latent moments from the released `video_vae/config.json`.
+/// Per-channel latent moments from the released `vae/config.json`.
 pub const official_latents_mean = [24]f32{
     0.858090341091156,    -0.9606591463088989, 1.0661640167236328,   -0.5090325474739075,
     -0.2727581858634949,  -1.3675414323806763, -0.2553254961967468,  -0.26907554268836975,
@@ -72,43 +72,31 @@ const FileConfig = struct {
     latent_channels: ?i64 = null,
     out_channels: ?i64 = null,
     decoder_num_layers: ?i64 = null,
-    num_layers: ?i64 = null,
     decoder_num_attention_heads: ?i64 = null,
-    heads: ?i64 = null,
     decoder_attention_head_dim: ?i64 = null,
-    dim_head: ?i64 = null,
     decoder_num_register_tokens: ?i64 = null,
-    num_register_tokens: ?i64 = null,
     decoder_ffn_mult: ?i64 = null,
     decoder_rope_theta: ?f32 = null,
-    rope_theta: ?f32 = null,
     decoder_rope_dim_ratio: ?f32 = null,
-    rope_dim_ratio: ?f32 = null,
     decoder_norm_eps: ?f32 = null,
     clip_length: ?u32 = null,
-    vae_clip_length: ?u32 = null,
     token_drop: ?u32 = null,
-    vae_token_drop: ?u32 = null,
-    vae_tile_size: ?u32 = null,
-    vae_tile_overlap_min: ?u32 = null,
     latents_mean: ?[]const f32 = null,
     latents_std: ?[]const f32 = null,
 
     fn overlay(self: FileConfig, out: *Config) void {
         if (self.latent_channels) |v| out.latent_channels = v;
         if (self.out_channels) |v| out.out_channels = v;
-        if (self.decoder_num_layers orelse self.num_layers) |v| out.decoder_num_layers = v;
-        if (self.decoder_num_attention_heads orelse self.heads) |v| out.decoder_num_attention_heads = v;
-        if (self.decoder_attention_head_dim orelse self.dim_head) |v| out.decoder_attention_head_dim = v;
-        if (self.decoder_num_register_tokens orelse self.num_register_tokens) |v| out.decoder_num_register_tokens = v;
+        if (self.decoder_num_layers) |v| out.decoder_num_layers = v;
+        if (self.decoder_num_attention_heads) |v| out.decoder_num_attention_heads = v;
+        if (self.decoder_attention_head_dim) |v| out.decoder_attention_head_dim = v;
+        if (self.decoder_num_register_tokens) |v| out.decoder_num_register_tokens = v;
         if (self.decoder_ffn_mult) |v| out.decoder_ffn_mult = v;
-        if (self.decoder_rope_theta orelse self.rope_theta) |v| out.decoder_rope_theta = v;
-        if (self.decoder_rope_dim_ratio orelse self.rope_dim_ratio) |v| out.decoder_rope_dim_ratio = v;
+        if (self.decoder_rope_theta) |v| out.decoder_rope_theta = v;
+        if (self.decoder_rope_dim_ratio) |v| out.decoder_rope_dim_ratio = v;
         if (self.decoder_norm_eps) |v| out.decoder_norm_eps = v;
-        if (self.clip_length orelse self.vae_clip_length) |v| out.clip_length = v;
-        if (self.token_drop orelse self.vae_token_drop) |v| out.token_drop = v;
-        if (self.vae_tile_size) |v| out.tile_px = v;
-        if (self.vae_tile_overlap_min) |v| out.tile_overlap_px = v;
+        if (self.clip_length) |v| out.clip_length = v;
+        if (self.token_drop) |v| out.token_drop = v;
         if (self.latents_mean) |mean| {
             for (0..@min(mean.len, out.latents_mean.len)) |i| out.latents_mean[i] = mean[i];
         }
@@ -118,26 +106,13 @@ const FileConfig = struct {
     }
 };
 
-fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
-    var buffer: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch return 2;
-    return if (store.store.getShape(key)) |shape| shape.rank() else 2;
-}
-
-fn linearWeight(store: zml.io.TensorStore.View, weight_name: []const u8) zml.Tensor {
-    return switch (tensorRank(store, weight_name)) {
-        5 => store.createTensor(weight_name, .{ .dout, .d, .kt, .kh, .kw }, .replicated),
-        4 => store.createTensor(weight_name, .{ .dout, .d, .kh, .kw }, .replicated),
-        3 => store.createTensor(weight_name, .{ .dout, .d, .k }, .replicated),
-        else => store.createTensor(weight_name, .{ .dout, .d }, .replicated),
-    };
-}
-
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
-    if (tensorRank(store, weight_name) == 2)
-        return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
+    return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
+}
+
+fn convLinear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
     return .init(
-        linearWeight(store, weight_name),
+        store.createTensor(weight_name, .{ .dout, .d, .kt, .kh, .kw }, .replicated),
         if (bias_name) |name| store.maybeCreateTensor(name, .{.dout}, .replicated) else null,
         .d,
     );
@@ -165,33 +140,25 @@ const LayerNorm = struct {
 
     pub fn forward(self: LayerNorm, x: zml.Tensor) zml.Tensor {
         if (self.rms) {
-            const normalized = zml.nn.rmsNorm(x.convert(.f32), .d, self.eps);
-            return normalized.mul(self.weight.convert(.f32).broad(normalized.shape())).convert(x.dtype());
+            const normalized = zml.nn.rmsNorm(x, .d, self.eps);
+            return normalized.mul(self.weight.convert(x.dtype()).broad(normalized.shape()));
         }
         return (zml.nn.LayerNorm{
-            .weight = self.weight.convert(.f32),
-            .bias = if (self.bias) |b| b.convert(.f32) else null,
+            .weight = self.weight,
+            .bias = self.bias,
             .eps = self.eps,
-        }).forward(x.convert(.f32)).convert(x.dtype());
+        }).forward(x);
     }
 };
 
 const SwiGlu = struct {
     w1: zml.nn.Linear,
     w2: zml.nn.Linear,
-    value_first: bool = false,
 
     pub fn init(store: zml.io.TensorStore.View) SwiGlu {
-        if (store.getShape("w1.weight") != null) {
-            return .{
-                .w1 = linear(store, "w1.weight", "w1.bias"),
-                .w2 = linear(store, "w2.weight", "w2.bias"),
-            };
-        }
         return .{
             .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias"),
             .w2 = linear(store, "net.2.weight", "net.2.bias"),
-            .value_first = true,
         };
     }
 
@@ -202,32 +169,21 @@ const SwiGlu = struct {
 
     pub fn forward(self: SwiGlu, x: zml.Tensor) zml.Tensor {
         const fused = applyLinear(self.w1, x);
-        const a, const b = fused.chunkExact(-1, 2);
-        const gated = if (self.value_first) b.silu().mul(a) else a.silu().mul(b);
-        return applyLinear(self.w2, gated.rename(.{ .dout = .d }));
+        const value, const gate = fused.chunkExact(-1, 2);
+        return applyLinear(self.w2, gate.silu().mul(value).rename(.{ .dout = .d }));
     }
 };
 
 const Attention = struct {
-    qkv: ?zml.nn.Linear = null,
-    q: ?zml.nn.Linear = null,
-    k: ?zml.nn.Linear = null,
-    v: ?zml.nn.Linear = null,
+    q: zml.nn.Linear,
+    k: zml.nn.Linear,
+    v: zml.nn.Linear,
     out: zml.nn.Linear,
     num_heads: i64,
     head_dim: i64,
     eps: f32,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) Attention {
-        if (store.getShape("to_qkv.weight") != null) {
-            return .{
-                .qkv = linear(store, "to_qkv.weight", "to_qkv.bias"),
-                .out = linear(store, "to_out.weight", "to_out.bias"),
-                .num_heads = cfg.decoder_num_attention_heads,
-                .head_dim = cfg.decoder_attention_head_dim,
-                .eps = cfg.decoder_norm_eps,
-            };
-        }
         return .{
             .q = linear(store, "to_q.weight", "to_q.bias"),
             .k = linear(store, "to_k.weight", "to_k.bias"),
@@ -240,24 +196,18 @@ const Attention = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-        if (self.qkv) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.q) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.k) |*layer| zml.nn.Linear.unloadBuffers(layer);
-        if (self.v) |*layer| zml.nn.Linear.unloadBuffers(layer);
+        zml.nn.Linear.unloadBuffers(&self.q);
+        zml.nn.Linear.unloadBuffers(&self.k);
+        zml.nn.Linear.unloadBuffers(&self.v);
         zml.nn.Linear.unloadBuffers(&self.out);
     }
 
     fn projectQkv(self: Attention, x: zml.Tensor) struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } {
-        if (self.qkv) |qkv| {
-            const split = applyLinear(qkv, x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 3 * self.head_dim });
-            const parts = split.chunkExact(.hd, 3);
-            return .{ .q = parts[0], .k = parts[1], .v = parts[2] };
-        }
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
         return .{
-            .q = applyLinear(self.q.?, x).splitAxis(.dout, heads),
-            .k = applyLinear(self.k.?, x).splitAxis(.dout, heads),
-            .v = applyLinear(self.v.?, x).splitAxis(.dout, heads),
+            .q = applyLinear(self.q, x).splitAxis(.dout, heads),
+            .k = applyLinear(self.k, x).splitAxis(.dout, heads),
+            .v = applyLinear(self.v, x).splitAxis(.dout, heads),
         };
     }
 
@@ -266,8 +216,8 @@ const Attention = struct {
         var q = qkv.q;
         var k = qkv.k;
         const v = qkv.v;
-        q = zml.nn.rmsNorm(q.convert(.f32), .hd, self.eps).convert(x.dtype());
-        k = zml.nn.rmsNorm(k.convert(.f32), .hd, self.eps).convert(x.dtype());
+        q = zml.nn.rmsNorm(q, .hd, self.eps);
+        k = zml.nn.rmsNorm(k, .hd, self.eps);
         q = applyRotary(q, cos, sin);
         k = applyRotary(k, cos, sin);
         const attn = zml.nn.sdpa(
@@ -397,14 +347,13 @@ pub const Model = struct {
         const blocks = try allocator.alloc(TransformerBlock, @intCast(cfg.decoder_num_layers));
         errdefer allocator.free(blocks);
         const block_store = dec.withPrefix("transformer_blocks");
-        const block_rms = !dec.hasKey("x_embedder");
-        for (blocks, 0..) |*block, i| block.* = .init(block_store.withLayer(i), cfg, block_rms);
+        for (blocks, 0..) |*block, i| block.* = .init(block_store.withLayer(i), cfg, true);
 
         const post = store.withPrefix("post_quant_conv");
         return .{
             .embed = .{
-                .post_quant = linear(post, "weight", "bias"),
-                .proj = linear(dec.withPrefix(if (dec.hasKey("x_embedder")) "x_embedder" else "proj_in"), "weight", "bias"),
+                .post_quant = convLinear(post, "weight", "bias"),
+                .proj = linear(dec.withPrefix("proj_in"), "weight", "bias"),
                 .register_tokens = dec.createTensor("register_tokens", .{ .b, .s, .d }, .replicated),
                 .cfg = cfg,
             },
@@ -424,8 +373,7 @@ pub const Model = struct {
 };
 
 pub fn ready(store: zml.io.TensorStore.View) bool {
-    const has_embed = store.hasKey("decoder.x_embedder.weight") or store.hasKey("decoder.proj_in.weight");
-    return has_embed and store.hasKey("post_quant_conv.weight");
+    return store.hasKey("decoder.proj_in.weight") and store.hasKey("post_quant_conv.weight");
 }
 
 fn decoderView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
