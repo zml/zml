@@ -7,6 +7,10 @@ pub const ffi = @import("ffi.zig");
 
 const log = std.log.scoped(.pjrt);
 
+const kv_store = @import("key_value_store.zig");
+pub const KeyValueStoreError = kv_store.Error;
+pub const KeyValueStore = kv_store.KeyValueStore;
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -421,6 +425,25 @@ pub const Client = opaque {
         const ret = try api.call(.PJRT_Client_Create, .{
             .create_options = @ptrCast(create_options),
             .num_options = create_options.len,
+        });
+        return @ptrCast(ret.client.?);
+    }
+
+    pub fn initWithKeyValueStore(
+        api: *const Api,
+        create_options: []const NamedValue,
+        key_value_store: *const KeyValueStore,
+    ) ClientInitError!*Client {
+        const user_arg: *anyopaque = @ptrCast(@constCast(key_value_store));
+        const ret = try api.call(.PJRT_Client_Create, .{
+            .create_options = @ptrCast(create_options),
+            .num_options = create_options.len,
+            .kv_get_callback = kv_store.getCallback,
+            .kv_get_user_arg = user_arg,
+            .kv_put_callback = kv_store.putCallback,
+            .kv_put_user_arg = user_arg,
+            .kv_try_get_callback = kv_store.tryGetCallback,
+            .kv_try_get_user_arg = user_arg,
         });
         return @ptrCast(ret.client.?);
     }

@@ -2,9 +2,12 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "pjrt",
-    tags = ["manual"],
-    srcs = ["ffi.zig"],
+    srcs = [
+        "ffi.zig",
+        "key_value_store.zig",
+    ],
     main = "pjrt.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "@xla//xla/ffi/api:c_api",
