@@ -769,7 +769,7 @@ pub fn fusedExpertsImpl_fp4(
             .gammas = routing.sorted_weights,
             .bias = bias_gate_up,
             .apply_swiglu = true,
-            .activation_limit = activation_limit orelse 1.0,
+            .activation_limit = activation_limit,
             .block_m = kernel_cfg.block_m,
             .block_n = kernel_cfg.block_n,
             .block_k = kernel_cfg.block_k,
@@ -1135,7 +1135,7 @@ const GemmOpts = struct {
     gammas: ?zml.Tensor = null,
     bias: ?zml.Tensor = null,
     apply_swiglu: bool = false,
-    activation_limit: f32 = 1.0,
+    activation_limit: ?f32 = null,
     block_m: u32,
     block_n: u32,
     block_k: u32,
@@ -1233,10 +1233,16 @@ fn runGemm(
     return y;
 }
 
-fn applySwiGlu(input: zml.Tensor, activation_limit: f32) zml.Tensor {
-    const threshold = zml.Tensor.scalar(activation_limit, .f32);
-    const gate = input.slice1d(.dout, .{ .start = 0, .step = 2 }).minimum(threshold);
-    const up = input.slice1d(.dout, .{ .start = 1, .step = 2 }).clamp(threshold.negate(), threshold);
+fn applySwiGlu(input: zml.Tensor, activation_limit: ?f32) zml.Tensor {
+    var gate = input.slice1d(.dout, .{ .start = 0, .step = 2 });
+    var up = input.slice1d(.dout, .{ .start = 1, .step = 2 });
+
+    if (activation_limit) |limit| {
+        const threshold = zml.Tensor.scalar(limit, .f32);
+        gate = gate.minimum(threshold);
+        up = up.clamp(threshold.negate(), threshold);
+    }
+
     return gate.silu().mul(up);
 }
 
