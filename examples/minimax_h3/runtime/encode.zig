@@ -41,59 +41,6 @@ fn copyNchwTile(
     }
 }
 
-fn blendNchw(
-    acc: []f32,
-    incoming: []const f32,
-    channels: u32,
-    t: u32,
-    acc_h: u32,
-    acc_w: u32,
-    inc_h: u32,
-    inc_w: u32,
-    out_y: u32,
-    out_x: u32,
-    blend_h: u32,
-    blend_w: u32,
-) void {
-    if (blend_h == 0 and blend_w == 0) {
-        var c: u32 = 0;
-        while (c < channels) : (c += 1) {
-            var tt: u32 = 0;
-            while (tt < t) : (tt += 1) {
-                var y: u32 = 0;
-                while (y < inc_h) : (y += 1) {
-                    const si = ((((c * t + tt) * inc_h) + y) * inc_w);
-                    const di = ((((c * t + tt) * acc_h) + (out_y + y)) * acc_w) + out_x;
-                    @memcpy(acc[di..][0..inc_w], incoming[si..][0..inc_w]);
-                }
-            }
-        }
-        return;
-    }
-    var c: u32 = 0;
-    while (c < channels) : (c += 1) {
-        var tt: u32 = 0;
-        while (tt < t) : (tt += 1) {
-            var y: u32 = 0;
-            while (y < inc_h) : (y += 1) {
-                var x: u32 = 0;
-                while (x < inc_w) : (x += 1) {
-                    const si = ((((c * t + tt) * inc_h) + y) * inc_w) + x;
-                    const di = ((((c * t + tt) * acc_h) + (out_y + y)) * acc_w) + (out_x + x);
-                    var w: f32 = 1.0;
-                    if (blend_h > 0 and y < blend_h) {
-                        w *= @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(blend_h));
-                    }
-                    if (blend_w > 0 and x < blend_w) {
-                        w *= @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(blend_w));
-                    }
-                    acc[di] = acc[di] * (1.0 - w) + incoming[si] * w;
-                }
-            }
-        }
-    }
-}
-
 fn runVisualClip(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -134,9 +81,34 @@ fn runVisualClip(
     const tile_mom = try allocator.alloc(f32, moments_c * out_t * tile_lat_h * tile_lat_w);
     defer allocator.free(tile_mom);
 
-    var out_y: u32 = 0;
+    const n_y: u32 = @intCast(y_plan.count());
+    const n_x: u32 = @intCast(x_plan.count());
+    var stitcher: ?vae.NchwStitcher = null;
+    defer if (stitcher) |*s| s.deinit(allocator);
+    if (n_y > 1 or n_x > 1) {
+        const y_ov = try allocator.alloc(u32, y_plan.overlaps.len);
+        defer allocator.free(y_ov);
+        const x_ov = try allocator.alloc(u32, x_plan.overlaps.len);
+        defer allocator.free(x_ov);
+        for (y_plan.overlaps, y_ov) |px, *lat| lat.* = px / spec.spatial;
+        for (x_plan.overlaps, x_ov) |px, *lat| lat.* = px / spec.spatial;
+        stitcher = try vae.NchwStitcher.init(
+            allocator,
+            canvas,
+            moments_c,
+            out_t,
+            latent_h,
+            latent_w,
+            tile_lat_h,
+            tile_lat_w,
+            n_y,
+            n_x,
+            y_ov,
+            x_ov,
+        );
+    }
+
     for (y_plan.starts, y_plan.lengths, 0..) |y0, ylen, yi| {
-        var out_x: u32 = 0;
         for (x_plan.starts, x_plan.lengths, 0..) |x0, xlen, xi| {
             copyNchwTile(pixels_nchw, 3, frames, height, width, y0, x0, tile_h, tile_w, tile_px);
             var pix = try buffers.fromItems(io, platform, .init(.{
@@ -162,14 +134,25 @@ fn runVisualClip(
                 .w = tile_lat_w,
             }, .f32), std.mem.sliceAsBytes(tile_mom)));
 
-            const use_h = ylen / spec.spatial;
-            const use_w = xlen / spec.spatial;
-            const blend_h: u32 = if (yi == 0) 0 else y_plan.overlaps[yi - 1] / spec.spatial;
-            const blend_w: u32 = if (xi == 0) 0 else x_plan.overlaps[xi - 1] / spec.spatial;
-            blendNchw(canvas, tile_mom, moments_c, out_t, latent_h, latent_w, use_h, use_w, out_y, out_x, blend_h, blend_w);
-            out_x += if (xi + 1 == x_plan.count()) use_w else use_w - (if (xi + 1 < x_plan.count()) x_plan.overlaps[xi] / spec.spatial else 0);
+            if (stitcher) |*s| {
+                s.push(@intCast(yi), @intCast(xi), tile_mom);
+            } else {
+                vae.copyNchwCrop(
+                    canvas,
+                    latent_h,
+                    latent_w,
+                    0,
+                    0,
+                    tile_mom,
+                    tile_lat_h,
+                    tile_lat_w,
+                    ylen / spec.spatial,
+                    xlen / spec.spatial,
+                    moments_c,
+                    out_t,
+                );
+            }
         }
-        out_y += if (yi + 1 == y_plan.count()) ylen / spec.spatial else (ylen - (if (yi + 1 < y_plan.count()) y_plan.overlaps[yi] else 0)) / spec.spatial;
     }
     return canvas;
 }
