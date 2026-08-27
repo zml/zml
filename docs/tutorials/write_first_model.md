@@ -47,34 +47,34 @@ touch simple_layer/BUILD.bazel
 Before firing up our editor, let's quickly talk about a few basic ZML
 fundamentals.
 
-In ZML, we describe a _Module_, which represents our AI model, as a Zig
-`struct`. That struct can contain Tensor fields that are used for computation,
-e.g. weights and biases. In the _forward_ function of a Module, we describe the
-computation by calling tensor operations like _mul_, _add_, _dot_,
-_conv2D_, etc., or even nested Modules.
+In ZML, we describe an AI model as a Zig `struct`. That struct can contain
+Tensor fields that are used for computation, e.g. weights and biases. In the
+_forward_ function, we describe the computation by calling tensor operations
+like _mul_, _add_, _dot_, _conv2D_, etc., or even nested layer structs.
 
-ZML creates an MLIR representation of the computation when we compile the
-_Module_. For compilation, only the _Tensors_ are required. No actual tensor data
-is needed at this step. This is important for large models: we can compile them 
-while the actual weight data is being fetched from disk.
+ZML creates an MLIR representation of the computation when we compile that
+struct's forward method. For compilation, only the _Tensors_ are required. No
+actual tensor data is needed at this step. This is important for large models:
+we can compile them while the actual weight data is being fetched from disk.
 
-To accomplish this, ZML uses a _TensorStore_. The _TensorStore_ loads everything
-that is required to make _Tensors_ and later materialize them to _Buffers_. In our
-example though, we won't even use a _TensorStore_ as it's optional. We will directly
-create tensors using their shape and data type.
+To accomplish this for real checkpoints, ZML uses a _TensorStore_
+(`zml.io.TensorStore`). The _TensorStore_ maps names/ids to sources so you can
+build _Tensors_ and later materialize them to _Buffers_ (via `zml.io.Loader`).
+In our example though, we won't use a _TensorStore_. We will directly create
+tensors using their shape and data type.
 
-After compilation is done, we get what we call an _Executable_. From this _Executable_ 
-we can create _Args_ and _Results_, two structs that will store respectively the inputs 
-and outputs of a computation done with an _Executable_.
+After compilation is done, we get what we call an _Exe_ (`zml.Exe`). From this _Exe_
+we can create _Args_ and _Results_, two structs that will store respectively the inputs
+and outputs of a computation done with an _Exe_.
 
 **So the steps for us are:**
 
-- describe the computation as ZML _Module_, using tensor operations
-- initialize the _Module_
-- compile the _Module_ to produce an _Executable_
-- make a "bufferized" version of the _Module_, containing the actual data on the 
+- describe the computation as a ZML model struct (often called a module in prose), using tensor operations
+- initialize the model
+- compile it to produce an _Exe_
+- make a "bufferized" version of the model (`zml.Bufferized(T)`), containing the actual data on the
   computation device
-- prepare the _Args_ and _Results_ of a computation and call the _Executable_
+- prepare the _Args_ and _Results_ of a computation and call the _Exe_
 - get the result back to CPU memory and print it
 
 If you like to read more about the underlying concepts of the above, please see
@@ -146,9 +146,9 @@ boilerplate code for allocations and io.
 
 We also get our ZML CPU platform `platform` automatically.
 
-### Initializing the Module
+### Initializing the model
 
-Next, we need to initialize the module so that we can compile it.
+Next, we need to initialize the model so that we can compile it.
 
 ```zig
 const layer: Layer = .{
@@ -158,11 +158,11 @@ const layer: Layer = .{
 ```
 
 As you can see, it's pretty simple. You can create _Tensors_ from their shape and data type.
-Alternatively, you are free to add an arbitrary `.init()` function to your _Module_ if the
+Alternatively, you are free to add an arbitrary `.init()` function to your model if the
 initialization code is complex.
 
 
-### Compiling our Module for the accelerator
+### Compiling for the accelerator
 
 We're only going to use the CPU for our simple model, but we need to compile the
 `forward()` function nonetheless:
@@ -171,13 +171,13 @@ We're only going to use the CPU for our simple model, but we need to compile the
 // Our computation require an input tensor
 const input: zml.Tensor = .init(.{3}, .f16);
 
-var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
-defer executable.deinit();
+var exe = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
+defer exe.deinit();
 ```
 
-You might wonder what this `sharding` variable is for ? ZML supports sharding tensors across multiple devices,
-and the `compile()` function needs to know how the tensors are sharded in order to compile the module correctly.
-For this simple example, we just replicate the tensors across all devices for simplicity.
+The last argument is `zml.CompilationOptions` (here empty `.{}`). You can pass
+shardings and a partitioner when targeting multiple devices; see `examples/sharding`
+and `zml.Sharding`. For this example, defaults are enough (replicated across devices).
 
 
 ### Creating the "bufferized" Model
@@ -201,14 +201,14 @@ defer layer_buffers.bias.?.deinit();
 
 ### Calling / running the Model
 
-Before being able to run our _Executable_ there is still two steps:
+Before being able to run our _Exe_ there are still two steps:
 - create the input buffer
 - create and fill the _Args_ and _Results_ structs
 
-To create the `input` we already know how to do it, as we did it for the _Module_ 
+To create the `input` we already know how to do it, as we did it for the model
 buffers.
 
-To create the _Args_ and _Results_, the _Executable_ exposes two conveniences.
+To create the _Args_ and _Results_, the _Exe_ exposes two conveniences.
 
 ```zig
 // create the input buffer
@@ -217,17 +217,17 @@ var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replic
 defer input_buffer.deinit();
 
 // create the Args and Results structs
-var args = try executable.args(allocator);
+var args = try exe.args(allocator);
 defer args.deinit(allocator);
 
-var results = try executable.results(allocator);
+var results = try exe.results(allocator);
 defer results.deinit(allocator);
 
 // fill the Args
 args.set(.{ layer_buffers, input_buffer });
 
-// call our executable 
-executable.call(args, &results);
+// call our executable
+exe.call(args, &results);
 
 // Retrieve the resulting buffer
 var result = results.get(zml.Buffer);
@@ -357,8 +357,8 @@ pub fn main(init: std.process.Init) !void {
     // Our computation require an input tensor
     const input: zml.Tensor = .init(.{3}, .f16);
 
-    var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
-    defer executable.deinit();
+    var exe = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
+    defer exe.deinit();
 
     const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 2.0, 3.0 }));
     const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 1.0, 1.0 }));
@@ -375,17 +375,17 @@ pub fn main(init: std.process.Init) !void {
     defer input_buffer.deinit();
 
     // create the Args and Results structs
-    var args = try executable.args(allocator);
+    var args = try exe.args(allocator);
     defer args.deinit(allocator);
 
-    var results = try executable.results(allocator);
+    var results = try exe.results(allocator);
     defer results.deinit(allocator);
 
     // fill the Args
     args.set(.{ layer_buffers, input_buffer });
 
     // call our executable
-    executable.call(args, &results);
+    exe.call(args, &results);
 
     // Retrieve the resulting buffer
     var result = results.get(zml.Buffer);

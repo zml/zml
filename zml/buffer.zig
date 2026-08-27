@@ -26,8 +26,8 @@ test {
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
 /// * contains a handle that the ZML runtime can use to convert into a physical address, but there is no guarantee this address is visible from the CPU.
-/// * loading weights from disk directly to the `device zml.aio.loadBuffers`
-/// * can be created by calling `HostBuffer.toDevice(platform)`.
+/// * weights can be loaded from disk onto device via `zml.io.Loader` / `TensorStore`.
+/// * can be created from a host `Slice` with `Buffer.fromSlice` / `fromSliceOpts`.
 pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
