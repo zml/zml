@@ -65,7 +65,7 @@ pub const module = struct {
         platform_: *const Platform,
         opts: Compiler.Options,
     ) Compiler.Error!Exe {
-        return Compiler.compile(io_, allocator, platform_, func, args, opts);
+        return Compiler.compile(allocator, io_, platform_, func, args, opts);
     }
 };
 

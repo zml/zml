@@ -251,20 +251,20 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
 pub fn Typed(comptime func: anytype) type {
     return struct {
         pub fn compile(
-            io: std.Io,
             allocator: std.mem.Allocator,
+            io: std.Io,
             platform: *const Platform,
             opts: Options,
             args: std.meta.ArgsTuple(@TypeOf(func)),
         ) Error!Exe {
-            return Compiler.compile(io, allocator, platform, func, args, opts);
+            return Compiler.compile(allocator, io, platform, func, args, opts);
         }
     };
 }
 
 pub fn compile(
-    io: std.Io,
     allocator: std.mem.Allocator,
+    io: std.Io,
     platform: *const Platform,
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
