@@ -23,8 +23,6 @@ const log = std.log.scoped(.minimax_h3);
 
 const HostLayout = struct {
     positions: []f32,
-    timestep_indices: []u32,
-    adaln_indices: []u32,
     text_indices: []u32,
     video_indices: []u32,
     audio_indices: []u32,
@@ -38,18 +36,12 @@ const HostLayout = struct {
             positions[i * 3 + 2] = pos.w;
         }
 
-        const timestep_indices = try allocator.dupe(u32, layout.timestep_indices);
-        errdefer allocator.free(timestep_indices);
-        const adaln_indices = try pipeline.adalnIndices(allocator, layout);
-        errdefer allocator.free(adaln_indices);
         const text_indices = try allocator.dupe(u32, layout.text_indices);
         errdefer allocator.free(text_indices);
         const video_indices = try allocator.dupe(u32, layout.video_indices);
         errdefer allocator.free(video_indices);
         return .{
             .positions = positions,
-            .timestep_indices = timestep_indices,
-            .adaln_indices = adaln_indices,
             .text_indices = text_indices,
             .video_indices = video_indices,
             .audio_indices = try allocator.dupe(u32, layout.audio_indices),
@@ -58,8 +50,6 @@ const HostLayout = struct {
 
     fn deinit(self: HostLayout, allocator: std.mem.Allocator) void {
         allocator.free(self.positions);
-        allocator.free(self.timestep_indices);
-        allocator.free(self.adaln_indices);
         allocator.free(self.text_indices);
         allocator.free(self.video_indices);
         allocator.free(self.audio_indices);
@@ -429,7 +419,6 @@ fn denoise(
     loaded: *const dit.LoadedModel,
     store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
-    opts: pipeline.Options,
     geo: pipeline.Geometry,
     text: zml.Buffer,
     text_len: u32,
@@ -473,6 +462,29 @@ fn denoise(
 
     var host = try HostLayout.fromLayout(allocator, layout);
     defer host.deinit(allocator);
+
+    const flat_n = steps * packing.timestep_slot_count;
+    const flat_t = try allocator.alloc(f32, flat_n);
+    defer allocator.free(flat_t);
+    const all_tidx = try allocator.alloc(u32, steps * seq);
+    defer allocator.free(all_tidx);
+    const all_adaln = try allocator.alloc(u32, steps * seq);
+    defer allocator.free(all_adaln);
+    const row_ts = try allocator.alloc(f32, seq);
+    defer allocator.free(row_ts);
+    for (0..steps) |i| {
+        const tidx = all_tidx[i * seq ..][0..seq];
+        _ = packing.writeRowPlan(
+            layout,
+            schedules.video.timesteps[i],
+            schedules.audio.timesteps[i],
+            row_ts,
+            tidx,
+            flat_t[i * packing.timestep_slot_count ..][0..packing.timestep_slot_count],
+        );
+        packing.writeAdalnIndices(all_adaln[i * seq ..][0..seq], tidx, layout.token_tags);
+    }
+
     var pos_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq, .ax = 3 }, .f32), host.positions);
     defer pos_buf.deinit();
     var video_idx = try buffers.fromItems(io, platform, .init(.{ .s = geo.video_tokens }, .u32), host.video_indices);
@@ -481,17 +493,17 @@ fn denoise(
     defer audio_idx.deinit();
     var text_idx = try buffers.fromItems(io, platform, .init(.{ .s = text_len }, .u32), host.text_indices);
     defer text_idx.deinit();
-    var adaln_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), host.adaln_indices);
+    var adaln_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[0..seq]);
     defer adaln_buf.deinit();
-    var time_idx = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), host.timestep_indices);
+    var time_idx = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[0..seq]);
     defer time_idx.deinit();
     if (dump_dir) |dir| {
         try dumpHostF32(io, dir, "positions", host.positions, &.{ @intCast(seq), 3 });
         try dumpHostU32(io, dir, "video_indices", host.video_indices, &.{@intCast(geo.video_tokens)});
         try dumpHostU32(io, dir, "audio_indices", host.audio_indices, &.{@intCast(geo.audio_tokens)});
         try dumpHostU32(io, dir, "text_indices", host.text_indices, &.{@intCast(text_len)});
-        try dumpHostU32(io, dir, "adaln_indices", host.adaln_indices, &.{@intCast(seq)});
-        try dumpHostU32(io, dir, "timestep_indices", host.timestep_indices, &.{@intCast(seq)});
+        try dumpHostU32(io, dir, "adaln_indices", all_adaln[0..seq], &.{@intCast(seq)});
+        try dumpHostU32(io, dir, "timestep_indices", all_tidx[0..seq], &.{@intCast(seq)});
         const tags = try allocator.alloc(u32, layout.token_tags.len);
         defer allocator.free(tags);
         for (layout.token_tags, tags) |tag, *dst| dst.* = tag;
@@ -524,14 +536,6 @@ fn denoise(
     defer cos.deinit();
     defer sin.deinit();
 
-    const flat_n = steps * packing.timestep_slot_count;
-    const flat_t = try allocator.alloc(f32, flat_n);
-    defer allocator.free(flat_t);
-    for (0..steps) |i| {
-        const video_t = schedules.video.timesteps[i];
-        const audio_t = 1.0 - scheduler_mod.timeShiftSigma(1.0 - video_t, opts.video_shift, opts.audio_shift);
-        packing.writeTimesteps(flat_t[i * packing.timestep_slot_count ..][0..packing.timestep_slot_count], video_t, audio_t);
-    }
     var flat_buf = try buffers.fromItems(io, platform, .init(.{ .n = flat_n }, .f32), flat_t);
     defer flat_buf.deinit();
 
@@ -683,7 +687,13 @@ fn denoise(
     while (step_i < steps) : (step_i += 1) {
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const video_t = schedules.video.timesteps[step_i];
-        const audio_t = 1.0 - scheduler_mod.timeShiftSigma(1.0 - video_t, opts.video_shift, opts.audio_shift);
+        const audio_t = schedules.audio.timesteps[step_i];
+        if (step_i != 0) {
+            adaln_buf.deinit();
+            adaln_buf = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_adaln[step_i * seq ..][0..seq]);
+            time_idx.deinit();
+            time_idx = try buffers.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[step_i * seq ..][0..seq]);
+        }
         var step_buf = try scalarU32(io, platform, @intCast(step_i));
         defer step_buf.deinit();
 
@@ -1029,7 +1039,6 @@ pub fn generate(
         &models.dit,
         &models.dit_store,
         shardings,
-        req.opts,
         req.geo,
         text,
         @intCast(req.tokens.len),
