@@ -251,8 +251,8 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
 pub fn Typed(comptime func: anytype) type {
     return struct {
         pub fn compile(
-            allocator: std.mem.Allocator,
             io: std.Io,
+            allocator: std.mem.Allocator,
             platform: *const Platform,
             opts: Options,
             args: std.meta.ArgsTuple(@TypeOf(func)),
@@ -263,11 +263,11 @@ pub fn Typed(comptime func: anytype) type {
 }
 
 pub fn compile(
-    allocator: std.mem.Allocator,
     io: std.Io,
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
-    platform: *const Platform,
     opts: Options,
 ) Error!Exe {
     // TODO: Here we have somewhat of a requirement

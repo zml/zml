@@ -50,6 +50,20 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
+pub const module = struct {
+    /// Deprecated, use `platform.compile` or `zml.Compiler.compile`
+    pub fn compile(
+        allocator: std.mem.Allocator,
+        io_: std.Io,
+        comptime func: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(func)),
+        platform_: *const Platform,
+        opts: Compiler.Options,
+    ) Compiler.Error!Exe {
+        return Compiler.compile(io_, allocator, platform_, func, args, opts);
+    }
+};
+
 test "zml" {
     std.testing.refAllDecls(@This());
 }

@@ -1343,7 +1343,7 @@ test scatterConfig {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -2622,7 +2622,7 @@ test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

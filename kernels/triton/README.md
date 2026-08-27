@@ -196,7 +196,7 @@ pub fn forward(self: Model, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
 
 `call` is a thin wrapper over `Kernel.emit(...)` + `zml.ops.triton(...)`.
 It must be called from inside a `Compilation` (i.e., during
-`zml.module.compile(...)`) — `emit` builds the TTIR string in its own
+`zml.Compiler.compile(...)`) — `emit` builds the TTIR string in its own
 throwaway context; `zml.ops.triton(...)` drops the `stablehlo.custom_call`
 into the model's context. For offline tools, `Kernel.emit(allocator, cfg)`
 gives you just the TTIR string.

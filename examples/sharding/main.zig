@@ -7,7 +7,7 @@ const log = std.log.scoped(.sharding);
 pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &.{
-        .{ .scope = .@"zml/module", .level = .debug },
+        .{ .scope = .@"zml/compiler", .level = .debug },
     },
 };
 

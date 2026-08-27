@@ -2748,7 +2748,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2900,7 +2900,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -3125,7 +3125,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -3664,7 +3664,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+        var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3717,7 +3717,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+        var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();

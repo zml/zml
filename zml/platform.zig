@@ -576,7 +576,7 @@ pub const Platform = struct {
         args: std.meta.ArgsTuple(@TypeOf(func)),
         opts: zml.Compiler.Options,
     ) !Exe {
-        return zml.Compiler.compile(allocator, io, func, args, self, opts);
+        return zml.Compiler.compile(io, allocator, self, func, args, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
