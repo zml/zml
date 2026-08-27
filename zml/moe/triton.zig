@@ -735,18 +735,25 @@ pub fn fusedExpertsImpl_fp4(
         .token = @divExact(@as(i64, @intCast(input.count())), input.dim(.d)),
         .d = input.dim(.d),
     });
+    const num_tokens = x.dim(.token);
+    const num_routes: i64 = @intCast(topk_ids.count());
+    stdx.debug.assert(@mod(num_routes, num_tokens) == 0, "expected {} routing ids to be divisible by {} tokens", .{ num_routes, num_tokens });
+    stdx.debug.assert(topk_weights.count() == topk_ids.count(), "expected matching routing id and weight counts, got {} and {}", .{ topk_ids.count(), topk_weights.count() });
+    const topk = @divExact(num_routes, num_tokens);
+    const flat_topk_ids = topk_ids.reshape(.{ .token = num_tokens, .topk = topk });
+    const flat_topk_weights = topk_weights.reshape(.{ .token = num_tokens, .topk = topk });
     const kernel_cfg = getBestConfig(
-        @intCast(topk_ids.dim(.b)),
-        @intCast(topk_ids.dim(.eid)),
+        @intCast(num_tokens),
+        @intCast(topk),
         @intCast(weights_gate_up.dim(.expert)),
     );
     const num_experts = weights_gate_up.dim(.expert);
-    const aligned_routing = prepareRouting(topk_ids, num_experts, @intCast(kernel_cfg.block_m));
+    const aligned_routing = prepareRouting(flat_topk_ids, num_experts, @intCast(kernel_cfg.block_m));
     const routing = prepareFp4Routing(
         aligned_routing,
-        topk_ids,
-        topk_weights,
-        x.dim(.token),
+        flat_topk_ids,
+        flat_topk_weights,
+        num_tokens,
         num_experts,
         @intCast(kernel_cfg.block_m),
     );
@@ -1048,7 +1055,7 @@ fn prepareFp4Routing(
     num_experts: i64,
     block_m: i64,
 ) Fp4Routing {
-    const topk = topk_ids.dim(.eid);
+    const topk = topk_ids.dim(.topk);
     const num_routes = aligned.num_assignments;
     const num_rows = if (aligned.naive_block_assignment)
         num_routes
