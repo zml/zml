@@ -780,6 +780,7 @@ pub fn fusedExpertsImpl_fp4(
             .block_m = kernel_cfg.block_m,
             .block_n = kernel_cfg.block_n,
             .block_k = kernel_cfg.block_k,
+            .split_k = kernel_cfg.split_k,
             .group_m = kernel_cfg.group_m,
             .num_warps = kernel_cfg.num_warps,
             .num_stages = kernel_cfg.num_stages,
@@ -806,6 +807,7 @@ pub fn fusedExpertsImpl_fp4(
             .block_m = kernel_cfg.block_m,
             .block_n = kernel_cfg.block_n,
             .block_k = kernel_cfg.block_k,
+            .split_k = kernel_cfg.split_k,
             .group_m = kernel_cfg.group_m,
             .num_warps = kernel_cfg.num_warps,
             .num_stages = kernel_cfg.num_stages,
@@ -831,6 +833,7 @@ const KernelConf = struct {
     block_m: u32,
     block_n: u32,
     block_k: u32,
+    split_k: u32 = 1,
     group_m: u32,
     num_warps: u32,
     num_stages: u32,
@@ -1011,6 +1014,15 @@ fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
         config.num_stages = 2;
     }
 
+    config.split_k = if (num_tokens <= 4)
+        8
+    else if (num_tokens <= 16)
+        4
+    else if (num_tokens <= 32)
+        2
+    else
+        1;
+
     return config;
 }
 
@@ -1027,30 +1039,6 @@ fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
     }
 
     return configForTokenBucket(best_num_tokens);
-}
-
-fn getCuCount() usize {
-    const platform = zml.module.CompilationContext.current().platform;
-    if (platform.devices.len == 0) return 1;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
-    if (attribute.int64 <= 0) return 1;
-    return @intCast(attribute.int64);
-}
-
-fn selectFp4SplitK(num_k_tiles: i64, direct_programs: i64, cu_count_: usize) i32 {
-    if (num_k_tiles < 2 or direct_programs <= 0) return 1;
-
-    const cu_count: i64 = @intCast(@max(cu_count_, 1));
-    // Skinny decode GEMMs need several resident programs per CU to hide the
-    // latency of streaming expert weights. Cap the workspace/reduction cost.
-    const target_programs = cu_count * 4;
-    const max_split_k: i32 = 8;
-    if (direct_programs >= target_programs) return 1;
-
-    const required_splits = std.math.divCeil(i64, target_programs, direct_programs) catch unreachable;
-    var split_k: i32 = 1;
-    while (split_k < max_split_k and @as(i64, split_k) * 2 <= num_k_tiles and split_k < required_splits) split_k *= 2;
-    return split_k;
 }
 
 fn tokenDistance(a: u32, b: u32) u32 {
@@ -1170,6 +1158,7 @@ const GemmOpts = struct {
     block_m: u32,
     block_n: u32,
     block_k: u32,
+    split_k: u32,
     group_m: u32,
     num_warps: u32,
     num_stages: u32,
@@ -1200,7 +1189,10 @@ fn runGemm(
     if (@mod(contract_k, block_k) != 0) return error.InvalidShape;
     const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
     const direct_programs = opts.routing.grid_m * grid_n;
-    const split_k = selectFp4SplitK(@divExact(contract_k, block_k), direct_programs, getCuCount());
+    const num_k_tiles = @divExact(contract_k, block_k);
+    var split_k: i32 = @intCast(opts.split_k);
+    stdx.debug.assert(std.math.isPowerOfTwo(split_k), "expected split_k ({}) to be a power of two", .{split_k});
+    while (split_k > num_k_tiles) split_k = @divExact(split_k, 2);
     const has_gammas = opts.gammas != null;
     const gathered_input = if (opts.gather) |gather| blk: {
         const token_ids = gather.divByConst(opts.routing.gather_divisor).withTags(.{.route});
@@ -1327,12 +1319,9 @@ fn scalarI64(v: i64) zml.Tensor {
     return zml.Tensor.constant(.{ .i64 = v }).reshape(.{1});
 }
 
-test "MXFP4 split-K launch selection" {
-    try std.testing.expectEqual(@as(i32, 1), selectFp4SplitK(1, 1, 132));
-    try std.testing.expectEqual(@as(i32, 8), selectFp4SplitK(48, 64, 132));
-    try std.testing.expectEqual(@as(i32, 4), selectFp4SplitK(48, 200, 132));
-    try std.testing.expectEqual(@as(i32, 2), selectFp4SplitK(48, 300, 132));
-    try std.testing.expectEqual(@as(i32, 1), selectFp4SplitK(48, 528, 132));
-    try std.testing.expectEqual(@as(i32, 2), selectFp4SplitK(2, 1, 132));
-    try std.testing.expectEqual(@as(i32, 4), selectFp4SplitK(6, 1, 132));
+test "MXFP4 configuration enables split-K for decode" {
+    try std.testing.expectEqual(@as(u32, 8), getBestConfig(1, 8, 128).split_k);
+    try std.testing.expectEqual(@as(u32, 4), getBestConfig(8, 8, 128).split_k);
+    try std.testing.expectEqual(@as(u32, 2), getBestConfig(32, 8, 128).split_k);
+    try std.testing.expectEqual(@as(u32, 1), getBestConfig(64, 8, 128).split_k);
 }
