@@ -575,6 +575,24 @@ pub const LayerNorm = struct {
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
+    pub fn fromStore(
+        store: zml.io.TensorStore.View,
+        weight_name: []const u8,
+        bias_name: ?[]const u8,
+        partitions: anytype,
+        eps: f32,
+    ) LayerNorm {
+        return .{
+            .weight = store.createTensor(weight_name, .{.d}, partitions),
+            .bias = if (bias_name) |name| store.maybeCreateTensor(name, .{.d}, partitions) else null,
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
+        zml.Buffer.deinitAll(LayerNorm, self);
+    }
+
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
@@ -593,6 +611,27 @@ pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
     return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
 }
+
+pub const RmsNorm = struct {
+    weight: Tensor,
+    eps: f32 = 1e-6,
+
+    pub fn init(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", tagz, .replicated),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        zml.Buffer.deinitAll(RmsNorm, self);
+    }
+
+    pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+        const axis = self.weight.shape().tag(0);
+        return rmsNorm(x, axis, self.eps).mul(self.weight.convert(x.dtype()).broad(x.shape()));
+    }
+};
 
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
@@ -815,6 +854,20 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
     return zml.nn.mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
+}
+
+/// HuggingFace `rotate_half` rotary: `x * cos + rotate_half(x) * sin`.
+/// `cos`/`sin` last dim is the rotary dim; remaining last-dim of `x` passes through.
+pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
+    const rotary_dim = cos.dim(-1);
+    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
+    const half = @divExact(rotary_dim, 2);
+    const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
+    const x2 = x_rot.slice1d(-1, .{ .start = half, .end = rotary_dim });
+    const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+    const y = x_rot.mul(cos.broad(x_rot.shape())).add(rotated.mul(sin.broad(x_rot.shape())));
+    if (rotary_dim == x.dim(-1)) return y;
+    return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
