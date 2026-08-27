@@ -164,6 +164,7 @@ zig_library(
         "//pjrt",
         "//platforms",
         "//platforms/tpu:ragged_paged",
+        "//platforms/cuda/flashinfer_cutlass_moe",
         "//stdx",
         "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
         "//upb",
@@ -179,7 +180,6 @@ zig_library(
     }) + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",
-            "//platforms/cuda/flashinfer_cutlass_moe",
         ],
         "//conditions:default": [],
     }),
