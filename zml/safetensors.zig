@@ -253,7 +253,7 @@ pub const TensorRegistry = struct {
 
     tensors: Tensors,
     metadata: Metadatas,
-    /// Layer stem → Hadamard group. Filled from small uint8 JSON siblings (`convrot`).
+    /// Layer stem → Hadamard group. Filled only by `ingestConvrotMarkers`.
     convrot_group: std.StringHashMapUnmanaged(u32) = .{},
 
     mutex: std.Io.Mutex = .init,
@@ -313,6 +313,15 @@ pub const TensorRegistry = struct {
         self.metadata.deinit(allocator);
         self.convrot_group.deinit(allocator);
         self.arena.deinit();
+    }
+
+    /// MiniMax int8 ConvRot JSON siblings (`convrot` / `convrot_groupsize`).
+    /// Not run during parse. Call after open when the checkpoint may contain them.
+    pub fn ingestConvrotMarkers(self: *TensorRegistry, io: std.Io) !void {
+        var it = self.tensors.iterator();
+        while (it.next()) |entry| {
+            try ingestConvrotMarker(self, io, entry.value_ptr.*);
+        }
     }
 
     pub fn mergeMetadata(
@@ -460,7 +469,6 @@ pub fn parseSafetensors(
         };
 
         try registry.registerTensor(tensor);
-        try ingestConvrotMarker(registry, io, file, tensor);
     }
 }
 
@@ -494,13 +502,14 @@ pub fn convrotGroupFromMarker(bytes: []const u8) error{UnsupportedConvrotGroup}!
 fn ingestConvrotMarker(
     registry: *TensorRegistry,
     io: std.Io,
-    file: std.Io.File,
     tensor: Tensor,
 ) !void {
     const n = tensor.byteSize();
     if (tensor.shape.dtype() != .u8 or tensor.shape.rank() > 1 or n == 0 or n > quant_marker_max_bytes) return;
     var bytes: [quant_marker_max_bytes]u8 = undefined;
     const slice = bytes[0..@intCast(n)];
+    const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
+    defer file.close(io);
     const got = try file.readPositional(io, &.{slice}, tensor.offset);
     if (got != @as(usize, @intCast(n))) return error.UnexpectedEndOfFile;
     const group = (try convrotGroupFromMarker(slice)) orelse return;
