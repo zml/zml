@@ -733,6 +733,7 @@ pub const Activation = union(enum) {
     elu: f32,
     silu,
     gelu,
+    gelu_erf,
     quick_gelu,
 
     pub fn forward(self: Activation, x: Tensor) Tensor {
@@ -742,6 +743,7 @@ pub const Activation = union(enum) {
             .relu => x.relu(),
             .silu => x.silu(),
             .gelu => x.gelu(),
+            .gelu_erf => x.geluErf(),
             .elu => |alpha| elu(x, alpha),
             .quick_gelu => x.quickGelu(),
             .leakyReLU => |slope| x.leakyReLU(slope),

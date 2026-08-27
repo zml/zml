@@ -138,26 +138,6 @@ const LayerNorm = struct {
     }
 };
 
-/// Official merger `nn.GELU()` is erf, not `gelu_pytorch_tanh`.
-fn geluErf(x: zml.Tensor) zml.Tensor {
-    const x_f = x.convert(.f32);
-    const z = x_f.scale(std.math.sqrt(0.5));
-    return x_f.mul(erfApprox(z).addConstant(1)).scale(0.5).convert(x.dtype());
-}
-
-fn erfApprox(x: zml.Tensor) zml.Tensor {
-    const x_f = x.convert(.f32);
-    const ax = x_f.abs();
-    const t = ax.scale(0.3275911).addConstant(1).powByConst(-1);
-    var poly = t.scale(1.061405429).addConstant(-1.453152027);
-    poly = t.mul(poly).addConstant(1.421413741);
-    poly = t.mul(poly).addConstant(-0.284496736);
-    poly = t.mul(poly).addConstant(0.254829592);
-    poly = t.mul(poly);
-    const erfc = poly.mul(ax.mul(ax).negate().exp());
-    return x_f.sign().mul(erfc.negate().addConstant(1));
-}
-
 fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
     const x_f = x.convert(.f32);
     const half = @divExact(x_f.dim(-1), 2);
@@ -291,7 +271,9 @@ pub const Merger = struct {
             x = self.norm.forward(x);
             x = x.splitAxis(.s, .{ .s = grouped, .m = self.merge }).merge(.{ .d = .{ .m, .d } });
         }
-        x = asLinear(self.fc2, geluErf(asLinear(self.fc1, x)).rename(.{ .dout = .d })).rename(.{ .dout = .d });
+        const h = asLinear(self.fc1, x);
+        // Official `nn.GELU()` is erf in f32.
+        x = asLinear(self.fc2, h.convert(.f32).geluErf().convert(h.dtype()).rename(.{ .dout = .d })).rename(.{ .dout = .d });
         return .{ .tokens = x };
     }
 };

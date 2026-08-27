@@ -1640,6 +1640,25 @@ pub const Tensor = struct {
         return tanh_.addConstant(1).mul(x).scale(0.5);
     }
 
+    /// Exact GELU: `0.5 * x * (1 + erf(x / √2))` (`nn.GELU()`).
+    /// `gelu` is the tanh approximation (`gelu_pytorch_tanh`).
+    pub fn geluErf(x: Tensor) Tensor {
+        return x.mul(x.scale(std.math.sqrt(0.5)).erf().addConstant(1)).scale(0.5);
+    }
+
+    /// Abramowitz–Stegun erf (max error ~1.5e-7). StableHLO has no `erf`.
+    pub fn erf(self: Tensor) Tensor {
+        const ax = self.abs();
+        const t = ax.scale(0.3275911).addConstant(1).powByConst(-1);
+        var poly = t.scale(1.061405429).addConstant(-1.453152027);
+        poly = t.mul(poly).addConstant(1.421413741);
+        poly = t.mul(poly).addConstant(-0.284496736);
+        poly = t.mul(poly).addConstant(0.254829592);
+        poly = t.mul(poly);
+        const erfc = poly.mul(ax.mul(ax).negate().exp());
+        return self.sign().mul(erfc.negate().addConstant(1));
+    }
+
     /// Returns a Tensor containing an approximation of the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
     ///
     /// It's an even more crude approximation than gelu.
