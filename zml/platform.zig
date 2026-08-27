@@ -939,6 +939,40 @@ test "platform accepts non-power-of-two CPU device counts" {
     }
 }
 
+test "platform gcd-fits a dim that does not divide the device count" {
+    {
+        var probe = Platform.init(
+            std.testing.allocator,
+            std.testing.io,
+            .cpu,
+            .{ .cpu = .{ .device_count = 4 } },
+        ) catch return error.SkipZigTest;
+        probe.deinit(std.testing.allocator, std.testing.io);
+    }
+
+    var platform = try Platform.init(
+        std.testing.allocator,
+        std.testing.io,
+        .cpu,
+        .{ .cpu = .{ .device_count = 3 } },
+    );
+    defer platform.deinit(std.testing.allocator, std.testing.io);
+
+    const sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
+    const shape = zml.Shape.init(.{ .model = 8 }, .f32).withPartitioning(.{ .model = .model });
+    const placement = try sharding.placement(shape);
+    try std.testing.expectEqual(@as(i64, 8), placement.shape.dim(0));
+
+    var host: [8]f32 = .{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    var buffer: zml.Buffer = try .fromSlice(std.testing.io, platform, .init(shape, std.mem.sliceAsBytes(&host)), sharding);
+    defer buffer.deinit();
+    try std.testing.expectEqual(@as(u32, 3), buffer.numShards());
+
+    const round_trip = try buffer.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer round_trip.free(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &host, round_trip.items(f32));
+}
+
 test "platform compiles and runs a 3-way sharded add" {
     {
         var probe = Platform.init(
