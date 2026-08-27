@@ -623,7 +623,7 @@ pub const SelfAttn = struct {
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = zml.module.CompilationContext.current().partitioning.shardableDim(
+        const kv_head_sharding = zml.Compiler.current().partitioning.shardableDim(
             k.shape().withPartitioning(.{ .h = .model }),
             .h,
             q.dim(.h),

@@ -5,7 +5,7 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const CompilationContext = @import("module.zig").CompilationContext;
+const Compiler = @import("Compiler.zig");
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
@@ -92,7 +92,7 @@ pub const Tensor = struct {
     ///
     /// The shape is derived from the type of the mlir.Value.
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
         const n = ranked_tensor.rank();
 
@@ -153,7 +153,7 @@ pub const Tensor = struct {
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const ctx = CompilationContext.currentOrNull() orelse {
+        const ctx = Compiler.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
             return res;
@@ -203,7 +203,7 @@ pub const Tensor = struct {
 
     /// Copy the given tensor to the specified memory.
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
@@ -240,7 +240,7 @@ pub const Tensor = struct {
     /// Copy all the given tensor to the specified memory.
     /// The input struct is copied on the stack, so it must be a simple flat struct without pointers.
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return flat_tensors,
             .cuda, .rocm, .tpu, .oneapi => {},
@@ -258,7 +258,7 @@ pub const Tensor = struct {
     /// Mark the given input tensor as being physically located on a specific memory.
     /// Has no effect if the input tensor is not an executable input.
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
@@ -276,7 +276,7 @@ pub const Tensor = struct {
     /// Mark all the given input tensors as being physically located on a specific memory
     /// see `zml.Tensor.onMemory`
     pub fn onMemoryAll(tensors: anytype, kind: Memory.Kind) void {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
             .cpu, .neuron, .metal => return,
@@ -311,10 +311,10 @@ pub const Tensor = struct {
 
     /// Returns the mlir.Value associated with the Tensor.
     ///
-    /// This will fail if used outside of a compilation context.
+    /// This will fail if used outside of a Compiler context.
     pub fn value(self: Tensor) *const mlir.Value {
-        if (CompilationContext.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
-            return CompilationContext.current().currentScope().block.argument(argument_index);
+        if (Compiler.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
+            return Compiler.current().currentScope().block.argument(argument_index);
         } else if (self._value) |v| {
             return v;
         } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
@@ -328,7 +328,7 @@ pub const Tensor = struct {
     /// is not allowed to reuse the donated input buffer after the call.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
-        const compilation_context = CompilationContext.current();
+        const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
         if (scope.id_to_argument.get(origin.id)) |argument_index| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
@@ -2093,7 +2093,7 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         var buffer = ctx.alloc(*const mlir.Value, tensors.len);
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
@@ -2125,7 +2125,7 @@ pub const Tensor = struct {
             stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         var reshaped = ctx.alloc(Tensor, tensors.len);
         for (tensors, 0..) |tensor, i| {
             reshaped[i] = tensor.reshape(res_shape);
@@ -2476,7 +2476,7 @@ pub const Tensor = struct {
     }
 
     pub fn uninitialized(sh: Shape) Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         const buffer_type = mlir.Type.memRef(
             mlirx.Type.fromDType(ctx.mlir_ctx, sh.dtype()),
             sh.dims(),
@@ -2584,7 +2584,7 @@ pub const Tensor = struct {
     }
 
     pub fn optimizationBarrier(self: Tensor) Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
 
         const op = dialects.stablehlo.optimizationBarrier(
             ctx.mlir_ctx,
@@ -2748,7 +2748,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -2900,7 +2900,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -3125,7 +3125,7 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+            var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
@@ -3500,7 +3500,7 @@ pub const Tensor = struct {
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         var result: SortRes = switch (ctx.platform.target) {
             // Work around https://github.com/aws-neuron/aws-neuron-sdk/issues/1339 until Neuron's sort+slice rewrite uses the slice size as k.
             .neuron => blk: {
@@ -3664,7 +3664,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+        var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3703,7 +3703,7 @@ pub const Tensor = struct {
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
         const len: usize = if (tail_chunk_size == 0) n_chunks else n_chunks + 1;
-        const chunks = CompilationContext.current().alloc(Tensor, len);
+        const chunks = Compiler.current().alloc(Tensor, len);
 
         for (0.., chunks) |i, *chunk| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
@@ -3717,7 +3717,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+        var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
@@ -3760,7 +3760,7 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const res = CompilationContext.current().alloc(Tensor, split_sizes.len);
+        const res = Compiler.current().alloc(Tensor, split_sizes.len);
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
@@ -4485,7 +4485,7 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
-        const ctx = CompilationContext.current();
+        const ctx = Compiler.current();
         const full_name = std.fmt.allocPrint(ctx.arena.allocator(), "{s}: {f}", .{ name, input.shape() }) catch @panic("OOM");
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
@@ -4501,25 +4501,25 @@ pub const Tensor = struct {
     }
 
     fn mlirCtx() *mlir.Context {
-        return CompilationContext.current().mlir_ctx;
+        return Compiler.current().mlir_ctx;
     }
 
     fn currentBlock() *mlir.Block {
-        return CompilationContext.current().currentScope().block;
+        return Compiler.current().currentScope().block;
     }
 
     /// Returns the donation data of the tensor.
     pub fn donation(self: Tensor) ?usize {
-        return CompilationContext.current().currentScope().id_to_donation.get(self.id);
+        return Compiler.current().currentScope().id_to_donation.get(self.id);
     }
 
     /// Returns the output memory kind of the tensor.
     pub fn outputMemoryKind(self: Tensor) Memory.Kind {
-        return CompilationContext.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
+        return Compiler.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
     }
 
     pub fn inputMemoryKind(self: Tensor) ?Memory.Kind {
-        return CompilationContext.current().currentScope().id_to_input_memory_kind.get(self.id);
+        return Compiler.current().currentScope().id_to_input_memory_kind.get(self.id);
     }
 };
 

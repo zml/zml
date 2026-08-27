@@ -79,7 +79,7 @@ pub const Linear = struct {
         var lhs_scale: ?Tensor = null;
         var undo: ?Tensor = null;
 
-        const platform = zml.module.CompilationContext.current().platform;
+        const platform = zml.Compiler.current().platform;
         if (q.scheme.activationQuant()) |aq| {
             if (aq.supportedOn(platform)) {
                 const quantized = aq.apply(lhs, igs, self.tag);
@@ -434,7 +434,7 @@ pub fn scaledDot(
     else
         rhs_scale;
 
-    const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
+    const mlir_ctx = zml.Compiler.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
         .array(mlir_ctx, &.{
             .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
@@ -598,7 +598,7 @@ test normalizeL2 {
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, .{});
     defer exe.deinit();
 
     var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
@@ -873,7 +873,7 @@ pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: R
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
 pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
-    const allocator = zml.module.CompilationContext.current().allocator;
+    const allocator = zml.Compiler.current().allocator;
     const N_half: u32 = @intCast(@divExact(N, 2));
     const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
 
@@ -1121,7 +1121,7 @@ test "real/img" {
         }
     };
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, .{});
         defer exe.deinit();
 
         var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -1129,7 +1129,7 @@ test "real/img" {
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, .{});
         defer exe.deinit();
 
         var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -1139,7 +1139,7 @@ test "real/img" {
 
     // test the function that accepts 1 void argument
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, .{});
         defer exe.deinit();
 
         var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
@@ -1149,7 +1149,7 @@ test "real/img" {
 
     // test the function that takes NO arguments
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
@@ -1158,7 +1158,7 @@ test "real/img" {
     }
 
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
@@ -1192,10 +1192,10 @@ test rope {
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
     const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
-    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{});
+    var exe_interleaved = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, .{});
     defer exe_interleaved.deinit();
 
-    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
+    var exe_sequential = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, .{});
     defer exe_sequential.deinit();
 
     const x_values: [5][4]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5 });
@@ -1216,7 +1216,7 @@ test "rope: Proportional" {
     const platform = zml.testing.env();
 
     const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         allocator,
         io,
         rope,
@@ -1228,7 +1228,6 @@ test "rope: Proportional" {
                 .scaling = .{ .proportional = .{ .partial_rotary_factor = 0.25 } },
             },
         },
-        platform,
         .{},
     );
     defer exe.deinit();
@@ -1261,7 +1260,7 @@ test "rope: Yarn with partial_rotary_factor" {
     const platform = zml.testing.env();
 
     const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         allocator,
         io,
         rope,
@@ -1281,7 +1280,6 @@ test "rope: Yarn with partial_rotary_factor" {
                 } },
             },
         },
-        platform,
         .{},
     );
     defer exe.deinit();
@@ -1370,12 +1368,11 @@ test nearest {
     // 3D Tensor (basic)
     {
         const input_3d_basic: zml.Tensor = .init(.{ 1, 1, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1400,12 +1397,11 @@ test nearest {
     // 3D Tensor (advanced)
     {
         const input_3d_advanced: zml.Tensor = .init(.{ 2, 3, 4 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1438,12 +1434,11 @@ test nearest {
     // 4D Tensor (basic)
     {
         const input_4d_basic: zml.Tensor = .init(.{ 1, 1, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1468,12 +1463,11 @@ test nearest {
     // 4D Tensor (advanced)
     {
         const input_4d_advanced: zml.Tensor = .init(.{ 2, 2, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1526,12 +1520,11 @@ test nearest {
     // 5D Tensor (basic)
     {
         const input_5d: zml.Tensor = .init(.{ 1, 1, 1, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1595,7 +1588,7 @@ test resizeBilinear {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1662,7 +1655,7 @@ test resizeBicubic {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1962,12 +1955,11 @@ test "gated delta net" {
     const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
 
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         std.testing.allocator,
         std.testing.io,
         GatedDeltaNet.forward,
         .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
-        platform,
         .{},
     );
     defer exe.deinit();
@@ -2117,7 +2109,7 @@ test sampleTokens {
     const rng: zml.Tensor.Rng = .init();
     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, .{});
     defer exe.deinit();
 
     var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, .replicated, 0xdeadbeef);
@@ -2259,7 +2251,7 @@ test sampleTokensDynamic {
     const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
     const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, .{});
     defer exe.deinit();
 
     var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), .replicated, std.mem.sliceAsBytes(&logits_data));
@@ -2296,7 +2288,7 @@ test sampleTokensDynamic {
 
         const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
         const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
-        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{});
+        var exe_bf16 = try platform.compileFn(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, .{});
         defer exe_bf16.deinit();
 
         const boost = bf16.inf;

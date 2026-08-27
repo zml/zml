@@ -240,7 +240,7 @@ fn runnersFromAttributes(attributes: Attributes) !*Runners {
 }
 
 fn currentRunners() !*Runners {
-    const platform = zml.module.CompilationContext.current().platform;
+    const platform = zml.Compiler.current().platform;
     const runners = platform.state.cuda.fi_cutlass_moe_runners;
     return runners orelse error.RunnersNotLoaded;
 }

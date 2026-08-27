@@ -647,7 +647,7 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
-    const compilation_context = zml.module.CompilationContext.current();
+    const compilation_context = zml.Compiler.current();
     const io = compilation_context.io;
     const allocator = compilation_context.allocator;
 

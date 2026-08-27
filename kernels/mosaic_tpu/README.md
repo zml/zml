@@ -20,7 +20,7 @@ Two layers define the surface:
   for the final IR string. Pass `Builder.open` / `Builder.init` a
   `zml.kernel.mosaic_tpu.newContext()` (a throwaway context with the dialects
   the DSL emits), `defer ctx.deinit()` once you have the string — not a
-  `CompilationContext`'s `mlir_ctx`. (`Builder.buildOpts(...)` is a convenience
+  `Compilation`'s `mlir_ctx`. (`Builder.buildOpts(...)` is a convenience
   that bundles `open + declareArgs` into one call and returns a heap-allocated
   `*Built(Spec)`; reach for it in escape-hatch code that drives the lifecycle manually.)
 - **High layer** — `zml.kernel.mosaic_tpu.Kernel(Config, spec)`: the
