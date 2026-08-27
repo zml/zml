@@ -554,34 +554,32 @@ pub const PhysicalMesh = struct {
             .leaf => return,
             .branch => |b| {
                 if (b.children.len == 0) return error.InvalidPhysicalMesh;
+                if (b.children.len > std.math.maxInt(u8)) return error.InvalidPhysicalMesh;
 
                 switch (b.geometry) {
-                    .mesh => {
-                        var has_leaf = false;
-                        var has_branch = false;
-                        var expected_tag: ?PhysicalAxisTag = null;
-
-                        for (b.children) |child| {
-                            switch (child) {
-                                .leaf => has_leaf = true,
-                                .branch => |cb| {
-                                    has_branch = true;
-                                    if (expected_tag == null) {
-                                        expected_tag = cb.tag;
-                                    } else if (cb.tag != expected_tag.?) {
-                                        return error.IncompatibleGeometry;
-                                    }
-                                },
-                            }
-                        }
-
-                        if (has_leaf and has_branch) return error.IncompatibleGeometry;
-                    },
-                    .ring => {
-                        if (b.children.len < 2) return error.IncompatibleGeometry;
-                    },
-                    .point_to_point, .tree, .isolated => {},
+                    .ring => if (b.children.len < 2) return error.IncompatibleGeometry,
+                    .mesh, .point_to_point, .tree, .isolated => {},
                 }
+
+                var saw_leaf = false;
+                var saw_branch = false;
+                var child_tag: ?PhysicalAxisTag = null;
+                var child_fanout: ?usize = null;
+                for (b.children) |child| {
+                    switch (child) {
+                        .leaf => saw_leaf = true,
+                        .branch => |cb| {
+                            saw_branch = true;
+                            if (child_tag == null) {
+                                child_tag = cb.tag;
+                                child_fanout = cb.children.len;
+                            } else if (cb.tag != child_tag or cb.children.len != child_fanout) {
+                                return error.IncompatibleGeometry;
+                            }
+                        },
+                    }
+                }
+                if (saw_leaf and saw_branch) return error.IncompatibleGeometry;
 
                 for (b.children) |child| try validateGeometry(child);
             },
@@ -923,22 +921,33 @@ pub const PhysicalMesh = struct {
         return mesh;
     }
 
-    pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+    fn linearTree(
+        allocator: std.mem.Allocator,
+        platform_devices: []const PlatformDevice,
+        tag: PhysicalAxisTag,
+        axis_geometry: AxisGeometry,
+    ) !Tree {
+        if (platform_devices.len == 0) return error.InvalidPhysicalMesh;
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
-
         for (nodes, platform_devices) |*n, d| n.* = .device(d);
-
         return .{
             .branch = .{
-                .tag = .bus,
-                .geometry = .tree,
+                .tag = tag,
+                .geometry = axis_geometry,
                 .children = nodes,
             },
         };
     }
 
+    pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        return linearTree(allocator, platform_devices, .bus, .tree);
+    }
+
     pub fn gpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
-        const placements = try CoordsTopology.collect(allocator, platform_devices);
+        const placements = CoordsTopology.collect(allocator, platform_devices) catch |err| switch (err) {
+            error.MissingDeviceCoords, error.InvalidDeviceCoords => return linearTree(allocator, platform_devices, .link, .point_to_point),
+            else => return err,
+        };
         defer allocator.free(placements);
 
         const layout = try CoordsTopology.layout(placements, MAX_MESH_RANK);
@@ -2344,4 +2353,141 @@ test "sharding: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));
+}
+
+test "sharding: 1D placement for 3, 5, 6, and 7 devices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const cases = [_]struct { n: usize, dim: i64 }{
+        .{ .n = 3, .dim = 12 },
+        .{ .n = 5, .dim = 20 },
+        .{ .n = 6, .dim = 12 },
+        .{ .n = 7, .dim = 14 },
+    };
+
+    for (cases) |case| {
+        const physical: PhysicalMesh = switch (case.n) {
+            3 => try runner.physical(.{3}, .point_to_point),
+            5 => try runner.physical(.{5}, .point_to_point),
+            6 => try runner.physical(.{6}, .point_to_point),
+            7 => try runner.physical(.{7}, .point_to_point),
+            else => unreachable,
+        };
+        try std.testing.expectEqual(case.n, physical.countDevices());
+
+        const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
+        const strategy: Strategy = .parseBindings(.{ .model = .link_x });
+        const sharding: Sharding.Data = try .init("n_mesh", &physical, logical, strategy);
+        try std.testing.expectEqual(@as(i32, @intCast(case.n)), sharding.numPartitions());
+
+        const shard: i64 = @divExact(case.dim, @as(i64, @intCast(case.n)));
+        var slice_store: [7][1][2]i64 = undefined;
+        var expected: [7]ShardingTest.ExpectedShard = undefined;
+        for (0..case.n) |i| {
+            slice_store[i][0] = .{ @as(i64, @intCast(i)) * shard, shard };
+            expected[i] = .{
+                .device_id = i,
+                .slices = &slice_store[i],
+            };
+        }
+
+        try runner.run(.{
+            .sharding = sharding,
+            .shape = Shape.init(.{ .model = case.dim }, .f32).withPartitioning(.{ .model = .model }),
+            .expected_shards = expected[0..case.n],
+        });
+    }
+}
+
+test "sharding: 1D non-power-of-two rejects indivisible dim" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{3}, .point_to_point);
+    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{ .model = .link_x });
+
+    try runner.run(.{
+        .sharding = try .init("indivisible", &physical, logical, strategy),
+        .shape = Shape.init(.{ .model = 8 }, .f32).withPartitioning(.{ .model = .model }),
+        .expect_error = error.IncompatibleSharding,
+    });
+}
+
+test "sharding: 2x3 mesh" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{ 2, 3 }, .{ .mesh = .torus });
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y });
+
+    try runner.run(.{
+        .sharding = try .init("mesh_2x3", &physical, logical, strategy),
+        .shape = Shape.init(.{ .batch = 4, .model = 6 }, .f32)
+            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .expected_sdy = "#sdy.sharding<@mesh_2x3, [{\"link_x\"}, {\"link_y\"}]>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 1, .slices = &.{ .{ 0, 2 }, .{ 2, 2 } } },
+            .{ .device_id = 2, .slices = &.{ .{ 0, 2 }, .{ 4, 2 } } },
+            .{ .device_id = 3, .slices = &.{ .{ 2, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 4, .slices = &.{ .{ 2, 2 }, .{ 2, 2 } } },
+            .{ .device_id = 5, .slices = &.{ .{ 2, 2 }, .{ 4, 2 } } },
+        },
+    });
+}
+
+test "sharding: replicate across 5 devices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{5}, .point_to_point);
+    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{ .model = .link_x });
+
+    try runner.run(.{
+        .sharding = try .init("repl_5", &physical, logical, strategy),
+        .shape = Shape.init(.{ .model = 8 }, .f32),
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{.{ 0, 8 }} },
+            .{ .device_id = 1, .slices = &.{.{ 0, 8 }} },
+            .{ .device_id = 2, .slices = &.{.{ 0, 8 }} },
+            .{ .device_id = 3, .slices = &.{.{ 0, 8 }} },
+            .{ .device_id = 4, .slices = &.{.{ 0, 8 }} },
+        },
+    });
+}
+
+test "sharding: odd closed ring is a valid mesh" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{3}, .{ .ring = .closed_ring });
+    try std.testing.expectEqual(3, physical.countDevices());
+    try std.testing.expectEqual(3, physical.axis(.link_x));
+}
+
+test "sharding: ragged physical mesh is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const y0 = try allocator.alloc(PhysicalNode, 2);
+    y0[0] = .{ .leaf = .{ .id = 0, .coords = @splat(0xff) } };
+    y0[1] = .{ .leaf = .{ .id = 1, .coords = @splat(0xff) } };
+    const y1 = try allocator.alloc(PhysicalNode, 1);
+    y1[0] = .{ .leaf = .{ .id = 2, .coords = @splat(0xff) } };
+    const x = try allocator.alloc(PhysicalNode, 2);
+    x[0] = .axis(.link_y, .point_to_point, y0);
+    x[1] = .axis(.link_y, .point_to_point, y1);
+    const root: PhysicalNode = .axis(.link_x, .point_to_point, x);
+
+    try std.testing.expectError(error.IncompatibleGeometry, PhysicalMesh.fromTree(allocator, .cuda, root));
 }

@@ -386,6 +386,7 @@ fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {
                     \\{f}
                     \\
                     \\The Buffer dimension isn't properly divisible by the number of devices along the sharded axis.
+                    \\Arbitrary device counts are supported. Each sharded dimension must divide evenly; uneven shard sizes are not.
                 , .{ shape, sharding });
                 @panic("Buffer shape should be divisible by the number of devices along the sharded axis.");
             },

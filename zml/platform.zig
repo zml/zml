@@ -39,13 +39,12 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
         return error.MissingDevices;
     }
-    switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
-            if (!std.math.isPowerOfTwo(num_devices)) {
-                log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
-                return error.InvalidDeviceCount;
-            }
-        },
+    if (num_devices > Platform.MAX_NUM_DEVICES) {
+        log.err(
+            "Platform {} has {} addressable devices, ZML supports at most {}. Hide extras with CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES / the platform device filter.",
+            .{ target, num_devices, Platform.MAX_NUM_DEVICES },
+        );
+        return error.TooManyDevices;
     }
 }
 
@@ -296,9 +295,6 @@ pub const Platform = struct {
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
-        if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
-        }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
 
@@ -895,6 +891,104 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     std.debug.print("{s} [device={d}]: {d}\n", .{ name, device_ordinal, slice });
 
     return null;
+}
+
+test "platform accepts non-power-of-two CPU device counts" {
+    {
+        var probe = Platform.init(
+            std.testing.allocator,
+            std.testing.io,
+            .cpu,
+            .{ .cpu = .{ .device_count = 4 } },
+        ) catch return error.SkipZigTest;
+        probe.deinit(std.testing.allocator, std.testing.io);
+    }
+
+    const counts = [_]u32{ 1, 3, 5, 6, 7 };
+    for (counts) |n| {
+        var platform = try Platform.init(
+            std.testing.allocator,
+            std.testing.io,
+            .cpu,
+            .{ .cpu = .{ .device_count = n } },
+        );
+        defer platform.deinit(std.testing.allocator, std.testing.io);
+
+        try std.testing.expectEqual(n, platform.devices.len);
+        try std.testing.expectEqual(n, platform.physical_mesh.countDevices());
+        try std.testing.expectEqual(n, platform.physical_mesh.axis(.bus));
+
+        const sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
+        try std.testing.expectEqual(@as(i32, @intCast(n)), sharding.data.numPartitions());
+
+        const dim: i64 = 2 * @as(i64, n);
+        const shape = zml.Shape.init(.{ .model = dim }, .f32).withPartitioning(.{ .model = .model });
+        const placement = try sharding.placement(shape);
+        try std.testing.expectEqual(@as(i64, 2), placement.shape.dim(0));
+
+        var host: [14]f32 = undefined;
+        for (host[0..@intCast(dim)], 0..) |*e, i| e.* = @floatFromInt(i);
+        const slice: zml.Slice = .init(shape, std.mem.sliceAsBytes(host[0..@intCast(dim)]));
+        var buffer: zml.Buffer = try .fromSlice(std.testing.io, platform, slice, sharding);
+        defer buffer.deinit();
+        try std.testing.expectEqual(n, buffer.numShards());
+
+        const round_trip = try buffer.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer round_trip.free(std.testing.allocator);
+        try std.testing.expectEqualSlices(f32, host[0..@intCast(dim)], round_trip.items(f32));
+    }
+}
+
+test "platform compiles and runs a 3-way sharded add" {
+    {
+        var probe = Platform.init(
+            std.testing.allocator,
+            std.testing.io,
+            .cpu,
+            .{ .cpu = .{ .device_count = 4 } },
+        ) catch return error.SkipZigTest;
+        probe.deinit(std.testing.allocator, std.testing.io);
+    }
+
+    var platform = try Platform.init(
+        std.testing.allocator,
+        std.testing.io,
+        .cpu,
+        .{ .cpu = .{ .device_count = 3 } },
+    );
+    defer platform.deinit(std.testing.allocator, std.testing.io);
+
+    const sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
+    const shape = zml.Shape.init(.{ .model = 12 }, .f32).withPartitioning(.{ .model = .model });
+
+    const Kernel = struct {
+        fn add(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+            return a.add(b);
+        }
+    };
+
+    var add_exe = try zml.module.compile(
+        std.testing.allocator,
+        std.testing.io,
+        Kernel.add,
+        .{ zml.Tensor.fromShape(shape), zml.Tensor.fromShape(shape) },
+        platform,
+        .{ .shardings = &.{sharding} },
+    );
+    defer add_exe.deinit();
+
+    var lhs_host: [12]f32 = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var rhs_host: [12]f32 = .{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    var lhs: zml.Buffer = try .fromSlice(std.testing.io, platform, .init(shape, std.mem.sliceAsBytes(&lhs_host)), sharding);
+    defer lhs.deinit();
+    var rhs: zml.Buffer = try .fromSlice(std.testing.io, platform, .init(shape, std.mem.sliceAsBytes(&rhs_host)), sharding);
+    defer rhs.deinit();
+
+    var add_out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &add_exe, Kernel.add, .{ lhs, rhs });
+    defer add_out.deinit();
+    const add_host = try add_out.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer add_host.free(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, add_host.items(f32));
 }
 
 test "platform defaultMemoryLayout is boring" {
