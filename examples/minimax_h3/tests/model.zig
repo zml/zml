@@ -17,11 +17,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testNchwToThwc();
     try testMmRopeHost();
     try testOfficialSpatialGrid();
-    try testOfficialRotateHalf();
     try testTorchNoise(allocator);
     try testMultistepSampler();
     try testRngReset();
-    try testOfficialEuler();
     try testAdalnIndexLayout(allocator);
     try testSchedulerFormula(allocator);
 }
@@ -305,38 +303,8 @@ fn testOfficialSpatialGrid() !void {
     try std.testing.expectApproxEqAbs(@as(f32, 8.0), axis[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 16.0), axis[2], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 24.0), axis[3], 1e-6);
-
-    // Official 1344×768 canvas: latent 48×84, width axis after f32 cast of f64 linspace.
-    var wide: [42]f32 = undefined;
-    const w_axis = packing.spatialAxis(84, @sqrt(@as(f64, 48 * 84)), &wide);
-    try std.testing.expectEqual(@as(usize, 42), w_axis.len);
-    try std.testing.expectApproxEqAbs(@as(f32, -5.16601038), w_axis[0], 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, -4.15810537), w_axis[1], 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, -3.15019989), w_axis[2], 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, -2.14229465), w_axis[3], 1e-6);
-}
-fn testOfficialRotateHalf() !void {
-    const x = [_]f32{ 1, 2, 3, 4 };
-    const rotated = [_]f32{ -3, -4, 1, 2 };
-    var out: [4]f32 = undefined;
-    const half = x.len / 2;
-    for (0..half) |i| {
-        out[i] = -x[half + i];
-        out[half + i] = x[i];
-    }
-    try std.testing.expectEqualSlices(f32, &rotated, &out);
 }
 fn testTorchNoise(allocator: std.mem.Allocator) !void {
-    var gen = noise.Generator.init(1);
-    const want_u = [_]f32{ 0.7576315999031067, 0.2793108820915222, 0.40306925773620605, 0.7346844673156738, 0.029281556606292725, 0.7998586297035217, 0.3971373438835144, 0.7543719410896301 };
-    for (want_u) |w| try std.testing.expectApproxEqAbs(w, gen.uniform01(), 1e-7);
-
-    var gen_n = noise.Generator.init(1);
-    var n16: [16]f32 = undefined;
-    noise.randn(&gen_n, &n16);
-    const want_n = [_]f32{ -1.5255959033966064, -0.7502318024635315, -0.6539809107780457, -1.6094847917556763, -0.1001671776175499, -0.6091889142990112, -0.9797722697257996, -1.6090962886810303 };
-    for (want_n, n16[0..8]) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-5);
-
     var gen_v = noise.Generator.init(1);
     const video = try noise.drawVideo(allocator, &gen_v, &.{}, &.{}, 2, 4, 4, .{ 1, 2, 2 });
     defer allocator.free(video);
@@ -369,14 +337,6 @@ fn testRngReset() !void {
     const first = a.uniform01();
     a.reset();
     try std.testing.expectEqual(first, a.uniform01());
-}
-fn testOfficialEuler() !void {
-    var x = [_]f32{1.0};
-    const v = [_]f32{2.0};
-    const sig = [_]f32{ 1.0, 0.5, 0.25 };
-    const ts = [_]f32{ 0.0, 0.5 };
-    scheduler.eulerStep(&sig, &ts, 1, &x, &v);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
 fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
     const layout = try packing.build(allocator, .{

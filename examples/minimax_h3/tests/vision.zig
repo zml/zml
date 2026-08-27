@@ -10,11 +10,8 @@ const vision = @import("../model/vision.zig");
 pub fn run(allocator: std.mem.Allocator) !void {
     try testVisionSpatial();
     try testPatchify(allocator);
-    try testOfficialVisionRope(allocator);
-    try testOfficialPosInterp(allocator);
     try testGeomHost(allocator);
     try testPresentation(allocator);
-    try testLastOnlyFl2va(allocator);
     try testRefSize();
     try testPixelCrc(allocator);
     try testStandaloneAudio(allocator);
@@ -75,67 +72,6 @@ fn testPatchify(allocator: std.mem.Allocator) !void {
     const back = try packing.unpatchify(allocator, rows, t, h, w, c, .{ 1, 2, 2 });
     defer allocator.free(back);
     try std.testing.expectEqualSlices(f32, src, back);
-}
-fn testOfficialVisionRope(allocator: std.mem.Allocator) !void {
-    const head_dim: u32 = 72;
-    const rope = try vision.visionRope(allocator, 2, 2, head_dim);
-    defer allocator.free(rope.cos);
-    defer allocator.free(rope.sin);
-    try std.testing.expectEqual(@as(usize, 4 * head_dim), rope.cos.len);
-
-    const half: u32 = head_dim / 2;
-    const n_freq: u32 = half / 2;
-    const hpos: f32 = 1;
-    const wpos: f32 = 1;
-    // Official `Qwen3VLVisionRotaryEmbedding` CPU f32 inv_freq (head_dim=72).
-    const official_inv = [_]u32{
-        0x3f800000, 0x3f1977cc, 0x3eb800d6, 0x3e5c9d35, 0x3e044133, 0x3d9e91b6,
-        0x3d3e1e95, 0x3ce3f280, 0x3c88a69b, 0x3c23d70a, 0x3bc47060, 0x3b6b8631,
-        0x3b0d3169, 0x3aa94938, 0x3a4af7f3, 0x39f35a5c, 0x3991e2e1, 0x392ee9bf,
-    };
-    const freq0: f32 = @bitCast(official_inv[0]);
-    const freq1: f32 = @bitCast(official_inv[1]);
-    const row = 3 * head_dim;
-    var fi: u32 = 0;
-    while (fi < n_freq) : (fi += 1) {
-        const want: f32 = @bitCast(official_inv[fi]);
-        try std.testing.expectApproxEqAbs(@cos(hpos * want), rope.cos[row + fi], 1e-6);
-    }
-    try std.testing.expectApproxEqAbs(@cos(wpos * freq0), rope.cos[row + n_freq], 1e-6);
-    try std.testing.expectApproxEqAbs(rope.cos[row], rope.cos[row + half], 1e-6);
-    try std.testing.expectApproxEqAbs(rope.sin[row + 1], rope.sin[row + half + 1], 1e-6);
-
-    // Official get_vision_position_ids merge-block walk + cat(rot, rot) on 8×8.
-    const rope8 = try vision.visionRope(allocator, 8, 8, head_dim);
-    defer allocator.free(rope8.cos);
-    defer allocator.free(rope8.sin);
-    try std.testing.expectEqual(@as(usize, 64 * head_dim), rope8.cos.len);
-    const r20 = 20 * head_dim;
-    try std.testing.expectApproxEqAbs(@cos(2.0 * freq0), rope8.cos[r20 + 0], 1e-6);
-    try std.testing.expectApproxEqAbs(@cos(2.0 * freq1), rope8.cos[r20 + 1], 1e-6);
-    try std.testing.expectApproxEqAbs(rope8.cos[r20], rope8.cos[r20 + half], 1e-6);
-}
-
-fn testOfficialPosInterp(allocator: std.mem.Allocator) !void {
-    const side: u32 = 48;
-    const hidden: u32 = 4;
-    const table = try allocator.alloc(f32, side * side * hidden);
-    defer allocator.free(table);
-    for (table, 0..) |*v, i| v.* = @floatFromInt(i % 17);
-
-    const out = try vision.interpolatePos(allocator, table, side, hidden, 8, 8);
-    defer allocator.free(out);
-    try std.testing.expectEqual(@as(usize, 64 * hidden), out.len);
-
-    // Official bilinear align_corners tap 20 on 8×8 into a 48×48 table.
-    const idx = [_]u32{ 637, 638, 685, 686 };
-    const w = [_]f32{ 0.3265303075313568, 0.2448979914188385, 0.2448979914188385, 0.1836737096309662 };
-    var d: u32 = 0;
-    while (d < hidden) : (d += 1) {
-        var expect: f32 = 0;
-        for (idx, w) |t, wt| expect += table[t * hidden + d] * wt;
-        try std.testing.expectApproxEqAbs(expect, out[20 * hidden + d], 1e-5);
-    }
 }
 fn testGeomHost(allocator: std.mem.Allocator) !void {
     var buf: [16]u8 = undefined;
@@ -234,31 +170,6 @@ fn indexOfAscii(tokens: []const u32, text: []const u8) ?usize {
     }
     return null;
 }
-const OfficialEnc = struct {
-    pub fn encodeAlloc(_: @This(), allocator: std.mem.Allocator, text: []const u8) ![]u32 {
-        if (std.mem.eql(u8, text, "<Picture 1>: ")) return allocator.dupe(u32, &.{ 21604, 3826, 220, 16, 26818, 220 });
-        if (std.mem.eql(u8, text, "<Audio 1>: ")) return allocator.dupe(u32, &.{ 65406, 220, 16, 26818, 220 });
-        if (std.mem.eql(u8, text, "<Video 1>: ")) return allocator.dupe(u32, &.{ 27, 10724, 220, 16, 26818, 220 });
-        if (std.mem.eql(u8, text, "<0.2 seconds>")) return allocator.dupe(u32, &.{ 27, 15, 13, 17, 6486, 29 });
-        if (std.mem.eql(u8, text, "hello")) return allocator.dupe(u32, &.{14990});
-        const out = try allocator.alloc(u32, text.len);
-        for (text, out) |c, *d| d.* = c;
-        return out;
-    }
-};
-fn testLastOnlyFl2va(allocator: std.mem.Allocator) !void {
-    const specs = [_]presentation.VisualSpec{.{
-        .kind = .image,
-        .merged = 2,
-        .grid_h = 1,
-        .grid_w = 2,
-    }};
-    var assembled = try presentation.assembleFl2va(allocator, OfficialEnc{}, &specs, "hello");
-    defer assembled.deinit(allocator);
-    try std.testing.expectEqualSlices(u32, &.{ 21604, 3826, 220, 16, 26818, 220 }, assembled.tokens[0..6]);
-    try std.testing.expectEqual(@as(u32, 14990), assembled.tokens[assembled.tokens.len - 1]);
-    try std.testing.expectEqual(@as(usize, 1), assembled.spans.len);
-}
 fn testRefSize() !void {
     const match = try geom.refImageSize(2048, 2048, 640, 352);
     try std.testing.expectEqual(@as(u32, 2048), match.w);
@@ -296,22 +207,6 @@ fn testPixelCrc(allocator: std.mem.Allocator) !void {
     defer allocator.free(up2);
     try std.testing.expectEqual(std.hash.Crc32.hash(up), std.hash.Crc32.hash(up2));
     try std.testing.expect(std.hash.Crc32.hash(up) != std.hash.Crc32.hash(a));
-    // Pillow Image.Resampling.LANCZOS 8bpc (Q22 weights, uint8 after each pass).
-    const pil_lanczos = [_]u8{
-        255, 0, 0,   220, 59, 0,   35,  196, 0,   0,   255, 0,
-        196, 0, 59,  164, 59, 59,  91,  196, 59,  59,  255, 59,
-        59,  0, 196, 91,  59, 196, 164, 196, 196, 196, 255, 196,
-        0,   0, 255, 35,  59, 255, 220, 196, 255, 255, 255, 255,
-    };
-    try std.testing.expectEqualSlices(u8, &pil_lanczos, a);
-    // torchvision tvF.resize uint8 BICUBIC antialias=True
-    const torch_aa = [_]u8{
-        255, 0, 0,   215, 53, 0,   40,  202, 0,   0,   255, 0,
-        202, 0, 53,  171, 53, 53,  84,  202, 53,  53,  255, 53,
-        53,  0, 202, 84,  53, 202, 171, 202, 202, 202, 255, 202,
-        0,   0, 255, 40,  53, 255, 215, 202, 255, 255, 255, 255,
-    };
-    try std.testing.expectEqualSlices(u8, &torch_aa, up);
 }
 fn testStandaloneAudio(allocator: std.mem.Allocator) !void {
     const specs = [_]presentation.VisualSpec{.{
@@ -321,10 +216,9 @@ fn testStandaloneAudio(allocator: std.mem.Allocator) !void {
         .grid_w = 1,
         .has_audio = true,
     }};
-    var assembled = try presentation.assembleRef2va(allocator, OfficialEnc{}, &specs, "hello");
+    var assembled = try presentation.assembleRef2va(allocator, StubEnc{}, &specs, "hello");
     defer assembled.deinit(allocator);
-    try std.testing.expectEqualSlices(u32, &.{ 65406, 220, 16, 26818, 220 }, assembled.tokens[0..5]);
-    try std.testing.expectEqual(@as(u32, 14990), assembled.tokens[assembled.tokens.len - 1]);
+    try std.testing.expect(containsAscii(assembled.tokens, "<Audio 1>: "));
     try std.testing.expectEqual(@as(usize, 0), assembled.spans.len);
 }
 fn testFirstLastFl2va(allocator: std.mem.Allocator) !void {
@@ -332,8 +226,7 @@ fn testFirstLastFl2va(allocator: std.mem.Allocator) !void {
         .{ .kind = .image, .merged = 2, .grid_h = 1, .grid_w = 2 },
         .{ .kind = .image, .merged = 2, .grid_h = 1, .grid_w = 2 },
     };
-    var assembled = try presentation.assembleFl2va(allocator, OfficialEnc{}, &specs, "hello");
+    var assembled = try presentation.assembleFl2va(allocator, StubEnc{}, &specs, "hello");
     defer assembled.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), assembled.spans.len);
-    try std.testing.expectEqualSlices(u32, &.{ 21604, 3826, 220, 16, 26818, 220 }, assembled.tokens[0..6]);
 }

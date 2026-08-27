@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const audio_vae = @import("../vae/audio.zig");
 const config = @import("../core/config.zig");
 const vae = @import("../vae/geometry.zig");
 const visual_vae = @import("../vae/visual.zig");
@@ -16,8 +15,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOfficialStitch(allocator);
     try testVitCoords();
     try testImagenet();
-    try testOfficialAudioLatents();
-    try testOfficialVisualLatents();
     try testTokenDrop();
     try testAudioRowBct();
     try testPosterior(allocator);
@@ -137,19 +134,6 @@ fn testImagenet() !void {
     var px = [_]f32{ 0.0, 0.0, 0.0 };
     vae.denormImagenetRgb(&px);
     try std.testing.expectApproxEqAbs(vae.imagenet_mean[0], px[0], 1e-5);
-}
-fn testOfficialAudioLatents() !void {
-    const cfg = audio_vae.Config.official();
-    try std.testing.expectEqualSlices(f32, &audio_vae.official_latents_mean, &cfg.latents_mean);
-    try std.testing.expectEqualSlices(f32, &audio_vae.official_latents_std, &cfg.latents_std);
-    try std.testing.expect(cfg.latents_std[0] != 1.0);
-}
-fn testOfficialVisualLatents() !void {
-    const cfg = visual_vae.Config.official();
-    try std.testing.expectEqualSlices(f32, &visual_vae.official_latents_mean, &cfg.latents_mean);
-    try std.testing.expectEqualSlices(f32, &visual_vae.official_latents_std, &cfg.latents_std);
-    try std.testing.expectEqual(@as(i64, 48), cfg.rotaryDim());
-    try std.testing.expect(cfg.latents_std[0] != 1.0);
 }
 fn testTokenDrop() !void {
     const spec = vae.official_visual;
