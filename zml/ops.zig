@@ -1935,14 +1935,29 @@ pub fn manualComputation(
             if (@TypeOf(inputs) == Tensor) {
                 break :b &[1]Tensor{inputs};
             }
-            if (!struct_info.is_tuple) @compileError("Expected tuple inputs");
-            var inputs_flat: [struct_info.fields.len]Tensor = undefined;
-            meta.collectBuf((struct {
-                pub fn func(t: Tensor) Tensor {
-                    return t;
+
+            if (struct_info.is_tuple) {
+                inline for (struct_info.fields) |field| {
+                    if (field.type != Tensor) {
+                        @compileError("manualComputation input field '" ++ field.name ++ "' must be Tensor but is " ++ @typeName(field.type));
+                    }
                 }
-            }).func, {}, &inputs, &inputs_flat);
-            break :b &inputs_flat;
+
+                var inputs_flat: [struct_info.fields.len]Tensor = undefined;
+                inline for (struct_info.fields, 0..) |field, i| {
+                    inputs_flat[i] = @field(inputs, field.name);
+                }
+                break :b &inputs_flat;
+            } else {
+                if (!struct_info.is_tuple) @compileError("Expected tuple inputs");
+                var inputs_flat: [struct_info.fields.len]Tensor = undefined;
+                meta.collectBuf((struct {
+                    pub fn func(t: Tensor) Tensor {
+                        return t;
+                    }
+                }).func, {}, &inputs, &inputs_flat);
+                break :b &inputs_flat;
+            }
         },
         .array => &inputs,
         .pointer => |pointer_info| b: {
