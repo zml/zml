@@ -363,7 +363,7 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
     var second_out_shape: ?zml.Shape = null;
 
     const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok;
-    const num_experts = qwen_model.config.text_config.num_experts.?;
+    const num_experts = qwen_model.config.text_config.num_experts;
 
     for (qwen_model.text_model.layers) |layer| {
         const gate_up_shape = zml.Shape.init(.{
