@@ -9,8 +9,6 @@ const log = std.log.scoped(.minimax_h3);
 
 pub const Config = config_mod.Config;
 
-const RmsNorm = zml.nn.RmsNorm;
-
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
     return .fromStore(store, weight_name, bias_name, partitions, bias_partitions, .d);
 }
@@ -45,8 +43,8 @@ const Attention = struct {
     k: zml.nn.Linear,
     v: zml.nn.Linear,
     out: zml.nn.Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_norm: zml.nn.RmsNorm,
+    k_norm: zml.nn.RmsNorm,
     num_heads: i64,
     head_dim: i64,
     attn_backend: zml.attention.Backend = .vanilla,
@@ -71,8 +69,8 @@ const Attention = struct {
         zml.nn.Linear.unloadBuffers(&self.k);
         zml.nn.Linear.unloadBuffers(&self.v);
         zml.nn.Linear.unloadBuffers(&self.out);
-        RmsNorm.unloadBuffers(&self.q_norm);
-        RmsNorm.unloadBuffers(&self.k_norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.q_norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.k_norm);
     }
 
     fn projectQkv(self: Attention, x: zml.Tensor) struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } {
@@ -116,7 +114,7 @@ pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) str
     const parts = freqs.chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
     const emb = zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
-    return .{ emb.cos().rename(.{ .f = .hd }), emb.sin().rename(.{ .f = .hd }) };
+    return .{ emb.cos(), emb.sin() };
 }
 
 pub const TimeEmbedder = struct {
@@ -189,9 +187,9 @@ pub const AdaLn = struct {
 };
 
 pub const BlockCore = struct {
-    norm1: RmsNorm,
+    norm1: zml.nn.RmsNorm,
     attn: Attention,
-    norm2: RmsNorm,
+    norm2: zml.nn.RmsNorm,
     mlp: SwiGlu,
     hidden_size: i64,
 
@@ -209,9 +207,9 @@ pub const BlockCore = struct {
     };
 
     pub fn unloadBuffers(self: *zml.Bufferized(BlockCore)) void {
-        RmsNorm.unloadBuffers(&self.norm1);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm1);
         Attention.unloadBuffers(&self.attn);
-        RmsNorm.unloadBuffers(&self.norm2);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm2);
         SwiGlu.unloadBuffers(&self.mlp);
     }
 
@@ -307,9 +305,9 @@ pub const BlockGroup = struct {
 };
 
 pub const TransformerBlock = struct {
-    norm1: RmsNorm,
+    norm1: zml.nn.RmsNorm,
     attn: Attention,
-    norm2: RmsNorm,
+    norm2: zml.nn.RmsNorm,
     mlp: SwiGlu,
     adaln: AdaLn,
     hidden_size: i64,
@@ -339,18 +337,18 @@ pub const TransformerBlock = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerBlock)) void {
-        RmsNorm.unloadBuffers(&self.norm1);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm1);
         Attention.unloadBuffers(&self.attn);
-        RmsNorm.unloadBuffers(&self.norm2);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm2);
         SwiGlu.unloadBuffers(&self.mlp);
         AdaLn.unloadBuffers(&self.adaln);
     }
 };
 
 const TokenRefinerBlock = struct {
-    norm1: RmsNorm,
+    norm1: zml.nn.RmsNorm,
     attn: Attention,
-    norm2: RmsNorm,
+    norm2: zml.nn.RmsNorm,
     mlp: SwiGlu,
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TokenRefinerBlock {
@@ -365,9 +363,9 @@ const TokenRefinerBlock = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TokenRefinerBlock)) void {
-        RmsNorm.unloadBuffers(&self.norm1);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm1);
         Attention.unloadBuffers(&self.attn);
-        RmsNorm.unloadBuffers(&self.norm2);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm2);
         SwiGlu.unloadBuffers(&self.mlp);
     }
 
@@ -380,7 +378,7 @@ const TokenRefinerBlock = struct {
 
 const TokenRefiner = struct {
     blocks: []TokenRefinerBlock,
-    final_norm: RmsNorm,
+    final_norm: zml.nn.RmsNorm,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: Config) !TokenRefiner {
         const block_store = store.withPrefix("refiner_blocks");
@@ -402,7 +400,7 @@ const TokenRefiner = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(TokenRefiner), allocator: std.mem.Allocator) void {
         for (self.blocks) |*block| TokenRefinerBlock.unloadBuffers(block);
         allocator.free(self.blocks);
-        RmsNorm.unloadBuffers(&self.final_norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.final_norm);
     }
 
     pub fn forward(self: TokenRefiner, x: zml.Tensor) zml.Tensor {
@@ -415,7 +413,7 @@ const TokenRefiner = struct {
 };
 
 const FinalLayer = struct {
-    norm: RmsNorm,
+    norm: zml.nn.RmsNorm,
     adaln: AdaLn,
     video_out: zml.nn.Linear,
     audio_out: zml.nn.Linear,
@@ -430,7 +428,7 @@ const FinalLayer = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(FinalLayer)) void {
-        RmsNorm.unloadBuffers(&self.norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm);
         AdaLn.unloadBuffers(&self.adaln);
         zml.nn.Linear.unloadBuffers(&self.video_out);
         zml.nn.Linear.unloadBuffers(&self.audio_out);
@@ -534,12 +532,12 @@ pub const PatchEmbed = struct {
 };
 
 pub const FinishCore = struct {
-    norm: RmsNorm,
+    norm: zml.nn.RmsNorm,
     video_out: zml.nn.Linear,
     audio_out: zml.nn.Linear,
 
     pub fn unloadBuffers(self: *zml.Bufferized(FinishCore)) void {
-        RmsNorm.unloadBuffers(&self.norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.norm);
         zml.nn.Linear.unloadBuffers(&self.video_out);
         zml.nn.Linear.unloadBuffers(&self.audio_out);
     }
@@ -680,7 +678,7 @@ pub const FinishOutput = struct {
     audio: zml.Tensor,
 };
 
-fn modulateRows(norm: RmsNorm, hidden: zml.Tensor, mods: zml.Tensor, timestep_indices: zml.Tensor) zml.Tensor {
+fn modulateRows(norm: zml.nn.RmsNorm, hidden: zml.Tensor, mods: zml.Tensor, timestep_indices: zml.Tensor) zml.Tensor {
     const n = norm.forward(hidden.withPartitioning(.{ .d = .replicated }));
     const selected = mods.gather(.{ .n = timestep_indices }, .{});
     const parts = selected.chunkExact(.k, 2);

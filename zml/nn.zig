@@ -858,6 +858,7 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
 
 /// HuggingFace `rotate_half` rotary: `x * cos + rotate_half(x) * sin`.
 /// `cos`/`sin` last dim is the rotary dim; remaining last-dim of `x` passes through.
+/// Last-axis tags on the tables are aligned to `x` before broadcast.
 pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const rotary_dim = cos.dim(-1);
     const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
@@ -865,7 +866,9 @@ pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
     const x2 = x_rot.slice1d(-1, .{ .start = half, .end = rotary_dim });
     const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-    const y = x_rot.mul(cos.broad(x_rot.shape())).add(rotated.mul(sin.broad(x_rot.shape())));
+    const rot_tag = x_rot.shape().tag(-1);
+    const y = x_rot.mul(cos.renameTag(-1, rot_tag).broad(x_rot.shape()))
+        .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
     if (rotary_dim == x.dim(-1)) return y;
     return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
