@@ -646,11 +646,11 @@ pub const KvCache = struct {
     }
 
     pub fn keysAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
-        return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
+        return kv.k.slice(.layer, .dynSingle(layer_index));
     }
 
     pub fn valuesAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
-        return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
+        return kv.v.slice(.layer, .dynSingle(layer_index));
     }
 
     pub fn updateAt(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, layer_index: zml.Tensor) KvCache {

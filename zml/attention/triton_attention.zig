@@ -846,8 +846,8 @@ pub const paged = struct {
 
     fn tokenToSequence(query_start_len: zml.Tensor, query_count: i64) zml.Tensor {
         const sequence_count = query_start_len.dim(.b) - 1;
-        const starts = query_start_len.slice1d(.b, .{ .end = sequence_count }).rename(.{ .b = .seq });
-        const ends = query_start_len.slice1d(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+        const starts = query_start_len.slice(.b, .{ .end = sequence_count }).rename(.{ .b = .seq });
+        const ends = query_start_len.slice(.b, .{ .start = 1 }).rename(.{ .b = .seq });
         const query_x_sequence_shape = zml.Shape.init(.{ .q = query_count, .seq = sequence_count }, .i32);
         const query = zml.Tensor.iota(query_x_sequence_shape, .q).convert(.i32);
         const in_range = query.cmp(.GE, starts.broad(query_x_sequence_shape)).convert(.i32)
@@ -865,7 +865,7 @@ pub const paged = struct {
         stdx.debug.assert(tokens_pos.shape().hasTags(.{.q}), "paged MLA token positions must have a .q axis, got {f}", .{tokens_pos.shape()});
 
         const query_to_sequence = tokenToSequence(parameters.query_start_len, topk_i32.dim(.q));
-        const sequence_ends = parameters.query_start_len.slice1d(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+        const sequence_ends = parameters.query_start_len.slice(.b, .{ .start = 1 }).rename(.{ .b = .seq });
         const last_query = sequence_ends.gather(.{ .seq = query_to_sequence }, .{}).sub(.scalar(1, .i32));
         const last_token_pos = tokens_pos
             .gather(.{ .q = last_query.rename(.{ .q = .lookup }) }, .{})

@@ -30,6 +30,8 @@ pub const Tensor = struct {
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 
+    const ResolvedAxis = u3;
+
     pub fn init(shape_like: anytype, dt: DataType) Tensor {
         return .fromShape(.init(shape_like, dt));
     }
@@ -121,14 +123,14 @@ pub const Tensor = struct {
     /// Returns the index of axis 'axis_'.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axis(self: Tensor, axis_: anytype) u3 {
+    pub fn axis(self: Tensor, axis_: anytype) ResolvedAxis {
         return self._shape.axis(axis_);
     }
 
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, constants.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(ResolvedAxis, constants.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -1847,19 +1849,43 @@ pub const Tensor = struct {
 
     pub const Slice = struct {
         start: i64 = 0,
+        dyn_start: ?Tensor = null,
+        len: i64 = to_the_end,
         end: i64 = to_the_end,
         step: i32 = 1,
         singleton: bool = false,
 
-        const full = .{ .start = 0, .end = to_the_end, .step = 1 };
+        /// Select the full slice
+        pub const full: Slice = .{ .start = 0, .end = to_the_end, .step = 1 };
 
+        /// Select a single element and drop the corresponding axis (to keep the axis use .{ .start = off, .len =1 })
         pub fn single(offset: i64) Slice {
             return .{ .start = offset, .end = offset + 1, .singleton = true };
         }
 
+        /// Select a single element and drop the corresponding axis (to keep the axis use .{ .start = off, .len =1 })
+        pub fn dyn(start: Tensor, len: i64) Slice {
+            stdx.debug.assert(start.rank() == 0, "Slice.dyn expects scalar input, got {f}", .{start});
+            return .{ .dyn_start = start, .len = len };
+        }
+
+        pub fn dynSingle(start: Tensor) Slice {
+            stdx.debug.assert(start.rank() == 0, "Slice.dynSingle expects scalar input, got {f}", .{start});
+            return .{ .dyn_start = start, .len = 1, .singleton = true };
+        }
+
         pub fn absolute(s: Slice, d: i64) Slice {
             const start = if (s.start < 0) d + s.start else s.start;
-            const end = if (s.end == to_the_end) d else if (s.end < 0) d + s.end else s.end;
+            const end = if (s.singleton)
+                start + 1
+            else if (s.end == to_the_end)
+                d
+            else if (s.end < 0)
+                d + s.end
+            else if (s.len != to_the_end)
+                start + s.len
+            else
+                s.end;
             const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
             stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
             stdx.debug.assert(end <= d, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
@@ -1868,36 +1894,98 @@ pub const Tensor = struct {
 
         const to_the_end = std.math.maxInt(i64);
 
-        pub fn format(self: Slice, writer: *std.Io.Writer) !void {
-            if (self.singleton) {
-                try writer.print("[{d}]", .{self.start});
-            } else if (self.end == to_the_end and self.step == 1) {
-                try writer.print("[{d}..]", .{self.start});
-            } else if (self.step == 1) {
-                try writer.print("[{d}..{d}]", .{ self.start, self.end });
+        pub fn format(s: Slice, writer: *std.Io.Writer) !void {
+            const end = if (s.len != to_the_end) s.start +| s.len else s.end;
+            if (s.dyn_start) |_| {
+                if (s.singleton)
+                    try writer.writeAll("[x]")
+                else
+                    try writer.print("[x..x+{}]", .{s.len});
+            } else if (s.singleton) {
+                try writer.print("[{d}]", .{s.start});
+            } else if (end == to_the_end and s.step == 1) {
+                try writer.print("[{d}..]", .{s.start});
+            } else if (s.step == 1) {
+                try writer.print("[{d}..{d}]", .{ s.start, end });
             } else {
-                try writer.print("[{d}..{d}:{d}]", .{ self.start, self.end, self.step });
+                try writer.print("[{d}..{d}:{d}]", .{ s.start, end, s.step });
             }
         }
     };
 
-    /// Slices the input Tensor over the given axis using the given parameters.
-    pub fn slice1d(self: Tensor, axis_: anytype, s: Slice) Tensor {
-        var slices: [constants.MAX_RANK]Slice = @splat(.{});
-        slices[self.axis(axis_)] = s;
-        return self.slice(slices[0..self.rank()]);
+    /// Slice a Tensor across a specific axes.
+    ///
+    /// Due to the nature of stablehlo, the length of the slices need to be known when compiling the IR.
+    /// Examples:
+    /// ```
+    /// Tensor(.{.a=20,.b=30,.c=40 }).slice(.a, .{ .start = 5, .len = 11});
+    /// Tensor(.{.a=20,.b=30,.c=40 }).slice(0, .single(5));
+    /// ```
+    pub fn slice(self: Tensor, axis_: anytype, slice_: Slice) Tensor {
+        return self.slices(@as([]const ResolvedAxis, &.{self.axis(axis_)}), &.{slice_});
     }
 
-    /// Slices the input Tensor using the given parameters.
-    pub fn slice(self: Tensor, slices: []const Slice) Tensor {
-        var start_indices: [constants.MAX_RANK]i64 = undefined;
-        var strides: [constants.MAX_RANK]i64 = undefined;
-        var limit_indices: [constants.MAX_RANK]i64 = undefined;
+    /// Slices a Tensor across many axes.
+    ///
+    /// ```
+    /// Tensor(.{.a=20,.b=30,.c=40 }).slices(.{ .a, .b }, &.{ .start = 5, .end = 11}, .dyn(x) });
+    /// Tensor(.{.a=20,.b=30,.c=40 }).slices(.{
+    ///     .a = .{ .start = a_off, .len = 11 },
+    ///     .b = .{ .start = b_off, .len = 12 },
+    ///   });
+    /// Tensor(.{ 20,30,40}).slices(.{ 0, 2 }, .{.dyn(a_off, .len = 20), .{ .start = 8, .len = 12 }});
+    /// ```
+    pub fn slices(self: Tensor, axes_: anytype, slices_: []const Slice) Tensor {
+        // Note: with typed slices, the callsites are less akwards.
+        if (@TypeOf(axes_) != []const ResolvedAxis) {
+            const resolved_axes: []const ResolvedAxis = self._shape.parseAxes(axes_)[0].slice();
+            return self.slices(resolved_axes, slices_);
+        }
+
+        const rk = self.rank();
+        any_dyn: {
+            for (slices_) |s| {
+                if (s.dyn_start) |_| break :any_dyn;
+            }
+            return self.staticSlices(axes_, slices_);
+        }
+
+        const zero = scalar(0, .i64).value();
+        var start_indices: [constants.MAX_RANK]*const mlir.Value = @splat(zero);
+        var new_shape: Shape = self._shape;
+        var to_remove: Shape.AxesArray = .empty;
+
+        for (axes_, slices_) |a, s| {
+            stdx.debug.assert(s.step == 1, "Tensor.slices doesn't support mixing strided and dynamic slices, got {f}", .{stdx.fmt.slice(slices_)});
+            new_shape._dims.buffer[a] = s.len;
+            start_indices[a] = if (s.dyn_start) |dyn|
+                dyn.convert(.i64).value()
+            else
+                scalar(s.start, .i64).value();
+            if (s.singleton) to_remove.appendAssumeCapacity(@intCast(a));
+        }
+
+        const op = dialects.stablehlo.dynamic_slice(
+            mlirCtx(),
+            self.value(),
+            new_shape.dims(),
+            start_indices[0..rk],
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
+
+        const res = _result(new_shape, op.result(0));
+        return res.reshape(new_shape.removeMany(to_remove.constSlice()));
+    }
+
+    fn staticSlices(self: Tensor, axes_: []const ResolvedAxis, slices_: []const Slice) Tensor {
+        var start_indices: [constants.MAX_RANK]i64 = @splat(0);
+        var strides: [constants.MAX_RANK]i64 = @splat(1);
+        var limit_indices: [constants.MAX_RANK]i64 = self._shape._dims.buffer;
         var res_shape: Shape = self._shape;
 
-        for (slices, 0..) |s, a| {
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
+        for (axes_, slices_) |a, s| {
+            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
+            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
 
             const args: Slice = s.absolute(self.dim(a));
             start_indices[a] = args.start;
@@ -1919,8 +2007,8 @@ pub const Tensor = struct {
 
         var res = _result(res_shape, slice_op.result(0));
         var to_remove: Shape.AxesArray = .empty;
-        for (slices, 0..) |s, a| {
-            if (s.singleton) to_remove.appendAssumeCapacity(@intCast(a));
+        for (axes_, slices_) |a, s| {
+            if (s.singleton) to_remove.appendAssumeCapacity(a);
         }
         return res.reshape(res_shape.removeMany(to_remove.constSlice()));
     }
@@ -1934,10 +2022,11 @@ pub const Tensor = struct {
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
         defer x_buffer.deinit();
 
-        // Wrap slice1d to hide the anytype in the signature.
+        // Wrap slice to hide the anytype in the signature.
+        // TODO(wzk): stdx.meta.specifyFn (waiting 0.17 for SoA meta programming)
         const Local = struct {
-            pub fn _slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
-                return input.slice1d(ax, slice_);
+            fn _slice1dAxis(input: Tensor, ax: i8, slice_: Tensor.Slice) Tensor {
+                return input.slice(ax, slice_);
             }
         };
 
@@ -1957,7 +2046,40 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{x_buffer});
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{ x_buffer, .{} });
+            defer res.deinit();
+
+            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
+        }
+    }
+
+    test "dynamic slices" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn dynSliceResolved(x: Tensor, ax: ResolvedAxis, dyn_slice: Slice) Tensor {
+                return x.slice(ax, dyn_slice);
+            }
+        };
+
+        inline for (.{
+            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
+            .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
+        }) |testcase| {
+            const x_data, const x_shape, const expectation, const z_value: i32, const ax = testcase;
+            const x: Tensor = .fromShape(x_shape);
+            const z: Tensor = .init(.{}, .i32);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.dynSliceResolved, .{ x, ax, .dyn(z, 2) }, platform, .{});
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
+            defer x_buffer.deinit();
+            var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), .replicated, std.mem.asBytes(&z_value));
+            defer z_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.dynSliceResolved, .{ x_buffer, .{ .dyn_start = z_buffer } });
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
@@ -1966,20 +2088,6 @@ pub const Tensor = struct {
 
     inline fn wrapIndex(self: Tensor, axis_: usize, idx: i64) i64 {
         return if (idx < 0) self.dim(axis_) + idx else idx;
-    }
-
-    pub fn choose1d(self: Tensor, axis_: anytype, i: i64) Tensor {
-        return self.slice1d(axis_, .single(i));
-    }
-
-    pub fn choose(self: Tensor, offsets: anytype) Tensor {
-        const off, const tags = Shape.parseDimensions(offsets);
-        var slices: [constants.MAX_RANK]Slice = @splat(.{});
-        for (off.constSlice(), tags.constSlice()) |o, t| {
-            const ax = self.axis(t);
-            slices[ax] = .single(o);
-        }
-        return self.slice(slices[0..self.rank()]);
     }
 
     /// Concatenates the input Tensors along the given axis.
@@ -3004,7 +3112,7 @@ pub const Tensor = struct {
 
             pub fn _scatterCB(self: Tensor, coords: Tensor, updates: Tensor) Tensor {
                 return self.scatterSlices(
-                    .{ .c = coords.choose1d(.coord, 0), .b = coords.choose1d(.coord, 1) },
+                    .{ .c = coords.slice(.coord, .single(0)), .b = coords.slice(.coord, .single(1)) },
                     updates,
                     .{ .update_fn = ScatterOpts.increment },
                 );
@@ -3434,8 +3542,8 @@ pub const Tensor = struct {
             },
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
-                sorted.values = sorted.values.slice1d(a, .{ .end = k });
-                sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
+                sorted.values = sorted.values.slice(a, .{ .end = k });
+                sorted.indices = sorted.indices.slice(a, .{ .end = k });
                 break :blk sorted;
             },
         };
@@ -3546,7 +3654,7 @@ pub const Tensor = struct {
         var chunks: [n_chunks]Tensor = undefined;
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
-            chunks[i] = self.slice1d(a, .{ .start = start, .end = start + chunk_size });
+            chunks[i] = self.slice(a, .{ .start = start, .end = start + chunk_size });
         }
         return chunks;
     }
@@ -3599,7 +3707,7 @@ pub const Tensor = struct {
 
         for (0.., chunks) |i, *chunk| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
-            chunk.* = self.slice1d(a, .{ .start = start, .end = @min(start + chunk_size, d) });
+            chunk.* = self.slice(a, .{ .start = start, .end = @min(start + chunk_size, d) });
         }
         return chunks;
     }
@@ -3656,7 +3764,7 @@ pub const Tensor = struct {
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
-            res[i] = self.slice1d(a, .{ .start = start, .end = start + n });
+            res[i] = self.slice(a, .{ .start = start, .end = start + n });
             start += n;
         }
         return res;
@@ -3703,109 +3811,6 @@ pub const Tensor = struct {
             inline for (expectation, 0..) |expected, i| {
                 try std.testing.expectEqual(expected, try res[i].getValue(@TypeOf(expected), std.testing.io));
             }
-        }
-    }
-
-    /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
-    /// Note: this doesn't support tagging, if you have tags,
-    /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
-        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {f}", .{slice_.start});
-
-        const a = self.axis(axis_);
-        const new_shape = self._shape.set(a, slice_.len);
-
-        var start_indices: [constants.MAX_RANK]*const mlir.Value = @splat(constant(slice_.start.dtype().zero()).value());
-        start_indices[a] = slice_.start.value();
-
-        const op = dialects.stablehlo.dynamic_slice(
-            mlirCtx(),
-            self.value(),
-            new_shape.dims(),
-            start_indices[0..self.rank()],
-            .unknown(mlirCtx()),
-        ).appendTo(currentBlock());
-
-        return _result(new_shape, op.result(0));
-    }
-
-    pub const DynSlice = struct { start: Tensor, len: i64 };
-
-    /// Slices a Tensor across many axes, with runtime known offsets.
-    ///
-    /// Due to the nature of stablehlo, the length of the slices need to be known when compiling the IR.
-    /// When using the tagged API it is allowed to not specify some axes.
-    /// But with the non-tagged API all slices need to be specified.
-    /// Examples:
-    /// ```
-    /// Tensor(.{.a=20,.b=30,.c=40 }).dynamicSlice(.{ .a = .{ .start = a_off, .len = 11});
-    /// Tensor(.{.a=20,.b=30,.c=40 }).dynamicSlice(.{
-    ///     .a = .{ .start = a_off, .len = 11 },
-    ///     .b = .{ .start = b_off, .len = 12 },
-    ///   });
-    /// Tensor(.{ 20,30,40}).dynamicSlice(.{.{ .start = scalar(0, .i32), .len = 20 }, .{ .start = b_off, .len = 12 }, .{ .start = scalar(0, .i32), .len = 40 }});
-    /// ```
-    pub fn dynamicSlice(self: Tensor, slices_: anytype) Tensor {
-        // TODO: the untagged api is a bit verbose. Should I allow: `Tensor(.{ 20,30,40}).dynamicSlice(.{.{}, .{ .start = b_off, .len = 12 }, .{}});` ??
-        //
-        const slices, const slices_tags = Shape.parseStruct(DynSlice, slices_);
-
-        // TODO use slices and slices_tags for the format.
-        // Currently this prints: "dynSlice(struct{q: struct{start: tensor.Tensor, comptime len: comptime_int = 1}}{ .q = struct{start: tensor.Tensor, comptime len: comptime_int = 1}{ .start = Tensor({1,10}, dtype=.i64), .len = 1 } })"
-        // which is kinda ugly.
-
-        const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
-        const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values: [constants.MAX_RANK]*const mlir.Value = @splat(zero);
-        var res_shape = self._shape;
-        for (slices.constSlice(), 0..) |slice_, i| {
-            const offset = slice_.start;
-            const len = slice_.len;
-            if (slices_tags.len == 0) {
-                stdx.debug.assert(self.rank() == slices.len, "dynamicSlice expects tensor rank and 'slices_' length to be equal, got {d} and {d}", .{ self.rank(), slices.len });
-
-                offset_values[i] = offset.value();
-                res_shape._dims.set(i, len);
-
-                stdx.debug.assert(len <= self.dim(i), "dynamicSlice expects slices 'len' to be less than or equal to their corresponding dimension in input tensor, got {d} and {d} for index {d}", .{ len, self.dim(i), i });
-            } else {
-                const t = slices_tags.get(i);
-                const a = res_shape.hasTag(t) orelse stdx.debug.panic("dynamicSlice expects input tensor to have tags used in 'slices_' but {s} is missing (input shape is {f})", .{ t, self._shape });
-
-                stdx.debug.assert(len <= self.dim(a), "dynamicSlice expects slices 'len' to be less than their corresponding dimension in input tensor, got {d} and {d} for axis {s}", .{ len, self.dim(a), t });
-
-                offset_values[a] = offset.value();
-                res_shape._dims.set(a, len);
-            }
-        }
-        const op = dialects.stablehlo.dynamic_slice(mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], .unknown(mlirCtx())).appendTo(currentBlock());
-        return _result(res_shape, op.result(0));
-    }
-
-    test dynamicSlice {
-        const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-
-        inline for (.{
-            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
-            .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
-        }) |testcase| {
-            const x_data, const x_shape, const expectation, const z_value: i32, const ax = testcase;
-            const x: Tensor = .fromShape(x_shape);
-            const z: Tensor = .init(.{}, .i32);
-
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.dynamicSlice1d, .{ x, ax, .{ .len = 2, .start = z } }, platform, .{});
-            defer exe.deinit();
-
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
-            defer x_buffer.deinit();
-            var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), .replicated, std.mem.asBytes(&z_value));
-            defer z_buffer.deinit();
-
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.dynamicSlice1d, .{ x_buffer, .{ .start = z_buffer } });
-            defer res.deinit();
-
-            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
@@ -4389,8 +4394,8 @@ pub const Tensor = struct {
         const k = @mod(shift, n); // normalize shift to [0, n)
         if (k == 0) return self;
         return Tensor.concatenate(&.{
-            self.slice1d(a, .{ .start = n - k, .end = n }),
-            self.slice1d(a, .{ .start = 0, .end = n - k }),
+            self.slice(a, .{ .start = n - k, .end = n }),
+            self.slice(a, .{ .start = 0, .end = n - k }),
         }, a);
     }
 

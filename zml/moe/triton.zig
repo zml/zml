@@ -108,8 +108,8 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
 
 fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
