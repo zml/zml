@@ -11,8 +11,9 @@ const Shape = zml.Shape;
 const tri = zml.kernel.triton;
 const DType = tri.DType;
 const toDType = tri.from;
-const a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
 const kernels = @import("triton_kernels/triton_kernels.zig");
+const w4a16 = @import("triton_kernels/w4a16.zig");
+const w4a16_splitk = @import("triton_kernels/w4a16_splitk.zig");
 
 const log = std.log.scoped(.moe_triton);
 
@@ -1189,50 +1190,88 @@ fn runGemm(
     else
         opts.output_shape;
 
-    const cfg: a16w4_kernel.Cfg = .{
+    const cfg: w4a16.Cfg = .{
         .a_dtype = zml.kernel.triton.from(gathered_input.dtype()),
-        .wp_dtype = packedByteDtype(weights.dtype()),
-        .ws_dtype = packedByteDtype(scales.dtype()),
+        .w_dtype = packedByteDtype(weights.dtype()),
+        .scale_dtype = packedByteDtype(scales.dtype()),
         .c_dtype = zml.kernel.triton.from(raw_output_shape.dtype()),
         .BLOCK_M = block_m,
         .BLOCK_N = block_n,
         .BLOCK_K = block_k,
-        .SPLIT_K = 1,
-        .GROUP_M = @intCast(opts.group_m),
-        .num_warps = @intCast(opts.num_warps),
-        .num_stages = @intCast(opts.num_stages),
     };
 
-    var y = a16w4_kernel.Kernel.call(
+    var y = if (opts.block_m < 8) blk: {
+        const split_k: i32 = @intCast(@min(@as(i64, 4), @divExact(contract_k, block_k)));
+        const split_output_shape = raw_output_shape.withDtype(.f32);
+        const c_init = zml.Tensor.zeroes(split_output_shape);
+        break :blk w4a16_splitk.Kernel.call(
+            .{
+                .A = gathered_input,
+                .B = weights,
+                .Scales = scales,
+                .TileExperts = opts.routing.tile_experts,
+                .TileStarts = opts.routing.tile_starts,
+                .TileEnds = opts.routing.tile_ends,
+                .N = scalarI64(n),
+                .K = scalarI64(contract_k),
+                .stride_am = scalarI64(contract_k),
+                .stride_ak = scalarI64(1),
+                .stride_be = scalarI64(n * packed_k),
+                .stride_bk = scalarI64(1),
+                .stride_bn = scalarI64(packed_k),
+                .stride_se = scalarI64(n * scale_k),
+                .stride_sk = scalarI64(1),
+                .stride_sn = scalarI64(scale_k),
+                .stride_cm = scalarI64(raw_output_shape.dim(-1)),
+                .stride_cn = scalarI64(1),
+                .CInit = c_init,
+            },
+            .{ .C = split_output_shape },
+            .{
+                .cfg = .{
+                    .a_dtype = cfg.a_dtype,
+                    .w_dtype = cfg.w_dtype,
+                    .scale_dtype = cfg.scale_dtype,
+                    .BLOCK_M = block_m,
+                    .BLOCK_N = block_n,
+                    .BLOCK_K = block_k,
+                    .SPLIT_K = split_k,
+                },
+                .grid = .{ @intCast(opts.routing.grid_m), @intCast(grid_n), split_k },
+                .num_warps = @intCast(opts.num_warps),
+                .num_stages = @intCast(opts.num_stages),
+                .output_operand_aliases = .{ .C = .CInit },
+            },
+        ).C.convert(raw_output_shape.dtype());
+    } else w4a16.Kernel.call(
         .{
-            .a_ptr = gathered_input,
-            .wp_ptr = weights,
-            .ws_ptr = scales,
-            .tile_expert_ptr = opts.routing.tile_experts,
-            .tile_mstart_ptr = opts.routing.tile_starts,
-            .tile_mend_ptr = opts.routing.tile_ends,
-            .NUM_M_TILES_ptr = scalarI64(opts.routing.grid_m),
-            .N_ptr = scalarI64(n),
-            .K_ptr = scalarI64(contract_k),
-            .stride_am_ptr = scalarI64(contract_k),
-            .stride_ak_ptr = scalarI64(1),
-            .stride_we_ptr = scalarI64(n * packed_k),
-            .stride_wk_ptr = scalarI64(1),
-            .stride_wn_ptr = scalarI64(packed_k),
-            .stride_se_ptr = scalarI64(n * scale_k),
-            .stride_sk_ptr = scalarI64(1),
-            .stride_sn_ptr = scalarI64(scale_k),
-            .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
-            .stride_cn_ptr = scalarI64(1),
+            .A = gathered_input,
+            .B = weights,
+            .Scales = scales,
+            .TileExperts = opts.routing.tile_experts,
+            .TileStarts = opts.routing.tile_starts,
+            .TileEnds = opts.routing.tile_ends,
+            .N = scalarI64(n),
+            .K = scalarI64(contract_k),
+            .stride_am = scalarI64(contract_k),
+            .stride_ak = scalarI64(1),
+            .stride_be = scalarI64(n * packed_k),
+            .stride_bk = scalarI64(1),
+            .stride_bn = scalarI64(packed_k),
+            .stride_se = scalarI64(n * scale_k),
+            .stride_sk = scalarI64(1),
+            .stride_sn = scalarI64(scale_k),
+            .stride_cm = scalarI64(raw_output_shape.dim(-1)),
+            .stride_cn = scalarI64(1),
         },
-        .{ .c = raw_output_shape },
+        .{ .C = raw_output_shape },
         .{
             .cfg = cfg,
-            .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
+            .grid = .{ @intCast(opts.routing.grid_m), @intCast(grid_n), 1 },
             .num_warps = @intCast(opts.num_warps),
             .num_stages = @intCast(opts.num_stages),
         },
-    ).c;
+    ).C;
 
     if (opts.apply_swiglu) {
         y = applySwiGlu(y.convert(.f32), opts.activation_limit).convert(opts.output_shape.dtype());
