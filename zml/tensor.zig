@@ -15,7 +15,7 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("Sharding.zig");
+const Sharding = @import("sharding.zig");
 
 test {
     std.testing.refAllDecls(@This());

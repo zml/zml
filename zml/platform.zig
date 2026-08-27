@@ -12,7 +12,7 @@ const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
-const Sharding = @import("Sharding.zig");
+const Sharding = @import("sharding.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
