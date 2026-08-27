@@ -37,21 +37,20 @@ const Args = struct {
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
         \\
-        \\ Joint video+audio from MiniMax-H3. Attachments pick the task:
-        \\   none → t2va    --image/--last-image → fl2va    --refs → ref2va
+        \\ Generate video and audio from MiniMax-H3.
         \\
         \\ Options:
-        \\   --model=<path>      Model repository, DiT file, or hf:// (required)
-        \\   --prompt=<string>   Intent (default: cinematic waves at dusk)
+        \\   --model=<path>      Path to the model repository (required)
+        \\   --prompt=<string>   Prompt (default: cinematic waves at dusk)
         \\   --image=<path>      First frame
         \\   --last-image=<path> Last frame
         \\   --refs=<paths>      Comma-separated images, videos, audio
-        \\   --duration=<sec>    5–15 (default: 5)
-        \\   --size=<WxH>        Pixels (default: 1344x768)
+        \\   --duration=<sec>    Duration 5–15 (default: 5)
+        \\   --size=<WxH>        Resolution (default: 1344x768)
         \\   --steps=<n>         Denoise steps (default: 30)
         \\   --seed=<n>          RNG seed
-        \\   --out=<path>        Directory or .mp4 (default: output/)
-        \\   --dit=<path>        Transformer weights (size / quant). Encoder and VAE stay with --model
+        \\   --out=<path>        Output directory or .mp4 (default: output/)
+        \\   --dit=<path>        Transformer weights only
         \\
     ;
 };
@@ -96,6 +95,7 @@ fn hasMedia(args: Args) bool {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
+    // `bazel run` starts in the runfiles tree. Hop back to the shell cwd.
     if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
         var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
         defer working_dir.close(init.io);
@@ -122,6 +122,9 @@ pub fn main(init: std.process.Init) !void {
         .dit = args.dit,
     };
 
+    //
+    // Virtual File Systems
+    //
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
@@ -141,11 +144,12 @@ pub fn main(init: std.process.Init) !void {
 
     const io = vfs.io();
 
+    //
+    // Platform
+    //
     const platform: *zml.Platform = try .auto(allocator, io, .{
-        .cpu = .{ .device_count = 1 },
         .physical_mesh = .{ .custom = sharding.physicalMesh },
-        // Grow to what the run uses. Default BFC preallocate grabs 90% of every GPU.
-        .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
+        .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
     });
     defer platform.deinit(allocator, io);
     try vision.register(platform);
@@ -173,6 +177,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
+    //
+    // Load the model
+    //
     const model_repo = try zml.safetensors.resolveModelRepo(io, args.model);
     var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings, paths) catch |err| return rejectUser(err);
     defer models.deinit(allocator, io);
@@ -289,6 +296,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
+    //
+    // Compile
+    //
     const compile_policy: pipeline.CompilePolicy = .{
         .attention = mem.attention,
         .group_size = mem.group_size,
@@ -330,6 +340,9 @@ pub fn main(init: std.process.Init) !void {
     );
     defer compiled_vae.deinit();
 
+    //
+    // Generate
+    //
     try session.generate(allocator, io, platform, &models, &compiled, &compiled_vae, &all, &progress, .{
         .opts = opts,
         .geo = geo_work,

@@ -26,8 +26,7 @@ pub const Plan = struct {
 /// Bytes reserved for one streamed transformer block.
 pub const streamed_block_bytes: u64 = 768 * 1024 * 1024;
 
-/// Geometry needed by the memory estimator. Keep this independent from the
-/// runtime pipeline so core policy does not depend on orchestration code.
+/// Canvas sizes the memory estimator needs.
 pub const Geometry = struct {
     pixel_w: u32,
     pixel_h: u32,
