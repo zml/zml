@@ -119,11 +119,11 @@ fn squeezeToTag(t: zml.Tensor, comptime tag: anytype) zml.Tensor {
 fn padRepeatT(x: zml.Tensor, low: i64, high: i64) zml.Tensor {
     var y = x;
     if (low > 0) {
-        const first = x.slice1d(.t, .{ .start = 0, .end = 1 });
+        const first = x.slice(.t, .{ .start = 0, .end = 1 });
         y = zml.Tensor.concatenate(&.{ first.broad(first.shape().setDim(.t, low)), y }, .t);
     }
     if (high > 0) {
-        const last = x.slice1d(.t, .{ .start = x.dim(.t) - 1, .end = x.dim(.t) });
+        const last = x.slice(.t, .{ .start = x.dim(.t) - 1, .end = x.dim(.t) });
         y = zml.Tensor.concatenate(&.{ y, last.broad(last.shape().setDim(.t, high)) }, .t);
     }
     return y;
@@ -308,7 +308,7 @@ const Activation1d = struct {
             .feature_group_count = channels,
             .padding = &.{ self.kernel - 1, self.kernel - 1 },
         }).scale(@as(f32, @floatFromInt(self.ratio)));
-        y = y.slice1d(.t, .{ .start = crop_left, .end = y.dim(.t) - crop_right });
+        y = y.slice(.t, .{ .start = crop_left, .end = y.dim(.t) - crop_right });
         y = self.act.forward(y.convert(x.dtype())).convert(.f32);
         const even = @mod(self.kernel, 2) == 0;
         const pad_left = @divFloor(self.kernel, 2) - @intFromBool(even);
@@ -520,7 +520,7 @@ const ResidualUnit = struct {
         const yt = y.withPartialTags(.{ .b, .c, .t });
         if (xt.dim(.t) != yt.dim(.t)) {
             const pad = @divFloor(xt.dim(.t) - yt.dim(.t), 2);
-            return yt.add(xt.slice1d(.t, .{ .start = pad, .end = xt.dim(.t) - pad }));
+            return yt.add(xt.slice(.t, .{ .start = pad, .end = xt.dim(.t) - pad }));
         }
         return yt.add(xt);
     }

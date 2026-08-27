@@ -861,16 +861,16 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
 /// Last-axis tags on the tables are aligned to `x` before broadcast.
 pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const rotary_dim = cos.dim(-1);
-    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
+    const x_rot = x.slice(-1, .{ .start = 0, .end = rotary_dim });
     const half = @divExact(rotary_dim, 2);
-    const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x_rot.slice1d(-1, .{ .start = half, .end = rotary_dim });
+    const x1 = x_rot.slice(-1, .{ .start = 0, .end = half });
+    const x2 = x_rot.slice(-1, .{ .start = half, .end = rotary_dim });
     const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     const rot_tag = x_rot.shape().tag(-1);
     const y = x_rot.mul(cos.renameTag(-1, rot_tag).broad(x_rot.shape()))
         .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
     if (rotary_dim == x.dim(-1)) return y;
-    return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
+    return Tensor.concatenate(&.{ y, x.slice(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
@@ -878,12 +878,12 @@ pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
 
     return switch (layout) {
         .real_im_pass, .real_pass_im_pass => .{
-            x.slice1d(-1, .{ .end = @divExact(n, 2) }),
-            x.slice1d(-1, .{ .start = @divExact(n, 2), .end = n }),
+            x.slice(-1, .{ .end = @divExact(n, 2) }),
+            x.slice(-1, .{ .start = @divExact(n, 2), .end = n }),
         },
         .interleaved => .{
-            x.slice1d(-1, .{ .start = 0, .step = 2 }),
-            x.slice1d(-1, .{ .start = 1, .step = 2 }),
+            x.slice(-1, .{ .start = 0, .step = 2 }),
+            x.slice(-1, .{ .start = 1, .step = 2 }),
         },
     };
 }
@@ -906,22 +906,22 @@ pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) str
     const half_rotary = @divExact(rotary_dim, 2);
     return switch (layout) {
         .real_im_pass => .{
-            x.slice1d(ax, .{ .end = half_rotary }),
-            x.slice1d(ax, .{ .start = half_rotary, .end = rotary_dim }),
-            .{ .real_im_pass = x.slice1d(ax, .{ .start = rotary_dim }) },
+            x.slice(ax, .{ .end = half_rotary }),
+            x.slice(ax, .{ .start = half_rotary, .end = rotary_dim }),
+            .{ .real_im_pass = x.slice(ax, .{ .start = rotary_dim }) },
         },
         .real_pass_im_pass => .{
-            x.slice1d(ax, .{ .end = half_rotary }),
-            x.slice1d(ax, .{ .start = half, .end = half + half_rotary }),
+            x.slice(ax, .{ .end = half_rotary }),
+            x.slice(ax, .{ .start = half, .end = half + half_rotary }),
             .{ .real_pass_im_pass = .{
-                x.slice1d(ax, .{ .start = half_rotary, .end = half }),
-                x.slice1d(ax, .{ .start = half + half_rotary }),
+                x.slice(ax, .{ .start = half_rotary, .end = half }),
+                x.slice(ax, .{ .start = half + half_rotary }),
             } },
         },
         .interleaved => .{
-            x.slice1d(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
-            x.slice1d(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
-            .{ .interleaved = x.slice1d(ax, .{ .start = rotary_dim }) },
+            x.slice(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
+            x.slice(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
+            .{ .interleaved = x.slice(ax, .{ .start = rotary_dim }) },
         },
     };
 }
@@ -1664,7 +1664,7 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeLinear1d(out, ax, d, child_opt);
     }
@@ -1731,7 +1731,7 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeCubic1d(out, ax, d, child_opt);
     }
@@ -1970,7 +1970,7 @@ pub const GatedDeltaNet = struct {
     }
 
     fn sliceStep(input: Tensor, step_: Tensor) Tensor {
-        return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
+        return input.slice(.s, .dynSingle(step_));
     }
 
     fn validateInitialState(gdn: GatedDeltaNet, state: State) void {
@@ -2313,7 +2313,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     // this propagate to probs_sum and probs_max.
     const probs = x.softmax(.topk);
     const probs_sum = probs.cumulativeSum(.topk);
-    const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
+    const probs_max = probs.slice(.topk, .{ .start = 0, .end = 1 });
 
     const top_p = opts.top_p.convert(x.dtype()).broad(x.shape());
     const min_p = opts.min_p.convert(x.dtype()).broad(probs_max.shape()).mul(probs_max).broad(x.shape());

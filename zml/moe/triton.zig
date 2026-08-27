@@ -11,10 +11,14 @@ const Shape = zml.Shape;
 const tri = zml.kernel.triton;
 const DType = tri.DType;
 const toDType = tri.from;
-const kernels = @import("triton_kernels/triton_kernels.zig");
 const a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
+const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.moe_triton);
+
+test {
+    std.testing.refAllDecls(@This());
+}
 
 // =============================================================================
 // Public API
@@ -108,8 +112,8 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
 
 fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
@@ -1243,8 +1247,8 @@ fn runGemm(
 }
 
 fn applySwiGlu(input: zml.Tensor, activation_limit: ?f32) zml.Tensor {
-    var gate = input.slice1d(.dout, .{ .start = 0, .step = 2 });
-    var up = input.slice1d(.dout, .{ .start = 1, .step = 2 });
+    var gate = input.slice(.dout, .{ .start = 0, .step = 2 });
+    var up = input.slice(.dout, .{ .start = 1, .step = 2 });
 
     if (activation_limit) |limit| {
         const threshold = zml.Tensor.scalar(limit, .f32);

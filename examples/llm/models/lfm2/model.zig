@@ -471,7 +471,7 @@ pub const ShortConv = struct {
                 const sh = tokens_position_offset.shape().insert(.last, .{ .seq = self.config.conv_L_cache });
                 break :lkp zml.Tensor.iota(sh, .seq).convert(.u32).add(left_pad.convert(.u32).broad(sh)).broad(sh);
             };
-            const scatter_data = Bx.dynamicSlice(.{ .seq = @as(zml.Tensor.DynSlice, .{ .start = start.convert(.u32), .len = @intCast(self.config.conv_L_cache) }) });
+            const scatter_data = Bx.slice(.seq, .dyn(start, self.config.conv_L_cache));
             cache.state = cache.state.scatterSlices(.{ .layer = cache_index, .seq = cache_seq_indices }, scatter_data, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(cache.state);
             const padding = self.config.conv_L_cache - 1;
             const conv_out_ = zml.Tensor.conv1d(Bx, self.kernel, .{
@@ -487,12 +487,12 @@ pub const ShortConv = struct {
                 .output_spatial_dimensions = Bx.axis(.seq),
                 .feature_group_count = Bx.dim(.d),
             });
-            break :b conv_out_.slice1d(.seq, .{ .end = Bx.dim(.seq) });
+            break :b conv_out_.slice(.seq, .{ .end = Bx.dim(.seq) });
         } else b: {
             cache.state = cache.state.rollRight1d(.seq, -1).scatterSlices(.{ .layer = cache_index, .seq = tokens_position_offset.convert(.u32).clamp(.scalar(@as(u32, 0), .u32), .scalar(self.config.conv_L_cache - 1, .u32)) }, Bx, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(cache.state);
             const kernel = self.kernel.squeeze(.in).rename(.{ .out = .d, .kernel_size = .seq });
             const sh = kernel.shape().insert(.last, .{ .batch = tokens_position_offset.dim(.batch) });
-            break :b cache.state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer).mul(kernel.broad(sh).transpose(.{ .batch, .seq, .d })).sum(.seq);
+            break :b cache.state.slice(.layer, .dynSingle(cache_index)).mul(kernel.broad(sh).transpose(.{ .batch, .seq, .d })).sum(.seq);
         };
 
         const y = C.mul(conv_out);
@@ -669,11 +669,11 @@ pub const KvCache = struct {
     }
 
     pub fn keys(self: KvCache, cache_index: zml.Tensor) zml.Tensor {
-        return self.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer);
+        return self.k.slice(.layer, .dynSingle(cache_index));
     }
 
     pub fn values(self: KvCache, cache_index: zml.Tensor) zml.Tensor {
-        return self.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer);
+        return self.v.slice(.layer, .dynSingle(cache_index));
     }
 
     pub fn update(self: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_position: zml.Tensor, cache_index: zml.Tensor) KvCache {

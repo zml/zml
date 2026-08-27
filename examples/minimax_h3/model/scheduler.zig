@@ -153,8 +153,8 @@ pub fn apply(input: StepInput) StepOutput {
     var next = ratio.mul(sample_f).add(zml.Tensor.scalar(1.0, .f32).sub(ratio).mul(denoised_f));
     if (input.model.hold > 0) {
         const seq = next.dim(.s);
-        const prefix = sample_f.slice1d(.s, .{ .start = 0, .end = input.model.hold });
-        const rest = next.slice1d(.s, .{ .start = input.model.hold, .end = seq });
+        const prefix = sample_f.slice(.s, .{ .start = 0, .end = input.model.hold });
+        const rest = next.slice(.s, .{ .start = input.model.hold, .end = seq });
         next = zml.Tensor.concatenate(&.{ prefix, rest }, .s);
     }
     return .{ .sample = next.convert(sample.dtype()).reuseBuffer(input.sample) };

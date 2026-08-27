@@ -397,7 +397,7 @@ pub fn finish(input: FinishInput) FinishOutput {
     const hidden = self.norm_out.forward(input.hidden);
     const proj = applyLinear(self.proj_out, hidden).rename(.{ .dout = .d });
     const keep = proj.dim(.s) - self.cfg.decoder_num_register_tokens - 1;
-    return .{ .patches = proj.slice1d(.s, .{ .start = 0, .end = keep }) };
+    return .{ .patches = proj.slice(.s, .{ .start = 0, .end = keep }) };
 }
 
 pub const LoadedModel = struct {

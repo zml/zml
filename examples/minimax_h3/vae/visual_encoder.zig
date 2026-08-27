@@ -27,12 +27,12 @@ fn reflectPadBoth(x: zml.Tensor, axis: anytype, pad: i64) zml.Tensor {
     if (pad <= 0) return x;
     const n = x.dim(axis);
     if (n <= 1) {
-        const first = x.slice1d(axis, .{ .start = 0, .end = 1 });
+        const first = x.slice(axis, .{ .start = 0, .end = 1 });
         const extra = first.broad(first.shape().setDim(axis, pad));
         return zml.Tensor.concatenate(&.{ extra, x, extra }, axis);
     }
-    const left = x.slice1d(axis, .{ .start = 1, .end = 1 + pad }).reverse(.{axis});
-    const right = x.slice1d(axis, .{ .start = n - 1 - pad, .end = n - 1 }).reverse(.{axis});
+    const left = x.slice(axis, .{ .start = 1, .end = 1 + pad }).reverse(.{axis});
+    const right = x.slice(axis, .{ .start = n - 1 - pad, .end = n - 1 }).reverse(.{axis});
     return zml.Tensor.concatenate(&.{ left, x, right }, axis);
 }
 
@@ -40,10 +40,10 @@ fn reflectPadHigh(x: zml.Tensor, axis: anytype, pad: i64) zml.Tensor {
     if (pad <= 0) return x;
     const n = x.dim(axis);
     if (n <= 1) {
-        const last = x.slice1d(axis, .{ .start = n - 1, .end = n });
+        const last = x.slice(axis, .{ .start = n - 1, .end = n });
         return zml.Tensor.concatenate(&.{ x, last.broad(last.shape().setDim(axis, pad)) }, axis);
     }
-    const tail = x.slice1d(axis, .{ .start = n - 1 - pad, .end = n - 1 }).reverse(.{axis});
+    const tail = x.slice(axis, .{ .start = n - 1 - pad, .end = n - 1 }).reverse(.{axis});
     return zml.Tensor.concatenate(&.{ x, tail }, axis);
 }
 

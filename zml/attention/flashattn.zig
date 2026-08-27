@@ -1234,7 +1234,7 @@ pub const paged_fa2 = struct {
                     .b = batch_dim_decode,
                 }, .f32)).withPartitioning(.{ .hkv = .model });
                 const dummy_cu_seqlens_k_decode = zml.Tensor.zeroes(cu_seqlens_q_decode.shape());
-                var q_decode = q.dynamicSlice1d(0, .{ .start = mixed_parameters.metadata.decode_offset, .len = batch_dim_decode });
+                var q_decode = q.slice(0, .dyn(mixed_parameters.metadata.decode_offset, batch_dim_decode));
 
                 if (seqlenq_ngroups_swapped) {
                     q_decode = q_decode.transpose(.{ .b, .hg, .hkv, .hd }).merge(.{ .b = .{ .b, .hg } }).withPartitioning(.{ .hkv = .model });
@@ -1832,7 +1832,7 @@ pub const paged_fa3 = struct {
                     .hg = num_head_groups,
                 }, .f32));
                 const scheduler_metadata_decode = zml.Tensor.zeroes(.init(.{ .b = batch_size_decode + 1 }, .i32));
-                var q_decode = q.dynamicSlice1d(0, .{ .start = mixed_parameters.metadata.decode_offset, .len = batch_size_decode }).withPartitioning(.{ .hkv = .model });
+                var q_decode = q.slice(0, .dyn(mixed_parameters.metadata.decode_offset, batch_size_decode)).withPartitioning(.{ .hkv = .model });
 
                 q_decode = q_decode.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
 

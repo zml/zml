@@ -78,8 +78,8 @@ fn requireScalePair(opts: Options, dtype: zml.DataType) !void {
 
 fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
 
     const act = switch (mode) {
         .silu => gate.silu().mul(up),
