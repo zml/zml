@@ -9,8 +9,6 @@ const log = std.log.scoped(.minimax_h3_encoder);
 
 pub const Config = config_mod.EncoderConfig;
 
-const RmsNorm = zml.nn.RmsNorm;
-
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, partitions: anytype) zml.nn.Linear {
     return .fromStore(store, weight_name, null, partitions, .replicated, .d);
 }
@@ -47,8 +45,8 @@ const SelfAttn = struct {
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
     o_proj: zml.nn.Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_norm: zml.nn.RmsNorm,
+    k_norm: zml.nn.RmsNorm,
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
@@ -73,8 +71,8 @@ const SelfAttn = struct {
         zml.nn.Linear.unloadBuffers(&self.k_proj);
         zml.nn.Linear.unloadBuffers(&self.v_proj);
         zml.nn.Linear.unloadBuffers(&self.o_proj);
-        RmsNorm.unloadBuffers(&self.q_norm);
-        RmsNorm.unloadBuffers(&self.k_norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.q_norm);
+        zml.nn.RmsNorm.unloadBuffers(&self.k_norm);
     }
 
     pub fn forward(self: SelfAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
@@ -98,9 +96,9 @@ const SelfAttn = struct {
 };
 
 pub const TransformerLayer = struct {
-    input_layernorm: RmsNorm,
+    input_layernorm: zml.nn.RmsNorm,
     self_attn: SelfAttn,
-    post_attention_layernorm: RmsNorm,
+    post_attention_layernorm: zml.nn.RmsNorm,
     mlp: Mlp,
 
     pub const Input = struct {
@@ -125,9 +123,9 @@ pub const TransformerLayer = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
-        RmsNorm.unloadBuffers(&self.input_layernorm);
+        zml.nn.RmsNorm.unloadBuffers(&self.input_layernorm);
         SelfAttn.unloadBuffers(&self.self_attn);
-        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+        zml.nn.RmsNorm.unloadBuffers(&self.post_attention_layernorm);
         Mlp.unloadBuffers(&self.mlp);
     }
 
