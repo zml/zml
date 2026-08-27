@@ -111,7 +111,8 @@ const Credentials = union(enum) {
                         ),
                     };
                 }
-                unreachable;
+                log.warn("Unknown credentials type: {s}", .{obj_type.string});
+                return std.json.ParseFromValueError.InvalidEnumTag;
             },
             else => std.json.ParseFromValueError.UnexpectedToken,
         };
@@ -380,20 +381,23 @@ pub const GCS = struct {
     pub fn auto(allocator: std.mem.Allocator, inner_io: std.Io, http_client: *std.http.Client, environ_map: *std.process.Environ.Map) !GCS {
         var jsonBuffer: [1024]u8 = undefined;
 
-        if (environ_map.get("GOOGLE_APPLICATION_CREDENTIALS")) |json_path| {
-            var f = try std.Io.Dir.openFile(.cwd(), inner_io, json_path, .{});
-            defer f.close(inner_io);
-            var reader = f.reader(inner_io, &jsonBuffer);
-            return try .init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } });
-        }
+        const credentials_file: ?std.Io.File = if (environ_map.get("GOOGLE_APPLICATION_CREDENTIALS")) |json_path| blk: {
+            break :blk std.Io.Dir.openFile(.cwd(), inner_io, json_path, .{}) catch |err| {
+                log.err("Unable to open GCS credentials file {s}, skipping: {t}", .{ json_path, err });
+                break :blk null;
+            };
+        } else if (applicationDefaultCredentials(inner_io, environ_map)) |f|
+            f
+        else
+            null;
+        defer if (credentials_file) |f| f.close(inner_io);
 
-        if (applicationDefaultCredentials(inner_io, environ_map)) |f| {
-            defer f.close(inner_io);
+        if (credentials_file) |f| blk: {
             var reader = f.reader(inner_io, &jsonBuffer);
             return GCS.init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } }) catch |err| switch (err) {
                 InitError.InvalidCredentialJson => {
-                    log.warn("Invalid GCS credential JSON", .{});
-                    return .init(allocator, inner_io, http_client, .{});
+                    log.err("Invalid GCS credentials JSON", .{});
+                    break :blk;
                 },
                 else => return err,
             };
