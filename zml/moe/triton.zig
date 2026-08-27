@@ -730,7 +730,7 @@ pub fn fusedExpertsImpl_fp4(
     scales_down: zml.Tensor,
     bias_down: ?zml.Tensor,
     activation_limit: ?f32,
-) zml.Tensor {
+) !zml.Tensor {
     const x = input.reshape(.{
         .token = @divExact(@as(i64, @intCast(input.count())), input.dim(.d)),
         .d = input.dim(.d),
@@ -763,7 +763,7 @@ pub fn fusedExpertsImpl_fp4(
         .dout = @divExact(weights_gate_up.dim(.dout), 2),
     }, .bf16);
 
-    const hidden = runGemm(
+    const hidden = try runGemm(
         x,
         weights_gate_up,
         scales_gate_up,
@@ -791,7 +791,7 @@ pub fn fusedExpertsImpl_fp4(
         .d = weights_down.dim(.d),
     }, .bf16);
 
-    const routed = runGemm(
+    const routed = try runGemm(
         hidden,
         weights_down,
         scales_down,
@@ -1155,7 +1155,7 @@ fn runGemm(
     weights: zml.Tensor,
     scales: zml.Tensor,
     opts: GemmOpts,
-) zml.Tensor {
+) !zml.Tensor {
     const input_matrix = input.withTags(.{ .row, .k });
     const contract_k = input_matrix.dim(.k);
     const packed_k = weights.dim(opts.weight_contract_tag);
@@ -1172,6 +1172,8 @@ fn runGemm(
     const block_m: i32 = @intCast(opts.block_m);
     const block_n: i32 = @intCast(opts.block_n);
     const block_k: i32 = @intCast(opts.block_k);
+    // TODO: update the kernel to support uneven K.
+    if (@mod(contract_k, block_k) != 0) return error.InvalidShape;
     const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
     const has_gammas = opts.gammas != null;
     const gathered_input = if (opts.gather) |gather| blk: {
