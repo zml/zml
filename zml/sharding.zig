@@ -550,11 +550,17 @@ pub const PhysicalMesh = struct {
     }
 
     fn validateGeometry(node: PhysicalNode) !void {
+        try validateGeometryAt(node, 0, .empty);
+    }
+
+    fn validateGeometryAt(node: PhysicalNode, depth: usize, ancestors: std.EnumSet(PhysicalAxisTag)) !void {
         switch (node) {
             .leaf => return,
             .branch => |b| {
                 if (b.children.len == 0) return error.InvalidPhysicalMesh;
                 if (b.children.len > std.math.maxInt(u8)) return error.InvalidPhysicalMesh;
+                if (depth >= MAX_MESH_RANK) return error.InvalidPhysicalMesh;
+                if (ancestors.contains(b.tag)) return error.IncompatibleGeometry;
 
                 switch (b.geometry) {
                     .ring => if (b.children.len < 2) return error.IncompatibleGeometry,
@@ -581,7 +587,9 @@ pub const PhysicalMesh = struct {
                 }
                 if (saw_leaf and saw_branch) return error.IncompatibleGeometry;
 
-                for (b.children) |child| try validateGeometry(child);
+                var next = ancestors;
+                next.insert(b.tag);
+                for (b.children) |child| try validateGeometryAt(child, depth + 1, next);
             },
         }
     }
@@ -1446,15 +1454,24 @@ pub const Data = struct {
 
             if (spec == .axis) {
                 if (self.binding(spec.axis)) |binding_| {
+                    var candidates: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
                     for (binding_) |p_tag| {
                         for (view.axes.slice(), 0..) |v_ax, i| {
-                            // Only use the axis if it's bound and hasn't been consumed by a previous dimension
-                            if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
-                                dim_axes.appendAssumeCapacity(i);
-                                globally_used.insert(v_ax.tag);
-                                used_mask[i] = true;
+                            if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag) and !containsIndex(candidates.constSlice(), i)) {
+                                candidates.appendAssumeCapacity(i);
                             }
                         }
+                    }
+                    var sizes: [MAX_MESH_RANK]u32 = undefined;
+                    for (candidates.slice(), 0..) |p_idx, i| {
+                        sizes[i] = @intCast(view.axes.get(p_idx).size);
+                    }
+                    const fit = fitDimToAxes(shape.dim(ax), sizes[0..candidates.len]);
+                    for (candidates.slice(), 0..) |p_idx, i| {
+                        if (!fit.used[i]) continue;
+                        dim_axes.appendAssumeCapacity(p_idx);
+                        globally_used.insert(view.axes.get(p_idx).tag);
+                        used_mask[p_idx] = true;
                     }
                 }
             }
@@ -1991,12 +2008,25 @@ fn productU32(sizes: []const u32) u32 {
     return n;
 }
 
+fn containsIndex(haystack: []const usize, needle: usize) bool {
+    for (haystack) |v| {
+        if (v == needle) return true;
+    }
+    return false;
+}
+
+fn gcdU32(dim: i64, size: u32) u32 {
+    if (dim <= 0 or size <= 1) return 1;
+    return @intCast(std.math.gcd(@as(u64, @intCast(dim)), @as(u64, size)));
+}
+
 fn fitDimToAxes(dim: i64, sizes: []const u32) DimAxisFit {
+    std.debug.assert(sizes.len <= MAX_MESH_RANK);
     var fit: DimAxisFit = .{ .len = sizes.len };
     fit.total_bound = productU32(sizes);
-    if (sizes.len == 0 or dim <= 0 or fit.total_bound == 0) return fit;
+    if (sizes.len == 0 or dim <= 0) return fit;
 
-    if (@mod(dim, @as(i64, fit.total_bound)) == 0) {
+    if (fit.total_bound != 0 and @mod(dim, @as(i64, fit.total_bound)) == 0) {
         fit.total_unique = fit.total_bound;
         for (sizes, 0..) |s, i| {
             fit.used[i] = true;
@@ -2005,52 +2035,64 @@ fn fitDimToAxes(dim: i64, sizes: []const u32) DimAxisFit {
         return fit;
     }
 
-    if (sizes.len == 1) {
-        const g: u32 = @intCast(std.math.gcd(@as(u64, @intCast(dim)), @as(u64, fit.total_bound)));
-        if (g <= 1) return fit;
-        fit.used[0] = true;
-        fit.unique[0] = g;
-        fit.total_unique = g;
-        return fit;
-    }
-
-    var best_mask: u32 = 0;
+    var best_unique: [MAX_MESH_RANK]u32 = @splat(0);
+    var best_used: [MAX_MESH_RANK]bool = @splat(false);
     var best_prod: u32 = 1;
-    const all: u32 = @as(u32, 1) << @intCast(sizes.len);
-    var mask: u32 = 1;
-    while (mask < all) : (mask += 1) {
-        var prod: u32 = 1;
-        var overflow = false;
-        for (sizes, 0..) |s, i| {
-            if (mask & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            prod = std.math.mul(u32, prod, s) catch {
-                overflow = true;
-                break;
-            };
-        }
-        if (overflow or @mod(dim, @as(i64, prod)) != 0) continue;
-        if (prod > best_prod) {
-            best_prod = prod;
-            best_mask = mask;
-        }
-    }
-    if (best_prod <= 1) return fit;
 
-    fit.total_unique = best_prod;
-    for (sizes, 0..) |s, i| {
-        if (best_mask & (@as(u32, 1) << @intCast(i)) == 0) continue;
-        fit.used[i] = true;
-        fit.unique[i] = s;
+    if (sizes.len > 0) {
+        const all: u32 = @as(u32, 1) << @intCast(sizes.len);
+        var mask: u32 = 1;
+        while (mask < all) : (mask += 1) {
+            var prod: u32 = 1;
+            var overflow = false;
+            for (sizes, 0..) |s, i| {
+                if (mask & (@as(u32, 1) << @intCast(i)) == 0) continue;
+                if (s <= 1) {
+                    overflow = true;
+                    break;
+                }
+                prod = std.math.mul(u32, prod, s) catch {
+                    overflow = true;
+                    break;
+                };
+            }
+            if (overflow or @mod(dim, @as(i64, prod)) != 0) continue;
+            if (prod > best_prod) {
+                best_prod = prod;
+                best_unique = @splat(0);
+                best_used = @splat(false);
+                for (sizes, 0..) |s, i| {
+                    if (mask & (@as(u32, 1) << @intCast(i)) == 0) continue;
+                    best_used[i] = true;
+                    best_unique[i] = s;
+                }
+            }
+        }
     }
+
+    for (sizes, 0..) |s, i| {
+        const g = gcdU32(dim, s);
+        if (g <= best_prod) continue;
+        best_prod = g;
+        best_unique = @splat(0);
+        best_used = @splat(false);
+        best_used[i] = true;
+        best_unique[i] = g;
+    }
+
+    if (best_prod <= 1) return fit;
+    fit.total_unique = best_prod;
+    fit.unique = best_unique;
+    fit.used = best_used;
     return fit;
 }
 
 const AxisSplit = struct {
     /// For each physical coordinate depth, the contribution of that coordinate
     /// to the linear shard index. Unused depths have stride 0.
-    coord_strides: Device.Coords,
-    coord_divisors: Device.Coords,
-    counts: Device.Coords,
+    coord_strides: [MAX_MESH_RANK]u32,
+    coord_divisors: [MAX_MESH_RANK]u32,
+    counts: [MAX_MESH_RANK]u32,
     num_devices: u32,
 
     pub const empty: AxisSplit = .{
@@ -2060,25 +2102,23 @@ const AxisSplit = struct {
         .num_devices = 1,
     };
 
-    pub fn add(split: *AxisSplit, size: u8, depth: u8) void {
-        split.addPartial(size, depth, size);
-    }
-
-    pub fn addPartial(split: *AxisSplit, size: u8, depth: u8, unique: u8) void {
+    pub fn addPartial(split: *AxisSplit, size: u32, depth: u8, unique: u32) void {
         std.debug.assert(unique > 0 and size % unique == 0);
-        for (&split.coord_strides) |*stride| stride.* *= unique;
+        for (&split.coord_strides) |*stride| {
+            stride.* = std.math.mul(u32, stride.*, unique) catch unreachable;
+        }
         split.coord_strides[depth] = 1;
         split.coord_divisors[depth] = size / unique;
         split.counts[depth] = unique;
-        split.num_devices *= unique;
+        split.num_devices = std.math.mul(u32, split.num_devices, unique) catch unreachable;
     }
 
     pub fn linearIndex(split: AxisSplit, device_coords: Device.Coords) u32 {
-        @setRuntimeSafety(false);
-        const coords_u8: @Vector(MAX_MESH_RANK, u8) = device_coords;
-        const strides: @Vector(MAX_MESH_RANK, u8) = split.coord_strides;
-        const divisors: @Vector(MAX_MESH_RANK, u8) = split.coord_divisors;
-        return @reduce(.Add, (coords_u8 / divisors) * strides);
+        var idx: u32 = 0;
+        inline for (0..MAX_MESH_RANK) |i| {
+            idx += (device_coords[i] / split.coord_divisors[i]) * split.coord_strides[i];
+        }
+        return idx;
     }
 
     pub fn format(split: AxisSplit, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -2135,7 +2175,9 @@ fn appendBoundAxis(
     out: *stdx.BoundedArray(BoundAxis, MAX_MESH_RANK),
 ) void {
     if (used_axes.contains(tag)) return;
-    used_axes.insert(tag);
+    for (out.constSlice()) |b| {
+        if (b.tag == tag) return;
+    }
     const info = physical.axisInfo(tag) orelse return;
     const depth = physical.axis_traversal.depth(tag) orelse return;
     out.appendAssumeCapacity(.{
@@ -2161,7 +2203,8 @@ fn calculateSplit(
     var plan: AxisSplit = .empty;
     for (bound.slice(), 0..) |b, i| {
         if (!fit.used[i]) continue;
-        plan.addPartial(b.size, b.depth, @intCast(fit.unique[i]));
+        used_axes.insert(b.tag);
+        plan.addPartial(b.size, b.depth, fit.unique[i]);
     }
     return plan;
 }
@@ -2603,6 +2646,7 @@ test "sharding: 1D gcd fit shards by 2 and replicates the leftover 3" {
     try runner.run(.{
         .sharding = try .init("gcd_6", &physical, logical, strategy),
         .shape = Shape.init(.{ .model = 8 }, .f32).withPartitioning(.{ .model = .model }),
+        .expected_sdy = "#sdy.sharding<@gcd_6, [{\"link_x\":(1)2}], replicated={\"link_x\":(2)3}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
             .{ .device_id = 1, .slices = &.{.{ 0, 4 }} },
@@ -2626,6 +2670,7 @@ test "sharding: 2x3 mesh uses the axis that divides the dim" {
     try runner.run(.{
         .sharding = try .init("fit_2x3", &physical, logical, strategy),
         .shape = Shape.init(.{ .model = 8 }, .f32).withPartitioning(.{ .model = .model }),
+        .expected_sdy = "#sdy.sharding<@fit_2x3, [{\"link_x\"}], replicated={\"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
             .{ .device_id = 1, .slices = &.{.{ 0, 4 }} },
@@ -2663,6 +2708,39 @@ test "fitDimToAxes" {
         try std.testing.expectEqual(3, fit.total_unique);
         try std.testing.expect(!fit.used[0]);
         try std.testing.expect(fit.used[1]);
+    }
+    {
+        const fit = fitDimToAxes(8, &.{ 1, 6 });
+        try std.testing.expectEqual(2, fit.total_unique);
+        try std.testing.expect(!fit.used[0]);
+        try std.testing.expectEqual(2, fit.unique[1]);
+    }
+    {
+        const fit = fitDimToAxes(8, &.{ 3, 6 });
+        try std.testing.expectEqual(2, fit.total_unique);
+        try std.testing.expect(!fit.used[0]);
+        try std.testing.expectEqual(2, fit.unique[1]);
+    }
+    {
+        const fit = fitDimToAxes(9, &.{ 2, 6 });
+        try std.testing.expectEqual(3, fit.total_unique);
+        try std.testing.expectEqual(3, fit.unique[1]);
+    }
+    {
+        const fit = fitDimToAxes(0, &.{6});
+        try std.testing.expect(fit.isReplicated());
+    }
+    {
+        const fit = fitDimToAxes(1, &.{6});
+        try std.testing.expect(fit.isReplicated());
+    }
+    {
+        const fit = fitDimToAxes(8, &.{});
+        try std.testing.expect(fit.isReplicated());
+    }
+    {
+        const fit = fitDimToAxes(8, &.{1});
+        try std.testing.expect(fit.isReplicated());
     }
 }
 
@@ -2739,4 +2817,125 @@ test "sharding: ragged physical mesh is rejected" {
     const root: PhysicalNode = .axis(.link_x, .point_to_point, x);
 
     try std.testing.expectError(error.IncompatibleGeometry, PhysicalMesh.fromTree(allocator, .cuda, root));
+}
+
+test "sharding: 2x3 mesh uses y when dim is 9" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{ 2, 3 }, .{ .mesh = .torus });
+    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{ .model = .{ .link_x, .link_y } });
+
+    try runner.run(.{
+        .sharding = try .init("fit_2x3_9", &physical, logical, strategy),
+        .shape = Shape.init(.{ .model = 9 }, .f32).withPartitioning(.{ .model = .model }),
+        .expected_sdy = "#sdy.sharding<@fit_2x3_9, [{\"link_y\"}], replicated={\"link_x\"}>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{.{ 0, 3 }} },
+            .{ .device_id = 1, .slices = &.{.{ 3, 3 }} },
+            .{ .device_id = 2, .slices = &.{.{ 6, 3 }} },
+            .{ .device_id = 3, .slices = &.{.{ 0, 3 }} },
+            .{ .device_id = 4, .slices = &.{.{ 3, 3 }} },
+            .{ .device_id = 5, .slices = &.{.{ 6, 3 }} },
+        },
+    });
+}
+
+test "sharding: unused first dim leaves the axis for the next dim" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{3}, .point_to_point);
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{ .batch = .link_x, .model = .link_x });
+
+    try runner.run(.{
+        .sharding = try .init("reuse_axis", &physical, logical, strategy),
+        .shape = Shape.init(.{ .batch = 8, .model = 6 }, .f32)
+            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .expected_sdy = "#sdy.sharding<@reuse_axis, [{}, {\"link_x\"}]>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{ .{ 0, 8 }, .{ 0, 2 } } },
+            .{ .device_id = 1, .slices = &.{ .{ 0, 8 }, .{ 2, 2 } } },
+            .{ .device_id = 2, .slices = &.{ .{ 0, 8 }, .{ 4, 2 } } },
+        },
+    });
+}
+
+test "sharding: leftover mesh axis is available to the next dim" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+
+    const physical: PhysicalMesh = try runner.physical(.{ 2, 3 }, .{ .mesh = .torus });
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth });
+    const strategy: Strategy = .parseBindings(.{
+        .batch = .{ .link_x, .link_y },
+        .model = .{ .link_x, .link_y },
+    });
+
+    try runner.run(.{
+        .sharding = try .init("leftover_axis", &physical, logical, strategy),
+        .shape = Shape.init(.{ .batch = 8, .model = 9 }, .f32)
+            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .expected_sdy = "#sdy.sharding<@leftover_axis, [{\"link_x\"}, {\"link_y\"}]>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{ .{ 0, 4 }, .{ 0, 3 } } },
+            .{ .device_id = 1, .slices = &.{ .{ 0, 4 }, .{ 3, 3 } } },
+            .{ .device_id = 2, .slices = &.{ .{ 0, 4 }, .{ 6, 3 } } },
+            .{ .device_id = 3, .slices = &.{ .{ 4, 4 }, .{ 0, 3 } } },
+            .{ .device_id = 4, .slices = &.{ .{ 4, 4 }, .{ 3, 3 } } },
+            .{ .device_id = 5, .slices = &.{ .{ 4, 4 }, .{ 6, 3 } } },
+        },
+    });
+}
+
+test "sharding: 1-child ring is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const kids = try allocator.alloc(PhysicalNode, 1);
+    kids[0] = .{ .leaf = .{ .id = 0, .coords = @splat(0xff) } };
+    const root: PhysicalNode = .axis(.link_x, .{ .ring = .closed_ring }, kids);
+
+    try std.testing.expectError(error.IncompatibleGeometry, PhysicalMesh.fromTree(allocator, .cuda, root));
+}
+
+test "sharding: duplicate tag on a path is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const inner = try allocator.alloc(PhysicalNode, 1);
+    inner[0] = .{ .leaf = .{ .id = 0, .coords = @splat(0xff) } };
+    const mid = try allocator.alloc(PhysicalNode, 1);
+    mid[0] = .axis(.link_x, .point_to_point, inner);
+    const root: PhysicalNode = .axis(.link_y, .point_to_point, mid);
+    const outer = try allocator.alloc(PhysicalNode, 1);
+    outer[0] = root;
+    const tree: PhysicalNode = .axis(.link_x, .point_to_point, outer);
+
+    try std.testing.expectError(error.IncompatibleGeometry, PhysicalMesh.fromTree(allocator, .cuda, tree));
+}
+
+test "sharding: mesh deeper than MAX_MESH_RANK is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const tags = [_]PhysicalAxisTag{ .link, .link_x, .link_y, .link_z, .bus };
+    var node: PhysicalNode = .{ .leaf = .{ .id = 0, .coords = @splat(0xff) } };
+    var i: usize = tags.len;
+    while (i > 0) {
+        i -= 1;
+        const kids = try allocator.alloc(PhysicalNode, 1);
+        kids[0] = node;
+        node = .axis(tags[i], .point_to_point, kids);
+    }
+
+    try std.testing.expectError(error.InvalidPhysicalMesh, PhysicalMesh.fromTree(allocator, .cuda, node));
 }
