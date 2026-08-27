@@ -112,7 +112,7 @@ pub const AxisRefAttribute = opaque {
 
     pub fn subAxis(ctx: *mlir.Context, axis_name: []const u8, pre_size: i64, size: i64) *const AxisRefAttribute {
         const sub_axis: *const SubAxisInfoAttribute = .init(ctx, pre_size, size);
-        return @ptrCast(c.sdyAxisRefAttrGet(ctx.ptr(), mlir.stringRef(axis_name), sub_axis).ptr);
+        return @ptrCast(c.sdyAxisRefAttrGet(ctx.ptr(), mlir.stringRef(axis_name), sub_axis.ptr()).ptr);
     }
 
     pub fn asAttr(self: *const AxisRefAttribute) *const mlir.Attribute {

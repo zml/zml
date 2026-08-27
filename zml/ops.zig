@@ -117,7 +117,8 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         break :b block;
     };
 
-    var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
+    var replica_group_storage: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    stdx.debug.assert(num_devices > 0 and num_devices <= Platform.MAX_NUM_DEVICES, "allReduce replica group size {} exceeds Platform.MAX_NUM_DEVICES {}", .{ num_devices, Platform.MAX_NUM_DEVICES });
     for (0..@intCast(num_devices)) |i| {
         replica_group_storage[i] = @intCast(i);
     }

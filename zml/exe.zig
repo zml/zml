@@ -10,7 +10,7 @@ const module = @import("module.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("Sharding.zig");
+const Sharding = @import("sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 
 pub const Exe = struct {

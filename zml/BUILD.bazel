@@ -76,7 +76,7 @@ zig_library(
 zig_library(
     name = "zml",
     srcs = [
-        "Sharding.zig",
+        "sharding.zig",
         "attention.zig",
         "attention/attnd.zig",
         "attention/flashattn.zig",

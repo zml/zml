@@ -13,10 +13,11 @@ const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const Target = @import("platform.zig").Target;
 const tracer = @import("profiling/tracer.zig");
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("Sharding.zig");
+const Sharding = @import("sharding.zig");
 const Placement = Sharding.Placement;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
@@ -1395,6 +1396,7 @@ const DirectMemoryWriterDeviceTest = struct {
     pub const Scenario = struct {
         name: []const u8,
         create_options: CreateOptions,
+        target: ?Target = null,
         shape: Shape,
         logical_mesh: Sharding.LogicalMesh,
         strategy: Sharding.Strategy,
@@ -1408,8 +1410,12 @@ const DirectMemoryWriterDeviceTest = struct {
     io: std.Io,
 
     fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
-        var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
+        var platform = try self.createPlatform(scenario);
         defer platform.deinit(self.allocator, self.io);
+
+        if (scenario.target != null) {
+            try std.testing.expectEqual(scenario.create_options.cpu.device_count, platform.devices.len);
+        }
 
         const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
@@ -1421,6 +1427,22 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.pool_chunks,
             scenario.pool_chunk_size,
         );
+    }
+
+    fn createPlatform(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !*Platform {
+        if (scenario.target) |target| {
+            return Platform.init(self.allocator, self.io, target, scenario.create_options) catch |err| {
+                var probe = Platform.init(
+                    self.allocator,
+                    self.io,
+                    .cpu,
+                    .{ .cpu = .{ .device_count = 4 } },
+                ) catch return error.SkipZigTest;
+                probe.deinit(self.allocator, self.io);
+                return err;
+            };
+        }
+        return Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
     }
 
     fn runDirectMemoryWriter(
@@ -1601,6 +1623,44 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
+    });
+}
+
+test "DirectMemoryWriter: 1D model split on 3 CPU devices" {
+    const case: DirectMemoryWriterDeviceTest = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+
+    try case.run(.{
+        .name = "model_3_cpu",
+        .target = .cpu,
+        .create_options = .{
+            .physical_mesh = .auto,
+            .cpu = .{ .device_count = 3 },
+        },
+        .shape = Shape.init(.{ .model = 96 }, .f32).withPartitioning(.{ .model = .model }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
+        .strategy = .parseBindings(.{ .model = .bus }),
+    });
+}
+
+test "DirectMemoryWriter: 1D model split on 6 CPU devices" {
+    const case: DirectMemoryWriterDeviceTest = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+
+    try case.run(.{
+        .name = "model_6_cpu",
+        .target = .cpu,
+        .create_options = .{
+            .physical_mesh = .auto,
+            .cpu = .{ .device_count = 6 },
+        },
+        .shape = Shape.init(.{ .model = 96 }, .f32).withPartitioning(.{ .model = .model }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
+        .strategy = .parseBindings(.{ .model = .bus }),
     });
 }
 

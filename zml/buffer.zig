@@ -12,7 +12,7 @@ const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("Sharding.zig");
+const Sharding = @import("sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
@@ -386,6 +386,7 @@ fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {
                     \\{f}
                     \\
                     \\The Buffer dimension isn't properly divisible by the number of devices along the sharded axis.
+                    \\Arbitrary device counts are supported. Each sharded dimension must divide evenly; uneven shard sizes are not.
                 , .{ shape, sharding });
                 @panic("Buffer shape should be divisible by the number of devices along the sharded axis.");
             },
