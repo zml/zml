@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const policy_mod = @import("../core/policy.zig");
-const multistep_mod = @import("../model/multistep.zig");
 const config = @import("../core/config.zig");
 const dit = @import("../model/dit.zig");
 const noise = @import("../model/noise.zig");
@@ -42,8 +41,6 @@ fn testScheduler(allocator: std.mem.Allocator) !void {
     try std.testing.expectApproxEqAbs(@as(f32, 12.0 / 13.0), scheduler.shiftSigma(0.5, 12.0), 1e-6);
     try std.testing.expectEqual(@as(f32, 0.0), scheduler.shiftSigma(0.0, 12.0));
 
-    const audio = scheduler.timeShiftSigma(0.5, 12.0, 3.0);
-    try std.testing.expect(audio > 0.0 and audio < 1.0);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), scheduler.Schedule.scaleNoise(0.5, 1.0, 0.0), 1e-6);
 
     const dual = try scheduler.DualSchedule.init(allocator, 10, config.video_shift, config.audio_shift);
@@ -364,10 +361,10 @@ fn testMultistepSampler() !void {
     const v = [_]f32{1.0};
     const sig = [_]f32{ 1.0, 0.5, 0.0 };
     const ts = [_]f32{ 0.0, 0.5 };
-    multistep_mod.eulerStep(&sig, &ts, 0, &x, &v);
+    scheduler.eulerStep(&sig, &ts, 0, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
     x[0] = 1.0;
-    multistep_mod.eulerStep(&sig, &ts, 1, &x, &v);
+    scheduler.eulerStep(&sig, &ts, 1, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
 fn testRngReset(allocator: std.mem.Allocator) !void {
@@ -431,7 +428,7 @@ fn testOfficialEuler() !void {
     const v = [_]f32{2.0};
     const sig = [_]f32{ 1.0, 0.5, 0.25 };
     const ts = [_]f32{ 0.0, 0.5 };
-    multistep_mod.eulerStep(&sig, &ts, 1, &x, &v);
+    scheduler.eulerStep(&sig, &ts, 1, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }
 fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
@@ -482,6 +479,6 @@ fn testSchedulerFormula(allocator: std.mem.Allocator) !void {
     const v = [_]f32{1.0};
     const sig = [_]f32{ 1.0, 0.5, 0.0 };
     const ts = [_]f32{ 0.0, 0.5 };
-    multistep_mod.eulerStep(&sig, &ts, 0, &x, &v);
+    scheduler.eulerStep(&sig, &ts, 0, &x, &v);
     try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }

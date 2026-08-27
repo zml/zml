@@ -4,10 +4,8 @@ const zml = @import("zml");
 const config = @import("config.zig");
 const packing = @import("../model/packing.zig");
 
-pub const AttnKind = enum { vanilla, cuda_fa2 };
-
 pub const Decision = struct {
-    attention: AttnKind,
+    attention: zml.attention.Backend,
     resident_blocks: u32,
     group_size: u32,
     tile_batch: u32,
@@ -26,9 +24,15 @@ pub const Query = struct {
     seq: u64,
     causal: bool,
     tp: u32,
+    /// FA kernel used when the seq-length heuristic selects flash. `Backend.auto` is FA3 on Hopper.
+    flash: zml.attention.Backend = .cuda_fa2,
 };
 
-pub fn selectAttention(q: Query) AttnKind {
+pub fn isFlash(backend: zml.attention.Backend) bool {
+    return backend == .cuda_fa2 or backend == .cuda_fa3;
+}
+
+pub fn selectAttention(q: Query) zml.attention.Backend {
     if (q.target != .cuda) return .vanilla;
     if (q.dtype != .bf16 and q.dtype != .f16) return .vanilla;
     if (q.head_dim < 16 or q.head_dim > 256 or @rem(q.head_dim, 8) != 0) return .vanilla;
@@ -38,7 +42,7 @@ pub fn selectAttention(q: Query) AttnKind {
     const quadratic = q.seq * q.seq * 4 * heads_local;
     const linear = q.seq * @as(u64, @intCast(q.head_dim)) * heads_local * 8;
     if (quadratic <= linear * 4) return .vanilla;
-    return .cuda_fa2;
+    return if (isFlash(q.flash)) q.flash else .cuda_fa2;
 }
 
 pub fn sdpaScoreBytes(seq: u64, heads: i64, tp: u32) u64 {
@@ -125,6 +129,7 @@ pub fn decide(args: struct {
     dtype_bytes: u32,
     tile_count: u32 = 1,
     tile_act_bytes: u64 = 0,
+    flash: zml.attention.Backend = .cuda_fa2,
 }) Decision {
     const attn = selectAttention(.{
         .target = args.target,
@@ -134,11 +139,12 @@ pub fn decide(args: struct {
         .seq = args.seq,
         .causal = false,
         .tp = args.tp,
+        .flash = args.flash,
     });
     const hid: u64 = @intCast(@max(args.hidden, 1));
     const act = args.seq * hid * args.dtype_bytes * 8;
     const scores = sdpaScoreBytes(args.seq, args.heads, args.tp);
-    const scratch = if (attn == .cuda_fa2)
+    const scratch = if (isFlash(attn))
         fa2ScratchBytes(args.seq, args.heads, args.head_dim, args.tp)
     else
         scores;
@@ -163,7 +169,7 @@ pub fn decide(args: struct {
         .group_size = group,
         .tile_batch = tiles,
         .score_bytes = scores,
-        .fa2_scratch_bytes = if (attn == .cuda_fa2) scratch else 0,
+        .fa2_scratch_bytes = if (isFlash(attn)) scratch else 0,
         .adaln_table_bytes = tables,
         .activation_bytes = act,
         .block_core_bytes = per_core,

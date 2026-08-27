@@ -3,8 +3,8 @@ const std = @import("std");
 const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
-const buffers = @import("../core/buffers.zig");
 const config_mod = @import("../core/config.zig");
+const weights = @import("../core/weights.zig");
 const packing = @import("../model/packing.zig");
 const pipeline = @import("pipeline.zig");
 const vae = @import("../vae/geometry.zig");
@@ -111,7 +111,7 @@ fn runVisualClip(
     for (y_plan.starts, y_plan.lengths, 0..) |y0, ylen, yi| {
         for (x_plan.starts, x_plan.lengths, 0..) |x0, xlen, xi| {
             copyNchwTile(pixels_nchw, 3, frames, height, width, y0, x0, tile_h, tile_w, tile_px);
-            var pix = try buffers.fromItems(io, platform, .init(.{
+            var pix = try weights.fromItems(io, platform, .init(.{
                 .b = 1,
                 .c = 3,
                 .t = frames,
@@ -330,7 +330,7 @@ pub fn encodeAudio(
     const exe = if (compiled.audio) |*c| c else return error.AudioEncodeMissing;
     var runner = try zml.FnExe(audio_vae.encode).Runner(.{.model}).init(exe, allocator, .{ .model = bufs.* });
     defer runner.deinit(allocator);
-    var wav = try buffers.fromItems(io, platform, .init(.{ .b = 2, .c = 1, .t = samples }, .f32), batch);
+    var wav = try weights.fromItems(io, platform, .init(.{ .b = 2, .c = 1, .t = samples }, .f32), batch);
     defer wav.deinit();
     var latents: zml.Buffer = undefined;
     runner.run(io, .{

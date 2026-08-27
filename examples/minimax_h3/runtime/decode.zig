@@ -3,7 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
-const buffers = @import("../core/buffers.zig");
 const media = @import("media.zig");
 const pipeline = @import("pipeline.zig");
 const vae = @import("../vae/geometry.zig");
@@ -225,7 +224,7 @@ fn initVisualRunners(
         .embed = try EmbedRunner.init(&compiled.embed, allocator, .{ .model = cache.embed }),
         .block = try BlockRunner.init(&compiled.block, allocator, .{ .layer = cache.blocks[0] }),
         .finish = try FinishRunner.init(&compiled.finish, allocator, .{ .model = cache.finish }),
-        .pos = try buffers.fromItems(io, platform, .init(.{ .s = seq, .ax = 3 }, .f32), positions),
+        .pos = try weights.fromItems(io, platform, .init(.{ .s = seq, .ax = 3 }, .f32), positions),
     };
 }
 
@@ -251,7 +250,7 @@ fn runVisualBatch(
         latent_shape = latent_shape.withPartitioning(.{ .b = .model });
         break :blk shardings[0];
     } else .replicated;
-    var latent_buf = try buffers.fromItemsSharded(io, platform, latent_shape, latent_sharding, packed_latents);
+    var latent_buf = try weights.fromItemsSharded(io, platform, latent_shape, latent_sharding, packed_latents);
     defer latent_buf.deinit();
 
     var hidden: zml.Buffer = undefined;
@@ -564,7 +563,7 @@ pub fn decodeAudio(
     var runner = try zml.FnExe(audio_vae.decode).Runner(.{.model}).init(audio_exe, allocator, .{ .model = bufs });
     defer runner.deinit(allocator);
 
-    var latent_buf = try buffers.fromItems(io, platform, .init(.{
+    var latent_buf = try weights.fromItems(io, platform, .init(.{
         .b = 2,
         .c = loaded.cfg.latent_channels,
         .t = geo.audio_t,

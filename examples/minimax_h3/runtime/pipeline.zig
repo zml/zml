@@ -10,7 +10,6 @@ const packing = @import("../model/packing.zig");
 const policy = @import("../core/policy.zig");
 const sharding_mod = @import("../core/sharding.zig");
 const scheduler_mod = @import("../model/scheduler.zig");
-const multistep = @import("../model/multistep.zig");
 const vae = @import("../vae/geometry.zig");
 const vision = @import("../model/vision.zig");
 const visual_enc = @import("../vae/visual_encoder.zig");
@@ -76,7 +75,7 @@ pub const Geometry = struct {
 };
 
 pub const CompilePolicy = struct {
-    attention: policy.AttnKind = .vanilla,
+    attention: zml.attention.Backend = .vanilla,
     group_size: u32 = 1,
     steps: u32,
     hold_video: i64 = 0,
@@ -95,8 +94,8 @@ pub const Compiled = struct {
     block_group: ?zml.FnExe(dit.BlockGroup.forward) = null,
     group_size: u32 = 1,
     finish: zml.FnExe(dit.finish),
-    apply_video: zml.FnExe(multistep.apply),
-    apply_audio: zml.FnExe(multistep.apply),
+    apply_video: zml.FnExe(scheduler_mod.apply),
+    apply_audio: zml.FnExe(scheduler_mod.apply),
     encode_embed: zml.FnExe(encoder.EmbedTokens.forward),
     encode_layer: zml.FnExe(encoder.TransformerLayer.forward),
     encode_scatter: ?zml.FnExe(dit.scatterRows) = null,
@@ -267,8 +266,8 @@ fn compileDitFinish(ctx: CompileCtx, dit_model: dit.Model, geo: Geometry, seq_le
     }});
 }
 
-fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(multistep.apply) {
-    return compileLogged(multistep.apply, "minimax_h3_apply_video", ctx, .{.{
+fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler_mod.apply) {
+    return compileLogged(scheduler_mod.apply, "minimax_h3_apply_video", ctx, .{.{
         .model = .{ .hold = hold },
         .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
         .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
@@ -278,8 +277,8 @@ fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnE
     }});
 }
 
-fn compileApplyAudio(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(multistep.apply) {
-    return compileLogged(multistep.apply, "minimax_h3_apply_audio", ctx, .{.{
+fn compileApplyAudio(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler_mod.apply) {
+    return compileLogged(scheduler_mod.apply, "minimax_h3_apply_audio", ctx, .{.{
         .model = .{ .hold = hold },
         .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
         .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
@@ -332,6 +331,7 @@ pub fn compile(
     var model = dit_model;
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
     const dit_dt = model.blocks[0].norm1.weight.dtype();
+    const flash = zml.attention.Backend.auto(platform);
     const refiner_attn = policy.selectAttention(.{
         .target = platform.target,
         .dtype = dit_dt,
@@ -340,6 +340,7 @@ pub fn compile(
         .seq = text_len,
         .causal = false,
         .tp = tp,
+        .flash = flash,
     });
     model.applyBackend(compile_policy.attention, refiner_attn);
     var enc_work = enc_model;
@@ -351,6 +352,7 @@ pub fn compile(
         .seq = text_len,
         .causal = true,
         .tp = tp,
+        .flash = flash,
     });
     enc_work.applyBackend(enc_attn);
 

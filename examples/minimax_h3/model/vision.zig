@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const buffers = @import("../core/buffers.zig");
 const config_mod = @import("../core/config.zig");
 const geometry = @import("../conditioning/geometry.zig");
 const vision_conv = @import("vision_conv.zig");
@@ -770,7 +769,7 @@ fn runPatches(
         temporal,
     });
 
-    const table_host = try buffers.toF32(allocator, io, cache.pos);
+    const table_host = try weights.toF32(allocator, io, cache.pos);
     defer allocator.free(table_host);
     const side: u32 = @intFromFloat(@sqrt(@as(f32, @floatFromInt(loaded.cfg.num_position_embeddings))));
     const spatial_pos = try interpolatePos(allocator, table_host, side, @intCast(loaded.cfg.hidden_size), grid.h, grid.w);
@@ -799,9 +798,9 @@ fn runPatches(
     });
     defer hidden.deinit();
 
-    var cos_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_cos);
+    var cos_buf = try weights.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_cos);
     defer cos_buf.deinit();
-    var sin_buf = try buffers.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_sin);
+    var sin_buf = try weights.fromF32(allocator, io, platform, .init(.{ .s = seq, .hd = loaded.cfg.headDim() }, .f32), rope_sin);
     defer sin_buf.deinit();
 
     var deepstack: [3][]f32 = .{ &.{}, &.{}, &.{} };
@@ -833,7 +832,7 @@ fn runPatches(
             var tokens: zml.Buffer = undefined;
             ds_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &tokens }, .opts = .{ .wait = true } });
             defer tokens.deinit();
-            deepstack[ds_i] = try buffers.toF32(allocator, io, tokens);
+            deepstack[ds_i] = try weights.toF32(allocator, io, tokens);
             ds_i += 1;
         }
     }
@@ -842,7 +841,7 @@ fn runPatches(
     var merged_buf: zml.Buffer = undefined;
     merge_run.run(io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .tokens = &merged_buf }, .opts = .{ .wait = true } });
     defer merged_buf.deinit();
-    const merged = try buffers.toF32(allocator, io, merged_buf);
+    const merged = try weights.toF32(allocator, io, merged_buf);
     log.info("vision: ok merged={d} [{f}]", .{ merged.len, vision_start.untilNow(io, .awake) });
     return .{
         .merged = merged,
