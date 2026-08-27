@@ -208,7 +208,7 @@ pub fn vitRope(position_ids: zml.Tensor, rotary_dim: i64, theta: f32) struct { z
     const parts = freqs.chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
     const emb = zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
-    return .{ emb.cos().rename(.{ .f = .hd }), emb.sin().rename(.{ .f = .hd }) };
+    return .{ emb.cos(), emb.sin() };
 }
 
 pub const TransformerBlock = struct {
