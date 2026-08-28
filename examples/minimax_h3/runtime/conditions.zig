@@ -214,6 +214,7 @@ pub fn prepare(
             }
         }
     }
+    try request_mod.validateResolvedAudioCount(audios.items.len);
 
     const vcfg = try vision.configFromRepo(allocator, io, enc_dir, text_hidden);
     const hidden_dim: u32 = @intCast(text_hidden);
@@ -424,19 +425,17 @@ pub fn prepare(
             null;
         defer if (a_bufs) |*b| audio_vae.EncoderModel.unloadBuffers(b);
 
-        const tile = encodeTileSize(visuals.items, vae.official_visual.tile_px);
-        var compiled_e = try pipeline.compileEncode(
-            allocator,
-            io,
-            platform,
-            if (v_loaded) |m| m.inner else null,
-            tile.h,
-            tile.w,
-            hasVideo(visuals.items),
-            req.shardings,
-            progress,
-        );
-        defer compiled_e.deinit();
+        const VisualExecutable = struct {
+            tile_h: u32,
+            tile_w: u32,
+            need_clip: bool,
+            exe: pipeline.EncodeCompiled,
+        };
+        var visual_executables: std.ArrayList(VisualExecutable) = .empty;
+        defer {
+            for (visual_executables.items) |*entry| entry.exe.deinit();
+            visual_executables.deinit(allocator);
+        }
 
         const AudioExecutable = struct {
             samples: u32,
@@ -450,10 +449,40 @@ pub fn prepare(
 
         for (visuals.items) |item| {
             if (item.kind == .audio) continue;
-            encoded_visuals[n_vis] = if (item.kind == .video or item.kind == .video_audio)
-                try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.vae_frames, item.h, item.w)
+            const need_clip = item.kind == .video or item.kind == .video_audio;
+            const tile = encodeTileSize(item, vae.official_visual.tile_px);
+            var executable_index: ?usize = null;
+            for (visual_executables.items, 0..) |entry, index| {
+                if (entry.tile_h == tile.h and entry.tile_w == tile.w and entry.need_clip == need_clip) {
+                    executable_index = index;
+                    break;
+                }
+            }
+            if (executable_index == null) {
+                const exe = try pipeline.compileEncode(
+                    allocator,
+                    io,
+                    platform,
+                    v_loaded.?.inner,
+                    tile.h,
+                    tile.w,
+                    need_clip,
+                    req.shardings,
+                    progress,
+                );
+                try visual_executables.append(allocator, .{
+                    .tile_h = tile.h,
+                    .tile_w = tile.w,
+                    .need_clip = need_clip,
+                    .exe = exe,
+                });
+                executable_index = visual_executables.items.len - 1;
+            }
+            const compiled_e = &visual_executables.items[executable_index.?].exe;
+            encoded_visuals[n_vis] = if (need_clip)
+                try encode_mod.encodeVideo(allocator, io, platform, compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.vae_frames, item.h, item.w)
             else
-                try encode_mod.encodeKeyframe(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
+                try encode_mod.encodeKeyframe(allocator, io, platform, compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
             encoded_visuals[n_vis].keyframe_index = item.keyframe_index;
             n_vis += 1;
         }
@@ -538,14 +567,7 @@ fn countVisual(items: anytype) usize {
     return n;
 }
 
-fn encodeTileSize(items: anytype, tile_px: u32) struct { h: u32, w: u32 } {
-    var max_h: u32 = 0;
-    var max_w: u32 = 0;
-    for (items) |item| {
-        if (item.kind == .audio) continue;
-        max_h = @max(max_h, item.h);
-        max_w = @max(max_w, item.w);
-    }
-    if (max_h == 0) return .{ .h = tile_px, .w = tile_px };
-    return .{ .h = @min(tile_px, max_h), .w = @min(tile_px, max_w) };
+fn encodeTileSize(item: anytype, tile_px: u32) struct { h: u32, w: u32 } {
+    std.debug.assert(item.kind != .audio);
+    return .{ .h = @min(tile_px, item.h), .w = @min(tile_px, item.w) };
 }

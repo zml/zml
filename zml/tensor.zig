@@ -1162,8 +1162,8 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const input: Tensor = .init(.{ 1, 1, 1, 1, 1 }, .f32);
-        const kernel: Tensor = .init(.{ 1, 1, 1, 1, 1 }, .f32);
+        const input: Tensor = .init(.{ 1, 1, 2, 2, 2 }, .f32);
+        const kernel: Tensor = .init(.{ 1, 1, 2, 2, 2 }, .f32);
         const Local = struct {
             fn fwd(x: Tensor, w: Tensor) Tensor {
                 return x.conv3d(w, .{});
@@ -1173,14 +1173,16 @@ pub const Tensor = struct {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ input, kernel }, .{});
         defer exe.deinit();
 
-        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{3}));
+        const xs = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+        const ws = [_]f32{ 8, 7, 6, 5, 4, 3, 2, 1 };
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
         defer x_buf.deinit();
-        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{2}));
+        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&ws));
         defer w_buf.deinit();
 
         var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ x_buf, w_buf });
         defer res.deinit();
-        try std.testing.expectEqual(@as(f32, 6), try res.getValue(f32, std.testing.io));
+        try std.testing.expectEqual(@as(f32, 120), try res.getValue(f32, std.testing.io));
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensors.

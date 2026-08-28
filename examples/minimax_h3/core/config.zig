@@ -234,7 +234,7 @@ pub const EncoderFileConfig = struct {
 pub const full_canvas_min_device_bytes: u64 = 80 * 1024 * 1024 * 1024;
 
 pub fn checkDuration(seconds: f32) !void {
-    if (seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
+    if (!std.math.isFinite(seconds) or seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
 }
 
 pub fn checkSteps(steps: u32) !void {
@@ -405,7 +405,7 @@ pub fn audioLatentFromFrames(frames: u32) u32 {
 
 /// Canvas: short edge, area cap `768*1344`, then nearest multiple of 32.
 pub fn resolveCanvas(aspect_w: f32, aspect_h: f32, short_edge: u32, max_pixels: u32) error{InvalidAspect}!Size {
-    if (aspect_w <= 0 or aspect_h <= 0) return error.InvalidAspect;
+    if (!std.math.isFinite(aspect_w) or !std.math.isFinite(aspect_h) or aspect_w <= 0 or aspect_h <= 0) return error.InvalidAspect;
     const ratio = aspect_w / aspect_h;
     if (ratio < min_aspect or ratio > max_aspect) return error.InvalidAspect;
 
@@ -418,17 +418,29 @@ pub fn resolveCanvas(aspect_w: f32, aspect_h: f32, short_edge: u32, max_pixels: 
         width = @floatFromInt(short_edge);
         height = @as(f32, @floatFromInt(short_edge)) / ratio;
     }
+    const cap: u64 = if (max_pixels == 0) canvas_max_pixels else max_pixels;
     const area = width * height;
-    if (area > @as(f32, @floatFromInt(max_pixels))) {
-        const scale = @sqrt(@as(f32, @floatFromInt(max_pixels)) / area);
+    if (area > @as(f32, @floatFromInt(cap))) {
+        const scale = @sqrt(@as(f32, @floatFromInt(cap)) / area);
         width *= scale;
         height *= scale;
     }
     const multiple: f32 = @floatFromInt(canvas_multiple);
-    return .{
-        .w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(width / multiple))) * canvas_multiple),
-        .h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(height / multiple))) * canvas_multiple),
-    };
+    var w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(width / multiple))) * canvas_multiple);
+    var h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(height / multiple))) * canvas_multiple);
+    // Nearest-32 snapping can push the final area back over the requested cap.
+    // Shrink by one grid cell at a time while preserving the closest practical
+    // aspect ratio.
+    while (@as(u64, w) * @as(u64, h) > cap and (w > canvas_multiple or h > canvas_multiple)) {
+        if (w >= h and w > canvas_multiple) {
+            w -= canvas_multiple;
+        } else if (h > canvas_multiple) {
+            h -= canvas_multiple;
+        } else {
+            break;
+        }
+    }
+    return .{ .w = w, .h = h };
 }
 
 pub fn frameCount(duration_s: f32) u32 {

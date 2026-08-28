@@ -123,3 +123,9 @@ pub fn validateRefs(refs: []const Reference) !void {
     }
     if (n_aud != 0 and n_img == 0 and n_vid == 0) return error.AudioRefNeedsVisual;
 }
+
+/// Re-check after media probing: a declared video may resolve to a
+/// video+audio reference and therefore consume one of the audio slots.
+pub fn validateResolvedAudioCount(count: usize) !void {
+    if (count > @as(usize, config.max_ref_audios)) return error.TooManyRefAudios;
+}

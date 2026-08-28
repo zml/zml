@@ -65,6 +65,18 @@ pub const Backend = enum {
             .cuda_fa3 => head_dim == 64 or head_dim == 96 or head_dim == 128 or head_dim == 192 or head_dim == 256,
         };
     }
+
+    /// Dense/varlen flash attention currently has a stricter numerical
+    /// contract than the existing causal FA2 path. Keep the broader FA2 ABI
+    /// support in `supportsHeadDim`, but only select the dense custom call when
+    /// its workspace does not need head-dimension rounding.
+    pub fn supportsDenseHeadDim(backend: Backend, head_dim: i64) bool {
+        return switch (backend) {
+            .cuda_fa2 => head_dim >= 32 and head_dim <= 256 and @rem(head_dim, 32) == 0,
+            .cuda_fa3 => backend.supportsHeadDim(head_dim),
+            else => backend.supportsHeadDim(head_dim),
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {
@@ -238,7 +250,7 @@ fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backen
     if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
     if (@rem(q.dim(.h), k.dim(.h)) != 0) return false;
     if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
-    if (!backend.supportsHeadDim(q.dim(.hd))) return false;
+    if (!backend.supportsDenseHeadDim(q.dim(.hd))) return false;
 
     if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
     if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
@@ -347,6 +359,7 @@ test "dense attention: supported head dimensions" {
 
 test "dense attention: hd=70 falls back to sdpa" {
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 70));
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 70));
     try testDense(
         .init(.{ .b = 1, .q = 16, .h = 8, .hd = 70 }, .bf16),
@@ -376,10 +389,13 @@ test "dense attention: f32 falls back to sdpa" {
     );
 }
 
-test "dense attention: FA2 head dims 48, 80, 144" {
+test "dense attention: rounded FA2 head dims fall back to sdpa" {
     try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 48));
     try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 80));
     try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 144));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 48));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 80));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 144));
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 48));
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 80));
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 144));

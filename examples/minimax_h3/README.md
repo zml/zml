@@ -10,7 +10,7 @@ Same modes as Hailuo / the MiniMax video API. Open weights are **768P**.
 | first-and-last-frame | `--first-frame=a.png --last-frame=b.png` |
 | reference-to-video | `--refs=char.png,motion.mp4,voice.wav` |
 
-Default canvas: text-to-video is **16:9**. Other modes are **adaptive** from the first visual (still, last frame, or first non-audio `--refs`). `--ratio=9:16` (and the other Hailuo ratios) override that. `--size=WxH` sets exact pixels.
+Default canvas: text-to-video is **16:9**. Other modes are **adaptive** from the first visual (still, last frame, or first non-audio `--refs`). Ref2VA references are still encoded at their own geometry; mixed-size references do not share a padded VAE compile shape. `--ratio=9:16` (and the other Hailuo ratios) override the target canvas. `--size=WxH` sets exact pixels.
 
 `--refs` order matters. A video keeps its own soundtrack. A wav after a video is a separate audio reference.
 
@@ -42,7 +42,8 @@ Local checkpoint: `--model=/var/models/MiniMaxAI/MiniMax-H3`.
 - `--ratio=<spec>`: `adaptive` \| `16:9` \| `9:16` \| `1:1` \| `4:3` \| `3:4` \| `21:9`.
 - `--resolution=768P`: Open weights only. `2K` is hosted API.
 - `--out=<path>`: `.mp4` or directory. Default `output.mp4`.
-- `--steps`, `--seed`
+- `--steps`, `--seed`. H3 follows the upstream sigma-grid convention: `N`
+  sigma points include terminal zero, so `N` points produce `N-1` DiT evaluations.
 
 Advanced: `--frames`, `--size=WxH`, `--short-edge`, `--max-pixels`, `--dit`.
 

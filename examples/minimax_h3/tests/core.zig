@@ -69,6 +69,9 @@ fn testCli() !void {
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(3));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(15.01));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(16));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.inf(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(-std.math.inf(f32)));
 }
 fn testSharding(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), sharding_mod.tensorParallelDegree(0));
@@ -303,6 +306,9 @@ fn testCanvasPresets() !void {
     const snapped = try config.snapSizeBudget(snapped_raw.w, snapped_raw.h, config.canvas_max_pixels);
     try std.testing.expectEqual(@as(u32, 1344), snapped.w);
     try std.testing.expectEqual(@as(u32, 768), snapped.h);
+    const capped = try config.resolveCanvas(1, 1, 2000, config.canvas_max_pixels);
+    try std.testing.expect(@as(u64, capped.w) * capped.h <= @as(u64, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(std.math.nan(f32), 1, 768, config.canvas_max_pixels));
     try std.testing.expectError(error.InvalidSize, config.parseWxH("1344"));
     const bad = try config.parseWxH("100x10");
     try std.testing.expectError(error.InvalidAspect, config.snapSizeBudget(bad.w, bad.h, config.canvas_max_pixels));
@@ -361,6 +367,8 @@ fn testRequest(allocator: std.mem.Allocator) !void {
     const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
     defer request_mod.freeRefs(allocator, refs);
     try std.testing.expectEqual(@as(usize, 3), refs.len);
+    try request_mod.validateResolvedAudioCount(@as(usize, config.max_ref_audios));
+    try std.testing.expectError(error.TooManyRefAudios, request_mod.validateResolvedAudioCount(@as(usize, config.max_ref_audios) + 1));
     try std.testing.expectEqual(packing.ReferenceKind.image, refs[0].kind);
     try std.testing.expectEqual(packing.ReferenceKind.video, refs[1].kind);
     try std.testing.expectEqual(packing.ReferenceKind.audio, refs[2].kind);

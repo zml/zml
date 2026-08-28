@@ -39,7 +39,7 @@ pub fn selectAttention(q: Query) zml.attention.Backend {
     if (q.dtype != .bf16 and q.dtype != .f16) return .vanilla;
     if (q.head_dim < 16 or q.head_dim > 256 or @rem(q.head_dim, 8) != 0) return .vanilla;
     if (q.heads <= 0 or @rem(q.heads, @as(i64, @max(1, q.tp))) != 0) return .vanilla;
-    if (isFlash(q.flash) and !q.flash.supportsHeadDim(q.head_dim)) return .vanilla;
+    if (isFlash(q.flash) and !q.flash.supportsDenseHeadDim(q.head_dim)) return .vanilla;
     if (q.causal and q.seq < 2) return .vanilla;
     const heads_local: u64 = @intCast(@divExact(q.heads, @as(i64, @max(1, q.tp))));
     const quadratic = q.seq * q.seq * 4 * heads_local;
