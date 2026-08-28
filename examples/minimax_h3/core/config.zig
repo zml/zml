@@ -309,7 +309,7 @@ pub fn parseSize(text: []const u8) error{ InvalidSize, InvalidAspect, SizeTooLar
     return snapSizeBudget(raw.w, raw.h, canvas_max_pixels);
 }
 
-pub fn parseResolution(text: []const u8) error{OpenWeightsAre768P, InvalidResolution}!void {
+pub fn parseResolution(text: []const u8) error{ OpenWeightsAre768P, InvalidResolution }!void {
     const t = std.mem.trim(u8, text, " \t");
     if (t.len == 0 or std.ascii.eqlIgnoreCase(t, "768p") or std.ascii.eqlIgnoreCase(t, "768")) return;
     if (std.ascii.eqlIgnoreCase(t, "2k")) return error.OpenWeightsAre768P;
