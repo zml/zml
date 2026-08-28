@@ -87,8 +87,6 @@ pub const Error = std.mem.Allocator.Error ||
     pjrtx.Client.CompileError ||
     error{MissingDeviceInTile};
 
-const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
-
 pub const Scope = struct {
     block: *mlir.Block,
     id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
@@ -376,20 +374,11 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     }
 }
 
-pub const OutputInfos = std.MultiArrayList(OutputInfo);
-pub const OutputInfo = struct {
-    shape: Shape,
-    sharding: Sharding,
-    value: *const mlir.Value,
-    donation: ?usize,
-    memory_kind: Memory.Kind,
-};
-
-fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partitioning, v: anytype) !OutputInfos {
+fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partitioning, v: anytype) !std.MultiArrayList(TensorInfo) {
     const CollectOutputInfoCb = struct {
         allocator: std.mem.Allocator,
         partitioning: Sharding.Partitioning,
-        infos: OutputInfos = .empty,
+        infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
             try ctx.infos.append(ctx.allocator, .{
@@ -409,30 +398,36 @@ fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partit
     return context.infos;
 }
 
-pub const InputInfos = std.MultiArrayList(InputInfo);
-pub const InputInfo = struct {
-    shape: Shape,
-    sharding: Sharding,
-    memory_kind: ?Memory.Kind,
-};
-
-fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partitioning, v: anytype) !InputInfos {
+fn collectInputInfo(compiler: *Compiler, scope: *Scope, v: anytype) !std.MultiArrayList(TensorInfo) {
     const CollectInputInfoCb = struct {
-        allocator: std.mem.Allocator,
-        partitioning: Sharding.Partitioning,
-        infos: InputInfos = .empty,
+        compiler: *Compiler,
+        scope: *Scope,
+
+        current_argument_id: u32 = 0,
+        infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
-            try ctx.infos.append(ctx.allocator, .{
+            const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, tensor.shape());
+
+            const value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
+            const gop = ctx.scope.id_to_argument.getOrPut(ctx.scope.arena.allocator(), tensor.id) catch unreachable;
+            if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
+
+            gop.value_ptr.* = ctx.current_argument_id;
+            defer ctx.current_argument_id += 1;
+
+            try ctx.infos.append(ctx.compiler.allocator, .{
                 .shape = tensor.shape(),
-                .sharding = try ctx.partitioning.selectSharding(tensor.shape()),
+                .sharding = try ctx.compiler.partitioning.selectSharding(tensor.shape()),
+                .value = value,
+                .donation = ctx.current_argument_id,
                 .memory_kind = tensor.inputMemoryKind(),
             });
         }
     };
 
-    var context: CollectInputInfoCb = .{ .allocator = allocator, .partitioning = partitioning };
-    errdefer context.infos.deinit(allocator);
+    var context: CollectInputInfoCb = .{ .compiler = compiler, .scope = scope };
+    errdefer context.infos.deinit(compiler.allocator);
 
     try meta.visit(CollectInputInfoCb.cb, &context, v);
 
@@ -441,22 +436,44 @@ fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partiti
 
 const EmitMlirResult = struct {
     func: *mlir.Operation,
-    input_info: InputInfos,
-    output_info: OutputInfos,
+    input_info: std.MultiArrayList(TensorInfo),
+    output_info: std.MultiArrayList(TensorInfo),
 };
 
-fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) ![]*const mlir.Attribute {
-    const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
-    for (res, attributes) |*r, attr| {
-        r.* = .dict(mlir_ctx, attr.constSlice());
+pub const TensorInfo = struct {
+    shape: Shape,
+    sharding: Sharding,
+    value: *const mlir.Value,
+    donation: ?usize,
+    memory_kind: ?Memory.Kind,
+
+    pub fn attributes(info: TensorInfo, arena: std.mem.Allocator, compiler: *const Compiler) !AttributeList {
+        var attrs: AttributeList = .empty;
+
+        const mlir_ctx = compiler.mlir_ctx;
+        const sharding_attr = try compiler.partitioning.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
+        const name = switch (compiler.partitioning.partitioner) {
+            .gspmd => "mhlo.sharding",
+            .shardy => "sdy.sharding",
+        };
+        attrs.appendAssumeCapacity(.named(mlir_ctx, name, sharding_attr));
+
+        const memory_kind = info.memory_kind orelse .device;
+        if (memory_kind != .device) {
+            attrs.appendAssumeCapacity(.named(
+                mlir_ctx,
+                "mhlo.memory_kind",
+                .string(mlir_ctx, compiler.platform.memoryKind(memory_kind)),
+            ));
+        }
+
+        return attrs;
     }
-    return res;
-}
+};
+
+const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
 fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
-    var arena = std.heap.ArenaAllocator.init(compiler.allocator);
-    defer arena.deinit();
-
     const module = mlir.Module.init(.unknown(compiler.mlir_ctx));
     errdefer module.deinit();
 
@@ -465,102 +482,65 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
 
     compiler.pushBlock(block);
     defer compiler.popBlock();
+    const fn_scope: *Scope = compiler.currentScope();
 
-    const LocalContext = struct {
-        compiler: *Compiler,
-        current_argument_id: usize = 0,
-    };
-    var context: LocalContext = .{
-        .compiler = compiler,
-    };
-    meta.visit(struct {
-        fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            const mlir_type = mlirx.Type.rankedTensor(ctx_.compiler.mlir_ctx, tensor.shape());
-            _ = ctx_.compiler.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compiler.mlir_ctx));
-            const gop = ctx_.compiler.currentScope().id_to_argument.getOrPut(ctx_.compiler.currentScope().arena.allocator(), tensor.id) catch unreachable;
-            if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
-            gop.value_ptr.* = ctx_.current_argument_id;
-            ctx_.current_argument_id += 1;
-        }
-    }.cb, &context, &args);
-
-    var output_info, var input_info = b: {
+    var input_info, var output_info = b: {
         compiler.activate();
         defer compiler.deactivate();
 
-        const result = @call(.auto, func, args);
-
-        var input_info = try collectInputInfo(compiler.allocator, compiler.partitioning, &args);
+        var input_info = try collectInputInfo(compiler, fn_scope, &args);
         errdefer input_info.deinit(compiler.allocator);
+
+        const result = @call(.auto, func, args);
 
         var output_info = try collectOutputInfo(compiler.allocator, compiler.partitioning, &result);
         errdefer output_info.deinit(compiler.allocator);
 
-        break :b .{ output_info, input_info };
+        break :b .{ input_info, output_info };
     };
+
     errdefer input_info.deinit(compiler.allocator);
     errdefer output_info.deinit(compiler.allocator);
+    // Finalize in a separate function that doesn't depend on `func` type.
+    return try finalizeMlirFunc(compiler, fn_scope, input_info, output_info);
+}
 
-    const input_attributes = try arena.allocator().alloc(AttributeList, input_info.len);
-    @memset(input_attributes, .empty);
+fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.MultiArrayList(TensorInfo), output_info: std.MultiArrayList(TensorInfo)) !EmitMlirResult {
+    var arena_state = std.heap.ArenaAllocator.init(compiler.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mlir_ctx = compiler.mlir_ctx;
 
-    const output_attributes = try arena.allocator().alloc(AttributeList, output_info.len);
-    @memset(output_attributes, .empty);
+    const fn_return = dialects.func.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
+    _ = fn_return.appendTo(fn_scope.block);
 
-    for (output_info.items(.donation), 0..) |donation, index| if (donation) |argument_index| {
-        input_attributes[argument_index].appendAssumeCapacity(.named(compiler.mlir_ctx, "tf.aliasing_output", .int(compiler.mlir_ctx, .i32, index)));
-    };
-    for (output_info.items(.memory_kind), 0..) |output_memory_kind, index| {
-        if (output_memory_kind == .device) continue;
-        output_attributes[index].appendAssumeCapacity(.named(
-            compiler.mlir_ctx,
-            "mhlo.memory_kind",
-            .string(
-                compiler.mlir_ctx,
-                compiler.platform.memoryKind(output_memory_kind),
-            ),
-        ));
+    // Input sharding/memory attributes
+    const input_attributes = try arena.alloc(AttributeList, input_info.len);
+    for (0.., input_attributes) |i, *input_attrs| {
+        input_attrs.* = try input_info.get(i).attributes(arena, compiler);
     }
-    _ = dialects.func.returns(compiler.mlir_ctx, output_info.items(.value), .unknown(compiler.mlir_ctx)).appendTo(compiler.currentScope().block);
 
-    for (input_info.items(.shape), input_info.items(.sharding), input_info.items(.memory_kind), 0..) |shape, sharding, maybe_memory_kind, i| {
-        const attr = try compiler.partitioning.tensorShardingAttr(compiler.arena.allocator(), compiler.mlir_ctx, shape, sharding);
-        const name = switch (compiler.partitioning.partitioner) {
-            .gspmd => "mhlo.sharding",
-            .shardy => "sdy.sharding",
-        };
-
-        input_attributes[i].appendAssumeCapacity(.named(compiler.mlir_ctx, name, attr));
-
-        if (maybe_memory_kind) |memory_kind| {
-            if (memory_kind == .device) continue;
-            input_attributes[i].appendAssumeCapacity(.named(
-                compiler.mlir_ctx,
-                "mhlo.memory_kind",
-                .string(
-                    compiler.mlir_ctx,
-                    compiler.platform.memoryKind(memory_kind),
-                ),
-            ));
+    // Input donation attributes
+    for (output_info.items(.donation), 0..) |donation, index| {
+        if (donation) |argument_index| {
+            input_attributes[argument_index].appendAssumeCapacity(
+                .named(mlir_ctx, "tf.aliasing_output", .int(mlir_ctx, .i32, index)),
+            );
         }
     }
 
-    for (output_info.items(.shape), output_info.items(.sharding), 0..) |shape, sharding, i| {
-        const attr = try compiler.partitioning.tensorShardingAttr(compiler.arena.allocator(), compiler.mlir_ctx, shape, sharding);
-        const name = switch (compiler.partitioning.partitioner) {
-            .gspmd => "mhlo.sharding",
-            .shardy => "sdy.sharding",
-        };
-
-        output_attributes[i].appendAssumeCapacity(.named(compiler.mlir_ctx, name, attr));
+    // Output sharding/memory attributes
+    const output_attributes = try arena.alloc(AttributeList, output_info.len);
+    for (0.., output_attributes) |i, *output_attrs| {
+        output_attrs.* = try output_info.get(i).attributes(arena, compiler);
     }
 
-    const mlir_func = dialects.func.func(compiler.mlir_ctx, .{
+    const mlir_func = dialects.func.func(mlir_ctx, .{
         .name = "main",
-        .block = compiler.currentScope().block,
-        .location = .unknown(compiler.mlir_ctx),
-        .args_attributes = try finalizeAttributeList(arena.allocator(), compiler.mlir_ctx, input_attributes),
-        .results_attributes = try finalizeAttributeList(arena.allocator(), compiler.mlir_ctx, output_attributes),
+        .block = fn_scope.block,
+        .location = .unknown(mlir_ctx),
+        .args_attributes = try finalizeAttributeList(arena, mlir_ctx, input_attributes),
+        .results_attributes = try finalizeAttributeList(arena, mlir_ctx, output_attributes),
         .verify = false,
     });
 
@@ -569,6 +549,14 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
         .input_info = input_info,
         .output_info = output_info,
     };
+}
+
+fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) ![]*const mlir.Attribute {
+    const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
+    for (res, attributes) |*r, attr| {
+        r.* = .dict(mlir_ctx, attr.constSlice());
+    }
+    return res;
 }
 
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
