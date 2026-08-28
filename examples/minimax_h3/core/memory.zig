@@ -134,7 +134,7 @@ pub fn plan(opts: Opts) Plan {
         decision.denoise_peak_bytes;
     const peak = @max(encoder_peak, @max(denoise_with_prefetch, @max(vae_peak, audio_vae_peak)));
     const full_floor = config.full_canvas_min_device_bytes;
-    const needs_full_floor = @min(opts.geo.pixel_w, opts.geo.pixel_h) > config.preview_short_side;
+    const needs_full_floor = config.usesFullCanvasEnvelope(opts.geo.pixel_w, opts.geo.pixel_h);
 
     var result: Plan = .{
         .peak_bytes = peak,
@@ -159,7 +159,7 @@ pub fn plan(opts: Opts) Plan {
     };
     if (needs_full_floor and opts.device_bytes != 0 and opts.device_bytes < full_floor) {
         result.safe = false;
-        result.reason = "requested size is below the full-canvas device-memory floor";
+        result.reason = "official 768P canvas is below the measured 80 GiB/device envelope";
         return result;
     }
     if (opts.device_bytes != 0 and decision.denoise_peak_bytes > budget) {

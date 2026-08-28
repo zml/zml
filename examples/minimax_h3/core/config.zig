@@ -226,12 +226,16 @@ pub const EncoderFileConfig = struct {
     }
 };
 
-/// Early full-canvas gate (short side > `preview_short_side`).
-/// The detailed planner's denoise estimate can look safe on a 24 GiB card
-/// (streamed DiT). That number omits vision encode, compile, and allocator
-/// overhead, and `memory.plan` runs after visual conditioning, so it cannot
-/// replace this check. Measured 768P T2VA HBM on GB300 was ~77 GiB.
+/// Measured full-768P T2VA HBM on GB300 was ~77 GiB. This is a tested
+/// envelope for official-sized canvases (short side ≥ 768), not a compile
+/// invariant. The planner is authoritative for smaller canvases; this
+/// number is the fail-fast envelope so a 24 GiB card is not sent through
+/// visual conditioning only to OOM. Preview (short side ≤ 352) skips it.
 pub const full_canvas_min_device_bytes: u64 = 80 * 1024 * 1024 * 1024;
+
+pub fn usesFullCanvasEnvelope(width: u32, height: u32) bool {
+    return @min(width, height) >= default_short_side;
+}
 
 pub fn checkDuration(seconds: f32) !void {
     if (!std.math.isFinite(seconds) or seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
@@ -255,7 +259,7 @@ pub fn minDeviceBytes(platform: *const zml.Platform) u64 {
 
 pub fn checkDeviceForSize(width: u32, height: u32, device_bytes: u64) !void {
     if (device_bytes == 0) return;
-    if (@min(width, height) > preview_short_side and device_bytes < full_canvas_min_device_bytes)
+    if (usesFullCanvasEnvelope(width, height) and device_bytes < full_canvas_min_device_bytes)
         return error.SizeTooLarge;
 }
 
@@ -426,24 +430,36 @@ pub fn resolveCanvas(aspect_w: f32, aspect_h: f32, short_edge: u32, max_pixels: 
         height *= scale;
     }
     const multiple: f32 = @floatFromInt(canvas_multiple);
-    var w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(width / multiple))) * canvas_multiple);
-    var h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(height / multiple))) * canvas_multiple);
-    // Nearest-32 snapping can push the final area back over the requested cap.
-    // Shrink by one grid cell at a time while preserving the closest practical
-    // aspect ratio.
+    const w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(width / multiple))) * canvas_multiple);
+    const h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(height / multiple))) * canvas_multiple);
+    return shrinkToCap(w, h, cap, ratio);
+}
+
+fn shrinkToCap(width: u32, height: u32, cap: u64, target_ratio: f32) Size {
+    var w = width;
+    var h = height;
     while (@as(u64, w) * @as(u64, h) > cap and (w > canvas_multiple or h > canvas_multiple)) {
-        if (w >= h and w > canvas_multiple) {
+        const can_w = w > canvas_multiple;
+        const can_h = h > canvas_multiple;
+        if (can_w and can_h) {
+            const rw = @as(f32, @floatFromInt(w - canvas_multiple)) / @as(f32, @floatFromInt(h));
+            const rh = @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h - canvas_multiple));
+            if (@abs(rw - target_ratio) <= @abs(rh - target_ratio)) {
+                w -= canvas_multiple;
+            } else {
+                h -= canvas_multiple;
+            }
+        } else if (can_w) {
             w -= canvas_multiple;
-        } else if (h > canvas_multiple) {
-            h -= canvas_multiple;
         } else {
-            break;
+            h -= canvas_multiple;
         }
     }
     return .{ .w = w, .h = h };
 }
 
 pub fn frameCount(duration_s: f32) u32 {
+    if (!std.math.isFinite(duration_s) or duration_s < 0) return 0;
     return @intFromFloat(@round(duration_s * video_fps));
 }
 

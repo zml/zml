@@ -57,13 +57,15 @@ const Args = struct {
         \\   --first-frame=<path>   First frame
         \\   --last-frame=<path>    Last frame
         \\   --refs=<paths>         Reference images, videos, audio. Comma-separated, order matters.
-        \\                          A video keeps its own soundtrack; a following wav is a separate ref.
+        \\                          Max 12 files / 9 images / 3 videos / 3 audios.
+        \\                          A video soundtrack counts as one audio ref; a following wav is another.
+        \\                          Adaptive canvas uses the first visual; each ref is encoded at its own size.
         \\   --duration=<sec>       5–15 (default: 5)
         \\   --ratio=<spec>         Hailuo ratio: adaptive | 16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9
         \\                          Default: 16:9 for text-to-video, adaptive from the first visual otherwise
         \\   --resolution=768P      Open weights are 768P. 2K is hosted-only
         \\   --out=<path>           .mp4 or directory (default: output.mp4)
-        \\   --steps=<n>            Denoise steps (default: 30)
+        \\   --steps=<n>            Sigma points including terminal zero (default: 30 → 29 DiT evals)
         \\   --seed=<n>             RNG seed (default: 0)
         \\
         \\ Advanced:
@@ -89,7 +91,7 @@ fn rejectUser(err: anyerror) anyerror {
         error.InvalidResolution => reject(err, "--resolution must be 768P (open weights)", .{}),
         error.OpenWeightsAre768P => reject(err, "this checkpoint is 768P; 2K is the hosted MiniMax API only", .{}),
         error.InvalidAspect => reject(err, "aspect must be between 1:4 and 4:1", .{}),
-        error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels or needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
+        error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels, or official 768P needs the measured >={d} GiB/device envelope", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
         error.InvalidDuration => reject(err, "--duration must be 5–15 seconds", .{}),
         error.T2vaRejectsAdaptive => reject(err, "text-to-video needs a ratio (16:9, 9:16, …); omit --ratio for 16:9", .{}),
         error.AdaptiveNeedsVisual => reject(err, "adaptive ratio needs --first-frame, --last-frame, or a visual --refs", .{}),

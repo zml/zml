@@ -544,6 +544,7 @@ fn readWavAny(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Pcm {
 
 /// Official `int(max_duration * sample_rate)` — truncate toward zero in float64.
 pub fn officialTruncateSamples(duration_s: f32, rate: u32) u32 {
+    if (!std.math.isFinite(duration_s) or duration_s < 0) return 0;
     return @intFromFloat(@as(f64, duration_s) * @as(f64, @floatFromInt(rate)));
 }
 

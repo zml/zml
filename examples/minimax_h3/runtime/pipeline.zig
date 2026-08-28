@@ -43,6 +43,10 @@ pub const Geometry = struct {
     audio_dim: u32,
 
     pub fn init(opts: Options, dit_cfg: config.Config) Geometry {
+        if (opts.frames == 0) {
+            std.debug.assert(std.math.isFinite(opts.duration_s));
+            std.debug.assert(opts.duration_s >= 5.0 and opts.duration_s <= 15.0);
+        }
         const frames = if (opts.frames != 0) opts.frames else config.alignFrameCount(config.frameCount(opts.duration_s));
         const lat = config.visualLatentSize(opts.height, opts.width, frames);
         const audio_t = config.audioLatentFromFrames(frames);

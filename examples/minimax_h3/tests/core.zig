@@ -19,6 +19,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testSplitComma(allocator);
     try testFrameGeometry();
     try testCanvasPresets();
+    try testCanvasRules(allocator);
     try testRequest(allocator);
     try testCheckpoint();
     try testMemoryPlan(allocator);
@@ -72,6 +73,12 @@ fn testCli() !void {
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.nan(f32)));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.inf(f32)));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(-std.math.inf(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(std.math.nan(f32), 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(std.math.inf(f32), 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(-std.math.inf(f32), 0));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(std.math.nan(f32)));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(std.math.inf(f32)));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(-std.math.inf(f32)));
 }
 fn testSharding(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), sharding_mod.tensorParallelDegree(0));
@@ -309,6 +316,11 @@ fn testCanvasPresets() !void {
     const capped = try config.resolveCanvas(1, 1, 2000, config.canvas_max_pixels);
     try std.testing.expect(@as(u64, capped.w) * capped.h <= @as(u64, config.canvas_max_pixels));
     try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(std.math.nan(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(std.math.inf(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(-std.math.inf(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, std.math.nan(f32), 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, std.math.inf(f32), 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, -std.math.inf(f32), 768, config.canvas_max_pixels));
     try std.testing.expectError(error.InvalidSize, config.parseWxH("1344"));
     const bad = try config.parseWxH("100x10");
     try std.testing.expectError(error.InvalidAspect, config.snapSizeBudget(bad.w, bad.h, config.canvas_max_pixels));
@@ -356,12 +368,77 @@ fn testCanvasPresets() !void {
     try std.testing.expectEqualStrings("b.png", request_mod.canvasAnchor("", "b.png", &.{}));
     try config.checkSteps(30);
     try std.testing.expectError(error.TooFewSteps, config.checkSteps(1));
+}
+
+fn expectAreaAtMost(size: config.Size, max_pixels: u32) !void {
+    try std.testing.expect(@as(u64, size.w) * size.h <= @as(u64, max_pixels));
+}
+
+fn testCanvasRules(allocator: std.mem.Allocator) !void {
+    const cap = config.canvas_max_pixels;
+    const tight: u32 = 200_000;
+    const cases = [_]struct { w: f32, h: f32, short: u32, max: u32 }{
+        .{ .w = 16, .h = 9, .short = 768, .max = cap },
+        .{ .w = 9, .h = 16, .short = 768, .max = cap },
+        .{ .w = 1, .h = 1, .short = 768, .max = cap },
+        .{ .w = 21, .h = 9, .short = 768, .max = cap },
+        .{ .w = 4, .h = 1, .short = 768, .max = cap },
+        .{ .w = 1, .h = 4, .short = 768, .max = cap },
+        .{ .w = 16, .h = 9, .short = 2000, .max = tight },
+        .{ .w = 9, .h = 16, .short = 2000, .max = tight },
+        .{ .w = 21, .h = 9, .short = 1024, .max = 300_000 },
+    };
+    for (cases) |c| {
+        const got = try config.resolveCanvas(c.w, c.h, c.short, c.max);
+        try expectAreaAtMost(got, if (c.max == 0) cap else c.max);
+        try std.testing.expectEqual(@as(u32, 0), got.w % config.canvas_multiple);
+        try std.testing.expectEqual(@as(u32, 0), got.h % config.canvas_multiple);
+    }
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, 5, 768, cap));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(5, 1, 768, cap));
+
+    const sized = try config.resolveCanvasSpec(.{ .kind = .pixels, .pixels = .{ .w = 800, .h = 600 } }, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 800), sized.w);
+    try std.testing.expectEqual(@as(u32, 608), sized.h);
+    try expectAreaAtMost(sized, cap);
+    const explicit = try config.pickCanvas("1344x768", "");
+    const exact = try config.resolveCanvasSpec(explicit, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 1344), exact.w);
+    try std.testing.expectEqual(@as(u32, 768), exact.h);
+
+    const ratio = try config.pickCanvas("", "9:16");
+    const portrait = try config.resolveCanvasSpec(ratio, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 768), portrait.w);
+    try std.testing.expectEqual(@as(u32, 1344), portrait.h);
+
+    const first = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 720, 1280, 0, 0);
+    const reversed = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 1280, 720, 0, 0);
+    try std.testing.expect(first.w != reversed.w or first.h != reversed.h);
+    try std.testing.expectEqual(@as(u32, 768), first.w);
+    try std.testing.expectEqual(@as(u32, 1344), first.h);
+    try std.testing.expectEqual(@as(u32, 1344), reversed.w);
+    try std.testing.expectEqual(@as(u32, 768), reversed.h);
+
+    const refs_ab = try request_mod.refsFromComma(allocator, "portrait.png,landscape.png");
+    defer request_mod.freeRefs(allocator, refs_ab);
+    const refs_ba = try request_mod.refsFromComma(allocator, "landscape.png,portrait.png");
+    defer request_mod.freeRefs(allocator, refs_ba);
+    try std.testing.expectEqualStrings("portrait.png", request_mod.canvasAnchor("", "", refs_ab));
+    try std.testing.expectEqualStrings("landscape.png", request_mod.canvasAnchor("", "", refs_ba));
+
+    const oversize = try config.parseWxH("1920x1080");
+    try std.testing.expectError(error.SizeTooLarge, config.snapSizeBudget(oversize.w, oversize.h, cap));
 
     const consumer_bytes = 24 * 1024 * 1024 * 1024;
     try std.testing.expectError(error.SizeTooLarge, config.checkDeviceForSize(1344, 768, consumer_bytes));
+    try std.testing.expectError(error.SizeTooLarge, config.checkDeviceForSize(768, 1344, consumer_bytes));
     try config.checkDeviceForSize(640, 352, consumer_bytes);
+    try config.checkDeviceForSize(640, 512, consumer_bytes);
     try config.checkDeviceForSize(1344, 768, 80 * 1024 * 1024 * 1024);
     try config.checkDeviceForSize(1344, 768, 0);
+    try std.testing.expect(config.usesFullCanvasEnvelope(1344, 768));
+    try std.testing.expect(!config.usesFullCanvasEnvelope(640, 512));
+    try std.testing.expect(!config.usesFullCanvasEnvelope(640, 352));
 }
 fn testRequest(allocator: std.mem.Allocator) !void {
     const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
@@ -470,7 +547,22 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
         .tp = 2,
     });
     try std.testing.expect(!full.safe);
-    try std.testing.expectEqualStrings("requested size is below the full-canvas device-memory floor", full.reason);
+    try std.testing.expectEqualStrings("official 768P canvas is below the measured 80 GiB/device envelope", full.reason);
+    const mid_geo = blk: {
+        var g = geo;
+        g.pixel_w = 640;
+        g.pixel_h = 512;
+        break :blk g;
+    };
+    const mid = memory_mod.plan(.{
+        .geo = .init(mid_geo),
+        .layout = layout,
+        .hidden = 256,
+        .steps = 4,
+        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .tp = 2,
+    });
+    try std.testing.expect(!std.mem.eql(u8, mid.reason, "official 768P canvas is below the measured 80 GiB/device envelope"));
 }
 fn testFullCanvasFloor(allocator: std.mem.Allocator) !void {
     const dit_cfg = config.Config.official();
@@ -503,7 +595,7 @@ fn testFullCanvasFloor(allocator: std.mem.Allocator) !void {
         .layers = @intCast(dit_cfg.num_layers),
     });
     try std.testing.expect(!consumer.safe);
-    try std.testing.expectEqualStrings("requested size is below the full-canvas device-memory floor", consumer.reason);
+    try std.testing.expectEqualStrings("official 768P canvas is below the measured 80 GiB/device envelope", consumer.reason);
     try std.testing.expect(consumer.denoise_peak_bytes <= 24 * 1024 * 1024 * 1024 * policy_mod.safety_numer / policy_mod.safety_denom);
     const ok = memory_mod.plan(.{
         .geo = .init(geo),

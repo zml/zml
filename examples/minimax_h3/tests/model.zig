@@ -135,6 +135,13 @@ fn testScheduler(allocator: std.mem.Allocator) !void {
     defer dual.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 12.0), dual.video.shift);
     try std.testing.expectEqual(@as(f32, 3.0), dual.audio.shift);
+
+    const official = try scheduler.Schedule.init(allocator, config.video_shift, config.default_steps);
+    defer official.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, config.default_steps), official.sigmas.len);
+    try std.testing.expectEqual(@as(usize, config.default_steps - 1), official.timesteps.len);
+    try std.testing.expectEqual(@as(usize, config.default_steps - 1), official.stepCount());
+    try std.testing.expectEqual(@as(f32, 0.0), official.sigmas[official.sigmas.len - 1]);
 }
 fn testTimestepEmbedding() !void {
     const t = [_]f32{ 0.0, 1.0 };
