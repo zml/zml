@@ -1158,6 +1158,31 @@ pub const Tensor = struct {
         });
     }
 
+    test conv3d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ 1, 1, 1, 1, 1 }, .f32);
+        const kernel: Tensor = .init(.{ 1, 1, 1, 1, 1 }, .f32);
+        const Local = struct {
+            fn fwd(x: Tensor, w: Tensor) Tensor {
+                return x.conv3d(w, .{});
+            }
+        };
+
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ input, kernel }, .{});
+        defer exe.deinit();
+
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{3}));
+        defer x_buf.deinit();
+        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{2}));
+        defer w_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ x_buf, w_buf });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(f32, 6), try res.getValue(f32, std.testing.io));
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp("add", dialects.stablehlo.add)(self, other);
@@ -1643,10 +1668,45 @@ pub const Tensor = struct {
         return tanh_.addConstant(1).mul(x).scale(0.5);
     }
 
-    /// Exact GELU: `0.5 * x * (1 + erf(x / √2))` (`nn.GELU()`).
-    /// `gelu` is the tanh approximation (`gelu_pytorch_tanh`).
+    /// Erf-form GELU: `0.5 * x * (1 + erf(x / √2))`.
+    /// `erf` is the Abramowitz–Stegun approximation (StableHLO has no erf).
     pub fn geluErf(x: Tensor) Tensor {
         return x.mul(x.scale(std.math.sqrt(0.5)).erf().addConstant(1)).scale(0.5);
+    }
+
+    test geluErf {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ .d = 3 }, .f32);
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.geluErf, .{input}, .{});
+        defer exe.deinit();
+
+        const xs = [_]f32{ -1.0, 0.5, 2.0 };
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
+        defer x_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.geluErf, .{x_buf});
+        defer res.deinit();
+        var actual: [3]f32 = undefined;
+        try res.toSlice(std.testing.io, zml.Slice.init(input.shape(), std.mem.sliceAsBytes(&actual)));
+
+        for (xs, actual) |x, got| {
+            const want = 0.5 * x * (1.0 + hostAbramowitzStegunErf(x / @sqrt(2.0)));
+            try std.testing.expectApproxEqRel(want, got, 1e-5);
+        }
+    }
+
+    fn hostAbramowitzStegunErf(x: f32) f32 {
+        const ax = @abs(x);
+        const t = 1.0 / (1.0 + 0.3275911 * ax);
+        var poly = t * 1.061405429 - 1.453152027;
+        poly = t * poly + 1.421413741;
+        poly = t * poly - 0.284496736;
+        poly = t * poly + 0.254829592;
+        poly *= t;
+        const erfc = poly * @exp(-ax * ax);
+        return std.math.sign(x) * (1.0 - erfc);
     }
 
     /// Abramowitz–Stegun erf (max error ~1.5e-7). StableHLO has no `erf`.

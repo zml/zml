@@ -452,6 +452,7 @@ pub fn FnExe(comptime function_: anytype) type {
                 }
 
                 /// `bake` is incremental; reset the count or the previous prefix stays bound.
+                /// Borrowed `baked` buffers must outlive async `run` until the next `rebake` or `deinit`.
                 pub fn rebake(self: *RunnerSelf, baked: BakedInput) void {
                     self.args.baked_count = 0;
                     self.args.bake(baked);

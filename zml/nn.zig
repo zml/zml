@@ -592,6 +592,35 @@ pub const RmsNorm = struct {
     }
 };
 
+test "RmsNorm" {
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .d = 2 }, .f32);
+    const weight: Tensor = .init(.{ .d = 2 }, .f32);
+    const layer: RmsNorm = .{ .weight = weight, .eps = 1e-6 };
+    const Local = struct {
+        fn fwd(n: RmsNorm, t: Tensor) Tensor {
+            return n.forward(t);
+        }
+    };
+
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ layer, x }, .{});
+    defer exe.deinit();
+
+    var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 3, 4 }));
+    defer x_buf.deinit();
+    var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 1 }));
+    defer w_buf.deinit();
+
+    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ .{ .weight = w_buf }, x_buf });
+    defer res.deinit();
+    var actual: [2]f32 = undefined;
+    try res.toSlice(std.testing.io, .init(x.shape(), std.mem.sliceAsBytes(&actual)));
+
+    const rsqrt = 1.0 / @sqrt(12.5 + 1e-6);
+    try std.testing.expectApproxEqRel(3.0 * rsqrt, actual[0], 1e-5);
+    try std.testing.expectApproxEqRel(4.0 * rsqrt, actual[1], 1e-5);
+}
+
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
@@ -830,6 +859,28 @@ pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
         .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
     if (rotary_dim == x.dim(-1)) return y;
     return Tensor.concatenate(&.{ y, x.slice(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
+}
+
+test applyRotary {
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    const cos_t: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    const sin_t: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, applyRotary, .{ x, cos_t, sin_t }, .{});
+    defer exe.deinit();
+
+    var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 2, 3, 4 }));
+    defer x_buf.deinit();
+    var cos_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, cos_t.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 0, 1, 0 }));
+    defer cos_buf.deinit();
+    var sin_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, sin_t.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 0, 1 }));
+    defer sin_buf.deinit();
+
+    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, applyRotary, .{ x_buf, cos_buf, sin_buf });
+    defer res.deinit();
+    var actual: [4]f32 = undefined;
+    try res.toSlice(std.testing.io, .init(x.shape(), std.mem.sliceAsBytes(&actual)));
+    try std.testing.expectEqualSlices(f32, &.{ 1, -4, 3, 2 }, &actual);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
