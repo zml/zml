@@ -61,7 +61,7 @@ pub const Backend = enum {
     pub fn supportsHeadDim(backend: Backend, head_dim: i64) bool {
         return switch (backend) {
             .vanilla, .attnd, .nki, .metal_fa => head_dim > 0,
-            .cuda_fa2 => head_dim >= 16 and head_dim <= 256 and @rem(head_dim, 16) == 0,
+            .cuda_fa2 => head_dim >= 8 and head_dim <= 256 and @rem(head_dim, 8) == 0,
             .cuda_fa3 => head_dim == 64 or head_dim == 96 or head_dim == 128 or head_dim == 192 or head_dim == 256,
         };
     }
@@ -203,13 +203,9 @@ pub const DenseOpts = struct {
 };
 
 /// Dense attention (causal or bidirectional).
-/// CUDA FA2 / FA3 only when that backend supports `.hd`; otherwise `zml.nn.sdpa`.
+/// CUDA FA2 / FA3 when available and legal; otherwise `zml.nn.sdpa`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
-    const flash = switch (backend) {
-        .cuda_fa2, .cuda_fa3 => backend.supportsHeadDim(q.dim(.hd)),
-        else => false,
-    };
-    if (flash) {
+    if (denseCanUseFlash(q, k, v, backend)) {
         return switch (backend) {
             .cuda_fa2 => flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
             .cuda_fa3 => flashattn.fa3.dense(q, k, v, .{ .is_causal = opts.is_causal }),
@@ -221,6 +217,34 @@ pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts
     else
         null;
     return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+}
+
+fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend) bool {
+    switch (backend) {
+        .cuda_fa2, .cuda_fa3 => {},
+        else => return false,
+    }
+    if (!q.shape().hasTags(.{ .q, .h, .hd })) return false;
+    if (!k.shape().hasTags(.{ .k, .h, .hd })) return false;
+    if (!v.shape().hasTags(.{ .k, .h, .hd })) return false;
+
+    const q_b = q.shape().hasTag(.b) != null;
+    const k_b = k.shape().hasTag(.b) != null;
+    const v_b = v.shape().hasTag(.b) != null;
+    if (q_b != k_b or q_b != v_b) return false;
+    if (q_b and (q.dim(.b) != k.dim(.b) or q.dim(.b) != v.dim(.b) or q.dim(.b) <= 0)) return false;
+
+    if (q.dim(.q) <= 0 or k.dim(.k) <= 0 or v.dim(.k) != k.dim(.k)) return false;
+    if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
+    if (@rem(q.dim(.h), k.dim(.h)) != 0) return false;
+    if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
+    if (!backend.supportsHeadDim(q.dim(.hd))) return false;
+
+    if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
+    if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
+
+    const compiler = zml.Compiler.currentOrNull() orelse return false;
+    return backend.isAvailable(compiler.platform);
 }
 
 test "attention: q=1,qh=64,kh=8" {
@@ -321,14 +345,62 @@ test "dense attention: supported head dimensions" {
     }
 }
 
-test "dense attention: hd=72 falls back to sdpa" {
-    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 72));
-    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 72));
+test "dense attention: hd=70 falls back to sdpa" {
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 70));
     try testDense(
-        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 72 }, .bf16),
-        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 72 }, .bf16),
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 70 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 70 }, .bf16),
         false,
     );
+}
+
+test "dense attention: batch size > 1" {
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 8, .h = 4, .hd = 64 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 8, .h = 4, .hd = 64 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: f32 falls back to sdpa" {
+    try testDense(
+        .init(.{ .b = 1, .q = 8, .h = 4, .hd = 64 }, .f32),
+        .init(.{ .b = 1, .k = 8, .h = 4, .hd = 64 }, .f32),
+        false,
+    );
+}
+
+test "dense attention: FA2 head dims 48, 80, 144" {
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 48));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 80));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 144));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 48));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 80));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 144));
+    inline for (.{ 48, 80, 144 }) |head_dim| {
+        try testDense(
+            .init(.{ .b = 1, .q = 8, .h = 4, .hd = head_dim }, .bf16),
+            .init(.{ .b = 1, .k = 8, .h = 4, .hd = head_dim }, .bf16),
+            false,
+        );
+    }
+}
+
+test "Backend.supportsHeadDim matches FA C ABI" {
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 8));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 24));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 72));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 7));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 264));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa3, 64));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 48));
 }
 
 test "dense attention: gqa causal hd=128" {
@@ -388,8 +460,6 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
 
     const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
     for (backends) |backend| {
-        const supported = backend.supportsHeadDim(q_shape.dim(.hd));
-        if (supported and !backend.isAvailable(platform)) continue;
         const exe = try platform.compileFn(
             allocator,
             io,

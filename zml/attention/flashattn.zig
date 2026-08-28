@@ -118,9 +118,28 @@ fn bufferFromFfiBuffer(ffi_buffer: *const ffi.Buffer) Buffer {
     };
 }
 
+pub fn fa2RoundHeadDim(head_dim: i64) i64 {
+    if (head_dim <= 0) return 32;
+    if (head_dim <= 192) return std.mem.alignForward(i64, head_dim, 32);
+    return 256;
+}
+
+pub fn fa3RoundHeadDim(head_dim: i64) i64 {
+    if (head_dim <= 64) return 64;
+    if (head_dim <= 96) return 96;
+    if (head_dim <= 128) return 128;
+    if (head_dim <= 192) return 192;
+    return 256;
+}
+
+fn resolvedHeadDim(head_dim: i64) i64 {
+    return if (head_dim > 0) head_dim else 256;
+}
+
 fn modelAxisPartitions(shape: zml.Shape) i32 {
     const ctx = zml.Compiler.current();
-    return @intCast(ctx.partitioning.numPartitionsForLogicalAxis(shape, .model) catch 1);
+    return @intCast(ctx.partitioning.numPartitionsForLogicalAxis(shape, .model) catch |err|
+        std.debug.panic("flash attention requires a covering sharding for axis .model: {s}", .{@errorName(err)}));
 }
 
 const DenseBatch = struct {
@@ -269,21 +288,21 @@ pub const fa2 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
-            head_dim: i64 = 128,
+            head_dim: i64 = 0,
         };
 
         pub fn init(opts: InitOptions) Metadata {
-            const hd = if (opts.head_dim > 0) opts.head_dim else 128;
+            const hd_ws = fa2RoundHeadDim(resolvedHeadDim(opts.head_dim));
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
                     .withTags(.{ .s, .h, .dummy })
                     .withPartitioning(.{ .h = .model })),
 
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, hd }, .f32)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, hd_ws }, .f32)
                     .withTags(.{ .dummy, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
 
-                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, hd }, .f32)
+                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, hd_ws }, .f32)
                     .withTags(.{ .s, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
             };
@@ -487,12 +506,13 @@ pub const fa3 = struct {
         const ctx: *ffi.ExecutionContext = @constCast(call_frame.ctx);
         const stream = call_frame.api.stream(ctx);
 
+        const num_splits: i32 = getScalarAttributeAs(i32, call_frame, "num_splits") orelse 0;
         const params: flashattn.FA3MhaFwdParams = .{
             .max_seqlen_q = max_seqlen_q,
             .max_seqlen_k = max_seqlen_k,
             .softcap = 0.0,
             .is_rotary_interleaved = false,
-            .num_splits = 0,
+            .num_splits = num_splits,
             .sm_margin = 0,
             .is_causal = is_causal,
             .softmax_scale = softmax_scale,
@@ -546,19 +566,21 @@ pub const fa3 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
-            head_dim: i64 = 128,
+            head_dim: i64 = 0,
+            batch: i64 = 1,
         };
 
         pub fn init(opts: InitOptions) Metadata {
-            const hd = if (opts.head_dim > 0) opts.head_dim else 128;
+            const hd = resolvedHeadDim(opts.head_dim);
+            const batch = if (opts.batch > 0) opts.batch else 1;
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * hd * 4}, .i8)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
                 .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * hd * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
+                .scheduler_metadata = .fromShape(zml.Shape.init(.{batch + 1}, .i32)
                     .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
             };
         }
@@ -642,6 +664,7 @@ pub const fa3 = struct {
             .seqlen = flat.q.dim(.tot),
             .num_heads = q_.dim(.h),
             .head_dim = head_dim,
+            .batch = flat.bs,
         });
         const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
         const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
@@ -676,6 +699,7 @@ pub const fa3 = struct {
                 .window_size_right = @as(i32, -1),
                 .max_seqlen_q = max_seqlen_q,
                 .max_seqlen_k = max_seqlen_k,
+                .num_splits = @as(i32, 1),
             },
             .{
                 .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
@@ -686,6 +710,34 @@ pub const fa3 = struct {
         return unflattenDense(o, q_, flat.bs);
     }
 };
+
+test "FA2/FA3 scratch sizing matches C ABI rounding" {
+    const fa2_cases = [_][2]i64{
+        .{ 8, 32 },    .{ 16, 32 },   .{ 32, 32 },   .{ 48, 64 },
+        .{ 64, 64 },   .{ 80, 96 },   .{ 96, 96 },   .{ 112, 128 },
+        .{ 128, 128 }, .{ 144, 160 }, .{ 160, 160 }, .{ 176, 192 },
+        .{ 192, 192 }, .{ 208, 256 }, .{ 224, 256 }, .{ 256, 256 },
+    };
+    for (fa2_cases) |c| {
+        try std.testing.expectEqual(c[1], fa2RoundHeadDim(c[0]));
+        const meta = fa2.Metadata.init(.{ .seqlen = 8, .num_heads = 2, .head_dim = c[0] });
+        try std.testing.expectEqual(c[1], meta.out_accum.dim(.hd));
+    }
+
+    const unknown = fa2.Metadata.init(.{ .seqlen = 1, .num_heads = 1 });
+    try std.testing.expectEqual(@as(i64, 256), unknown.out_accum.dim(.hd));
+
+    const fa3_round = [_][2]i64{
+        .{ 48, 64 },   .{ 64, 64 },   .{ 80, 96 },   .{ 96, 96 },
+        .{ 128, 128 }, .{ 144, 192 }, .{ 192, 192 }, .{ 256, 256 },
+    };
+    for (fa3_round) |c| {
+        try std.testing.expectEqual(c[1], fa3RoundHeadDim(c[0]));
+        const meta = fa3.Metadata.init(.{ .seqlen = 8, .num_heads = 2, .head_dim = c[0], .batch = 3 });
+        try std.testing.expectEqual(@as(i64, 4), meta.scheduler_metadata.dim(0));
+        try std.testing.expectEqual(@as(usize, @intCast(2 * 8 * c[0] * 4)), meta.out_accum.shape().count());
+    }
+}
 
 pub const paged_fa2 = struct {
     // God knows why flash attention uses this number and not something else.
