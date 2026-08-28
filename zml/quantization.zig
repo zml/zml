@@ -123,11 +123,13 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
     else
         x;
     const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = nvfp4_block_size });
-    const amax = grouped.abs().max(.blk);
 
-    const scales = amax.scale(1.0 / value_max)
+    const amax = grouped.abs()
+        .scale(1.0 / value_max)
         .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
-        .convert(.f8e4m3fn);
+        .max(.blk);
+
+    const scales = amax.convert(.f8e4m3fn);
 
     const divisor = scales.convert(dt)
         .maximum(.scalar(scale_min_normal, dt))
