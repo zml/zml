@@ -882,6 +882,33 @@ pub const Mla = struct {
             else => @panic("NOPE"),
         };
     }
+
+    pub fn pagedSparseAttentionFp8(
+        parameters: Parameters,
+        q: zml.Tensor,
+        kv_nope: zml.Tensor,
+        kv_rope: zml.Tensor,
+        kv_scales: zml.Tensor,
+        sink: ?zml.Tensor,
+        topk: zml.Tensor,
+        tokens_pos: zml.Tensor,
+        opts: Mla.Options,
+    ) zml.Tensor {
+        return switch (parameters) {
+            .triton => |triton_parameters| triton.paged.pagedSparseMlaDsv4Fp8(
+                triton_parameters,
+                q,
+                kv_nope,
+                kv_rope,
+                kv_scales,
+                sink,
+                topk,
+                tokens_pos,
+                opts,
+            ),
+            else => std.debug.panic("FP8 MLA pages currently require the Triton backend", .{}),
+        };
+    }
 };
 
 test "use mla kernel" {

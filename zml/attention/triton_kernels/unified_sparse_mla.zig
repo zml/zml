@@ -26,6 +26,7 @@ pub const Config = struct {
     num_splits: i64 = 1,
     use_attn_sink: bool = false,
     all_decode: bool = false,
+    scale_block_size: i64 = 0,
 };
 
 pub const Kernel2D = tri.Kernel(Config, .{
@@ -33,6 +34,8 @@ pub const Kernel2D = tri.Kernel(Config, .{
     .inputs = &.{
         "query_ptr",
         "kv_cache_ptr",
+        "kv_rope_cache_ptr",
+        "kv_scale_cache_ptr",
         "attn_sink_ptr",
         "topk_indices_ptr",
         "active_query_count_ptr",
@@ -43,6 +46,10 @@ pub const Kernel2D = tri.Kernel(Config, .{
         "output_stride_1_ptr",
         "stride_cache_0_ptr",
         "stride_cache_1_ptr",
+        "stride_rope_cache_0_ptr",
+        "stride_rope_cache_1_ptr",
+        "stride_scale_cache_0_ptr",
+        "stride_scale_cache_1_ptr",
     },
     .outputs = &.{"output"},
     .run = run2D,
@@ -52,6 +59,8 @@ fn run2D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
     const a = try b.declareArgs(.{
         .query_ptr = .{ .ptr = cfg.q_dtype },
         .kv_cache_ptr = .{ .ptr = cfg.kv_dtype },
+        .kv_rope_cache_ptr = .{ .ptr = .bf16 },
+        .kv_scale_cache_ptr = .{ .ptr = .i8 },
         .attn_sink_ptr = .{ .ptr = cfg.sink_dtype },
         .topk_indices_ptr = .{ .ptr = .i32 },
         .active_query_count_ptr = .{ .ptr = .i32 },
@@ -62,6 +71,10 @@ fn run2D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         .output_stride_1_ptr = .{ .ptr = .i64 },
         .stride_cache_0_ptr = .{ .ptr = .i64 },
         .stride_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_rope_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_rope_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_scale_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_scale_cache_1_ptr = .{ .ptr = .i64 },
         .output_ptr = .{ .ptr = cfg.o_dtype },
     });
 
@@ -72,6 +85,10 @@ fn run2D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
     const output_stride_1 = b.load(a.output_stride_1_ptr);
     const stride_cache_0 = b.load(a.stride_cache_0_ptr);
     const stride_cache_1 = b.load(a.stride_cache_1_ptr);
+    const stride_rope_cache_0 = b.load(a.stride_rope_cache_0_ptr);
+    const stride_rope_cache_1 = b.load(a.stride_rope_cache_1_ptr);
+    const stride_scale_cache_0 = b.load(a.stride_scale_cache_0_ptr);
+    const stride_scale_cache_1 = b.load(a.stride_scale_cache_1_ptr);
 
     kernelUnifiedAttentionSparseMla(
         b,
@@ -79,6 +96,8 @@ fn run2D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         null,
         a.query_ptr,
         a.kv_cache_ptr,
+        a.kv_rope_cache_ptr,
+        a.kv_scale_cache_ptr,
         a.attn_sink_ptr,
         a.topk_indices_ptr,
         a.active_query_count_ptr,
@@ -89,6 +108,10 @@ fn run2D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         output_stride_1,
         stride_cache_0,
         stride_cache_1,
+        stride_rope_cache_0,
+        stride_rope_cache_1,
+        stride_scale_cache_0,
+        stride_scale_cache_1,
         cfg,
         false,
     );
@@ -99,6 +122,8 @@ pub const Kernel3D = tri.Kernel(Config, .{
     .inputs = &.{
         "query_ptr",
         "kv_cache_ptr",
+        "kv_rope_cache_ptr",
+        "kv_scale_cache_ptr",
         "attn_sink_ptr",
         "topk_indices_ptr",
         "active_query_count_ptr",
@@ -109,6 +134,10 @@ pub const Kernel3D = tri.Kernel(Config, .{
         "output_stride_1_ptr",
         "stride_cache_0_ptr",
         "stride_cache_1_ptr",
+        "stride_rope_cache_0_ptr",
+        "stride_rope_cache_1_ptr",
+        "stride_scale_cache_0_ptr",
+        "stride_scale_cache_1_ptr",
     },
     .outputs = &.{ "partial_output", "partial_lse" },
     .run = run3D,
@@ -118,6 +147,8 @@ fn run3D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
     const a = try b.declareArgs(.{
         .query_ptr = .{ .ptr = cfg.q_dtype },
         .kv_cache_ptr = .{ .ptr = cfg.kv_dtype },
+        .kv_rope_cache_ptr = .{ .ptr = .bf16 },
+        .kv_scale_cache_ptr = .{ .ptr = .i8 },
         .attn_sink_ptr = .{ .ptr = cfg.sink_dtype },
         .topk_indices_ptr = .{ .ptr = .i32 },
         .active_query_count_ptr = .{ .ptr = .i32 },
@@ -128,6 +159,10 @@ fn run3D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         .output_stride_1_ptr = .{ .ptr = .i64 },
         .stride_cache_0_ptr = .{ .ptr = .i64 },
         .stride_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_rope_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_rope_cache_1_ptr = .{ .ptr = .i64 },
+        .stride_scale_cache_0_ptr = .{ .ptr = .i64 },
+        .stride_scale_cache_1_ptr = .{ .ptr = .i64 },
         .partial_output_ptr = .{ .ptr = .f32 },
         .partial_lse_ptr = .{ .ptr = .f32 },
     });
@@ -139,6 +174,10 @@ fn run3D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
     const output_stride_1 = b.load(a.output_stride_1_ptr);
     const stride_cache_0 = b.load(a.stride_cache_0_ptr);
     const stride_cache_1 = b.load(a.stride_cache_1_ptr);
+    const stride_rope_cache_0 = b.load(a.stride_rope_cache_0_ptr);
+    const stride_rope_cache_1 = b.load(a.stride_rope_cache_1_ptr);
+    const stride_scale_cache_0 = b.load(a.stride_scale_cache_0_ptr);
+    const stride_scale_cache_1 = b.load(a.stride_scale_cache_1_ptr);
 
     kernelUnifiedAttentionSparseMla(
         b,
@@ -146,6 +185,8 @@ fn run3D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         a.partial_lse_ptr,
         a.query_ptr,
         a.kv_cache_ptr,
+        a.kv_rope_cache_ptr,
+        a.kv_scale_cache_ptr,
         a.attn_sink_ptr,
         a.topk_indices_ptr,
         a.active_query_count_ptr,
@@ -156,6 +197,10 @@ fn run3D(b: *tri.Builder, cfg: Config) tri.FinishError!void {
         output_stride_1,
         stride_cache_0,
         stride_cache_1,
+        stride_rope_cache_0,
+        stride_rope_cache_1,
+        stride_scale_cache_0,
+        stride_scale_cache_1,
         cfg,
         true,
     );
@@ -167,6 +212,8 @@ fn kernelUnifiedAttentionSparseMla(
     partial_lse_ptr: ?Value,
     query_ptr: Value,
     kv_cache_ptr: Value,
+    kv_rope_cache_ptr: Value,
+    kv_scale_cache_ptr: Value,
     attn_sink_ptr: Value,
     topk_indices_ptr: Value,
     active_query_count_ptr: Value,
@@ -177,6 +224,10 @@ fn kernelUnifiedAttentionSparseMla(
     output_stride_1: Value,
     stride_cache_0: Value,
     stride_cache_1: Value,
+    stride_rope_cache_0: Value,
+    stride_rope_cache_1: Value,
+    stride_scale_cache_0: Value,
+    stride_scale_cache_1: Value,
     config: Config,
     comptime three_d: bool,
 ) void {
@@ -191,6 +242,10 @@ fn kernelUnifiedAttentionSparseMla(
     const NUM_TILES: i64 = @divTrunc(config.topk_count + TILE_SIZE - 1, TILE_SIZE);
     const NUM_SPLITS: i64 = if (three_d) config.num_splits else 1;
     const TILES_PER_SPLIT: i64 = @divTrunc(NUM_TILES + NUM_SPLITS - 1, NUM_SPLITS);
+    const fp8_block_scaled_cache = config.kv_dtype == .f8e4m3fn and config.scale_block_size == 64;
+    if (fp8_block_scaled_cache) {
+        std.debug.assert(VALUE_RANK == 512);
+    }
 
     const q_block_global_idx = k.programId(.x);
     const split_idx = if (three_d) k.programId(.y) else k.liftAs(0, .i32);
@@ -279,14 +334,66 @@ fn kernelUnifiedAttentionSparseMla(
             S = S.add(scale.mul(k.dot(Q_rope.?, K_rope, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
         }
 
-        const k_value_dim_offsets = offs_value.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
-        const k_value_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ VALUE_RANK, TILE_SIZE })
-            .addPtr(k.broadcastTo(k_value_dim_offsets, &.{ VALUE_RANK, TILE_SIZE }));
-        const K_value = k.loadOpts(k_value_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ VALUE_RANK, TILE_SIZE })), .{
-            .mask = valid_t.expandDims(0),
-            .other = k.zeros(&.{ VALUE_RANK, TILE_SIZE }, config.kv_dtype),
-            .cache_modifier = if (config.all_decode) .cg else .none,
-        });
+        const K_value = if (fp8_block_scaled_cache) blk: {
+            const scale_block_ptrs = kv_scale_cache_ptr
+                .addPtr(physical_block_idx_t.to(.i64).mul(stride_scale_cache_0))
+                .addPtr(slot_t.to(.i64).mul(stride_scale_cache_1));
+            const value_offsets = offs_value.expandDims(1);
+            const full_shape = &.{ VALUE_RANK, TILE_SIZE };
+            const nope_dims = offs_value.lt(448).expandDims(1);
+            const nope_mask = k.broadcastTo(nope_dims, full_shape)
+                .bitAnd(k.broadcastTo(valid_t.expandDims(0), full_shape));
+            const nope_ptrs = k.broadcastTo(cache_block_ptrs, full_shape)
+                .addPtr(k.broadcastTo(value_offsets, full_shape))
+                .addPtr(k.broadcastTo(cache_slot_offsets, full_shape));
+            const nope_fp8 = k.loadOpts(nope_ptrs, .{
+                .mask = nope_mask,
+                .other = k.zeros(full_shape, config.kv_dtype),
+                .cache_modifier = if (config.all_decode) .cg else .none,
+            });
+            const scale_indices = offs_value.div(@as(i32, @intCast(config.scale_block_size))).expandDims(1);
+            const encoded_scale = k.loadOpts(
+                k.broadcastTo(scale_block_ptrs, full_shape)
+                    .addPtr(k.broadcastTo(scale_indices, full_shape)),
+                .{
+                    .mask = nope_mask,
+                    .other = k.zeros(full_shape, .i8),
+                },
+            );
+            // UE8M0 uses the same biased exponent field as IEEE f32. Forming
+            // the f32 bit pattern avoids an SFU exp2 for every selected value.
+            const scale_bits = k.shli(
+                encoded_scale.to(.i32).bitAnd(255),
+                k.full(full_shape, 23, .i32),
+            );
+            const dequant = nope_fp8.to(.f32).mul(k.bitcast(scale_bits, .f32)).to(config.q_dtype);
+
+            const rope_block_ptrs = kv_rope_cache_ptr
+                .addPtr(physical_block_idx_t.to(.i64).mul(stride_rope_cache_0))
+                .addPtr(slot_t.to(.i64).mul(stride_rope_cache_1));
+            const rope_dims = offs_value.ge(448).expandDims(1);
+            const rope_mask = k.broadcastTo(rope_dims, full_shape)
+                .bitAnd(k.broadcastTo(valid_t.expandDims(0), full_shape));
+            const rope = k.loadOpts(
+                k.broadcastTo(rope_block_ptrs, full_shape)
+                    .addPtr(k.broadcastTo(value_offsets.add(-448), full_shape)),
+                .{
+                    .mask = rope_mask,
+                    .other = k.zeros(full_shape, .bf16),
+                    .cache_modifier = if (config.all_decode) .cg else .none,
+                },
+            );
+            break :blk k.where(k.broadcastTo(nope_dims, full_shape), dequant, rope.to(config.q_dtype));
+        } else blk: {
+            const k_value_dim_offsets = offs_value.expandDims(1).mul(@as(i32, @intCast(config.stride_cache_dim)));
+            const k_value_dim_ptrs = k.broadcastTo(cache_block_ptrs, &.{ VALUE_RANK, TILE_SIZE })
+                .addPtr(k.broadcastTo(k_value_dim_offsets, &.{ VALUE_RANK, TILE_SIZE }));
+            break :blk k.loadOpts(k_value_dim_ptrs.addPtr(k.broadcastTo(cache_slot_offsets, &.{ VALUE_RANK, TILE_SIZE })), .{
+                .mask = valid_t.expandDims(0),
+                .other = k.zeros(&.{ VALUE_RANK, TILE_SIZE }, config.kv_dtype),
+                .cache_modifier = if (config.all_decode) .cg else .none,
+            });
+        };
 
         S = S.add(scale.mul(k.dot(Q_value, K_value, k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32))));
 
@@ -304,7 +411,8 @@ fn kernelUnifiedAttentionSparseMla(
         const new_L = L.mul(alpha).add(l_j);
 
         const V = k.trans(K_value, &.{ 1, 0 });
-        const new_acc = k.dot(P.to(config.kv_dtype), V, acc_scaled);
+        const pv_dtype = if (fp8_block_scaled_cache) config.q_dtype else config.kv_dtype;
+        const new_acc = k.dot(P.to(pv_dtype), V, acc_scaled);
 
         loop.yield(.{ m_j, new_L, new_acc });
     }

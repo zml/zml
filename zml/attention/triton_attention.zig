@@ -68,6 +68,12 @@ fn isCudaComputeCapability(expected: []const u8) bool {
     return std.mem.eql(u8, actual, expected);
 }
 
+fn isBlackwellCuda() bool {
+    return isCudaComputeCapability("10.0") or
+        isCudaComputeCapability("10.3") or
+        isCudaComputeCapability("12.0");
+}
+
 fn sparseMlaTuning(paged_opts: paged.PagedSparseMlaOptions) SparseMlaTuning {
     var tuning: SparseMlaTuning = .{};
     const is_sm103 = isCudaComputeCapability("10.3");
@@ -758,7 +764,45 @@ pub const paged = struct {
     }
 
     fn pagedSparseMlaKernel(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, active_query_count: zml.Tensor, paged_opts: PagedSparseMlaOptions) zml.Tensor {
-        const tuning = sparseMlaTuning(paged_opts);
+        return pagedSparseMlaKernelImpl(
+            q,
+            kv_cache,
+            .scalar(0, .bf16),
+            .scalar(0, .i8),
+            sink,
+            topk,
+            active_query_count,
+            paged_opts,
+            0,
+        );
+    }
+
+    fn pagedSparseMlaKernelImpl(
+        q: zml.Tensor,
+        kv_cache: zml.Tensor,
+        kv_rope_cache: zml.Tensor,
+        kv_scale_cache: zml.Tensor,
+        sink: ?zml.Tensor,
+        topk: zml.Tensor,
+        active_query_count: zml.Tensor,
+        paged_opts: PagedSparseMlaOptions,
+        scale_block_size: i64,
+    ) zml.Tensor {
+        const fp8_block_scaled_cache = kv_cache.dtype() == .f8e4m3fn and scale_block_size == 64;
+        var tuning = sparseMlaTuning(paged_opts);
+        const blackwell_dsv4_topk512 = fp8_block_scaled_cache and
+            topk.dim(.topk) == 512 and
+            isBlackwellCuda();
+        if (blackwell_dsv4_topk512) {
+            // DSV4 selects 512 cache rows. A 32-token tile halves the number
+            // of seven-block dequantization loop iterations versus the generic
+            // multi-query decode tuning, while retaining enough split-K work
+            // to fill GB300.
+            tuning.tile_size = 32;
+            if (paged_opts.total_q_blocks == 1) tuning.max_block_m = 32;
+            if (paged_opts.total_q_blocks == 4) tuning.max_block_m = 32;
+            if (paged_opts.total_q_blocks == 16) tuning.max_block_m = 32;
+        }
         const value_rank: i64 = @intCast(paged_opts.value_rank);
         const rope_rank: i64 = if (paged_opts.value_rank == paged_opts.qk_rank) 0 else @intCast(paged_opts.rope_rank);
         stdx.debug.assert(std.math.isPowerOfTwo(paged_opts.value_rank), "sparse MLA value rank ({}) must be a power of two", .{paged_opts.value_rank});
@@ -770,6 +814,8 @@ pub const paged = struct {
         const q_strides = q.shape().computeElementStrides().constSlice();
         const out_strides = out_shape.computeElementStrides().constSlice();
         const kv_strides = kv_cache.shape().computeElementStrides().constSlice();
+        const rope_strides = if (fp8_block_scaled_cache) kv_rope_cache.shape().computeElementStrides().constSlice() else &[_]i64{ 0, 0 };
+        const scale_strides = if (fp8_block_scaled_cache) kv_scale_cache.shape().computeElementStrides().constSlice() else &[_]i64{ 0, 0 };
 
         const sink_: zml.Tensor = sink orelse .scalar(0, .i8);
         const use_sink = sink != null;
@@ -780,7 +826,10 @@ pub const paged = struct {
             paged_opts.num_heads,
             @intCast(topk.dim(.topk)),
             getCuCount(),
-            paged_opts.num_kv_splits,
+            if (blackwell_dsv4_topk512 and paged_opts.total_q_blocks == 16)
+                4
+            else
+                paged_opts.num_kv_splits,
             tuning,
         );
 
@@ -800,12 +849,15 @@ pub const paged = struct {
             .num_splits = @intCast(launch.num_splits),
             .use_attn_sink = use_sink,
             .all_decode = paged_opts.all_decode,
+            .scale_block_size = scale_block_size,
         };
         log.debug("pagedSparseMla launch: {any}, kernel: {any}", .{ launch, kernel_config });
 
         const kernel_inputs: mla_kernels.Kernel2D.Inputs = .{
             .query_ptr = q,
             .kv_cache_ptr = kv_cache,
+            .kv_rope_cache_ptr = kv_rope_cache,
+            .kv_scale_cache_ptr = kv_scale_cache,
             .attn_sink_ptr = sink_,
             .topk_indices_ptr = topk,
             .active_query_count_ptr = active_query_count,
@@ -816,6 +868,10 @@ pub const paged = struct {
             .output_stride_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(out_strides[1])),
             .stride_cache_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(kv_strides[kv_cache.shape().axis(.page)])),
             .stride_cache_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(kv_strides[kv_cache.shape().axis(.k_chunk)])),
+            .stride_rope_cache_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(if (fp8_block_scaled_cache) rope_strides[kv_rope_cache.shape().axis(.page)] else 0)),
+            .stride_rope_cache_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(if (fp8_block_scaled_cache) rope_strides[kv_rope_cache.shape().axis(.k_chunk)] else 0)),
+            .stride_scale_cache_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(if (fp8_block_scaled_cache) scale_strides[kv_scale_cache.shape().axis(.page)] else 0)),
+            .stride_scale_cache_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(if (fp8_block_scaled_cache) scale_strides[kv_scale_cache.shape().axis(.k_chunk)] else 0)),
         };
 
         if (launch.num_splits == 1) {
@@ -836,6 +892,8 @@ pub const paged = struct {
         const kernel_3d_inputs: mla_kernels.Kernel3D.Inputs = .{
             .query_ptr = kernel_inputs.query_ptr,
             .kv_cache_ptr = kernel_inputs.kv_cache_ptr,
+            .kv_rope_cache_ptr = kernel_inputs.kv_rope_cache_ptr,
+            .kv_scale_cache_ptr = kernel_inputs.kv_scale_cache_ptr,
             .attn_sink_ptr = kernel_inputs.attn_sink_ptr,
             .topk_indices_ptr = kernel_inputs.topk_indices_ptr,
             .active_query_count_ptr = kernel_inputs.active_query_count_ptr,
@@ -846,6 +904,10 @@ pub const paged = struct {
             .output_stride_1_ptr = kernel_inputs.output_stride_1_ptr,
             .stride_cache_0_ptr = kernel_inputs.stride_cache_0_ptr,
             .stride_cache_1_ptr = kernel_inputs.stride_cache_1_ptr,
+            .stride_rope_cache_0_ptr = kernel_inputs.stride_rope_cache_0_ptr,
+            .stride_rope_cache_1_ptr = kernel_inputs.stride_rope_cache_1_ptr,
+            .stride_scale_cache_0_ptr = kernel_inputs.stride_scale_cache_0_ptr,
+            .stride_scale_cache_1_ptr = kernel_inputs.stride_scale_cache_1_ptr,
         };
         const partials = mla_kernels.Kernel3D.call(
             kernel_3d_inputs,
@@ -1050,6 +1112,78 @@ pub const paged = struct {
             }).body,
         );
     }
+
+    pub fn pagedSparseMlaDsv4Fp8(
+        parameters: Parameters,
+        q: zml.Tensor,
+        kv_nope: zml.Tensor,
+        kv_rope: zml.Tensor,
+        kv_scales: zml.Tensor,
+        sink: ?zml.Tensor,
+        topk: zml.Tensor,
+        tokens_pos: zml.Tensor,
+        opts: MlaOptions,
+    ) zml.Tensor {
+        stdx.debug.assert(q.dim(.hd) == 512, "DeepSeek V4 FP8 MLA expects q head dim 512, got {}", .{q.dim(.hd)});
+        stdx.debug.assert(kv_nope.dtype() == .f8e4m3fn and kv_nope.dim(.hd) == 448, "DeepSeek V4 FP8 MLA expects 448 E4M3 NoPE values, got {f}", .{kv_nope.shape()});
+        stdx.debug.assert(kv_rope.dtype() == .bf16 and kv_rope.dim(.hd) == 64, "DeepSeek V4 FP8 MLA expects 64 BF16 RoPE values, got {f}", .{kv_rope.shape()});
+        stdx.debug.assert(kv_scales.dtype() == .i8 and kv_scales.dim(.hd) == 8, "DeepSeek V4 FP8 MLA expects 7 UE8M0 scales plus padding, got {f}", .{kv_scales.shape()});
+        stdx.debug.assert(opts.valueRank(q.dim(.hd)) == 512, "DeepSeek V4 FP8 MLA expects the complete latent value", .{});
+
+        return zml.ops.manualComputation(
+            .{
+                q,
+                kv_nope,
+                kv_rope,
+                kv_scales,
+                sink,
+                topk,
+                tokens_pos,
+                parameters.block_table,
+                parameters.seq_lens,
+                parameters.query_start_len,
+            },
+            q.shape(),
+            .{ .opts = opts, .options = parameters.options_ },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
+                    const parameters_: Parameters = .{
+                        .block_table = inputs[7],
+                        .seq_lens = inputs[8],
+                        .query_start_len = inputs[9],
+                        .options_ = ctx_.options,
+                    };
+                    const block_size = inputs[1].dim(.k_chunk);
+                    const topk_final = topkToPhysical(parameters_, inputs[5], inputs[6], block_size);
+                    const active_query_count = inputs[9]
+                        .slice1d(.b, .{ .start = inputs[9].dim(.b) - 1 })
+                        .squeeze(.b);
+                    const paged_opts: PagedSparseMlaOptions = .{
+                        .qk_rank = 512,
+                        .value_rank = 512,
+                        .num_heads = @intCast(inputs[0].dim(.h)),
+                        .block_size = @intCast(block_size),
+                        .rope_rank = 64,
+                        .scale = ctx_.opts.scale,
+                        .total_q_blocks = @intCast(inputs[0].dim(.q)),
+                        .num_kv_splits = ctx_.opts.num_kv_splits,
+                        .all_decode = !ctx_.options.is_prefill,
+                    };
+                    return pagedSparseMlaKernelImpl(
+                        inputs[0],
+                        inputs[1],
+                        inputs[2],
+                        inputs[3],
+                        inputs[4],
+                        topk_final,
+                        active_query_count,
+                        paged_opts,
+                        64,
+                    );
+                }
+            }).body,
+        );
+    }
 };
 
 test "sparse MLA launch selection balances occupancy and split overhead" {
@@ -1164,4 +1298,21 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     const dsv4_three_d = paged.pagedSparseMlaKernel(dsv4_q, dsv4_kv, sink, topk, dsv4_opts);
     try std.testing.expect(dsv4_three_d.shape().eql(dsv4_output_shape));
     try std.testing.expect(dsv4_three_d.value().owner().verify());
+
+    const dsv4_nope = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hd = 448 }, .f8e4m3fn));
+    const dsv4_rope = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hd = 64 }, .bf16));
+    const dsv4_scales = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hd = 8 }, .i8));
+    const dsv4_fp8 = paged.pagedSparseMlaKernelImpl(
+        dsv4_q,
+        dsv4_nope,
+        dsv4_rope,
+        dsv4_scales,
+        sink,
+        topk,
+        zml.Tensor.scalar(1, .i32),
+        dsv4_opts,
+        64,
+    );
+    try std.testing.expect(dsv4_fp8.shape().eql(dsv4_output_shape));
+    try std.testing.expect(dsv4_fp8.value().owner().verify());
 }
