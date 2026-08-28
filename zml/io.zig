@@ -579,6 +579,16 @@ pub const MemoryWriter = union(enum) {
         sharding: Sharding,
         buffer: *Buffer,
     ) !MemoryWriter {
+        if (platform.isDistributed()) {
+            return .{ .buffered = try .init(
+                allocator,
+                io,
+                platform,
+                shape,
+                sharding,
+                buffer,
+            ) };
+        }
         return switch (platform.target) {
             .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
             .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
@@ -1096,21 +1106,35 @@ pub const DirectMemoryWriter = struct {
             writer.deinit();
         };
 
-        var pjrt_buffers: Buffer.Shards = .empty;
+        var local_shards: Buffer.LocalShards = .empty;
         const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
-            defer initialized += 1;
-
-            const pool = &pools[device.id];
-            const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(.default).?;
+            const local_slot = for (
+                platform.addressableDevices(),
+                0..,
+            ) |local_device, slot| {
+                if (local_device.id() == device.id) break slot;
+            } else return error.MissingAddressableDevice;
+            const pool = &pools[local_slot];
+            const shard_dma_allocator = dma_allocators[local_slot].allocator();
+            const pjrt_mem = platform.addressableDevices()[local_slot]
+                .memory(.default).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
+            initialized += 1;
 
-            pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
+            local_shards.appendAssumeCapacity(.{
+                .global_device_id = device.id,
+                .buffer = shard_writers[i].pjrt_buffer,
+            });
         }
 
-        buffer.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
+        buffer.* = .fromPjrtBuffers(
+            platform,
+            shape,
+            sharding,
+            local_shards.constSlice(),
+        );
 
         const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
         errdefer dispatch_spans.deinit(allocator);

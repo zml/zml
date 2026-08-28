@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var output = results.get(zml.Buffer);
     defer output.deinit();
     std.debug.assert(output.numGlobalShards() == 4);
-    std.debug.assert(output.numLocalShards() == 2);
+    std.debug.assert(output.numShards() == 2);
 
     var shards = output.shards();
     while (shards.next()) |shard| {

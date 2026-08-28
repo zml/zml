@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
         "process={d} owns {d}/{d} output shards\n",
         .{
             platform.processIndex(),
-            local_logits.numLocalShards(),
+            local_logits.numShards(),
             local_logits.numGlobalShards(),
         },
     );

@@ -22,11 +22,8 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-    input_shardings: []const Sharding,
     output_shardings: []const Sharding,
-
-    num_devices: usize,
-    num_partitions: i32,
+    addressable_device_ids: []const u32,
 
     arena: std.heap.ArenaAllocator,
 
@@ -34,11 +31,8 @@ pub const Exe = struct {
         allocator: std.mem.Allocator,
         platform: *const Platform,
         exe: *pjrt.LoadedExecutable,
-        num_devices: usize,
-        num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
-        input_shardings: []const Sharding,
         output_shardings: []const Sharding,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -48,18 +42,49 @@ pub const Exe = struct {
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
         // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
-        const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
         const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
+        const addressable_devices = exe.addressableDevices(platform.pjrt_api);
+        stdx.debug.assert(
+            addressable_devices.len > 0 and
+                addressable_devices.len <= Platform.MAX_NUM_DEVICES,
+            "Executable has invalid addressable device count {d}",
+            .{addressable_devices.len},
+        );
+        const addressable_device_ids = try arena.allocator().alloc(
+            u32,
+            addressable_devices.len,
+        );
+        for (addressable_devices, addressable_device_ids, 0..) |
+            device,
+            *device_id,
+            i,
+        | {
+            device_id.* = @intCast(
+                device.getDescription(platform.pjrt_api).id(
+                    platform.pjrt_api,
+                ),
+            );
+            stdx.debug.assert(
+                platform.addressableDeviceById(device_id.*) != null,
+                "Executable device {d} is not addressable on process {d}",
+                .{ device_id.*, platform.processIndex() },
+            );
+            for (addressable_device_ids[0..i]) |previous_id| {
+                stdx.debug.assert(
+                    previous_id != device_id.*,
+                    "Executable contains duplicate addressable device {d}",
+                    .{device_id.*},
+                );
+            }
+        }
 
         return .{
             .platform = platform,
             .exe = exe,
             .input_shapes = input_shapes_copy,
             .output_shapes = output_shapes_copy,
-            .input_shardings = input_shardings_copy,
             .output_shardings = output_shardings_copy,
-            .num_devices = num_devices,
-            .num_partitions = num_partitions,
+            .addressable_device_ids = addressable_device_ids,
             .arena = arena,
         };
     }
@@ -71,34 +96,49 @@ pub const Exe = struct {
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
-        return Arguments.init(allocator, self.input_shapes, self.input_shardings, self.num_devices);
+        return Arguments.init(
+            allocator,
+            self.platform,
+            self.input_shapes,
+            self.addressable_device_ids,
+        );
     }
 
     pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
-        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform, self.num_devices);
+        return Results.init(
+            allocator,
+            self.output_shapes,
+            self.output_shardings,
+            self.platform,
+            self.addressable_device_ids,
+        );
     }
 
     pub const FlatBuffers = struct {
         buffers: []const [*]*pjrt.Buffer,
         raw_buffers: []const *pjrt.Buffer,
 
-        num_devices: usize,
-
-        pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
-            const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
+        pub fn init(
+            allocator: std.mem.Allocator,
+            count: usize,
+            device_count: usize,
+        ) !FlatBuffers {
+            const raw_buffers = try allocator.alloc(
+                *pjrt.Buffer,
+                device_count * count,
+            );
             errdefer allocator.free(raw_buffers);
 
-            const buffers = try allocator.alloc([*]*pjrt.Buffer, num_devices);
+            const buffers = try allocator.alloc([*]*pjrt.Buffer, device_count);
             errdefer allocator.free(buffers);
 
-            for (0..num_devices) |i| {
+            for (0..device_count) |i| {
                 buffers[i] = raw_buffers[i * count ..].ptr;
             }
 
             return .{
                 .buffers = buffers,
                 .raw_buffers = raw_buffers,
-                .num_devices = num_devices,
             };
         }
 
@@ -109,22 +149,33 @@ pub const Exe = struct {
     };
 
     pub const Arguments = struct {
+        platform: *const Platform,
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
+        addressable_device_ids: []const u32,
         baked_count: usize = 0,
-        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) !Arguments {
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+        pub fn init(
+            allocator: std.mem.Allocator,
+            platform: *const Platform,
+            shapes: []const Shape,
+            addressable_device_ids: []const u32,
+        ) !Arguments {
+            const flat_buffers = try FlatBuffers.init(
+                allocator,
+                shapes.len,
+                addressable_device_ids.len,
+            );
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
             errdefer allocator.free(expected_shapes);
 
             return .{
+                .platform = platform,
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
-                .shardings = shardings,
+                .addressable_device_ids = addressable_device_ids,
             };
         }
 
@@ -138,11 +189,22 @@ pub const Exe = struct {
         }
 
         pub fn setPartial(self: *Arguments, v: anytype, offset: usize) void {
+            _ = self.setFrom(v, offset + self.baked_count);
+        }
+
+        pub fn bake(self: *Arguments, v: anytype) void {
+            self.baked_count = self.setFrom(v, self.baked_count);
+        }
+
+        fn setFrom(self: *Arguments, v: anytype, start: usize) usize {
             const LocalContext = struct {
                 self: *Arguments,
-                current_index: usize = 0,
+                current_index: usize,
             };
-            var context: LocalContext = .{ .self = self, .current_index = offset + self.baked_count };
+            var context: LocalContext = .{
+                .self = self,
+                .current_index = start,
+            };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *const Buffer) void {
                     stdx.debug.assert(
@@ -150,48 +212,51 @@ pub const Exe = struct {
                         "Expected argument {} to have shape {f}, got {f}",
                         .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() },
                     );
-
-                    const expected = context_.self.flat_buffers.num_devices;
-                    const shard_count = buffer._shards.len;
-
                     stdx.debug.assert(
-                        shard_count == expected,
-                        "Argument {} has {d} shards but executable expects {d}",
-                        .{ context_.current_index, shard_count, expected },
+                        buffer._platform == context_.self.platform,
+                        "Argument {d} belongs to a different Platform",
+                        .{context_.current_index},
                     );
 
-                    for (0..expected) |device_index| {
+                    var actual_ids: stdx.BoundedArray(
+                        u32,
+                        Platform.MAX_NUM_DEVICES,
+                    ) = .empty;
+                    for (buffer._local_shards.constSlice()) |shard| {
+                        actual_ids.appendAssumeCapacity(
+                            shard.global_device_id,
+                        );
+                    }
+                    for (
+                        context_.self.addressable_device_ids,
+                        0..,
+                    ) |device_id, device_index| {
+                        const pjrt_buffer = for (
+                            buffer._local_shards.constSlice(),
+                        ) |shard| {
+                            if (shard.global_device_id == device_id) {
+                                break shard.buffer;
+                            }
+                        } else {
+                            stdx.debug.panic(
+                                "Argument {d} on process {d} is missing global device {d}; expected IDs {any}, actual IDs {any}",
+                                .{
+                                    context_.current_index,
+                                    context_.self.platform.processIndex(),
+                                    device_id,
+                                    context_.self.addressable_device_ids,
+                                    actual_ids.constSlice(),
+                                },
+                            );
+                        };
                         context_.self.flat_buffers.buffers[device_index][context_.current_index] =
-                            buffer._shards.get(device_index);
+                            pjrt_buffer;
                     }
 
                     context_.current_index += 1;
                 }
             }.cb, &context, &v);
-        }
-
-        pub fn bake(self: *Arguments, v: anytype) void {
-            const LocalContext = struct {
-                self: *Arguments,
-
-                current_index: usize = 0,
-            };
-
-            var context: LocalContext = .{ .self = self, .current_index = self.baked_count };
-
-            meta.visit(struct {
-                fn cb(context_: *LocalContext, buffer: *const Buffer) void {
-                    stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected argument {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
-
-                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
-                        context_.self.flat_buffers.buffers[device_index][context_.current_index] = buffer._shards.get(device_index);
-                    }
-
-                    context_.current_index += 1;
-                }
-            }.cb, &context, &v);
-
-            self.baked_count = context.current_index;
+            return context.current_index;
         }
     };
 
@@ -201,9 +266,20 @@ pub const Exe = struct {
 
         expected_shapes: []const Shape,
         shardings: []const Sharding,
+        addressable_device_ids: []const u32,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform, num_devices: usize) !Results {
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+        pub fn init(
+            allocator: std.mem.Allocator,
+            shapes: []const Shape,
+            shardings: []const Sharding,
+            platform: *const Platform,
+            addressable_device_ids: []const u32,
+        ) !Results {
+            const flat_buffers = try FlatBuffers.init(
+                allocator,
+                shapes.len,
+                addressable_device_ids.len,
+            );
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
@@ -214,6 +290,7 @@ pub const Exe = struct {
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
                 .shardings = shardings,
+                .addressable_device_ids = addressable_device_ids,
             };
         }
 
@@ -231,11 +308,7 @@ pub const Exe = struct {
             var context: LocalContext = .{ .self = self, .current_index = 0 };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *Buffer) void {
-                    var shards: Buffer.Shards = .empty;
-                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
-                        shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
-                    }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
+                    buffer.* = context_.self.take(context_.current_index);
                     context_.current_index += 1;
                 }
             }.cb, &context, &result);
@@ -250,15 +323,29 @@ pub const Exe = struct {
             var context: LocalContext = .{ .results = self, .current_index = 0 };
             meta.visit(struct {
                 fn cb(ctx: *LocalContext, buffer: *Buffer) void {
-                    //stdx.debug.assert(ctx.results.expected_shapes[ctx.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ ctx.current_index, ctx.results.expected_shapes[ctx.current_index], buffer.shape() });
-                    var shards: Buffer.Shards = .empty;
-                    for (0..ctx.results.flat_buffers.num_devices) |device_index| {
-                        shards.appendAssumeCapacity(ctx.results.flat_buffers.buffers[device_index][ctx.current_index]);
-                    }
-                    buffer.* = Buffer.fromPjrtBuffers(ctx.results.platform, ctx.results.expected_shapes[ctx.current_index], ctx.results.shardings[ctx.current_index], shards.constSlice());
+                    buffer.* = ctx.results.take(ctx.current_index);
                     ctx.current_index += 1;
                 }
             }.cb, &context, &v);
+        }
+
+        fn take(self: *Results, result_index: usize) Buffer {
+            var shards: Buffer.LocalShards = .empty;
+            for (
+                self.addressable_device_ids,
+                0..,
+            ) |device_id, device_index| {
+                shards.appendAssumeCapacity(.{
+                    .global_device_id = device_id,
+                    .buffer = self.flat_buffers.buffers[device_index][result_index],
+                });
+            }
+            return .fromPjrtBuffers(
+                self.platform,
+                self.expected_shapes[result_index],
+                self.shardings[result_index],
+                shards.constSlice(),
+            );
         }
     };
 
@@ -305,12 +392,27 @@ pub const Exe = struct {
 
     pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
+        stdx.debug.assert(
+            arguments.platform == self.platform and
+                results_.platform == self.platform and
+                std.mem.eql(
+                    u32,
+                    self.addressable_device_ids,
+                    arguments.addressable_device_ids,
+                ) and std.mem.eql(
+                u32,
+                self.addressable_device_ids,
+                results_.addressable_device_ids,
+            ),
+            "Arguments or Results belong to a different executable device set",
+            .{},
+        );
         var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
 
-        const partition_events = events[0..@intCast(self.num_partitions)];
+        const local_events = events[0..self.addressable_device_ids.len];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
-            .neuron => partition_events,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) partition_events else null,
+            .neuron => local_events,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) local_events else null,
         };
 
         self.exe.execute(self.platform.pjrt_api, .{

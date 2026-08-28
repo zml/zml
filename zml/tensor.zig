@@ -401,23 +401,30 @@ pub const Tensor = struct {
         defer z_d.deinit();
 
         var y_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..y_d.numShards()) |dev| {
-            y_memory[dev] = y_d.opaqueDevicePtr(dev);
+        for (platform.addressableDevices(), 0..) |device, i| {
+            y_memory[i] = y_d.opaqueDevicePtr(device.id());
         }
 
         const y2_d, const z2_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ x_d, y_d, z_d });
 
         var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..y2_d.numShards()) |dev| {
-            output_memory[dev] = y2_d.opaqueDevicePtr(dev);
+        for (platform.addressableDevices(), 0..) |device, i| {
+            output_memory[i] = y2_d.opaqueDevicePtr(device.id());
         }
 
         // Check that y_d and y2_d point to the same addresses on the devices.
-        try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y2_d.numShards()]);
+        try std.testing.expectEqualSlices(
+            *anyopaque,
+            y_memory[0..platform.addressableDevices().len],
+            output_memory[0..platform.addressableDevices().len],
+        );
 
         // Check that z_d and z2_d DO NOT POINT to the same addresses
-        for (0..z2_d.numShards()) |dev| {
-            try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+        for (platform.addressableDevices()) |device| {
+            try std.testing.expect(
+                z2_d.opaqueDevicePtr(device.id()) !=
+                    z_d.opaqueDevicePtr(device.id()),
+            );
         }
     }
 

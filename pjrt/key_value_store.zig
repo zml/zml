@@ -54,7 +54,17 @@ fn callbackError(
 }
 
 fn free(value: [*c]u8) callconv(.c) void {
-    std.c.free(@ptrCast(value));
+    if (value != null) std.c.free(@ptrCast(value));
+}
+
+fn setValue(args: anytype, value: []u8) Error!void {
+    // PJRT calls the required deleter even for empty successful values.
+    args.*.value = if (value.len == 0)
+        @ptrCast((try std.heap.c_allocator.alloc(u8, 1)).ptr)
+    else
+        @ptrCast(value.ptr);
+    args.*.value_size = value.len;
+    args.*.value_deleter_callback = free;
 }
 
 pub fn getCallback(
@@ -71,9 +81,9 @@ pub fn getCallback(
         args.*.timeout_in_ms,
     ) catch |err| return callbackError(args.*.callback_error, err);
 
-    args.*.value = @ptrCast(value.ptr);
-    args.*.value_size = value.len;
-    args.*.value_deleter_callback = free;
+    setValue(args, value) catch |err| {
+        return callbackError(args.*.callback_error, err);
+    };
     return null;
 }
 
@@ -94,9 +104,9 @@ pub fn tryGetCallback(
         args.*.callback_error,
         error.NotFound,
     );
-    args.*.value = @ptrCast(result.ptr);
-    args.*.value_size = result.len;
-    args.*.value_deleter_callback = free;
+    setValue(args, result) catch |err| {
+        return callbackError(args.*.callback_error, err);
+    };
     return null;
 }
 
@@ -112,4 +122,28 @@ pub fn putCallback(
         return callbackError(args.*.callback_error, err);
     };
     return null;
+}
+
+test "empty callback values have an owned non-null pointer" {
+    const Args = struct {
+        value: [*c]u8 = undefined,
+        value_size: usize = undefined,
+        value_deleter_callback: ?*const fn (
+            value: [*c]u8,
+        ) callconv(.c) void = undefined,
+    };
+
+    const empty = try std.heap.c_allocator.alloc(u8, 0);
+    defer std.heap.c_allocator.free(empty);
+    var args: Args = .{};
+    try setValue(&args, empty);
+    try std.testing.expect(args.value != null);
+    try std.testing.expectEqual(0, args.value_size);
+    args.value_deleter_callback.?(args.value);
+
+    const value = try std.heap.c_allocator.dupe(u8, "value");
+    try setValue(&args, value);
+    try std.testing.expect(args.value != null);
+    try std.testing.expectEqual(value.len, args.value_size);
+    args.value_deleter_callback.?(args.value);
 }

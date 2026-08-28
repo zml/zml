@@ -32,36 +32,101 @@ pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
     _sharding: Sharding,
-    _shards: Shards,
+    _local_shards: LocalShards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
-    pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
+    pub const LocalShard = struct {
+        global_device_id: u32,
+        buffer: *pjrt.Buffer,
+    };
+    pub const LocalShards = stdx.BoundedArray(LocalShard, MAX_NUM_SHARDS);
 
     pub const Shard = struct {
-        _platform: *const Platform,
-        _pjrt_buffer: *pjrt.Buffer,
+        _buffer: *const Buffer,
+        _index: usize,
 
-        pub fn devicePtr(self: *const Shard) *anyopaque {
-            return self._pjrt_buffer.opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
+        fn local(self: Shard) LocalShard {
+            return self._buffer._local_shards.get(self._index);
+        }
+
+        pub fn globalDeviceId(self: Shard) u32 {
+            return self.local().global_device_id;
+        }
+
+        pub fn shape(self: Shard) Shape {
+            return placementOrPanic(
+                self._buffer._sharding,
+                self._buffer._shape,
+            ).shape;
+        }
+
+        pub fn globalSlices(self: Shard) Sharding.Placement.Slices {
+            const placement = placementOrPanic(
+                self._buffer._sharding,
+                self._buffer._shape,
+            );
+            return placement.slices(
+                self._buffer.shardingDevice(self.globalDeviceId()).coords,
+            );
+        }
+
+        pub fn devicePtr(self: Shard) *anyopaque {
+            return self.local().buffer.opaqueDeviceMemoryDataPointer(
+                self._buffer._platform.pjrt_api,
+            ) catch unreachable;
+        }
+
+        pub fn toSlice(
+            self: Shard,
+            io: std.Io,
+            destination: Slice,
+        ) !void {
+            stdx.debug.assert(
+                self.shape().eql(destination.shape),
+                "Shard shape {f} doesn't match destination slice {f}",
+                .{ self.shape(), destination.shape },
+            );
+            if (!destination.isContiguous()) {
+                return error.NonContiguousShardRead;
+            }
+
+            const maybe_event = try self.local().buffer.toHostBuffer(
+                self._buffer._platform.pjrt_api,
+                destination.data(),
+            );
+            if (maybe_event) |event| {
+                defer event.deinit(self._buffer._platform.pjrt_api);
+                try event.await(self._buffer._platform.pjrt_api, io);
+            }
+        }
+
+        pub fn toSliceAlloc(
+            self: Shard,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+        ) !Slice {
+            const result = try Slice.alloc(allocator, self.shape());
+            errdefer result.free(allocator);
+            try self.toSlice(io, result);
+            return result;
         }
     };
 
     pub const ShardIterator = struct {
-        _platform: *const Platform,
-        _shards: []const *pjrt.Buffer,
+        _buffer: *const Buffer,
         _index: usize = 0,
 
         pub fn remaining(self: *ShardIterator) usize {
-            return self._shards.len -| self._index;
+            return self._buffer._local_shards.len -| self._index;
         }
 
         pub fn next(self: *ShardIterator) ?Shard {
             defer self._index += 1;
-            if (self._index >= self._shards.len) return null;
+            if (self._index >= self._buffer._local_shards.len) return null;
 
             return .{
-                ._pjrt_buffer = self._shards[self._index],
-                ._platform = self._platform,
+                ._buffer = self._buffer,
+                ._index = self._index,
             };
         }
     };
@@ -72,8 +137,8 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *Buffer) void {
-        for (self._shards.constSlice()) |buffer| {
-            buffer.deinit(self._platform.pjrt_api);
+        for (self._local_shards.constSlice()) |shard| {
+            shard.buffer.deinit(self._platform.pjrt_api);
         }
     }
 
@@ -91,13 +156,16 @@ pub const Buffer = struct {
     }
 
     pub fn numShards(self: Buffer) u32 {
-        return @intCast(self._shards.len);
+        return @intCast(self._local_shards.len);
+    }
+
+    pub fn numGlobalShards(self: Buffer) u32 {
+        return @intCast(self._sharding.devicesInCanonicalOrder().len);
     }
 
     pub fn shards(self: *const Buffer) ShardIterator {
         return .{
-            ._platform = self._platform,
-            ._shards = self._shards.constSlice(),
+            ._buffer = self,
         };
     }
 
@@ -123,13 +191,12 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = shape_,
             ._sharding = sharding.resolve(platform),
-            ._shards = .empty,
+            ._local_shards = .empty,
         };
-        errdefer for (res._shards.slice()) |shard| {
-            shard.deinit(platform.pjrt_api);
+        errdefer for (res._local_shards.slice()) |shard| {
+            shard.buffer.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
@@ -137,12 +204,19 @@ pub const Buffer = struct {
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
-        for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+        for (res._sharding.devicesInCanonicalOrder()) |device| {
+            const local_device = platform.addressableDeviceById(device.id) orelse
+                continue;
+            const memory = local_device.memory(opts.memory);
+            stdx.debug.assert(
+                memory != null,
+                "Device {d} doesn't have {} memory",
+                .{ device.id, opts.memory },
+            );
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
-                .dst = .{ .memory = memory.pjrt_memory },
+                .dst = .{ .memory = memory.?.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -154,7 +228,10 @@ pub const Buffer = struct {
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
             if (event) |ev| ev.deinit(platform.pjrt_api);
 
-            res._shards.appendAssumeCapacity(pjrt_buffer);
+            res._local_shards.appendAssumeCapacity(.{
+                .global_device_id = device.id,
+                .buffer = pjrt_buffer,
+            });
         }
 
         if (opts.wait) {
@@ -191,8 +268,8 @@ pub const Buffer = struct {
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
-        for (self._shards.constSlice()) |buffer| {
-            const ev = buffer.readyEvent(self._platform.pjrt_api);
+        for (self._local_shards.constSlice()) |shard| {
+            const ev = shard.buffer.readyEvent(self._platform.pjrt_api);
             defer ev.deinit(self._platform.pjrt_api);
             try ev.await(self._platform.pjrt_api, io);
         }
@@ -212,23 +289,29 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = shape_,
             ._sharding = sharding.resolve(platform),
-            ._shards = .empty,
+            ._local_shards = .empty,
         };
-        errdefer for (res._shards.slice()) |shard| {
-            shard.deinit(platform.pjrt_api);
+        errdefer for (res._local_shards.slice()) |shard| {
+            shard.buffer.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const placement = placementOrPanic(res._sharding, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
-        for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+        for (res._sharding.devicesInCanonicalOrder()) |device| {
+            const local_device = platform.addressableDeviceById(device.id) orelse
+                continue;
+            const memory = local_device.memory(opts.memory);
+            stdx.debug.assert(
+                memory != null,
+                "Device {d} doesn't have {} memory",
+                .{ device.id, opts.memory },
+            );
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
-                .dst = .{ .memory = memory.pjrt_memory },
+                .dst = .{ .memory = memory.?.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -236,23 +319,70 @@ pub const Buffer = struct {
             };
 
             const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
-            res._shards.appendAssumeCapacity(shard_buffer);
+            res._local_shards.appendAssumeCapacity(.{
+                .global_device_id = device.id,
+                .buffer = shard_buffer,
+            });
         }
 
         return res;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
-        stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
-        stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
+    pub fn fromPjrtBuffers(
+        platform: *const Platform,
+        sh: Shape,
+        sharding_: Sharding,
+        local_shards: []const LocalShard,
+    ) Buffer {
+        stdx.debug.assert(
+            local_shards.len <= MAX_NUM_SHARDS,
+            "ZML doesn't support having more than {} shards. Received {} shards for one buffer.",
+            .{ MAX_NUM_SHARDS, local_shards.len },
+        );
+        stdx.debug.assert(
+            local_shards.len > 0,
+            "fromPjrtBuffers expects at least one buffer, got 0.",
+            .{},
+        );
 
-        return .{
+        const sharding = sharding_.resolve(platform);
+        var result: Buffer = .{
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = Shards.fromSlice(pjrt_buffers) catch unreachable,
+            ._local_shards = .empty,
         };
+
+        for (local_shards, 0..) |shard, i| {
+            stdx.debug.assert(
+                platform.addressableDeviceById(shard.global_device_id) != null,
+                "Device {d} is not addressable on process {d}",
+                .{ shard.global_device_id, platform.processIndex() },
+            );
+            for (local_shards[0..i]) |previous| {
+                stdx.debug.assert(
+                    previous.global_device_id != shard.global_device_id,
+                    "Duplicate local shard for global device {d}",
+                    .{shard.global_device_id},
+                );
+            }
+        }
+
+        for (sharding.devicesInCanonicalOrder()) |device| {
+            for (local_shards) |shard| {
+                if (shard.global_device_id == device.id) {
+                    result._local_shards.appendAssumeCapacity(shard);
+                    break;
+                }
+            }
+        }
+        stdx.debug.assert(
+            result._local_shards.len == local_shards.len,
+            "One or more local shard IDs do not belong to the Buffer sharding",
+            .{},
+        );
+        return result;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
@@ -270,41 +400,41 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
         const placement = placementOrPanic(self._sharding, self._shape);
-        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
-            // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
+        const selected = try self.readableLocalShards(placement);
+        for (selected.constSlice()) |shard_index| {
+            const shard: Shard = .{ ._buffer = &self, ._index = shard_index };
+            const device = self.shardingDevice(shard.globalDeviceId());
             const sub_slice = placement.shardSlice(device.coords, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
+        }
 
-            const size_bytes = placement.shape.byteSize();
-            const destination = sub_slice.data()[0..size_bytes];
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
-
-            if (maybe_event) |event| {
-                try event.await(self._platform.pjrt_api, io);
-            }
+        for (selected.constSlice()) |shard_index| {
+            const shard: Shard = .{ ._buffer = &self, ._index = shard_index };
+            const device = self.shardingDevice(shard.globalDeviceId());
+            try shard.toSlice(
+                io,
+                placement.shardSlice(device.coords, slice),
+            );
         }
     }
 
     /// Copies the content of the Buffer to the provided slice.
     /// The returned slice owns the memory.
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
+        const placement = placementOrPanic(self._sharding, self._shape);
+        const selected = try self.readableLocalShards(placement);
+
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
-
-        const placement = placementOrPanic(self._sharding, self._shape);
 
         var shard_slice = try Slice.alloc(allocator, placement.shape);
         defer shard_slice.free(allocator);
 
-        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+        for (selected.constSlice()) |shard_index| {
+            const shard: Shard = .{ ._buffer = &self, ._index = shard_index };
+            const device = self.shardingDevice(shard.globalDeviceId());
             const sub_slice = placement.shardSlice(device.coords, slice);
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
-            if (maybe_event) |event| {
-                try event.await(self._platform.pjrt_api, io);
-            }
-
-            // TODO: why is this using Slice.copy while `toSlice` errors out ?
-            // TODO: why is this writing in a copy rather than directly in place.
+            try shard.toSlice(io, shard_slice);
             sub_slice.copy(shard_slice.constData());
         }
 
@@ -319,10 +449,86 @@ pub const Buffer = struct {
         return placement.shape.byteSize() * self._sharding.devicesInCanonicalOrder().len;
     }
 
-    pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
-        return self._shards.get(device_id).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
+    pub fn localByteSize(self: Buffer) usize {
+        const placement = placementOrPanic(self._sharding, self._shape);
+        return placement.shape.byteSize() * self._local_shards.len;
+    }
+
+    pub fn opaqueDevicePtr(
+        self: Buffer,
+        global_device_id: u32,
+    ) *anyopaque {
+        for (self._local_shards.constSlice()) |shard| {
+            if (shard.global_device_id == global_device_id) {
+                return shard.buffer.opaqueDeviceMemoryDataPointer(
+                    self._platform.pjrt_api,
+                ) catch unreachable;
+            }
+        }
+        stdx.debug.panic(
+            "Buffer has no local shard for global device {d}",
+            .{global_device_id},
+        );
+    }
+
+    fn shardingDevice(self: Buffer, global_device_id: u32) Sharding.Device {
+        for (self._sharding.devicesInCanonicalOrder()) |device| {
+            if (device.id == global_device_id) return device;
+        }
+        stdx.debug.panic(
+            "Global device {d} does not belong to the Buffer sharding",
+            .{global_device_id},
+        );
+    }
+
+    fn readableLocalShards(
+        self: Buffer,
+        placement: Sharding.Placement,
+    ) error{GlobalReadRequiresGather}!stdx.BoundedArray(
+        usize,
+        MAX_NUM_SHARDS,
+    ) {
+        var regions: stdx.BoundedArray(
+            Sharding.Placement.Slices,
+            MAX_NUM_SHARDS,
+        ) = .empty;
+        var result: stdx.BoundedArray(usize, MAX_NUM_SHARDS) = .empty;
+
+        for (self._sharding.devicesInCanonicalOrder()) |device| {
+            const region = placement.slices(device.coords);
+            for (regions.constSlice()) |previous| {
+                if (slicesEqual(previous, region)) break;
+            } else {
+                regions.appendAssumeCapacity(region);
+                const local_index = for (
+                    self._local_shards.constSlice(),
+                    0..,
+                ) |shard, index| {
+                    const local_device = self.shardingDevice(
+                        shard.global_device_id,
+                    );
+                    if (slicesEqual(
+                        region,
+                        placement.slices(local_device.coords),
+                    )) break index;
+                } else return error.GlobalReadRequiresGather;
+                result.appendAssumeCapacity(local_index);
+            }
+        }
+        return result;
     }
 };
+
+fn slicesEqual(
+    left: Sharding.Placement.Slices,
+    right: Sharding.Placement.Slices,
+) bool {
+    if (left.len != right.len) return false;
+    for (left.constSlice(), right.constSlice()) |a, b| {
+        if (a.start != b.start or a.size != b.size) return false;
+    }
+    return true;
+}
 
 test "device round-trip" {
     const zml = @import("zml.zig");
@@ -347,8 +553,26 @@ test "device round-trip" {
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated
     const model_sharding: zml.Sharding = platform.shardings.get("model").?;
-    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
+    var x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
+    defer x_d.deinit();
     try std.testing.expectEqual(platform.devices.len, x_d.numShards());
+    try std.testing.expectEqual(
+        model_sharding.devicesInCanonicalOrder().len,
+        x_d.numGlobalShards(),
+    );
+    try std.testing.expectEqual(x_d.byteSize(), x_d.localByteSize());
+
+    var shards = x_d.shards();
+    for (model_sharding.devicesInCanonicalOrder()) |device| {
+        if (platform.addressableDeviceById(device.id) == null) continue;
+        const shard = shards.next().?;
+        try std.testing.expectEqual(device.id, shard.globalDeviceId());
+        try std.testing.expectEqual(
+            @as(usize, x_h.shape.rank()),
+            shard.globalSlices().len,
+        );
+    }
+    try std.testing.expect(shards.next() == null);
 
     {
         const x_h_reborn: zml.Slice = try x_d.toSliceAlloc(allocator, io);
@@ -367,6 +591,10 @@ test "device round-trip" {
         errdefer std.log.err(" - reference: {d}\n- actual: {d}", .{ x_h, x_h_reborn });
         try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
     }
+
+    var scalar = try zml.Buffer.scalar(io, platform, 42, .i32);
+    defer scalar.deinit();
+    try std.testing.expectEqual(42, try scalar.getValue(i32, io));
 }
 
 fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {

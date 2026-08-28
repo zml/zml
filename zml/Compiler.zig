@@ -309,6 +309,8 @@ pub fn compile(
     const num_partitions = compiler.partitioning.numPartitions();
     const num_replicas = compiler.partitioning.numReplicas();
     const num_devices = compiler.partitioning.numDevices();
+    _ = num_devices;
+    // num_devices = numPartitions × numReplicas = all global devices
 
     compiler.module.operation().setAttributeByName(
         "mhlo.num_partitions",
@@ -330,9 +332,10 @@ pub fn compile(
     defer arena.deinit();
 
     const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
+    errdefer loaded_executable.deinit(platform.pjrt_api);
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
-    const exe = try Exe.init(
+    return Exe.init(
         allocator,
         platform,
         loaded_executable,
@@ -344,9 +347,6 @@ pub fn compile(
         result.input_info.items(.sharding),
         result.output_info.items(.sharding),
     );
-    errdefer exe.deinit();
-
-    return exe;
 }
 
 fn addPartitionerOperations(ctx: *Compiler) !void {

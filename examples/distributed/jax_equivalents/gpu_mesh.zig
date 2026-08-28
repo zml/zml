@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             global_shape,
             global_array.numGlobalShards(),
-            global_array.numLocalShards(),
+            global_array.numShards(),
         },
     );
     try common.printLocalShards(
@@ -85,5 +85,5 @@ pub fn main(init: std.process.Init) !void {
         "replicated_global_sum",
     );
 
-    try platform.barrier(io, "gpu-mesh-before-shutdown");
+    try platform.barrier("gpu-mesh-before-shutdown");
 }

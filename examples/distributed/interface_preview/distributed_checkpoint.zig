@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             platform.processIndex(),
             restored.step,
-            restored.weights.numLocalShards(),
+            restored.weights.numShards(),
         },
     );
 }
