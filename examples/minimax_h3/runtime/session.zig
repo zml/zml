@@ -3,7 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 
 const repository = @import("repository.zig");
-const config = @import("../core/config.zig");
 const decode = @import("decode.zig");
 const dit = @import("../model/dit.zig");
 const encoder = @import("../model/encoder.zig");
@@ -103,11 +102,9 @@ fn encodeText(
     const encode_start: std.Io.Timestamp = .now(io, .awake);
     const n_layers = loaded.inner.layers.len;
     const layer_bytes: u64 = if (n_layers == 0) 0 else weights.modelBytes(&loaded.inner.layers[0]);
-    const n_keep = policy.encKeepLayers(config.minDeviceBytes(platform), layer_bytes, @intCast(n_layers));
-    const keep_all = n_keep == n_layers and n_layers > 0;
     log.info(
-        "encoder: start tokens={d} layers={d} keep={d} prefetch={d} layer={d}MiB",
-        .{ tokens.len, n_layers, n_keep, policy.encPrefetch(@intCast(n_layers)), layer_bytes / (1024 * 1024) },
+        "encoder: start tokens={d} layers={d} streamed=true prefetch={d} layer={d}MiB",
+        .{ tokens.len, n_layers, policy.encPrefetch(@intCast(n_layers)), layer_bytes / (1024 * 1024) },
     );
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
@@ -201,46 +198,20 @@ fn encodeText(
     var zero_delta = try weights.fromF32(allocator, io, platform, .init(.{ .b = 1, .s = seq, .d = hidden_dim }, loaded.inner.embed_tokens.weight.dtype()), zeros);
     defer zero_delta.deinit();
 
-    var kept = try allocator.alloc(?zml.Bufferized(encoder.TransformerLayer), if (keep_all) n_layers else 0);
-    defer {
-        for (kept) |*slot| {
-            if (slot.*) |*bufs| encoder.TransformerLayer.unloadBuffers(bufs);
-        }
-        allocator.free(kept);
-    }
-    if (keep_all) {
-        var fill_i: usize = 0;
-        while (fill_i < n_layers) : (fill_i += 1) {
-            const slot = fill_i % prefetch;
-            kept[fill_i] = try futs[slot].?.await(io);
-            futs[slot] = null;
-            if (fill_i + prefetch < n_layers) {
-                futs[slot] = try io.concurrent(loadEncoderLayer, .{
-                    allocator, io, platform, loaded, store, shardings, fill_i + prefetch, progress, &loaders[slot],
-                });
-            }
-        }
-    }
-
     const LayerRunner = zml.FnExe(encoder.TransformerLayer.forward).Runner(.{.layer});
     var layer_runner: ?LayerRunner = null;
     defer if (layer_runner) |*r| r.deinit(allocator);
     var layer_i: usize = 0;
     while (layer_i < n_layers) : (layer_i += 1) {
-        var streamed: ?zml.Bufferized(encoder.TransformerLayer) = null;
-        defer if (streamed) |*bufs| encoder.TransformerLayer.unloadBuffers(bufs);
-        const layer_bufs = if (keep_all) kept[layer_i].? else blk: {
-            const slot = layer_i % prefetch;
-            const bufs = try futs[slot].?.await(io);
-            futs[slot] = null;
-            if (layer_i + prefetch < n_layers) {
-                futs[slot] = try io.concurrent(loadEncoderLayer, .{
-                    allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
-                });
-            }
-            streamed = bufs;
-            break :blk bufs;
-        };
+        const slot = layer_i % prefetch;
+        var layer_bufs = try futs[slot].?.await(io);
+        futs[slot] = null;
+        defer encoder.TransformerLayer.unloadBuffers(&layer_bufs);
+        if (layer_i + prefetch < n_layers) {
+            futs[slot] = try io.concurrent(loadEncoderLayer, .{
+                allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
+            });
+        }
         if (layer_runner) |*r| {
             r.rebake(.{ .layer = layer_bufs });
         } else {
@@ -781,6 +752,7 @@ pub const Generate = struct {
     cond: DenoiseCond,
     seed: u64,
     resident_blocks: u32,
+    prefetch_vae: bool,
     out: []const u8,
 };
 
@@ -816,8 +788,6 @@ pub fn generate(
         if (audio_f.cancel(io)) |exe| exe.deinit() else |_| {}
     };
 
-    const device_bytes = config.minDeviceBytes(platform);
-    const prefetch_vae = device_bytes == 0 or device_bytes >= config.full_canvas_min_device_bytes;
     const VaeCacheFut = @TypeOf(try io.concurrent(decode.loadVisualCache, .{
         allocator,
         io,
@@ -852,7 +822,7 @@ pub fn generate(
     );
     defer text.deinit();
 
-    if (prefetch_vae) {
+    if (req.prefetch_vae) {
         cache_f = try io.concurrent(decode.loadVisualCache, .{
             allocator,
             io,

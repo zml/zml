@@ -57,6 +57,14 @@ pub const Backend = enum {
             },
         };
     }
+
+    pub fn supportsHeadDim(backend: Backend, head_dim: i64) bool {
+        return switch (backend) {
+            .vanilla, .attnd, .nki, .metal_fa => head_dim > 0,
+            .cuda_fa2 => head_dim >= 16 and head_dim <= 256 and @rem(head_dim, 16) == 0,
+            .cuda_fa3 => head_dim == 64 or head_dim == 96 or head_dim == 128 or head_dim == 192 or head_dim == 256,
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {
@@ -298,6 +306,26 @@ test "dense attention: f16 hd=128" {
     );
 }
 
+test "dense attention: supported head dimensions" {
+    inline for (.{ 64, 96, 128, 256 }) |head_dim| {
+        try testDense(
+            .init(.{ .b = 1, .q = 16, .h = 8, .hd = head_dim }, .bf16),
+            .init(.{ .b = 1, .k = 16, .h = 8, .hd = head_dim }, .bf16),
+            false,
+        );
+    }
+}
+
+test "dense attention: hd=72 stays off flash" {
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 72));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 72));
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 72 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 72 }, .bf16),
+        false,
+    );
+}
+
 test "dense attention: gqa causal hd=128" {
     try testDense(
         .init(.{ .q = 16, .h = 16, .hd = 128 }, .bf16),
@@ -327,9 +355,12 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
     const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
     defer rng_k.deinit();
 
-    const q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
-    const k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
-    const v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+    defer q.deinit();
+    var k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer k.deinit();
+    var v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer v.deinit();
 
     const shardings = platform.shardings.values();
     const vanilla_exe = try platform.compileFn(
@@ -344,7 +375,8 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
     );
     defer vanilla_exe.deinit();
 
-    const vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, dense, .{ q, k, v });
+    var vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, dense, .{ q, k, v });
+    defer vanilla_d.deinit();
     try vanilla_d.await(io);
     const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
     defer vanilla_h.free(allocator);
@@ -352,6 +384,7 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
     const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
     for (backends) |backend| {
         if (!backend.isAvailable(platform)) continue;
+        if (!backend.supportsHeadDim(q_shape.dim(.hd))) continue;
         const exe = try platform.compileFn(
             allocator,
             io,
@@ -436,7 +469,19 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
+        const metadata: Metadata = .init(switch (backend) {
+            .cuda_fa2 => .{ .cuda_fa2 = .{
+                .seqlen = tensors.k.dim(.k),
+                .num_heads = tensors.q.dim(.h),
+                .head_dim = tensors.q.dim(.hd),
+            } },
+            .cuda_fa3 => .{ .cuda_fa3 = .{
+                .seqlen = tensors.k.dim(.k),
+                .num_heads = tensors.q.dim(.h),
+                .head_dim = tensors.q.dim(.hd),
+            } },
+            else => .fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)),
+        });
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,

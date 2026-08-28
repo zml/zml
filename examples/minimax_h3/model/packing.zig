@@ -57,7 +57,7 @@ pub fn timestepValues(video_t: f32, audio_t: f32) [timestep_slot_count]f32 {
     };
 }
 
-pub fn padUnique(out: []f32, unique: []const f32) void {
+fn padUnique(out: []f32, unique: []const f32) void {
     if (out.len == 0 or unique.len == 0) return;
     const n = @min(out.len, unique.len);
     @memcpy(out[0..n], unique[0..n]);
@@ -77,7 +77,7 @@ fn sortAscending(values: []f32) void {
 }
 
 /// `torch.unique(..., sorted=True)` over the distinct row times (at most 4).
-pub fn uniqueSorted(values: []const f32, out: *[timestep_slot_count]f32) u32 {
+fn uniqueSorted(values: []const f32, out: *[timestep_slot_count]f32) u32 {
     var n: u32 = 0;
     for (values) |v| {
         var seen = false;
@@ -103,7 +103,7 @@ fn indexOfEqual(values: []const f32, needle: f32) u32 {
     std.debug.panic("timestep missing from unique set", .{});
 }
 
-pub fn fillRowTimesteps(layout: Layout, video_t: f32, audio_t: f32, out: []f32) void {
+fn fillRowTimesteps(layout: Layout, video_t: f32, audio_t: f32, out: []f32) void {
     std.debug.assert(out.len == layout.seqLen());
     const cond_v = layout.conditionVideoRows();
     const cond_a = layout.conditionAudioRows();
@@ -178,6 +178,25 @@ pub const Layout = struct {
     }
 };
 
+fn conditionVideoTokens(videos: []const ConditionVideo) u32 {
+    var rows: u32 = 0;
+    for (videos) |video| {
+        rows += config.videoTokenCount(video.latent_t, video.latent_h, video.latent_w, .{ 1, 2, 2 });
+    }
+    return rows;
+}
+
+fn conditionAudioTokens(audios: []const ConditionAudio) u32 {
+    var rows: u32 = 0;
+    for (audios) |audio| rows += audio.latent_t * 2;
+    return rows;
+}
+
+pub fn checkConditionRows(layout: Layout, videos: []const ConditionVideo, audios: []const ConditionAudio) !void {
+    if (layout.conditionVideoRows() != conditionVideoTokens(videos)) return error.ConditionVideoRowMismatch;
+    if (layout.conditionAudioRows() != conditionAudioTokens(audios)) return error.ConditionAudioRowMismatch;
+}
+
 pub const BuildArgs = struct {
     text_len: u32,
     latent_t: u32,
@@ -197,7 +216,7 @@ const frame_rescale_f64: f64 = 5.0 / 3.0;
 
 /// Official builds the rotary grid in float64 (`np.linspace`, pairwise
 /// frame spans) and only casts to f32 at the rope. Match that path.
-pub fn videoSpan(frame: u32) f64 {
+fn videoSpan(frame: u32) f64 {
     return frame_rescale_f64 * @as(f64, @floatFromInt(video_spans[frame % video_spans.len]));
 }
 
@@ -406,11 +425,15 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
             var block_end = rotary_time;
             if (block.kind == .audio or block.kind == .video_audio) {
                 if (block.audio_index < 0) return error.MissingReferenceAudio;
-                const audio = args.condition_audios[@intCast(block.audio_index)];
+                const audio_index: usize = @intCast(block.audio_index);
+                if (audio_index >= args.condition_audios.len) return error.InvalidReferenceAudioIndex;
+                const audio = args.condition_audios[audio_index];
                 var w_low = w_axis[0];
                 var w_high = w_axis[w_axis.len - 1];
                 if (block.video_index >= 0) {
-                    const video = args.condition_videos[@intCast(block.video_index)];
+                    const video_index: usize = @intCast(block.video_index);
+                    if (video_index >= args.condition_videos.len) return error.InvalidReferenceVideoIndex;
+                    const video = args.condition_videos[video_index];
                     var cw_buf: [256]f32 = undefined;
                     const area = @sqrt(@as(f64, @floatFromInt(video.latent_h * video.latent_w)));
                     const cw = spatialAxis(video.latent_w, area, &cw_buf);
@@ -422,7 +445,9 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
             }
             if (block.kind != .audio) {
                 if (block.video_index < 0) return error.MissingReferenceVideo;
-                const video = args.condition_videos[@intCast(block.video_index)];
+                const video_index: usize = @intCast(block.video_index);
+                if (video_index >= args.condition_videos.len) return error.InvalidReferenceVideoIndex;
+                const video = args.condition_videos[video_index];
                 var ch_buf: [256]f32 = undefined;
                 var cw_buf: [256]f32 = undefined;
                 const area = @sqrt(@as(f64, @floatFromInt(video.latent_h * video.latent_w)));
@@ -451,6 +476,7 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
 
     var layout = try b.finish(.{ .start = video.start, .end = video.end }, .{ .start = audio.start, .end = audio.end });
     errdefer layout.deinit(allocator);
+    try checkConditionRows(layout, args.condition_videos, args.condition_audios);
     const row_ts = try allocator.alloc(f32, layout.seqLen());
     defer allocator.free(row_ts);
     // Official `torch.unique(..., sorted=True)`.

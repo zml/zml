@@ -44,6 +44,15 @@ fn testEncodeVideoLatentT() !void {
         config.videoLatentFrames(config.alignFrameCount(120)),
         vae.encodeVideoLatentT(vae.official_visual, 120),
     );
+
+    // Diffusers keeps the full reference for Qwen-VL, but snaps only the VAE
+    // input down to the largest 17*n+5 prefix.
+    try std.testing.expectEqual(@as(u32, 5), vae.referenceVideoFrameCount(vae.official_visual, 5));
+    try std.testing.expectEqual(@as(u32, 21), vae.referenceVideoFrameCount(vae.official_visual, 21));
+    try std.testing.expectEqual(@as(u32, 22), vae.referenceVideoFrameCount(vae.official_visual, 22));
+    try std.testing.expectEqual(@as(u32, 22), vae.referenceVideoFrameCount(vae.official_visual, 38));
+    try std.testing.expectEqual(@as(u32, 39), vae.referenceVideoFrameCount(vae.official_visual, 39));
+    try std.testing.expectEqual(@as(u32, 56), vae.referenceVideoFrameCount(vae.official_visual, 60));
 }
 fn testOfficialVaeNativeTile(allocator: std.mem.Allocator) !void {
     const spec = vae.official_visual;
@@ -71,11 +80,11 @@ fn testUnpackPatches(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 13, 20, 21, 22, 23 }, nchw);
 }
 fn testVaeGeometry() !void {
-    const lat = vae.official_visual.latentFromPixels(768, 1376, 120);
+    const lat = config.visualLatentSize(768, 1376, 120);
     try std.testing.expectEqual(@as(u32, 37), lat.t);
     try std.testing.expectEqual(@as(u32, 48), lat.h);
     try std.testing.expectEqual(@as(u32, 86), lat.w);
-    const official = vae.official_visual.latentFromPixels(768, 1344, 120);
+    const official = config.visualLatentSize(768, 1344, 120);
     try std.testing.expectEqual(@as(u32, 84), official.w);
     try std.testing.expectEqual(@as(u32, 96), vae.official_visual.patchDim());
     try std.testing.expectEqual(@as(u32, 200), vae.official_audio.tokenCount(100));

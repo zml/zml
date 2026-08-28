@@ -103,7 +103,7 @@ const Attention = struct {
     }
 };
 
-pub fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) struct { zml.Tensor, zml.Tensor } {
+fn mmRope(position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32) struct { zml.Tensor, zml.Tensor } {
     const pos = position_ids.convert(.f32).withPartialTags(.{ .s, .ax });
     const inv = zml.nn.invFreq(2 * rope_freq_dim, .{
         .layout = .real_im_pass,
@@ -143,7 +143,7 @@ pub const TimeEmbedder = struct {
     }
 };
 
-pub fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
+fn timestepFeatures(t: zml.Tensor, dim: i64) zml.Tensor {
     const inv = zml.nn.invFreq(dim, .{
         .layout = .real_im_pass,
         .scaling = .{ .default = .{ .rope_theta = 10000.0 } },

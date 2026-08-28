@@ -1,14 +1,113 @@
 const std = @import("std");
 
 const geom = @import("../conditioning/geometry.zig");
+const packing = @import("../model/packing.zig");
+const conditions = @import("../runtime/conditions.zig");
 const media = @import("../runtime/media.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     try testResample(allocator);
+    try testReferenceIndexDomains();
+    try testOfficialAudioTruncate();
     try testMediaErrors();
     try testFfmpegProbe();
     try testOutputTarget();
     try testExportVideo(allocator);
+}
+
+fn expectReferenceIndices(
+    kinds: []const packing.ReferenceKind,
+    video_has_audio: []const bool,
+    expected: []const packing.ReferenceBlock,
+) !void {
+    try std.testing.expectEqual(kinds.len, video_has_audio.len);
+    try std.testing.expectEqual(kinds.len, expected.len);
+    var domains: conditions.ReferenceIndexDomains = .{};
+    for (kinds, video_has_audio, expected) |kind, has_audio, want| {
+        const got = domains.next(kind, has_audio);
+        try std.testing.expectEqual(want.kind, got.kind);
+        try std.testing.expectEqual(want.video_index, got.video_index);
+        try std.testing.expectEqual(want.audio_index, got.audio_index);
+    }
+}
+
+fn testReferenceIndexDomains() !void {
+    try expectReferenceIndices(&.{.image}, &.{false}, &.{.{ .kind = .image, .video_index = 0 }});
+    try expectReferenceIndices(&.{.video}, &.{false}, &.{.{ .kind = .video, .video_index = 0 }});
+    try expectReferenceIndices(
+        &.{ .audio, .video },
+        &.{ true, false },
+        &.{
+            .{ .kind = .audio, .audio_index = 0 },
+            .{ .kind = .video, .video_index = 0 },
+        },
+    );
+    try expectReferenceIndices(
+        &.{ .audio, .image },
+        &.{ true, false },
+        &.{
+            .{ .kind = .audio, .audio_index = 0 },
+            .{ .kind = .image, .video_index = 0 },
+        },
+    );
+    try expectReferenceIndices(
+        &.{ .image, .audio },
+        &.{ false, true },
+        &.{
+            .{ .kind = .image, .video_index = 0 },
+            .{ .kind = .audio, .audio_index = 0 },
+        },
+    );
+    try expectReferenceIndices(
+        &.{ .video, .audio },
+        &.{ false, true },
+        &.{
+            .{ .kind = .video, .video_index = 0 },
+            .{ .kind = .audio, .audio_index = 0 },
+        },
+    );
+    const triples = [_][3]packing.ReferenceKind{
+        .{ .image, .audio, .video },
+        .{ .audio, .image, .video },
+        .{ .video, .audio, .image },
+        .{ .image, .video, .audio },
+    };
+    for (triples) |kinds| {
+        var domains: conditions.ReferenceIndexDomains = .{};
+        var visual_index: i32 = 0;
+        var audio_index: i32 = 0;
+        for (kinds) |kind| {
+            const block = domains.next(kind, false);
+            if (kind == .audio) {
+                try std.testing.expectEqual(audio_index, block.audio_index);
+                try std.testing.expectEqual(@as(i32, -1), block.video_index);
+                audio_index += 1;
+            } else {
+                try std.testing.expectEqual(visual_index, block.video_index);
+                try std.testing.expectEqual(@as(i32, -1), block.audio_index);
+                visual_index += 1;
+            }
+        }
+    }
+
+    // A video's soundtrack shares its reference block, but occupies its own
+    // encoded-audio slot and does not perturb later visual indices.
+    try expectReferenceIndices(
+        &.{ .audio, .video_audio, .image },
+        &.{ true, true, false },
+        &.{
+            .{ .kind = .audio, .audio_index = 0 },
+            .{ .kind = .video_audio, .video_index = 0, .audio_index = 1 },
+            .{ .kind = .image, .video_index = 1 },
+        },
+    );
+}
+
+fn testOfficialAudioTruncate() !void {
+    // Official: int(max_duration * sample_rate) toward zero, not rounded.
+    try std.testing.expectEqual(@as(u32, 0), media.officialTruncateSamples(0.5, 1));
+    try std.testing.expectEqual(@as(u32, 2), media.officialTruncateSamples(2.9, 1));
+    try std.testing.expectEqual(@as(u32, 160000), media.officialTruncateSamples(5.0, 32000));
 }
 
 fn testResample(allocator: std.mem.Allocator) !void {

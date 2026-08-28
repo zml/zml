@@ -626,14 +626,12 @@ pub fn partitionsVaeBatch(batch: u32, tp: u32) bool {
 pub const EncodeCompiled = struct {
     visual_t1: ?zml.FnExe(visual_enc.encode) = null,
     visual_clip: ?zml.FnExe(visual_enc.encode) = null,
-    audio: ?zml.FnExe(audio_vae.encode) = null,
     tile_h: u32,
     tile_w: u32,
 
     pub fn deinit(self: *EncodeCompiled) void {
         if (self.visual_t1) |*c| c.deinit();
         if (self.visual_clip) |*c| c.deinit();
-        if (self.audio) |*c| c.deinit();
     }
 };
 
@@ -644,7 +642,7 @@ fn compileVisualEncode(ctx: CompileCtx, model: visual_enc.Model, t: u32, h: u32,
     }});
 }
 
-fn compileAudioEncode(ctx: CompileCtx, model: audio_vae.EncoderModel, samples: u32) !zml.FnExe(audio_vae.encode) {
+fn compileAudioEncodeInner(ctx: CompileCtx, model: audio_vae.EncoderModel, samples: u32) !zml.FnExe(audio_vae.encode) {
     return compileLogged(audio_vae.encode, "minimax_h3_audio_encode", ctx, .{.{
         .model = model,
         .wav = .init(.{ .b = 2, .c = 1, .t = samples }, .f32),
@@ -656,11 +654,9 @@ pub fn compileEncode(
     io: std.Io,
     platform: *const zml.Platform,
     visual: ?visual_enc.Model,
-    audio: ?audio_vae.EncoderModel,
     tile_h: u32,
     tile_w: u32,
     need_clip: bool,
-    audio_samples: u32,
     shardings: sharding.Shardings,
     progress: *std.Progress.Node,
 ) !EncodeCompiled {
@@ -685,18 +681,31 @@ pub fn compileEncode(
         var tmp = exe;
         tmp.deinit();
     };
-    const audio_exe = if (audio) |m| try compileAudioEncode(ctx, m, audio_samples) else null;
-    errdefer if (audio_exe) |exe| {
-        var tmp = exe;
-        tmp.deinit();
-    };
     return .{
         .visual_t1 = t1,
         .visual_clip = clip,
-        .audio = audio_exe,
         .tile_h = tile_h,
         .tile_w = tile_w,
     };
+}
+
+pub fn compileAudioEncode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model: audio_vae.EncoderModel,
+    samples: u32,
+    shardings: sharding.Shardings,
+    progress: *std.Progress.Node,
+) !zml.FnExe(audio_vae.encode) {
+    var all = shardings.all();
+    return compileAudioEncodeInner(.{
+        .allocator = allocator,
+        .io = io,
+        .platform = platform,
+        .shardings = &all,
+        .progress = progress,
+    }, model, samples);
 }
 
 pub fn compileVision(

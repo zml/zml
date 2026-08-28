@@ -62,13 +62,39 @@ fn hasVideo(items: anytype) bool {
     return false;
 }
 
-fn padStereo(allocator: std.mem.Allocator, stereo: []const f32, samples: u32) ![]f32 {
-    const out = try allocator.alloc(f32, @as(usize, samples) * 2);
-    @memset(out, 0);
-    const n = @min(stereo.len, out.len);
-    @memcpy(out[0..n], stereo[0..n]);
-    return out;
-}
+pub const ReferenceIndexDomains = struct {
+    encoded_visuals: i32 = 0,
+    encoded_audios: i32 = 0,
+
+    pub fn next(self: *ReferenceIndexDomains, kind: packing.ReferenceKind, has_audio: bool) packing.ReferenceBlock {
+        return switch (kind) {
+            .image => blk: {
+                const index = self.encoded_visuals;
+                self.encoded_visuals += 1;
+                break :blk .{ .kind = .image, .video_index = index };
+            },
+            .video, .video_audio => blk: {
+                const video_index = self.encoded_visuals;
+                self.encoded_visuals += 1;
+                var audio_index: i32 = -1;
+                if (has_audio) {
+                    audio_index = self.encoded_audios;
+                    self.encoded_audios += 1;
+                }
+                break :blk .{
+                    .kind = if (has_audio) .video_audio else .video,
+                    .video_index = video_index,
+                    .audio_index = audio_index,
+                };
+            },
+            .audio => blk: {
+                const index = self.encoded_audios;
+                self.encoded_audios += 1;
+                break :blk .{ .kind = .audio, .audio_index = index };
+            },
+        };
+    }
+};
 
 pub const Prepare = struct {
     variant: config.Variant,
@@ -114,6 +140,7 @@ pub fn prepare(
         rgb: []u8 = &.{},
         qwen_rgb: []u8 = &.{},
         frames: u32 = 1,
+        vae_frames: u32 = 1,
         w: u32 = 0,
         h: u32 = 0,
         nchw: ?[]f32 = null,
@@ -125,7 +152,6 @@ pub fn prepare(
         temporal: u32 = 1,
         merged: u32 = 0,
         seq: u32 = 0,
-        video_index: i32 = -1,
         timestamps: []f32 = &.{},
         has_audio: bool = false,
     };
@@ -133,7 +159,6 @@ pub fn prepare(
         path: []const u8,
         stereo: []f32 = &.{},
         latent_t: u32 = 0,
-        audio_index: i32 = -1,
     };
 
     var visuals: std.ArrayList(VisualItem) = .empty;
@@ -153,6 +178,7 @@ pub fn prepare(
     }
     var blocks: std.ArrayList(packing.ReferenceBlock) = .empty;
     defer blocks.deinit(allocator);
+    var reference_indices: ReferenceIndexDomains = .{};
 
     if (req.variant == .fl2va) {
         if (req.first_frame.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.first_frame, .keyframe_index = 0 });
@@ -161,36 +187,29 @@ pub fn prepare(
         for (req.refs) |ref| {
             switch (ref.kind) {
                 .image => {
-                    const vidx: i32 = @intCast(visuals.items.len);
-                    try visuals.append(allocator, .{ .kind = .image, .path = ref.path, .video_index = vidx });
-                    try blocks.append(allocator, .{ .kind = .image, .video_index = vidx });
+                    const block = reference_indices.next(.image, false);
+                    try visuals.append(allocator, .{ .kind = .image, .path = ref.path });
+                    try blocks.append(allocator, block);
                 },
                 .video, .video_audio => {
-                    const vidx: i32 = @intCast(visuals.items.len);
-                    var aidx: i32 = -1;
                     const meta = try media.probeVideo(allocator, io, ref.path);
                     const has_audio = meta.has_audio;
+                    const block = reference_indices.next(.video, has_audio);
                     try visuals.append(allocator, .{
                         .kind = if (has_audio) .video_audio else .video,
                         .path = ref.path,
-                        .video_index = vidx,
                         .has_audio = has_audio,
                     });
                     if (has_audio) {
-                        aidx = @intCast(audios.items.len);
-                        try audios.append(allocator, .{ .path = ref.path, .audio_index = aidx });
+                        try audios.append(allocator, .{ .path = ref.path });
                     }
-                    try blocks.append(allocator, .{
-                        .kind = if (has_audio) .video_audio else .video,
-                        .video_index = vidx,
-                        .audio_index = aidx,
-                    });
+                    try blocks.append(allocator, block);
                 },
                 .audio => {
-                    const aidx: i32 = @intCast(audios.items.len);
-                    try audios.append(allocator, .{ .path = ref.path, .audio_index = aidx });
+                    const block = reference_indices.next(.audio, true);
+                    try audios.append(allocator, .{ .path = ref.path });
                     try visuals.append(allocator, .{ .kind = .audio, .path = ref.path, .has_audio = true });
-                    try blocks.append(allocator, .{ .kind = .audio, .audio_index = aidx });
+                    try blocks.append(allocator, block);
                 },
             }
         }
@@ -214,6 +233,7 @@ pub fn prepare(
             item.w = own.w;
             item.h = own.h;
             item.frames = keep;
+            item.vae_frames = vae.referenceVideoFrameCount(vae.official_visual, keep);
             const src_plane = @as(usize, clip.w) * clip.h * 3;
             const dst_plane = @as(usize, own.w) * own.h * 3;
             item.rgb = try allocator.alloc(u8, keep * dst_plane);
@@ -224,8 +244,8 @@ pub fn prepare(
                 defer allocator.free(rgb);
                 @memcpy(item.rgb[fi * dst_plane ..][0..dst_plane], rgb);
             }
-            item.nchw = try media.rgbVideoToNchwImagenet(allocator, item.rgb, item.frames, item.h, item.w);
-            item.latent_t = vae.encodeVideoLatentT(vae.official_visual, item.frames);
+            item.nchw = try media.rgbVideoToNchwImagenet(allocator, item.rgb, item.vae_frames, item.h, item.w);
+            item.latent_t = vae.encodeVideoLatentT(vae.official_visual, item.vae_frames);
         } else if (req.variant == .fl2va) {
             item.rgb = if (keyframe_i == 0)
                 try media.loadRgb(allocator, io, item.path, req.geo.pixel_w, req.geo.pixel_h)
@@ -279,14 +299,12 @@ pub fn prepare(
 
     const hop = loaded_audio.cfg.hop;
     const rate = loaded_audio.cfg.sample_rate;
-    var max_audio_samples: u32 = 0;
     for (audios.items) |*item| {
         const duration_s = @as(f32, @floatFromInt(req.geo.frames)) / config.video_fps;
         item.stereo = try media.loadAudioOfficial(allocator, io, item.path, duration_s, rate);
         const samples: u32 = @intCast(item.stereo.len / 2);
         const aligned = geom.hopAlign(samples, hop);
         item.latent_t = aligned / hop;
-        max_audio_samples = @max(max_audio_samples, aligned);
     }
 
     var specs: std.ArrayList(presentation.VisionClip) = .empty;
@@ -412,33 +430,75 @@ pub fn prepare(
             io,
             platform,
             if (v_loaded) |m| m.inner else null,
-            if (a_loaded) |m| m.inner else null,
             tile.h,
             tile.w,
             hasVideo(visuals.items),
-            if (max_audio_samples == 0) hop else max_audio_samples,
             req.shardings,
             progress,
         );
         defer compiled_e.deinit();
 
+        const AudioExecutable = struct {
+            samples: u32,
+            exe: zml.FnExe(audio_vae.encode),
+        };
+        var audio_executables: std.ArrayList(AudioExecutable) = .empty;
+        defer {
+            for (audio_executables.items) |*entry| entry.exe.deinit();
+            audio_executables.deinit(allocator);
+        }
+
         for (visuals.items) |item| {
             if (item.kind == .audio) continue;
             encoded_visuals[n_vis] = if (item.kind == .video or item.kind == .video_audio)
-                try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.frames, item.h, item.w)
+                try encode_mod.encodeVideo(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.vae_frames, item.h, item.w)
             else
                 try encode_mod.encodeKeyframe(allocator, io, platform, &compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
             encoded_visuals[n_vis].keyframe_index = item.keyframe_index;
             n_vis += 1;
         }
         for (audios.items, encoded_audios) |item, *out| {
-            const padded = try padStereo(allocator, item.stereo, max_audio_samples);
-            defer allocator.free(padded);
-            out.* = try encode_mod.encodeAudio(allocator, io, platform, &compiled_e, &a_loaded.?, &a_bufs.?, padded);
+            const samples = item.latent_t * hop;
+            var executable_index: ?usize = null;
+            for (audio_executables.items, 0..) |entry, index| {
+                if (entry.samples == samples) {
+                    executable_index = index;
+                    break;
+                }
+            }
+            if (executable_index == null) {
+                const exe = try pipeline.compileAudioEncode(
+                    allocator,
+                    io,
+                    platform,
+                    a_loaded.?.inner,
+                    samples,
+                    req.shardings,
+                    progress,
+                );
+                try audio_executables.append(allocator, .{ .samples = samples, .exe = exe });
+                executable_index = audio_executables.items.len - 1;
+            }
+            out.* = try encode_mod.encodeAudio(
+                allocator,
+                io,
+                platform,
+                &audio_executables.items[executable_index.?].exe,
+                &a_loaded.?,
+                &a_bufs.?,
+                item.stereo,
+            );
+            std.debug.assert(out.latent_t == item.latent_t);
             n_aud_enc += 1;
         }
     }
 
+    if (blocks.items.len != 0) {
+        if (n_vis != @as(usize, @intCast(reference_indices.encoded_visuals)))
+            return error.ReferenceVisualIndexMismatch;
+        if (n_aud_enc != @as(usize, @intCast(reference_indices.encoded_audios)))
+            return error.ReferenceAudioIndexMismatch;
+    }
     const conds = try encode_mod.packConditions(allocator, encoded_visuals[0..n_vis], encoded_audios[0..n_aud_enc], blocks.items, patch);
     errdefer conds.deinit(allocator);
     for (encoded_visuals[0..n_vis]) |v| v.deinit(allocator);

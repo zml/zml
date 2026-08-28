@@ -1,14 +1,14 @@
 const std = @import("std");
 
-const zml = @import("zml");
-
 const geom = @import("../conditioning/geometry.zig");
 const packing = @import("../model/packing.zig");
 const presentation = @import("../conditioning/presentation.zig");
 const vision = @import("../model/vision.zig");
+const vision_sdpa = @import("../model/vision_sdpa.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     try testVisionSpatial();
+    try testVisionSdpaCapabilities();
     try testPatchify(allocator);
     try testGeomHost(allocator);
     try testPresentation(allocator);
@@ -16,6 +16,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testPixelCrc(allocator);
     try testStandaloneAudio(allocator);
     try testFirstLastFl2va(allocator);
+}
+
+fn testVisionSdpaCapabilities() !void {
+    try std.testing.expect(vision_sdpa.supports(.cuda, .bf16, 72));
+    try std.testing.expect(!vision_sdpa.supports(.cuda, .f16, 72));
+    try std.testing.expect(!vision_sdpa.supports(.cpu, .bf16, 72));
+    try std.testing.expect(!vision_sdpa.supports(.cuda, .bf16, 81));
 }
 
 fn testVisionSpatial() !void {

@@ -200,7 +200,7 @@ const Attention = struct {
     }
 };
 
-pub fn vitRope(position_ids: zml.Tensor, rotary_dim: i64, theta: f32) struct { zml.Tensor, zml.Tensor } {
+fn vitRope(position_ids: zml.Tensor, rotary_dim: i64, theta: f32) struct { zml.Tensor, zml.Tensor } {
     const n_dim: i64 = 3;
     const freq_len = @divExact(rotary_dim, 2 * n_dim);
     const step = @as(f32, @floatFromInt(2 * n_dim)) / @as(f32, @floatFromInt(rotary_dim));

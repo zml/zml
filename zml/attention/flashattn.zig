@@ -546,15 +546,17 @@ pub const fa3 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
+            head_dim: i64 = 128,
         };
 
         pub fn init(opts: InitOptions) Metadata {
+            const hd = if (opts.head_dim > 0) opts.head_dim else 128;
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * hd * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * hd * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
                 .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
                     .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
@@ -639,6 +641,7 @@ pub const fa3 = struct {
         const scratch = Metadata.init(.{
             .seqlen = flat.q.dim(.tot),
             .num_heads = q_.dim(.h),
+            .head_dim = head_dim,
         });
         const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
         const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());

@@ -110,14 +110,13 @@ fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
     return zml.nn.applyRotary(x.convert(.f32), cos.convert(.f32), sin.convert(.f32)).convert(x.dtype());
 }
 
-/// Tiled SDPA. Head dim is 72 (FA2 wants a multiple of 8 near 128) and full-canvas
-/// seq is thousands of patches, so `zml.nn.sdpa` materializes S² scores.
 fn visionAttn(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, head_dim: i64) zml.Tensor {
     const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-    return switch (q.dtype()) {
-        .bf16, .f16 => vision_sdpa.forward(q, k, v, scale),
-        else => zml.nn.sdpa(q, k, v, .{}),
-    };
+    const target = zml.Compiler.current().platform.target;
+    return if (vision_sdpa.supports(target, q.dtype(), head_dim))
+        vision_sdpa.forward(q, k, v, scale)
+    else
+        zml.nn.sdpa(q, k, v, .{});
 }
 
 pub const VisionBlock = struct {

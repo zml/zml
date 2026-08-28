@@ -8,7 +8,7 @@ const log = std.log.scoped(.minimax_h3_media);
 
 pub const RgbImage = struct { w: u32, h: u32, rgb: []u8 };
 
-pub fn writePpm(
+fn writePpm(
     io: std.Io,
     dir: std.Io.Dir,
     name: []const u8,
@@ -24,7 +24,7 @@ pub fn writePpm(
     try writer.interface.writeAll(rgb);
 }
 
-pub fn writeWavS16(
+fn writeWavS16(
     io: std.Io,
     dir: std.Io.Dir,
     name: []const u8,
@@ -52,7 +52,7 @@ pub fn writeWavS16(
     try writer.interface.writeAll(std.mem.sliceAsBytes(pcm));
 }
 
-pub fn rgbU8FromNchw(allocator: std.mem.Allocator, nchw: []const f32, frames: u32, height: u32, width: u32) ![]u8 {
+fn rgbU8FromNchw(allocator: std.mem.Allocator, nchw: []const f32, frames: u32, height: u32, width: u32) ![]u8 {
     const plane = @as(usize, frames) * height * width;
     std.debug.assert(nchw.len >= plane * 3);
     const out = try allocator.alloc(u8, plane * 3);
@@ -88,7 +88,7 @@ pub const Output = struct {
     }
 };
 
-pub fn writeFrameSequence(
+fn writeFrameSequence(
     allocator: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
@@ -199,7 +199,7 @@ fn runFfmpeg(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8)
     });
 }
 
-pub fn muxMp4(
+fn muxMp4(
     allocator: std.mem.Allocator,
     io: std.Io,
     frames_dir: []const u8,
@@ -226,6 +226,7 @@ pub fn muxMp4(
         "yuv420p",
         "-c:a",
         "aac",
+        "-shortest",
         mp4_path,
     }) catch |err| {
         log.warn("ffmpeg {s}: {s}", .{ ffmpeg_bin, @errorName(err) });
@@ -541,10 +542,15 @@ fn readWavAny(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Pcm {
     return .{ .stereo = stereo, .rate = info.rate };
 }
 
+/// Official `int(max_duration * sample_rate)` — truncate toward zero in float64.
+pub fn officialTruncateSamples(duration_s: f32, rate: u32) u32 {
+    return @intFromFloat(@as(f64, duration_s) * @as(f64, @floatFromInt(rate)));
+}
+
 pub fn loadAudioOfficial(allocator: std.mem.Allocator, io: std.Io, path: []const u8, duration_s: f32, dst_rate: u32) ![]f32 {
     const native = try loadWavNative(allocator, io, path);
     defer allocator.free(native.stereo);
-    const max_pcm: u32 = @intFromFloat(@round(duration_s * @as(f32, @floatFromInt(native.rate))));
+    const max_pcm = officialTruncateSamples(duration_s, native.rate);
     const truncated = try geom.truncateStereo(allocator, native.stereo, max_pcm);
     defer allocator.free(truncated);
     return geom.resampleLinear(allocator, truncated, native.rate, dst_rate);

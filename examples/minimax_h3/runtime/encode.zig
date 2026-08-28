@@ -298,7 +298,7 @@ pub fn encodeAudio(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    compiled: *const pipeline.EncodeCompiled,
+    exe: *const zml.FnExe(audio_vae.encode),
     loaded: *const audio_vae.LoadedEncoder,
     bufs: *const zml.Bufferized(audio_vae.EncoderModel),
     stereo: []const f32,
@@ -323,7 +323,6 @@ pub fn encodeAudio(
     @memcpy(batch[0..samples], left);
     @memcpy(batch[samples..], right);
 
-    const exe = if (compiled.audio) |*c| c else return error.AudioEncodeMissing;
     var runner = try zml.FnExe(audio_vae.encode).Runner(.{.model}).init(exe, allocator, .{ .model = bufs.* });
     defer runner.deinit(allocator);
     var wav = try weights.fromItems(io, platform, .init(.{ .b = 2, .c = 1, .t = samples }, .f32), batch);

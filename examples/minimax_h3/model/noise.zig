@@ -33,10 +33,6 @@ pub const Generator = struct {
         return self;
     }
 
-    pub fn reset(self: *Generator) void {
-        self.* = init(self.seed);
-    }
-
     pub fn random(self: *Generator) u32 {
         self.left -= 1;
         if (self.left == 0) self.nextState();
@@ -132,13 +128,13 @@ fn randnSerial(gen: *Generator, out: []f32) void {
     }
 }
 
-pub fn nchwRandn(allocator: std.mem.Allocator, gen: *Generator, c: u32, t: u32, h: u32, w: u32) ![]f32 {
+fn nchwRandn(allocator: std.mem.Allocator, gen: *Generator, c: u32, t: u32, h: u32, w: u32) ![]f32 {
     const out = try allocator.alloc(f32, @as(usize, c) * t * h * w);
     randn(gen, out);
     return out;
 }
 
-pub fn patchifyNchw(
+fn patchifyNchw(
     allocator: std.mem.Allocator,
     nchw: []const f32,
     c: u32,

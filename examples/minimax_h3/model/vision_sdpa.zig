@@ -12,7 +12,6 @@ const Input = struct {
 const Output = struct { o: zml.Shape };
 const Attrs = struct { scale: f32 };
 
-/// Tiled online-softmax. Native head_dim=72; full-seq `zml.nn.sdpa` is S².
 const SdpaCall = zml.ops.CustomCall(Input, Output, Attrs, sdpaFfi, .{
     .name = "h3$vision_sdpa",
     .sharding_aware = false,
@@ -151,7 +150,20 @@ const KernelSlot = struct { dev: c_int = -1, fn_ptr: ?*anyopaque = null };
 var nvrtc_cache: ?Nvrtc = null;
 var driver_cache: ?Driver = null;
 var ptx_cache: ?[]u8 = null;
-var kernel_slots: [4]KernelSlot = [_]KernelSlot{.{}} ** 4;
+var kernel_slots: [zml.Platform.MAX_NUM_DEVICES]KernelSlot = [_]KernelSlot{.{}} ** zml.Platform.MAX_NUM_DEVICES;
+var cache_lock: std.atomic.Value(bool) = .init(false);
+
+pub fn supports(target: zml.Target, dtype: zml.DataType, head_dim: i64) bool {
+    return target == .cuda and dtype == .bf16 and head_dim > 0 and head_dim <= Dmax;
+}
+
+fn lockCaches() void {
+    while (cache_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {}
+}
+
+fn unlockCaches() void {
+    cache_lock.store(false, .release);
+}
 
 fn loadSo(name: [:0]const u8) ?*anyopaque {
     return std.c.dlopen(name, .{ .LAZY = true, .GLOBAL = true });
@@ -236,10 +248,10 @@ fn compilePtx() ![]const u8 {
         var n: usize = 0;
         _ = nvrtc.log_size(prog, &n);
         if (n > 1) {
-            var log_buf: [4096]u8 = undefined;
-            const take = @min(n, log_buf.len);
-            _ = nvrtc.log(prog, &log_buf);
-            log.err("nvrtc: {s}", .{log_buf[0 .. take - 1]});
+            const log_buf = try std.heap.c_allocator.alloc(u8, n);
+            defer std.heap.c_allocator.free(log_buf);
+            _ = nvrtc.log(prog, log_buf.ptr);
+            log.err("nvrtc: {s}", .{log_buf[0 .. n - 1]});
         }
         try checkNvrtc(nvrtc, st, "nvrtcCompileProgram");
     }
@@ -247,12 +259,14 @@ fn compilePtx() ![]const u8 {
     var ptx_n: usize = 0;
     try checkNvrtc(nvrtc, nvrtc.ptx_size(prog, &ptx_n), "nvrtcGetPTXSize");
     const ptx = try std.heap.c_allocator.alloc(u8, ptx_n);
+    errdefer std.heap.c_allocator.free(ptx);
     try checkNvrtc(nvrtc, nvrtc.ptx(prog, ptx.ptr), "nvrtcGetPTX");
     ptx_cache = ptx;
     return ptx;
 }
 
 fn kernelForDev(drv: Driver, dev: c_int) !?*anyopaque {
+    if (dev < 0 or dev >= @as(c_int, @intCast(kernel_slots.len))) return error.VisionSdpaDevice;
     for (kernel_slots) |s| {
         if (s.dev == dev and s.fn_ptr != null) return s.fn_ptr;
     }
@@ -289,11 +303,16 @@ fn launch(
     if (d > Dmax or d <= 0) return error.VisionSdpaHeadDim;
     if (k.shape.dim(2) != s or v.shape.dim(2) != s) return error.VisionSdpaShape;
 
-    const drv = try loadDriver();
-    if (drv.init(0) != 0) return error.CudaInit;
-    var dev: c_int = 0;
-    if (drv.get_dev(&dev) != 0) return error.CudaGetDevice;
-    const func = (try kernelForDev(drv, dev)) orelse return error.VisionSdpaKernel;
+    const cached = blk: {
+        lockCaches();
+        defer unlockCaches();
+        const drv = try loadDriver();
+        if (drv.init(0) != 0) return error.CudaInit;
+        var dev: c_int = 0;
+        if (drv.get_dev(&dev) != 0) return error.CudaGetDevice;
+        const func = (try kernelForDev(drv, dev)) orelse return error.VisionSdpaKernel;
+        break :blk .{ .driver = drv, .function = func };
+    };
     var q_ptr = q.ptr;
     var k_ptr = k.ptr;
     var v_ptr = v.ptr;
@@ -316,7 +335,7 @@ fn launch(
     };
     const gx: c_uint = @intCast(b * h);
     const gy: c_uint = @intCast(@divFloor(s + Br - 1, Br));
-    const st = drv.launch(func, gx, gy, 1, Br, 1, 1, 0, @constCast(stream), &args, null);
+    const st = cached.driver.launch(cached.function, gx, gy, 1, Br, 1, 1, 0, @constCast(stream), &args, null);
     if (st != 0) {
         log.err("cuLaunchKernel: {d}", .{st});
         return error.CuLaunch;

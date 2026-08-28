@@ -277,15 +277,19 @@ fn testFrameGeometry() !void {
     try std.testing.expectError(error.InvalidDuration, config.resolveFrames(5.0, 5));
 }
 fn testCanvasPresets() !void {
-    const official = try config.parseSize("1344x768");
+    const official_raw = try config.parseWxH("1344x768");
+    const official = try config.snapSizeBudget(official_raw.w, official_raw.h, config.canvas_max_pixels);
     try std.testing.expectEqual(@as(u32, 1344), official.w);
     try std.testing.expectEqual(@as(u32, 768), official.h);
-    const snapped = try config.parseSize("1340x770");
+    const snapped_raw = try config.parseWxH("1340x770");
+    const snapped = try config.snapSizeBudget(snapped_raw.w, snapped_raw.h, config.canvas_max_pixels);
     try std.testing.expectEqual(@as(u32, 1344), snapped.w);
     try std.testing.expectEqual(@as(u32, 768), snapped.h);
-    try std.testing.expectError(error.InvalidSize, config.parseSize("1344"));
-    try std.testing.expectError(error.InvalidAspect, config.parseSize("100x10"));
-    try std.testing.expectError(error.SizeTooLarge, config.parseSize("1920x1080"));
+    try std.testing.expectError(error.InvalidSize, config.parseWxH("1344"));
+    const bad = try config.parseWxH("100x10");
+    try std.testing.expectError(error.InvalidAspect, config.snapSizeBudget(bad.w, bad.h, config.canvas_max_pixels));
+    const large = try config.parseWxH("1920x1080");
+    try std.testing.expectError(error.SizeTooLarge, config.snapSizeBudget(large.w, large.h, config.canvas_max_pixels));
 
     try std.testing.expectEqual(.default, (try config.parseRatio("")).kind);
     try std.testing.expectEqual(.adaptive, (try config.parseRatio("adaptive")).kind);
@@ -553,6 +557,26 @@ fn testAttentionPolicy() !void {
     try std.testing.expect(policy_mod.isFlash(.cuda_fa2));
     try std.testing.expect(policy_mod.isFlash(.cuda_fa3));
     try std.testing.expect(!policy_mod.isFlash(.vanilla));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 72,
+        .heads = 16,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+        .flash = .cuda_fa3,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 72,
+        .heads = 16,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+        .flash = .cuda_fa2,
+    }));
 }
 fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     const geo: pipeline.Geometry = .{
@@ -637,18 +661,12 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 4), policy_mod.encPrefetch(50));
     try std.testing.expectEqual(@as(u32, 3), policy_mod.vaeLoadWindow(3));
     try std.testing.expectEqual(@as(u32, 8), policy_mod.vaeLoadWindow(32));
-    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(46, 50));
+    try std.testing.expectEqual(@as(u32, 46), policy_mod.ditKeepBlocks(46, 50));
     try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(50, 50));
     try std.testing.expectEqual(@as(u32, 40), policy_mod.ditKeepBlocks(40, 50));
     try std.testing.expectEqual(@as(u32, 0), policy_mod.ditKeepBlocks(0, 50));
-    try std.testing.expectEqual(@as(u32, 3), policy_mod.ditKeepBlocks(2, 3));
+    try std.testing.expectEqual(@as(u32, 2), policy_mod.ditKeepBlocks(2, 3));
     const gib: u64 = 1024 * 1024 * 1024;
-    const enc_layer: u64 = gib;
-    try std.testing.expectEqual(@as(u32, 0), policy_mod.encKeepLayers(24 * gib, enc_layer, 50));
-    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(284 * gib, enc_layer, 50));
-    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(0, enc_layer, 50));
-    try std.testing.expectEqual(@as(u32, 50), policy_mod.encKeepLayers(48 * gib, 0, 50));
-    try std.testing.expectEqual(@as(u32, 0), policy_mod.encKeepLayers(48 * gib, enc_layer, 0));
     const gb300 = policy_mod.decide(.{
         .target = .cuda,
         .seq = 8632,
@@ -665,6 +683,12 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     });
     try std.testing.expectEqual(@as(u32, 50), gb300.resident_blocks);
     try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(gb300.resident_blocks, 50));
+    try std.testing.expectEqual(
+        gb300.fixed_bytes + gb300.resident_core_bytes + gb300.transient_core_bytes,
+        gb300.denoise_live_bytes,
+    );
+    try std.testing.expectEqual(policy_mod.allocatorPeak(gb300.denoise_live_bytes), gb300.denoise_peak_bytes);
+    try std.testing.expect(gb300.denoise_peak_bytes <= gb300.budget_bytes);
     const unreported = policy_mod.decide(.{
         .target = .cuda,
         .seq = 8632,
@@ -679,29 +703,21 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .block_core_bytes = 1300 * 1024 * 1024,
         .dtype_bytes = 2,
     });
-    try std.testing.expectEqual(@as(u32, 50), unreported.resident_blocks);
+    try std.testing.expectEqual(@as(u32, 0), unreported.resident_blocks);
+    try std.testing.expectEqual(@as(u64, 2 * 1300 * 1024 * 1024), unreported.transient_core_bytes);
+    try std.testing.expect(!policy_mod.canPrefetchVae(0, std.math.maxInt(u64), 1, 1));
+    const boundary_budget: u64 = 1_000;
+    const fixed_peak: u64 = 400;
+    const block_bytes: u64 = 100;
+    const seven_resident_live = fixed_peak + 7 * block_bytes + policy_mod.transientCoreBytes(7, 10, block_bytes);
+    const eight_resident_live = fixed_peak + 8 * block_bytes + policy_mod.transientCoreBytes(8, 10, block_bytes);
+    try std.testing.expect(policy_mod.canPrefetchVae(2_000, boundary_budget * 2 + 100, seven_resident_live, 100));
+    try std.testing.expect(!policy_mod.canPrefetchVae(2_000, boundary_budget * 2 + 100, eight_resident_live, 100));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(0, 1, 100, 2));
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
     try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
     try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(5, 1, 100, 2));
     try std.testing.expectEqual(@as(u32, 3), policy_mod.tileBatch(5, 1, 100, 3));
-    const leftover_tiles = policy_mod.decide(.{
-        .target = .cpu,
-        .seq = 64,
-        .hidden = 256,
-        .heads = 56,
-        .head_dim = 128,
-        .layers = 2,
-        .steps = 2,
-        .dtype = .bf16,
-        .device_bytes = 0,
-        .tp = 2,
-        .block_core_bytes = 1,
-        .dtype_bytes = 2,
-        .tile_count = 5,
-        .tile_act_bytes = 1,
-    });
-    try std.testing.expectEqual(@as(u32, 4), leftover_tiles.tile_batch);
     try std.testing.expect(fa2.tile_batch >= 1);
     try std.testing.expect(pipeline.partitionsVaeBatch(6, 2));
     try std.testing.expect(!pipeline.partitionsVaeBatch(6, 1));

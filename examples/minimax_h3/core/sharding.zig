@@ -126,7 +126,7 @@ pub fn tensorParallelStrategy(mesh: *const zml.Sharding.PhysicalMesh) error{ Inv
     return tensorParallelStrategyFor(mesh, h.dit, h.enc, h.kv);
 }
 
-pub fn physicalMeshFor(
+fn physicalMeshFor(
     allocator: std.mem.Allocator,
     target: zml.Target,
     devices: []const zml.platform.Device,

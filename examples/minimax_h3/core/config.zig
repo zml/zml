@@ -226,8 +226,7 @@ pub const EncoderFileConfig = struct {
     }
 };
 
-/// Minimum measured device memory for official 768p.
-pub const full_canvas_min_device_bytes: u64 = 40 * 1024 * 1024 * 1024;
+pub const full_canvas_min_device_bytes: u64 = 80 * 1024 * 1024 * 1024;
 
 pub fn checkDuration(seconds: f32) !void {
     if (seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
@@ -302,11 +301,6 @@ pub fn parseWxH(text: []const u8) error{InvalidSize}!Size {
     const height = std.fmt.parseInt(u32, text[sep + 1 ..], 10) catch return error.InvalidSize;
     if (width == 0 or height == 0) return error.InvalidSize;
     return .{ .w = width, .h = height };
-}
-
-pub fn parseSize(text: []const u8) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
-    const raw = try parseWxH(text);
-    return snapSizeBudget(raw.w, raw.h, canvas_max_pixels);
 }
 
 pub fn parseResolution(text: []const u8) error{ OpenWeightsAre768P, InvalidResolution }!void {

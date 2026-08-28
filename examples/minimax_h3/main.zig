@@ -181,9 +181,6 @@ pub fn main(init: std.process.Init) !void {
         .dit = args.dit,
     };
 
-    //
-    // Virtual File Systems
-    //
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
@@ -206,9 +203,6 @@ pub fn main(init: std.process.Init) !void {
     const heads = repo.peekHeadCounts(allocator, io, model_repo, variant, paths) catch |err| return rejectUser(err);
     sharding.preparePhysicalMesh(heads);
 
-    //
-    // Platform
-    //
     const platform: *zml.Platform = try .auto(allocator, io, .{
         .physical_mesh = .{ .custom = sharding.physicalMesh },
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
@@ -233,9 +227,6 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
-    //
-    // Load the model
-    //
     var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings, paths) catch |err| return rejectUser(err);
     defer models.deinit(allocator, io);
 
@@ -313,6 +304,17 @@ pub fn main(init: std.process.Init) !void {
     const core0 = models.dit.inner.blocks[0].corePart();
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
+    const text_prep = models.dit.inner.textPrep();
+    const patch_embed = models.dit.inner.patchEmbed();
+    const finish_core = models.dit.inner.finishCore();
+    const fixed_denoise_weight_bytes = weights.modelBytes(&text_prep) +|
+        weights.modelBytes(&patch_embed) +| weights.modelBytes(&finish_core);
+    var encoder_weight_bytes = weights.modelBytes(&models.enc.inner.embed_tokens);
+    const encoder_window = @min(models.enc.inner.layers.len, policy.encPrefetch(@intCast(models.enc.inner.layers.len)));
+    for (models.enc.inner.layers[0..encoder_window]) |*layer| encoder_weight_bytes +|= weights.modelBytes(layer);
+    var vae_cache_bytes = weights.modelBytes(&models.visual.inner.embed) +|
+        weights.modelBytes(&models.visual.inner.finish);
+    for (models.visual.inner.blocks) |*block| vae_cache_bytes +|= weights.modelBytes(block);
     const mem = memory.plan(.{
         .geo = .init(geo),
         .layout = packed_run.layout,
@@ -325,33 +327,37 @@ pub fn main(init: std.process.Init) !void {
         .layers = @intCast(models.dit.cfg.num_layers),
         .dtype = dit_dt,
         .target = platform.target,
-        .block_core_bytes = weights.modelBytes(&core0) / @max(1, tp),
+        .block_core_bytes = weights.modelBytes(&core0),
         .flash = .auto(platform),
+        .fixed_denoise_weight_bytes = fixed_denoise_weight_bytes,
+        .encoder_weight_bytes = encoder_weight_bytes,
+        .vae_cache_bytes = vae_cache_bytes,
+        .audio_vae_weight_bytes = weights.modelBytes(&models.audio.inner),
     });
     if (!mem.safe) {
         log.err("{s} (peak {d} MiB)", .{ mem.reason, mem.peak_bytes / (1024 * 1024) });
         return rejectUser(error.MemoryPlanUnsafe);
     }
     log.info(
-        "memory peak={d}MiB act={d}MiB block={d}MiB scores={d}MiB fa2={d}MiB tables={d}MiB resident={d} keep={d} group={d} tile_batch={d} attn={s}",
+        "memory peak={d}MiB encoder={d}MiB denoise={d}MiB visual_vae={d}MiB audio_vae={d}MiB fixed={d}MiB resident_core={d}MiB transient_core={d}MiB vae_cache={d}MiB resident={d} group={d} tile_batch={d} vae_prefetch={} attn={s}",
         .{
             mem.peak_bytes / (1024 * 1024),
-            mem.activation_bytes / (1024 * 1024),
-            mem.streamed_block_bytes / (1024 * 1024),
-            mem.score_bytes / (1024 * 1024),
-            mem.fa2_scratch_bytes / (1024 * 1024),
-            mem.adaln_table_bytes / (1024 * 1024),
+            mem.encoder_peak_bytes / (1024 * 1024),
+            mem.denoise_peak_bytes / (1024 * 1024),
+            mem.vae_peak_bytes / (1024 * 1024),
+            mem.audio_vae_peak_bytes / (1024 * 1024),
+            mem.fixed_denoise_bytes / (1024 * 1024),
+            mem.resident_core_bytes / (1024 * 1024),
+            mem.transient_core_bytes / (1024 * 1024),
+            mem.vae_cache_bytes / (1024 * 1024),
             mem.resident_blocks,
-            policy.ditKeepBlocks(mem.resident_blocks, @intCast(models.dit.cfg.num_layers)),
             mem.group_size,
             mem.tile_batch,
+            mem.prefetch_vae,
             @tagName(mem.attention),
         },
     );
 
-    //
-    // Compile
-    //
     const compile_policy: pipeline.CompilePolicy = .{
         .attention = mem.attention,
         .group_size = mem.group_size,
@@ -393,9 +399,6 @@ pub fn main(init: std.process.Init) !void {
     );
     defer compiled_vae.deinit();
 
-    //
-    // Generate
-    //
     try session.generate(allocator, io, platform, &models, &compiled, &compiled_vae, &all, &progress, .{
         .geo = geo,
         .canvas = out_geo,
@@ -410,6 +413,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .seed = args.seed,
         .resident_blocks = mem.resident_blocks,
+        .prefetch_vae = mem.prefetch_vae,
         .out = args.out,
     });
 }

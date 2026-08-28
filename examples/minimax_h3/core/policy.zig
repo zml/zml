@@ -8,12 +8,15 @@ pub const Decision = struct {
     attention: zml.attention.Backend,
     resident_blocks: u32,
     group_size: u32,
-    tile_batch: u32,
     score_bytes: u64,
     fa2_scratch_bytes: u64,
     adaln_table_bytes: u64,
-    activation_bytes: u64,
-    block_core_bytes: u64,
+    fixed_bytes: u64,
+    resident_core_bytes: u64,
+    transient_core_bytes: u64,
+    denoise_live_bytes: u64,
+    denoise_peak_bytes: u64,
+    budget_bytes: u64,
 };
 
 pub const Query = struct {
@@ -24,7 +27,6 @@ pub const Query = struct {
     seq: u64,
     causal: bool,
     tp: u32,
-    /// FA kernel used when the seq-length heuristic selects flash. `Backend.auto` is FA3 on Hopper.
     flash: zml.attention.Backend = .cuda_fa2,
 };
 
@@ -37,6 +39,7 @@ pub fn selectAttention(q: Query) zml.attention.Backend {
     if (q.dtype != .bf16 and q.dtype != .f16) return .vanilla;
     if (q.head_dim < 16 or q.head_dim > 256 or @rem(q.head_dim, 8) != 0) return .vanilla;
     if (q.heads <= 0 or @rem(q.heads, @as(i64, @max(1, q.tp))) != 0) return .vanilla;
+    if (isFlash(q.flash) and !q.flash.supportsHeadDim(q.head_dim)) return .vanilla;
     if (q.causal and q.seq < 2) return .vanilla;
     const heads_local: u64 = @intCast(@divExact(q.heads, @as(i64, @max(1, q.tp))));
     const quadratic = q.seq * q.seq * 4 * heads_local;
@@ -93,23 +96,37 @@ pub fn vaeLoadWindow(blocks: u32) u32 {
 pub const safety_numer: u64 = 85;
 pub const safety_denom: u64 = 100;
 
-/// Keep every encoder layer when they fit. Unreported `device_bytes` (0)
-/// matches `memory.plan`: treat as unlimited.
-pub fn encKeepLayers(device_bytes: u64, layer_bytes: u64, layers: u32) u32 {
-    if (layers == 0) return 0;
-    if (layer_bytes == 0 or device_bytes == 0) return layers;
-    const budget = device_bytes * safety_numer / safety_denom;
-    const need = layer_bytes * layers;
-    if (need <= budget) return layers;
-    return 0;
+/// PJRT's non-preallocated BFC allocator grows in chunks and retains those
+/// chunks between phases. Measured HBM is about 1.5x live tensor bytes for H3,
+/// so policy decisions reserve that allocator high-water overhead explicitly.
+pub fn allocatorPeak(live_bytes: u64) u64 {
+    return live_bytes +| live_bytes / 2;
 }
 
-/// Keep the DiT tail on-device when it is one group or less. Reloading
-/// those blocks every step costs more than the 1–2 GiB they occupy.
 pub fn ditKeepBlocks(resident: u32, layers: u32) u32 {
-    if (resident >= layers) return layers;
-    if (resident + groupSize(resident) >= layers) return layers;
-    return resident;
+    return @min(resident, layers);
+}
+
+pub fn transientCoreBytes(resident: u32, layers: u32, per_core: u64) u64 {
+    const streamed = layers - @min(resident, layers);
+    return @as(u64, @min(streamed, 2)) * per_core;
+}
+
+pub fn chooseResidentBlocks(budget: u64, fixed: u64, per_core: u64, layers: u32) u32 {
+    if (per_core == 0 or layers == 0 or budget <= fixed) return 0;
+    var best: u32 = 0;
+    var resident: u32 = 0;
+    while (resident <= layers) : (resident += 1) {
+        const live = fixed +| @as(u64, resident) *| per_core +| transientCoreBytes(resident, layers, per_core);
+        const peak = allocatorPeak(live);
+        if (peak <= budget) best = resident;
+    }
+    return best;
+}
+
+pub fn canPrefetchVae(device_bytes: u64, budget: u64, denoise_live: u64, vae_cache_bytes: u64) bool {
+    if (device_bytes == 0 or vae_cache_bytes == 0) return false;
+    return allocatorPeak(denoise_live +| vae_cache_bytes) <= budget;
 }
 
 pub fn tileBatch(tile_count: u32, tile_act_bytes: u64, headroom: u64, partitions: u32) u32 {
@@ -137,9 +154,8 @@ pub fn decide(args: struct {
     tp: u32,
     block_core_bytes: u64,
     dtype_bytes: u32,
-    tile_count: u32 = 1,
-    tile_act_bytes: u64 = 0,
     flash: zml.attention.Backend = .cuda_fa2,
+    fixed_bytes: u64 = 0,
 }) Decision {
     const attn = selectAttention(.{
         .target = args.target,
@@ -160,29 +176,34 @@ pub fn decide(args: struct {
         scores;
     const tables = adalnTableBytes(args.steps, args.hidden, args.layers, args.dtype_bytes);
     const collective = act / 4;
-    const reserved = act + scratch + collective + tables;
+    const fixed = act +| scratch +| collective +| tables +| args.fixed_bytes;
     const budget = if (args.device_bytes == 0)
         std.math.maxInt(u64)
     else
         args.device_bytes * safety_numer / safety_denom;
-    const headroom = budget -| reserved;
     const per_core = if (args.block_core_bytes == 0) 0 else args.block_core_bytes;
-    const resident: u32 = if (per_core == 0 or headroom < per_core)
-        0
+    const resident = if (args.device_bytes == 0)
+        @as(u32, 0)
     else
-        @intCast(@min(@as(u64, args.layers), headroom / per_core));
+        chooseResidentBlocks(budget, fixed, per_core, args.layers);
+    const resident_bytes = @as(u64, resident) *| per_core;
+    const transient_bytes = transientCoreBytes(resident, args.layers, per_core);
+    const denoise_live = fixed +| resident_bytes +| transient_bytes;
+    const denoise_peak = allocatorPeak(denoise_live);
     const group = groupSize(resident);
-    const tiles = tileBatch(args.tile_count, args.tile_act_bytes, headroom / 4, @max(1, args.tp));
     return .{
         .attention = attn,
         .resident_blocks = resident,
         .group_size = group,
-        .tile_batch = tiles,
         .score_bytes = scores,
         .fa2_scratch_bytes = if (isFlash(attn)) scratch else 0,
         .adaln_table_bytes = tables,
-        .activation_bytes = act,
-        .block_core_bytes = per_core,
+        .fixed_bytes = fixed,
+        .resident_core_bytes = resident_bytes,
+        .transient_core_bytes = transient_bytes,
+        .denoise_live_bytes = denoise_live,
+        .denoise_peak_bytes = denoise_peak,
+        .budget_bytes = budget,
     };
 }
 

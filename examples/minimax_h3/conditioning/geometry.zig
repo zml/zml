@@ -4,7 +4,7 @@ const config = @import("../core/config.zig");
 
 pub const Size = config.Size;
 
-pub fn snapMultiple(value: u32, multiple: u32) u32 {
+fn snapMultiple(value: u32, multiple: u32) u32 {
     if (value == 0) return multiple;
     return @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(value)) / @as(f32, @floatFromInt(multiple))))) * multiple);
 }
@@ -235,7 +235,7 @@ pub fn resizeBicubic(allocator: std.mem.Allocator, src: []const u8, src_w: u32, 
     return resize1dBicubicAa(allocator, mid, dst_w, src_h, dst_h, false);
 }
 
-pub fn cropRgb(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, x: u32, y: u32, dst_w: u32, dst_h: u32) ![]u8 {
+fn cropRgb(allocator: std.mem.Allocator, src: []const u8, src_w: u32, src_h: u32, x: u32, y: u32, dst_w: u32, dst_h: u32) ![]u8 {
     const out = try allocator.alloc(u8, @as(usize, dst_w) * dst_h * 3);
     var row: u32 = 0;
     while (row < dst_h) : (row += 1) {

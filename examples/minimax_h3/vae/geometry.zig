@@ -4,8 +4,6 @@ const config = @import("../core/config.zig");
 const noise = @import("../model/noise.zig");
 const packing = @import("../model/packing.zig");
 
-const LatentHw = config.LatentHw;
-
 pub const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
 pub const imagenet_std = [_]f32{ 0.229, 0.224, 0.225 };
 
@@ -18,11 +16,6 @@ pub const VisualSpec = struct {
     token_drop: u32 = 3,
     tile_px: u32 = 256,
     tile_overlap_px: u32 = 64,
-
-    pub fn latentFromPixels(self: VisualSpec, pixel_h: u32, pixel_w: u32, frames: u32) LatentHw {
-        _ = self;
-        return config.visualLatentSize(pixel_h, pixel_w, frames);
-    }
 
     pub fn patchDim(self: VisualSpec) u32 {
         return self.channels * @as(u32, @intCast(self.patch[0] * self.patch[1] * self.patch[2]));
@@ -383,11 +376,11 @@ pub fn audioBctToRows(dst: []f32, bct: []const f32, channels: u32, t: u32) void 
     }
 }
 
-pub fn f32ToF16Bits(value: f32) u16 {
+fn f32ToF16Bits(value: f32) u16 {
     return @as(u16, @bitCast(@as(f16, @floatCast(value))));
 }
 
-pub fn f16BitsToF32(bits: u16) f32 {
+fn f16BitsToF32(bits: u16) f32 {
     return @as(f16, @bitCast(bits));
 }
 
@@ -462,6 +455,16 @@ pub fn encodeVideoLatentT(spec: VisualSpec, frames: u32) u32 {
     const tokens = clips * spec.tokensChunkSize();
     if (spec.token_drop >= tokens) return 0;
     return tokens - spec.token_drop;
+}
+
+/// Reference videos follow the official encoder's snap-down rule. The vision
+/// conditioner still sees every normalized frame; only the visual VAE input is
+/// shortened to the largest `clip_length * n + tokens_chunk_size` prefix.
+pub fn referenceVideoFrameCount(spec: VisualSpec, frames: u32) u32 {
+    const tail = spec.tokensChunkSize();
+    const minimum = spec.clip_length + tail;
+    if (frames < minimum) return frames;
+    return ((frames - tail) / spec.clip_length) * spec.clip_length + tail;
 }
 
 pub fn vitCoords(dim: u32, out: []f32) []f32 {
