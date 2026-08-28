@@ -233,6 +233,7 @@ pub fn forwardMoe(
                 const down_weight_unpacked = unpackedWeight(down);
                 const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
                     return error.MissingNvfp4Scales;
+
                 if (expert_partition.eql(.init(.experts))) {
                     break :b zml.ops.manualComputation(
                         .{
@@ -286,14 +287,12 @@ pub fn forwardMoe(
                                     sharded_inputs[4],
                                     local_topk_weights,
                                     local_topk_ids,
-                                    .{
-                                        .fc1_act_global = sharded_inputs[5],
-                                        .fc1_weight_block = sharded_inputs[6],
-                                        .fc1_global = sharded_inputs[7],
-                                        .fc2_act_global = sharded_inputs[8],
-                                        .fc2_weight_block = sharded_inputs[9],
-                                        .fc2_global = sharded_inputs[10],
-                                    },
+                                    sharded_inputs[5],
+                                    sharded_inputs[6],
+                                    sharded_inputs[7],
+                                    sharded_inputs[8],
+                                    sharded_inputs[9],
+                                    sharded_inputs[10],
                                     .{
                                         .workspace_query_device = ctx.workspace_query_device,
                                         .activation = ctx.activation,
@@ -323,9 +322,6 @@ pub fn forwardMoe(
                     nvfp4,
                     runner_options,
                 );
-            }
-            if (flashinfer_metadata.nvfp4_scales != null) {
-                return error.UnexpectedNvfp4Scales;
             }
 
             if (expert_partition.eql(.init(.experts))) {

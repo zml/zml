@@ -13,6 +13,11 @@ filegroup(
 )
 
 filegroup(
+    name = "lib_sm103",
+    srcs = ["lib/libflashinfer_cutlass_moe_sm103.so"],
+)
+
+filegroup(
     name = "lib_sm120",
     srcs = ["lib/libflashinfer_cutlass_moe_sm120.so"],
 )
@@ -21,6 +26,7 @@ filegroup(
     name = "libraries",
     srcs = [
         ":lib_sm100",
+        ":lib_sm103",
         ":lib_sm120",
         ":lib_sm90",
     ],
