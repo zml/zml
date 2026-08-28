@@ -77,8 +77,6 @@ Not in this example: hosted 2K, Context-IR, Hailuo 4 s. Open weights are 768P, 5
 
 Tested backends: **CUDA** for generation; unit tests also run on **CPU**. ROCm uses vanilla attention (no FA2/FA3). Tensor parallelism is 1, 2, 4, or 8 devices. `ffmpeg` is required to probe/decode media and to mux output.
 
-Official 768P (short side ≥ 768) uses a measured **≥80 GiB/device** envelope (GB300 T2VA HBM was ~77 GiB). That is a tested fail-fast envelope, not a compile invariant. The memory planner is authoritative for smaller canvases. Preview canvases (short side ≤ 352, e.g. `--short-edge=352`) skip the envelope. The planner's denoise-only estimate can look safe on a 24 GiB card; it omits vision encode, compile, and allocator overhead and runs after visual conditioning.
-
 ## Tests
 
 ```bash

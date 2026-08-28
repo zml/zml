@@ -23,7 +23,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testRequest(allocator);
     try testCheckpoint();
     try testMemoryPlan(allocator);
-    try testFullCanvasFloor(allocator);
+    try testMemoryPlannerAuthority(allocator);
     try testOfficialPin();
     try testTokenizerRelpaths();
     try testWeightEntrypoints();
@@ -429,16 +429,16 @@ fn testCanvasRules(allocator: std.mem.Allocator) !void {
     const oversize = try config.parseWxH("1920x1080");
     try std.testing.expectError(error.SizeTooLarge, config.snapSizeBudget(oversize.w, oversize.h, cap));
 
-    const consumer_bytes = 24 * 1024 * 1024 * 1024;
-    try std.testing.expectError(error.SizeTooLarge, config.checkDeviceForSize(1344, 768, consumer_bytes));
-    try std.testing.expectError(error.SizeTooLarge, config.checkDeviceForSize(768, 1344, consumer_bytes));
-    try config.checkDeviceForSize(640, 352, consumer_bytes);
-    try config.checkDeviceForSize(640, 512, consumer_bytes);
-    try config.checkDeviceForSize(1344, 768, 80 * 1024 * 1024 * 1024);
-    try config.checkDeviceForSize(1344, 768, 0);
+    const gib: u64 = 1024 * 1024 * 1024;
     try std.testing.expect(config.usesFullCanvasEnvelope(1344, 768));
+    try std.testing.expect(config.usesFullCanvasEnvelope(768, 768));
     try std.testing.expect(!config.usesFullCanvasEnvelope(640, 512));
     try std.testing.expect(!config.usesFullCanvasEnvelope(640, 352));
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(1344, 768, 64 * gib));
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(768, 768, 64 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, 80 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(640, 352, 24 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, 0));
 }
 fn testRequest(allocator: std.mem.Allocator) !void {
     const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
@@ -546,8 +546,7 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
         .device_bytes = 24 * 1024 * 1024 * 1024,
         .tp = 2,
     });
-    try std.testing.expect(!full.safe);
-    try std.testing.expectEqualStrings("official 768P canvas is below the measured 80 GiB/device envelope", full.reason);
+    try expectPlannerDecides(full, 24 * 1024 * 1024 * 1024);
     const mid_geo = blk: {
         var g = geo;
         g.pixel_w = 640;
@@ -562,13 +561,42 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
         .device_bytes = 24 * 1024 * 1024 * 1024,
         .tp = 2,
     });
-    try std.testing.expect(!std.mem.eql(u8, mid.reason, "official 768P canvas is below the measured 80 GiB/device envelope"));
+    try expectPlannerDecides(mid, 24 * 1024 * 1024 * 1024);
+    try std.testing.expect(mid.safe);
 }
-fn testFullCanvasFloor(allocator: std.mem.Allocator) !void {
+
+const envelope_reject_reason = "official 768P canvas is below the measured 80 GiB/device envelope";
+
+fn peaksOverBudget(p: memory_mod.Plan, device_bytes: u64) bool {
+    if (device_bytes == 0) return false;
+    const budget = device_bytes * policy_mod.safety_numer / policy_mod.safety_denom;
+    return p.denoise_peak_bytes > budget or
+        p.encoder_peak_bytes > budget or
+        p.vae_peak_bytes > budget or
+        p.audio_vae_peak_bytes > budget;
+}
+
+fn expectPlannerDecides(p: memory_mod.Plan, device_bytes: u64) !void {
+    try std.testing.expect(!std.mem.eql(u8, p.reason, envelope_reject_reason));
+    try std.testing.expectEqual(!peaksOverBudget(p, device_bytes), p.safe);
+    if (p.safe) {
+        try std.testing.expectEqualStrings("ok", p.reason);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, p.reason, "exceeds 85% of device memory") != null);
+    }
+}
+
+fn planOfficialCanvas(
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    device_bytes: u64,
+    encoder_weight_bytes: u64,
+) !memory_mod.Plan {
     const dit_cfg = config.Config.official();
     const geo = pipeline.Geometry.init(.{
-        .width = 1344,
-        .height = 768,
+        .width = width,
+        .height = height,
         .frames = 124,
         .steps = 30,
     }, dit_cfg);
@@ -582,34 +610,55 @@ fn testFullCanvasFloor(allocator: std.mem.Allocator) !void {
         .audio_t_noise = 0,
     });
     defer layout.deinit(allocator);
-    const consumer = memory_mod.plan(.{
+    return memory_mod.plan(.{
         .geo = .init(geo),
         .layout = layout,
         .hidden = dit_cfg.hidden_size,
         .steps = 30,
-        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .device_bytes = device_bytes,
         .tp = 1,
         .target = .cuda,
         .heads = dit_cfg.num_attention_heads,
         .head_dim = dit_cfg.attention_head_dim,
         .layers = @intCast(dit_cfg.num_layers),
+        .encoder_weight_bytes = encoder_weight_bytes,
     });
-    try std.testing.expect(!consumer.safe);
-    try std.testing.expectEqualStrings("official 768P canvas is below the measured 80 GiB/device envelope", consumer.reason);
-    try std.testing.expect(consumer.denoise_peak_bytes <= 24 * 1024 * 1024 * 1024 * policy_mod.safety_numer / policy_mod.safety_denom);
-    const ok = memory_mod.plan(.{
-        .geo = .init(geo),
-        .layout = layout,
-        .hidden = dit_cfg.hidden_size,
-        .steps = 30,
-        .device_bytes = config.full_canvas_min_device_bytes,
-        .tp = 1,
-        .target = .cuda,
-        .heads = dit_cfg.num_attention_heads,
-        .head_dim = dit_cfg.attention_head_dim,
-        .layers = @intCast(dit_cfg.num_layers),
-    });
-    try std.testing.expect(ok.safe);
+}
+
+fn testMemoryPlannerAuthority(allocator: std.mem.Allocator) !void {
+    const gib: u64 = 1024 * 1024 * 1024;
+    const square_64 = try planOfficialCanvas(allocator, 768, 768, 64 * gib, 0);
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(768, 768, 64 * gib));
+    try expectPlannerDecides(square_64, 64 * gib);
+
+    const wide_64 = try planOfficialCanvas(allocator, 1344, 768, 64 * gib, 0);
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(1344, 768, 64 * gib));
+    try expectPlannerDecides(wide_64, 64 * gib);
+
+    const wide_80 = try planOfficialCanvas(allocator, 1344, 768, config.full_canvas_min_device_bytes, 0);
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, config.full_canvas_min_device_bytes));
+    try expectPlannerDecides(wide_80, config.full_canvas_min_device_bytes);
+    if (!peaksOverBudget(wide_80, config.full_canvas_min_device_bytes))
+        try std.testing.expect(wide_80.safe);
+
+    const preview = try planOfficialCanvas(allocator, 640, 352, 24 * gib, 0);
+    try std.testing.expect(!config.usesFullCanvasEnvelope(640, 352));
+    try expectPlannerDecides(preview, 24 * gib);
+
+    const unknown = try planOfficialCanvas(allocator, 1344, 768, 0, 0);
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, 0));
+    try expectPlannerDecides(unknown, 0);
+    try std.testing.expect(unknown.safe);
+
+    const over = try planOfficialCanvas(allocator, 768, 768, 64 * gib, 64 * gib);
+    try std.testing.expect(!over.safe);
+    try std.testing.expectEqualStrings("estimated text-encoder peak exceeds 85% of device memory", over.reason);
+    try expectPlannerDecides(over, 64 * gib);
+
+    if (!peaksOverBudget(wide_64, 64 * gib)) {
+        try std.testing.expect(wide_64.safe);
+        try std.testing.expectEqualStrings("ok", wide_64.reason);
+    }
 }
 fn testOfficialPin() !void {
     try std.testing.expectEqualStrings("MiniMaxAI/MiniMax-H3", config.official_repo);

@@ -226,15 +226,14 @@ pub const EncoderFileConfig = struct {
     }
 };
 
-/// Measured full-768P T2VA HBM on GB300 was ~77 GiB. This is a tested
-/// envelope for official-sized canvases (short side ≥ 768), not a compile
-/// invariant. The planner is authoritative for smaller canvases; this
-/// number is the fail-fast envelope so a 24 GiB card is not sent through
-/// visual conditioning only to OOM. Preview (short side ≤ 352) skips it.
 pub const full_canvas_min_device_bytes: u64 = 80 * 1024 * 1024 * 1024;
 
 pub fn usesFullCanvasEnvelope(width: u32, height: u32) bool {
     return @min(width, height) >= default_short_side;
+}
+
+pub fn belowTestedFullCanvasEnvelope(width: u32, height: u32, device_bytes: u64) bool {
+    return device_bytes != 0 and usesFullCanvasEnvelope(width, height) and device_bytes < full_canvas_min_device_bytes;
 }
 
 pub fn checkDuration(seconds: f32) !void {
@@ -255,12 +254,6 @@ pub fn minDeviceBytes(platform: *const zml.Platform) u64 {
         }
     }
     return min_b;
-}
-
-pub fn checkDeviceForSize(width: u32, height: u32, device_bytes: u64) !void {
-    if (device_bytes == 0) return;
-    if (usesFullCanvasEnvelope(width, height) and device_bytes < full_canvas_min_device_bytes)
-        return error.SizeTooLarge;
 }
 
 pub fn parseJson(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) !std.json.Parsed(T) {

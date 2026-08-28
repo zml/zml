@@ -91,7 +91,7 @@ fn rejectUser(err: anyerror) anyerror {
         error.InvalidResolution => reject(err, "--resolution must be 768P (open weights)", .{}),
         error.OpenWeightsAre768P => reject(err, "this checkpoint is 768P; 2K is the hosted MiniMax API only", .{}),
         error.InvalidAspect => reject(err, "aspect must be between 1:4 and 4:1", .{}),
-        error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels, or official 768P needs the measured >={d} GiB/device envelope", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
+        error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels", .{}),
         error.InvalidDuration => reject(err, "--duration must be 5–15 seconds", .{}),
         error.T2vaRejectsAdaptive => reject(err, "text-to-video needs a ratio (16:9, 9:16, …); omit --ratio for 16:9", .{}),
         error.AdaptiveNeedsVisual => reject(err, "adaptive ratio needs --first-frame, --last-frame, or a visual --refs", .{}),
@@ -214,7 +214,8 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const device_bytes = config.minDeviceBytes(platform);
-    config.checkDeviceForSize(px.w, px.h, device_bytes) catch |err| return rejectUser(err);
+    if (config.belowTestedFullCanvasEnvelope(px.w, px.h, device_bytes))
+        log.warn("80 GiB/device is the tested full-768P envelope", .{});
 
     const shardings: sharding.Shardings = try .init(platform, heads);
     if (frame_plan.raw != frame_plan.aligned)

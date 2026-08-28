@@ -93,7 +93,7 @@ For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 ### MiniMax-H3
 
-MiniMax-H3 generates video and audio together. CUDA. Official 768P uses a measured ≥80 GiB/device envelope; preview with `--short-edge=352`. Use `//examples/minimax_h3`. See [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md).
+MiniMax-H3 generates video and audio together. CUDA. Preview with `--short-edge=352`. Use `//examples/minimax_h3`. See [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md).
 
 ```
 bazel test //examples/minimax_h3:test
