@@ -209,6 +209,67 @@ pub fn encodeKeyframe(
     };
 }
 
+fn nchwPlane(h: u32, w: u32) usize {
+    return @as(usize, h) * w;
+}
+
+/// Repeat the last frame so `[C, src_t, H, W]` becomes `[C, dst_t, H, W]`.
+pub fn padTimeNchw(dst: []f32, src: []const f32, channels: u32, src_t: u32, dst_t: u32, h: u32, w: u32) void {
+    std.debug.assert(dst_t >= src_t);
+    const plane = nchwPlane(h, w);
+    std.debug.assert(src.len >= @as(usize, channels) * src_t * plane);
+    std.debug.assert(dst.len >= @as(usize, channels) * dst_t * plane);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        const src_off = @as(usize, c) * src_t * plane;
+        const dst_off = @as(usize, c) * dst_t * plane;
+        @memcpy(dst[dst_off..][0 .. src_t * plane], src[src_off..][0 .. src_t * plane]);
+        if (src_t == 0) continue;
+        const last = src[src_off + (src_t - 1) * plane ..][0..plane];
+        var t: u32 = src_t;
+        while (t < dst_t) : (t += 1) {
+            @memcpy(dst[dst_off + t * plane ..][0..plane], last);
+        }
+    }
+}
+
+/// Copy `src[c, 0:src_t]` into `dst[c, dst_t_offset:dst_t_offset+src_t]`.
+pub fn copyTimeChunkNchw(
+    dst: []f32,
+    dst_total_t: u32,
+    dst_t_offset: u32,
+    src: []const f32,
+    src_t: u32,
+    channels: u32,
+    h: u32,
+    w: u32,
+) void {
+    std.debug.assert(dst_t_offset + src_t <= dst_total_t);
+    const plane = nchwPlane(h, w);
+    std.debug.assert(src.len >= @as(usize, channels) * src_t * plane);
+    std.debug.assert(dst.len >= @as(usize, channels) * dst_total_t * plane);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        const src_off = @as(usize, c) * src_t * plane;
+        const dst_off = (@as(usize, c) * dst_total_t + dst_t_offset) * plane;
+        @memcpy(dst[dst_off..][0 .. src_t * plane], src[src_off..][0 .. src_t * plane]);
+    }
+}
+
+/// Compact `[C, src_t, H, W]` to `[C, keep_t, H, W]`. `dst` may alias `src`.
+pub fn compactTimePrefixNchw(dst: []f32, src: []const f32, channels: u32, src_t: u32, keep_t: u32, h: u32, w: u32) void {
+    std.debug.assert(keep_t <= src_t);
+    const plane = nchwPlane(h, w);
+    std.debug.assert(src.len >= @as(usize, channels) * src_t * plane);
+    std.debug.assert(dst.len >= @as(usize, channels) * keep_t * plane);
+    var c: u32 = 0;
+    while (c < channels) : (c += 1) {
+        const src_off = @as(usize, c) * src_t * plane;
+        const dst_off = @as(usize, c) * keep_t * plane;
+        std.mem.copyForwards(f32, dst[dst_off..][0 .. keep_t * plane], src[src_off..][0 .. keep_t * plane]);
+    }
+}
+
 pub fn encodeVideo(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -224,20 +285,10 @@ pub fn encodeVideo(
     const spec = vae.official_visual;
     const pad = (spec.clip_length - (frames % spec.clip_length)) % spec.clip_length;
     const padded_t = frames + pad;
-    const plane = @as(usize, height) * width;
+    const plane = nchwPlane(height, width);
     const padded = try allocator.alloc(f32, 3 * padded_t * plane);
     defer allocator.free(padded);
-    @memcpy(padded[0 .. 3 * frames * plane], pixels_nchw[0 .. 3 * frames * plane]);
-    if (pad > 0) {
-        var c: u32 = 0;
-        while (c < 3) : (c += 1) {
-            const last = pixels_nchw[(c * frames + (frames - 1)) * plane ..][0..plane];
-            var p: u32 = 0;
-            while (p < pad) : (p += 1) {
-                @memcpy(padded[(c * padded_t + frames + p) * plane ..][0..plane], last);
-            }
-        }
-    }
+    padTimeNchw(padded, pixels_nchw, 3, frames, padded_t, height, width);
 
     const encode_start: std.Io.Timestamp = .now(io, .awake);
     const clips = padded_t / spec.clip_length;
@@ -260,13 +311,13 @@ pub fn encodeVideo(
         }
         const moments = try runVisualClip(allocator, io, platform, compiled, bufs, clip_px, spec.clip_length, height, width);
         defer allocator.free(moments);
-        const n = 48 * chunk * lh * lw;
-        @memcpy(all[acc_t * 48 * lh * lw ..][0..n], moments[0..n]);
+        copyTimeChunkNchw(all, clips * chunk, acc_t, moments, chunk, 48, lh, lw);
         acc_t += chunk;
         log.info("visual encode clip {d}/{d}", .{ clip_i + 1, clips });
     }
 
     const keep_t = if (spec.token_drop < acc_t) acc_t - spec.token_drop else acc_t;
+    compactTimePrefixNchw(all, all, 48, acc_t, keep_t, lh, lw);
     const kept = all[0 .. 48 * keep_t * lh * lw];
     log.info("visual encode video {d}x{d}x{d} -> {d}x{d}x{d} [{f}]", .{
         frames,

@@ -3,6 +3,7 @@ const std = @import("std");
 const geom = @import("../conditioning/geometry.zig");
 const packing = @import("../model/packing.zig");
 const conditions = @import("../runtime/conditions.zig");
+const encode = @import("../runtime/encode.zig");
 const media = @import("../runtime/media.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
@@ -13,6 +14,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testFfmpegProbe();
     try testOutputTarget();
     try testExportVideo(allocator);
+    try testNchwTimeLayout();
 }
 
 fn expectReferenceIndices(
@@ -190,4 +192,32 @@ fn testExportVideo(allocator: std.mem.Allocator) !void {
         var wav = dest.openFile(io, "audio.wav", .{ .mode = .read_only }) catch return error.TestUnexpectedResult;
         wav.close(io);
     }
+}
+
+fn testNchwTimeLayout() !void {
+    const padded_src = [_]f32{ 10, 11, 20, 21, 30, 31 };
+    var padded: [12]f32 = undefined;
+    encode.padTimeNchw(&padded, &padded_src, 3, 2, 4, 1, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 11, 11, 20, 21, 21, 21, 30, 31, 31, 31 }, &padded);
+
+    const clip0 = [_]f32{ 10, 11, 20, 21 };
+    const clip1 = [_]f32{ 12, 13, 22, 23 };
+    var concat: [8]f32 = undefined;
+    @memset(&concat, 0);
+    encode.copyTimeChunkNchw(&concat, 4, 0, &clip0, 2, 2, 1, 1);
+    encode.copyTimeChunkNchw(&concat, 4, 2, &clip1, 2, 2, 1, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 13, 20, 21, 22, 23 }, &concat);
+
+    const prefix_src = [_]f32{ 10, 11, 12, 13, 20, 21, 22, 23 };
+    var prefix: [4]f32 = undefined;
+    encode.compactTimePrefixNchw(&prefix, &prefix_src, 2, 4, 2, 1, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 20, 21 }, &prefix);
+
+    var combined = concat;
+    encode.compactTimePrefixNchw(&combined, &combined, 2, 4, 2, 1, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 20, 21 }, combined[0..4]);
+
+    var overlap = prefix_src;
+    encode.compactTimePrefixNchw(&overlap, &overlap, 2, 4, 3, 1, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 20, 21, 22 }, overlap[0..6]);
 }
