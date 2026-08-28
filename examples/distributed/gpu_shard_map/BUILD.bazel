@@ -1,0 +1,17 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "gpu_shard_map",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//examples/distributed/common",
+        "//zml",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [":gpu_shard_map"],
+)

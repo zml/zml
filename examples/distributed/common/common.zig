@@ -64,6 +64,20 @@ pub fn dataSharding(platform: *zml.Platform) !zml.Sharding {
     );
 }
 
+pub fn hostGpuSharding(platform: *zml.Platform) !zml.Sharding {
+    return platform.registerShardingWithStrategy(
+        "host-gpu",
+        .mesh(.{
+            .host = .low_bandwidth,
+            .gpu = .high_bandwidth,
+        }),
+        .parseBindings(.{
+            .host = .network,
+            .gpu = .link,
+        }),
+    );
+}
+
 pub fn hybridSharding(platform: *zml.Platform) !zml.Sharding {
     return platform.registerShardingWithStrategy(
         "data-model",
@@ -76,6 +90,80 @@ pub fn hybridSharding(platform: *zml.Platform) !zml.Sharding {
             .model = .link,
         }),
     );
+}
+
+pub fn allocateValues(
+    allocator: std.mem.Allocator,
+    shape: zml.Shape,
+    mode: enum { ones, sequence },
+) !zml.Slice {
+    const result = try zml.Slice.alloc(allocator, shape);
+    for (result.items(f32), 0..) |*value, index| {
+        value.* = switch (mode) {
+            .ones => 1,
+            .sequence => @floatFromInt(index),
+        };
+    }
+    return result;
+}
+
+pub fn expectTopology(
+    platform: *const zml.Platform,
+    global: usize,
+    local: usize,
+) !void {
+    if (platform.globalDevices().len != global or
+        platform.addressableDevices().len != local)
+    {
+        return error.UnexpectedTopology;
+    }
+}
+
+pub fn expectShardCounts(
+    buffer: *const zml.Buffer,
+    global: usize,
+    local: usize,
+) !void {
+    if (buffer.numGlobalShards() != @as(u32, @intCast(global)) or
+        buffer.numShards() != @as(u32, @intCast(local)))
+    {
+        return error.UnexpectedShardCount;
+    }
+}
+
+pub fn expectAddressable(
+    platform: *const zml.Platform,
+    buffer: *const zml.Buffer,
+) !void {
+    var shards = buffer.shards();
+    while (shards.next()) |shard| {
+        for (platform.addressableDevices()) |device| {
+            if (device.id() == shard.globalDeviceId()) break;
+        } else return error.RemoteBufferShard;
+    }
+}
+
+pub fn printLocalShards(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    buffer: *const zml.Buffer,
+    label: []const u8,
+) !void {
+    var shards = buffer.shards();
+    while (shards.next()) |shard| {
+        const local = try shard.toSliceAlloc(allocator, io);
+        defer local.free(allocator);
+        std.debug.print(
+            "{s}: device={d} slices={any} shape={f} values={any}\n",
+            .{
+                label,
+                shard.globalDeviceId(),
+                shard.globalSlices().constSlice(),
+                shard.shape(),
+                local.constItems(f32),
+            },
+        );
+    }
 }
 
 fn usage() error{InvalidArguments} {

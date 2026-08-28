@@ -71,5 +71,6 @@ bazel run //examples/distributed/data_parallel_matmul -- \
 `multihost.md`. Process-local buffer creation, named collectives, training
 conveniences, and checkpoint management are later interface candidates.
 
-For direct counterparts to the five JAX programs in the workspace root, see
-[`../jax_equivalents`](../jax_equivalents/README.md).
+Runnable counterparts to the five JAX programs in the workspace root are in
+`../gpu_example`, `../gpu_mesh`, `../gpu_matmul`,
+`../gpu_matmul_replicated`, and `../gpu_shard_map`.

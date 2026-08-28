@@ -2,13 +2,16 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "gpu_example",
-    main = "gpu_example.zig",
+    name = "gpu_matmul_replicated",
+    main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = [
+        "//examples/distributed/common",
+        "//zml",
+    ],
 )
 
 build_test(
     name = "test",
-    targets = [":gpu_example"],
+    targets = [":gpu_matmul_replicated"],
 )

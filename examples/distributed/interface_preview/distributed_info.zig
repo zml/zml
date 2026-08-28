@@ -43,5 +43,5 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    try platform.barrier(io, "distributed-info-complete");
+    try platform.barrier("distributed-info-complete");
 }
