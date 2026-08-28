@@ -12,7 +12,7 @@ const visual_enc = @import("../vae/visual_encoder.zig");
 
 const log = std.log.scoped(.minimax_h3_encode);
 
-fn copyNchwTile(
+pub fn copyNchwTile(
     src: []const f32,
     channels: u32,
     t: u32,

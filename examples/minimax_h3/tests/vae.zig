@@ -3,11 +3,14 @@ const std = @import("std");
 const zml = @import("zml");
 
 const config = @import("../core/config.zig");
+const conditions = @import("../runtime/conditions.zig");
+const encode = @import("../runtime/encode.zig");
 const vae = @import("../vae/geometry.zig");
 const visual_vae = @import("../vae/visual.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     try testEncodeVideoLatentT();
+    try testMixedResolutionEncodeIsolation();
     try testOfficialVaeNativeTile(allocator);
     try testUnpackPatches(allocator);
     try testVaeGeometry();
@@ -19,6 +22,72 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testAudioRowBct();
     try testPosterior(allocator);
     try testVaeEmbedBatchShapes();
+}
+
+fn fillRamp(dst: []f32) void {
+    for (dst, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+}
+
+fn spatialMean(src: []const f32, h: u32, w: u32) f32 {
+    var sum: f32 = 0;
+    const n = h * w;
+    for (src[0..n]) |v| sum += v;
+    return sum / @as(f32, @floatFromInt(n));
+}
+
+fn testMixedResolutionEncodeIsolation() !void {
+    const portrait_h: u32 = 80;
+    const portrait_w: u32 = 48;
+    const landscape_h: u32 = 48;
+    const landscape_w: u32 = 80;
+    const portrait_alone = conditions.visualEncodeKey(.image, portrait_h, portrait_w);
+    const landscape_alone = conditions.visualEncodeKey(.image, landscape_h, landscape_w);
+    const portrait_mixed = conditions.visualEncodeKey(.image, portrait_h, portrait_w);
+    const landscape_mixed = conditions.visualEncodeKey(.image, landscape_h, landscape_w);
+    try std.testing.expectEqual(portrait_alone.tile_h, portrait_mixed.tile_h);
+    try std.testing.expectEqual(portrait_alone.tile_w, portrait_mixed.tile_w);
+    try std.testing.expectEqual(landscape_alone.tile_h, landscape_mixed.tile_h);
+    try std.testing.expectEqual(landscape_alone.tile_w, landscape_mixed.tile_w);
+    try std.testing.expect(portrait_alone.tile_h != landscape_alone.tile_h or portrait_alone.tile_w != landscape_alone.tile_w);
+    try std.testing.expect(!portrait_alone.need_clip);
+    try std.testing.expect(!landscape_alone.need_clip);
+
+    const video_key = conditions.visualEncodeKey(.video, 180, 320);
+    try std.testing.expect(video_key.need_clip);
+    try std.testing.expectEqual(@as(u32, 180), video_key.tile_h);
+    try std.testing.expectEqual(@as(u32, 256), video_key.tile_w);
+    try std.testing.expect(video_key.tile_h != portrait_alone.tile_h or video_key.tile_w != portrait_alone.tile_w);
+
+    var portrait: [80 * 48]f32 = undefined;
+    var landscape: [48 * 80]f32 = undefined;
+    fillRamp(&portrait);
+    fillRamp(&landscape);
+
+    var portrait_native: [80 * 48]f32 = undefined;
+    var landscape_native: [48 * 80]f32 = undefined;
+    encode.copyNchwTile(&portrait, 1, 1, portrait_h, portrait_w, 0, 0, portrait_h, portrait_w, &portrait_native);
+    encode.copyNchwTile(&landscape, 1, 1, landscape_h, landscape_w, 0, 0, landscape_h, landscape_w, &landscape_native);
+    try std.testing.expectEqualSlices(f32, &portrait, &portrait_native);
+    try std.testing.expectEqualSlices(f32, &landscape, &landscape_native);
+
+    var shared_portrait: [80 * 80]f32 = undefined;
+    var shared_landscape: [80 * 80]f32 = undefined;
+    encode.copyNchwTile(&portrait, 1, 1, portrait_h, portrait_w, 0, 0, 80, 80, &shared_portrait);
+    encode.copyNchwTile(&landscape, 1, 1, landscape_h, landscape_w, 0, 0, 80, 80, &shared_landscape);
+
+    const portrait_mean = spatialMean(&portrait_native, portrait_h, portrait_w);
+    const landscape_mean = spatialMean(&landscape_native, landscape_h, landscape_w);
+    const shared_portrait_mean = spatialMean(&shared_portrait, 80, 80);
+    const shared_landscape_mean = spatialMean(&shared_landscape, 80, 80);
+    try std.testing.expect(portrait_mean != shared_portrait_mean);
+    try std.testing.expect(landscape_mean != shared_landscape_mean);
+
+    var mixed_portrait: [80 * 48]f32 = undefined;
+    var mixed_landscape: [48 * 80]f32 = undefined;
+    encode.copyNchwTile(&portrait, 1, 1, portrait_h, portrait_w, 0, 0, portrait_mixed.tile_h, portrait_mixed.tile_w, &mixed_portrait);
+    encode.copyNchwTile(&landscape, 1, 1, landscape_h, landscape_w, 0, 0, landscape_mixed.tile_h, landscape_mixed.tile_w, &mixed_landscape);
+    try std.testing.expectEqualSlices(f32, &portrait_native, &mixed_portrait);
+    try std.testing.expectEqualSlices(f32, &landscape_native, &mixed_landscape);
 }
 
 /// `embed` builds register/cls/concat shapes with `setDim` on the token batch.

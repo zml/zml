@@ -5,6 +5,7 @@ const packing = @import("../model/packing.zig");
 const conditions = @import("../runtime/conditions.zig");
 const encode = @import("../runtime/encode.zig");
 const media = @import("../runtime/media.zig");
+const request_mod = @import("../core/request.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     try testResample(allocator);
@@ -12,6 +13,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOfficialAudioTruncate();
     try testMediaErrors();
     try testFfmpegProbe();
+    try testResolvedAudioCount(allocator);
     try testOutputTarget();
     try testExportVideo(allocator);
     try testNchwTimeLayout();
@@ -110,6 +112,72 @@ fn testOfficialAudioTruncate() !void {
     try std.testing.expectEqual(@as(u32, 0), media.officialTruncateSamples(0.5, 1));
     try std.testing.expectEqual(@as(u32, 2), media.officialTruncateSamples(2.9, 1));
     try std.testing.expectEqual(@as(u32, 160000), media.officialTruncateSamples(5.0, 32000));
+    try std.testing.expectEqual(@as(u32, 0), media.officialTruncateSamples(std.math.nan(f32), 32000));
+    try std.testing.expectEqual(@as(u32, 0), media.officialTruncateSamples(std.math.inf(f32), 32000));
+    try std.testing.expectEqual(@as(u32, 0), media.officialTruncateSamples(-std.math.inf(f32), 32000));
+}
+
+fn probeByName(_: std.mem.Allocator, _: std.Io, path: []const u8) !media.VideoMeta {
+    return .{
+        .w = 16,
+        .h = 16,
+        .fps = 24,
+        .has_audio = std.mem.indexOf(u8, path, "+a") != null,
+    };
+}
+
+fn probeFromFfmpegText(_: std.mem.Allocator, _: std.Io, path: []const u8) !media.VideoMeta {
+    const silent =
+        \\Input #0, mov, from 'clip.mp4':
+        \\  Stream #0:0: Video: h264 (High), yuv420p, 320x180, 24 fps
+    ;
+    const voiced =
+        \\Input #0, mov, from 'clip.mp4':
+        \\  Stream #0:0: Video: h264 (High), yuv420p, 320x180, 24 fps
+        \\  Stream #0:1: Audio: aac, 48000 Hz, stereo
+    ;
+    return media.parseFfmpegProbe(if (std.mem.indexOf(u8, path, "+a") != null) voiced else silent);
+}
+
+fn testResolvedAudioCount(allocator: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+
+    const three_audio_videos = try request_mod.refsFromComma(allocator, "a+a.mp4,b+a.mp4,c+a.mp4");
+    defer request_mod.freeRefs(allocator, three_audio_videos);
+    {
+        const got = try conditions.collectRefs(allocator, io, three_audio_videos, probeByName);
+        defer got.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 3), got.audios.len);
+        try std.testing.expectEqual(packing.ReferenceKind.video_audio, got.visuals[0].kind);
+    }
+
+    const three_plus_wav = try request_mod.refsFromComma(allocator, "a+a.mp4,b+a.mp4,c+a.mp4,bed.wav");
+    defer request_mod.freeRefs(allocator, three_plus_wav);
+    try std.testing.expectError(error.TooManyRefAudios, conditions.collectRefs(allocator, io, three_plus_wav, probeByName));
+
+    const two_plus_wav = try request_mod.refsFromComma(allocator, "a+a.mp4,b+a.mp4,bed.wav");
+    defer request_mod.freeRefs(allocator, two_plus_wav);
+    {
+        const got = try conditions.collectRefs(allocator, io, two_plus_wav, probeFromFfmpegText);
+        defer got.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 3), got.audios.len);
+        try std.testing.expectEqual(packing.ReferenceKind.video_audio, got.visuals[0].kind);
+        try std.testing.expectEqual(packing.ReferenceKind.audio, got.visuals[2].kind);
+    }
+
+    const two_plus_two_wav = try request_mod.refsFromComma(allocator, "a+a.mp4,b+a.mp4,bed.wav,score.wav");
+    defer request_mod.freeRefs(allocator, two_plus_two_wav);
+    try std.testing.expectError(error.TooManyRefAudios, conditions.collectRefs(allocator, io, two_plus_two_wav, probeFromFfmpegText));
+
+    const silent_plus_audio = try request_mod.refsFromComma(allocator, "a.mp4,b.mp4,c.mp4,x.wav,y.wav,z.wav");
+    defer request_mod.freeRefs(allocator, silent_plus_audio);
+    {
+        const got = try conditions.collectRefs(allocator, io, silent_plus_audio, probeFromFfmpegText);
+        defer got.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 3), got.audios.len);
+        try std.testing.expectEqual(packing.ReferenceKind.video, got.visuals[0].kind);
+    }
 }
 
 fn testResample(allocator: std.mem.Allocator) !void {

@@ -96,6 +96,105 @@ pub const ReferenceIndexDomains = struct {
     }
 };
 
+pub const CollectedVisual = struct {
+    kind: packing.ReferenceKind,
+    path: []const u8,
+    has_audio: bool = false,
+};
+
+pub const CollectedAudio = struct {
+    path: []const u8,
+};
+
+pub const CollectedRefs = struct {
+    visuals: []CollectedVisual,
+    audios: []CollectedAudio,
+    blocks: []packing.ReferenceBlock,
+    encoded_visuals: i32 = 0,
+    encoded_audios: i32 = 0,
+
+    pub fn deinit(self: CollectedRefs, allocator: std.mem.Allocator) void {
+        allocator.free(self.visuals);
+        allocator.free(self.audios);
+        allocator.free(self.blocks);
+    }
+};
+
+/// Probe videos, then enforce the resolved audio-reference limit.
+/// `probe` must be `fn (Allocator, Io, []const u8) !type` with a `has_audio` field.
+pub fn collectRefs(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    refs: []const request_mod.Reference,
+    probe: anytype,
+) !CollectedRefs {
+    var visuals: std.ArrayList(CollectedVisual) = .empty;
+    errdefer visuals.deinit(allocator);
+    var audios: std.ArrayList(CollectedAudio) = .empty;
+    errdefer audios.deinit(allocator);
+    var blocks: std.ArrayList(packing.ReferenceBlock) = .empty;
+    errdefer blocks.deinit(allocator);
+    var reference_indices: ReferenceIndexDomains = .{};
+
+    for (refs) |ref| {
+        switch (ref.kind) {
+            .image => {
+                const block = reference_indices.next(.image, false);
+                try visuals.append(allocator, .{ .kind = .image, .path = ref.path });
+                try blocks.append(allocator, block);
+            },
+            .video, .video_audio => {
+                const meta = try probe(allocator, io, ref.path);
+                const has_audio = meta.has_audio;
+                const block = reference_indices.next(.video, has_audio);
+                try visuals.append(allocator, .{
+                    .kind = if (has_audio) .video_audio else .video,
+                    .path = ref.path,
+                    .has_audio = has_audio,
+                });
+                if (has_audio) {
+                    try audios.append(allocator, .{ .path = ref.path });
+                }
+                try blocks.append(allocator, block);
+            },
+            .audio => {
+                const block = reference_indices.next(.audio, true);
+                try audios.append(allocator, .{ .path = ref.path });
+                try visuals.append(allocator, .{ .kind = .audio, .path = ref.path, .has_audio = true });
+                try blocks.append(allocator, block);
+            },
+        }
+    }
+    try request_mod.validateResolvedAudioCount(audios.items.len);
+    const visuals_s = try visuals.toOwnedSlice(allocator);
+    errdefer allocator.free(visuals_s);
+    const audios_s = try audios.toOwnedSlice(allocator);
+    errdefer allocator.free(audios_s);
+    const blocks_s = try blocks.toOwnedSlice(allocator);
+    return .{
+        .visuals = visuals_s,
+        .audios = audios_s,
+        .blocks = blocks_s,
+        .encoded_visuals = reference_indices.encoded_visuals,
+        .encoded_audios = reference_indices.encoded_audios,
+    };
+}
+
+pub const VisualEncodeKey = struct {
+    tile_h: u32,
+    tile_w: u32,
+    need_clip: bool,
+};
+
+pub fn visualEncodeKey(kind: packing.ReferenceKind, pixel_h: u32, pixel_w: u32) VisualEncodeKey {
+    const tile_px = vae.official_visual.tile_px;
+    return .{
+        .tile_h = @min(tile_px, pixel_h),
+        .tile_w = @min(tile_px, pixel_w),
+        .need_clip = kind == .video or kind == .video_audio,
+    };
+}
+
 pub const Prepare = struct {
     variant: config.Variant,
     first_frame: []const u8,
@@ -184,37 +283,24 @@ pub fn prepare(
         if (req.first_frame.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.first_frame, .keyframe_index = 0 });
         if (req.last_frame.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.last_frame, .keyframe_index = 1 });
     } else {
-        for (req.refs) |ref| {
-            switch (ref.kind) {
-                .image => {
-                    const block = reference_indices.next(.image, false);
-                    try visuals.append(allocator, .{ .kind = .image, .path = ref.path });
-                    try blocks.append(allocator, block);
-                },
-                .video, .video_audio => {
-                    const meta = try media.probeVideo(allocator, io, ref.path);
-                    const has_audio = meta.has_audio;
-                    const block = reference_indices.next(.video, has_audio);
-                    try visuals.append(allocator, .{
-                        .kind = if (has_audio) .video_audio else .video,
-                        .path = ref.path,
-                        .has_audio = has_audio,
-                    });
-                    if (has_audio) {
-                        try audios.append(allocator, .{ .path = ref.path });
-                    }
-                    try blocks.append(allocator, block);
-                },
-                .audio => {
-                    const block = reference_indices.next(.audio, true);
-                    try audios.append(allocator, .{ .path = ref.path });
-                    try visuals.append(allocator, .{ .kind = .audio, .path = ref.path, .has_audio = true });
-                    try blocks.append(allocator, block);
-                },
-            }
+        const collected = try collectRefs(allocator, io, req.refs, media.probeVideo);
+        defer collected.deinit(allocator);
+        for (collected.visuals) |item| {
+            try visuals.append(allocator, .{
+                .kind = item.kind,
+                .path = item.path,
+                .has_audio = item.has_audio,
+            });
         }
+        for (collected.audios) |item| {
+            try audios.append(allocator, .{ .path = item.path });
+        }
+        try blocks.appendSlice(allocator, collected.blocks);
+        reference_indices = .{
+            .encoded_visuals = collected.encoded_visuals,
+            .encoded_audios = collected.encoded_audios,
+        };
     }
-    try request_mod.validateResolvedAudioCount(audios.items.len);
 
     const vcfg = try vision.configFromRepo(allocator, io, enc_dir, text_hidden);
     const hidden_dim: u32 = @intCast(text_hidden);
@@ -568,6 +654,8 @@ fn countVisual(items: anytype) usize {
 }
 
 fn encodeTileSize(item: anytype, tile_px: u32) struct { h: u32, w: u32 } {
+    _ = tile_px;
     std.debug.assert(item.kind != .audio);
-    return .{ .h = @min(tile_px, item.h), .w = @min(tile_px, item.w) };
+    const key = visualEncodeKey(item.kind, item.h, item.w);
+    return .{ .h = key.tile_h, .w = key.tile_w };
 }
