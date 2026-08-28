@@ -22,6 +22,7 @@ pub const Options = struct {
     duration_s: f32 = 5.0,
     width: u32 = 1344,
     height: u32 = 768,
+    frames: u32 = 0,
     steps: u32 = 30,
     seed: u64 = 0,
     video_shift: f32 = config_mod.video_shift,
@@ -44,9 +45,9 @@ pub const Geometry = struct {
     audio_dim: u32,
 
     pub fn init(opts: Options, dit_cfg: config_mod.Config) Geometry {
-        const frames = config_mod.alignFrameCount(config_mod.frameCount(opts.duration_s));
+        const frames = if (opts.frames != 0) opts.frames else config_mod.alignFrameCount(config_mod.frameCount(opts.duration_s));
         const lat = config_mod.visualLatentSize(opts.height, opts.width, frames);
-        const audio_t = config_mod.audioLatentLength(opts.duration_s);
+        const audio_t = config_mod.audioLatentFromFrames(frames);
         const vt = config_mod.videoTokenCount(lat.t, lat.h, lat.w, dit_cfg.patch_size);
         const at = vae.official_audio.tokenCount(audio_t);
         return .{

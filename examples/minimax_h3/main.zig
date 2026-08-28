@@ -5,6 +5,7 @@ const stdx = zml.stdx;
 
 const conditions = @import("runtime/conditions.zig");
 const config = @import("core/config.zig");
+const media = @import("runtime/media.zig");
 const memory = @import("core/memory.zig");
 const pipeline = @import("runtime/pipeline.zig");
 const policy = @import("core/policy.zig");
@@ -24,33 +25,53 @@ pub const std_options: std.Options = .{
 const Args = struct {
     model: []const u8,
     prompt: []const u8 = "A cinematic wide shot of waves at dusk.",
-    image: []const u8 = "",
-    last_image: []const u8 = "",
+    first_frame: []const u8 = "",
+    last_frame: []const u8 = "",
     refs: []const u8 = "",
     duration: f32 = 5.0,
-    size: []const u8 = config.default_size,
+    frames: u32 = 0,
+    ratio: []const u8 = "",
+    resolution: []const u8 = "768P",
+    size: []const u8 = "",
+    short_edge: u32 = config.default_short_side,
+    max_pixels: u32 = config.canvas_max_pixels,
     steps: u32 = config.default_steps,
     seed: u64 = 0,
-    out: []const u8 = "output",
+    out: []const u8 = "output.mp4",
     dit: []const u8 = "",
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
         \\
-        \\ Generate video and audio from MiniMax-H3.
+        \\ MiniMax-H3: video + audio. Same modes as Hailuo / the MiniMax API.
+        \\
+        \\   text-to-video          --prompt='...'
+        \\   image-to-video         --first-frame=first.png
+        \\   last-frame             --last-frame=last.png
+        \\   first-and-last-frame   --first-frame=a.png --last-frame=b.png
+        \\   reference-to-video     --refs=char.png,motion.mp4,voice.wav
         \\
         \\ Options:
-        \\   --model=<path>      Path to the model repository (required)
-        \\   --prompt=<string>   Prompt (default: cinematic waves at dusk)
-        \\   --image=<path>      First frame
-        \\   --last-image=<path> Last frame
-        \\   --refs=<paths>      Comma-separated images, videos, audio
-        \\   --duration=<sec>    Duration 5–15 (default: 5)
-        \\   --size=<WxH>        Resolution (default: 1344x768)
-        \\   --steps=<n>         Denoise steps (default: 30)
-        \\   --seed=<n>          RNG seed
-        \\   --out=<path>        Output directory or .mp4 (default: output/)
-        \\   --dit=<path>        Transformer weights only
+        \\   --model=<path>         Repository (required). Local or hf://MiniMaxAI/MiniMax-H3
+        \\   --prompt=<string>      What happens in the shot
+        \\   --first-frame=<path>   First frame
+        \\   --last-frame=<path>    Last frame
+        \\   --refs=<paths>         Reference images, videos, audio. Comma-separated, order matters.
+        \\                          A video keeps its own soundtrack; a following wav is a separate ref.
+        \\   --duration=<sec>       5–15 (default: 5)
+        \\   --ratio=<spec>         Hailuo ratio: adaptive | 16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9
+        \\                          Default: 16:9 for text-to-video, adaptive from the first visual otherwise
+        \\   --resolution=768P      Open weights are 768P. 2K is hosted-only
+        \\   --out=<path>           .mp4 or directory (default: output.mp4)
+        \\   --steps=<n>            Denoise steps (default: 30)
+        \\   --seed=<n>             RNG seed (default: 0)
+        \\
+        \\ Advanced:
+        \\   --frames=<n>           Frame count instead of --duration
+        \\   --size=<WxH>           Exact pixels (overrides --ratio)
+        \\   --short-edge=<n>       Adaptive/ratio short edge (default: 768)
+        \\   --max-pixels=<n>       Area cap (default: 768*1344)
+        \\   --dit=<path>           Transformer weights only
         \\
     ;
 };
@@ -63,13 +84,23 @@ fn reject(err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
 fn rejectUser(err: anyerror) anyerror {
     return switch (err) {
         error.InvalidSize => reject(err, "--size must be WxH (example 1344x768)", .{}),
-        error.InvalidAspect => reject(err, "--size aspect must be between 1:4 and 4:1", .{}),
-        error.SizeTooLarge => reject(err, "--size area exceeds 768×1344 or needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
-        error.InvalidDuration => reject(err, "--duration must be 5–15", .{}),
+        error.InvalidCanvas => reject(err, "--ratio must be adaptive, 16:9, 9:16, 1:1, 4:3, 3:4, or 21:9", .{}),
+        error.ConflictingCanvas => reject(err, "pass --ratio or --size, not both", .{}),
+        error.InvalidResolution => reject(err, "--resolution must be 768P (open weights)", .{}),
+        error.OpenWeightsAre768P => reject(err, "this checkpoint is 768P; 2K is the hosted MiniMax API only", .{}),
+        error.InvalidAspect => reject(err, "aspect must be between 1:4 and 4:1", .{}),
+        error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels or needs >={d} GiB/device", .{config.full_canvas_min_device_bytes / (1024 * 1024 * 1024)}),
+        error.InvalidDuration => reject(err, "--duration must be 5–15 seconds", .{}),
+        error.T2vaRejectsAdaptive => reject(err, "text-to-video needs a ratio (16:9, 9:16, …); omit --ratio for 16:9", .{}),
+        error.AdaptiveNeedsVisual => reject(err, "adaptive ratio needs --first-frame, --last-frame, or a visual --refs", .{}),
+        error.ImageLoadFailed => reject(err, "could not read the first image or video size", .{}),
+        error.FfmpegMissing => reject(err, "ffmpeg not found; needed to read image/video size", .{}),
         error.TooFewSteps => reject(err, "--steps must be >= 2", .{}),
         error.AudioRefNeedsVisual => reject(err, "audio --refs need at least one image or video", .{}),
-        error.Ref2vaRejectsKeyframes => reject(err, "pass --image/--last-image or --refs, not both", .{}),
-        error.Ref2vaTransformerMissing => reject(err, "ref2va needs transformer_ref/", .{}),
+        error.T2vaRejectsMedia => reject(err, "text-to-video is prompt-only; drop --first-frame/--last-frame/--refs", .{}),
+        error.Fl2vaRejectsRefs => reject(err, "image-to-video cannot take --refs; use reference-to-video instead", .{}),
+        error.Ref2vaRejectsKeyframes => reject(err, "use --first-frame/--last-frame or --refs, not both", .{}),
+        error.Ref2vaTransformerMissing => reject(err, "reference-to-video needs transformer_ref/", .{}),
         error.TransformerMissing => reject(err, "transformer weights not found", .{}),
         error.EncoderMissing => reject(err, "text_encoder not found", .{}),
         error.VaeMissing => reject(err, "vae or audio_vae not found", .{}),
@@ -82,14 +113,14 @@ fn rejectUser(err: anyerror) anyerror {
         error.TooManyRefVideos => reject(err, "too many reference videos (max 3)", .{}),
         error.TooManyRefAudios => reject(err, "too many reference audios (max 3)", .{}),
         error.IntentEmpty => reject(err, "needs a non-empty --prompt", .{}),
-        error.Fl2vaNeedsImage => reject(err, "fl2va needs --image and/or --last-image", .{}),
-        error.Ref2vaNeedsRefs => reject(err, "ref2va needs --refs", .{}),
+        error.Fl2vaNeedsImage => reject(err, "image-to-video needs --first-frame and/or --last-frame", .{}),
+        error.Ref2vaNeedsRefs => reject(err, "reference-to-video needs --refs", .{}),
         else => err,
     };
 }
 
-fn hasMedia(args: Args) bool {
-    return args.image.len != 0 or args.last_image.len != 0 or args.refs.len != 0;
+fn hasMedia(first: []const u8, last: []const u8, refs: []const u8) bool {
+    return first.len != 0 or last.len != 0 or refs.len != 0;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -103,20 +134,48 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
-    config.checkDuration(args.duration) catch |err| return rejectUser(err);
+    if (args.frames == 0) config.checkDuration(args.duration) catch |err| return rejectUser(err);
     config.checkSteps(args.steps) catch |err| return rejectUser(err);
-    const px = config.parseSize(args.size) catch |err| return rejectUser(err);
+    config.parseResolution(args.resolution) catch |err| return rejectUser(err);
+    const first = args.first_frame;
+    const last = args.last_frame;
     const refs = try request.refsFromComma(allocator, args.refs);
     defer request.freeRefs(allocator, refs, false);
-    const variant = request.inferVariant(args.image, args.last_image, refs) catch |err| return rejectUser(err);
+    const variant = request.inferVariant(first, last, refs) catch |err| return rejectUser(err);
     const encode_prompt = std.mem.trimEnd(u8, args.prompt, "\n");
     request.validate(.{
         .variant = variant,
         .prompt = encode_prompt,
-        .first_image = args.image,
-        .last_image = args.last_image,
+        .first_frame = first,
+        .last_frame = last,
         .refs = refs,
     }) catch |err| return rejectUser(err);
+    const canvas = config.pickCanvas(args.size, args.ratio) catch |err| return rejectUser(err);
+    const need_src = canvas.kind == .adaptive or (canvas.kind == .hailuo and variant != .t2va);
+    var src_w: u32 = 0;
+    var src_h: u32 = 0;
+    const anchor = request.canvasAnchor(first, last, refs);
+    if (need_src) {
+        if (anchor.len == 0) return rejectUser(error.AdaptiveNeedsVisual);
+        const src = media.probeSize(allocator, init.io, anchor) catch |err| return rejectUser(err);
+        src_w = src.w;
+        src_h = src.h;
+    }
+    const px = config.resolveCanvasSpec(canvas, variant, src_w, src_h, args.short_edge, args.max_pixels) catch |err| return rejectUser(err);
+    const frame_plan = config.resolveFrames(args.duration, args.frames) catch |err| return rejectUser(err);
+    const mode = config.modeLabel(variant, first, last);
+    const play_s = frame_plan.seconds();
+    log.info("{s}  {d}x{d}  {d:.1}s ({d} frames)  {d} steps  seed {d}", .{
+        mode,
+        px.w,
+        px.h,
+        play_s,
+        frame_plan.aligned,
+        args.steps,
+        args.seed,
+    });
+    if (need_src)
+        log.info("from {s} ({d}x{d})", .{ std.fs.path.basename(anchor), src_w, src_h });
     const paths: repo.Open = .{
         .model = args.model,
         .dit = args.dit,
@@ -162,17 +221,11 @@ pub fn main(init: std.process.Init) !void {
     config.checkDeviceForSize(px.w, px.h, device_bytes) catch |err| return rejectUser(err);
 
     const shardings: sharding.Shardings = try .init(platform, heads);
-    const frames = config.alignFrameCount(config.frameCount(args.duration));
+    if (frame_plan.raw != frame_plan.aligned)
+        log.info("frames {d} → {d} (VAE 17n+5)", .{ frame_plan.raw, frame_plan.aligned });
     log.info(
-        "run model={s} variant={s} {d}x{d} frames={d} steps={d} seed={d} target={s} shard={d} devices={d} device={d}GiB",
+        "{s}  shard={d}  devices={d}  {d}GiB",
         .{
-            args.model,
-            @tagName(variant),
-            px.w,
-            px.h,
-            frames,
-            args.steps,
-            args.seed,
             @tagName(platform.target),
             shardings.model.numPartitionsForLogicalAxis(.model),
             platform.devices.len,
@@ -191,6 +244,7 @@ pub fn main(init: std.process.Init) !void {
         .duration_s = args.duration,
         .width = px.w,
         .height = px.h,
+        .frames = frame_plan.aligned,
         .steps = args.steps,
         .seed = args.seed,
     };
@@ -204,11 +258,11 @@ pub fn main(init: std.process.Init) !void {
     var tok_enc = try tokenizer.encoder();
     defer tok_enc.deinit();
 
-    var encoded = if (hasMedia(args))
+    var encoded = if (hasMedia(first, last, args.refs))
         try conditions.prepare(allocator, io, platform, &progress, &tok_enc, .{
             .variant = variant,
-            .first_image = args.image,
-            .last_image = args.last_image,
+            .first_frame = first,
+            .last_frame = last,
             .refs = refs,
             .prompt = encode_prompt,
             .geo = geo,
@@ -243,11 +297,11 @@ pub fn main(init: std.process.Init) !void {
     log.info(
         "layout {s} {d}x{d} {d} frames ({d:.1}s) latents {d}x{d}x{d} audio_t={d} seq={d} steps={d} seed={d}",
         .{
-            @tagName(opts.variant),
+            mode,
             geo_work.pixel_w,
             geo_work.pixel_h,
             geo_work.frames,
-            opts.duration_s,
+            play_s,
             geo_work.latent_t,
             geo_work.latent_h,
             geo_work.latent_w,

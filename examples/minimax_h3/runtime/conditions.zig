@@ -72,8 +72,8 @@ fn padStereo(allocator: std.mem.Allocator, stereo: []const f32, samples: u32) ![
 
 pub const Prepare = struct {
     variant: config_mod.Variant,
-    first_image: []const u8,
-    last_image: []const u8,
+    first_frame: []const u8,
+    last_frame: []const u8,
     refs: []const request_mod.Reference,
     prompt: []const u8,
     geo: pipeline.Geometry,
@@ -101,8 +101,8 @@ pub fn prepare(
         "conditions: {s} first={s} last={s} refs={d}",
         .{
             @tagName(req.variant),
-            if (req.first_image.len == 0) "-" else req.first_image,
-            if (req.last_image.len == 0) "-" else req.last_image,
+            if (req.first_frame.len == 0) "-" else req.first_frame,
+            if (req.last_frame.len == 0) "-" else req.last_frame,
             req.refs.len,
         },
     );
@@ -155,8 +155,8 @@ pub fn prepare(
     defer blocks.deinit(allocator);
 
     if (req.variant == .fl2va) {
-        if (req.first_image.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.first_image, .keyframe_index = 0 });
-        if (req.last_image.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.last_image, .keyframe_index = 1 });
+        if (req.first_frame.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.first_frame, .keyframe_index = 0 });
+        if (req.last_frame.len != 0) try visuals.append(allocator, .{ .kind = .image, .path = req.last_frame, .keyframe_index = 1 });
     } else {
         for (req.refs) |ref| {
             switch (ref.kind) {
@@ -168,15 +168,8 @@ pub fn prepare(
                 .video, .video_audio => {
                     const vidx: i32 = @intCast(visuals.items.len);
                     var aidx: i32 = -1;
-                    var has_audio = ref.kind == .video_audio or ref.soundtrack.len != 0;
-                    var audio_path = ref.soundtrack;
-                    if (!has_audio) {
-                        const meta = try media.probeVideo(allocator, io, ref.path);
-                        if (meta.has_audio) {
-                            has_audio = true;
-                            audio_path = ref.path;
-                        }
-                    }
+                    const meta = try media.probeVideo(allocator, io, ref.path);
+                    const has_audio = meta.has_audio;
                     try visuals.append(allocator, .{
                         .kind = if (has_audio) .video_audio else .video,
                         .path = ref.path,
@@ -185,7 +178,7 @@ pub fn prepare(
                     });
                     if (has_audio) {
                         aidx = @intCast(audios.items.len);
-                        try audios.append(allocator, .{ .path = if (audio_path.len != 0) audio_path else ref.path, .audio_index = aidx });
+                        try audios.append(allocator, .{ .path = ref.path, .audio_index = aidx });
                     }
                     try blocks.append(allocator, .{
                         .kind = if (has_audio) .video_audio else .video,

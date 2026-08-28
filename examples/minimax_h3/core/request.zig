@@ -6,19 +6,27 @@ const packing = @import("../model/packing.zig");
 pub const Reference = struct {
     kind: packing.ReferenceKind,
     path: []const u8,
-    soundtrack: []const u8 = "",
 };
 
 pub const Request = struct {
     variant: config.Variant = .t2va,
     prompt: []const u8,
-    first_image: []const u8 = "",
-    last_image: []const u8 = "",
+    first_frame: []const u8 = "",
+    last_frame: []const u8 = "",
     refs: []const Reference = &.{},
 };
 
-pub fn inferVariant(first_image: []const u8, last_image: []const u8, refs: []const Reference) !config.Variant {
-    const has_keyframes = first_image.len != 0 or last_image.len != 0;
+pub fn canvasAnchor(first_frame: []const u8, last_frame: []const u8, refs: []const Reference) []const u8 {
+    if (first_frame.len != 0) return first_frame;
+    if (last_frame.len != 0) return last_frame;
+    for (refs) |r| {
+        if (r.kind != .audio) return r.path;
+    }
+    return "";
+}
+
+pub fn inferVariant(first_frame: []const u8, last_frame: []const u8, refs: []const Reference) !config.Variant {
+    const has_keyframes = first_frame.len != 0 or last_frame.len != 0;
     if (refs.len != 0) {
         if (has_keyframes) return error.Ref2vaRejectsKeyframes;
         return .ref2va;
@@ -51,17 +59,7 @@ pub fn refsFromPaths(allocator: std.mem.Allocator, paths: []const []const u8) ![
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < paths.len) : (i += 1) {
-        const kind = guessKind(paths[i]);
-        if (kind == .video and i + 1 < paths.len and guessKind(paths[i + 1]) == .audio) {
-            try out.append(allocator, .{
-                .kind = .video_audio,
-                .path = paths[i],
-                .soundtrack = paths[i + 1],
-            });
-            i += 1;
-            continue;
-        }
-        try out.append(allocator, .{ .kind = kind, .path = paths[i] });
+        try out.append(allocator, .{ .kind = guessKind(paths[i]), .path = paths[i] });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -77,10 +75,7 @@ fn guessKind(path: []const u8) packing.ReferenceKind {
 
 pub fn freeRefs(allocator: std.mem.Allocator, refs: []Reference, owned_strings: bool) void {
     if (owned_strings) {
-        for (refs) |r| {
-            allocator.free(r.path);
-            if (r.soundtrack.len != 0) allocator.free(r.soundtrack);
-        }
+        for (refs) |r| allocator.free(r.path);
     }
     allocator.free(refs);
 }
@@ -88,16 +83,16 @@ pub fn freeRefs(allocator: std.mem.Allocator, refs: []Reference, owned_strings: 
 pub fn validate(req: Request) !void {
     switch (req.variant) {
         .t2va => {
-            if (req.first_image.len != 0 or req.last_image.len != 0 or req.refs.len != 0)
+            if (req.first_frame.len != 0 or req.last_frame.len != 0 or req.refs.len != 0)
                 return error.T2vaRejectsMedia;
         },
         .fl2va => {
-            if (req.first_image.len == 0 and req.last_image.len == 0) return error.Fl2vaNeedsImage;
+            if (req.first_frame.len == 0 and req.last_frame.len == 0) return error.Fl2vaNeedsImage;
             if (req.refs.len != 0) return error.Fl2vaRejectsRefs;
         },
         .ref2va => {
             if (req.refs.len == 0) return error.Ref2vaNeedsRefs;
-            if (req.first_image.len != 0 or req.last_image.len != 0) return error.Ref2vaRejectsKeyframes;
+            if (req.first_frame.len != 0 or req.last_frame.len != 0) return error.Ref2vaRejectsKeyframes;
         },
     }
     if (std.mem.trim(u8, req.prompt, " \t\r\n").len == 0) return error.IntentEmpty;

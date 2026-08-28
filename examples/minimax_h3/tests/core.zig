@@ -268,6 +268,15 @@ fn testFrameGeometry() !void {
     try std.testing.expectEqual(@as(u32, 124), config.alignFrameCount(120));
     try std.testing.expectEqual(@as(u32, 37), config.videoLatentFrames(124));
     try std.testing.expectEqual(@as(u32, 207), config.audioLatentLength(5.0));
+    try std.testing.expectEqual(@as(u32, 207), config.audioLatentFromFrames(124));
+    const five = try config.resolveFrames(5.0, 0);
+    try std.testing.expectEqual(@as(u32, 120), five.raw);
+    try std.testing.expectEqual(@as(u32, 124), five.aligned);
+    try std.testing.expectApproxEqAbs(@as(f32, 124.0 / 24.0), five.seconds(), 1e-6);
+    const exact = try config.resolveFrames(5.0, 124);
+    try std.testing.expectEqual(@as(u32, 124), exact.raw);
+    try std.testing.expectEqual(@as(u32, 124), exact.aligned);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(5.0, 5));
 }
 fn testCanvasPresets() !void {
     const official = try config.parseSize("1344x768");
@@ -279,6 +288,46 @@ fn testCanvasPresets() !void {
     try std.testing.expectError(error.InvalidSize, config.parseSize("1344"));
     try std.testing.expectError(error.InvalidAspect, config.parseSize("100x10"));
     try std.testing.expectError(error.SizeTooLarge, config.parseSize("1920x1080"));
+
+    try std.testing.expectEqual(.hailuo, (try config.parseRatio("")).kind);
+    try std.testing.expectEqual(.adaptive, (try config.parseRatio("adaptive")).kind);
+    const r169 = try config.parseRatio("16:9");
+    try std.testing.expectEqual(.ratio, r169.kind);
+    try std.testing.expectEqual(@as(f32, 16), r169.ratio_w);
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("official"));
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("800x1200"));
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("nope"));
+
+    const t2va = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .t2va, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 1344), t2va.w);
+    try std.testing.expectEqual(@as(u32, 768), t2va.h);
+    const ref = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .ref2va, 720, 1264, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), ref.w);
+    try std.testing.expectEqual(@as(u32, 1344), ref.h);
+    const rocket = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .fl2va, 1024, 1536, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), rocket.w);
+    try std.testing.expectEqual(@as(u32, 1152), rocket.h);
+    const portrait = try config.resolveCanvasSpec(.{ .kind = .ratio, .ratio_w = 9, .ratio_h = 16 }, .t2va, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), portrait.w);
+    try std.testing.expectEqual(@as(u32, 1344), portrait.h);
+    try std.testing.expectError(error.T2vaRejectsAdaptive, config.resolveCanvasSpec(.{ .kind = .adaptive }, .t2va, 0, 0, 0, 0));
+    try std.testing.expectError(error.AdaptiveNeedsVisual, config.resolveCanvasSpec(.{ .kind = .hailuo }, .ref2va, 0, 0, 0, 0));
+    try std.testing.expectEqual(.hailuo, (try config.pickCanvas("", "")).kind);
+    try std.testing.expectEqual(.ratio, (try config.pickCanvas("", "16:9")).kind);
+    const sized = try config.pickCanvas("800x600", "");
+    try std.testing.expectEqual(.pixels, sized.kind);
+    try std.testing.expectError(error.ConflictingCanvas, config.pickCanvas("800x600", "16:9"));
+    try config.parseResolution("768P");
+    try config.parseResolution("768p");
+    try std.testing.expectError(error.OpenWeightsAre768P, config.parseResolution("2K"));
+    try std.testing.expectError(error.InvalidResolution, config.parseResolution("4K"));
+    try std.testing.expectEqualStrings("text-to-video", config.modeLabel(.t2va, "", ""));
+    try std.testing.expectEqualStrings("image-to-video", config.modeLabel(.fl2va, "a.png", ""));
+    try std.testing.expectEqualStrings("last-frame", config.modeLabel(.fl2va, "", "b.png"));
+    try std.testing.expectEqualStrings("first-and-last-frame", config.modeLabel(.fl2va, "a.png", "b.png"));
+    try std.testing.expectEqualStrings("reference-to-video", config.modeLabel(.ref2va, "", ""));
+    try std.testing.expectEqualStrings("a.png", request_mod.canvasAnchor("a.png", "b.png", &.{}));
+    try std.testing.expectEqualStrings("b.png", request_mod.canvasAnchor("", "b.png", &.{}));
     try config.checkSteps(30);
     try std.testing.expectError(error.TooFewSteps, config.checkSteps(1));
 
@@ -291,11 +340,12 @@ fn testCanvasPresets() !void {
 fn testRequest(allocator: std.mem.Allocator) !void {
     const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
     defer request_mod.freeRefs(allocator, refs, false);
-    try std.testing.expectEqual(@as(usize, 2), refs.len);
+    try std.testing.expectEqual(@as(usize, 3), refs.len);
     try std.testing.expectEqual(packing.ReferenceKind.image, refs[0].kind);
-    try std.testing.expectEqual(packing.ReferenceKind.video_audio, refs[1].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.video, refs[1].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.audio, refs[2].kind);
     try std.testing.expectEqualStrings("clip.mp4", refs[1].path);
-    try std.testing.expectEqualStrings("bed.wav", refs[1].soundtrack);
+    try std.testing.expectEqualStrings("bed.wav", refs[2].path);
 
     try request_mod.validate(.{ .prompt = "hi", .variant = .t2va });
     try std.testing.expectError(error.IntentEmpty, request_mod.validate(.{ .prompt = "   ", .variant = .t2va }));

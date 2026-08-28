@@ -422,6 +422,16 @@ fn findFps(text: []const u8) ?f32 {
     return null;
 }
 
+pub fn probeSize(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !struct { w: u32, h: u32 } {
+    const result = runFfmpeg(allocator, io, &.{
+        ffmpeg_bin, "-hide_banner", "-i", path,
+    }) catch return error.FfmpegMissing;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const size = findWxH(result.stderr) orelse return error.ImageLoadFailed;
+    return .{ .w = size.w, .h = size.h };
+}
+
 pub fn probeVideo(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !VideoMeta {
     const result = runFfmpeg(allocator, io, &.{
         ffmpeg_bin, "-hide_banner", "-i", path,

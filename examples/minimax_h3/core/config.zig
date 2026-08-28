@@ -18,6 +18,14 @@ pub const visual_cond_timestep: f32 = 0.999;
 pub const default_short_side: u32 = 768;
 pub const default_size: []const u8 = "1344x768";
 pub const default_steps: u32 = 30;
+pub const official_ratios = [_]struct { name: []const u8, w: f32, h: f32 }{
+    .{ .name = "21:9", .w = 21, .h = 9 },
+    .{ .name = "16:9", .w = 16, .h = 9 },
+    .{ .name = "4:3", .w = 4, .h = 3 },
+    .{ .name = "1:1", .w = 1, .h = 1 },
+    .{ .name = "3:4", .w = 3, .h = 4 },
+    .{ .name = "9:16", .w = 9, .h = 16 },
+};
 /// 16:9 at 352 short-edge after snap-32. Memory floor uses this as "small".
 pub const preview_short_side: u32 = 352;
 pub const video_shift: f32 = 12.0;
@@ -52,6 +60,20 @@ pub const Variant = enum {
         return taskDirName(self.taskFamily());
     }
 };
+
+/// Hailuo / API mode names.
+pub fn modeLabel(variant: Variant, first_frame: []const u8, last_frame: []const u8) []const u8 {
+    return switch (variant) {
+        .t2va => "text-to-video",
+        .fl2va => if (first_frame.len != 0 and last_frame.len != 0)
+            "first-and-last-frame"
+        else if (first_frame.len == 0)
+            "last-frame"
+        else
+            "image-to-video",
+        .ref2va => "reference-to-video",
+    };
+}
 
 pub const TaskFamily = enum { fl2va, ref2va };
 
@@ -266,23 +288,116 @@ pub fn loadEncoderConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.D
 
 pub const Size = struct { w: u32, h: u32 };
 
-pub fn parseSize(text: []const u8) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
+pub const CanvasSpec = struct {
+    kind: enum { hailuo, adaptive, ratio, pixels },
+    ratio_w: f32 = 16,
+    ratio_h: f32 = 9,
+    pixels: Size = .{ .w = 0, .h = 0 },
+};
+
+pub fn parseWxH(text: []const u8) error{InvalidSize}!Size {
     const sep = std.mem.indexOfScalar(u8, text, 'x') orelse std.mem.indexOfScalar(u8, text, 'X') orelse return error.InvalidSize;
     if (sep == 0 or sep + 1 >= text.len) return error.InvalidSize;
     const width = std.fmt.parseInt(u32, text[0..sep], 10) catch return error.InvalidSize;
     const height = std.fmt.parseInt(u32, text[sep + 1 ..], 10) catch return error.InvalidSize;
-    return snapSize(width, height);
+    if (width == 0 or height == 0) return error.InvalidSize;
+    return .{ .w = width, .h = height };
+}
+
+pub fn parseSize(text: []const u8) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
+    const raw = try parseWxH(text);
+    return snapSizeBudget(raw.w, raw.h, canvas_max_pixels);
+}
+
+pub fn parseResolution(text: []const u8) error{OpenWeightsAre768P, InvalidResolution}!void {
+    const t = std.mem.trim(u8, text, " \t");
+    if (t.len == 0 or std.ascii.eqlIgnoreCase(t, "768p") or std.ascii.eqlIgnoreCase(t, "768")) return;
+    if (std.ascii.eqlIgnoreCase(t, "2k")) return error.OpenWeightsAre768P;
+    return error.InvalidResolution;
+}
+
+pub fn parseRatio(text: []const u8) error{InvalidCanvas}!CanvasSpec {
+    const t = std.mem.trim(u8, text, " \t");
+    if (t.len == 0) return .{ .kind = .hailuo };
+    if (std.ascii.eqlIgnoreCase(t, "adaptive")) return .{ .kind = .adaptive };
+    for (official_ratios) |r| {
+        if (std.ascii.eqlIgnoreCase(t, r.name)) return .{ .kind = .ratio, .ratio_w = r.w, .ratio_h = r.h };
+    }
+    return error.InvalidCanvas;
+}
+
+pub fn pickCanvas(size: []const u8, ratio: []const u8) error{ InvalidSize, InvalidCanvas, ConflictingCanvas }!CanvasSpec {
+    const s = std.mem.trim(u8, size, " \t");
+    const r = std.mem.trim(u8, ratio, " \t");
+    if (s.len != 0 and r.len != 0) return error.ConflictingCanvas;
+    if (s.len != 0) return .{ .kind = .pixels, .pixels = try parseWxH(s) };
+    return parseRatio(r);
 }
 
 pub fn snapSize(width: u32, height: u32) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
+    return snapSizeBudget(width, height, canvas_max_pixels);
+}
+
+pub fn snapSizeBudget(width: u32, height: u32, max_pixels: u32) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
     if (width == 0 or height == 0) return error.InvalidSize;
     const ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
     if (ratio < min_aspect or ratio > max_aspect) return error.InvalidAspect;
     const multiple: f32 = @floatFromInt(canvas_multiple);
     const w = @max(canvas_multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(width)) / multiple))) * canvas_multiple);
     const h = @max(canvas_multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(height)) / multiple))) * canvas_multiple);
-    if (@as(u64, w) * @as(u64, h) > canvas_max_pixels) return error.SizeTooLarge;
+    const cap: u64 = if (max_pixels == 0) canvas_max_pixels else max_pixels;
+    if (@as(u64, w) * @as(u64, h) > cap) return error.SizeTooLarge;
     return .{ .w = w, .h = h };
+}
+
+pub fn resolveCanvasSpec(
+    spec: CanvasSpec,
+    variant: Variant,
+    src_w: u32,
+    src_h: u32,
+    short_edge: u32,
+    max_pixels: u32,
+) error{ InvalidAspect, InvalidSize, SizeTooLarge, T2vaRejectsAdaptive, AdaptiveNeedsVisual }!Size {
+    const short = if (short_edge == 0) default_short_side else short_edge;
+    const cap = if (max_pixels == 0) canvas_max_pixels else max_pixels;
+    switch (spec.kind) {
+        .hailuo => switch (variant) {
+            .t2va => return resolveCanvas(16, 9, short, cap),
+            .fl2va, .ref2va => return resolveFromSource(src_w, src_h, short, cap),
+        },
+        .adaptive => {
+            if (variant == .t2va) return error.T2vaRejectsAdaptive;
+            return resolveFromSource(src_w, src_h, short, cap);
+        },
+        .ratio => return resolveCanvas(spec.ratio_w, spec.ratio_h, short, cap),
+        .pixels => return snapSizeBudget(spec.pixels.w, spec.pixels.h, cap),
+    }
+}
+
+fn resolveFromSource(src_w: u32, src_h: u32, short_edge: u32, max_pixels: u32) error{ InvalidAspect, AdaptiveNeedsVisual }!Size {
+    if (src_w == 0 or src_h == 0) return error.AdaptiveNeedsVisual;
+    return resolveCanvas(@floatFromInt(src_w), @floatFromInt(src_h), short_edge, max_pixels);
+}
+
+pub const FramePlan = struct {
+    raw: u32,
+    aligned: u32,
+
+    pub fn seconds(self: FramePlan) f32 {
+        return @as(f32, @floatFromInt(self.aligned)) / video_fps;
+    }
+};
+
+pub fn resolveFrames(duration_s: f32, frames: u32) error{InvalidDuration}!FramePlan {
+    const raw = if (frames != 0) frames else frameCount(duration_s);
+    const aligned = alignFrameCount(raw);
+    const seconds = @as(f32, @floatFromInt(aligned)) / video_fps;
+    if (seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
+    return .{ .raw = raw, .aligned = aligned };
+}
+
+pub fn audioLatentFromFrames(frames: u32) u32 {
+    return @intFromFloat(@round(@as(f32, @floatFromInt(frames)) / video_fps * audio_hz));
 }
 
 /// Canvas: short edge, area cap `768*1344`, then nearest multiple of 32.
@@ -342,8 +457,7 @@ pub fn visualLatentSize(pixel_h: u32, pixel_w: u32, frames: u32) LatentHw {
 }
 
 pub fn audioLatentLength(duration_s: f32) u32 {
-    const frames = alignFrameCount(frameCount(duration_s));
-    return @intFromFloat(@round(@as(f32, @floatFromInt(frames)) / video_fps * audio_hz));
+    return audioLatentFromFrames(alignFrameCount(frameCount(duration_s)));
 }
 
 pub fn videoTokenCount(latent_t: u32, latent_h: u32, latent_w: u32, patch: [3]i64) u32 {

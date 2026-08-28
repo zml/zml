@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
+const config = @import("../core/config.zig");
 const media = @import("media.zig");
 const pipeline = @import("pipeline.zig");
 const vae = @import("../vae/geometry.zig");
@@ -620,13 +621,14 @@ pub fn writeOutputs(
         pcm,
         configSampleRate(),
     );
+    const play_s = @as(f32, @floatFromInt(geo.frames)) / config.video_fps;
     if (muxed) {
-        log.info("wrote {d}x{d} {d} frames → {s}/{s}", .{
-            geo.pixel_w,
-            geo.pixel_h,
-            geo.frames,
+        log.info("wrote {s}/{s}  {d}x{d}  {d:.1}s", .{
             out_path,
             mp4_name,
+            geo.pixel_w,
+            geo.pixel_h,
+            play_s,
         });
     } else {
         log.info("wrote {d}x{d} frames/ + audio.wav out={s} (ffmpeg missing)", .{
