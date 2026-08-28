@@ -684,8 +684,19 @@ test "FnExe Runner rebake replaces borrowed model buffers" {
     b_scale.deinit();
     b_bias.deinit();
     b_live = false;
-    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = true } });
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = false } });
+    try output.await(io);
     try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
     output.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 33, 36, 39, 42 }, &actual);
+
+    var a2_scale = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 1, 1, 1 }));
+    defer a2_scale.deinit();
+    var a2_bias = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 10, 10, 10, 10 }));
+    defer a2_bias.deinit();
+    runner.rebake(.{ .model = .{ .scale = a2_scale, .bias = a2_bias } });
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = true } });
+    try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
+    output.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 11, 12, 13, 14 }, &actual);
 }
