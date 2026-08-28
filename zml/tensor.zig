@@ -159,14 +159,13 @@ pub const Tensor = struct {
             return res;
         };
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch |err| switch (err) {
+        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
             error.NoSuitableSharding => std.debug.panic(
                 "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
                 .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
             ),
-            error.OutOfMemory, error.WriteFailed => @panic("OOM"),
-            error.MissingDeviceInTile => @panic("TODO"),
         };
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
