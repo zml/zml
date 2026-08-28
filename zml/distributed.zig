@@ -3,7 +3,7 @@ const std = @import("std");
 const pjrt = @import("pjrt");
 const kv_store = @import("distributed/kv_store.zig");
 
-pub const Error = kv_store.Error;
+pub const Error = kv_store.Error || error{InconsistentValue};
 
 /// Fixed-size distributed process configuration.
 ///
@@ -38,7 +38,7 @@ pub const Runtime = struct {
         client: kv_store.Client,
         key_value_store: pjrt.KeyValueStore,
         server: ?kv_store.Server,
-        barrier_generation: std.atomic.Value(u64) = .init(0),
+        rendezvous_generation: std.atomic.Value(u64) = .init(0),
         destroying_client: std.atomic.Value(bool) = .init(false),
     };
 
@@ -113,12 +113,39 @@ pub const Runtime = struct {
         return &state.key_value_store;
     }
 
+    pub fn processIndex(self: Runtime) usize {
+        return self.state.?.config.process_index;
+    }
+
+    pub fn processCount(self: Runtime) usize {
+        return self.state.?.config.process_count;
+    }
+
     /// Synchronizes every process at a reusable, generation-safe name.
     pub fn barrier(self: *Runtime, name: []const u8) Error!void {
         const state = self.state orelse return error.InvalidLifecycle;
-        return barrierUntil(
+        return rendezvousUntil(
             state,
             name,
+            null,
+            deadlineFromNow(
+                state.client.io,
+                state.config.operation_timeout,
+            ),
+        );
+    }
+
+    /// Requires every process to publish the same value.
+    pub fn consensus(
+        self: *Runtime,
+        name: []const u8,
+        value: []const u8,
+    ) Error!void {
+        const state = self.state orelse return error.InvalidLifecycle;
+        return rendezvousUntil(
+            state,
+            name,
+            value,
             deadlineFromNow(
                 state.client.io,
                 state.config.operation_timeout,
@@ -146,7 +173,12 @@ pub const Runtime = struct {
             state.client.io,
             state.config.shutdown_timeout,
         );
-        barrierUntil(state, "shutdown-ready", deadline) catch |err| {
+        rendezvousUntil(
+            state,
+            "shutdown-ready",
+            null,
+            deadline,
+        ) catch |err| {
             pjrt_client.deinit(api);
             return err;
         };
@@ -208,17 +240,18 @@ fn bindAddress(config: Config) std.Io.net.IpAddress {
     };
 }
 
-fn barrierUntil(
+fn rendezvousUntil(
     state: *Runtime.State,
     name: []const u8,
+    expected: ?[]const u8,
     deadline: std.Io.Timestamp,
 ) Error!void {
     if (name.len == 0) return error.InvalidRequest;
     if (state.server) |*server| try server.check();
-    const generation = state.barrier_generation.fetchAdd(1, .seq_cst);
+    const generation = state.rendezvous_generation.fetchAdd(1, .seq_cst);
     const prefix = std.fmt.allocPrint(
         state.allocator,
-        "barrier/{d}/{d}/{s}",
+        "rendezvous/{d}/{d}/{s}",
         .{ generation, name.len, name },
     ) catch return error.OutOfMemory;
     defer state.allocator.free(prefix);
@@ -229,7 +262,7 @@ fn barrierUntil(
         state.config.process_index,
     );
     defer state.allocator.free(own_key);
-    try state.client.putUntil(own_key, "", deadline);
+    try state.client.putUntil(own_key, expected orelse "", deadline);
 
     for (0..state.config.process_count) |process_index| {
         const key = try processKey(
@@ -243,7 +276,10 @@ fn barrierUntil(
             key,
             deadline,
         );
+        const matches = expected == null or
+            std.mem.eql(u8, expected.?, value);
         state.allocator.free(value);
+        if (!matches) return error.InconsistentValue;
     }
 }
 
@@ -325,7 +361,7 @@ test "distributed config validation" {
     );
 }
 
-test "distributed runtime supports repeated named barriers" {
+test "distributed runtime rendezvous" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -350,6 +386,11 @@ test "distributed runtime supports repeated named barriers" {
     var rank1 = try Runtime.init(allocator, io, rank1_config);
     defer rank1.deinit();
 
+    try std.testing.expectEqual(0, rank0.processIndex());
+    try std.testing.expectEqual(1, rank1.processIndex());
+    try std.testing.expectEqual(2, rank0.processCount());
+    try std.testing.expectEqual(2, rank1.processCount());
+
     for (0..2) |_| {
         var rank0_barrier = try io.concurrent(
             barrierForTest,
@@ -359,10 +400,45 @@ test "distributed runtime supports repeated named barriers" {
         try rank0_barrier.await(io);
     }
 
+    var rank0_consensus = try io.concurrent(
+        consensusForTest,
+        .{ &rank0, "same-name", "same-value" },
+    );
+    try rank1.consensus("same-name", "same-value");
+    try rank0_consensus.await(io);
+
+    rank0_consensus = try io.concurrent(
+        consensusForTest,
+        .{ &rank0, "same-name", "rank-zero" },
+    );
+    try std.testing.expectError(
+        error.InconsistentValue,
+        rank1.consensus("same-name", "rank-one"),
+    );
+    try std.testing.expectError(
+        error.InconsistentValue,
+        rank0_consensus.await(io),
+    );
+
+    rank0_consensus = try io.concurrent(
+        consensusForTest,
+        .{ &rank0, "same-name", "same-again" },
+    );
+    try rank1.consensus("same-name", "same-again");
+    try rank0_consensus.await(io);
+
     rank1.deinit();
     rank0.deinit();
 }
 
 fn barrierForTest(runtime: *Runtime) Error!void {
     return runtime.barrier("same-name");
+}
+
+fn consensusForTest(
+    runtime: *Runtime,
+    name: []const u8,
+    value: []const u8,
+) Error!void {
+    return runtime.consensus(name, value);
 }

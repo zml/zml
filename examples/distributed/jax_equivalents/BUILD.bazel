@@ -5,10 +5,7 @@ zig_binary(
     name = "gpu_example",
     main = "gpu_example.zig",
     visibility = ["//visibility:public"],
-    deps = [
-        "//platforms",
-        "//zml",
-    ],
+    deps = ["//zml"],
 )
 
 build_test(

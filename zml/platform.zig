@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -9,6 +8,7 @@ const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
 const constants = @import("constants.zig");
+const distributed = @import("distributed.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
@@ -39,6 +39,13 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
         return error.MissingDevices;
     }
+    if (num_devices > Platform.MAX_NUM_DEVICES) {
+        log.err(
+            "Platform {} supports at most {} devices, got {}",
+            .{ target, Platform.MAX_NUM_DEVICES, num_devices },
+        );
+        return error.TooManyDevices;
+    }
     switch (target) {
         .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
             if (!std.math.isPowerOfTwo(num_devices)) {
@@ -48,6 +55,69 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         },
     }
 }
+
+/// Global PJRT metadata valid until its Platform is deinitialized.
+/// Only addressable devices have local memory state.
+pub const DeviceDescription = struct {
+    platform: *const Platform,
+    pjrt_device: *const pjrt.Device,
+    pjrt_desc: *const pjrt.DeviceDescription,
+
+    fn init(
+        platform: *const Platform,
+        pjrt_device: *const pjrt.Device,
+    ) DeviceDescription {
+        return .{
+            .platform = platform,
+            .pjrt_device = pjrt_device,
+            .pjrt_desc = pjrt_device.getDescription(platform.pjrt_api),
+        };
+    }
+
+    pub fn id(self: DeviceDescription) u32 {
+        return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
+    }
+
+    pub fn processIndex(self: DeviceDescription) usize {
+        return self.pjrt_desc.processIndex(self.platform.pjrt_api);
+    }
+
+    pub fn isAddressable(self: DeviceDescription) bool {
+        return self.pjrt_device.isAddressable(self.platform.pjrt_api);
+    }
+
+    pub fn kind(self: DeviceDescription) []const u8 {
+        return self.pjrt_desc.kind(self.platform.pjrt_api);
+    }
+
+    pub fn debugString(self: DeviceDescription) []const u8 {
+        return self.pjrt_desc.debugString(self.platform.pjrt_api);
+    }
+
+    pub fn toString(self: DeviceDescription) []const u8 {
+        return self.pjrt_desc.toString(self.platform.pjrt_api);
+    }
+
+    pub fn attributes(
+        self: DeviceDescription,
+    ) []const pjrt.NamedValue {
+        return self.pjrt_desc.attributes(self.platform.pjrt_api);
+    }
+
+    pub fn attribute(
+        self: DeviceDescription,
+        name: []const u8,
+    ) ?pjrt.NamedValue.Value {
+        return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
+    }
+
+    pub fn format(
+        self: DeviceDescription,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{s} ({s})", .{ self.kind(), self.debugString() });
+    }
+};
 
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
@@ -103,7 +173,7 @@ pub const Memory = struct {
     }
 
     fn deinit(self: *Memory, allocator: std.mem.Allocator) void {
-        allocator.free(self.addressable_devices);
+        allocator.free(self.addressable_by_devices);
     }
 
     fn populateAddressableByDevices(self: *Memory) void {
@@ -173,7 +243,7 @@ pub const Device = struct {
         return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
     }
 
-    pub fn processIndex(self: Device) i32 {
+    pub fn processIndex(self: Device) usize {
         return self.pjrt_desc.processIndex(self.platform.pjrt_api);
     }
 
@@ -226,12 +296,52 @@ fn sortDevicesById(target: Target, devices: []Device) void {
     };
 
     std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
+}
 
-    if (builtin.mode == .Debug) {
-        for (devices, 0..) |device, expected_id| {
-            std.debug.assert(platformDeviceSortId(target, device) == expected_id);
+fn hashInt(hasher: *std.hash.Wyhash, value: anytype) void {
+    const Int = @TypeOf(value);
+    var bytes: [@sizeOf(Int)]u8 = undefined;
+    std.mem.writeInt(Int, &bytes, value, .big);
+    hasher.update(&bytes);
+}
+
+fn topologyHash(platform: *const Platform) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update("zml-platform-topology-v1");
+    hashInt(&hasher, @as(u8, @intCast(@intFromEnum(platform.target))));
+    hashInt(&hasher, @as(u64, platform.processCount()));
+
+    for (platform.global_devices) |device| {
+        hashInt(&hasher, device.id());
+        hashInt(&hasher, @as(u64, device.processIndex()));
+        hashInt(&hasher, @as(u32, @intCast(device.kind().len)));
+        hasher.update(device.kind());
+    }
+
+    for (platform.physical_mesh.axisOrder().slice()) |tag| {
+        const info = platform.physical_mesh.axisInfo(tag).?;
+        hashInt(&hasher, @as(u8, @intCast(@intFromEnum(tag))));
+        hashInt(&hasher, @as(u64, @intCast(info.size)));
+        hashInt(
+            &hasher,
+            @as(u8, @intCast(@intFromEnum(std.meta.activeTag(info.geometry)))),
+        );
+        switch (info.geometry) {
+            .ring => |kind| hashInt(
+                &hasher,
+                @as(u8, @intCast(@intFromEnum(kind))),
+            ),
+            .mesh => |kind| hashInt(
+                &hasher,
+                @as(u8, @intCast(@intFromEnum(kind))),
+            ),
+            .point_to_point, .tree, .isolated => {},
         }
     }
+    for (platform.physical_mesh.devices_in_canonical_order) |device| {
+        hashInt(&hasher, device.id);
+    }
+    return hasher.final();
 }
 
 // State union tagged on target platform to handle related resources
@@ -280,7 +390,9 @@ pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    runtime: ?distributed.Runtime,
     state: State,
+    global_devices: []const DeviceDescription,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
@@ -290,16 +402,44 @@ pub const Platform = struct {
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
+        if (options.distributed != null) {
+            switch (target) {
+                .cuda, .rocm, .oneapi, .metal => {},
+                else => return error.UnsupportedDistributedTarget,
+            }
+            switch (options.physical_mesh) {
+                .auto => {},
+                .custom => return error.UnsupportedDistributedPhysicalMesh,
+            }
+        }
+
+        var runtime: ?distributed.Runtime = if (options.distributed) |config|
+            try distributed.Runtime.init(allocator, io, config)
+        else
+            null;
+        errdefer if (runtime) |*value| value.deinit();
+
         const api = try loadOrGetApi(allocator, io, target);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
-        const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
-        const pjrt_devices = pjrt_client.addressableDevices(api);
-        try validateDeviceCount(target, pjrt_devices.len);
-        if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
-        }
+        const named_values = options.toNamedValues(
+            target,
+            &named_values_buf,
+        );
+        const pjrt_client = if (runtime) |*value|
+            try pjrt.Client.initWithKeyValueStore(
+                api,
+                named_values,
+                try value.keyValueStore(),
+            )
+        else
+            try pjrt.Client.init(api, named_values);
+        errdefer pjrt_client.deinit(api);
 
+        const pjrt_global_devices = pjrt_client.devices(api);
+        try validateDeviceCount(target, pjrt_global_devices.len);
+        const pjrt_devices = pjrt_client.addressableDevices(api);
+        if (pjrt_devices.len == 0) return error.MissingDevices;
         const pjrt_memories = pjrt_client.addressableMemories(api);
 
         // Note: Platform is a self-owning struct. It contains the arena that created it in the first place
@@ -318,9 +458,11 @@ pub const Platform = struct {
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .runtime = runtime,
                 .state = State.init(target),
                 .shardings = .empty,
                 // set below
+                .global_devices = undefined,
                 .devices = undefined,
                 .memories = undefined,
                 .physical_mesh = undefined,
@@ -334,6 +476,70 @@ pub const Platform = struct {
         try platform.shardings.ensureTotalCapacity(arena, 8);
 
         {
+            const global_devices = try arena.alloc(
+                DeviceDescription,
+                pjrt_global_devices.len,
+            );
+            platform.global_devices = global_devices;
+            for (
+                pjrt_global_devices,
+                global_devices,
+            ) |pjrt_device, *description| {
+                description.* = .init(platform, pjrt_device);
+            }
+            const GlobalOrder = struct {
+                fn lessThan(
+                    _: @This(),
+                    lhs: DeviceDescription,
+                    rhs: DeviceDescription,
+                ) bool {
+                    return lhs.id() < rhs.id();
+                }
+            };
+            std.mem.sort(
+                DeviceDescription,
+                global_devices,
+                GlobalOrder{},
+                GlobalOrder.lessThan,
+            );
+            for (global_devices[1..], global_devices[0 .. global_devices.len - 1]) |current, previous| {
+                if (current.id() == previous.id()) {
+                    return error.InvalidDeviceTopology;
+                }
+            }
+
+            if (runtime) |value| {
+                for (pjrt_devices) |pjrt_device| {
+                    const description = pjrt_device.getDescription(api);
+                    if (description.processIndex(api) != value.processIndex() or
+                        platform.globalDeviceById(
+                            @intCast(description.id(api)),
+                        ) == null)
+                    {
+                        return error.InvalidDeviceTopology;
+                    }
+                }
+
+                const configured_ids = options.distributed.?.local_device_ids;
+                if (configured_ids.len != 0) {
+                    if (configured_ids.len != pjrt_devices.len) {
+                        return error.InvalidDeviceTopology;
+                    }
+                    for (pjrt_devices) |pjrt_device| {
+                        const hardware_id: i64 = @intCast(
+                            pjrt_device.localHardwareId(api),
+                        );
+                        if (std.mem.indexOfScalar(
+                            i64,
+                            configured_ids,
+                            hardware_id,
+                        ) == null) {
+                            return error.InvalidDeviceTopology;
+                        }
+                    }
+                }
+            }
+
             const devices = try arena.alloc(Device, pjrt_devices.len);
             platform.devices = devices;
             const memories = try arena.alloc(Memory, pjrt_memories.len);
@@ -352,10 +558,44 @@ pub const Platform = struct {
                 platform_memory.populateAddressableByDevices();
             }
 
-            platform.physical_mesh = try switch (options.physical_mesh) {
-                .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
-                .custom => |builder| builder(arena, target, devices),
-            };
+            if (runtime != null) {
+                var process_devices: stdx.BoundedArray(
+                    Sharding.ProcessDevice,
+                    MAX_NUM_DEVICES,
+                ) = .empty;
+                for (global_devices) |description| {
+                    process_devices.appendAssumeCapacity(.{
+                        .id = description.id(),
+                        .process_index = description.processIndex(),
+                    });
+                }
+                platform.physical_mesh = try Sharding.PhysicalMesh.distributedGpu(
+                    arena,
+                    target,
+                    process_devices.constSlice(),
+                    runtime.?.processCount(),
+                );
+            } else {
+                platform.physical_mesh = try switch (options.physical_mesh) {
+                    .auto => Sharding.PhysicalMesh.auto(
+                        arena,
+                        target,
+                        devices,
+                    ),
+                    .custom => |builder| builder(arena, target, devices),
+                };
+            }
+
+            if (runtime) |*value| {
+                var digest: [8]u8 = undefined;
+                std.mem.writeInt(
+                    u64,
+                    &digest,
+                    topologyHash(platform),
+                    .big,
+                );
+                try value.consensus("platform-topology-v1", &digest);
+            }
             platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
         }
 
@@ -395,6 +635,9 @@ pub const Platform = struct {
     }
 
     pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !*Platform {
+        if (options.distributed != null) {
+            return error.DistributedTargetRequired;
+        }
         const ordered_targets: []const Target = &.{
             .tpu,
             .neuron,
@@ -409,6 +652,56 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
+    pub fn isDistributed(self: *const Platform) bool {
+        return self.runtime != null;
+    }
+
+    pub fn processIndex(self: *const Platform) usize {
+        return if (self.runtime) |runtime| runtime.processIndex() else 0;
+    }
+
+    pub fn processCount(self: *const Platform) usize {
+        return if (self.runtime) |runtime| runtime.processCount() else 1;
+    }
+
+    pub fn globalDevices(
+        self: *const Platform,
+    ) []const DeviceDescription {
+        return self.global_devices;
+    }
+
+    pub fn addressableDevices(self: *const Platform) []const Device {
+        return self.devices;
+    }
+
+    pub fn globalDeviceById(
+        self: *const Platform,
+        id: u32,
+    ) ?*const DeviceDescription {
+        for (self.global_devices) |*device| {
+            if (device.id() == id) return device;
+        }
+        return null;
+    }
+
+    pub fn addressableDeviceById(
+        self: *const Platform,
+        id: u32,
+    ) ?*const Device {
+        for (self.devices) |*device| {
+            if (device.id() == id) return device;
+        }
+        return null;
+    }
+
+    pub fn barrier(
+        self: *Platform,
+        name: []const u8,
+    ) distributed.Error!void {
+        if (name.len == 0) return error.InvalidRequest;
+        if (self.runtime) |*runtime| try runtime.barrier(name);
+    }
+
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const tee = "├─ ";
         const line = "│  ";
@@ -416,6 +709,10 @@ pub const Platform = struct {
 
         try writer.print("platform: {s}\n", .{@tagName(self.target)});
         try writer.print("version: {f}\n", .{self.pjrt_api.version()});
+        try writer.print(
+            "process: {d}/{d}\n",
+            .{ self.processIndex(), self.processCount() },
+        );
 
         try writer.print("extensions:\n", .{});
         {
@@ -454,12 +751,34 @@ pub const Platform = struct {
             }
         }
 
-        try writer.print("devices:\n", .{});
+        try writer.print("global devices:\n", .{});
+        for (self.global_devices, 0..) |device, i| {
+            try writer.print(
+                "{s}id={d} process={d} addressable={} {f}\n",
+                .{
+                    if (i == self.global_devices.len - 1) langle else tee,
+                    device.id(),
+                    device.processIndex(),
+                    device.isAddressable(),
+                    device,
+                },
+            );
+        }
+
+        try writer.print("addressable devices:\n", .{});
         for (self.devices, 0..) |device, i| {
             const is_last_device = i == self.devices.len - 1;
             const child_indent = if (is_last_device) "   " else line;
 
-            try writer.print("{s}{f}\n", .{ if (is_last_device) langle else tee, device });
+            try writer.print(
+                "{s}id={d} local_hardware_id={d} {f}\n",
+                .{
+                    if (is_last_device) langle else tee,
+                    device.id(),
+                    device.localHardwareId(),
+                    device,
+                },
+            );
 
             {
                 const device_attrs = device.pjrt_desc.attributes(self.pjrt_api);
@@ -519,6 +838,8 @@ pub const Platform = struct {
                 }
             }
         }
+
+        try writer.print("physical mesh:{f}\n", .{self.physical_mesh});
     }
 
     pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithAttributes) {
@@ -532,7 +853,21 @@ pub const Platform = struct {
             self.state.deinit();
         }
         self.physical_mesh.deinit(self.arena.allocator());
-        self.pjrt_client.deinit(self.pjrt_api);
+        if (self.runtime) |*runtime| {
+            var client: ?*pjrt.Client = self.pjrt_client;
+            runtime.destroyPjrtClient(
+                self.pjrt_api,
+                &client,
+            ) catch |err| {
+                log.err(
+                    "Distributed Platform shutdown failed on rank {}: {}",
+                    .{ runtime.processIndex(), err },
+                );
+            };
+            runtime.deinit();
+        } else {
+            self.pjrt_client.deinit(self.pjrt_api);
+        }
         self.arena.deinit();
     }
 
@@ -581,7 +916,7 @@ pub const Platform = struct {
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {{ ", .{@tagName(self.target)});
-        for (self.devices(), 0..) |device, i| {
+        for (self.addressableDevices(), 0..) |device, i| {
             try writer.print("{s}(\"{s}\")", .{ device.toString(), device.kind() });
             if (i < self.devices.len - 1) try writer.writeAll(", ");
         }
@@ -705,6 +1040,7 @@ pub const CreateOptions = struct {
     };
 
     physical_mesh: PhysicalMesh = .auto,
+    distributed: ?distributed.Config = null,
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
@@ -730,9 +1066,6 @@ pub const CreateOptions = struct {
         /// `use_tfrt_gpu_client` name.
         gpu_async_dispatch: bool = true,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
-        // visible_devices: []const i64 = &.{},
-        // node_id
-        // num_nodes
         // enable_mock_nccl
         // mock_gpu_topology
 
@@ -789,6 +1122,33 @@ pub const CreateOptions = struct {
                 const options = @field(self, @tagName(t));
                 stdx.debug.assertComptime(@sizeOf(@TypeOf(options)) == 0, "zml.platform.CreateOptions.{s} is discarded", .{@tagName(t)});
             },
+        }
+        if (self.distributed) |config| {
+            switch (target) {
+                .cuda, .rocm, .oneapi, .metal => {
+                    std.debug.assert(
+                        values.capacity - values.items.len >= 3,
+                    );
+                    values.appendAssumeCapacity(.init(
+                        .int64,
+                        "node_id",
+                        @intCast(config.process_index),
+                    ));
+                    values.appendAssumeCapacity(.init(
+                        .int64,
+                        "num_nodes",
+                        @intCast(config.process_count),
+                    ));
+                    if (config.local_device_ids.len != 0) {
+                        values.appendAssumeCapacity(.init(
+                            .int64list,
+                            "visible_devices",
+                            config.local_device_ids,
+                        ));
+                    }
+                },
+                else => {},
+            }
         }
         return values.items;
     }
@@ -900,6 +1260,30 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
 test "platform defaultMemoryLayout is boring" {
     const platform = zml.testing.env();
 
+    try std.testing.expect(!platform.isDistributed());
+    try std.testing.expectEqual(0, platform.processIndex());
+    try std.testing.expectEqual(1, platform.processCount());
+    try std.testing.expectEqual(
+        platform.addressableDevices().len,
+        platform.globalDevices().len,
+    );
+    for (platform.addressableDevices()) |device| {
+        try std.testing.expectEqual(
+            device.id(),
+            platform.globalDeviceById(device.id()).?.id(),
+        );
+        try std.testing.expectEqual(
+            device.id(),
+            platform.addressableDeviceById(device.id()).?.id(),
+        );
+    }
+    try std.testing.expect(platform.globalDeviceById(
+        std.math.maxInt(u32),
+    ) == null);
+    try std.testing.expect(platform.addressableDeviceById(
+        std.math.maxInt(u32),
+    ) == null);
+
     const shapes = [_][]const i64{
         &.{4096},
         &.{ 4096, 4096 },
@@ -920,5 +1304,90 @@ test "platform defaultMemoryLayout is boring" {
                 .tile_dims_sizes = &.{},
             },
         });
+    }
+}
+
+test "platform rejects unsupported distributed options" {
+    const config: distributed.Config = .{
+        .coordinator_address = .{ .ip4 = .loopback(8910) },
+        .process_index = 0,
+        .process_count = 2,
+        .namespace = "platform-test",
+        .local_device_ids = &.{ 0, 1 },
+    };
+    try std.testing.expectError(
+        error.DistributedTargetRequired,
+        Platform.auto(
+            std.testing.allocator,
+            std.testing.io,
+            .{ .distributed = config },
+        ),
+    );
+    for ([_]Target{ .cpu, .tpu, .neuron }) |target| {
+        try std.testing.expectError(
+            error.UnsupportedDistributedTarget,
+            Platform.init(
+                std.testing.allocator,
+                std.testing.io,
+                target,
+                .{ .distributed = config },
+            ),
+        );
+    }
+
+    const Custom = struct {
+        fn build(
+            _: std.mem.Allocator,
+            _: Target,
+            _: []const Device,
+        ) !Sharding.PhysicalMesh {
+            unreachable;
+        }
+    };
+    for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
+        try std.testing.expectError(
+            error.UnsupportedDistributedPhysicalMesh,
+            Platform.init(
+                std.testing.allocator,
+                std.testing.io,
+                target,
+                .{
+                    .distributed = config,
+                    .physical_mesh = .{ .custom = Custom.build },
+                },
+            ),
+        );
+    }
+
+    var storage: [16]pjrt.NamedValue = undefined;
+    for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
+        const values = (CreateOptions{
+            .distributed = config,
+        }).toNamedValues(target, &storage);
+        try std.testing.expectEqualStrings(
+            "node_id",
+            values[values.len - 3].name(),
+        );
+        try std.testing.expectEqual(
+            0,
+            values[values.len - 3].value().int64,
+        );
+        try std.testing.expectEqualStrings(
+            "num_nodes",
+            values[values.len - 2].name(),
+        );
+        try std.testing.expectEqual(
+            2,
+            values[values.len - 2].value().int64,
+        );
+        try std.testing.expectEqualStrings(
+            "visible_devices",
+            values[values.len - 1].name(),
+        );
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{ 0, 1 },
+            values[values.len - 1].value().int64list,
+        );
     }
 }

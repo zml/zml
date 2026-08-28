@@ -285,8 +285,15 @@ pub const Device = struct {
     }
 };
 
+/// Global device ownership used to construct a distributed physical mesh.
+pub const ProcessDevice = struct {
+    id: u32,
+    process_index: usize,
+};
+
 /// Physical axis tags represent hardware interconnect tiers.
 pub const PhysicalAxisTag = enum {
+    network, // Inter-host network
     link, // Intra-device / island-local 1D interconnect
     link_x, // Torus/Mesh Dim X (TPU, Trainium)
     link_y, // Torus/Mesh Dim Y (TPU, Trainium)
@@ -347,9 +354,13 @@ pub const PhysicalNode = union(enum) {
     }
 
     pub fn device(device_: PlatformDevice) PhysicalNode {
+        return deviceId(device_.id());
+    }
+
+    pub fn deviceId(id: u32) PhysicalNode {
         return .{
             .leaf = .{
-                .id = @intCast(device_.id()),
+                .id = id,
                 .coords = Device.undefined_coords,
             },
         };
@@ -713,9 +724,19 @@ pub const PhysicalMesh = struct {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
-            .cuda, .rocm => &.{.link},
-            .cpu, .metal => &.{.bus},
-            .oneapi => &.{ .link, .bus },
+            .cuda, .rocm => if (self.hasAxis(.network))
+                &.{ .link, .network }
+            else
+                &.{.link},
+            .oneapi => if (self.hasAxis(.network))
+                &.{ .link, .network }
+            else
+                &.{ .link, .bus },
+            .metal => if (self.hasAxis(.network))
+                &.{ .link, .network }
+            else
+                &.{.bus},
+            .cpu => &.{.bus},
         };
     }
 
@@ -973,6 +994,95 @@ pub const PhysicalMesh = struct {
                 .children = nodes,
             },
         };
+    }
+
+    /// Builds a rectangular inter-host mesh for GPU device metadata.
+    pub fn distributedGpu(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const ProcessDevice,
+        process_count: usize,
+    ) !PhysicalMesh {
+        switch (target) {
+            .cuda, .rocm, .oneapi, .metal => {},
+            else => return error.UnsupportedPlatform,
+        }
+        if (process_count == 0 or
+            process_count > devices.len or
+            devices.len > Platform.MAX_NUM_DEVICES)
+        {
+            return error.InvalidDeviceTopology;
+        }
+
+        const sorted = try allocator.dupe(ProcessDevice, devices);
+        defer allocator.free(sorted);
+        const Sort = struct {
+            fn lessThan(
+                _: @This(),
+                lhs: ProcessDevice,
+                rhs: ProcessDevice,
+            ) bool {
+                if (lhs.process_index != rhs.process_index) {
+                    return lhs.process_index < rhs.process_index;
+                }
+                return lhs.id < rhs.id;
+            }
+        };
+        std.mem.sort(ProcessDevice, sorted, Sort{}, Sort.lessThan);
+
+        const device_counts = try allocator.alloc(usize, process_count);
+        defer allocator.free(device_counts);
+        @memset(device_counts, 0);
+        for (sorted, 0..) |device, index| {
+            if (device.process_index >= process_count) {
+                return error.InvalidDeviceTopology;
+            }
+            for (sorted[0..index]) |previous| {
+                if (previous.id == device.id) {
+                    return error.InvalidDeviceTopology;
+                }
+            }
+            device_counts[device.process_index] += 1;
+        }
+
+        const devices_per_process = device_counts[0];
+        if (devices_per_process == 0) {
+            return error.InvalidDeviceTopology;
+        }
+        for (device_counts) |count| {
+            if (count != devices_per_process) {
+                return error.InvalidDeviceTopology;
+            }
+        }
+
+        const hosts = try allocator.alloc(PhysicalNode, process_count);
+        var hosts_built: usize = 0;
+        errdefer {
+            for (hosts[0..hosts_built]) |host| freeNode(allocator, host);
+            allocator.free(hosts);
+        }
+
+        for (hosts, 0..) |*host, process_index| {
+            const local_devices = try allocator.alloc(
+                PhysicalNode,
+                devices_per_process,
+            );
+            const offset = process_index * devices_per_process;
+            for (
+                local_devices,
+                sorted[offset..][0..devices_per_process],
+            ) |*node, device| {
+                node.* = .deviceId(device.id);
+            }
+            host.* = .axis(.link, .point_to_point, local_devices);
+            hosts_built += 1;
+        }
+
+        return fromOwnedTree(
+            allocator,
+            target,
+            .axis(.network, .tree, hosts),
+        );
     }
 
     pub fn tpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
@@ -2359,4 +2469,108 @@ test "sharding: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));
+}
+
+test "sharding: distributed GPU mesh" {
+    const allocator = std.testing.allocator;
+    const devices = [_]ProcessDevice{
+        .{ .id = 3, .process_index = 1 },
+        .{ .id = 1, .process_index = 0 },
+        .{ .id = 2, .process_index = 1 },
+        .{ .id = 0, .process_index = 0 },
+    };
+    for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
+        var physical = try PhysicalMesh.distributedGpu(
+            allocator,
+            target,
+            &devices,
+            2,
+        );
+        defer physical.deinit(allocator);
+
+        try std.testing.expectEqual(target, physical.target);
+        try std.testing.expectEqual(2, physical.axis(.network));
+        try std.testing.expectEqual(2, physical.axis(.link));
+        const ordered = physical.devices_in_canonical_order;
+        try std.testing.expectEqual(4, ordered.len);
+        for (ordered, 0..) |device, id| {
+            try std.testing.expectEqual(
+                @as(u32, @intCast(id)),
+                device.id,
+            );
+        }
+
+        const logical: LogicalMesh = .mesh(.{ .data = .low_bandwidth });
+        const explicit: Strategy = .parseBindings(.{
+            .data = .{ .network, .link },
+        });
+        const explicit_data: Data = try .init(
+            "distributed-explicit",
+            &physical,
+            logical,
+            explicit,
+        );
+        try std.testing.expectEqual(
+            4,
+            explicit_data.numPartitionsForLogicalAxis(.data),
+        );
+
+        const suggested_data: Data = try .init(
+            "distributed-suggested",
+            &physical,
+            logical,
+            .suggest(logical, &physical),
+        );
+        try std.testing.expectEqual(
+            2,
+            suggested_data.numPartitionsForLogicalAxis(.data),
+        );
+    }
+}
+
+test "sharding: distributed GPU mesh rejects invalid input" {
+    const allocator = std.testing.allocator;
+    const valid = [_]ProcessDevice{
+        .{ .id = 0, .process_index = 0 },
+        .{ .id = 1, .process_index = 1 },
+    };
+    try std.testing.expectError(
+        error.UnsupportedPlatform,
+        PhysicalMesh.distributedGpu(allocator, .cpu, &valid, 2),
+    );
+    for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
+        try std.testing.expectError(
+            error.InvalidDeviceTopology,
+            PhysicalMesh.distributedGpu(allocator, target, &.{}, 2),
+        );
+        try std.testing.expectError(
+            error.InvalidDeviceTopology,
+            PhysicalMesh.distributedGpu(allocator, target, &.{
+                .{ .id = 0, .process_index = 0 },
+                .{ .id = 0, .process_index = 1 },
+            }, 2),
+        );
+        try std.testing.expectError(
+            error.InvalidDeviceTopology,
+            PhysicalMesh.distributedGpu(allocator, target, &.{
+                .{ .id = 0, .process_index = 0 },
+                .{ .id = 1, .process_index = 0 },
+            }, 2),
+        );
+        try std.testing.expectError(
+            error.InvalidDeviceTopology,
+            PhysicalMesh.distributedGpu(allocator, target, &.{
+                .{ .id = 0, .process_index = 0 },
+                .{ .id = 1, .process_index = 1 },
+                .{ .id = 2, .process_index = 1 },
+            }, 2),
+        );
+        try std.testing.expectError(
+            error.InvalidDeviceTopology,
+            PhysicalMesh.distributedGpu(allocator, target, &.{
+                .{ .id = 0, .process_index = 0 },
+                .{ .id = 1, .process_index = 2 },
+            }, 2),
+        );
+    }
 }

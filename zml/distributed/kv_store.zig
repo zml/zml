@@ -835,7 +835,7 @@ fn readerError(err: ?std.Io.net.Stream.Reader.Error) Error {
     return if (err) |value| transportError(value) else error.InvalidRequest;
 }
 
-fn writerError(err: ?std.Io.net.Stream.Writer.Error) Error {
+inline fn writerError(err: ?std.Io.net.Stream.Writer.Error) Error {
     return if (err) |value| transportError(value) else error.Unavailable;
 }
 
@@ -916,7 +916,7 @@ test "key-value store operations, namespaces, limits, and stop" {
     try client_a.put(&max_key, &max_value);
     try std.testing.expectError(
         error.ResourceExhausted,
-        client_a.put("x", &([_]u8{'v'} * *65)),
+        client_a.put("x", &([_]u8{'v'} ** 65)),
     );
     try std.testing.expectError(
         error.DeadlineExceeded,
