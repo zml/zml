@@ -384,11 +384,19 @@ pub const FramePlan = struct {
 };
 
 pub fn resolveFrames(duration_s: f32, frames: u32) error{InvalidDuration}!FramePlan {
-    const raw = if (frames != 0) frames else frameCount(duration_s);
-    const aligned = alignFrameCount(raw);
-    const seconds = @as(f32, @floatFromInt(aligned)) / video_fps;
-    if (seconds < 5.0 or seconds > 15.0) return error.InvalidDuration;
-    return .{ .raw = raw, .aligned = aligned };
+    const raw = if (frames != 0) frames else blk: {
+        try checkDuration(duration_s);
+        break :blk frameCount(duration_s);
+    };
+    if (frames != 0) {
+        const min_frames = frameCount(5.0);
+        const max_frames = frameCount(15.0);
+        if (raw < min_frames or raw > max_frames) return error.InvalidDuration;
+    }
+    return .{
+        .raw = raw,
+        .aligned = alignFrameCount(raw),
+    };
 }
 
 pub fn audioLatentFromFrames(frames: u32) u32 {

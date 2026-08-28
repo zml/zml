@@ -45,7 +45,7 @@ pub fn selectAttention(q: Query) zml.attention.Backend {
     const quadratic = q.seq * q.seq * 4 * heads_local;
     const linear = q.seq * @as(u64, @intCast(q.head_dim)) * heads_local * 8;
     if (quadratic <= linear * 4) return .vanilla;
-    return if (isFlash(q.flash)) q.flash else .cuda_fa2;
+    return q.flash;
 }
 
 pub fn sdpaScoreBytes(seq: u64, heads: i64, tp: u32) u64 {

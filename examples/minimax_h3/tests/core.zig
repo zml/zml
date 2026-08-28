@@ -63,8 +63,11 @@ fn testConfig() !void {
 }
 fn testCli() !void {
     try config.checkDuration(5);
+    try config.checkDuration(15);
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(4.99));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(4));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(3));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(15.01));
     try std.testing.expectError(error.InvalidDuration, config.checkDuration(16));
 }
 fn testSharding(allocator: std.mem.Allocator) !void {
@@ -272,6 +275,20 @@ fn testFrameGeometry() !void {
     try std.testing.expectEqual(@as(u32, 120), five.raw);
     try std.testing.expectEqual(@as(u32, 124), five.aligned);
     try std.testing.expectApproxEqAbs(@as(f32, 124.0 / 24.0), five.seconds(), 1e-6);
+    const fifteen = try config.resolveFrames(15.0, 0);
+    try std.testing.expectEqual(@as(u32, 360), fifteen.raw);
+    try std.testing.expectEqual(@as(u32, 362), fifteen.aligned);
+    try std.testing.expect(fifteen.seconds() > 15.0);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(4.99, 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(15.01, 0));
+    const five_frames = try config.resolveFrames(0, 120);
+    try std.testing.expectEqual(@as(u32, 120), five_frames.raw);
+    try std.testing.expectEqual(@as(u32, 124), five_frames.aligned);
+    const fifteen_frames = try config.resolveFrames(0, 360);
+    try std.testing.expectEqual(@as(u32, 360), fifteen_frames.raw);
+    try std.testing.expectEqual(@as(u32, 362), fifteen_frames.aligned);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(0, 119));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(0, 361));
     const exact = try config.resolveFrames(5.0, 124);
     try std.testing.expectEqual(@as(u32, 124), exact.raw);
     try std.testing.expectEqual(@as(u32, 124), exact.aligned);
@@ -544,6 +561,37 @@ fn testAttentionPolicy() !void {
         .tp = 2,
     });
     try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, long);
+
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .vanilla,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .cuda_fa2,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .cuda_fa3,
+    }));
 
     try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
         .target = .cpu,
