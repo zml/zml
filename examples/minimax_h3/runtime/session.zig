@@ -102,9 +102,12 @@ fn encodeText(
     const encode_start: std.Io.Timestamp = .now(io, .awake);
     const n_layers = loaded.inner.layers.len;
     const layer_bytes: u64 = if (n_layers == 0) 0 else weights.modelBytes(&loaded.inner.layers[0]);
+    // Metal: overlapping encoder H2D with compute segfaults in AGX command-encoder coalescing.
+    const serial = platform.target == .metal;
+    const prefetch = if (serial) 1 else policy.encPrefetch(@intCast(n_layers));
     log.info(
         "encoder: start tokens={d} layers={d} streamed=true prefetch={d} layer={d}MiB",
-        .{ tokens.len, n_layers, policy.encPrefetch(@intCast(n_layers)), layer_bytes / (1024 * 1024) },
+        .{ tokens.len, n_layers, prefetch, layer_bytes / (1024 * 1024) },
     );
     var embed_bufs = try loaded.loadEmbed(allocator, io, platform, store, shardings, progress);
     defer encoder.EmbedTokens.unloadBuffers(&embed_bufs);
@@ -113,7 +116,6 @@ fn encodeText(
     });
     defer embed_runner.deinit(allocator);
 
-    const prefetch = policy.encPrefetch(@intCast(n_layers));
     var loaders: [policy.enc_prefetch]zml.io.Loader = undefined;
     var loaders_ready: u32 = 0;
     defer {
@@ -131,10 +133,12 @@ fn encodeText(
         for (&futs) |*f| cancelEnc(f, io);
     }
     var spawned: usize = 0;
-    while (spawned < prefetch and spawned < n_layers) : (spawned += 1) {
-        futs[spawned] = try io.concurrent(loadEncoderLayer, .{
-            allocator, io, platform, loaded, store, shardings, spawned, progress, &loaders[spawned],
-        });
+    if (!serial) {
+        while (spawned < prefetch and spawned < n_layers) : (spawned += 1) {
+            futs[spawned] = try io.concurrent(loadEncoderLayer, .{
+                allocator, io, platform, loaded, store, shardings, spawned, progress, &loaders[spawned],
+            });
+        }
     }
 
     var hidden: zml.Buffer = undefined;
@@ -203,15 +207,20 @@ fn encodeText(
     defer if (layer_runner) |*r| r.deinit(allocator);
     var layer_i: usize = 0;
     while (layer_i < n_layers) : (layer_i += 1) {
-        const slot = layer_i % prefetch;
-        var layer_bufs = try futs[slot].?.await(io);
-        futs[slot] = null;
+        var layer_bufs = if (serial)
+            try loadEncoderLayer(allocator, io, platform, loaded, store, shardings, layer_i, progress, &loaders[0])
+        else blk: {
+            const slot = layer_i % prefetch;
+            const bufs = try futs[slot].?.await(io);
+            futs[slot] = null;
+            if (layer_i + prefetch < n_layers) {
+                futs[slot] = try io.concurrent(loadEncoderLayer, .{
+                    allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
+                });
+            }
+            break :blk bufs;
+        };
         defer encoder.TransformerLayer.unloadBuffers(&layer_bufs);
-        if (layer_i + prefetch < n_layers) {
-            futs[slot] = try io.concurrent(loadEncoderLayer, .{
-                allocator, io, platform, loaded, store, shardings, layer_i + prefetch, progress, &loaders[slot],
-            });
-        }
         if (layer_runner) |*r| {
             r.rebake(.{ .layer = layer_bufs });
         } else {
