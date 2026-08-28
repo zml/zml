@@ -7,7 +7,7 @@ const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
 
-const CompilationContext = @import("module.zig").CompilationContext;
+const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
@@ -126,7 +126,7 @@ pub const triton = struct {
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
-                const cur = CompilationContext.current();
+                const cur = Compiler.current();
 
                 const ttir = emit(cur.allocator, opts.cfg) catch |err|
                     std.debug.panic("zml.kernel.triton.Kernel({s}).call: emit failed: {}", .{ name, err });
@@ -232,7 +232,7 @@ pub const mosaic_tpu = struct {
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
-                const cur = CompilationContext.current();
+                const cur = Compiler.current();
 
                 const ir = emit(cur.allocator, opts.cfg) catch |err|
                     std.debug.panic("zml.kernel.mosaic_tpu.Kernel({s}).call: emit failed: {}", .{ name, err });
@@ -365,7 +365,7 @@ pub const mosaic_tpu = struct {
     };
 
     fn callTpuCustomCall(args: TpuCustomCallArgs) *mlir.Operation {
-        const cur = CompilationContext.current();
+        const cur = Compiler.current();
 
         var all_inputs: stdx.BoundedArray(*const mlir.Value, dialects.stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
         for (args.dynamic_grid_bounds) |t| all_inputs.appendAssumeCapacity(t.value());

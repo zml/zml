@@ -138,7 +138,7 @@ corresponding types.
 5. Load some user inputs (custom struct), encode them into arrays of numbers
    (`zml.Slice`), and copy them to the accelerator (`zml.Buffer`).
 
-6. Call the executable on the user inputs. `module.call` accepts `zml.Buffer`
+6. Call the executable on the user inputs. `exe.call` accepts `zml.Buffer`
    arguments and returns `zml.Buffer`
 
 7. Return the model output (`zml.Buffer`) to the host (`zml.Slice`),

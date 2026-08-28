@@ -4,7 +4,6 @@ const flashattn = @import("platforms/cuda/flashattn");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
-const CompilationContext = @import("../module.zig").CompilationContext;
 const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
@@ -306,7 +305,7 @@ pub const fa2 = struct {
     };
 
     pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index_: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        const ctx = CompilationContext.current();
+        const ctx = zml.Compiler.current();
 
         var bs: i64 = 1;
         var q = q_;
@@ -1056,7 +1055,7 @@ pub const paged_fa2 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
-        const ctx = CompilationContext.current();
+        const ctx = zml.Compiler.current();
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);

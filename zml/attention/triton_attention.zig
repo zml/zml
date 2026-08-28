@@ -13,7 +13,7 @@ const mla_kernels = @import("triton_kernels/unified_sparse_mla.zig");
 const log = std.log.scoped(.@"zml/attention/triton");
 
 fn isOneapiTarget() bool {
-    return zml.module.CompilationContext.current().platform.target == .oneapi;
+    return zml.Compiler.current().platform.target == .oneapi;
 }
 
 fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
@@ -204,7 +204,7 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
 }
 
 fn getCuCount() usize {
-    const platform = zml.module.CompilationContext.current().platform;
+    const platform = zml.Compiler.current().platform;
     if (platform.devices.len == 0) return 1;
     const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
     if (attribute.int64 <= 0) return 1;
@@ -988,7 +988,7 @@ test "sparse MLA launch selection honors valid explicit splits" {
 
 test "sparse MLA emits 2D and 3D Triton kernels" {
     const platform = zml.testing.env();
-    var compilation = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var compilation = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer compilation.deinit();
     compilation.activate();
     defer compilation.deactivate();
