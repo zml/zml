@@ -80,7 +80,7 @@ pub const Bundle = struct {
 
         const dit_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(dit_registry);
-        dit_registry.* = try openRegistry(allocator, io, dit_src);
+        dit_registry.* = try fetchRegistry(allocator, io, dit_src);
         errdefer dit_registry.deinit();
         try refuseUnsupported(dit_registry, allocator);
         var dit_store: zml.io.TensorStore = .fromRegistry(allocator, dit_registry);
@@ -88,21 +88,21 @@ pub const Bundle = struct {
 
         const enc_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(enc_registry);
-        enc_registry.* = try openRegistry(allocator, io, enc_src);
+        enc_registry.* = try fetchRegistry(allocator, io, enc_src);
         errdefer enc_registry.deinit();
         var enc_store: zml.io.TensorStore = .fromRegistry(allocator, enc_registry);
         errdefer enc_store.deinit();
 
         const visual_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(visual_registry);
-        visual_registry.* = try openRegistry(allocator, io, visual_src);
+        visual_registry.* = try fetchRegistry(allocator, io, visual_src);
         errdefer visual_registry.deinit();
         var visual_store: zml.io.TensorStore = .fromRegistry(allocator, visual_registry);
         errdefer visual_store.deinit();
 
         const audio_registry = try allocator.create(zml.safetensors.TensorRegistry);
         errdefer allocator.destroy(audio_registry);
-        audio_registry.* = try openRegistry(allocator, io, audio_src);
+        audio_registry.* = try fetchRegistry(allocator, io, audio_src);
         errdefer audio_registry.deinit();
         var audio_store: zml.io.TensorStore = .fromRegistry(allocator, audio_registry);
         errdefer audio_store.deinit();
@@ -197,14 +197,6 @@ fn openOfficialNested(io: std.Io, repo: std.Io.Dir, name: []const u8) ?std.Io.Di
     return null;
 }
 
-fn openRegistry(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    src: FileSource,
-) !zml.safetensors.TensorRegistry {
-    return fetchRegistry(allocator, io, src);
-}
-
 fn fetchRegistry(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -232,8 +224,8 @@ fn fileInDir(io: std.Io, dir: std.Io.Dir, name: []const u8) bool {
     return true;
 }
 
-/// Official HF dumps use either Transformers (`model.safetensors*`) or
-/// Diffusers (`diffusion_pytorch_model*`) names. Empty task folders such as
+/// HF checkpoints use Transformers (`model.safetensors*`) or Diffusers
+/// (`diffusion_pytorch_model*`) names. Empty task folders such as
 /// `FL2VA/transformer` exist and must not win over the real shard dir.
 pub const weight_entrypoints = [_][]const u8{
     "model.safetensors.index.json",
@@ -295,8 +287,8 @@ fn openDitOverride(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !
 }
 
 fn openOfficialDit(io: std.Io, search: Search, variant: config.Variant) ?std.Io.Dir {
-    // Official dump has no Ref2VA/. openTaskDir then falls back to the repo, so
-    // task/transformer is the fl2va DiT and must not win for ref2va.
+    // HF layout has no Ref2VA/ at the repo root. openTaskDir then falls back
+    // to the repo, so task/transformer is the FL2VA DiT and must not win for ref2va.
     return switch (variant.taskFamily()) {
         .ref2va => takeWeightedDir(io, openOptionalDir(io, search.repo, "transformer_ref")) orelse
             takeWeightedDir(io, openNestedDir(io, search.repo, config.taskDirName(.ref2va), "transformer")),
@@ -316,14 +308,13 @@ pub fn loadTokenizer(
     io: std.Io,
     task_dir: std.Io.Dir,
     repo: std.Io.Dir,
-    model: []const u8,
     progress: *std.Progress.Node,
 ) !zml.tokenizer.Tokenizer {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
 
-    const bytes = try readTokenizerBytes(allocator, io, task_dir, repo, model);
+    const bytes = try readTokenizerBytes(allocator, io, task_dir, repo);
     defer allocator.free(bytes);
     log.info("tokenizer: {d} bytes", .{bytes.len});
     return try .fromBytes(allocator, bytes);
@@ -344,9 +335,8 @@ fn readTokenizerBytes(
     io: std.Io,
     task_dir: std.Io.Dir,
     repo: std.Io.Dir,
-    model: []const u8,
 ) ![]u8 {
-    if (readTokenizerAny(allocator, io, task_dir, repo, model)) |bytes| return bytes else |err| switch (err) {
+    if (readTokenizerAny(allocator, io, task_dir, repo)) |bytes| return bytes else |err| switch (err) {
         error.MissingTokenizer => {},
         else => return err,
     }
@@ -358,9 +348,7 @@ fn readTokenizerAny(
     io: std.Io,
     task_dir: std.Io.Dir,
     repo: std.Io.Dir,
-    model_path: []const u8,
 ) ![]u8 {
-    _ = model_path;
     const nearby = [_]std.Io.Dir{ task_dir, repo };
     for (nearby) |dir| {
         if (readTokenizer(allocator, io, dir)) |bytes| return bytes else |err| switch (err) {

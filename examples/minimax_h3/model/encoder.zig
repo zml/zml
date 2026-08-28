@@ -2,15 +2,17 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_encoder);
 
-pub const Config = config_mod.EncoderConfig;
+pub const Config = config.EncoderConfig;
+
+const rmsNorm = weights.rmsNorm;
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, partitions: anytype) zml.nn.Linear {
-    return .fromStore(store, weight_name, null, partitions, .replicated, .d);
+    return weights.linear(store, weight_name, null, partitions, .replicated);
 }
 
 const Mlp = struct {
@@ -58,8 +60,8 @@ const SelfAttn = struct {
             .k_proj = linear(store, "k_proj.weight", .{ .dout = .model }),
             .v_proj = linear(store, "v_proj.weight", .{ .dout = .model }),
             .o_proj = linear(store, "o_proj.weight", .{ .d = .model }),
-            .q_norm = .init(store.withPrefix("q_norm"), .{.hd}, cfg.rms_norm_eps),
-            .k_norm = .init(store.withPrefix("k_norm"), .{.hd}, cfg.rms_norm_eps),
+            .q_norm = rmsNorm(store.withPrefix("q_norm"), .{.hd}, cfg.rms_norm_eps),
+            .k_norm = rmsNorm(store.withPrefix("k_norm"), .{.hd}, cfg.rms_norm_eps),
             .num_heads = cfg.num_attention_heads,
             .num_kv_heads = cfg.num_key_value_heads,
             .head_dim = cfg.head_dim,
@@ -115,9 +117,9 @@ pub const TransformerLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) TransformerLayer {
         return .{
-            .input_layernorm = .init(store.withPrefix("input_layernorm"), .{.d}, cfg.rms_norm_eps),
+            .input_layernorm = rmsNorm(store.withPrefix("input_layernorm"), .{.d}, cfg.rms_norm_eps),
             .self_attn = .init(store.withPrefix("self_attn"), cfg),
-            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), .{.d}, cfg.rms_norm_eps),
+            .post_attention_layernorm = rmsNorm(store.withPrefix("post_attention_layernorm"), .{.d}, cfg.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp")),
         };
     }
@@ -194,7 +196,7 @@ pub const Model = struct {
 };
 
 fn embedTokens(store: zml.io.TensorStore.View) zml.nn.TokenEmbedding {
-    return .fromStore(store, "embed_tokens.weight", .{ .voc = .replicated, .d = .model });
+    return .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) };
 }
 
 fn rootView(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
@@ -206,7 +208,7 @@ pub const LoadedModel = struct {
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const cfg = try config_mod.loadEncoderConfig(allocator, io, repo);
+        const cfg = try config.loadEncoderConfig(allocator, io, repo);
         log.info("encoder: {d} layers hidden={d} heads={d}", .{
             cfg.used_hidden_layers,
             cfg.hidden_size,

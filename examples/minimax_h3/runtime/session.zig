@@ -13,7 +13,7 @@ const packing = @import("../model/packing.zig");
 const pipeline = @import("pipeline.zig");
 const policy = @import("../core/policy.zig");
 const presentation = @import("../conditioning/presentation.zig");
-const scheduler_mod = @import("../model/scheduler.zig");
+const scheduler = @import("../model/scheduler.zig");
 const vision = @import("../model/vision.zig");
 const weights = @import("../core/weights.zig");
 
@@ -287,7 +287,7 @@ fn denoise(
     text: zml.Buffer,
     text_len: u32,
     layout: packing.Layout,
-    schedules: scheduler_mod.DualSchedule,
+    schedules: scheduler.DualSchedule,
     seed: u64,
     cond: DenoiseCond,
     resident_blocks: u32,
@@ -509,9 +509,9 @@ fn denoise(
         group_tables = try allocator.alloc(zml.Buffer, group_size);
     }
 
-    var apply_v = try zml.FnExe(scheduler_mod.apply).Runner(.{}).init(&compiled.apply_video, allocator, .{});
+    var apply_v = try zml.FnExe(scheduler.apply).Runner(.{}).init(&compiled.apply_video, allocator, .{});
     defer apply_v.deinit(allocator);
-    var apply_a = try zml.FnExe(scheduler_mod.apply).Runner(.{}).init(&compiled.apply_audio, allocator, .{});
+    var apply_a = try zml.FnExe(scheduler.apply).Runner(.{}).init(&compiled.apply_audio, allocator, .{});
     defer apply_a.deinit(allocator);
 
     var video_buf = try weights.fromItems(io, platform, video_shape, video);
@@ -772,13 +772,12 @@ fn loadDitCore(
 }
 
 pub const Generate = struct {
-    opts: pipeline.Options,
     geo: pipeline.Geometry,
-    target: pipeline.Geometry,
+    canvas: pipeline.Geometry,
     tokens: []const u32,
     extras: TextExtras,
     layout: packing.Layout,
-    schedules: scheduler_mod.DualSchedule,
+    schedules: scheduler.DualSchedule,
     cond: DenoiseCond,
     seed: u64,
     resident_blocks: u32,
@@ -808,7 +807,7 @@ pub fn generate(
         io,
         platform,
         models.audio.inner,
-        req.target,
+        req.canvas,
         shardings,
         progress,
     });
@@ -890,9 +889,9 @@ pub fn generate(
     const thwc = try packing.unpatchify(
         allocator,
         latents.video,
-        req.target.latent_t,
-        req.target.latent_h,
-        req.target.latent_w,
+        req.canvas.latent_t,
+        req.canvas.latent_h,
+        req.canvas.latent_w,
         channels,
         models.dit.cfg.patch_size,
     );
@@ -909,7 +908,7 @@ pub fn generate(
         &models.visual,
         &models.visual_store,
         shardings,
-        req.target,
+        req.canvas,
         thwc,
         cache_arg,
         progress,
@@ -925,10 +924,10 @@ pub fn generate(
         &models.audio,
         &models.audio_store,
         shardings,
-        req.target,
+        req.canvas,
         latents.audio,
         progress,
     );
     defer allocator.free(wav);
-    try decode.writeOutputs(allocator, io, out_dir, dest.dir, dest.mp4_name, req.target, rgb, wav);
+    try decode.writeOutputs(allocator, io, out_dir, dest.dir, dest.mp4_name, req.canvas, rgb, wav);
 }

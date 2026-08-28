@@ -116,7 +116,7 @@ fn testPresentation(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualSlices(u32, &.{ 'h', 'e', 'l', 'l', 'o' }, t2.tokens);
     try std.testing.expectEqual(@as(usize, 0), t2.spans.len);
 
-    const fl_specs = [_]presentation.VisualSpec{.{
+    const fl_specs = [_]presentation.VisionClip{.{
         .kind = .image,
         .merged = 4,
         .grid_h = 2,
@@ -132,7 +132,7 @@ fn testPresentation(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 1), fl.spans.len);
 
     const ts = [_]f32{0.25};
-    const ref_specs = [_]presentation.VisualSpec{.{
+    const ref_specs = [_]presentation.VisionClip{.{
         .kind = .video_audio,
         .merged = 2,
         .grid_h = 1,
@@ -209,7 +209,7 @@ fn testPixelCrc(allocator: std.mem.Allocator) !void {
     try std.testing.expect(std.hash.Crc32.hash(up) != std.hash.Crc32.hash(a));
 }
 fn testStandaloneAudio(allocator: std.mem.Allocator) !void {
-    const specs = [_]presentation.VisualSpec{.{
+    const specs = [_]presentation.VisionClip{.{
         .kind = .audio,
         .merged = 0,
         .grid_h = 1,
@@ -222,7 +222,7 @@ fn testStandaloneAudio(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), assembled.spans.len);
 }
 fn testFirstLastFl2va(allocator: std.mem.Allocator) !void {
-    const specs = [_]presentation.VisualSpec{
+    const specs = [_]presentation.VisionClip{
         .{ .kind = .image, .merged = 2, .grid_h = 1, .grid_w = 2 },
         .{ .kind = .image, .merged = 2, .grid_h = 1, .grid_w = 2 },
     };

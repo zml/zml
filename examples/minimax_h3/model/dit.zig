@@ -2,16 +2,15 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
-pub const Config = config_mod.Config;
+pub const Config = config.Config;
 
-fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
-    return .fromStore(store, weight_name, bias_name, partitions, bias_partitions, .d);
-}
+const linear = weights.linear;
+const rmsNorm = weights.rmsNorm;
 
 const SwiGlu = struct {
     fc1: zml.nn.Linear,
@@ -57,8 +56,8 @@ const Attention = struct {
             .k = linear(store, "to_k.weight", null, qkv_part, .replicated),
             .v = linear(store, "to_v.weight", null, qkv_part, .replicated),
             .out = linear(store, "to_out.0.weight", null, out_part, .replicated),
-            .q_norm = .init(store.withPrefix("norm_q"), .{.hd}, cfg.qk_norm_eps),
-            .k_norm = .init(store.withPrefix("norm_k"), .{.hd}, cfg.qk_norm_eps),
+            .q_norm = rmsNorm(store.withPrefix("norm_q"), .{.hd}, cfg.qk_norm_eps),
+            .k_norm = rmsNorm(store.withPrefix("norm_k"), .{.hd}, cfg.qk_norm_eps),
             .num_heads = cfg.num_attention_heads,
             .head_dim = cfg.attention_head_dim,
         };
@@ -317,11 +316,11 @@ pub const TransformerBlock = struct {
         const mlp_store = store.withPrefix("ff");
         const adaln_store = store.withPrefix("adaln_proj");
         return .{
-            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
+            .norm1 = rmsNorm(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
             .attn = .init(attn_store, cfg),
-            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
+            .norm2 = rmsNorm(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
             .mlp = .init(mlp_store),
-            .adaln = .init(adaln_store, cfg.hidden_size, 6, config_mod.modality_count),
+            .adaln = .init(adaln_store, cfg.hidden_size, 6, config.modality_count),
             .hidden_size = cfg.hidden_size,
         };
     }
@@ -355,9 +354,9 @@ const TokenRefinerBlock = struct {
         const attn_store = store.withPrefix("attn");
         const mlp_store = store.withPrefix("ff");
         return .{
-            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
+            .norm1 = rmsNorm(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
             .attn = .init(attn_store, cfg),
-            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
+            .norm2 = rmsNorm(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
             .mlp = .init(mlp_store),
         };
     }
@@ -389,7 +388,7 @@ const TokenRefiner = struct {
         }
         return .{
             .blocks = blocks,
-            .final_norm = .init(store.withPrefix("final_norm"), .{.d}, cfg.final_norm_eps),
+            .final_norm = rmsNorm(store.withPrefix("final_norm"), .{.d}, cfg.final_norm_eps),
         };
     }
 
@@ -420,7 +419,7 @@ const FinalLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View, cfg: Config) FinalLayer {
         return .{
-            .norm = .init(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
+            .norm = rmsNorm(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
             .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size, 2, 1),
             .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
             .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
@@ -708,7 +707,7 @@ pub const LoadedModel = struct {
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        const cfg = try config_mod.loadDitConfig(allocator, io, repo);
+        const cfg = try config.loadDitConfig(allocator, io, repo);
         log.info("dit: {d} layers hidden={d} heads={d} text_dim={d}", .{
             cfg.num_layers,
             cfg.hidden_size,

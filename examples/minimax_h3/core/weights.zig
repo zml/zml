@@ -27,6 +27,32 @@ pub fn populate(
     try loader.await(io);
 }
 
+pub fn linear(
+    store: zml.io.TensorStore.View,
+    weight_name: []const u8,
+    bias_name: ?[]const u8,
+    partitions: anytype,
+    bias_partitions: anytype,
+) zml.nn.Linear {
+    return .init(
+        store.createTensor(weight_name, .{ .dout, .d }, partitions),
+        if (bias_name) |name| store.maybeCreateTensor(name, .{.dout}, bias_partitions) else null,
+        .d,
+    );
+}
+
+pub fn layerNorm(store: zml.io.TensorStore.View, eps: f32) zml.nn.LayerNorm {
+    return .{
+        .weight = store.createTensor("weight", .{.d}, .replicated),
+        .bias = store.maybeCreateTensor("bias", .{.d}, .replicated),
+        .eps = eps,
+    };
+}
+
+pub fn rmsNorm(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) zml.nn.RmsNorm {
+    return .{ .weight = store.createTensor("weight", tagz, .replicated), .eps = eps };
+}
+
 pub fn modelBytes(model: anytype) u64 {
     const Ctx = struct {
         n: u64 = 0,

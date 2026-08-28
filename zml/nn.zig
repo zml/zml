@@ -54,18 +54,6 @@ pub const Linear = struct {
         };
     }
 
-    pub fn fromStore(
-        store: zml.io.TensorStore.View,
-        weight_name: []const u8,
-        bias_name: ?[]const u8,
-        partitions: anytype,
-        bias_partitions: anytype,
-        tag: anytype,
-    ) Linear {
-        const bias = if (bias_name) |name| store.maybeCreateTensor(name, .{.dout}, bias_partitions) else null;
-        return .init(store.createTensor(weight_name, .{ .dout, .d }, partitions), bias, tag);
-    }
-
     pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
         zml.Buffer.deinitAll(Linear, self);
     }
@@ -519,14 +507,6 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
 pub const TokenEmbedding = struct {
     weight: Tensor,
 
-    pub fn fromStore(
-        store: zml.io.TensorStore.View,
-        weight_name: []const u8,
-        partitions: anytype,
-    ) TokenEmbedding {
-        return .{ .weight = store.createTensor(weight_name, .{ .voc, .d }, partitions) };
-    }
-
     pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
         zml.Buffer.deinitAll(TokenEmbedding, self);
     }
@@ -575,20 +555,6 @@ pub const LayerNorm = struct {
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
-    pub fn fromStore(
-        store: zml.io.TensorStore.View,
-        weight_name: []const u8,
-        bias_name: ?[]const u8,
-        partitions: anytype,
-        eps: f32,
-    ) LayerNorm {
-        return .{
-            .weight = store.createTensor(weight_name, .{.d}, partitions),
-            .bias = if (bias_name) |name| store.maybeCreateTensor(name, .{.d}, partitions) else null,
-            .eps = eps,
-        };
-    }
-
     pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
         zml.Buffer.deinitAll(LayerNorm, self);
     }
@@ -615,13 +581,6 @@ pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
 pub const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-6,
-
-    pub fn init(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) RmsNorm {
-        return .{
-            .weight = store.createTensor("weight", tagz, .replicated),
-            .eps = eps,
-        };
-    }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
         zml.Buffer.deinitAll(RmsNorm, self);

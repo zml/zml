@@ -8,8 +8,6 @@ We support the following models, automatically detected from the `model_type` in
 - Qwen 3.5
 - LFM 2.5
 
-MiniMax-H3 (joint video+audio) is `//examples/minimax_h3`, not this binary.
-
 ## Run
 
 To load a model from HuggingFace directly:

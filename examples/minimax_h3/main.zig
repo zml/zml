@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     const first = args.first_frame;
     const last = args.last_frame;
     const refs = try request.refsFromComma(allocator, args.refs);
-    defer request.freeRefs(allocator, refs, false);
+    defer request.freeRefs(allocator, refs);
     const variant = request.inferVariant(first, last, refs) catch |err| return rejectUser(err);
     const encode_prompt = std.mem.trimEnd(u8, args.prompt, "\n");
     request.validate(.{
@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         .refs = refs,
     }) catch |err| return rejectUser(err);
     const canvas = config.pickCanvas(args.size, args.ratio) catch |err| return rejectUser(err);
-    const need_src = canvas.kind == .adaptive or (canvas.kind == .hailuo and variant != .t2va);
+    const need_src = canvas.kind == .adaptive or (canvas.kind == .default and variant != .t2va);
     var src_w: u32 = 0;
     var src_h: u32 = 0;
     const anchor = request.canvasAnchor(first, last, refs);
@@ -240,20 +240,18 @@ pub fn main(init: std.process.Init) !void {
     defer models.deinit(allocator, io);
 
     const opts: pipeline.Options = .{
-        .variant = variant,
         .duration_s = args.duration,
         .width = px.w,
         .height = px.h,
         .frames = frame_plan.aligned,
         .steps = args.steps,
-        .seed = args.seed,
     };
-    const geo = pipeline.Geometry.init(opts, models.dit.cfg);
+    const out_geo = pipeline.Geometry.init(opts, models.dit.cfg);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
-    var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, args.model, &progress) catch |err| return rejectUser(err);
+    var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, &progress) catch |err| return rejectUser(err);
     defer tokenizer.deinit();
     var tok_enc = try tokenizer.encoder();
     defer tok_enc.deinit();
@@ -265,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
             .last_frame = last,
             .refs = refs,
             .prompt = encode_prompt,
-            .geo = geo,
+            .geo = out_geo,
             .models = &models,
             .shardings = shardings,
         })
@@ -273,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
         try conditions.tokenize(allocator, &tok_enc, encode_prompt);
     defer encoded.deinit(allocator);
 
-    const geo_work = geo.withConditions(encoded.conds.target_video_offset, encoded.conds.target_audio_offset);
+    const geo = out_geo.withConditions(encoded.conds.target_video_offset, encoded.conds.target_audio_offset);
     const extras = encoded.extras();
     const text_len: u32 = @intCast(encoded.tokens.len);
     log.info("prompt tokens={d} refs={d} cond_video={d} cond_audio={d}", .{
@@ -286,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
     var packed_run = try pipeline.pack(
         allocator,
         opts,
-        geo_work,
+        geo,
         text_len,
         encoded.tags,
         encoded.conds.videos,
@@ -298,17 +296,17 @@ pub fn main(init: std.process.Init) !void {
         "layout {s} {d}x{d} {d} frames ({d:.1}s) latents {d}x{d}x{d} audio_t={d} seq={d} steps={d} seed={d}",
         .{
             mode,
-            geo_work.pixel_w,
-            geo_work.pixel_h,
-            geo_work.frames,
+            geo.pixel_w,
+            geo.pixel_h,
+            geo.frames,
             play_s,
-            geo_work.latent_t,
-            geo_work.latent_h,
-            geo_work.latent_w,
-            geo_work.audio_t,
+            geo.latent_t,
+            geo.latent_h,
+            geo.latent_w,
+            geo.audio_t,
             packed_run.layout.seqLen(),
             opts.steps,
-            opts.seed,
+            args.seed,
         },
     );
 
@@ -316,7 +314,7 @@ pub fn main(init: std.process.Init) !void {
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
     const mem = memory.plan(.{
-        .geo = .init(geo_work),
+        .geo = .init(geo),
         .layout = packed_run.layout,
         .hidden = models.dit.cfg.hidden_size,
         .steps = @intCast(packed_run.schedules.video.stepCount()),
@@ -374,7 +372,7 @@ pub fn main(init: std.process.Init) !void {
         platform,
         models.dit.inner,
         models.enc.inner,
-        geo_work,
+        geo,
         text_len,
         packed_run.layout.seqLen(),
         compile_policy,
@@ -388,7 +386,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         models.visual.inner,
-        geo_work,
+        out_geo,
         mem.tile_batch,
         shardings,
         &progress,
@@ -399,9 +397,8 @@ pub fn main(init: std.process.Init) !void {
     // Generate
     //
     try session.generate(allocator, io, platform, &models, &compiled, &compiled_vae, &all, &progress, .{
-        .opts = opts,
-        .geo = geo_work,
-        .target = geo,
+        .geo = geo,
+        .canvas = out_geo,
         .tokens = encoded.tokens,
         .extras = extras,
         .layout = packed_run.layout,

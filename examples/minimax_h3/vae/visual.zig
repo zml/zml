@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const vae = @import("geometry.zig");
 const weights = @import("../core/weights.zig");
 
@@ -107,8 +107,11 @@ const FileConfig = struct {
 };
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
-    return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
+    return weights.linear(store, weight_name, bias_name, .replicated, .replicated);
 }
+
+const layerNorm = weights.layerNorm;
+const rmsNorm = weights.rmsNorm;
 
 fn convLinear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
     return .init(
@@ -234,10 +237,10 @@ pub const TransformerBlock = struct {
         const attn_store = store.withPrefix("attn");
         const ff_store = store.withPrefix("ff");
         return .{
-            .norm1 = .init(store.withPrefix("norm1"), .{.d}, cfg.decoder_norm_eps),
+            .norm1 = rmsNorm(store.withPrefix("norm1"), .{.d}, cfg.decoder_norm_eps),
             .attn = .init(attn_store, cfg),
             .scale1 = store.createTensor("scale1", .{.d}, .replicated),
-            .norm2 = .init(store.withPrefix("norm2"), .{.d}, cfg.decoder_norm_eps),
+            .norm2 = rmsNorm(store.withPrefix("norm2"), .{.d}, cfg.decoder_norm_eps),
             .ff = .init(ff_store),
             .scale2 = store.createTensor("scale2", .{.d}, .replicated),
         };
@@ -309,7 +312,7 @@ pub const Model = struct {
             },
             .blocks = blocks,
             .finish = .{
-                .norm_out = .fromStore(dec.withPrefix("norm_out"), "weight", "bias", .replicated, cfg.decoder_norm_eps),
+                .norm_out = layerNorm(dec.withPrefix("norm_out"), cfg.decoder_norm_eps),
                 .proj_out = linear(dec.withPrefix("proj_out"), "weight", "bias"),
                 .cfg = cfg,
             },
@@ -405,7 +408,7 @@ pub const LoadedModel = struct {
     cfg: Config,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
-        var parsed_root = try config_mod.parseOptional(FileConfig, allocator, io, repo, "config.json");
+        var parsed_root = try config.parseOptional(FileConfig, allocator, io, repo, "config.json");
         defer if (parsed_root) |*parsed| parsed.deinit();
         var cfg = Config.official();
         if (parsed_root) |parsed| parsed.value.overlay(&cfg);

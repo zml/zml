@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const vae = @import("geometry.zig");
 const weights = @import("../core/weights.zig");
 
@@ -361,6 +361,8 @@ const AMPBlock = struct {
     }
 };
 
+const layerNorm = weights.layerNorm;
+
 fn conv1x1(store: zml.io.TensorStore.View) zml.nn.Linear {
     const weight = switch (tensorRank(store, "weight")) {
         3 => store.createTensor("weight", .{ .dout, .d, .k }, .replicated),
@@ -566,7 +568,7 @@ const GeGluMlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) GeGluMlp {
         return .{
-            .norm = .fromStore(store.withPrefix("norm"), "weight", "bias", .replicated, 1e-5),
+            .norm = layerNorm(store.withPrefix("norm"), 1e-5),
             .w0 = conv1x1(store.withPrefix("w0")),
             .w1 = conv1x1(store.withPrefix("w1")),
             .w2 = conv1x1(store.withPrefix("w2")),
@@ -650,11 +652,11 @@ const AttnProjection = struct {
 
     pub fn init(store: zml.io.TensorStore.View, in_dim: i64, out_dim: i64) AttnProjection {
         return .{
-            .norm1 = .fromStore(store.withPrefix("norm1"), "weight", "bias", .replicated, 1e-5),
+            .norm1 = layerNorm(store.withPrefix("norm1"), 1e-5),
             .attn = .init(store.withPrefix("attn"), in_dim, out_dim, 8),
             .proj = conv1x1(store.withPrefix("proj")),
-            .norm3 = .fromStore(store.withPrefix("norm3"), "weight", "bias", .replicated, 1e-5),
-            .norm2 = .fromStore(store.withPrefix("norm2"), "weight", "bias", .replicated, 1e-5),
+            .norm3 = layerNorm(store.withPrefix("norm3"), 1e-5),
+            .norm2 = layerNorm(store.withPrefix("norm2"), 1e-5),
             .mlp = .init(store.withPrefix("mlp")),
         };
     }
@@ -778,7 +780,7 @@ pub const LoadedModel = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
         var cfg = Config.official();
-        if (try config_mod.parseOptional(FileConfig, allocator, io, repo, "config.json")) |parsed| {
+        if (try config.parseOptional(FileConfig, allocator, io, repo, "config.json")) |parsed| {
             defer parsed.deinit();
             cfg = parsed.value.resolve();
         }

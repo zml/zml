@@ -33,7 +33,7 @@ pub fn fillEncoderPositions(pos: []f32, seq: u32, spans: []const VisionSpan) voi
     }
 }
 
-pub const VisualSpec = struct {
+pub const VisionClip = struct {
     kind: packing.ReferenceKind,
     merged: u32,
     grid_h: u32,
@@ -123,7 +123,7 @@ pub fn assembleT2va(allocator: std.mem.Allocator, encode_text: anytype, prompt: 
     return b.finish();
 }
 
-pub fn assembleFl2va(allocator: std.mem.Allocator, encode_text: anytype, visuals: []const VisualSpec, prompt: []const u8) !Assembled {
+pub fn assembleFl2va(allocator: std.mem.Allocator, encode_text: anytype, visuals: []const VisionClip, prompt: []const u8) !Assembled {
     var b = Builder.init(allocator);
     errdefer b.deinit();
     for (visuals, 0..) |vis, i| {
@@ -138,7 +138,7 @@ pub fn assembleFl2va(allocator: std.mem.Allocator, encode_text: anytype, visuals
     return b.finish();
 }
 
-pub fn assembleRef2va(allocator: std.mem.Allocator, encode_text: anytype, visuals: []const VisualSpec, prompt: []const u8) !Assembled {
+pub fn assembleRef2va(allocator: std.mem.Allocator, encode_text: anytype, visuals: []const VisionClip, prompt: []const u8) !Assembled {
     var b = Builder.init(allocator);
     errdefer b.deinit();
     var n_pic: u32 = 0;
@@ -184,7 +184,7 @@ pub fn assemble(
     allocator: std.mem.Allocator,
     encode_text: anytype,
     variant: config.Variant,
-    visuals: []const VisualSpec,
+    visuals: []const VisionClip,
     prompt: []const u8,
 ) !Assembled {
     return switch (variant) {

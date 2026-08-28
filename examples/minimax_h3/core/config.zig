@@ -16,7 +16,6 @@ pub const visual_clip_length: u32 = 17;
 pub const visual_latents_per_chunk: u32 = 5;
 pub const visual_cond_timestep: f32 = 0.999;
 pub const default_short_side: u32 = 768;
-pub const default_size: []const u8 = "1344x768";
 pub const default_steps: u32 = 30;
 pub const official_ratios = [_]struct { name: []const u8, w: f32, h: f32 }{
     .{ .name = "21:9", .w = 21, .h = 9 },
@@ -75,6 +74,7 @@ pub fn modeLabel(variant: Variant, first_frame: []const u8, last_frame: []const 
     };
 }
 
+/// HF task folders. Text-to-video and first/last-frame share `FL2VA/`.
 pub const TaskFamily = enum { fl2va, ref2va };
 
 pub fn taskDirName(family: TaskFamily) []const u8 {
@@ -289,7 +289,7 @@ pub fn loadEncoderConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.D
 pub const Size = struct { w: u32, h: u32 };
 
 pub const CanvasSpec = struct {
-    kind: enum { hailuo, adaptive, ratio, pixels },
+    kind: enum { default, adaptive, ratio, pixels },
     ratio_w: f32 = 16,
     ratio_h: f32 = 9,
     pixels: Size = .{ .w = 0, .h = 0 },
@@ -318,7 +318,7 @@ pub fn parseResolution(text: []const u8) error{OpenWeightsAre768P, InvalidResolu
 
 pub fn parseRatio(text: []const u8) error{InvalidCanvas}!CanvasSpec {
     const t = std.mem.trim(u8, text, " \t");
-    if (t.len == 0) return .{ .kind = .hailuo };
+    if (t.len == 0) return .{ .kind = .default };
     if (std.ascii.eqlIgnoreCase(t, "adaptive")) return .{ .kind = .adaptive };
     for (official_ratios) |r| {
         if (std.ascii.eqlIgnoreCase(t, r.name)) return .{ .kind = .ratio, .ratio_w = r.w, .ratio_h = r.h };
@@ -332,10 +332,6 @@ pub fn pickCanvas(size: []const u8, ratio: []const u8) error{ InvalidSize, Inval
     if (s.len != 0 and r.len != 0) return error.ConflictingCanvas;
     if (s.len != 0) return .{ .kind = .pixels, .pixels = try parseWxH(s) };
     return parseRatio(r);
-}
-
-pub fn snapSize(width: u32, height: u32) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
-    return snapSizeBudget(width, height, canvas_max_pixels);
 }
 
 pub fn snapSizeBudget(width: u32, height: u32, max_pixels: u32) error{ InvalidSize, InvalidAspect, SizeTooLarge }!Size {
@@ -361,7 +357,7 @@ pub fn resolveCanvasSpec(
     const short = if (short_edge == 0) default_short_side else short_edge;
     const cap = if (max_pixels == 0) canvas_max_pixels else max_pixels;
     switch (spec.kind) {
-        .hailuo => switch (variant) {
+        .default => switch (variant) {
             .t2va => return resolveCanvas(16, 9, short, cap),
             .fl2va, .ref2va => return resolveFromSource(src_w, src_h, short, cap),
         },
@@ -454,10 +450,6 @@ pub fn visualLatentSize(pixel_h: u32, pixel_w: u32, frames: u32) LatentHw {
         .h = pixel_h / visual_spatial,
         .w = pixel_w / visual_spatial,
     };
-}
-
-pub fn audioLatentLength(duration_s: f32) u32 {
-    return audioLatentFromFrames(alignFrameCount(frameCount(duration_s)));
 }
 
 pub fn videoTokenCount(latent_t: u32, latent_h: u32, latent_w: u32, patch: [3]i64) u32 {

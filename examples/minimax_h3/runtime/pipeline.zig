@@ -3,13 +3,13 @@ const std = @import("std");
 const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const dit = @import("../model/dit.zig");
 const encoder = @import("../model/encoder.zig");
 const packing = @import("../model/packing.zig");
 const policy = @import("../core/policy.zig");
-const sharding_mod = @import("../core/sharding.zig");
-const scheduler_mod = @import("../model/scheduler.zig");
+const scheduler = @import("../model/scheduler.zig");
+const sharding = @import("../core/sharding.zig");
 const vae = @import("../vae/geometry.zig");
 const vision = @import("../model/vision.zig");
 const visual_enc = @import("../vae/visual_encoder.zig");
@@ -18,15 +18,13 @@ const visual_vae = @import("../vae/visual.zig");
 const log = std.log.scoped(.minimax_h3);
 
 pub const Options = struct {
-    variant: config_mod.Variant = .t2va,
     duration_s: f32 = 5.0,
     width: u32 = 1344,
     height: u32 = 768,
     frames: u32 = 0,
     steps: u32 = 30,
-    seed: u64 = 0,
-    video_shift: f32 = config_mod.video_shift,
-    audio_shift: f32 = config_mod.audio_shift,
+    video_shift: f32 = config.video_shift,
+    audio_shift: f32 = config.audio_shift,
 };
 
 pub const Geometry = struct {
@@ -44,11 +42,11 @@ pub const Geometry = struct {
     video_patch_dim: u32,
     audio_dim: u32,
 
-    pub fn init(opts: Options, dit_cfg: config_mod.Config) Geometry {
-        const frames = if (opts.frames != 0) opts.frames else config_mod.alignFrameCount(config_mod.frameCount(opts.duration_s));
-        const lat = config_mod.visualLatentSize(opts.height, opts.width, frames);
-        const audio_t = config_mod.audioLatentFromFrames(frames);
-        const vt = config_mod.videoTokenCount(lat.t, lat.h, lat.w, dit_cfg.patch_size);
+    pub fn init(opts: Options, dit_cfg: config.Config) Geometry {
+        const frames = if (opts.frames != 0) opts.frames else config.alignFrameCount(config.frameCount(opts.duration_s));
+        const lat = config.visualLatentSize(opts.height, opts.width, frames);
+        const audio_t = config.audioLatentFromFrames(frames);
+        const vt = config.videoTokenCount(lat.t, lat.h, lat.w, dit_cfg.patch_size);
         const at = vae.official_audio.tokenCount(audio_t);
         return .{
             .pixel_w = opts.width,
@@ -95,8 +93,8 @@ pub const Compiled = struct {
     block_group: ?zml.FnExe(dit.BlockGroup.forward) = null,
     group_size: u32 = 1,
     finish: zml.FnExe(dit.finish),
-    apply_video: zml.FnExe(scheduler_mod.apply),
-    apply_audio: zml.FnExe(scheduler_mod.apply),
+    apply_video: zml.FnExe(scheduler.apply),
+    apply_audio: zml.FnExe(scheduler.apply),
     encode_embed: zml.FnExe(encoder.EmbedTokens.forward),
     encode_layer: zml.FnExe(encoder.TransformerLayer.forward),
     encode_scatter: ?zml.FnExe(dit.scatterRows) = null,
@@ -210,7 +208,7 @@ fn compileDitBlock(ctx: CompileCtx, dit_model: dit.Model, seq_len: u32, steps: u
     const table = zml.Tensor.init(.{
         .t = steps,
         .n = packing.timestep_slot_count,
-        .mod = config_mod.modality_count,
+        .mod = config.modality_count,
         .k = 6,
         .d = dit_model.cfg.hidden_size,
     }, dt);
@@ -238,7 +236,7 @@ fn compileDitGroup(ctx: CompileCtx, dit_model: dit.Model, seq_len: u32, steps: u
         tab.* = zml.Tensor.init(.{
             .t = steps,
             .n = packing.timestep_slot_count,
-            .mod = config_mod.modality_count,
+            .mod = config.modality_count,
             .k = 6,
             .d = dit_model.cfg.hidden_size,
         }, dt);
@@ -267,8 +265,8 @@ fn compileDitFinish(ctx: CompileCtx, dit_model: dit.Model, geo: Geometry, seq_le
     }});
 }
 
-fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler_mod.apply) {
-    return compileLogged(scheduler_mod.apply, "minimax_h3_apply_video", ctx, .{.{
+fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler.apply) {
+    return compileLogged(scheduler.apply, "minimax_h3_apply_video", ctx, .{.{
         .model = .{ .hold = hold },
         .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
         .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
@@ -278,8 +276,8 @@ fn compileApplyVideo(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnE
     }});
 }
 
-fn compileApplyAudio(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler_mod.apply) {
-    return compileLogged(scheduler_mod.apply, "minimax_h3_apply_audio", ctx, .{.{
+fn compileApplyAudio(ctx: CompileCtx, tokens: u32, dim: u32, hold: i64) !zml.FnExe(scheduler.apply) {
+    return compileLogged(scheduler.apply, "minimax_h3_apply_audio", ctx, .{.{
         .model = .{ .hold = hold },
         .sample = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
         .velocity = .init(.{ .b = 1, .s = tokens, .d = dim }, .f32),
@@ -326,7 +324,7 @@ pub fn compile(
     text_len: u32,
     seq_len: u32,
     compile_policy: CompilePolicy,
-    shardings: sharding_mod.Shardings,
+    shardings: sharding.Shardings,
     progress: *std.Progress.Node,
 ) !Compiled {
     var model = dit_model;
@@ -559,7 +557,7 @@ pub fn compileVae(
     visual: visual_vae.Model,
     geo: Geometry,
     tile_batch: u32,
-    shardings: sharding_mod.Shardings,
+    shardings: sharding.Shardings,
     progress: *std.Progress.Node,
 ) !VaeCompiled {
     var all = shardings.all();
@@ -663,7 +661,7 @@ pub fn compileEncode(
     tile_w: u32,
     need_clip: bool,
     audio_samples: u32,
-    shardings: sharding_mod.Shardings,
+    shardings: sharding.Shardings,
     progress: *std.Progress.Node,
 ) !EncodeCompiled {
     var all = shardings.all();
@@ -707,7 +705,7 @@ pub fn compileVision(
     platform: *const zml.Platform,
     model: vision.Model,
     seq: u32,
-    shardings: sharding_mod.Shardings,
+    shardings: sharding.Shardings,
     progress: *std.Progress.Node,
 ) !vision.Compiled {
     var all = shardings.all();
@@ -756,7 +754,7 @@ pub fn compileVision(
 
 pub const Packed = struct {
     layout: packing.Layout,
-    schedules: scheduler_mod.DualSchedule,
+    schedules: scheduler.DualSchedule,
 
     pub fn deinit(self: *Packed, allocator: std.mem.Allocator) void {
         self.layout.deinit(allocator);
@@ -774,7 +772,7 @@ pub fn pack(
     audios: []const packing.ConditionAudio,
     references: []const packing.ReferenceBlock,
 ) !Packed {
-    const schedules = try scheduler_mod.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
+    const schedules = try scheduler.DualSchedule.init(allocator, opts.steps, opts.video_shift, opts.audio_shift);
     errdefer schedules.deinit(allocator);
     const video_t = schedules.video.timesteps[0];
     const audio_t = schedules.audio.timesteps[0];

@@ -3,7 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const weights = @import("../core/weights.zig");
 const packing = @import("../model/packing.zig");
 const pipeline = @import("pipeline.zig");
@@ -397,7 +397,7 @@ pub fn packConditions(
             .latent_w = v.latent_w,
             .keyframe_index = v.keyframe_index,
         };
-        vlen += config_mod.videoTokenCount(v.latent_t, v.latent_h, v.latent_w, patch) * patchDim(patch);
+        vlen += config.videoTokenCount(v.latent_t, v.latent_h, v.latent_w, patch) * patchDim(patch);
     }
     const vpatches = try allocator.alloc(f32, vlen);
     errdefer allocator.free(vpatches);

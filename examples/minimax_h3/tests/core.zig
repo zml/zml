@@ -26,7 +26,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testTokenizerRelpaths();
     try testWeightEntrypoints();
     try testGroupRefs(allocator);
-    try testSchemaFixtures();
     try testAttentionPolicy();
     try testMemoryPlanExact(allocator);
 }
@@ -267,7 +266,6 @@ fn testFrameGeometry() !void {
     try std.testing.expectEqual(@as(u32, 22), config.alignFrameCount(17));
     try std.testing.expectEqual(@as(u32, 124), config.alignFrameCount(120));
     try std.testing.expectEqual(@as(u32, 37), config.videoLatentFrames(124));
-    try std.testing.expectEqual(@as(u32, 207), config.audioLatentLength(5.0));
     try std.testing.expectEqual(@as(u32, 207), config.audioLatentFromFrames(124));
     const five = try config.resolveFrames(5.0, 0);
     try std.testing.expectEqual(@as(u32, 120), five.raw);
@@ -289,7 +287,7 @@ fn testCanvasPresets() !void {
     try std.testing.expectError(error.InvalidAspect, config.parseSize("100x10"));
     try std.testing.expectError(error.SizeTooLarge, config.parseSize("1920x1080"));
 
-    try std.testing.expectEqual(.hailuo, (try config.parseRatio("")).kind);
+    try std.testing.expectEqual(.default, (try config.parseRatio("")).kind);
     try std.testing.expectEqual(.adaptive, (try config.parseRatio("adaptive")).kind);
     const r169 = try config.parseRatio("16:9");
     try std.testing.expectEqual(.ratio, r169.kind);
@@ -298,21 +296,21 @@ fn testCanvasPresets() !void {
     try std.testing.expectError(error.InvalidCanvas, config.parseRatio("800x1200"));
     try std.testing.expectError(error.InvalidCanvas, config.parseRatio("nope"));
 
-    const t2va = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .t2va, 0, 0, 0, 0);
+    const t2va = try config.resolveCanvasSpec(.{ .kind = .default }, .t2va, 0, 0, 0, 0);
     try std.testing.expectEqual(@as(u32, 1344), t2va.w);
     try std.testing.expectEqual(@as(u32, 768), t2va.h);
-    const ref = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .ref2va, 720, 1264, 0, 0);
+    const ref = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 720, 1264, 0, 0);
     try std.testing.expectEqual(@as(u32, 768), ref.w);
     try std.testing.expectEqual(@as(u32, 1344), ref.h);
-    const rocket = try config.resolveCanvasSpec(.{ .kind = .hailuo }, .fl2va, 1024, 1536, 0, 0);
+    const rocket = try config.resolveCanvasSpec(.{ .kind = .default }, .fl2va, 1024, 1536, 0, 0);
     try std.testing.expectEqual(@as(u32, 768), rocket.w);
     try std.testing.expectEqual(@as(u32, 1152), rocket.h);
     const portrait = try config.resolveCanvasSpec(.{ .kind = .ratio, .ratio_w = 9, .ratio_h = 16 }, .t2va, 0, 0, 0, 0);
     try std.testing.expectEqual(@as(u32, 768), portrait.w);
     try std.testing.expectEqual(@as(u32, 1344), portrait.h);
     try std.testing.expectError(error.T2vaRejectsAdaptive, config.resolveCanvasSpec(.{ .kind = .adaptive }, .t2va, 0, 0, 0, 0));
-    try std.testing.expectError(error.AdaptiveNeedsVisual, config.resolveCanvasSpec(.{ .kind = .hailuo }, .ref2va, 0, 0, 0, 0));
-    try std.testing.expectEqual(.hailuo, (try config.pickCanvas("", "")).kind);
+    try std.testing.expectError(error.AdaptiveNeedsVisual, config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 0, 0, 0, 0));
+    try std.testing.expectEqual(.default, (try config.pickCanvas("", "")).kind);
     try std.testing.expectEqual(.ratio, (try config.pickCanvas("", "16:9")).kind);
     const sized = try config.pickCanvas("800x600", "");
     try std.testing.expectEqual(.pixels, sized.kind);
@@ -339,7 +337,7 @@ fn testCanvasPresets() !void {
 }
 fn testRequest(allocator: std.mem.Allocator) !void {
     const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
-    defer request_mod.freeRefs(allocator, refs, false);
+    defer request_mod.freeRefs(allocator, refs);
     try std.testing.expectEqual(@as(usize, 3), refs.len);
     try std.testing.expectEqual(packing.ReferenceKind.image, refs[0].kind);
     try std.testing.expectEqual(packing.ReferenceKind.video, refs[1].kind);
@@ -359,10 +357,10 @@ fn testRequest(allocator: std.mem.Allocator) !void {
         .variant = .fl2va,
     }));
     const audio_only = try request_mod.refsFromComma(allocator, "a.wav");
-    defer request_mod.freeRefs(allocator, audio_only, false);
+    defer request_mod.freeRefs(allocator, audio_only);
     try std.testing.expectError(error.AudioRefNeedsVisual, request_mod.validateRefs(audio_only));
     const too_many = try request_mod.refsFromComma(allocator, "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png");
-    defer request_mod.freeRefs(allocator, too_many, false);
+    defer request_mod.freeRefs(allocator, too_many);
     try std.testing.expectError(error.TooManyRefImages, request_mod.validateRefs(too_many));
     try std.testing.expectEqual(config.Variant.t2va, try request_mod.inferVariant("", "", &.{}));
     try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "", &.{}));
@@ -390,6 +388,7 @@ fn testCheckpoint() !void {
     try std.testing.expect(repo.inspect(&no_time).has_adaln_proj);
     try std.testing.expect(!repo.inspect(&no_time).has_time);
     try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
 }
 fn testMemoryPlan(allocator: std.mem.Allocator) !void {
     const geo: pipeline.Geometry = .{
@@ -465,13 +464,10 @@ fn testWeightEntrypoints() !void {
 }
 fn testGroupRefs(allocator: std.mem.Allocator) !void {
     const src = try request_mod.refsFromComma(allocator, "a.wav, b.png, c.mp4");
-    defer request_mod.freeRefs(allocator, src, false);
+    defer request_mod.freeRefs(allocator, src);
     try std.testing.expectEqual(packing.ReferenceKind.audio, src[0].kind);
     try std.testing.expectEqual(packing.ReferenceKind.image, src[1].kind);
     try std.testing.expectEqual(packing.ReferenceKind.video, src[2].kind);
-}
-fn testSchemaFixtures() !void {
-    try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
 }
 fn testAttentionPolicy() !void {
     const short = policy_mod.selectAttention(.{

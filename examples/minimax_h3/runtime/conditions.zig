@@ -4,7 +4,7 @@ const zml = @import("zml");
 
 const audio_vae = @import("../vae/audio.zig");
 const repository = @import("repository.zig");
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const encode_mod = @import("encode.zig");
 const geom = @import("../conditioning/geometry.zig");
 const media = @import("media.zig");
@@ -13,7 +13,7 @@ const pipeline = @import("pipeline.zig");
 const presentation = @import("../conditioning/presentation.zig");
 const request_mod = @import("../core/request.zig");
 const session_mod = @import("session.zig");
-const sharding_mod = @import("../core/sharding.zig");
+const sharding = @import("../core/sharding.zig");
 const vae = @import("../vae/geometry.zig");
 const vision = @import("../model/vision.zig");
 const visual_enc = @import("../vae/visual_encoder.zig");
@@ -71,14 +71,14 @@ fn padStereo(allocator: std.mem.Allocator, stereo: []const f32, samples: u32) ![
 }
 
 pub const Prepare = struct {
-    variant: config_mod.Variant,
+    variant: config.Variant,
     first_frame: []const u8,
     last_frame: []const u8,
     refs: []const request_mod.Reference,
     prompt: []const u8,
     geo: pipeline.Geometry,
     models: *repository.Bundle,
-    shardings: sharding_mod.Shardings,
+    shardings: sharding.Shardings,
 };
 
 pub fn prepare(
@@ -206,8 +206,8 @@ pub fn prepare(
         if (item.kind == .video or item.kind == .video_audio) {
             const clip = try media.loadVideoNative(allocator, io, item.path);
             defer allocator.free(clip.rgb);
-            const fps = if (clip.fps > 0) clip.fps else config_mod.video_fps;
-            const indices = try geom.resampleFrameIndices(clip.frames, fps, config_mod.video_fps, allocator);
+            const fps = if (clip.fps > 0) clip.fps else config.video_fps;
+            const indices = try geom.resampleFrameIndices(clip.frames, fps, config.video_fps, allocator);
             defer allocator.free(indices);
             const keep = @min(req.geo.frames, @as(u32, @intCast(indices.len)));
             const own = try geom.videoCanvas(clip.w, clip.h);
@@ -253,14 +253,14 @@ pub fn prepare(
         item.grid_h = spec.grid.h;
         item.grid_w = spec.grid.w;
         if (video) {
-            const sampled = try geom.sampleVideoConditionFrames(item.frames, config_mod.video_fps, config_mod.qwen_video_fps, 2);
+            const sampled = try geom.sampleVideoConditionFrames(item.frames, config.video_fps, config.qwen_video_fps, 2);
             item.temporal = sampled.block_count;
             item.seq = spec.seq * item.temporal;
             item.merged = spec.merged;
             item.timestamps = try allocator.alloc(f32, sampled.block_count);
             const idx_buf = try allocator.alloc(u32, sampled.indices_len);
             defer allocator.free(idx_buf);
-            const nidx = geom.fillVideoConditionIndices(item.frames, config_mod.video_fps, config_mod.qwen_video_fps, idx_buf);
+            const nidx = geom.fillVideoConditionIndices(item.frames, config.video_fps, config.qwen_video_fps, idx_buf);
             _ = geom.fillVideoTimestamps(sampled.block_count, item.timestamps);
             if (item.rgb.len != 0) {
                 var qwen_idx = try allocator.alloc(u32, sampled.block_count * 2);
@@ -281,7 +281,7 @@ pub fn prepare(
     const rate = loaded_audio.cfg.sample_rate;
     var max_audio_samples: u32 = 0;
     for (audios.items) |*item| {
-        const duration_s = @as(f32, @floatFromInt(req.geo.frames)) / config_mod.video_fps;
+        const duration_s = @as(f32, @floatFromInt(req.geo.frames)) / config.video_fps;
         item.stereo = try media.loadAudioOfficial(allocator, io, item.path, duration_s, rate);
         const samples: u32 = @intCast(item.stereo.len / 2);
         const aligned = geom.hopAlign(samples, hop);
@@ -289,7 +289,7 @@ pub fn prepare(
         max_audio_samples = @max(max_audio_samples, aligned);
     }
 
-    var specs: std.ArrayList(presentation.VisualSpec) = .empty;
+    var specs: std.ArrayList(presentation.VisionClip) = .empty;
     defer specs.deinit(allocator);
     for (visuals.items) |item| {
         try specs.append(allocator, .{

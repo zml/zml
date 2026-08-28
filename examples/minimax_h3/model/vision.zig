@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const config_mod = @import("../core/config.zig");
+const config = @import("../core/config.zig");
 const geometry = @import("../conditioning/geometry.zig");
 const vision_sdpa = @import("vision_sdpa.zig");
 const weights = @import("../core/weights.zig");
@@ -84,8 +84,10 @@ pub fn ready(store: zml.io.TensorStore.View) bool {
 }
 
 fn linear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
-    return .fromStore(store, weight_name, bias_name, .replicated, .replicated, .d);
+    return weights.linear(store, weight_name, bias_name, .replicated, .replicated);
 }
+
+const layerNorm = weights.layerNorm;
 
 fn conv3dLinear(store: zml.io.TensorStore.View, weight_name: []const u8, bias_name: ?[]const u8) zml.nn.Linear {
     return .init(
@@ -140,10 +142,10 @@ pub const VisionBlock = struct {
         const attn = store.withPrefix("attn");
         const mlp = store.withPrefix("mlp");
         return .{
-            .norm1 = .fromStore(store.withPrefix("norm1"), "weight", "bias", .replicated, 1e-6),
+            .norm1 = layerNorm(store.withPrefix("norm1"), 1e-6),
             .qkv = linear(attn, "qkv.weight", "qkv.bias"),
             .proj = linear(attn, "proj.weight", "proj.bias"),
-            .norm2 = .fromStore(store.withPrefix("norm2"), "weight", "bias", .replicated, 1e-6),
+            .norm2 = layerNorm(store.withPrefix("norm2"), 1e-6),
             .fc1 = linear(mlp, "linear_fc1.weight", "linear_fc1.bias"),
             .fc2 = linear(mlp, "linear_fc2.weight", "linear_fc2.bias"),
             .num_heads = cfg.num_heads,
@@ -204,7 +206,7 @@ pub const Merger = struct {
 
     pub fn init(store: zml.io.TensorStore.View, merge: i64, postshuffle: bool) Merger {
         return .{
-            .norm = .fromStore(store.withPrefix("norm"), "weight", "bias", .replicated, 1e-6),
+            .norm = layerNorm(store.withPrefix("norm"), 1e-6),
             .fc1 = linear(store, "linear_fc1.weight", "linear_fc1.bias"),
             .fc2 = linear(store, "linear_fc2.weight", "linear_fc2.bias"),
             .merge = merge,
@@ -863,7 +865,7 @@ pub fn applyVisionPositions(pos: []f32, start: u32, tokens: u32, grid_h: u32, gr
 }
 
 pub fn configFromRepo(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, text_hidden: i64) !Config {
-    const parsed = try config_mod.parseJson(FileConfig, allocator, io, repo, "config.json");
+    const parsed = try config.parseJson(FileConfig, allocator, io, repo, "config.json");
     defer parsed.deinit();
     return parsed.value.resolve(text_hidden);
 }

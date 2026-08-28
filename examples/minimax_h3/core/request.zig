@@ -54,7 +54,7 @@ pub fn refsFromComma(allocator: std.mem.Allocator, text: []const u8) ![]Referenc
     return refsFromPaths(allocator, paths);
 }
 
-pub fn refsFromPaths(allocator: std.mem.Allocator, paths: []const []const u8) ![]Reference {
+fn refsFromPaths(allocator: std.mem.Allocator, paths: []const []const u8) ![]Reference {
     var out: std.ArrayList(Reference) = .empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
@@ -73,10 +73,7 @@ fn guessKind(path: []const u8) packing.ReferenceKind {
     return .image;
 }
 
-pub fn freeRefs(allocator: std.mem.Allocator, refs: []Reference, owned_strings: bool) void {
-    if (owned_strings) {
-        for (refs) |r| allocator.free(r.path);
-    }
+pub fn freeRefs(allocator: std.mem.Allocator, refs: []Reference) void {
     allocator.free(refs);
 }
 
