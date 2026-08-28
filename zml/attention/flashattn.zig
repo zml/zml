@@ -119,7 +119,7 @@ fn bufferFromFfiBuffer(ffi_buffer: *const ffi.Buffer) Buffer {
 }
 
 fn modelAxisPartitions(shape: zml.Shape) i32 {
-    const ctx = CompilationContext.current();
+    const ctx = zml.Compiler.current();
     return @intCast(ctx.partitioning.numPartitionsForLogicalAxis(shape, .model) catch 1);
 }
 
