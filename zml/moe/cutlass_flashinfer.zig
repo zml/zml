@@ -88,7 +88,7 @@ pub const Metadata = struct {
         _: std.Io,
         _: *const zml.Platform,
     ) !zml.Bufferized(Metadata) {
-        return;
+        return {};
     }
 };
 
