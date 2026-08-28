@@ -54,6 +54,34 @@ pub const Partitioner = union(enum) {
     }
 };
 
+pub const CollectiveGroups = struct {
+    ids: [Platform.MAX_NUM_DEVICES]i64 = @splat(0),
+    group_count: u16,
+    group_size: u16,
+
+    pub fn full(num_partitions: usize) CollectiveGroups {
+        std.debug.assert(num_partitions > 0);
+        std.debug.assert(num_partitions <= Platform.MAX_NUM_DEVICES);
+
+        var groups: CollectiveGroups = .{
+            .group_count = 1,
+            .group_size = @intCast(num_partitions),
+        };
+        for (groups.ids[0..num_partitions], 0..) |*id, i| id.* = @intCast(i);
+        return groups;
+    }
+
+    pub fn values(self: *const CollectiveGroups) []const i64 {
+        return self.ids[0 .. @as(usize, self.group_count) * self.group_size];
+    }
+
+    pub fn eql(self: *const CollectiveGroups, other: *const CollectiveGroups) bool {
+        return self.group_count == other.group_count and
+            self.group_size == other.group_size and
+            std.mem.eql(i64, self.values(), other.values());
+    }
+};
+
 pub const Partitioning = struct {
     partitioner: Partitioner,
     shardings: []const Sharding,
@@ -127,6 +155,105 @@ pub const Partitioning = struct {
     pub fn numPartitionsForLogicalAxis(self: Partitioning, shape: Shape, logical_axis: anytype) !i64 {
         const sharding = try self.selectSharding(shape);
         return sharding.data.numPartitionsForLogicalAxis(logical_axis);
+    }
+
+    pub fn collectiveGroups(
+        self: Partitioning,
+        shape: Shape,
+        logical_axes: []const Shape.Tag,
+    ) !CollectiveGroups {
+        if (logical_axes.len == 0) return error.EmptyCollectiveAxes;
+
+        const sharding = try self.selectSharding(shape);
+        const data = sharding.data;
+        const view = data.physicalView();
+        var selected: [MAX_MESH_RANK]bool = @splat(false);
+
+        for (logical_axes, 0..) |logical_axis, i| {
+            for (logical_axes[0..i]) |previous| {
+                if (std.mem.eql(
+                    u8,
+                    std.mem.span(previous),
+                    std.mem.span(logical_axis),
+                )) return error.DuplicateCollectiveAxis;
+            }
+
+            var known = false;
+            for (data.logical.axes.slice()) |axis| {
+                known = known or std.mem.eql(
+                    u8,
+                    std.mem.span(axis),
+                    std.mem.span(logical_axis),
+                );
+            }
+            if (!known) return error.UnknownLogicalAxis;
+
+            const bound_axes = data.binding(logical_axis) orelse
+                return error.UnboundLogicalAxis;
+            if (bound_axes.len == 0) return error.UnboundLogicalAxis;
+
+            for (bound_axes) |bound_axis| {
+                var found = false;
+                for (view.axes.slice(), 0..) |*axis, axis_index| {
+                    if (axis.contains(bound_axis)) {
+                        selected[axis_index] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return error.InvalidCollectiveTopology;
+            }
+        }
+
+        var group_count: usize = 1;
+        var group_size: usize = 1;
+        for (view.axes.slice(), selected[0..view.axes.len]) |axis, is_selected| {
+            const size: usize = @intCast(axis.size);
+            if (is_selected) {
+                group_size *= size;
+            } else {
+                group_count *= size;
+            }
+        }
+
+        const num_partitions: usize = @intCast(view.total_devices);
+        if (group_count * group_size != num_partitions or
+            num_partitions > Platform.MAX_NUM_DEVICES)
+        {
+            return error.InvalidCollectiveTopology;
+        }
+
+        var groups: CollectiveGroups = .{
+            .group_count = @intCast(group_count),
+            .group_size = @intCast(group_size),
+        };
+        var member_counts: [Platform.MAX_NUM_DEVICES]u16 = @splat(0);
+        for (0..num_partitions) |partition_id| {
+            var key: usize = 0;
+            for (view.axes.slice(), selected[0..view.axes.len], 0..) |
+                axis,
+                is_selected,
+                axis_index,
+            | {
+                if (is_selected) continue;
+                key = key * @as(usize, @intCast(axis.size)) +
+                    view.axisCoordFromLinearShard(axis_index, partition_id);
+            }
+            if (key >= group_count or
+                @as(usize, member_counts[key]) >= group_size)
+            {
+                return error.InvalidCollectiveTopology;
+            }
+            groups.ids[key * group_size + @as(usize, member_counts[key])] =
+                @intCast(partition_id);
+            member_counts[key] += 1;
+        }
+        for (member_counts[0..group_count]) |count| {
+            if (@as(usize, count) != group_size) {
+                return error.InvalidCollectiveTopology;
+            }
+        }
+        return groups;
     }
 
     pub fn shardableDim(self: Partitioning, shape: Shape, axis: anytype, must_divide: i64) !DimSharding {
@@ -2469,6 +2596,163 @@ test "sharding: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));
+}
+
+test "sharding: collective groups follow logical axes" {
+    const allocator = std.testing.allocator;
+    const devices = [_]ProcessDevice{
+        .{ .id = 41, .process_index = 1 },
+        .{ .id = 13, .process_index = 0 },
+        .{ .id = 37, .process_index = 1 },
+        .{ .id = 7, .process_index = 0 },
+    };
+    const shape = Shape.init(.{ .batch = 8, .hidden = 8 }, .f32)
+        .withPartitioning(.{ .batch = .data, .hidden = .model });
+
+    for ([_]Target{ .cuda, .rocm }) |target| {
+        var physical = try PhysicalMesh.distributedGpu(
+            allocator,
+            target,
+            &devices,
+            2,
+        );
+        defer physical.deinit(allocator);
+
+        const logical: LogicalMesh = .mesh(.{
+            .data = .low_bandwidth,
+            .model = .high_bandwidth,
+            .unbound = .balanced,
+        });
+        const data: Data = try .init(
+            "collective-groups",
+            &physical,
+            logical,
+            .parseBindings(.{
+                .data = .network,
+                .model = .link,
+            }),
+        );
+        const sharding: Sharding = .{ .data = &data };
+        const partitioning: Partitioning = try .init(.shardy, &.{sharding});
+
+        const model = try partitioning.collectiveGroups(
+            shape,
+            &.{Shape.toTag(.model)},
+        );
+        try std.testing.expectEqual(2, model.group_count);
+        try std.testing.expectEqual(2, model.group_size);
+        try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, model.values());
+
+        const data_groups = try partitioning.collectiveGroups(
+            shape,
+            &.{Shape.toTag(.data)},
+        );
+        try std.testing.expectEqual(2, data_groups.group_count);
+        try std.testing.expectEqual(2, data_groups.group_size);
+        try std.testing.expectEqualSlices(
+            i64,
+            &.{ 0, 2, 1, 3 },
+            data_groups.values(),
+        );
+
+        const full = try partitioning.collectiveGroups(
+            shape,
+            &.{ Shape.toTag(.data), Shape.toTag(.model) },
+        );
+        try std.testing.expectEqual(1, full.group_count);
+        try std.testing.expectEqual(4, full.group_size);
+        try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, full.values());
+
+        try std.testing.expectError(
+            error.EmptyCollectiveAxes,
+            partitioning.collectiveGroups(shape, &.{}),
+        );
+        try std.testing.expectError(
+            error.DuplicateCollectiveAxis,
+            partitioning.collectiveGroups(
+                shape,
+                &.{ Shape.toTag(.model), Shape.toTag(.model) },
+            ),
+        );
+        try std.testing.expectError(
+            error.UnknownLogicalAxis,
+            partitioning.collectiveGroups(
+                shape,
+                &.{Shape.toTag(.unknown_axis)},
+            ),
+        );
+        try std.testing.expectError(
+            error.UnboundLogicalAxis,
+            partitioning.collectiveGroups(
+                shape,
+                &.{Shape.toTag(.unbound)},
+            ),
+        );
+    }
+}
+
+test "sharding: collective groups support singleton and folded axes" {
+    const allocator = std.testing.allocator;
+    const devices = [_]ProcessDevice{
+        .{ .id = 9, .process_index = 0 },
+        .{ .id = 3, .process_index = 1 },
+    };
+    var distributed = try PhysicalMesh.distributedGpu(
+        allocator,
+        .cuda,
+        &devices,
+        2,
+    );
+    defer distributed.deinit(allocator);
+    const singleton_data: Data = try .init(
+        "singleton-groups",
+        &distributed,
+        .mesh(.{ .model = .high_bandwidth }),
+        .parseBindings(.{ .model = .link }),
+    );
+    const singleton_sharding: Sharding = .{ .data = &singleton_data };
+    const singleton_partitioning: Partitioning = try .init(
+        .shardy,
+        &.{singleton_sharding},
+    );
+    const singleton = try singleton_partitioning.collectiveGroups(
+        Shape.init(.{ .hidden = 2 }, .f32)
+            .withPartitioning(.{ .hidden = .model }),
+        &.{Shape.toTag(.model)},
+    );
+    try std.testing.expectEqual(2, singleton.group_count);
+    try std.testing.expectEqual(1, singleton.group_size);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, singleton.values());
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ 2, 2, 2 }, .point_to_point);
+    var strategy: Strategy = .parseBindings(.{ .model = .link_x });
+    strategy.addFold(.link_x, &.{ .link_x, .link_z });
+    const folded_data: Data = try .init(
+        "folded-groups",
+        &physical,
+        .mesh(.{ .model = .high_bandwidth }),
+        strategy,
+    );
+    const folded_sharding: Sharding = .{ .data = &folded_data };
+    const folded_partitioning: Partitioning = try .init(
+        .shardy,
+        &.{folded_sharding},
+    );
+    const folded = try folded_partitioning.collectiveGroups(
+        Shape.init(.{ .hidden = 16 }, .f32)
+            .withPartitioning(.{ .hidden = .model }),
+        &.{Shape.toTag(.model)},
+    );
+    try std.testing.expectEqual(2, folded.group_count);
+    try std.testing.expectEqual(4, folded.group_size);
+    try std.testing.expectEqualSlices(
+        i64,
+        &.{ 0, 2, 4, 6, 1, 3, 5, 7 },
+        folded.values(),
+    );
 }
 
 test "sharding: distributed GPU mesh" {

@@ -64,6 +64,20 @@ pub fn dataSharding(platform: *zml.Platform) !zml.Sharding {
     );
 }
 
+pub fn hybridSharding(platform: *zml.Platform) !zml.Sharding {
+    return platform.registerShardingWithStrategy(
+        "data-model",
+        .mesh(.{
+            .data = .low_bandwidth,
+            .model = .high_bandwidth,
+        }),
+        .parseBindings(.{
+            .data = .network,
+            .model = .link,
+        }),
+    );
+}
+
 fn usage() error{InvalidArguments} {
     std.debug.print(
         \\Usage: EXAMPLE COORDINATOR RANK PROCESS_COUNT NAMESPACE

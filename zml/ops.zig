@@ -23,51 +23,53 @@ const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+    const groups: Sharding.CollectiveGroups = .full(
+        @intCast(Compiler.current().partitioning.numPartitions()),
+    );
+    return allReduceWithGroups(inputs, &groups, func);
+}
+
+pub fn allReduceAxes(
+    inputs: anytype,
+    comptime logical_axes: anytype,
+    comptime func: anytype,
+) AllReduceReturnType(@TypeOf(inputs)) {
+    const axes = parseLogicalAxes(logical_axes);
+    const input_tensors = allReduceInputs(inputs);
+    const partitioning = Compiler.current().partitioning;
+    const groups = partitioning.collectiveGroups(
+        input_tensors[0].shape(),
+        &axes,
+    ) catch |err| std.debug.panic(
+        "Unable to construct collective groups for {f}: {}",
+        .{ input_tensors[0].shape(), err },
+    );
+    for (input_tensors[1..]) |input| {
+        const input_groups = partitioning.collectiveGroups(
+            input.shape(),
+            &axes,
+        ) catch |err| std.debug.panic(
+            "Unable to construct collective groups for {f}: {}",
+            .{ input.shape(), err },
+        );
+        stdx.debug.assert(
+            groups.eql(&input_groups),
+            "allReduceAxes inputs resolve different collective groups",
+            .{},
+        );
+    }
+    return allReduceWithGroups(inputs, &groups, func);
+}
+
+fn allReduceWithGroups(
+    inputs: anytype,
+    groups: *const Sharding.CollectiveGroups,
+    comptime func: anytype,
+) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
-
-    const InputsT = @TypeOf(inputs);
-    const n_inputs = switch (@typeInfo(InputsT)) {
-        .@"struct" => |struct_info| b: {
-            if (InputsT == Tensor) break :b 1;
-            if (!struct_info.is_tuple) {
-                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs");
-            }
-            break :b struct_info.fields.len;
-        },
-        .array => |array_info| b: {
-            if (array_info.child != Tensor) {
-                @compileError("zml.ops.allReduce expects [N]Tensor inputs");
-            }
-            break :b array_info.len;
-        },
-        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
-    };
-    comptime stdx.debug.assertComptime(n_inputs > 0, "zml.ops.allReduce requires at least one input tensor", .{});
-
-    const input_tensors: [n_inputs]Tensor = switch (@typeInfo(InputsT)) {
-        .@"struct" => |struct_info| b: {
-            if (InputsT == Tensor) {
-                break :b .{inputs};
-            }
-            if (!struct_info.is_tuple) {
-                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs");
-            }
-
-            var flat_inputs: [n_inputs]Tensor = undefined;
-            meta.collectBuf((struct {
-                pub fn cb(t: Tensor) Tensor {
-                    return t;
-                }
-            }).cb, {}, &inputs, &flat_inputs);
-            break :b flat_inputs;
-        },
-        .array => inputs,
-        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
-    };
-
-    const num_devices = ctx.partitioning.numPartitions();
-    if (num_devices <= 1) return inputs;
+    const input_tensors = allReduceInputs(inputs);
+    if (groups.group_size <= 1) return inputs;
 
     const reducer_block = b: {
         const ArgsTypes: [input_tensors.len]type = @splat(ReduceArgs);
@@ -113,16 +115,6 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         break :b block;
     };
 
-    var replica_group_storage: [Platform.MAX_NUM_DEVICES]i64 = undefined;
-    for (0..@intCast(num_devices)) |i| {
-        replica_group_storage[i] = @intCast(i);
-    }
-    const replica_group_slice = replica_group_storage[0..@intCast(num_devices)];
-    const replica_groups_attr = mlir.Attribute.denseElements(
-        .rankedTensor(&.{ 1, num_devices }, .int(mlir_ctx, .i64)),
-        replica_group_slice,
-    );
-
     const handle = ctx.nextChannelId();
     const channel_handle_attr = dialects.stablehlo.channelHandle(
         mlir_ctx,
@@ -142,7 +134,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         &input_values,
         &result_types,
         reducer_block,
-        replica_groups_attr,
+        replicaGroupsAttribute(mlir_ctx, groups),
         channel_handle_attr,
     ).appendTo(ctx.currentScope().block);
 
@@ -165,6 +157,156 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             }
             break :b out;
         },
+        else => unreachable,
+    };
+}
+
+pub fn allGatherAxes(
+    input: Tensor,
+    comptime logical_axes: anytype,
+    tensor_axis: anytype,
+) Tensor {
+    const axes = parseLogicalAxes(logical_axes);
+    comptime stdx.debug.assertComptime(
+        axes.len == 1,
+        "zml.ops.allGatherAxes supports exactly one logical axis",
+        .{},
+    );
+
+    const ctx = Compiler.current();
+    stdx.debug.assert(
+        ctx.manual_computation_depth > 0,
+        "zml.ops.allGatherAxes must be used inside manualComputation",
+        .{},
+    );
+    const axis = input.axis(tensor_axis);
+    const partition = input.shape().partition(axis);
+    stdx.debug.assert(
+        partition == .axis and std.mem.eql(
+            u8,
+            std.mem.span(partition.axis),
+            std.mem.span(axes[0]),
+        ),
+        "allGatherAxes tensor dimension must be sharded by the selected logical axis",
+        .{},
+    );
+
+    const groups = ctx.partitioning.collectiveGroups(
+        input.shape(),
+        &axes,
+    ) catch |err| std.debug.panic(
+        "Unable to construct allGatherAxes groups for {f}: {}",
+        .{ input.shape(), err },
+    );
+    if (groups.group_size <= 1) return input;
+
+    const gathered_dim = std.math.mul(
+        i64,
+        input.dim(axis),
+        @as(i64, groups.group_size),
+    ) catch @panic("allGatherAxes result dimension overflow");
+    var result_shape = input.shape().setDim(axis, gathered_dim);
+    result_shape._partitioning.set(axis, .replicated);
+
+    const channel_handle = dialects.stablehlo.channelHandle(
+        ctx.mlir_ctx,
+        ctx.nextChannelId(),
+        .collective,
+    );
+    const op = dialects.stablehlo.allGather(
+        ctx.mlir_ctx,
+        input.value(),
+        mlirx.Type.rankedTensor(ctx.mlir_ctx, result_shape),
+        axis,
+        replicaGroupsAttribute(ctx.mlir_ctx, &groups),
+        channel_handle,
+    ).appendTo(ctx.currentScope().block);
+    return Tensor._result(result_shape, op.result(0));
+}
+
+fn replicaGroupsAttribute(
+    ctx: *mlir.Context,
+    groups: *const Sharding.CollectiveGroups,
+) *const mlir.Attribute {
+    return .denseElements(
+        .rankedTensor(
+            &.{
+                @as(i64, groups.group_count),
+                @as(i64, groups.group_size),
+            },
+            .int(ctx, .i64),
+        ),
+        groups.values(),
+    );
+}
+
+fn logicalAxisCount(comptime T: type) usize {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| if (info.is_tuple)
+            info.fields.len
+        else
+            @compileError("collective logical axes must be a tuple"),
+        else => @compileError("collective logical axes must be a tuple"),
+    };
+}
+
+fn parseLogicalAxes(
+    comptime logical_axes: anytype,
+) [logicalAxisCount(@TypeOf(logical_axes))]Shape.Tag {
+    const fields = std.meta.fields(@TypeOf(logical_axes));
+    if (fields.len == 0) {
+        @compileError("collective logical axes cannot be empty");
+    }
+
+    var axes: [fields.len]Shape.Tag = undefined;
+    inline for (fields, 0..) |field, i| {
+        axes[i] = Shape.toTag(@field(logical_axes, field.name));
+    }
+    return axes;
+}
+
+fn allReduceInputCount(comptime InputsT: type) usize {
+    if (InputsT == Tensor) return 1;
+    return switch (@typeInfo(InputsT)) {
+        .@"struct" => |info| if (info.is_tuple)
+            info.fields.len
+        else
+            @compileError(
+                "zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs",
+            ),
+        .array => |info| if (info.child == Tensor)
+            info.len
+        else
+            @compileError("zml.ops.allReduce expects [N]Tensor inputs"),
+        else => @compileError(
+            "zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs",
+        ),
+    };
+}
+
+fn allReduceInputs(
+    inputs: anytype,
+) [allReduceInputCount(@TypeOf(inputs))]Tensor {
+    const InputsT = @TypeOf(inputs);
+    const n_inputs = comptime allReduceInputCount(InputsT);
+    comptime stdx.debug.assertComptime(
+        n_inputs > 0,
+        "zml.ops.allReduce requires at least one input tensor",
+        .{},
+    );
+    if (InputsT == Tensor) return .{inputs};
+
+    return switch (@typeInfo(InputsT)) {
+        .@"struct" => b: {
+            var flat_inputs: [n_inputs]Tensor = undefined;
+            meta.collectBuf((struct {
+                pub fn cb(t: Tensor) Tensor {
+                    return t;
+                }
+            }).cb, {}, &inputs, &flat_inputs);
+            break :b flat_inputs;
+        },
+        .array => inputs,
         else => unreachable,
     };
 }

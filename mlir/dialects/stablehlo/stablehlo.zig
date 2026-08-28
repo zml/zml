@@ -1488,3 +1488,25 @@ pub fn allReduce(
         .location = .unknown(ctx),
     });
 }
+
+pub fn allGather(
+    ctx: *mlir.Context,
+    input: *const mlir.Value,
+    result_type: *const mlir.Type,
+    dimension: i64,
+    replica_groups: *const mlir.Attribute,
+    channel_handle: *const mlir.Attribute,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.all_gather", .{
+        .operands = .{ .flat = &.{input} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            .named(ctx, "all_gather_dim", .int(ctx, .i64, dimension)),
+            .named(ctx, "replica_groups", replica_groups),
+            .named(ctx, "channel_handle", channel_handle),
+            .named(ctx, "use_global_device_ids", .unit(ctx)),
+        },
+        .verify = true,
+        .location = .unknown(ctx),
+    });
+}

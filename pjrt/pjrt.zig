@@ -27,6 +27,7 @@ pub const meta = struct {
     pub fn structSize(comptime T: type) usize {
         // unsafe on purpose, we want this to fail if that ever changes
         const typedef_name = comptime blk: {
+            @setEvalBranchQuota(10_000);
             const needle = ".struct_";
             const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
             break :blk @typeName(T)[idx + needle.len ..];
