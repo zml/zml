@@ -1185,6 +1185,52 @@ pub const Tensor = struct {
         try std.testing.expectEqual(@as(f32, 120), try res.getValue(f32, std.testing.io));
     }
 
+    test "conv3d stride padding multi-channel" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ 1, 2, 3, 3, 4 }, .f32);
+        const kernel: Tensor = .init(.{ 2, 2, 2, 2, 2 }, .f32);
+        const Local = struct {
+            fn fwd(x: Tensor, w: Tensor) Tensor {
+                return x.conv3d(w, .{
+                    .window_strides = &.{ 1, 2, 1 },
+                    .padding = &.{ 1, 0, 0, 0, 0, 1 },
+                });
+            }
+        };
+
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ input, kernel }, .{});
+        defer exe.deinit();
+
+        var xs: [72]f32 = undefined;
+        for (&xs, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+        var ws: [32]f32 = undefined;
+        for (&ws, 0..) |*v, i| v.* = @floatFromInt(32 - i);
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
+        defer x_buf.deinit();
+        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&ws));
+        defer w_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ x_buf, w_buf });
+        defer res.deinit();
+        try std.testing.expectEqualSlices(i64, &.{ 1, 2, 3, 1, 4 }, res.shape().dims());
+        const got = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer got.free(std.testing.allocator);
+        const want = [_]f32{
+            3276,  3456,  3636,  1912,
+            9400,  9792,  10184, 5312,
+            14104, 14496, 14888, 7712,
+            524,   576,   628,   376,
+            2360,  2496,  2632,  1472,
+            3992,  4128,  4264,  2336,
+        };
+        try std.testing.expectEqual(@as(usize, want.len), got.items(f32).len);
+        for (want, got.items(f32)) |w, g| {
+            try std.testing.expectApproxEqAbs(w, g, 1e-3);
+        }
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp("add", dialects.stablehlo.add)(self, other);
