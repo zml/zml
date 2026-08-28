@@ -373,6 +373,14 @@ pub const TensorRegistry = struct {
         return self.tensors.iterator();
     }
 
+    pub fn metadataString(self: *const TensorRegistry, key: []const u8) ?[]const u8 {
+        const value = self.metadata.get(key) orelse return null;
+        return switch (value) {
+            .string => |string| string,
+            else => null,
+        };
+    }
+
     pub fn totalBytes(self: *TensorRegistry) u64 {
         var total: u64 = 0;
 
