@@ -1,6 +1,7 @@
 //! Runnable ZML equivalent of ../../../../gpu_example.py.
 
 const std = @import("std");
+const log = std.log;
 
 const distributed_example = @import("distributed_example");
 
@@ -31,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     if (devices_per_process[0] != 2 or devices_per_process[1] != 2) {
         return error.UnexpectedDeviceOwnership;
     }
-
+    log.info("\n{f}", .{platform.fmtVerbose()});
     std.debug.print(
         "process id = {d}\nglobal devices = {d}\nlocal devices = {d}\n",
         .{
