@@ -247,6 +247,9 @@ fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backen
     if (q_b and (q.dim(.b) != k.dim(.b) or q.dim(.b) != v.dim(.b) or q.dim(.b) <= 0)) return false;
 
     if (q.dim(.q) <= 0 or k.dim(.k) <= 0 or v.dim(.k) != k.dim(.k)) return false;
+    // Dense FA2 varlen is only numerically validated for Q==K. Unequal
+    // lengths disagree with SDPA on CUDA; use vanilla until that path is fixed.
+    if (q.dim(.q) != k.dim(.k)) return false;
     if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
     if (@rem(q.dim(.h), k.dim(.h)) != 0) return false;
     if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
@@ -423,6 +426,27 @@ test "dense attention: gqa causal hd=128" {
     try testDense(
         .init(.{ .q = 16, .h = 16, .hd = 128 }, .bf16),
         .init(.{ .k = 16, .h = 4, .hd = 128 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: Q != K" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 64 }, .bf16),
+        .init(.{ .b = 1, .k = 32, .h = 8, .hd = 64 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 16, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 16, .h = 4, .hd = 64 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: f16 causal gqa" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 64 }, .f16),
+        .init(.{ .b = 1, .k = 16, .h = 4, .hd = 64 }, .f16),
         true,
     );
 }
