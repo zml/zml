@@ -2,7 +2,7 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "distributed_identity",
+    name = "distributed_all_reduce",
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -13,5 +13,5 @@ zig_binary(
 
 build_test(
     name = "test",
-    targets = [":distributed_identity"],
+    targets = [":distributed_all_reduce"],
 )

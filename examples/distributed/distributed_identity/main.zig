@@ -1,73 +1,13 @@
 const std = @import("std");
 
+const distributed_example = @import("distributed_example");
 const zml = @import("zml");
-
-const Arguments = struct {
-    coordinator_address: std.Io.net.IpAddress,
-    rank: usize,
-    process_count: usize,
-    namespace: []const u8,
-};
 
 const Increment = struct {
     pub fn forward(input: zml.Tensor) zml.Tensor {
         return input.addConstant(1).withPartitioning(.{ .data = .data });
     }
 };
-
-fn usage() void {
-    std.debug.print(
-        \\Usage: distributed_identity COORDINATOR RANK PROCESS_COUNT NAMESPACE
-        \\
-        \\Example (one process and two GPUs per host):
-        \\  rank 0: distributed_identity 100.80.27.10:8910 0 2 run-001
-        \\  rank 1: distributed_identity 100.80.27.10:8910 1 2 run-001
-        \\
-    , .{});
-}
-
-fn parseArguments(init: std.process.Init) !Arguments {
-    var iterator = init.minimal.args.iterate();
-    _ = iterator.next();
-
-    const address_text = iterator.next() orelse {
-        usage();
-        return error.MissingCoordinatorAddress;
-    };
-    const rank_text = iterator.next() orelse {
-        usage();
-        return error.MissingRank;
-    };
-    const process_count_text = iterator.next() orelse {
-        usage();
-        return error.MissingProcessCount;
-    };
-    const namespace = iterator.next() orelse {
-        usage();
-        return error.MissingNamespace;
-    };
-    if (iterator.next() != null) {
-        usage();
-        return error.TooManyArguments;
-    }
-
-    const rank = try std.fmt.parseInt(usize, rank_text, 10);
-    const process_count = try std.fmt.parseInt(
-        usize,
-        process_count_text,
-        10,
-    );
-    if (process_count == 0 or rank >= process_count) {
-        return error.InvalidRank;
-    }
-
-    return .{
-        .coordinator_address = try .parseLiteral(address_text),
-        .rank = rank,
-        .process_count = process_count,
-        .namespace = namespace,
-    };
-}
 
 fn verifyLocalOutput(
     allocator: std.mem.Allocator,
@@ -105,31 +45,12 @@ fn verifyLocalOutput(
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const arguments = try parseArguments(init);
+    const job = try distributed_example.Job.parse(init);
 
-    var platform = try zml.Platform.init(allocator, io, .cuda, .{
-        .distributed = .{
-            .coordinator_address = arguments.coordinator_address,
-            .process_index = arguments.rank,
-            .process_count = arguments.process_count,
-            .namespace = arguments.namespace,
-            .local_device_ids = &.{ 0, 1 },
-        },
-        .xla_gpu = .{
-            .allocator = .{
-                .bfc = .{ .preallocate = false },
-            },
-        },
-    });
+    var platform = try job.openPlatform(allocator, io);
     defer platform.deinit(allocator, io);
 
-    const data_sharding = try platform.registerShardingWithStrategy(
-        "distributed-data",
-        .mesh(.{ .data = .low_bandwidth }),
-        .parseBindings(.{
-            .data = .{ .network, .link },
-        }),
-    );
+    const data_sharding = try distributed_example.dataSharding(platform);
     const global_shape = zml.Shape.init(.{ .data = 16 }, .f32)
         .withPartitioning(.{ .data = .data });
     const host_input = try zml.Slice.alloc(allocator, global_shape);
@@ -177,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     try verifyLocalOutput(
         allocator,
         io,
-        arguments.rank,
+        job.process_index,
         host_input,
         &output,
     );
@@ -205,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
     try verifyLocalOutput(
         allocator,
         io,
-        arguments.rank,
+        job.process_index,
         host_input,
         &async_output,
     );
@@ -214,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
         "rank={d} global_devices={d} local_devices={d} " ++
             "global_shards={d} local_shards={d}\n",
         .{
-            arguments.rank,
+            job.process_index,
             platform.globalDevices().len,
             platform.addressableDevices().len,
             output.numGlobalShards(),
