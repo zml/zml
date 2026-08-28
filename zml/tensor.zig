@@ -233,7 +233,7 @@ pub const Tensor = struct {
         ).appendTo(currentBlock());
 
         const res = _result(self._shape, op.result(0));
-        ctx.currentScope().id_to_output_memory_kind.put(ctx.currentScope().arena.allocator(), res.id, kind) catch unreachable;
+        ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
 
@@ -248,10 +248,10 @@ pub const Tensor = struct {
 
         var copy = flat_tensors;
         meta.visitFlatStruct(struct {
-            fn onMemory(k: Memory.Kind, x: *Tensor) void {
+            fn toMemory(k: Memory.Kind, x: *Tensor) void {
                 x.* = x.toMemory(k);
             }
-        }.onMemory, kind, &copy);
+        }.toMemory, kind, &copy);
         return copy;
     }
 
@@ -268,7 +268,7 @@ pub const Tensor = struct {
             return self;
         }
 
-        ctx.currentScope().id_to_input_memory_kind.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
+        ctx.currentScope().id_to_memory.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
 
         return self;
     }
@@ -314,11 +314,9 @@ pub const Tensor = struct {
     /// This will fail if used outside of a Compiler context.
     pub fn value(self: Tensor) *const mlir.Value {
         const scope = Compiler.current().currentScope();
-        if (scope.id_to_argument.get(self.id)) |argument_index| {
-            return scope.block.argument(argument_index);
-        } else if (self._value) |v| {
-            return v;
-        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
+        return scope.id_to_argument.get(self.id) orelse
+            self._value orelse
+            @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
     }
 
     /// Tell PJRT compiler that memory should be reuse between the two tensors.
@@ -331,10 +329,7 @@ pub const Tensor = struct {
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
-        if (scope.id_to_argument.get(origin.id)) |argument_index| {
-            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-            gop.value_ptr.* = argument_index;
-        } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+        if (scope.id_to_donation.get(origin.id)) |origin_donation| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
             gop.value_ptr.* = origin_donation;
         }
@@ -4507,20 +4502,6 @@ pub const Tensor = struct {
 
     fn currentBlock() *mlir.Block {
         return Compiler.current().currentScope().block;
-    }
-
-    /// Returns the donation data of the tensor.
-    pub fn donation(self: Tensor) ?usize {
-        return Compiler.current().currentScope().id_to_donation.get(self.id);
-    }
-
-    /// Returns the output memory kind of the tensor.
-    pub fn outputMemoryKind(self: Tensor) Memory.Kind {
-        return Compiler.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
-    }
-
-    pub fn inputMemoryKind(self: Tensor) ?Memory.Kind {
-        return Compiler.current().currentScope().id_to_input_memory_kind.get(self.id);
     }
 };
 

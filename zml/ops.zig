@@ -416,10 +416,9 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         const scope = compiler.pushBlock(sort_block);
         defer scope.pop();
 
-        const arena = scope.arena.allocator();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(arena, args[i].left.id, 2 * i) catch @panic("OOM");
-            scope.id_to_argument.put(arena, args[i].right.id, 2 * i + 1) catch @panic("OOM");
+            scope.registerTensorAsBlockArgument(args[i].left.id, 2 * i);
+            scope.registerTensorAsBlockArgument(args[i].right.id, 2 * i + 1);
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -507,9 +506,8 @@ pub fn @"while"(
         defer scope.pop();
 
         // Interpret initial_state as the block argument
-        scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.registerTensorAsBlockArgument(input.id, i);
         }
 
         const cond: Tensor = captured_context.cond(initial_state);
@@ -529,7 +527,7 @@ pub fn @"while"(
         // Interpret operands as the block argument
         scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.registerTensorAsBlockArgument(input.id, i);
         }
 
         const result: While.State = captured_context.body(initial_state);

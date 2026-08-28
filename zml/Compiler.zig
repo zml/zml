@@ -90,10 +90,9 @@ pub const Error = std.mem.Allocator.Error ||
 pub const Scope = struct {
     compiler: *Compiler,
     block: *mlir.Block,
-    id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
+    id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, *const mlir.Value),
     id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
-    id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
-    id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
+    id_to_memory: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
     arena: std.heap.ArenaAllocator,
 
     pub fn initFromBlock(compiler: *Compiler, block: *mlir.Block) Scope {
@@ -103,8 +102,7 @@ pub const Scope = struct {
             .block = block,
             .id_to_argument = .empty,
             .id_to_donation = .empty,
-            .id_to_output_memory_kind = .empty,
-            .id_to_input_memory_kind = .empty,
+            .id_to_memory = .empty,
             .arena = arena,
         };
     }
@@ -118,7 +116,7 @@ pub const Scope = struct {
     }
 
     pub fn registerTensorAsBlockArgument(scope: *Scope, id: Tensor.Id, arg_id: usize) void {
-        scope.id_to_argument.put(scope.arena.allocator(), id, arg_id) catch @panic("OOM");
+        scope.id_to_argument.put(scope.arena.allocator(), id, scope.block.argument(arg_id)) catch @panic("OOM");
     }
 };
 
@@ -335,6 +333,7 @@ pub fn compile(
         loaded_executable,
         @intCast(num_devices),
         num_partitions,
+        // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
         result.input_info.items(.sharding),
@@ -383,13 +382,15 @@ const EmitMlirResult = struct {
 };
 
 pub const TensorInfo = struct {
+    id: Tensor.Id,
     shape: Shape,
     sharding: Sharding,
     value: *const mlir.Value,
-    donation: ?usize,
-    memory_kind: ?Memory.Kind,
 
-    pub fn attributes(info: TensorInfo, arena: std.mem.Allocator, compiler: *const Compiler) error{OutOfMemory}!AttributeList {
+    // Only used for input tensors, stores which output tensor ends up with their buffer
+    aliasing_output: ?u32 = null,
+
+    pub fn attributes(info: TensorInfo, arena: std.mem.Allocator, compiler: *const Compiler, scope: *const Scope) error{OutOfMemory}!AttributeList {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
@@ -400,13 +401,19 @@ pub const TensorInfo = struct {
         };
         attrs.appendAssumeCapacity(.named(mlir_ctx, name, sharding_attr));
 
-        const memory_kind = info.memory_kind orelse .device;
-        if (memory_kind != .device) {
+        const memory = scope.id_to_memory.get(info.id) orelse .device;
+        if (memory != .device) {
             attrs.appendAssumeCapacity(.named(
                 mlir_ctx,
                 "mhlo.memory_kind",
-                .string(mlir_ctx, compiler.platform.memoryKind(memory_kind)),
+                .string(mlir_ctx, compiler.platform.memoryKind(memory)),
             ));
+        }
+
+        if (info.aliasing_output) |output_index| {
+            attrs.appendAssumeCapacity(
+                .named(mlir_ctx, "tf.aliasing_output", .int(mlir_ctx, .i32, output_index)),
+            );
         }
 
         return attrs;
@@ -425,7 +432,7 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     const fn_scope: *Scope = compiler.pushBlock(block);
     defer fn_scope.pop();
 
-    var input_info = try collectInputInfo(compiler, fn_scope, &args);
+    var input_info = try createBlockArguments(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
 
     var result = result: {
@@ -442,8 +449,8 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     return try finalizeMlirFunc(compiler, fn_scope, input_info, output_info);
 }
 
-fn collectInputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOfMemory}!std.MultiArrayList(TensorInfo) {
-    const CollectInputInfoCb = struct {
+fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOfMemory}!std.MultiArrayList(TensorInfo) {
+    const CreateBlockArgumentsCb = struct {
         compiler: *Compiler,
         scope: *Scope,
 
@@ -454,10 +461,12 @@ fn collectInputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOfM
             const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, tensor._shape);
 
             const value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
-            const gop = ctx.scope.id_to_argument.getOrPut(ctx.scope.arena.allocator(), tensor.id) catch unreachable;
+            const gop = ctx.scope.id_to_argument.getOrPutValue(ctx.scope.arena.allocator(), tensor.id, value) catch @panic("OOM");
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
 
-            gop.value_ptr.* = ctx.current_argument_id;
+            // Associate each input argument with their own buffer
+            ctx.scope.id_to_donation.putNoClobber(ctx.scope.arena.allocator(), tensor.id, ctx.current_argument_id) catch @panic("OOM");
+
             defer ctx.current_argument_id += 1;
 
             const input_sharding = ctx.compiler.partitioning.selectSharding(tensor._shape) catch |err| switch (err) {
@@ -467,19 +476,18 @@ fn collectInputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOfM
                 ),
             };
             try ctx.infos.append(ctx.compiler.allocator, .{
+                .id = tensor.id,
                 .shape = tensor._shape,
                 .sharding = input_sharding,
                 .value = value,
-                .donation = ctx.current_argument_id,
-                .memory_kind = ctx.scope.id_to_input_memory_kind.get(tensor.id),
             });
         }
     };
 
-    var context: CollectInputInfoCb = .{ .compiler = compiler, .scope = scope };
+    var context: CreateBlockArgumentsCb = .{ .compiler = compiler, .scope = scope };
     errdefer context.infos.deinit(compiler.allocator);
 
-    try meta.visit(CollectInputInfoCb.cb, &context, v);
+    try meta.visit(CreateBlockArgumentsCb.cb, &context, v);
 
     return context.infos;
 }
@@ -492,18 +500,16 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
-            const value = if (ctx.scope.id_to_argument.get(tensor.id)) |arg_id|
-                ctx.scope.block.argument(arg_id)
-            else
-                tensor._value orelse @panic("no value found for output tensor");
+            const value = ctx.scope.id_to_argument.get(tensor.id) orelse
+                tensor._value orelse
+                @panic("no value found for output tensor");
 
             try ctx.infos.append(ctx.compiler.allocator, .{
+                .id = tensor.id,
                 .shape = tensor._shape,
                 // Note: the panic should have been triggered during emitMlir or collectInputInfo
                 .sharding = ctx.compiler.partitioning.selectSharding(tensor._shape) catch @panic("failed to resolve output sharding"),
                 .value = value,
-                .donation = ctx.scope.id_to_donation.get(tensor.id),
-                .memory_kind = ctx.scope.id_to_output_memory_kind.get(tensor.id) orelse .device,
             });
         }
     };
@@ -524,33 +530,38 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     const fn_return = dialects.func.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
     _ = fn_return.appendTo(fn_scope.block);
 
-    // Input sharding/memory attributes
-    const input_attributes = try arena.alloc(AttributeList, input_info.len);
-    for (0.., input_attributes) |i, *input_attrs| {
-        input_attrs.* = try input_info.get(i).attributes(arena, compiler);
-    }
+    // Resolve donations
+    for (output_info.items(.id), 0..) |output_id, output_index| {
+        if (fn_scope.id_to_donation.get(output_id)) |donated_input| {
+            const aliasing_output: *?u32 = &input_info.items(.aliasing_output)[donated_input];
+            if (aliasing_output.*) |previous_aliased_output| {
+                std.debug.panic("Input {d} buffer {} was reused twice with `reuseBuffer` for output {} and output {}. Expected `reuseBuffer` to be called at most once", .{ donated_input, input_info.items(.shape)[donated_input], previous_aliased_output, output_index });
+            }
 
-    // Input donation attributes
-    for (output_info.items(.donation), 0..) |donation, index| {
-        if (donation) |argument_index| {
-            input_attributes[argument_index].appendAssumeCapacity(
-                .named(mlir_ctx, "tf.aliasing_output", .int(mlir_ctx, .i32, index)),
-            );
+            aliasing_output.* = @intCast(output_index);
         }
     }
 
+    // Input sharding/memory/aliasing attributes
+    const input_attributes = try arena.alloc(*const mlir.Attribute, input_info.len);
+    for (0.., input_attributes) |i, *input_attrs| {
+        const attrs_list = try input_info.get(i).attributes(arena, compiler, fn_scope);
+        input_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
+    }
+
     // Output sharding/memory attributes
-    const output_attributes = try arena.alloc(AttributeList, output_info.len);
+    const output_attributes = try arena.alloc(*const mlir.Attribute, output_info.len);
     for (0.., output_attributes) |i, *output_attrs| {
-        output_attrs.* = try output_info.get(i).attributes(arena, compiler);
+        const attrs_list = try output_info.get(i).attributes(arena, compiler, fn_scope);
+        output_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
     }
 
     const mlir_func = dialects.func.func(mlir_ctx, .{
         .name = "main",
         .block = fn_scope.block,
         .location = .unknown(mlir_ctx),
-        .args_attributes = try finalizeAttributeList(arena, mlir_ctx, input_attributes),
-        .results_attributes = try finalizeAttributeList(arena, mlir_ctx, output_attributes),
+        .args_attributes = input_attributes,
+        .results_attributes = output_attributes,
         .verify = false,
     });
 
@@ -559,14 +570,6 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         .input_info = input_info,
         .output_info = output_info,
     };
-}
-
-fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) error{OutOfMemory}![]*const mlir.Attribute {
-    const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
-    for (res, attributes) |*r, attr| {
-        r.* = .dict(mlir_ctx, attr.constSlice());
-    }
-    return res;
 }
 
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
