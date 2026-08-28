@@ -202,20 +202,25 @@ pub const DenseOpts = struct {
     is_causal: bool = false,
 };
 
-/// Dense attention (causal or bidirectional). FA2 / FA3 on CUDA when selected;
-/// `zml.nn.sdpa` is the fallback for every other backend.
+/// Dense attention (causal or bidirectional).
+/// CUDA FA2 / FA3 only when that backend supports `.hd`; otherwise `zml.nn.sdpa`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
-    return switch (backend) {
-        .vanilla, .attnd, .nki, .metal_fa => blk: {
-            const mask = if (opts.is_causal)
-                zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
-            else
-                null;
-            break :blk zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
-        },
-        .cuda_fa2 => flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
-        .cuda_fa3 => flashattn.fa3.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+    const flash = switch (backend) {
+        .cuda_fa2, .cuda_fa3 => backend.supportsHeadDim(q.dim(.hd)),
+        else => false,
     };
+    if (flash) {
+        return switch (backend) {
+            .cuda_fa2 => flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+            .cuda_fa3 => flashattn.fa3.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+            else => unreachable,
+        };
+    }
+    const mask = if (opts.is_causal)
+        zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
+    else
+        null;
+    return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
 }
 
 test "attention: q=1,qh=64,kh=8" {
@@ -316,7 +321,7 @@ test "dense attention: supported head dimensions" {
     }
 }
 
-test "dense attention: hd=72 stays off flash" {
+test "dense attention: hd=72 falls back to sdpa" {
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 72));
     try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 72));
     try testDense(
@@ -383,8 +388,8 @@ pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void 
 
     const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
     for (backends) |backend| {
-        if (!backend.isAvailable(platform)) continue;
-        if (!backend.supportsHeadDim(q_shape.dim(.hd))) continue;
+        const supported = backend.supportsHeadDim(q_shape.dim(.hd));
+        if (supported and !backend.isAvailable(platform)) continue;
         const exe = try platform.compileFn(
             allocator,
             io,

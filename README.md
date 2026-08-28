@@ -127,6 +127,7 @@ bazel test //zml:test
 # Examples
 
 - [`examples/llm`](./examples/llm): unified LLM CLI for Llama, Qwen, and LFM
+- [`examples/minimax_h3`](./examples/minimax_h3): MiniMax-H3 video+audio (T2VA / FL2VA / Ref2VA)
 - [`examples/mnist`](./examples/mnist): smallest end-to-end model run
 - [`examples/sharding`](./examples/sharding): logical mesh, partitioners, shard-local execution, profiler output
 - [`examples/io`](./examples/io): inspect and load local, `hf://`, `https://`, and `s3://` repositories through the VFS layer

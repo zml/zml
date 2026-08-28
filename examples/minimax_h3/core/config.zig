@@ -226,6 +226,11 @@ pub const EncoderFileConfig = struct {
     }
 };
 
+/// Early full-canvas gate (short side > `preview_short_side`).
+/// The detailed planner's denoise estimate can look safe on a 24 GiB card
+/// (streamed DiT). That number omits vision encode, compile, and allocator
+/// overhead, and `memory.plan` runs after visual conditioning, so it cannot
+/// replace this check. Measured 768P T2VA HBM on GB300 was ~77 GiB.
 pub const full_canvas_min_device_bytes: u64 = 80 * 1024 * 1024 * 1024;
 
 pub fn checkDuration(seconds: f32) !void {

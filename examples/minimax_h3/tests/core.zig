@@ -22,6 +22,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testRequest(allocator);
     try testCheckpoint();
     try testMemoryPlan(allocator);
+    try testFullCanvasFloor(allocator);
     try testOfficialPin();
     try testTokenizerRelpaths();
     try testWeightEntrypoints();
@@ -444,6 +445,54 @@ fn testMemoryPlan(allocator: std.mem.Allocator) !void {
         .tp = 2,
     });
     try std.testing.expect(!full.safe);
+    try std.testing.expectEqualStrings("requested size is below the full-canvas device-memory floor", full.reason);
+}
+fn testFullCanvasFloor(allocator: std.mem.Allocator) !void {
+    const dit_cfg = config.Config.official();
+    const geo = pipeline.Geometry.init(.{
+        .width = 1344,
+        .height = 768,
+        .frames = 124,
+        .steps = 30,
+    }, dit_cfg);
+    var layout = try packing.build(allocator, .{
+        .text_len = 64,
+        .latent_t = geo.latent_t,
+        .latent_h = geo.latent_h,
+        .latent_w = geo.latent_w,
+        .audio_t = geo.audio_t,
+        .video_t = 0,
+        .audio_t_noise = 0,
+    });
+    defer layout.deinit(allocator);
+    const consumer = memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = dit_cfg.hidden_size,
+        .steps = 30,
+        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .tp = 1,
+        .target = .cuda,
+        .heads = dit_cfg.num_attention_heads,
+        .head_dim = dit_cfg.attention_head_dim,
+        .layers = @intCast(dit_cfg.num_layers),
+    });
+    try std.testing.expect(!consumer.safe);
+    try std.testing.expectEqualStrings("requested size is below the full-canvas device-memory floor", consumer.reason);
+    try std.testing.expect(consumer.denoise_peak_bytes <= 24 * 1024 * 1024 * 1024 * policy_mod.safety_numer / policy_mod.safety_denom);
+    const ok = memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = dit_cfg.hidden_size,
+        .steps = 30,
+        .device_bytes = config.full_canvas_min_device_bytes,
+        .tp = 1,
+        .target = .cuda,
+        .heads = dit_cfg.num_attention_heads,
+        .head_dim = dit_cfg.attention_head_dim,
+        .layers = @intCast(dit_cfg.num_layers),
+    });
+    try std.testing.expect(ok.safe);
 }
 fn testOfficialPin() !void {
     try std.testing.expectEqualStrings("MiniMaxAI/MiniMax-H3", config.official_repo);

@@ -45,3 +45,11 @@ Local checkpoint: `--model=/var/models/MiniMaxAI/MiniMax-H3`.
 - `--steps`, `--seed`
 
 Advanced: `--frames`, `--size=WxH`, `--short-edge`, `--max-pixels`, `--dit`.
+
+Not in this example: hosted 2K, Context-IR, Hailuo 4 s. Open weights are 768P, 5–15 s.
+
+## Hardware
+
+CUDA. Tensor parallelism is 1, 2, 4, or 8 devices. `ffmpeg` is required to read image/video size and to mux output.
+
+Full 768P needs **≥80 GiB per device**. That is an early gate before weights load. The memory planner's denoise estimate can look like a 24 GiB card would stream the DiT; that number omits vision encode, compile, and allocator overhead, and the planner runs after visual conditioning. Preview canvases (short side ≤352, e.g. `--short-edge=352`) skip the floor.
