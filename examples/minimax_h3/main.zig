@@ -124,7 +124,8 @@ fn hasMedia(first: []const u8, last: []const u8, refs: []const u8) bool {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    // `bazel run` starts in the runfiles tree. Hop back to the shell cwd.
+    // `bazel run` executes binaries from Bazel's runfiles tree by default.
+    // If available, switch back to the shell's original working directory.
     if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
         var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
         defer working_dir.close(init.io);
@@ -132,6 +133,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+
+    //
+    // Request and canvas
+    //
     if (args.frames == 0) config.checkDuration(args.duration) catch |err| return rejectUser(err);
     config.checkSteps(args.steps) catch |err| return rejectUser(err);
     config.parseResolution(args.resolution) catch |err| return rejectUser(err);
@@ -179,6 +184,9 @@ pub fn main(init: std.process.Init) !void {
         .dit = args.dit,
     };
 
+    //
+    // Virtual File Systems
+    //
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
@@ -197,6 +205,10 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("s3", s3_vfs.io());
 
     const io = vfs.io();
+
+    //
+    // Platform and sharding
+    //
     const model_repo = try zml.safetensors.resolveModelRepo(io, args.model);
     const heads = repo.peekHeadCounts(allocator, io, model_repo, variant, paths) catch |err| return rejectUser(err);
     sharding.preparePhysicalMesh(heads);
@@ -213,6 +225,7 @@ pub fn main(init: std.process.Init) !void {
     if (config.belowTestedFullCanvasEnvelope(px.w, px.h, device_bytes))
         log.warn("80 GiB/device is the tested full-768P envelope", .{});
 
+    // Defines how the model's tensors are sharded across the available devices.
     const shardings: sharding.Shardings = try .init(platform, heads);
     if (frame_plan.raw != frame_plan.aligned)
         log.info("frames {d} → {d} (VAE 17n+5)", .{ frame_plan.raw, frame_plan.aligned });
@@ -226,6 +239,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
+    //
+    // Model initialization
+    //
     var models = repo.Bundle.open(allocator, io, model_repo, variant, shardings, paths) catch |err| return rejectUser(err);
     defer models.deinit(allocator, io);
 
@@ -241,6 +257,9 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
+    //
+    // Tokenizer and conditions
+    //
     var tokenizer = repo.loadTokenizer(allocator, io, models.task, model_repo, &progress) catch |err| return rejectUser(err);
     defer tokenizer.deinit();
     var tok_enc = try tokenizer.encoder();
@@ -300,6 +319,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
+    //
+    // Memory plan
+    //
     const core0 = models.dit.inner.blocks[0].corePart();
     const dit_dt = models.dit.inner.blocks[0].norm1.weight.dtype();
     const tp: u32 = @intCast(shardings.model.numPartitionsForLogicalAxis(.model));
@@ -357,6 +379,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
+    //
+    // Load the model and compile it
+    //
     const compile_policy: pipeline.CompilePolicy = .{
         .attention = mem.attention,
         .group_size = mem.group_size,
@@ -398,6 +423,9 @@ pub fn main(init: std.process.Init) !void {
     );
     defer compiled_vae.deinit();
 
+    //
+    // Generate video and audio
+    //
     try session.generate(allocator, io, platform, &models, &compiled, &compiled_vae, &all, &progress, .{
         .geo = geo,
         .canvas = out_geo,

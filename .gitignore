@@ -23,11 +23,7 @@ zig-out/
 # Data files
 *.wav
 *.ecdc
-*.ppm
 *.mp4
-
-# Example run output
-/output/
 
 # Python slope
 .venv
