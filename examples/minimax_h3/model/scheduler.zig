@@ -83,48 +83,6 @@ pub fn shiftSigma(sigma: f32, shift: f32) f32 {
     return shift * sigma / (1.0 + (shift - 1.0) * sigma);
 }
 
-pub fn timestepEmbedding(timesteps: []const f32, dim: usize, flip_sin_to_cos: bool, out: []f32) void {
-    std.debug.assert(out.len == timesteps.len * dim);
-    std.debug.assert(dim % 2 == 0);
-    const half = dim / 2;
-    for (timesteps, 0..) |t, row| {
-        const dst = out[row * dim ..][0..dim];
-        for (0..half) |i| {
-            const freq = @exp(-@log(@as(f32, 10000.0)) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half)));
-            const angle = t * freq;
-            if (flip_sin_to_cos) {
-                dst[i] = @cos(angle);
-                dst[half + i] = @sin(angle);
-            } else {
-                dst[i] = @sin(angle);
-                dst[half + i] = @cos(angle);
-            }
-        }
-    }
-}
-
-/// Official `MiniMaxH3Scheduler.step`: data-ward Euler (`eta = 0`).
-/// `x0 = x_t + (1 - t) * v`, then `x_next = r*x_t + (1-r)*x0` with `r = sigma_next / sigma`.
-pub fn eulerStep(
-    sigmas: []const f32,
-    timesteps: []const f32,
-    step_index: usize,
-    sample: []f32,
-    velocity: []const f32,
-) void {
-    std.debug.assert(step_index + 1 < sigmas.len);
-    std.debug.assert(step_index < timesteps.len);
-    std.debug.assert(sample.len == velocity.len);
-    const sigma = sigmas[step_index];
-    const sigma_next = sigmas[step_index + 1];
-    const sigma_t = 1.0 - timesteps[step_index];
-    const ratio = sigma_next / sigma;
-    for (sample, velocity) |*x, v| {
-        const denoised = x.* + sigma_t * v;
-        x.* = ratio * x.* + (1.0 - ratio) * denoised;
-    }
-}
-
 pub const StepModel = struct {
     hold: i64,
 };

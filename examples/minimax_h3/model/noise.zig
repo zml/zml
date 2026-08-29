@@ -33,7 +33,7 @@ pub const Generator = struct {
         return self;
     }
 
-    pub fn random(self: *Generator) u32 {
+    fn random(self: *Generator) u32 {
         self.left -= 1;
         if (self.left == 0) self.nextState();
         var y = self.state[self.next];
@@ -45,7 +45,7 @@ pub const Generator = struct {
         return y;
     }
 
-    pub fn uniform01(self: *Generator) f32 {
+    fn uniform01(self: *Generator) f32 {
         const mask: u32 = (1 << 24) - 1;
         const divisor: f32 = 1.0 / 16777216.0;
         return @as(f32, @floatFromInt(self.random() & mask)) * divisor;

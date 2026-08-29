@@ -7,7 +7,7 @@ const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_encoder);
 
-pub const Config = config.EncoderConfig;
+const Config = config.EncoderConfig;
 
 const rmsNorm = weights.rmsNorm;
 

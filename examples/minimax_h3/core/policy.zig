@@ -8,9 +8,6 @@ pub const Decision = struct {
     attention: zml.attention.Backend,
     resident_blocks: u32,
     group_size: u32,
-    score_bytes: u64,
-    fa2_scratch_bytes: u64,
-    adaln_table_bytes: u64,
     fixed_bytes: u64,
     resident_core_bytes: u64,
     transient_core_bytes: u64,
@@ -71,7 +68,7 @@ pub fn adalnTableBytes(steps: u32, hidden: i64, layers: i64, dtype_bytes: u32) u
     return per_block * @as(u64, @intCast(@max(layers, 0))) + final;
 }
 
-pub const compile_group_cap: u32 = 4;
+pub const compile_group_cap: u32 = 8;
 /// Encode is a single pass: extra resident layers do not help when weights
 /// come from disk. Hide H2D behind compute on the stream path.
 pub const enc_prefetch: u32 = 4;
@@ -112,7 +109,7 @@ pub fn transientCoreBytes(resident: u32, layers: u32, per_core: u64) u64 {
     return @as(u64, @min(streamed, 2)) * per_core;
 }
 
-pub fn chooseResidentBlocks(budget: u64, fixed: u64, per_core: u64, layers: u32) u32 {
+fn chooseResidentBlocks(budget: u64, fixed: u64, per_core: u64, layers: u32) u32 {
     if (per_core == 0 or layers == 0 or budget <= fixed) return 0;
     var best: u32 = 0;
     var resident: u32 = 0;
@@ -195,9 +192,6 @@ pub fn decide(args: struct {
         .attention = attn,
         .resident_blocks = resident,
         .group_size = group,
-        .score_bytes = scores,
-        .fa2_scratch_bytes = if (isFlash(attn)) scratch else 0,
-        .adaln_table_bytes = tables,
         .fixed_bytes = fixed,
         .resident_core_bytes = resident_bytes,
         .transient_core_bytes = transient_bytes,

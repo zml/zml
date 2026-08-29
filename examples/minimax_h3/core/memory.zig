@@ -8,9 +8,6 @@ const vae = @import("../vae/geometry.zig");
 
 pub const Plan = struct {
     peak_bytes: u64,
-    score_bytes: u64,
-    fa2_scratch_bytes: u64,
-    adaln_table_bytes: u64,
     fixed_denoise_bytes: u64,
     resident_core_bytes: u64,
     transient_core_bytes: u64,
@@ -135,9 +132,6 @@ pub fn plan(opts: Opts) Plan {
 
     var result: Plan = .{
         .peak_bytes = peak,
-        .score_bytes = decision.score_bytes,
-        .fa2_scratch_bytes = decision.fa2_scratch_bytes,
-        .adaln_table_bytes = decision.adaln_table_bytes,
         .fixed_denoise_bytes = decision.fixed_bytes,
         .resident_core_bytes = decision.resident_core_bytes,
         .transient_core_bytes = decision.transient_core_bytes,

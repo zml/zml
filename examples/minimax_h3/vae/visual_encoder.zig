@@ -7,12 +7,10 @@ const weights = @import("../core/weights.zig");
 
 const log = std.log.scoped(.minimax_h3_visual_enc);
 
-pub const block_out_channels = [_]i64{ 128, 256, 256, 512, 512, 1024 };
-pub const spatial_downsample = [_]i64{ 2, 2, 2, 2, 1, 1 };
-pub const temporal_downsample = [_]i64{ 1, 2, 2, 1, 1, 1 };
-pub const layers_per_block: usize = 2;
-pub const norm_groups: i64 = 32;
-pub const norm_eps: f32 = 1e-6;
+const spatial_downsample = [_]i64{ 2, 2, 2, 2, 1, 1 };
+const temporal_downsample = [_]i64{ 1, 2, 2, 1, 1, 1 };
+const norm_groups: i64 = 32;
+const norm_eps: f32 = 1e-6;
 
 fn convWeight(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
     return store.createTensor(name, .{ .co, .ci, .kt, .kh, .kw }, .replicated);

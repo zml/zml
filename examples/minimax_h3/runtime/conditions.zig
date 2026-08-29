@@ -57,11 +57,6 @@ pub fn tokenize(allocator: std.mem.Allocator, encode_text: anytype, text: []cons
     return .{ .tokens = tokens, .tags = tags };
 }
 
-fn hasVideo(items: anytype) bool {
-    for (items) |item| if (item.kind == .video or item.kind == .video_audio) return true;
-    return false;
-}
-
 pub const ReferenceIndexDomains = struct {
     encoded_visuals: i32 = 0,
     encoded_audios: i32 = 0,

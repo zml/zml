@@ -851,20 +851,10 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
     });
     defer layout.deinit(allocator);
     const seq = layout.seqLen();
-    const sdpa = memory_mod.plan(.{
-        .geo = .init(geo),
-        .layout = layout,
-        .hidden = 5376,
-        .steps = 9,
-        .device_bytes = 48 * 1024 * 1024 * 1024,
-        .tp = 1,
-        .target = .cpu,
-        .heads = 56,
-        .head_dim = 128,
-        .layers = 50,
-    });
-    try std.testing.expectEqual(policy_mod.sdpaScoreBytes(seq, 56, 1), sdpa.score_bytes);
     try std.testing.expect(policy_mod.sdpaScoreBytes(7440, 56, 1) > 10 * 1024 * 1024 * 1024);
+    try std.testing.expect(policy_mod.fa2ScratchBytes(seq, 56, 128, 2) > 0);
+    try std.testing.expect(policy_mod.fa2ScratchBytes(seq, 56, 128, 2) < policy_mod.sdpaScoreBytes(seq, 56, 2));
+    try std.testing.expect(policy_mod.adalnTableBytes(9, 5376, 50, 2) > 0);
 
     const fa2 = memory_mod.plan(.{
         .geo = .init(geo),
@@ -879,8 +869,6 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .layers = 50,
     });
     try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, fa2.attention);
-    try std.testing.expect(fa2.fa2_scratch_bytes > 0);
-    try std.testing.expect(fa2.fa2_scratch_bytes < fa2.score_bytes);
     const fa3 = memory_mod.plan(.{
         .geo = .init(geo),
         .layout = layout,
@@ -895,11 +883,11 @@ fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
         .flash = .cuda_fa3,
     });
     try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, fa3.attention);
-    try std.testing.expectEqual(fa2.fa2_scratch_bytes, fa3.fa2_scratch_bytes);
-    try std.testing.expect(fa2.adaln_table_bytes > 0);
     try std.testing.expect(policy_mod.groupSize(0) == 1);
     try std.testing.expect(policy_mod.groupSize(2) == 2);
-    try std.testing.expect(policy_mod.groupSize(8) == 4);
+    try std.testing.expect(policy_mod.groupSize(8) == 8);
+    try std.testing.expect(policy_mod.groupSize(16) == 8);
+    try std.testing.expect(policy_mod.groupSize(50) == 8);
     try std.testing.expectEqual(@as(u32, 4), policy_mod.enc_prefetch);
     try std.testing.expectEqual(@as(u32, 8), policy_mod.vae_load_window);
     try std.testing.expectEqual(@as(u32, 1), policy_mod.encPrefetch(1));

@@ -48,15 +48,6 @@ pub const ReferenceBlock = struct {
 /// `torch.unique(row_times, sorted=True)` (at most 4 distinct values).
 pub const timestep_slot_count: u32 = 4;
 
-pub fn timestepValues(video_t: f32, audio_t: f32) [timestep_slot_count]f32 {
-    return .{
-        video_t,
-        audio_t,
-        @max(video_t, config.visual_cond_timestep),
-        @max(audio_t, 1.0),
-    };
-}
-
 fn padUnique(out: []f32, unique: []const f32) void {
     if (out.len == 0 or unique.len == 0) return;
     const n = @min(out.len, unique.len);
@@ -163,10 +154,6 @@ pub const Layout = struct {
 
     pub fn seqLen(self: Layout) u32 {
         return @intCast(self.positions.len);
-    }
-
-    pub fn adalnIndex(self: Layout, row: usize) u32 {
-        return self.timestep_indices[row] * @as(u32, @intCast(config.modality_count)) + self.token_tags[row];
     }
 
     pub fn conditionVideoRows(self: Layout) u32 {

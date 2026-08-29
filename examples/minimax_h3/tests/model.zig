@@ -8,7 +8,6 @@ const scheduler = @import("../model/scheduler.zig");
 
 pub fn run(allocator: std.mem.Allocator) !void {
     try testScheduler(allocator);
-    try testTimestepEmbedding();
     try testPackingT2va(allocator);
     try testPackingTimestepSlots(allocator);
     try testOfficialRowTimesteps(allocator);
@@ -16,12 +15,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testPackingRef2va(allocator);
     try testRef2vaOrderPermutations(allocator);
     try testUnequalReferenceAudioLengths(allocator);
-    try testAdalnResidualHost();
     try testNchwToThwc();
     try testMmRopeHost();
     try testOfficialSpatialGrid();
     try testTorchNoise(allocator);
-    try testMultistepSampler();
     try testAdalnIndexLayout(allocator);
     try testSchedulerFormula(allocator);
 }
@@ -143,13 +140,7 @@ fn testScheduler(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, config.default_steps - 1), official.stepCount());
     try std.testing.expectEqual(@as(f32, 0.0), official.sigmas[official.sigmas.len - 1]);
 }
-fn testTimestepEmbedding() !void {
-    const t = [_]f32{ 0.0, 1.0 };
-    var out: [512]f32 = undefined;
-    scheduler.timestepEmbedding(&t, 256, true, &out);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[128], 1e-5);
-}
+
 fn testPackingT2va(allocator: std.mem.Allocator) !void {
     const layout = try packing.build(allocator, .{
         .text_len = 4,
@@ -171,25 +162,11 @@ fn testPackingT2va(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u8, 1), layout.token_tags[0]);
     try std.testing.expectEqual(@as(u8, 2), layout.token_tags[layout.target_audio_start]);
     try std.testing.expectEqual(@as(u8, 0), layout.token_tags[layout.target_video_start]);
-
-    const first_video = layout.adalnIndex(layout.target_video_start);
-    try std.testing.expectEqual(first_video % 3, 0);
-    const first_text = layout.adalnIndex(0);
-    try std.testing.expectEqual(first_text % 3, 1);
-    const first_audio = layout.adalnIndex(layout.target_audio_start);
-    try std.testing.expectEqual(first_audio % 3, 2);
     try std.testing.expectEqual(packing.timestep_slot_count, @as(u32, @intCast(layout.timesteps.len)));
     try std.testing.expectEqual(@as(u32, 0), layout.timestep_indices[layout.target_video_start]);
     try std.testing.expectEqual(@as(u32, 1), layout.timestep_indices[layout.target_audio_start]);
 }
 fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
-    const early = packing.timestepValues(0.99, 0.8);
-    const late = packing.timestepValues(0.1, 0.2);
-    try std.testing.expectEqual(@as(usize, 4), early.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.99), early[0], 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.999), early[2], 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), late[3], 1e-6);
-
     const a = try packing.build(allocator, .{
         .text_len = 3,
         .latent_t = 2,
@@ -215,7 +192,6 @@ fn testPackingTimestepSlots(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 0), a.timestep_indices[a.target_audio_start]);
     try std.testing.expectEqual(@as(u32, 0), b.timestep_indices[b.target_video_start]);
     try std.testing.expectEqual(@as(u32, 1), b.timestep_indices[b.target_audio_start]);
-    try std.testing.expectEqualSlices(f32, &late, &packing.timestepValues(0.1, 0.2));
 }
 fn testOfficialRowTimesteps(allocator: std.mem.Allocator) !void {
     const videos = [_]packing.ConditionVideo{.{
@@ -581,31 +557,6 @@ fn testRef2vaOrderPermutations(allocator: std.mem.Allocator) !void {
     });
 }
 
-fn testAdalnResidualHost() !void {
-    const x: f32 = 2.0;
-    const shift_msa: f32 = -0.5;
-    const scale_msa: f32 = 0.25;
-    const gate_msa: f32 = 0.5;
-    const attn: f32 = 4.0;
-    const attn_in = x * (1.0 + scale_msa) + shift_msa;
-    const after_attn = x + gate_msa * attn;
-    try std.testing.expectApproxEqAbs(@as(f32, 2.0), attn_in, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), after_attn, 1e-6);
-
-    const shift_mlp: f32 = 1.0;
-    const scale_mlp: f32 = -0.5;
-    const gate_mlp: f32 = 2.0;
-    const mlp: f32 = 0.75;
-    const mlp_in = after_attn * (1.0 + scale_mlp) + shift_mlp;
-    const after_mlp = after_attn + gate_mlp * mlp;
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), mlp_in, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 5.5), after_mlp, 1e-6);
-
-    const value: f32 = 3.0;
-    const gate: f32 = 1.0;
-    const silu = gate / (1.0 + @exp(-gate));
-    try std.testing.expectApproxEqAbs(silu * value, 3.0 * silu, 1e-6);
-}
 fn testNchwToThwc() !void {
     const src = [_]f32{ 0, 1, 2, 3, 10, 11, 12, 13 };
     var dst: [8]f32 = undefined;
@@ -651,17 +602,7 @@ fn testTorchNoise(allocator: std.mem.Allocator) !void {
     defer allocator.free(mixed);
     try std.testing.expectEqual(@as(usize, 96 + 2 * 2 * 2 * 96), mixed.len);
 }
-fn testMultistepSampler() !void {
-    var x = [_]f32{1.0};
-    const v = [_]f32{1.0};
-    const sig = [_]f32{ 1.0, 0.5, 0.0 };
-    const ts = [_]f32{ 0.0, 0.5 };
-    scheduler.eulerStep(&sig, &ts, 0, &x, &v);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
-    x[0] = 1.0;
-    scheduler.eulerStep(&sig, &ts, 1, &x, &v);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
-}
+
 fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
     const layout = try packing.build(allocator, .{
         .text_len = 4,
@@ -677,7 +618,6 @@ fn testAdalnIndexLayout(allocator: std.mem.Allocator) !void {
     defer allocator.free(idx);
     packing.writeAdalnIndices(idx, layout.timestep_indices, layout.token_tags);
     try std.testing.expectEqual(layout.seqLen(), idx.len);
-    try std.testing.expectEqual(layout.adalnIndex(0), idx[0]);
     try std.testing.expectEqual(@as(u32, 1), idx[0] % 3);
     try std.testing.expectEqual(@as(u32, 2), idx[layout.target_audio_start] % 3);
     try std.testing.expectEqual(@as(u32, 0), idx[layout.target_video_start] % 3);
@@ -705,11 +645,4 @@ fn testSchedulerFormula(allocator: std.mem.Allocator) !void {
     const want_a = [_]f32{ 1.0, 0.94736842, 0.88235294, 0.8, 0.69230769, 0.54545455, 1.0 / 3.0, 0.0 };
     try std.testing.expectEqual(want_a.len, audio.sigmas.len);
     for (want_a, audio.sigmas) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
-
-    var x = [_]f32{1.0};
-    const v = [_]f32{1.0};
-    const sig = [_]f32{ 1.0, 0.5, 0.0 };
-    const ts = [_]f32{ 0.0, 0.5 };
-    scheduler.eulerStep(&sig, &ts, 0, &x, &v);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), x[0], 1e-6);
 }

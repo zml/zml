@@ -25,8 +25,6 @@ pub const official_ratios = [_]struct { name: []const u8, w: f32, h: f32 }{
     .{ .name = "3:4", .w = 3, .h = 4 },
     .{ .name = "9:16", .w = 9, .h = 16 },
 };
-/// 16:9 at 352 short-edge after snap-32. Memory floor uses this as "small".
-pub const preview_short_side: u32 = 352;
 pub const video_shift: f32 = 12.0;
 pub const audio_shift: f32 = 3.0;
 pub const encoder_layers_used: u32 = 50;
