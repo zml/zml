@@ -10,7 +10,7 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-pub fn main() !void {
+test "minimax_h3" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -20,6 +20,4 @@ pub fn main() !void {
     try vision.run(allocator);
     try vae.run(allocator);
     try runtime.run(allocator);
-
-    std.debug.print("minimax_h3 tests: all passed\n", .{});
 }

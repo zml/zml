@@ -1,6 +1,5 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "minimax_h3",
@@ -10,25 +9,18 @@ zig_binary(
     deps = ["//zml"],
 )
 
-zig_binary(
-    name = "h3_tests",
+zig_test(
+    name = "test",
     srcs = glob(["**/*.zig"]),
     main = "tests.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
 
-sh_test(
-    name = "test",
-    srcs = ["run_h3_tests.sh"],
-    args = ["$(rootpath :h3_tests)"],
-    data = [":h3_tests"],
-)
-
 build_test(
     name = "compile",
     targets = [
         ":minimax_h3",
-        ":h3_tests",
+        ":test",
     ],
 )
