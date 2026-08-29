@@ -466,7 +466,6 @@ pub fn build(allocator: std.mem.Allocator, args: BuildArgs) !Layout {
     try checkConditionRows(layout, args.condition_videos, args.condition_audios);
     const row_ts = try allocator.alloc(f32, layout.seqLen());
     defer allocator.free(row_ts);
-    // Official `torch.unique(..., sorted=True)`.
     _ = writeRowPlan(layout, args.video_t, args.audio_t_noise, row_ts, layout.timestep_indices, layout.timesteps);
     return layout;
 }

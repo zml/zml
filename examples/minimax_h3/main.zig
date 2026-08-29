@@ -43,7 +43,7 @@ const Args = struct {
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
         \\
-        \\ MiniMax-H3: video + audio. Same modes as Hailuo / the MiniMax API.
+        \\ Generate video and audio from a MiniMax-H3 checkpoint.
         \\
         \\   text-to-video          --prompt='...'
         \\   image-to-video         --first-frame=first.png
@@ -53,19 +53,15 @@ const Args = struct {
         \\
         \\ Options:
         \\   --model=<path>         Repository (required). Local or hf://MiniMaxAI/MiniMax-H3
-        \\   --prompt=<string>      What happens in the shot
+        \\   --prompt=<string>      Prompt
         \\   --first-frame=<path>   First frame
         \\   --last-frame=<path>    Last frame
-        \\   --refs=<paths>         Reference images, videos, audio. Comma-separated, order matters.
-        \\                          Max 12 files / 9 images / 3 videos / 3 audios.
-        \\                          A video soundtrack counts as one audio ref; a following wav is another.
-        \\                          Adaptive canvas uses the first visual; each ref is encoded at its own size.
-        \\   --duration=<sec>       5–15 (default: 5)
-        \\   --ratio=<spec>         Hailuo ratio: adaptive | 16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9
-        \\                          Default: 16:9 for text-to-video, adaptive from the first visual otherwise
-        \\   --resolution=768P      Open weights are 768P. 2K is hosted-only
+        \\   --refs=<paths>         Comma-separated images, videos, audio (max 12 / 9 / 3 / 3)
+        \\   --duration=<sec>       5-15 (default: 5)
+        \\   --ratio=<spec>         adaptive | 16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9
+        \\   --resolution=768P      Open weights are 768P
         \\   --out=<path>           .mp4 or directory (default: output.mp4)
-        \\   --steps=<n>            Sigma points including terminal zero (default: 30 → 29 DiT evals)
+        \\   --steps=<n>            Sigma points including terminal zero (default: 30)
         \\   --seed=<n>             RNG seed (default: 0)
         \\
         \\ Advanced:
@@ -89,11 +85,11 @@ fn rejectUser(err: anyerror) anyerror {
         error.InvalidCanvas => reject(err, "--ratio must be adaptive, 16:9, 9:16, 1:1, 4:3, 3:4, or 21:9", .{}),
         error.ConflictingCanvas => reject(err, "pass --ratio or --size, not both", .{}),
         error.InvalidResolution => reject(err, "--resolution must be 768P (open weights)", .{}),
-        error.OpenWeightsAre768P => reject(err, "this checkpoint is 768P; 2K is the hosted MiniMax API only", .{}),
+        error.OpenWeightsAre768P => reject(err, "--resolution 2K is not supported", .{}),
         error.InvalidAspect => reject(err, "aspect must be between 1:4 and 4:1", .{}),
         error.SizeTooLarge => reject(err, "canvas exceeds --max-pixels", .{}),
-        error.InvalidDuration => reject(err, "--duration must be 5–15 seconds", .{}),
-        error.T2vaRejectsAdaptive => reject(err, "text-to-video needs a ratio (16:9, 9:16, …); omit --ratio for 16:9", .{}),
+        error.InvalidDuration => reject(err, "--duration must be 5-15 seconds", .{}),
+        error.T2vaRejectsAdaptive => reject(err, "text-to-video needs a ratio; omit --ratio for 16:9", .{}),
         error.AdaptiveNeedsVisual => reject(err, "adaptive ratio needs --first-frame, --last-frame, or a visual --refs", .{}),
         error.ImageLoadFailed => reject(err, "could not read the first image or video size", .{}),
         error.FfmpegMissing => reject(err, "ffmpeg not found; needed to read image/video size", .{}),

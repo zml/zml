@@ -24,7 +24,6 @@ zig-out/
 *.wav
 *.ecdc
 *.ppm
-*.f32
 *.mp4
 
 # Example run output

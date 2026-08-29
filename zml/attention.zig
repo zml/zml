@@ -66,10 +66,7 @@ pub const Backend = enum {
         };
     }
 
-    /// Dense/varlen flash attention currently has a stricter numerical
-    /// contract than the existing causal FA2 path. Keep the broader FA2 ABI
-    /// support in `supportsHeadDim`, but only select the dense custom call when
-    /// its workspace does not need head-dimension rounding.
+    /// Dense FA workspace needs head dim multiple of 32. `supportsHeadDim` is the broader ABI.
     pub fn supportsDenseHeadDim(backend: Backend, head_dim: i64) bool {
         return switch (backend) {
             .cuda_fa2 => head_dim >= 32 and head_dim <= 256 and @rem(head_dim, 32) == 0,
