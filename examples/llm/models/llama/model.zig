@@ -85,7 +85,7 @@ pub const LoadedModel = struct {
         defer loader.deinit();
 
         const all_shardings = shardings.all();
-        loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        try loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
