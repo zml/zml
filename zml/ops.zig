@@ -1979,6 +1979,27 @@ pub fn manualComputation(
     return manualComputationSliceToReturn(ReturnT, manualComputationInternal(inputs_, output_shapes, body_context, body_fn));
 }
 
+fn gspmdShardingConstraint(
+    ctx: *CompilationContext,
+    value: *const mlir.Value,
+    sharding: *const mlir.Attribute,
+) *const mlir.Value {
+    return dialects.stablehlo.custom_call(
+        ctx.mlir_ctx,
+        &.{value},
+        &.{value.type_()},
+        .{
+            .call_target_name = "Sharding",
+            .has_side_effect = false,
+            .backend_config = .{ .original = "" },
+            .additional_attributes = &.{
+                .named(ctx.mlir_ctx, "mhlo.sharding", sharding),
+            },
+        },
+        .unknown(ctx.mlir_ctx),
+    ).appendTo(ctx.currentScope().block).result(0);
+}
+
 fn manualComputationInternal(
     inputs: []const Tensor,
     outputs: []const Shape,
@@ -2081,7 +2102,13 @@ fn manualComputationInternal(
             break :blk outputs_;
         },
         .gspmd => blk: {
-            const manual_sharding = "{manual}";
+            var function_name_buffer: [64]u8 = undefined;
+            const function_name = std.fmt.bufPrint(
+                &function_name_buffer,
+                "manual_computation.impl_{d}",
+                .{ctx.nextCompositeId()},
+            ) catch unreachable;
+            const manual_sharding = mlir.Attribute.string(ctx.mlir_ctx, "{manual}");
             const output_shardings = allocator.alloc(*const mlir.Attribute, outputs.len) catch unreachable;
             const local_input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
             const local_output_shapes = allocator.alloc(Shape, outputs.len) catch unreachable;
@@ -2097,16 +2124,26 @@ fn manualComputationInternal(
             const local_input_values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
             for (0..inputs.len) |i| {
                 const local_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_input_shapes[i]);
+                const sharded_input = gspmdShardingConstraint(
+                    ctx,
+                    input_values[i],
+                    ctx.partitioning.tensorShardingAttr(
+                        allocator,
+                        ctx.mlir_ctx,
+                        input_shapes[i],
+                        null,
+                    ) catch unreachable,
+                );
                 const full_to_shard = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
-                    &.{input_values[i]},
+                    &.{sharded_input},
                     &.{local_type},
                     .{
                         .call_target_name = "SPMDFullToShardShape",
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", .string(ctx.mlir_ctx, manual_sharding)),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", manual_sharding),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
@@ -2114,33 +2151,60 @@ fn manualComputationInternal(
                 local_input_values[i] = full_to_shard.result(0);
             }
 
+            const manual_block = mlir.Block.init(&.{}, &.{});
+            for (local_input_shapes) |input_shape| {
+                _ = manual_block.addArgument(mlirx.Type.rankedTensor(ctx.mlir_ctx, input_shape), .unknown(ctx.mlir_ctx));
+            }
+
+            ctx.pushBlock(manual_block);
             const local_inputs = allocator.alloc(Tensor, inputs.len) catch unreachable;
             for (0..inputs.len) |i| {
-                local_inputs[i] = Tensor._result(local_input_shapes[i], local_input_values[i]);
+                local_inputs[i] = Tensor._result(local_input_shapes[i], manual_block.argument(i));
             }
 
             ctx.manual_computation_depth += 1;
-            defer ctx.manual_computation_depth -= 1;
             const body_inputs = manualComputationInputsArg(BodyInputsT, local_inputs);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
             const body_result = @call(.auto, body_fn, .{ body_context, allocator, body_inputs, body_output_shapes });
+            ctx.manual_computation_depth -= 1;
             const local_outputs = manualComputationBodyToSlice(BodyReturnT, allocator, body_result);
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
+
+            const global_values = allocator.alloc(*const mlir.Value, outputs.len) catch unreachable;
+            const global_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
             for (0..outputs.len) |i| {
                 stdx.debug.assert(local_outputs[i].shape().eql(local_output_shapes[i]), "manualComputation body returned shape {f}, expected {f}", .{ local_outputs[i].shape(), local_output_shapes[i] });
+                global_values[i] = local_outputs[i].value();
+                global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_output_shapes[i]);
             }
+            _ = dialects.func.returns(ctx.mlir_ctx, global_values, .unknown(ctx.mlir_ctx)).appendTo(manual_block);
+            ctx.popBlock();
+
+            _ = dialects.func.func(ctx.mlir_ctx, .{
+                .name = function_name,
+                .block = manual_block,
+                .location = .unknown(ctx.mlir_ctx),
+                .visibility = .private,
+                .verify = false,
+            }).appendTo(ctx.module.body());
+
+            const call = dialects.func.call(
+                ctx.mlir_ctx,
+                function_name,
+                local_input_values,
+                global_types,
+                .unknown(ctx.mlir_ctx),
+            ).appendTo(ctx.currentScope().block);
 
             if (outputs.len == 0) {
                 break :blk allocator.alloc(Tensor, 0) catch unreachable;
             }
 
-            const global_values = allocator.alloc(*const mlir.Value, outputs.len) catch unreachable;
-            const global_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
             for (outputs, 0..) |output_shape, i| {
                 global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
                 const shard_to_full = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
-                    &.{local_outputs[i].value()},
+                    &.{gspmdShardingConstraint(ctx, call.result(i), manual_sharding)},
                     &.{global_types[i]},
                     .{
                         .call_target_name = "SPMDShardToFullShape",

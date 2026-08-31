@@ -1547,10 +1547,26 @@ pub const Data = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
-        // Emit explicit device assignment list to avoid XLA requiring
-        // a sharding attribute on the custom-call instruction.
-        const ids = try self.deviceAssignment(allocator);
-        defer allocator.free(ids);
+        const pl = Placement.init(.{ .data = self }, shape) catch unreachable;
+        const replica_count: usize = if (has_replication)
+            @intCast(tile_shape.get(tile_shape.len - 1))
+        else
+            1;
+        const device_count: usize = @intCast(mapping.view.total_devices);
+        const ids = try allocator.alloc(usize, device_count);
+        const missing = std.math.maxInt(usize);
+        @memset(ids, missing);
+        for (self.physical.devices_in_canonical_order, 0..) |device, partition_id| {
+            var tile_index: usize = 0;
+            for (pl.axis_plans.slice()) |plan| {
+                tile_index = tile_index * @as(usize, @intCast(plan.num_devices)) +
+                    @as(usize, @intCast(plan.linearIndex(device.coords)));
+            }
+            const replicas = ids[tile_index * replica_count ..][0..replica_count];
+            const replica = std.mem.indexOfScalar(usize, replicas, missing) orelse
+                return error.MissingDeviceInTile;
+            replicas[replica] = partition_id;
+        }
 
         try out.writer.writeAll("{devices=[");
         for (tile_shape.slice(), 0..) |s, i| {
@@ -2324,6 +2340,39 @@ test "sharding: full 3D cluster sharding" {
             .{ .device_id = 7, .slices = &.{ .{ 2, 2 }, .{ 2, 2 }, .{ 2, 2 } } },
         },
     });
+}
+
+test "sharding: GSPMD tile assignment follows placement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const runner: ShardingTest = .init(allocator);
+    const physical = try runner.physical(.{ 2, 2 }, .point_to_point);
+    const data: Data = try .init(
+        "data-model",
+        &physical,
+        .mesh(.{
+            .data = .low_bandwidth,
+            .model = .high_bandwidth,
+        }),
+        .parseBindings(.{
+            .data = .link_x,
+            .model = .link_y,
+        }),
+    );
+    var ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const attr = try data.gspmdShardingAttrForShape(
+        allocator,
+        ctx,
+        Shape.init(.{ .feature = 32, .hidden = 64 }, .f32)
+            .withPartitioning(.{ .hidden = .model }),
+    );
+    try std.testing.expectEqualStrings(
+        "{devices=[1,2,2]0,2,1,3 last_tile_dim_replicate}",
+        @as(*const mlir.StringAttribute, @ptrCast(attr)).value(),
+    );
 }
 
 test "sharding: num partitions for logical axis" {
