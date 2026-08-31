@@ -290,6 +290,7 @@ pub fn compile(
     var compiler: Compiler = .init(allocator, st_io.io(), platform, opts);
     defer compiler.deinit();
 
+    log.warn("compiling: {s}", .{opts.program_name});
     var result = emitMlir(&compiler, func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
@@ -545,16 +546,20 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     _ = fn_return.appendTo(fn_scope.block);
 
     // Resolve donations
+    std.log.warn("donations: ", .{});
     for (output_info.items(.id), 0..) |output_id, output_index| {
         if (fn_scope.id_to_donation.get(output_id)) |donated_input| {
+            const input_id = input_info.items(.id)[donated_input];
             const aliasing_output: *?u32 = &input_info.items(.aliasing_output)[donated_input];
+            if (output_id == input_id) continue;
+
             if (aliasing_output.*) |previous_aliased_output| {
                 std.debug.panic("Input {d} buffer {} was reused twice with `reuseBuffer` for output {} and output {}. Expected `reuseBuffer` to be called at most once", .{ donated_input, input_info.items(.shape)[donated_input], previous_aliased_output, output_index });
             }
-
             aliasing_output.* = @intCast(output_index);
         }
     }
+    std.log.warn("input_info.items(.aliasing_output): {any}", .{input_info.items(.aliasing_output)});
 
     // Input sharding/memory/aliasing attributes
     const input_attributes = try arena.alloc(*const mlir.Attribute, input_info.len);

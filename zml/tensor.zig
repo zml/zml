@@ -207,7 +207,12 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal => {
+                var res = self;
+                res.id = nextTensorId();
+                res._value = self.value();
+                return res;
+            },
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -237,6 +242,35 @@ pub const Tensor = struct {
         const res = _result(self._shape, op.result(0));
         ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
+    }
+
+    test toMemory {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const io = std.testing.io;
+
+        const inputs: [8]f32 = .{ -3.0, -2, -1, 1, 2, 3, 5, -5 };
+        const x_t = Tensor.init(.{8}, .f32);
+
+        const Local = struct {
+            fn memcpyH2D(x: Tensor) Tensor {
+                return x.onMemory(.host_pinned).toMemory(.device);
+            }
+        };
+
+        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
+        defer exe.deinit();
+
+        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs), .{ .memory = .host_pinned });
+        defer x_h.deinit();
+
+        const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
+        try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
+
+        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        defer x_d.deinit();
+
+        try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
     }
 
     /// Copy all the given tensor to the specified memory.
@@ -334,6 +368,7 @@ pub const Tensor = struct {
         if (scope.id_to_donation.get(origin.id)) |origin_donation| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
             gop.value_ptr.* = origin_donation;
+            std.log.warn("giving Buffer {} from {}({f}) to {}({f})", .{ origin_donation, origin.id, origin, self.id, self });
         }
         return self;
     }
@@ -343,9 +378,9 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const io = std.testing.io;
 
-        const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
-        const left = Tensor.init(.{ 2, 6 }, .f32);
-        const right = Tensor.init(.{ 2, 6 }, .f32);
+        const inputs: [6]@Vector(2, i4) = .{ .{ -3.0, -2 }, .{ -1, 1 }, .{ 2, 3 }, .{ 1, 2 }, .{ 3, 4 }, .{ 5, -5 } };
+        const left = Tensor.init(.{ 6, 2 }, .i4);
+        const right = Tensor.init(.{ 6, 2 }, .i4);
 
         const Local = struct {
             fn memcopy(x: Tensor, y: Tensor) Tensor {
