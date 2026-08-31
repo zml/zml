@@ -324,7 +324,21 @@ pub fn loadRgbRaw(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !R
     const tmp_name = try scratch.join(allocator, "in.ppm");
     defer allocator.free(tmp_name);
     const result = runFfmpeg(allocator, io, &.{
-        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", path, "-frames:v", "1", tmp_name,
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        path,
+        "-frames:v",
+        "1",
+        // PIL/libjpeg chroma upsample. Default ffmpeg bilinear hits 67/255 on JPEG edges.
+        "-sws_flags",
+        "area+accurate_rnd+full_chroma_int+full_chroma_inp",
+        "-pix_fmt",
+        "rgb24",
+        tmp_name,
     }) catch return error.FfmpegMissing;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
