@@ -10,6 +10,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 """
 
 _ROCM_STRIP_PREFIX = "./opt/rocm-7.2.2"
+_PJRT_ROCM_URL = "file:///home/brabier/github/openxla/xla/bazel-bin/xla/pjrt/c/pjrt-rocm_linux-amd64.tar.gz"
+_PJRT_ROCM_SHA256 = "86a67903aab0e8960b1eda46572f17f357b7e4df804b3c4f3cc850333369ac78"
 
 def _rocm_dlopen_patchelf(name, src):
     return "\n".join([
@@ -275,8 +277,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-04-30T17-13-00Z/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "e543e48f902656598234b5ffc05196dde84a87106be21ada126c7323572f792b",
+        url = _PJRT_ROCM_URL,
+        sha256 = _PJRT_ROCM_SHA256,
     )
 
     return mctx.extension_metadata(

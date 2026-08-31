@@ -17,6 +17,253 @@ This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
 
+## ROCm direct-loader addendum (2026-08-31)
+
+This is a new-host/new-backend investigation and must not be mixed with the
+oneAPI/B70 medians below. The machine has eight MI300X devices, two NUMA nodes,
+and roughly 2 TiB RAM. The requested command is:
+
+```text
+ROCR_VISIBLE_DEVICES=7 bazel run --config=release \
+  --@zml//platforms:rocm=true //examples/io:playground -- \
+  load /var/models/google/gemma-4-31B-it/
+```
+
+The Gemma load contains 1,188 tensors and 58.251 GiB of logical weights. Before
+the fix, ROCm selected `vectored=false` because `zml/io.zig` allowed the direct
+loader only for CUDA and oneAPI. It therefore allocated ordinary full-tensor
+host buffers through `BufferedMemoryWriter`, then called
+`BufferFromHostBuffer` with `ImmutableUntilTransferCompletes`. Of the 1,188
+tensors, 1,187 totaling 55.626 GiB (95.49% of the bytes) are below XLA's 1 GiB
+staging cutoff and were copied into PJRT's pinned staging allocations before
+H2D. The one 2.625 GiB embedding tensor was above that explicit cutoff.
+
+The active ZML worktree now has both required ROCm changes:
+
+- `zml/mem.zig` routes `.rocm` through `DmaMapAllocator`, so the shared lazy
+  64 MiB slabs are registered with `PJRT_Client_DmaMap` rather than being
+  passthrough allocations. This edit predated the final loader-selection edit
+  and remains uncommitted/user-owned.
+- `zml/io.zig` includes `.rocm` in the `direct` predicate. This routes ROCm
+  through `loadVectored`, so file reads target the registered pool blocks and
+  the ordinary `BufferedMemoryWriter` path is not used.
+
+The release ROCm playground target builds successfully. A full fixed-command
+run reported `vectored=true`, mapped one 64 MiB slab, used 28 MiB pinned
+high-water, submitted and committed all 58.25 GiB in 30,650 transfers averaging
+1.95 MiB, and completed in 7.309 s in-loader / 7.317 s outside, or 7.96 GiB/s.
+A profiled repeat used 30 MiB high-water and completed in 7.201 s in-loader /
+7.21 s outside, or 8.08 GiB/s.
+
+The pre/post `perf` comparison proves that this bypasses the extra PJRT
+host-side linearization/staging copy; it does not mean that the necessary H2D
+DMA disappears:
+
+| sampled stack frame | pre-fix buffered | post-fix vectored |
+|---|---:|---:|
+| `LinearizeHostBufferInto` | 5,466 | 0 |
+| `CommonPjRtClient::Linearize` | 5,409 | 0 |
+| `TransposePlan::Execute` | 10,817 | 0 |
+| `__memmove_avx512_unaligned_erms` | 5,415 | 9 |
+
+The recordings are `/tmp/zml-rocm-load-release.perf.data` and
+`/tmp/zml-rocm-load-vectored-release.perf.data`; the profiled post-fix log is
+`/tmp/zml-rocm-load-vectored-release.log`. In the post-fix flat report,
+`_copy_to_iter` is 27.40%, KFD event-wait locking is visible, a PJRT
+`std::vector<...>::_M_fill_insert` is 2.75%, and `compiler_rt.memset` has fallen
+to 0.63%. No staging/linearization frame is sampled.
+
+### Why the default is still only approximately 8 GiB/s
+
+The first fixed-command result is dominated by transfer granularity and
+software scheduling, not the physical PCIe link. The default is a 2 MiB DMA
+block, eight initially active PJRT events, and twelve retained local request
+lifecycles. The two representative default runs made 30,650 PJRT submissions;
+average submission-to-callback latency was 1.273--1.791 ms. Eight times roughly
+2 MiB divided by that callback latency predicts only about 8.7--12.3 GiB/s,
+matching the observed range. The local adaptive controller changes source
+request size, but it does not enlarge the physical DMA block.
+
+A standalone HIP control used the same GPU and the matching
+`hipHostRegister` path. It was compiled as a tiny temporary program, not as an
+XLA build, and its source was removed after the run. With 8 GiB transferred per
+point on one stream it reached:
+
+| HIP copy size | registered H2D GiB/s |
+|---:|---:|
+| 2 MiB | 39.03 (40.94 with NUMA-1 binding) |
+| 8 MiB | 47.73 (47.71) |
+| 16 MiB | 49.19 (49.41) |
+| 32 MiB | 49.39 (50.14) |
+| 64 MiB | 50.67 (50.74) |
+| 128 MiB | 48.71 (50.89) |
+
+GPU 7 is on NUMA node 1 at PCIe 32 GT/s x16. It was idle and had no VRAM
+allocation after the tests. Thus neither host registration, ROCm's copy
+engine, nor PCIe is an 8 GiB/s hardware ceiling.
+
+A one-run diagnostic sweep fixed twelve request lifecycles and eight DMA
+events, with the read request equal to the DMA block:
+
+| request/block | submissions | wall GiB/s | average DMA latency |
+|---:|---:|---:|---:|
+| 2 MiB | 30,650 | 10.87 | 0.923 ms |
+| 8 MiB | 8,390 | **18.04** | 1.258 ms |
+| 16 MiB | 4,607 | 16.14 | 2.393 ms |
+| 32 MiB | 2,752 | 17.08 | 4.094 ms |
+
+Eight MiB is the best observed granularity on this Gemma tensor distribution,
+although these are screening runs rather than balanced medians. Larger nominal
+blocks have many partial tensor-tail transfers and raise source latency. At
+8 MiB, raising the fixed DMA width or retained request width did not help:
+
+| fixed reads | fixed DMA | wall GiB/s |
+|---:|---:|---:|
+| 12 | 4 | 13.85 |
+| 12 | 16 | 14.19 |
+| 12 | 32 | 14.07 |
+| 24 | 8 | 14.32 |
+| 24 | 16 | 12.13 |
+| 48 | 16 | 12.06 |
+
+The earlier 12/8/8 point was 18.04 GiB/s. This variability is real host noise,
+not evidence that 16 events are faster: during the sweep another user's
+`llmd` consumed roughly 3,245% CPU, an XLA ROCm PJRT test was active, NUMA node
+0 had only about 3 GiB free, and several Bazel servers were busy. GPU 7 itself
+was unused; the competing jobs occupied GPU 1. Repeat medians require a quiet
+host before selecting a new default.
+
+The remaining PJRT path is understood structurally. ZML creates one
+`AsyncHostToDeviceTransferManager` and one final device allocation per tensor,
+not one device allocation per chunk. Every chunk nevertheless crosses the C
+API, takes the common transfer-manager mutex, creates a promise/future and
+PJRT event, creates a `BufferSequencingEvent`, queues the memcpy on the one H2D
+stream, allocates/records a ROCm event, schedules a host callback, crosses the
+C API event callback again, and re-enters ZML's mutex-driven ready-queue pump.
+More than eight outstanding events raises callback latency instead of opening
+more link bandwidth.
+
+The follow-up kept the physical DMA block at 2 MiB and eight PJRT events while
+changing only the local source batch. The submission count therefore remained
+exactly 30,650 at every point:
+
+| read request | fixed reads | wall GiB/s | average read latency | average PJRT latency | pinned high-water |
+|---:|---:|---:|---:|---:|---:|
+| 2 MiB | 12 | 7.43 | 0.801 ms | 1.971 ms | 24 MiB |
+| 8 MiB | 12 | 14.42 | 2.903 ms | 0.994 ms | 96 MiB |
+| 32 MiB | 12 | 17.72 | 10.270 ms | 0.773 ms | 384 MiB |
+| 64 MiB | 12 | **18.31** | 17.629 ms | 0.737 ms | 768 MiB |
+| 128 MiB | 12 | 17.29 | 28.880 ms | 0.767 ms | 1.50 GiB |
+
+This proves that the default is not slow solely because it makes 30,650 PJRT
+calls: all five rows make the same number. Coupling one tiny source syscall and
+one retained lifecycle to each tiny DMA block creates harmful interleaving and
+does not keep a useful ready cohort in front of the H2D stream. Batching source
+reads amortizes kernel/VFS scheduling and lets the newest-ready queue feed
+PJRT continuously; callback latency itself drops by about 2.7x. The request
+size and DMA block should therefore be tuned independently on ROCm.
+
+At a 32 MiB source request and unchanged 2 MiB/eight-event DMA configuration,
+the retained-width screen was:
+
+| fixed reads | wall GiB/s | average PJRT latency | pinned high-water |
+|---:|---:|---:|---:|
+| 4 | 11.61 | 0.720 ms | 128 MiB |
+| 8 | 16.76 | 0.718 ms | 256 MiB |
+| 12 | 17.72 | 0.773 ms | 384 MiB |
+| 16 | **18.77** | 0.752 ms | 512 MiB |
+| 24 | 17.63 | 0.810 ms | 720 MiB |
+| 32 | 17.35 | 0.812 ms | 832 MiB |
+
+At 64 MiB, sixteen and 24 reads reached 17.96 and 16.62 GiB/s while consuming
+1.00 and 1.50 GiB pinned. The 32 MiB/16-read tuple is therefore the better
+2 MiB-DMA point.
+
+The file-only control matters because two sequential `dd` processes reached
+only 5.3--7.4 GiB/s and initially looked source-bound. That comparison was
+invalid: it had two sequential readers while ZML used 16 positional readers.
+A matched control split the 46 GiB shard across twelve disjoint range readers
+and the 12 GiB shard across four. Two rounds read all 58.25 GiB in 1.68 and
+1.65 seconds, or approximately 34.7 and **35.3 GiB/s**. The source stage and
+the raw 2 MiB registered-H2D stage (39--41 GiB/s) are each roughly twice as
+fast in isolation as the best 2 MiB-DMA loader point.
+
+A load-window-only profile at 32 MiB reads, 2 MiB DMA blocks, sixteen reads,
+and eight events completed at 18.25 GiB/s. Flat cycles were `_copy_to_iter`
+49.84%, `filemap_get_read_batch` 5.00%, `filemap_read` 4.10%,
+`kfd_wait_on_events` 1.18%, and no staging copy. The recording is
+`/tmp/zml-rocm-r32-dma2-r16-d8-load-window.perf.data`. A whole-process profile
+and stat run are also retained as `/tmp/zml-rocm-r32-dma2-r16-d8.perf.data`
+and `/tmp/zml-rocm-r32-dma2-r16-d8.perf.stat`, but they include roughly eight
+seconds of PJRT/BFC initialization around a 2.9-second logged weight-transfer
+phase. In that whole-process profile, the 2.93% `std::vector::_M_fill_insert`
+stack is `BFCAllocator::RegionManager::AddAllocationRegion` during device
+allocation, not per-chunk transfer work.
+
+The request/block controls were then separated correctly. With a fixed 32 MiB
+source request, sixteen retained reads, and eight PJRT events:
+
+| DMA block | PJRT submissions | wall GiB/s | average PJRT latency |
+|---:|---:|---:|---:|
+| 2 MiB | 30,650 | 19.88--19.97 profiled repeat | 0.704--0.723 ms |
+| 4 MiB | 15,804 | 21.87 | 1.244 ms |
+| 8 MiB | 8,390 | **23.79** | 1.893 ms |
+| 16 MiB | 4,607 | 19.24 | 3.381 ms |
+
+Eight MiB is the current combined optimum: it retains the useful large source
+batch while removing almost three quarters of the C-API/event/callback
+round-trips. Sixteen MiB has too many tensor-tail fragments and raises both
+source and completion latency.
+
+At 32 MiB reads and 8 MiB blocks, the last concurrency screen was:
+
+| fixed reads | fixed DMA | wall GiB/s | average PJRT latency | pinned high-water |
+|---:|---:|---:|---:|---:|
+| 12 | 8 | 17.72 | 1.969 ms | 384 MiB |
+| 16 | 4 | 22.64 | 1.151 ms | 512 MiB |
+| 16 | 8 | **23.79** | 1.893 ms | 512 MiB |
+| 16 | 12 | 22.96 | 3.247 ms | 512 MiB |
+| 20 | 8 | 22.54 | 2.232 ms | 640 MiB |
+| 24 | 8 | 23.77 | 2.213 ms | 768 MiB |
+
+Interleaved repeats resolve the apparent tie. Including the screening run,
+sixteen reads produced 23.79, 24.59, and 24.80 GiB/s: median **24.59 GiB/s**.
+Twenty-four reads produced 23.77, 23.04, and 21.13 GiB/s: median
+**23.04 GiB/s**, while requiring 768 rather than 512 MiB pinned. At the
+selected sixteen/eight point, adjacent 16 and 64 MiB source requests reached
+22.19 and 18.64 GiB/s in one-run screens; 32 MiB remains the clear candidate.
+
+This approximately triples the original 8.0 GiB/s result and reaches about
+70% of the matched 35.3 GiB/s file-only ceiling. It is still below the raw HIP
+copy ceiling because the complete pipeline must do the page-cache copy and H2D
+concurrently and still creates 8,390 PJRT/C-API/event/callback transactions.
+Further material improvement requires lower-overhead/batched PJRT completion
+or a different transfer API, not more event concurrency. A quiet-host repeat
+is still appropriate before changing global defaults, especially because the
+existing oneAPI results below prefer 2 MiB local requests/blocks.
+
+The current explicit ROCm diagnostic command is:
+
+```text
+ROCR_VISIBLE_DEVICES=7 \
+ZML_LOAD_DMA_BLOCK_MIB=8 \
+ZML_LOAD_READ_REQUEST_MIB=32 \
+ZML_LOAD_FIXED_READ_PARALLELISM=16 \
+ZML_LOAD_FIXED_DMA_PARALLELISM=8 \
+bazel-bin/examples/io/playground load /var/models/google/gemma-4-31B-it/
+```
+
+No XLA build was performed. The current XLA checkout is clean at
+`92fd6518987ecdfe0471d3cc49705e8144050b1b` (`GPU: use VMM only for command
+buffer temp allocations`). The local ROCm archive currently hashes to
+`32b36149625ff4dfc6713809a6751ed2210dbb14b446a84225f66dcee2770ce4`, while
+the dirty `platforms/rocm/rocm.bzl` expects
+`86a67903aab0e8960b1eda46572f17f357b7e4df804b3c4f3cc850333369ac78`.
+Bazel therefore used its cached older PJRT artifact for these measurements.
+That artifact tracks `DmaMap` ranges through `IsDmaMapped`, and the zero
+linearization samples prove its bypass was effective. Reproducibility from a
+cold Bazel repository still requires reconciling the configured archive hash.
+
 ## Active implementation: fully adaptive source tuple
 
 Work started 2026-07-23 against `plan.md` from detached HEAD `9957ffdd`.

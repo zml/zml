@@ -2105,11 +2105,6 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
 					"name": "libncurses-dev",
 					"version": "6.3-2ubuntu0.1"
@@ -2167,17 +2162,6 @@
 				"https://repo.radeon.com/rocm/apt/7.2.2/pool/main/c/comgr/comgr_3.0.0.70202-86~22.04_amd64.deb"
 			],
 			"version": "3.0.0.70202-86~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-			"name": "libtinfo-dev",
-			"sha256": "145736b5bec52cd4fc1b2c09517759383b95255f9fd304ace1de7d830295bb33",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/n/ncurses/libtinfo-dev_6.3-2ubuntu0.1_amd64.deb"
-			],
-			"version": "6.3-2ubuntu0.1"
 		},
 		{
 			"arch": "amd64",
@@ -2830,11 +2814,6 @@
 					"key": "comgr_3.0.0.70202-86_22.04_amd64",
 					"name": "comgr",
 					"version": "3.0.0.70202-86~22.04"
-				},
-				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
 				},
 				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
@@ -3694,11 +3673,6 @@
 					"version": "3.0.0.70202-86~22.04"
 				},
 				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
 					"name": "libncurses-dev",
 					"version": "6.3-2ubuntu0.1"
@@ -4069,11 +4043,6 @@
 					"key": "comgr_3.0.0.70202-86_22.04_amd64",
 					"name": "comgr",
 					"version": "3.0.0.70202-86~22.04"
-				},
-				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
 				},
 				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
@@ -4512,11 +4481,6 @@
 					"key": "comgr_3.0.0.70202-86_22.04_amd64",
 					"name": "comgr",
 					"version": "3.0.0.70202-86~22.04"
-				},
-				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
 				},
 				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
@@ -5279,11 +5243,6 @@
 					"version": "3.0.0.70202-86~22.04"
 				},
 				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
 					"name": "libncurses-dev",
 					"version": "6.3-2ubuntu0.1"
@@ -5815,11 +5774,6 @@
 					"version": "3.0.0.70202-86~22.04"
 				},
 				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
 					"name": "libncurses-dev",
 					"version": "6.3-2ubuntu0.1"
@@ -6205,11 +6159,6 @@
 					"key": "comgr_3.0.0.70202-86_22.04_amd64",
 					"name": "comgr",
 					"version": "3.0.0.70202-86~22.04"
-				},
-				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
 				},
 				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
@@ -7108,11 +7057,6 @@
 					"key": "comgr_3.0.0.70202-86_22.04_amd64",
 					"name": "comgr",
 					"version": "3.0.0.70202-86~22.04"
-				},
-				{
-					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo-dev",
-					"version": "6.3-2ubuntu0.1"
 				},
 				{
 					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",

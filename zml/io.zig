@@ -4513,7 +4513,7 @@ pub fn load(
         }
     }.call, .{&total_logical_bytes});
 
-    const direct = platform.target == .cuda or platform.target == .oneapi;
+    const direct = platform.target == .cuda or platform.target == .rocm or platform.target == .oneapi;
     load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, max_dma_parallelism_per_device={d}, read_request_size={s}, fixed_read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         direct,
