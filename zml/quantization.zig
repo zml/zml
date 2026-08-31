@@ -10,6 +10,7 @@ const Tensor = @import("tensor.zig").Tensor;
 
 pub const nvfp4_block_size = 16;
 pub const mx_block_size = 32;
+pub const fp8_block_size = 128;
 
 pub const Quantization = struct {
     scheme: Scheme, // decided when the checkpoint is read
@@ -105,7 +106,8 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input, global_scale, axis) else null,
-        .mxfp8, .mxfp4, .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+        .fp8_block128 => if (supportsNvfp4InputQuantization(platform)) quantizeFp8Block128(input, global_scale, axis) else null,
+        .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
 }
 
@@ -138,6 +140,37 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
     const values = grouped.div(divisor)
         .convert(.f4e2m1)
         .reshape(x.shape().withDtype(.f4e2m1));
+
+    return .{
+        .values = values,
+        .scales = scales.squeeze(.blk),
+        .global_scale = input_global_scale,
+    };
+}
+
+pub fn quantizeFp8Block128(x: Tensor, input_global_scale: ?Tensor, axis: anytype) QuantizedInput {
+    const value_max = DataType.f8e4m3fn.maxValue().as(f32);
+
+    stdx.debug.assert(x.shape().hasTag(axis) != null, "quantizeFp8Block128 expects x to have {any} tag, got {f}", .{ axis, x.shape() });
+    stdx.debug.assert(@rem(x.dim(axis), fp8_block_size) == 0, "quantizeFp8Block128 expects {any} to be a multiple of {}, got {f}", .{ axis, fp8_block_size, x.shape() });
+
+    const dt = x.dtype();
+    const scaled = if (input_global_scale) |igs|
+        x.div(igs.convert(dt).broad(x.shape()))
+    else
+        x;
+    const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = fp8_block_size });
+
+    const wide = grouped.convert(.f32);
+    const scales = wide.abs().scale(1.0 / value_max).max(.blk);
+
+    const divisor = scales
+        .maximum(.scalar(std.math.floatMin(f32), .f32))
+        .broad(wide.shape());
+
+    const values = wide.div(divisor)
+        .convert(.f8e4m3fn)
+        .reshape(x.shape().withDtype(.f8e4m3fn));
 
     return .{
         .values = values,
