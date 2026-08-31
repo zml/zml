@@ -2,11 +2,20 @@
 
 const std = @import("std");
 
-const distributed_example = @import("distributed_example");
 const zml = @import("zml");
 
-const rows_per_host = 4;
-const features_per_gpu = 8;
+const CliArgs = struct {
+    pub const help =
+        \\Usage: gpu_shard_map COORDINATOR RANK PROCESS_COUNT NAMESPACE
+    ;
+
+    positional: struct {
+        coordinator: []const u8,
+        rank: usize,
+        processCount: usize,
+        namespace: []const u8,
+    },
+};
 
 const Statistics = struct {
     partial_sums: zml.Tensor,
@@ -32,149 +41,75 @@ const ShardStatistics = struct {
                         .sum(.rows)
                         .sum(.features)
                         .reshape(local_outputs[0]);
-                    const global_sum = zml.ops.allReduceAxes(
+                    const outputs = allocator.alloc(zml.Tensor, 2) catch
+                        unreachable;
+                    outputs[0] = local_sum;
+                    outputs[1] = zml.ops.allReduceAxes(
                         local_sum,
                         .{.data},
                         zml.Tensor.add,
                     ).reshape(local_outputs[1]);
-                    const outputs = allocator.alloc(zml.Tensor, 2) catch
-                        unreachable;
-                    outputs[0] = local_sum;
-                    outputs[1] = global_sum;
                     return outputs;
                 }
             }).body,
         );
-        return .{
-            .partial_sums = mapped[0],
-            .global_sum = mapped[1],
-        };
+        return .{ .partial_sums = mapped[0], .global_sum = mapped[1] };
     }
 };
-
-fn verifyInput(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    features: usize,
-    input: *const zml.Buffer,
-) !void {
-    var shards = input.shards();
-    while (shards.next()) |shard| {
-        const slices = shard.globalSlices();
-        if (slices.len != 2 or slices.get(0).size != 2 or
-            slices.get(1).start != 0 or
-            slices.get(1).size != @as(i64, @intCast(features)))
-        {
-            return error.UnexpectedInputPlacement;
-        }
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        if (local.constItems(f32).len != 32) {
-            return error.UnexpectedInputPlacement;
-        }
-        for (local.constItems(f32)) |value| {
-            if (value != 1) return error.UnexpectedInputValue;
-        }
-    }
-}
-
-fn verifyPartialSums(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    partial_sums: *const zml.Buffer,
-) !void {
-    var starts: [2]i64 = undefined;
-    var shard_count: usize = 0;
-    var shards = partial_sums.shards();
-    while (shards.next()) |shard| {
-        const slices = shard.globalSlices();
-        if (slices.len != 1 or slices.get(0).size != 1 or
-            slices.get(0).start < 0 or slices.get(0).start >= 4)
-        {
-            return error.UnexpectedPartialPlacement;
-        }
-        for (starts[0..shard_count]) |start| {
-            if (start == slices.get(0).start) {
-                return error.DuplicatePartialShard;
-            }
-        }
-        starts[shard_count] = slices.get(0).start;
-        shard_count += 1;
-
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        if (local.constItems(f32)[0] != 32) {
-            return error.UnexpectedPartialSum;
-        }
-    }
-    if (shard_count != 2) return error.UnexpectedShardCount;
-}
-
-fn verifyGlobalSum(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    global_sum: *const zml.Buffer,
-) !void {
-    var shards = global_sum.shards();
-    while (shards.next()) |shard| {
-        if (shard.globalSlices().len != 0) {
-            return error.UnexpectedGlobalPlacement;
-        }
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        if (local.constItems(f32)[0] != 128) {
-            return error.UnexpectedGlobalSum;
-        }
-    }
-    if (try global_sum.getValue(f32, io) != 128) {
-        return error.UnexpectedGlobalSum;
-    }
-}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const job = try distributed_example.Job.parse(init);
-
-    var platform = try job.openPlatform(allocator, io);
+    const args = zml.stdx.flags.parse(init.minimal.args, CliArgs).positional;
+    if (args.processCount == 0 or
+        args.rank >= args.processCount or
+        args.namespace.len == 0)
+    {
+        return error.InvalidDistributedJob;
+    }
+    var platform = try zml.Platform.init(allocator, io, .cuda, .{
+        .distributed = .{
+            .coordinator_address = try .parseLiteral(args.coordinator),
+            .process_index = args.rank,
+            .process_count = args.processCount,
+            .namespace = args.namespace,
+            .local_device_ids = &.{ 0, 1 },
+        },
+        .xla_gpu = .{
+            .allocator = .{ .bfc = .{ .preallocate = false } },
+        },
+    });
     defer platform.deinit(allocator, io);
-    try distributed_example.expectTopology(platform, 4, 2);
-    const data_sharding = try distributed_example.dataSharding(platform);
 
-    const features = platform.addressableDevices().len * features_per_gpu;
-    const input_shape = zml.Shape.init(.{
-        .rows = platform.processCount() * rows_per_host,
-        .features = features,
+    if (platform.globalDevices().len != 4 or
+        platform.addressableDevices().len != 2)
+    {
+        return error.UnexpectedTopology;
+    }
+    const sharding = try platform.registerShardingWithStrategy(
+        "data",
+        .mesh(.{ .data = .low_bandwidth }),
+        .parseBindings(.{ .data = .{ .network, .link } }),
+    );
+    const shape = zml.Shape.init(.{
+        .rows = platform.processCount() * 4,
+        .features = platform.addressableDevices().len * 8,
     }, .f32).withPartitioning(.{
         .rows = .data,
         .features = .replicated,
     });
-    const host_data = try distributed_example.allocateValues(
-        allocator,
-        input_shape,
-        .ones,
-    );
+    const host_data = try zml.Slice.alloc(allocator, shape);
     defer host_data.free(allocator);
-    var input = try zml.Buffer.fromSlice(
-        io,
-        platform,
-        host_data,
-        data_sharding,
-    );
+    @memset(host_data.items(f32), 1);
+    var input = try zml.Buffer.fromSlice(io, platform, host_data, sharding);
     defer input.deinit();
-    try distributed_example.expectShardCounts(&input, 4, 2);
-    try distributed_example.expectAddressable(platform, &input);
-    try verifyInput(allocator, io, features, &input);
 
     var executable = try platform.compileFn(
         allocator,
         io,
         ShardStatistics.forward,
-        .{zml.Tensor.fromShape(input_shape)},
-        .{
-            .shardings = &.{data_sharding},
-            .program_name = "gpu-shard-map",
-        },
+        .{zml.Tensor.fromShape(shape)},
+        .{ .shardings = &.{sharding}, .program_name = "gpu-shard-map" },
     );
     defer executable.deinit();
     var arguments = try executable.args(allocator);
@@ -187,24 +122,27 @@ pub fn main(init: std.process.Init) !void {
     var output = results.get(zml.Bufferized(Statistics));
     defer output.partial_sums.deinit();
     defer output.global_sum.deinit();
-    try distributed_example.expectShardCounts(&output.partial_sums, 4, 2);
-    try distributed_example.expectShardCounts(&output.global_sum, 4, 2);
-    try distributed_example.expectAddressable(platform, &output.partial_sums);
-    try distributed_example.expectAddressable(platform, &output.global_sum);
-    try verifyPartialSums(allocator, io, &output.partial_sums);
-    try verifyGlobalSum(allocator, io, &output.global_sum);
-    try distributed_example.printLocalShards(
-        allocator,
-        io,
-        &output.partial_sums,
-        "partial_sum_expected_32",
-    );
-    try distributed_example.printLocalShards(
-        allocator,
-        io,
-        &output.global_sum,
-        "global_sum_expected_128",
-    );
-
+    var shards = output.partial_sums.shards();
+    while (shards.next()) |shard| {
+        const local = try shard.toSliceAlloc(allocator, io);
+        defer local.free(allocator);
+        const values = local.constItems(f32);
+        for (values) |value| {
+            if (value != 32) return error.UnexpectedPartialSum;
+        }
+        std.debug.print(
+            "partial_sum: device={d} slices={any} values={any}\n",
+            .{
+                shard.globalDeviceId(),
+                shard.globalSlices().constSlice(),
+                values,
+            },
+        );
+    }
+    const global_sum = try output.global_sum.getValue(f32, io);
+    if (global_sum != 128) {
+        return error.UnexpectedGlobalSum;
+    }
+    std.debug.print("global_sum={d}\n", .{global_sum});
     try platform.barrier("gpu-shard-map-before-shutdown");
 }

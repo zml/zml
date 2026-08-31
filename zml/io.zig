@@ -1109,16 +1109,9 @@ pub const DirectMemoryWriter = struct {
         var local_shards: Buffer.LocalShards = .empty;
         const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
-            const local_slot = for (
-                platform.addressableDevices(),
-                0..,
-            ) |local_device, slot| {
-                if (local_device.id() == device.id) break slot;
-            } else return error.MissingAddressableDevice;
-            const pool = &pools[local_slot];
-            const shard_dma_allocator = dma_allocators[local_slot].allocator();
-            const pjrt_mem = platform.addressableDevices()[local_slot]
-                .memory(.default).?;
+            const pool = &pools[device.id];
+            const shard_dma_allocator = dma_allocators[device.id].allocator();
+            const pjrt_mem = platform.devices[device.id].memory(.default).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
             initialized += 1;

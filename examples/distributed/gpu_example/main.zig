@@ -1,38 +1,49 @@
 //! Runnable ZML equivalent of ../../../../gpu_example.py.
 
 const std = @import("std");
-const log = std.log;
 
-const distributed_example = @import("distributed_example");
+const zml = @import("zml");
+
+const CliArgs = struct {
+    pub const help =
+        \\Usage: gpu_example COORDINATOR RANK PROCESS_COUNT NAMESPACE
+    ;
+
+    positional: struct {
+        coordinator: []const u8,
+        rank: usize,
+        processCount: usize,
+        namespace: []const u8,
+    },
+};
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-    const job = try distributed_example.Job.parse(init);
-
-    var platform = try job.openPlatform(allocator, io);
-    defer platform.deinit(allocator, io);
-    try distributed_example.expectTopology(platform, 4, 2);
-    if (platform.processIndex() != job.process_index or
-        platform.processCount() != 2)
+    const args = zml.stdx.flags.parse(init.minimal.args, CliArgs).positional;
+    if (args.processCount == 0 or
+        args.rank >= args.processCount or
+        args.namespace.len == 0)
     {
-        return error.UnexpectedProcessTopology;
+        return error.InvalidDistributedJob;
     }
+    var platform = try zml.Platform.init(init.gpa, init.io, .cuda, .{
+        .distributed = .{
+            .coordinator_address = try .parseLiteral(args.coordinator),
+            .process_index = args.rank,
+            .process_count = args.processCount,
+            .namespace = args.namespace,
+            .local_device_ids = &.{ 0, 1 },
+        },
+        .xla_gpu = .{
+            .allocator = .{ .bfc = .{ .preallocate = false } },
+        },
+    });
+    defer platform.deinit(init.gpa, init.io);
 
-    var devices_per_process: [2]usize = @splat(0);
-    for (platform.globalDevices()) |device| {
-        const process_index = device.processIndex();
-        if (process_index >= devices_per_process.len or
-            device.isAddressable() != (process_index == job.process_index))
-        {
-            return error.UnexpectedDeviceOwnership;
-        }
-        devices_per_process[process_index] += 1;
+    if (platform.globalDevices().len != 4 or
+        platform.addressableDevices().len != 2)
+    {
+        return error.UnexpectedTopology;
     }
-    if (devices_per_process[0] != 2 or devices_per_process[1] != 2) {
-        return error.UnexpectedDeviceOwnership;
-    }
-    log.info("\n{f}", .{platform.fmtVerbose()});
     std.debug.print(
         "process id = {d}\nglobal devices = {d}\nlocal devices = {d}\n",
         .{
@@ -52,7 +63,5 @@ pub fn main(init: std.process.Init) !void {
             },
         );
     }
-    std.debug.print("physical mesh:{f}\n", .{platform.physical_mesh});
-
     try platform.barrier("gpu-example-before-shutdown");
 }

@@ -5,10 +5,7 @@ zig_binary(
     name = "distributed_benchmark",
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = [
-        "//examples/distributed/common",
-        "//zml",
-    ],
+    deps = ["//zml"],
 )
 
 build_test(

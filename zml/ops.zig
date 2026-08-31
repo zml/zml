@@ -22,7 +22,7 @@ const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
-pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+pub fn allReduce(inputs: anytype, comptime func: anytype) @TypeOf(inputs) {
     const groups: Sharding.CollectiveGroups = .full(
         @intCast(Compiler.current().partitioning.numPartitions()),
     );
@@ -33,7 +33,7 @@ pub fn allReduceAxes(
     inputs: anytype,
     comptime logical_axes: anytype,
     comptime func: anytype,
-) AllReduceReturnType(@TypeOf(inputs)) {
+) @TypeOf(inputs) {
     const axes = parseLogicalAxes(logical_axes);
     const input_tensors = allReduceInputs(inputs);
     const partitioning = Compiler.current().partitioning;
@@ -65,7 +65,7 @@ fn allReduceWithGroups(
     inputs: anytype,
     groups: *const Sharding.CollectiveGroups,
     comptime func: anytype,
-) AllReduceReturnType(@TypeOf(inputs)) {
+) @TypeOf(inputs) {
     const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
     const input_tensors = allReduceInputs(inputs);
@@ -308,26 +308,6 @@ fn allReduceInputs(
         },
         .array => inputs,
         else => unreachable,
-    };
-}
-
-fn AllReduceReturnType(comptime InputsT: type) type {
-    if (InputsT == Tensor) return Tensor;
-
-    return switch (@typeInfo(InputsT)) {
-        .@"struct" => |struct_info| b: {
-            if (!struct_info.is_tuple) {
-                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor or [N]Tensor inputs");
-            }
-            break :b InputsT;
-        },
-        .array => |array_info| b: {
-            if (array_info.child != Tensor) {
-                @compileError("zml.ops.allReduce expects [N]Tensor inputs");
-            }
-            break :b InputsT;
-        },
-        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 }
 

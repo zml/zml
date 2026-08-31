@@ -88,7 +88,7 @@ pub const Client = struct {
         return self.getUntil(
             allocator,
             key,
-            deadlineFromNow(self.io, timeout),
+            std.Io.Clock.awake.now(self.io).addDuration(timeout),
         );
     }
 
@@ -99,11 +99,7 @@ pub const Client = struct {
         deadline: std.Io.Timestamp,
     ) Error![]u8 {
         const started = std.Io.Clock.awake.now(self.io);
-        const result = self.getUntilUnlogged(
-            allocator,
-            key,
-            deadline,
-        ) catch |err| {
+        errdefer |err| {
             self.logOperation(
                 .get,
                 key.len,
@@ -111,33 +107,25 @@ pub const Client = struct {
                 started,
                 @errorName(err),
             );
-            return err;
-        };
-        self.logOperation(.get, key.len, 0, started, "ok");
-        return result;
-    }
-
-    fn getUntilUnlogged(
-        self: *const Client,
-        allocator: std.mem.Allocator,
-        key: []const u8,
-        deadline: std.Io.Timestamp,
-    ) Error![]u8 {
+        }
         while (true) {
-            const result = self.request(
+            const result = self.requestUntil(
                 .get,
                 key,
                 "",
                 allocator,
                 deadline,
-            ) catch |err| switch (err) {
+            ) catch |cause| switch (cause) {
                 error.Unavailable => {
                     try self.waitToRetry(deadline);
                     continue;
                 },
-                else => return err,
+                else => return @as(Error![]u8, cause),
             };
-            if (result) |value| return value;
+            if (result) |value| {
+                self.logOperation(.get, key.len, 0, started, "ok");
+                return value;
+            }
             try self.waitToRetry(deadline);
         }
     }
@@ -148,22 +136,22 @@ pub const Client = struct {
         key: []const u8,
     ) Error!?[]u8 {
         const started = std.Io.Clock.awake.now(self.io);
-        const result = self.request(
+        errdefer |err| self.logOperation(
+            .get,
+            key.len,
+            0,
+            started,
+            @errorName(err),
+        );
+        const result = try self.requestUntil(
             .get,
             key,
             "",
             allocator,
-            deadlineFromNow(self.io, self.options.operation_timeout),
-        ) catch |err| {
-            self.logOperation(
-                .get,
-                key.len,
-                0,
-                started,
-                @errorName(err),
-            );
-            return err;
-        };
+            std.Io.Clock.awake.now(self.io).addDuration(
+                self.options.operation_timeout,
+            ),
+        );
         self.logOperation(
             .get,
             key.len,
@@ -182,7 +170,9 @@ pub const Client = struct {
         return self.putUntil(
             key,
             value,
-            deadlineFromNow(self.io, self.options.operation_timeout),
+            std.Io.Clock.awake.now(self.io).addDuration(
+                self.options.operation_timeout,
+            ),
         );
     }
 
@@ -193,7 +183,7 @@ pub const Client = struct {
         deadline: std.Io.Timestamp,
     ) Error!void {
         const started = std.Io.Clock.awake.now(self.io);
-        self.putUntilUnlogged(key, value, deadline) catch |err| {
+        errdefer |err| {
             self.logOperation(
                 .put,
                 key.len,
@@ -201,31 +191,22 @@ pub const Client = struct {
                 started,
                 @errorName(err),
             );
-            return err;
-        };
-        self.logOperation(.put, key.len, value.len, started, "ok");
-    }
-
-    fn putUntilUnlogged(
-        self: *const Client,
-        key: []const u8,
-        value: []const u8,
-        deadline: std.Io.Timestamp,
-    ) Error!void {
+        }
         while (true) {
-            _ = self.request(
+            _ = self.requestUntil(
                 .put,
                 key,
                 value,
                 null,
                 deadline,
-            ) catch |err| switch (err) {
+            ) catch |cause| switch (cause) {
                 error.Unavailable => {
                     try self.waitToRetry(deadline);
                     continue;
                 },
-                else => return err,
+                else => return @as(Error!void, cause),
             };
+            self.logOperation(.put, key.len, value.len, started, "ok");
             return;
         }
     }
@@ -266,28 +247,12 @@ pub const Client = struct {
         return self.putUntil(
             key,
             value,
-            deadlineFromNow(self.io, self.options.startup_timeout),
+            std.Io.Clock.awake.now(self.io).addDuration(
+                self.options.startup_timeout,
+            ),
         ) catch |err| {
             return pjrtError(err);
         };
-    }
-
-    fn request(
-        self: *const Client,
-        operation: Operation,
-        key: []const u8,
-        value: []const u8,
-        allocator: ?std.mem.Allocator,
-        deadline: std.Io.Timestamp,
-    ) Error!?[]u8 {
-        try self.validateRequest(key, value);
-        return self.requestUntil(
-            operation,
-            key,
-            value,
-            allocator,
-            deadline,
-        );
     }
 
     fn logOperation(
@@ -322,7 +287,10 @@ pub const Client = struct {
         allocator: ?std.mem.Allocator,
         deadline: std.Io.Timestamp,
     ) Error!?[]u8 {
-        if (deadlineReached(self.io, deadline)) {
+        try self.validateRequest(key, value);
+        if (std.Io.Clock.awake.now(self.io).nanoseconds >=
+            deadline.nanoseconds)
+        {
             return error.DeadlineExceeded;
         }
 
@@ -787,17 +755,6 @@ fn writeResponse(
     try writer.writeInt(u32, @intCast(value.len), .big);
     try writer.writeAll(value);
     try writer.flush();
-}
-
-fn deadlineFromNow(
-    io: std.Io,
-    duration: std.Io.Duration,
-) std.Io.Timestamp {
-    return std.Io.Clock.awake.now(io).addDuration(duration);
-}
-
-fn deadlineReached(io: std.Io, deadline: std.Io.Timestamp) bool {
-    return std.Io.Clock.awake.now(io).nanoseconds >= deadline.nanoseconds;
 }
 
 fn waitUntil(

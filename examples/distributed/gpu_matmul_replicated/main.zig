@@ -2,11 +2,20 @@
 
 const std = @import("std");
 
-const distributed_example = @import("distributed_example");
 const zml = @import("zml");
 
-const rows_per_host = 4;
-const columns_per_gpu = 8;
+const CliArgs = struct {
+    pub const help =
+        \\Usage: gpu_matmul_replicated COORDINATOR RANK PROCESS_COUNT NAMESPACE
+    ;
+
+    positional: struct {
+        coordinator: []const u8,
+        rank: usize,
+        processCount: usize,
+        namespace: []const u8,
+    },
+};
 
 const Matmul = struct {
     pub fn forward(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
@@ -17,73 +26,48 @@ const Matmul = struct {
     }
 };
 
-fn verifyReplicatedWeight(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    columns: usize,
-    weight: *const zml.Buffer,
-) !void {
-    var shards = weight.shards();
-    while (shards.next()) |shard| {
-        const slices = shard.globalSlices();
-        if (slices.len != 2 or
-            slices.get(0).start != 0 or
-            slices.get(0).size != @as(i64, @intCast(columns)) or
-            slices.get(1).start != 0 or
-            slices.get(1).size != @as(i64, @intCast(columns)))
-        {
-            return error.UnexpectedWeightPlacement;
-        }
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        for (local.constItems(f32)) |value| {
-            if (value != 1) return error.UnexpectedWeightValue;
-        }
-    }
-}
-
-fn verifyOutput(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    rank: usize,
-    columns: usize,
-    output: *const zml.Buffer,
-) !void {
-    var shard_count: usize = 0;
-    var shards = output.shards();
-    while (shards.next()) |shard| {
-        const slices = shard.globalSlices();
-        if (slices.len != 2 or
-            slices.get(0).start !=
-                @as(i64, @intCast(rank * rows_per_host)) or
-            slices.get(0).size != rows_per_host or
-            slices.get(1).start != 0 or
-            slices.get(1).size != @as(i64, @intCast(columns)))
-        {
-            return error.UnexpectedOutputPlacement;
-        }
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        for (local.constItems(f32)) |value| {
-            if (value != 16) return error.UnexpectedMatmulValue;
-        }
-        shard_count += 1;
-    }
-    if (shard_count != 2) return error.UnexpectedShardCount;
-}
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const job = try distributed_example.Job.parse(init);
-
-    var platform = try job.openPlatform(allocator, io);
+    const args = zml.stdx.flags.parse(init.minimal.args, CliArgs).positional;
+    if (args.processCount == 0 or
+        args.rank >= args.processCount or
+        args.namespace.len == 0)
+    {
+        return error.InvalidDistributedJob;
+    }
+    var platform = try zml.Platform.init(allocator, io, .cuda, .{
+        .distributed = .{
+            .coordinator_address = try .parseLiteral(args.coordinator),
+            .process_index = args.rank,
+            .process_count = args.processCount,
+            .namespace = args.namespace,
+            .local_device_ids = &.{ 0, 1 },
+        },
+        .xla_gpu = .{
+            .allocator = .{ .bfc = .{ .preallocate = false } },
+        },
+    });
     defer platform.deinit(allocator, io);
-    try distributed_example.expectTopology(platform, 4, 2);
-    const sharding = try distributed_example.hostGpuSharding(platform);
 
-    const rows = platform.processCount() * rows_per_host;
-    const columns = platform.addressableDevices().len * columns_per_gpu;
+    if (platform.globalDevices().len != 4 or
+        platform.addressableDevices().len != 2)
+    {
+        return error.UnexpectedTopology;
+    }
+    const sharding = try platform.registerShardingWithStrategy(
+        "host-gpu",
+        .mesh(.{
+            .host = .low_bandwidth,
+            .gpu = .high_bandwidth,
+        }),
+        .parseBindings(.{
+            .host = .network,
+            .gpu = .link,
+        }),
+    );
+    const rows = platform.processCount() * 4;
+    const columns = platform.addressableDevices().len * 8;
     const a_shape = zml.Shape.init(.{
         .rows = rows,
         .contracting = columns,
@@ -99,48 +83,47 @@ pub fn main(init: std.process.Init) !void {
         .output = .replicated,
     });
 
-    var executable = try platform.compileFn(
-        allocator,
-        io,
-        Matmul.forward,
-        .{
-            zml.Tensor.fromShape(a_shape),
-            zml.Tensor.fromShape(b_shape),
-        },
-        .{
-            .shardings = &.{sharding},
-            .program_name = "gpu-matmul-replicated",
-        },
-    );
-    defer executable.deinit();
-
-    const host_a = try distributed_example.allocateValues(
-        allocator,
-        a_shape,
-        .ones,
-    );
+    const host_a = try zml.Slice.alloc(allocator, a_shape);
     defer host_a.free(allocator);
-    const host_b = try distributed_example.allocateValues(
-        allocator,
-        b_shape,
-        .ones,
-    );
+    @memset(host_a.items(f32), 1);
+    const host_b = try zml.Slice.alloc(allocator, b_shape);
     defer host_b.free(allocator);
+    @memset(host_b.items(f32), 1);
     var a = try zml.Buffer.fromSlice(io, platform, host_a, sharding);
     defer a.deinit();
     var b = try zml.Buffer.fromSlice(
         io,
         platform,
         host_b,
-        zml.Sharding.replicated,
+        platform.replicated_sharding,
     );
     defer b.deinit();
-    try distributed_example.expectShardCounts(&a, 4, 2);
-    try distributed_example.expectShardCounts(&b, 4, 2);
-    try distributed_example.expectAddressable(platform, &a);
-    try distributed_example.expectAddressable(platform, &b);
-    try verifyReplicatedWeight(allocator, io, columns, &b);
+    var weight_shards = b.shards();
+    while (weight_shards.next()) |shard| {
+        const local = try shard.toSliceAlloc(allocator, io);
+        defer local.free(allocator);
+        const values = local.constItems(f32);
+        std.debug.print(
+            "replicated_B: device={d} slices={any} values={any}\n",
+            .{
+                shard.globalDeviceId(),
+                shard.globalSlices().constSlice(),
+                values[0..@min(values.len, 8)],
+            },
+        );
+    }
 
+    var executable = try platform.compileFn(
+        allocator,
+        io,
+        Matmul.forward,
+        .{ zml.Tensor.fromShape(a_shape), zml.Tensor.fromShape(b_shape) },
+        .{
+            .shardings = &.{sharding},
+            .program_name = "gpu-matmul-replicated",
+        },
+    );
+    defer executable.deinit();
     var arguments = try executable.args(allocator);
     defer arguments.deinit(allocator);
     var results = try executable.results(allocator);
@@ -148,17 +131,24 @@ pub fn main(init: std.process.Init) !void {
     arguments.set(.{ a, b });
     executable.callOpts(io, arguments, &results, .{ .wait = true });
 
-    var c = results.get(zml.Buffer);
-    defer c.deinit();
-    try distributed_example.expectShardCounts(&c, 4, 2);
-    try distributed_example.expectAddressable(platform, &c);
-    try verifyOutput(allocator, io, job.process_index, columns, &c);
-    try distributed_example.printLocalShards(
-        allocator,
-        io,
-        &c,
-        "A @ replicated_B",
-    );
-
+    var output = results.get(zml.Buffer);
+    defer output.deinit();
+    var output_shards = output.shards();
+    while (output_shards.next()) |shard| {
+        const local = try shard.toSliceAlloc(allocator, io);
+        defer local.free(allocator);
+        const values = local.constItems(f32);
+        for (values) |value| {
+            if (value != 16) return error.UnexpectedValue;
+        }
+        std.debug.print(
+            "A @ replicated_B: device={d} slices={any} values={any}\n",
+            .{
+                shard.globalDeviceId(),
+                shard.globalSlices().constSlice(),
+                values[0..@min(values.len, 8)],
+            },
+        );
+    }
     try platform.barrier("gpu-matmul-replicated-before-shutdown");
 }

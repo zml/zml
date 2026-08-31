@@ -1,9 +1,0 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
-
-zig_library(
-    name = "common",
-    import_name = "distributed_example",
-    main = "common.zig",
-    visibility = ["//visibility:public"],
-    deps = ["//zml"],
-)

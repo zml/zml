@@ -1157,9 +1157,8 @@ pub const PhysicalMesh = struct {
         };
         std.mem.sort(ProcessDevice, sorted, Sort{}, Sort.lessThan);
 
-        const device_counts = try allocator.alloc(usize, process_count);
-        defer allocator.free(device_counts);
-        @memset(device_counts, 0);
+        var counts_buffer: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
+        const device_counts = counts_buffer[0..process_count];
         for (sorted, 0..) |device, index| {
             if (device.process_index >= process_count) {
                 return error.InvalidDeviceTopology;

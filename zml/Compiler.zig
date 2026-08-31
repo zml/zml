@@ -308,9 +308,6 @@ pub fn compile(
 
     const num_partitions = compiler.partitioning.numPartitions();
     const num_replicas = compiler.partitioning.numReplicas();
-    const num_devices = compiler.partitioning.numDevices();
-    _ = num_devices;
-    // num_devices = numPartitions × numReplicas = all global devices
 
     compiler.module.operation().setAttributeByName(
         "mhlo.num_partitions",

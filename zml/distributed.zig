@@ -67,7 +67,14 @@ pub const Runtime = struct {
         var owned_config = config;
         owned_config.namespace = namespace;
         owned_config.local_device_ids = local_device_ids;
-        const options = optionsFromConfig(owned_config);
+        const options: kv_store.Options = .{
+            .startup_timeout = owned_config.startup_timeout,
+            .operation_timeout = owned_config.operation_timeout,
+            .retry_delay = owned_config.retry_delay,
+            .max_key_bytes = owned_config.max_key_bytes,
+            .max_value_bytes = owned_config.max_value_bytes,
+            .max_connections = owned_config.max_connections,
+        };
         state.* = .{
             .allocator = allocator,
             .config = owned_config,
@@ -86,7 +93,15 @@ pub const Runtime = struct {
             state.server = try .init(
                 allocator,
                 io,
-                bindAddress(owned_config),
+                owned_config.bind_address orelse
+                    switch (owned_config.coordinator_address) {
+                        .ip4 => |address| .{
+                            .ip4 = .unspecified(address.port),
+                        },
+                        .ip6 => |address| .{
+                            .ip6 = .unspecified(address.port),
+                        },
+                    },
                 options,
             );
             errdefer if (state.server) |*server| server.deinit();
@@ -128,8 +143,7 @@ pub const Runtime = struct {
             state,
             name,
             null,
-            deadlineFromNow(
-                state.client.io,
+            std.Io.Clock.awake.now(state.client.io).addDuration(
                 state.config.operation_timeout,
             ),
         );
@@ -146,8 +160,7 @@ pub const Runtime = struct {
             state,
             name,
             value,
-            deadlineFromNow(
-                state.client.io,
+            std.Io.Clock.awake.now(state.client.io).addDuration(
                 state.config.operation_timeout,
             ),
         );
@@ -169,8 +182,7 @@ pub const Runtime = struct {
             return error.InvalidLifecycle;
         }
         client.* = null;
-        const deadline = deadlineFromNow(
-            state.client.io,
+        const deadline = std.Io.Clock.awake.now(state.client.io).addDuration(
             state.config.shutdown_timeout,
         );
         rendezvousUntil(
@@ -185,12 +197,34 @@ pub const Runtime = struct {
 
         if (state.config.process_index != 0) {
             pjrt_client.deinit(api);
-            return acknowledgeClientDestroyed(state, deadline);
+            const key = try processKey(
+                state.allocator,
+                "shutdown/client-destroyed",
+                state.config.process_index,
+            );
+            defer state.allocator.free(key);
+            return state.client.putUntil(key, "", deadline);
         }
-        waitForFollowers(state, deadline) catch |err| {
-            pjrt_client.deinit(api);
-            return err;
-        };
+        for (1..state.config.process_count) |process_index| {
+            const key = processKey(
+                state.allocator,
+                "shutdown/client-destroyed",
+                process_index,
+            ) catch |err| {
+                pjrt_client.deinit(api);
+                return err;
+            };
+            defer state.allocator.free(key);
+            const value = state.client.getUntil(
+                state.allocator,
+                key,
+                deadline,
+            ) catch |err| {
+                pjrt_client.deinit(api);
+                return err;
+            };
+            state.allocator.free(value);
+        }
         pjrt_client.deinit(api);
     }
 };
@@ -220,24 +254,6 @@ fn validateConfig(config: Config) Error!void {
             return error.InvalidConfiguration;
         }
     }
-}
-
-fn optionsFromConfig(config: Config) kv_store.Options {
-    return .{
-        .startup_timeout = config.startup_timeout,
-        .operation_timeout = config.operation_timeout,
-        .retry_delay = config.retry_delay,
-        .max_key_bytes = config.max_key_bytes,
-        .max_value_bytes = config.max_value_bytes,
-        .max_connections = config.max_connections,
-    };
-}
-
-fn bindAddress(config: Config) std.Io.net.IpAddress {
-    return config.bind_address orelse switch (config.coordinator_address) {
-        .ip4 => |address| .{ .ip4 = .unspecified(address.port) },
-        .ip6 => |address| .{ .ip6 = .unspecified(address.port) },
-    };
 }
 
 fn rendezvousUntil(
@@ -283,39 +299,6 @@ fn rendezvousUntil(
     }
 }
 
-fn acknowledgeClientDestroyed(
-    state: *Runtime.State,
-    deadline: std.Io.Timestamp,
-) Error!void {
-    const key = try processKey(
-        state.allocator,
-        "shutdown/client-destroyed",
-        state.config.process_index,
-    );
-    defer state.allocator.free(key);
-    return state.client.putUntil(key, "", deadline);
-}
-
-fn waitForFollowers(
-    state: *Runtime.State,
-    deadline: std.Io.Timestamp,
-) Error!void {
-    for (1..state.config.process_count) |process_index| {
-        const key = try processKey(
-            state.allocator,
-            "shutdown/client-destroyed",
-            process_index,
-        );
-        defer state.allocator.free(key);
-        const value = try state.client.getUntil(
-            state.allocator,
-            key,
-            deadline,
-        );
-        state.allocator.free(value);
-    }
-}
-
 fn processKey(
     allocator: std.mem.Allocator,
     prefix: []const u8,
@@ -326,13 +309,6 @@ fn processKey(
         "{s}/{d}",
         .{ prefix, process_index },
     ) catch error.OutOfMemory;
-}
-
-fn deadlineFromNow(
-    io: std.Io,
-    duration: std.Io.Duration,
-) std.Io.Timestamp {
-    return std.Io.Clock.awake.now(io).addDuration(duration);
 }
 
 test "distributed config validation" {

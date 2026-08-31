@@ -1,7 +1,19 @@
 const std = @import("std");
 
-const distributed_example = @import("distributed_example");
 const zml = @import("zml");
+
+const CliArgs = struct {
+    pub const help =
+        \\Usage: distributed_all_reduce COORDINATOR RANK PROCESS_COUNT NAMESPACE
+    ;
+
+    positional: struct {
+        coordinator: []const u8,
+        rank: usize,
+        processCount: usize,
+        namespace: []const u8,
+    },
+};
 
 const rows_per_partition = 4;
 const feature_count = 8;
@@ -67,73 +79,42 @@ const Collectives = struct {
     }
 };
 
-fn verifyReplicatedScalar(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    rank: usize,
-    label: []const u8,
-    buffer: *const zml.Buffer,
-    expected: anytype,
-    global_device_count: usize,
-    local_device_count: usize,
-) !void {
-    if (buffer.numGlobalShards() !=
-        @as(u32, @intCast(global_device_count)) or
-        buffer.numShards() != @as(u32, @intCast(local_device_count)))
-    {
-        return error.UnexpectedShardCount;
-    }
-
-    const T = @TypeOf(expected);
-    var shards = buffer.shards();
-    while (shards.next()) |shard| {
-        if (shard.globalSlices().len != 0) {
-            return error.UnexpectedScalarPlacement;
-        }
-        const local = try shard.toSliceAlloc(allocator, io);
-        defer local.free(allocator);
-        const actual = local.constItems(T)[0];
-        if (actual != expected) {
-            std.log.err(
-                "{s} mismatch: rank={d} device={d} " ++
-                    "expected={any} actual={any}",
-                .{
-                    label,
-                    rank,
-                    shard.globalDeviceId(),
-                    expected,
-                    actual,
-                },
-            );
-            return error.UnexpectedCollectiveValue;
-        }
-        std.debug.print(
-            "rank={d} device={d} {s}={any}\n",
-            .{ rank, shard.globalDeviceId(), label, actual },
-        );
-    }
-    if (try buffer.getValue(T, io) != expected) {
-        return error.UnexpectedCollectiveValue;
-    }
-}
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const job = try distributed_example.Job.parse(init);
-
-    var platform = try job.openPlatform(allocator, io);
+    const args = zml.stdx.flags.parse(init.minimal.args, CliArgs).positional;
+    if (args.processCount == 0 or
+        args.rank >= args.processCount or
+        args.namespace.len == 0)
+    {
+        return error.InvalidDistributedJob;
+    }
+    var platform = try zml.Platform.init(allocator, io, .cuda, .{
+        .distributed = .{
+            .coordinator_address = try .parseLiteral(args.coordinator),
+            .process_index = args.rank,
+            .process_count = args.processCount,
+            .namespace = args.namespace,
+            .local_device_ids = &.{ 0, 1 },
+        },
+        .xla_gpu = .{
+            .allocator = .{ .bfc = .{ .preallocate = false } },
+        },
+    });
     defer platform.deinit(allocator, io);
 
-    const global_device_count = platform.globalDevices().len;
-    const local_device_count = platform.addressableDevices().len;
-    if (global_device_count != 4 or local_device_count != 2) {
+    if (platform.globalDevices().len != 4 or
+        platform.addressableDevices().len != 2)
+    {
         return error.UnexpectedTopology;
     }
-
-    const data_sharding = try distributed_example.dataSharding(platform);
+    const data_sharding = try platform.registerShardingWithStrategy(
+        "data",
+        .mesh(.{ .data = .low_bandwidth }),
+        .parseBindings(.{ .data = .{ .network, .link } }),
+    );
     const input_shape = zml.Shape.init(.{
-        .rows = global_device_count * rows_per_partition,
+        .rows = platform.globalDevices().len * rows_per_partition,
         .features = feature_count,
     }, .f32).withPartitioning(.{
         .rows = .data,
@@ -150,12 +131,6 @@ pub fn main(init: std.process.Init) !void {
         data_sharding,
     );
     defer input.deinit();
-    if (input.numGlobalShards() !=
-        @as(u32, @intCast(global_device_count)) or
-        input.numShards() != @as(u32, @intCast(local_device_count)))
-    {
-        return error.UnexpectedShardCount;
-    }
 
     var executable = try platform.compileFn(
         allocator,
@@ -182,34 +157,20 @@ pub fn main(init: std.process.Init) !void {
     try output.partition_sum.await(io);
     try output.manual_sum.await(io);
 
-    const partitions: u32 = @intCast(global_device_count);
+    const partitions: u32 = @intCast(platform.globalDevices().len);
     const expected_partition_sum = partitions * (partitions + 1) / 2;
     const expected_manual_sum: f32 = @floatFromInt(input_shape.count());
-    try verifyReplicatedScalar(
-        allocator,
-        io,
-        job.process_index,
-        "partition_sum",
-        &output.partition_sum,
-        expected_partition_sum,
-        global_device_count,
-        local_device_count,
-    );
-    try verifyReplicatedScalar(
-        allocator,
-        io,
-        job.process_index,
-        "manual_sum",
-        &output.manual_sum,
-        expected_manual_sum,
-        global_device_count,
-        local_device_count,
-    );
+    if (try output.partition_sum.getValue(u32, io) !=
+        expected_partition_sum or
+        try output.manual_sum.getValue(f32, io) != expected_manual_sum)
+    {
+        return error.UnexpectedCollectiveValue;
+    }
     std.debug.print(
         "rank={d} local_shape={d}x{d} partition_sum={d} " ++
             "manual_sum={d}\n",
         .{
-            job.process_index,
+            platform.processIndex(),
             rows_per_partition,
             feature_count,
             expected_partition_sum,

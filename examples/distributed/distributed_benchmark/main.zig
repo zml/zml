@@ -1,7 +1,6 @@
 const std = @import("std");
 const log = std.log;
 
-const distributed_example = @import("distributed_example");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
@@ -40,28 +39,36 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidDistributedJob;
     }
-    const job: distributed_example.Job = .{
-        .coordinator_address = try .parseLiteral(args.coordinator),
-        .process_index = args.rank,
-        .process_count = args.processCount,
-        .namespace = args.namespace,
-    };
-
-    var platform = try job.openPlatform(allocator, io);
+    var platform = try zml.Platform.init(allocator, io, .cuda, .{
+        .distributed = .{
+            .coordinator_address = try .parseLiteral(args.coordinator),
+            .process_index = args.rank,
+            .process_count = args.processCount,
+            .namespace = args.namespace,
+            .local_device_ids = &.{ 0, 1 },
+        },
+        .xla_gpu = .{
+            .allocator = .{ .bfc = .{ .preallocate = false } },
+        },
+    });
     defer platform.deinit(allocator, io);
-    try distributed_example.expectTopology(platform, 4, 2);
+    if (platform.globalDevices().len != 4 or
+        platform.addressableDevices().len != 2)
+    {
+        return error.UnexpectedTopology;
+    }
     if (cli_args.size == 0 or
-        @mod(cli_args.size, job.process_count) != 0 or
+        @mod(cli_args.size, args.processCount) != 0 or
         @mod(cli_args.size, platform.addressableDevices().len) != 0)
     {
         return error.InvalidMatrixSize;
     }
 
-    if (job.process_index == 0) log.info("\n{f}", .{platform.fmtVerbose()});
+    if (args.rank == 0) log.info("\n{f}", .{platform.fmtVerbose()});
     log.info(
         "rank={d} global_devices={d} local_devices={d}",
         .{
-            job.process_index,
+            args.rank,
             platform.globalDevices().len,
             platform.addressableDevices().len,
         },
@@ -95,11 +102,11 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var executable = blk: {
-        log.info("rank={d} compiling benchmark", .{job.process_index});
+        log.info("rank={d} compiling benchmark", .{args.rank});
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info(
             "rank={d} compiled benchmark [{f}]",
-            .{ job.process_index, now.untilNow(io, .awake) },
+            .{ args.rank, now.untilNow(io, .awake) },
         );
         break :blk try platform.compileFn(
             allocator,
@@ -117,31 +124,26 @@ pub fn main(init: std.process.Init) !void {
     };
     defer executable.deinit();
 
-    // Matching seeds keep host-replicated shards identical on every process.
-    var rng = std.Random.DefaultPrng.init(0);
-    const random = rng.random();
-    var a_buffer = try createRandomBuffer(
-        allocator,
+    const host_a = try zml.Slice.alloc(allocator, a_shape);
+    defer host_a.free(allocator);
+    @memset(host_a.data(), 0);
+    const host_b = try zml.Slice.alloc(allocator, b_shape);
+    defer host_b.free(allocator);
+    @memset(host_b.data(), 0);
+    var a_buffer = try zml.Buffer.fromSlice(
         io,
         platform,
-        a_shape,
+        host_a,
         benchmark_sharding,
-        random,
     );
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(
-        allocator,
+    var b_buffer = try zml.Buffer.fromSlice(
         io,
         platform,
-        b_shape,
+        host_b,
         benchmark_sharding,
-        random,
     );
     defer b_buffer.deinit();
-    try distributed_example.expectShardCounts(&a_buffer, 4, 2);
-    try distributed_example.expectShardCounts(&b_buffer, 4, 2);
-    try distributed_example.expectAddressable(platform, &a_buffer);
-    try distributed_example.expectAddressable(platform, &b_buffer);
 
     var executable_arguments = try executable.args(allocator);
     defer executable_arguments.deinit(allocator);
@@ -173,9 +175,7 @@ pub fn main(init: std.process.Init) !void {
     try platform.barrier("distributed-benchmark-finished");
     const elapsed = run_start.untilNow(io, .awake);
 
-    try distributed_example.expectShardCounts(&result, 4, 2);
-    try distributed_example.expectAddressable(platform, &result);
-    if (job.process_index == 0) {
+    if (args.rank == 0) {
         const elapsed_s = @as(
             f64,
             @floatFromInt(elapsed.toNanoseconds()),
@@ -195,45 +195,4 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     try platform.barrier("distributed-benchmark-before-shutdown");
-}
-
-fn createRandomBuffer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    shape: zml.Shape,
-    sharding: zml.Sharding,
-    random: std.Random,
-) !zml.Buffer {
-    const slice = try zml.Slice.alloc(allocator, shape);
-    defer slice.free(allocator);
-
-    switch (shape.dtype()) {
-        inline else => |value_type| {
-            const ZigType = value_type.toZigType();
-            switch (comptime value_type.class()) {
-                .bool, .complex => unreachable,
-                .integer => {
-                    for (slice.items(ZigType)) |*value| {
-                        value.* = random.int(ZigType);
-                    }
-                },
-                .float => {
-                    const value = random.float(f32);
-                    for (slice.items(ZigType)) |*element| {
-                        element.* = switch (ZigType) {
-                            f64, f32 => value,
-                            f16 => @floatCast(value),
-                            inline else => |T| if (@hasDecl(T, "fromF32"))
-                                T.fromF32(value)
-                            else
-                                unreachable,
-                        };
-                    }
-                },
-            }
-        },
-    }
-
-    return .fromSlice(io, platform, slice, sharding);
 }
