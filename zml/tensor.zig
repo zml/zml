@@ -239,6 +239,35 @@ pub const Tensor = struct {
         return res;
     }
 
+    test toMemory {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const io = std.testing.io;
+
+        const inputs: [8]f32 = .{ -3.0, -2, -1, 1, 2, 3, 5, -5 };
+        const x_t = Tensor.init(.{8}, .f32);
+
+        const Local = struct {
+            fn memcpyH2D(x: Tensor) Tensor {
+                return x.onMemory(.host_pinned).toMemory(.device);
+            }
+        };
+
+        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
+        defer exe.deinit();
+
+        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs), .{ .memory = .host_pinned });
+        defer x_h.deinit();
+
+        const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
+        try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
+
+        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        defer x_d.deinit();
+
+        try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
+    }
+
     /// Copy all the given tensor to the specified memory.
     /// The input struct is copied on the stack, so it must be a simple flat struct without pointers.
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
@@ -331,9 +360,13 @@ pub const Tensor = struct {
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
-        if (scope.id_to_donation.get(origin.id)) |origin_donation| {
-            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-            gop.value_ptr.* = origin_donation;
+        if (scope.id_to_donation.get(origin.id)) |og_donation| {
+            // reuseBuffer is making the donation explicit
+            const donation: Compiler.Donation = switch (og_donation) {
+                .implicit => |input| .{ .explicit = input },
+                .explicit => og_donation,
+            };
+            scope.id_to_donation.put(scope.arena.allocator(), self.id, donation) catch @panic("OOM");
         }
         return self;
     }
@@ -343,39 +376,49 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const io = std.testing.io;
 
-        const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
-        const left = Tensor.init(.{ 2, 6 }, .f32);
-        const right = Tensor.init(.{ 2, 6 }, .f32);
+        const inputs: [6]@Vector(2, i4) = .{ .{ -3.0, -2 }, .{ -1, 1 }, .{ 2, 3 }, .{ 1, 2 }, .{ 3, 4 }, .{ 5, -5 } };
+        const x_t = Tensor.init(.{ 6, 2 }, .i4);
+        const y_t = Tensor.init(.{ 6, 2 }, .i4);
+        const z_t = Tensor.init(.{ 6, 2 }, .i4);
 
         const Local = struct {
-            fn memcopy(x: Tensor, y: Tensor) Tensor {
-                return x.addConstant(1).reuseBuffer(y);
+            fn memcopy(x: Tensor, y: Tensor, z: Tensor) [2]Tensor {
+                // the first output reuses the given y, but the second ouput does NOT reuse z.
+                return .{ x.addConstant(1).reuseBuffer(y), z };
             }
         };
 
-        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ left, right }, platform, .{});
+        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, platform, .{});
         defer exe.deinit();
 
-        var left_d = try zml.Buffer.fromBytes(io, platform, left.shape(), .replicated, @ptrCast(&inputs));
-        defer left_d.deinit();
+        var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs));
+        defer x_d.deinit();
 
-        var right_d = try zml.Buffer.uninitialized(io, platform, left.shape(), .replicated, .{});
-        defer right_d.deinit();
+        var y_d = try zml.Buffer.uninitialized(io, platform, y_t.shape(), .replicated, .{});
+        defer y_d.deinit();
 
-        var right_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..right_d.numShards()) |dev| {
-            right_memory[dev] = right_d.opaqueDevicePtr(dev);
+        var z_d = try zml.Buffer.uninitialized(io, platform, z_t.shape(), .replicated, .{});
+        defer z_d.deinit();
+
+        var y_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
+        for (0..y_d.numShards()) |dev| {
+            y_memory[dev] = y_d.opaqueDevicePtr(dev);
         }
 
-        const output_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ left_d, right_d });
+        const y2_d, const z2_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ x_d, y_d, z_d });
 
         var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..output_d.numShards()) |dev| {
-            output_memory[dev] = output_d.opaqueDevicePtr(dev);
+        for (0..y2_d.numShards()) |dev| {
+            output_memory[dev] = y2_d.opaqueDevicePtr(dev);
         }
 
-        // Check that right_d and output_d point to the same addresses on the devices.
-        try std.testing.expectEqualSlices(*anyopaque, right_memory[0..right_d.numShards()], output_memory[0..output_d.numShards()]);
+        // Check that y_d and y2_d point to the same addresses on the devices.
+        try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y2_d.numShards()]);
+
+        // Check that z_d and z2_d DO NOT POINT to the same addresses
+        for (0..z2_d.numShards()) |dev| {
+            try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+        }
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
