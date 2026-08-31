@@ -602,33 +602,37 @@ pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     return Tensor.concatenate(&.{ y, x.slice(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
 
-test "applyRotary: cos=1 sin=0 is identity" {
+test "applyRotary: cos=0 sin=1 is rotate_half" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const platform = zml.testing.env();
 
-    const x: Tensor = .init(.{ .s = 3, .hd = 4 }, .f32);
+    const x: Tensor = .init(.{ .s = 2, .hd = 4 }, .f32);
     const Local = struct {
         fn fwd(input: Tensor) Tensor {
-            const ones = Tensor.scalar(1, input.dtype()).broad(input.shape());
             const zeros = Tensor.scalar(0, input.dtype()).broad(input.shape());
-            return applyRotary(input, ones, zeros);
+            const ones = Tensor.scalar(1, input.dtype()).broad(input.shape());
+            return applyRotary(input, zeros, ones);
         }
     };
     var exe = try platform.compileFn(allocator, io, Local.fwd, .{x}, .{});
     defer exe.deinit();
 
-    const x_h: [3][4]f32 = .{
-        .{ 0.25, -0.5, 0.75, -1.0 },
-        .{ 1.25, 0.0, -0.25, 0.5 },
-        .{ -0.75, 1.5, 0.125, -0.375 },
+    const x_h: [2][4]f32 = .{
+        .{ 1.0, 2.0, 3.0, 4.0 },
+        .{ -0.5, 0.25, 0.75, -1.25 },
     };
-    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    const y_h: [2][4]f32 = .{
+        .{ -3.0, -4.0, 1.0, 2.0 },
+        .{ -0.75, 1.25, -0.5, 0.25 },
+    };
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_h));
     defer x_buffer.deinit();
+    const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&y_h));
 
     var res = try zml.testing.autoCall(allocator, io, &exe, Local.fwd, .{x_buffer});
     defer res.deinit();
-    try zml.testing.expectClose(io, x_buffer, res, .{});
+    try zml.testing.expectClose(io, expected, res, .{});
 }
 
 /// Center and scale by the variance.

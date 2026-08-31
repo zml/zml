@@ -368,7 +368,7 @@ pub const fa2 = struct {
         stdx.debug.assert(q_.dim(.h) == k_.dim(.h) and k_.dim(.h) == v_.dim(.h), "cu_fa2 dense does not support GQA, got q={f} k={f} v={f}", .{ q_, k_, v_ });
         stdx.debug.assert(q_.dim(.hd) == k_.dim(.hd) and q_.dim(.hd) == v_.dim(.hd), "cu_fa2 dense expects matching head dim, got q={f} k={f} v={f}", .{ q_, k_, v_ });
         const head_dim = q_.dim(.hd);
-        stdx.debug.assert(head_dim >= 32 and head_dim <= 256 and @rem(head_dim, 32) == 0, "cu_fa2 dense head dim must be 32..=256 and a multiple of 32, got {d}", .{head_dim});
+        stdx.debug.assert(head_dim >= 32 and head_dim <= 128 and @rem(head_dim, 32) == 0, "cu_fa2 dense head dim must be 32..=128 and a multiple of 32, got {d}", .{head_dim});
         stdx.debug.assert(q_.dtype() == k_.dtype() and q_.dtype() == v_.dtype(), "cu_fa2 dense expects matching dtypes, got q={f} k={f} v={f}", .{ q_, k_, v_ });
         stdx.debug.assert(q_.dtype() == .f16 or q_.dtype() == .bf16, "cu_fa2 dense expects f16 or bf16, got {t}", .{q_.dtype()});
 
