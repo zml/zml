@@ -16,6 +16,7 @@ pub const Config = struct {
     }),
     head_dim: ?u32 = null,
     hidden_size: u32,
+    intermediate_size: u32,
     num_hidden_layers: u32,
     num_attention_heads: u32,
     num_key_value_heads: u32,
@@ -24,6 +25,7 @@ pub const Config = struct {
     rms_norm_eps: f32,
     hf_rope_impl: bool = true,
     tie_word_embeddings: bool = false,
+    vocab_size: u32,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
 };
 
@@ -80,7 +82,7 @@ pub const LoadedModel = struct {
         var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 32,
             .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
+            .parallelism = if (platform.isDistributed()) 1 else 16,
         });
         defer loader.deinit();
 
