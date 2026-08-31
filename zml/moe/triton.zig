@@ -11,9 +11,14 @@ const Shape = zml.Shape;
 const tri = zml.kernel.triton;
 const DType = tri.DType;
 const toDType = tri.from;
+const a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
 const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.moe_triton);
+
+test {
+    std.testing.refAllDecls(@This());
+}
 
 // =============================================================================
 // Public API
@@ -23,12 +28,7 @@ pub const Options = struct {
     inplace: bool = false,
     activation: Parameters.ActivationMode = .silu,
     apply_router_weight_on_input: bool = false,
-    use_fp8_w8a8: bool = false,
-    use_int8_w8a8: bool = false,
-    use_int8_w8a16: bool = false,
-    use_int4_w4a16: bool = false,
-    ocp_mx_scheme: ?[]const u8 = null,
-    per_channel_quant: bool = false,
+    quant_scheme: ?zml.nn.QuantScheme = null,
     global_num_experts: i64 = -1,
     expert_map: ?Tensor = null,
     w1_scale: ?Tensor = null,
@@ -47,6 +47,7 @@ pub const Options = struct {
     num_warps: i64 = 8,
     num_stages: i64 = 4,
     dynamic_launch_by_num_tokens: bool = true,
+    activation_threshold: ?f32 = null,
 };
 
 pub const Parameters = struct {
@@ -111,8 +112,8 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
 
 fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
@@ -124,6 +125,10 @@ fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
 // Top-level entry point
 // =============================================================================
 
+fn isMxFp8(quant_scheme: ?zml.nn.QuantScheme) bool {
+    return quant_scheme != null and quant_scheme.? == .mxfp8;
+}
+
 pub fn fusedExpertsImpl(
     hidden_states: Tensor,
     w1: Tensor,
@@ -134,6 +139,36 @@ pub fn fusedExpertsImpl(
     opts: Options,
 ) !Tensor {
     try validateOptions(opts);
+
+    if (opts.quant_scheme != null and opts.quant_scheme.? == .mxfp4) {
+        const local_topk_ids, const local_topk_weights = if (opts.expert_map) |expert_map| blk: {
+            const local_num_experts = w1.dim(.expert);
+            const mapped_ids = expert_map
+                .gather(.{ .expert = topk_ids.convert(.i32) }, .{})
+                .withTags(topk_ids.shape().tags());
+            const in_range = mapped_ids.cmp(.GE, Tensor.scalar(0, .i32))
+                .logical(.AND, mapped_ids.cmp(.LT, Tensor.scalar(local_num_experts, .i32)));
+
+            break :blk .{
+                in_range.select(mapped_ids, Tensor.scalar(local_num_experts, .i32)),
+                in_range.select(topk_weights, Tensor.scalar(0, topk_weights.dtype())),
+            };
+        } else .{ topk_ids, topk_weights };
+
+        return fusedExpertsImpl_fp4(
+            hidden_states,
+            local_topk_ids,
+            local_topk_weights,
+            w1,
+            opts.w1_scale.?,
+            opts.w1_bias,
+            w2,
+            opts.w2_scale.?,
+            opts.w2_bias,
+            opts.activation_threshold,
+        );
+    }
+
     const options = applyJsonTokenConfig(opts, hidden_states.dim(0)) catch |err| fallback: {
         log.warn("Failed to load MoE launch config from JSON ({}), falling back to built-in token heuristic", .{err});
         break :fallback applyDefaultTokenConfig(opts, hidden_states.dim(0), w1.dim(0));
@@ -155,29 +190,12 @@ pub fn fusedExpertsImpl(
         if (expert_map.dtype() != .i32) return error.UnsupportedType;
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
     }
-    const num_assignments = hidden.dim(.token) * ids.dim(.topk);
-    const sparsity_factor: i64 = 4;
-    const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
-
-    const max_num_tokens_padded = if (naive_block_assignment)
-        num_assignments * block_size_m
-    else if (num_assignments < num_experts)
-        num_assignments * block_size_m
-    else
-        num_assignments + num_experts * (block_size_m - 1);
-
-    const sorted_token_ids, const expert_ids_global, const num_tokens_post_padded = if (naive_block_assignment) blk: {
-        log.debug("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
-        const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
-        const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
-        const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
-        break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
-    } else alignBlockSize(ids, num_experts, block_size_m);
+    const routing = prepareRouting(ids, num_experts, block_size_m);
 
     const expert_ids = if (opts.expert_map) |expert_map|
-        expert_map.gather(.{ .expert = expert_ids_global }, .{}).withTags(.{.g})
+        expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
     else
-        expert_ids_global;
+        routing.expert_ids;
 
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
@@ -190,7 +208,7 @@ pub fn fusedExpertsImpl(
         hidden_quant,
         gate_up,
         options,
-        naive_block_assignment,
+        routing.naive_block_assignment,
         ids.dim(.topk),
         false,
         false,
@@ -211,14 +229,14 @@ pub fn fusedExpertsImpl(
         a_scale,
         b_scale_1,
         weights,
-        sorted_token_ids,
+        routing.sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded,
+        routing.num_tokens_post_padded,
         first_cfg,
         options,
-        max_num_tokens_padded,
-        num_assignments,
-        Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
+        routing.max_num_tokens_padded,
+        routing.num_assignments,
+        Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
     const activated = applyActivation(first_out, options.activation);
@@ -233,7 +251,7 @@ pub fn fusedExpertsImpl(
         activated_quant,
         down,
         options,
-        naive_block_assignment,
+        routing.naive_block_assignment,
         1,
         true,
         false,
@@ -254,13 +272,13 @@ pub fn fusedExpertsImpl(
         a_scale,
         b_scale_2,
         weights,
-        sorted_token_ids,
+        routing.sorted_token_ids,
         expert_ids,
-        num_tokens_post_padded,
+        routing.num_tokens_post_padded,
         second_cfg,
         options,
-        max_num_tokens_padded,
-        num_assignments,
+        routing.max_num_tokens_padded,
+        routing.num_assignments,
         Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     );
 
@@ -341,6 +359,46 @@ fn callFusedMoe(
             .num_stages = @intCast(options.num_stages),
         },
     ).c;
+}
+
+const Routing = struct {
+    sorted_token_ids: Tensor,
+    expert_ids: Tensor,
+    num_tokens_post_padded: Tensor,
+    max_num_tokens_padded: i64,
+    num_assignments: i64,
+    naive_block_assignment: bool,
+};
+
+fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
+    const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
+    const num_assignments = ids.dim(.token) * ids.dim(.topk);
+    const sparsity_factor: i64 = 4;
+    const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
+    const max_num_tokens_padded = if (naive_block_assignment)
+        num_assignments * block_size_m
+    else if (num_assignments < num_experts)
+        num_assignments * block_size_m
+    else
+        num_assignments + num_experts * (block_size_m - 1);
+
+    const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
+        log.debug("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
+        break :blk .{
+            Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32)),
+            ids.reshape(.{ .g = num_assignments }),
+            Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1}),
+        };
+    } else alignBlockSize(ids, num_experts, block_size_m);
+
+    return .{
+        .sorted_token_ids = sorted_token_ids,
+        .expert_ids = expert_ids,
+        .num_tokens_post_padded = num_tokens_post_padded,
+        .max_num_tokens_padded = max_num_tokens_padded,
+        .num_assignments = num_assignments,
+        .naive_block_assignment = naive_block_assignment,
+    };
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
@@ -490,7 +548,7 @@ fn makeFusedMoeConfig(
     has_bias: bool,
     output_dtype: DataType,
 ) kernels.FusedMoe.Cfg {
-    var use_fp8 = opts.use_fp8_w8a8;
+    var use_fp8 = isMxFp8(opts.quant_scheme);
     if (b.dtype() == .f8e4m3fn) use_fp8 = true;
     return .{
         .a_dtype = toDType(a.dtype()),
@@ -544,7 +602,7 @@ fn applyDefaultTokenConfig(opts: Options, num_tokens: i64, num_experts: i64) Opt
     }
 
     out.block_size_n = if (num_tokens <= 64) 64 else 128;
-    out.block_size_k = if (opts.use_fp8_w8a8 or num_tokens <= 64) 128 else 64;
+    out.block_size_k = if (isMxFp8(opts.quant_scheme) or num_tokens <= 64) 128 else 64;
 
     const tokens_per_expert = @divFloor(num_tokens, @max(num_experts, 1));
     out.group_size_m = if (tokens_per_expert > 128) 16 else 1;
@@ -589,7 +647,7 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
-    const compilation_context = zml.module.CompilationContext.current();
+    const compilation_context = zml.Compiler.current();
     const io = compilation_context.io;
     const allocator = compilation_context.allocator;
 
@@ -641,8 +699,7 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
-    if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
-    if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
+    if (opts.quant_scheme != null and opts.quant_scheme.? != .mxfp4) return error.UnsupportedQuantization;
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
@@ -661,4 +718,554 @@ fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor
     if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
     if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
     if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+}
+
+// =====
+// A16W4
+// =====
+pub fn fusedExpertsImpl_fp4(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    weights_gate_up: zml.Tensor,
+    scales_gate_up: zml.Tensor,
+    bias_gate_up: ?zml.Tensor,
+    weights_down: zml.Tensor,
+    scales_down: zml.Tensor,
+    bias_down: ?zml.Tensor,
+    activation_limit: ?f32,
+) !zml.Tensor {
+    const x = input.reshape(.{
+        .token = @divExact(@as(i64, @intCast(input.count())), input.dim(.d)),
+        .d = input.dim(.d),
+    });
+    const num_tokens = x.dim(.token);
+    const num_routes: i64 = @intCast(topk_ids.count());
+    stdx.debug.assert(@mod(num_routes, num_tokens) == 0, "expected {} routing ids to be divisible by {} tokens", .{ num_routes, num_tokens });
+    stdx.debug.assert(topk_weights.count() == topk_ids.count(), "expected matching routing id and weight counts, got {} and {}", .{ topk_ids.count(), topk_weights.count() });
+    const topk = @divExact(num_routes, num_tokens);
+    const flat_topk_ids = topk_ids.reshape(.{ .token = num_tokens, .topk = topk });
+    const flat_topk_weights = topk_weights.reshape(.{ .token = num_tokens, .topk = topk });
+    const kernel_cfg = getBestConfig(
+        @intCast(num_tokens),
+        @intCast(topk),
+        @intCast(weights_gate_up.dim(.expert)),
+    );
+    const num_experts = weights_gate_up.dim(.expert);
+    const aligned_routing = prepareRouting(flat_topk_ids, num_experts, @intCast(kernel_cfg.block_m));
+    const routing = prepareFp4Routing(
+        aligned_routing,
+        flat_topk_ids,
+        flat_topk_weights,
+        num_tokens,
+        num_experts,
+        @intCast(kernel_cfg.block_m),
+    );
+
+    const hidden_shape: zml.Shape = .init(.{
+        .route = routing.num_rows,
+        .dout = @divExact(weights_gate_up.dim(.dout), 2),
+    }, .bf16);
+
+    const hidden = try runGemm(
+        x,
+        weights_gate_up,
+        scales_gate_up,
+        .{
+            .routing = routing,
+            .weight_contract_tag = zml.Shape.toTag(.d),
+            .weight_output_tag = zml.Shape.toTag(.dout),
+            .output_shape = hidden_shape,
+            .gather = routing.sorted_route_ids,
+            .gammas = routing.sorted_weights,
+            .bias = bias_gate_up,
+            .apply_swiglu = true,
+            .activation_limit = activation_limit,
+            .block_m = kernel_cfg.block_m,
+            .block_n = kernel_cfg.block_n,
+            .block_k = kernel_cfg.block_k,
+            .group_m = kernel_cfg.group_m,
+            .num_warps = kernel_cfg.num_warps,
+            .num_stages = kernel_cfg.num_stages,
+        },
+    );
+
+    const routed_shape: zml.Shape = .init(.{
+        .route = routing.num_rows,
+        .d = weights_down.dim(.d),
+    }, .bf16);
+
+    const routed = try runGemm(
+        hidden,
+        weights_down,
+        scales_down,
+        .{
+            .routing = routing,
+            .weight_contract_tag = zml.Shape.toTag(.dout),
+            .weight_output_tag = zml.Shape.toTag(.d),
+            .output_shape = routed_shape,
+            .bias = bias_down,
+            .apply_swiglu = false,
+            .activation_limit = 1.0,
+            .block_m = kernel_cfg.block_m,
+            .block_n = kernel_cfg.block_n,
+            .block_k = kernel_cfg.block_k,
+            .group_m = kernel_cfg.group_m,
+            .num_warps = kernel_cfg.num_warps,
+            .num_stages = kernel_cfg.num_stages,
+        },
+    );
+
+    const active_routed = routing.active_routes.broad(routed.shape().withDtype(.bool)).select(
+        routed,
+        zml.Tensor.zeroes(routed.shape()),
+    );
+    const token_ids = routing.sorted_route_ids.divByConst(routing.topk).withTags(.{.route});
+    const output_flat_shape: zml.Shape = .init(.{ .token = routing.num_tokens, .d = input.dim(.d) }, .f32);
+    const output_flat = zml.Tensor.zeroes(output_flat_shape).scatterSlices(
+        .{ .token = token_ids },
+        active_routed.convert(.f32),
+        .{},
+    );
+
+    return output_flat.reshape(input.shape().withDtype(.f32)).convert(input.dtype());
+}
+
+const KernelConf = struct {
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    num_warps: u32,
+    num_stages: u32,
+};
+
+const kernel_config_token_buckets = [_]u32{
+    1,  2,   4,   8,   16,   24,   32,   48,   64,
+    96, 128, 256, 512, 1024, 1536, 2048, 3072, 4096,
+};
+
+fn configForTokenBucket(num_tokens: u32) KernelConf {
+    return switch (num_tokens) {
+        1 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        2 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        4 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        8 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        16 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 64,
+            .group_m = 64,
+            .num_warps = 4,
+            .num_stages = 5,
+        },
+        24 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        32 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        48 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 64,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        64 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        96 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        128 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        256 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        512 => .{
+            .block_m = 32,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        1024 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        1536 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        2048 => .{
+            .block_m = 128,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        3072 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        4096 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        else => unreachable,
+    };
+}
+
+fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
+    const num_routes = std.math.mul(u32, num_tokens, topk) catch std.math.maxInt(u32);
+    var config = getBestTokenBucketConfig(num_routes);
+
+    if (num_tokens <= 32 and num_routes <= 256 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 256;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    } else if (num_tokens <= 64 and num_routes <= 512 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 128;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    }
+
+    return config;
+}
+
+fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
+    var best_num_tokens = kernel_config_token_buckets[0];
+    var best_distance = tokenDistance(num_tokens, best_num_tokens);
+
+    for (kernel_config_token_buckets[1..]) |candidate| {
+        const distance = tokenDistance(num_tokens, candidate);
+        if (distance < best_distance or (distance == best_distance and candidate < best_num_tokens)) {
+            best_num_tokens = candidate;
+            best_distance = distance;
+        }
+    }
+
+    return configForTokenBucket(best_num_tokens);
+}
+
+fn tokenDistance(a: u32, b: u32) u32 {
+    return if (a >= b) a - b else b - a;
+}
+
+const Fp4Routing = struct {
+    num_tokens: i64,
+    num_rows: i64,
+    topk: i64,
+    gather_divisor: i64,
+    grid_m: i64,
+    sorted_route_ids: zml.Tensor,
+    sorted_weights: zml.Tensor,
+    active_routes: zml.Tensor,
+    tile_experts: zml.Tensor,
+    tile_starts: zml.Tensor,
+    tile_ends: zml.Tensor,
+};
+
+fn prepareFp4Routing(
+    aligned: Routing,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    num_tokens: i64,
+    num_experts: i64,
+    block_m: i64,
+) Fp4Routing {
+    const topk = topk_ids.dim(.topk);
+    const num_routes = aligned.num_assignments;
+    const num_rows = if (aligned.naive_block_assignment)
+        num_routes
+    else
+        aligned.max_num_tokens_padded;
+    const grid_m = if (aligned.naive_block_assignment)
+        num_routes
+    else
+        std.math.divCeil(i64, num_rows, block_m) catch unreachable;
+
+    const sorted_route_candidates = if (aligned.naive_block_assignment)
+        zml.Tensor.arange(.{ .end = num_routes }, .i32).withTags(.{.route})
+    else
+        aligned.sorted_token_ids.withTags(.{.route});
+    const route_index_valid = sorted_route_candidates.cmp(.GE, zml.Tensor.scalar(0, .i32))
+        .logical(.AND, sorted_route_candidates.cmp(.LT, zml.Tensor.scalar(num_routes, .i32)));
+    const sorted_route_ids = route_index_valid.select(
+        sorted_route_candidates,
+        zml.Tensor.zeroes(sorted_route_candidates.shape()),
+    );
+    const gather_indices = sorted_route_ids.rename(.{ .route = .sorted_route });
+
+    const flat_expert_ids = topk_ids.flatten().withTags(.{.route}).convert(.i32);
+    const sorted_expert_ids = flat_expert_ids
+        .gather(.{ .route = gather_indices }, .{})
+        .rename(.{ .sorted_route = .route });
+    const active_routes = route_index_valid
+        .logical(.AND, sorted_expert_ids.cmp(.GE, zml.Tensor.scalar(0, .i32)))
+        .logical(.AND, sorted_expert_ids.cmp(.LT, zml.Tensor.scalar(num_experts, .i32)));
+
+    const flat_weights = topk_weights.flatten().withTags(.{.route});
+    const gathered_weights = flat_weights
+        .gather(.{ .route = gather_indices }, .{})
+        .rename(.{ .sorted_route = .route })
+        .convert(.f32);
+    const sorted_weights = active_routes.select(gathered_weights, zml.Tensor.zeroes(gathered_weights.shape()));
+
+    const raw_tile_experts = aligned.expert_ids.withTags(.{.tile}).convert(.i32);
+    const valid_tile_experts = raw_tile_experts.cmp(.GE, zml.Tensor.scalar(0, .i32))
+        .logical(.AND, raw_tile_experts.cmp(.LT, zml.Tensor.scalar(num_experts, .i32)));
+    const tile_experts = valid_tile_experts.select(
+        raw_tile_experts,
+        zml.Tensor.zeroes(raw_tile_experts.shape()),
+    );
+    const tile_starts = if (aligned.naive_block_assignment)
+        zml.Tensor.arange(.{ .end = grid_m }, .i64).withTags(.{.tile})
+    else
+        zml.Tensor.arange(.{ .end = grid_m }, .i64).withTags(.{.tile}).scale(block_m);
+    const tile_ends = if (aligned.naive_block_assignment)
+        valid_tile_experts.select(tile_starts.addConstant(1), tile_starts)
+    else blk: {
+        const num_tokens_post_padded = aligned.num_tokens_post_padded
+            .withTags(.{.tile})
+            .convert(.i64)
+            .broad(tile_starts.shape());
+        const active_tiles = valid_tile_experts.logical(.AND, tile_starts.cmp(.LT, num_tokens_post_padded));
+        break :blk active_tiles.select(
+            tile_starts.addConstant(block_m).minimum(num_tokens_post_padded),
+            tile_starts,
+        );
+    };
+
+    return .{
+        .num_tokens = num_tokens,
+        .num_rows = num_rows,
+        .topk = topk,
+        .gather_divisor = topk,
+        .grid_m = grid_m,
+        .sorted_route_ids = sorted_route_ids,
+        .sorted_weights = sorted_weights,
+        .active_routes = active_routes,
+        .tile_experts = tile_experts,
+        .tile_starts = tile_starts,
+        .tile_ends = tile_ends,
+    };
+}
+
+const GemmOpts = struct {
+    routing: Fp4Routing,
+    weight_contract_tag: zml.Shape.Tag,
+    weight_output_tag: zml.Shape.Tag,
+    output_shape: zml.Shape,
+    gather: ?zml.Tensor = null,
+    gammas: ?zml.Tensor = null,
+    bias: ?zml.Tensor = null,
+    apply_swiglu: bool = false,
+    activation_limit: ?f32 = null,
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    num_warps: u32,
+    num_stages: u32,
+};
+fn runGemm(
+    input: zml.Tensor,
+    weights: zml.Tensor,
+    scales: zml.Tensor,
+    opts: GemmOpts,
+) !zml.Tensor {
+    const input_matrix = input.withTags(.{ .row, .k });
+    const contract_k = input_matrix.dim(.k);
+    const packed_k = weights.dim(opts.weight_contract_tag);
+    const scale_k = scales.dim(opts.weight_contract_tag);
+    const n = weights.dim(opts.weight_output_tag);
+
+    stdx.debug.assert(packed_k * 2 == contract_k, "expected packed int4 weight K {} to match activation K {}", .{ packed_k, contract_k });
+    stdx.debug.assert(scale_k * 32 == contract_k, "expected MX scale K {} to match activation K {}", .{ scale_k, contract_k });
+    const activation_reduction_n: i64 = if (opts.apply_swiglu) 2 else 1;
+    stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
+    stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
+    stdx.debug.assert(opts.bias == null, "MXFP4 Triton MoE GEMM bias is not wired yet", .{});
+
+    const block_m: i32 = @intCast(opts.block_m);
+    const block_n: i32 = @intCast(opts.block_n);
+    const block_k: i32 = @intCast(opts.block_k);
+    // TODO: update the kernel to support uneven K.
+    if (@mod(contract_k, block_k) != 0) return error.InvalidShape;
+    const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
+    const has_gammas = opts.gammas != null;
+    const gathered_input = if (opts.gather) |gather| blk: {
+        const token_ids = gather.divByConst(opts.routing.gather_divisor).withTags(.{.route});
+        break :blk input_matrix.gather(.{ .row = token_ids }, .{}).rename(.{ .route = .row });
+    } else input_matrix;
+    const raw_output_shape = if (opts.apply_swiglu)
+        opts.output_shape.set(-1, n)
+    else
+        opts.output_shape;
+
+    const cfg: a16w4_kernel.Cfg = .{
+        .a_dtype = zml.kernel.triton.from(gathered_input.dtype()),
+        .wp_dtype = packedByteDtype(weights.dtype()),
+        .ws_dtype = packedByteDtype(scales.dtype()),
+        .c_dtype = zml.kernel.triton.from(raw_output_shape.dtype()),
+        .BLOCK_M = block_m,
+        .BLOCK_N = block_n,
+        .BLOCK_K = block_k,
+        .SPLIT_K = 1,
+        .GROUP_M = @intCast(opts.group_m),
+        .num_warps = @intCast(opts.num_warps),
+        .num_stages = @intCast(opts.num_stages),
+    };
+
+    var y = a16w4_kernel.Kernel.call(
+        .{
+            .a_ptr = gathered_input,
+            .wp_ptr = weights,
+            .ws_ptr = scales,
+            .tile_expert_ptr = opts.routing.tile_experts,
+            .tile_mstart_ptr = opts.routing.tile_starts,
+            .tile_mend_ptr = opts.routing.tile_ends,
+            .NUM_M_TILES_ptr = scalarI64(opts.routing.grid_m),
+            .N_ptr = scalarI64(n),
+            .K_ptr = scalarI64(contract_k),
+            .stride_am_ptr = scalarI64(contract_k),
+            .stride_ak_ptr = scalarI64(1),
+            .stride_we_ptr = scalarI64(n * packed_k),
+            .stride_wk_ptr = scalarI64(1),
+            .stride_wn_ptr = scalarI64(packed_k),
+            .stride_se_ptr = scalarI64(n * scale_k),
+            .stride_sk_ptr = scalarI64(1),
+            .stride_sn_ptr = scalarI64(scale_k),
+            .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
+            .stride_cn_ptr = scalarI64(1),
+        },
+        .{ .c = raw_output_shape },
+        .{
+            .cfg = cfg,
+            .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
+            .num_warps = @intCast(opts.num_warps),
+            .num_stages = @intCast(opts.num_stages),
+        },
+    ).c;
+
+    if (opts.apply_swiglu) {
+        y = applySwiGlu(y.convert(.f32), opts.activation_limit).convert(opts.output_shape.dtype());
+    }
+
+    if (has_gammas) {
+        const gammas = opts.gammas.?.convert(.f32).appendAxes(.{.dout}).broad(opts.output_shape.withDtype(.f32));
+        y = y.convert(.f32).mul(gammas).convert(opts.output_shape.dtype());
+    }
+
+    return y;
+}
+
+fn applySwiGlu(input: zml.Tensor, activation_limit: ?f32) zml.Tensor {
+    var gate = input.slice(.dout, .{ .start = 0, .step = 2 });
+    var up = input.slice(.dout, .{ .start = 1, .step = 2 });
+
+    if (activation_limit) |limit| {
+        const threshold = zml.Tensor.scalar(limit, .f32);
+        gate = gate.minimum(threshold);
+        up = up.clamp(threshold.negate(), threshold);
+    }
+
+    return gate.silu().mul(up);
+}
+
+fn packedByteDtype(dt: zml.DataType) zml.kernel.triton.DType {
+    return switch (dt) {
+        .i8, .u8, .f4e2m1, .f8e8m0 => .i8,
+        else => zml.kernel.triton.from(dt),
+    };
+}
+
+fn scalarI64(v: i64) zml.Tensor {
+    return zml.Tensor.constant(.{ .i64 = v }).reshape(.{1});
 }

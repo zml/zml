@@ -14,6 +14,7 @@ test {
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
+    std.testing.refAllDecls(KvCache);
 }
 
 pub const Backend = enum {
@@ -246,11 +247,11 @@ pub const KvCache = union(enum) {
             },
             .dense => @panic("TODO"),
             .latent => |latent_kv| .{
-                .latent = latent_kv.scatterSlices(.{
+                .latent = latent_kv.scatterSlices(
                     .{ .page = page_index, .k_chunk = offset },
                     new_k,
                     .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                }).reuseBuffer(self.latent),
+                ).reuseBuffer(self.latent),
             },
         };
 
@@ -269,8 +270,8 @@ pub const KvCache = union(enum) {
     ) [2]zml.Tensor {
         return switch (self) {
             .split => |split| .{
-                split.k.dynamicSlice1d(split.k.axis(.page), .{ .start = page_index, .len = 1 }).squeeze(.page),
-                split.v.dynamicSlice1d(split.k.axis(.page), .{ .start = page_index, .len = 1 }).squeeze(.page),
+                split.k.slice(split.k.axis(.page), .dynSingle(page_index)),
+                split.v.slice(split.k.axis(.page), .dynSingle(page_index)),
             },
             .dense, .latent => @panic("TODO"),
         };
@@ -600,15 +601,15 @@ const AttentionLoop = struct {
 
     pub fn cond(self: While, state: State) zml.Tensor {
         const has_more_sequences = state.seq_id.cmp(.LT, .scalar(self.parameters.seq_lens.count(), .i32));
-        const query_start = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 });
-        const query_end = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state.seq_id.addConstant(1), .len = 1 });
+        const query_start = self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id));
+        const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id.addConstant(1)));
         const has_queries = query_start.cmp(.LT, query_end).asScalar();
         return has_more_sequences.logical(.AND, has_queries);
     }
 
     pub fn body(self: While, state_: State) State {
-        const query_start = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state_.seq_id, .len = 1 });
-        const query_end = self.parameters.query_start_len.dynamicSlice1d(0, .{ .start = state_.seq_id.addConstant(1), .len = 1 });
+        const query_start = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id));
+        const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id.addConstant(1)));
         const seq_num_queries_: zml.Tensor = .asScalar(.sub(query_end, query_start));
         const page_size_: u32 = @intCast(self.kv_cache.split.k.dim(.k_chunk));
 
@@ -628,7 +629,7 @@ const AttentionLoop = struct {
                     const num_slots: u32 = page_size;
 
                     // seq_lens includes the current queries; subtracting their count gives the context length.
-                    const seq_len = while_body.parameters.seq_lens.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 }).asScalar();
+                    const seq_len = while_body.parameters.seq_lens.slice(0, .dynSingle(state.seq_id));
                     const q_offset = seq_len.sub(if_ctx.seq_num_queries).add(state.q_page_idx.scale(page_size));
                     const next_k_offset = state.k_page_idx.addConstant(1).scale(page_size);
 
@@ -649,7 +650,7 @@ const AttentionLoop = struct {
                     const num_slots: u32 = 1;
 
                     // A decode query is the final token in seq_len, so its zero-based offset is seq_len - 1.
-                    const seq_len = while_body.parameters.seq_lens.dynamicSlice1d(0, .{ .start = state.seq_id, .len = 1 }).asScalar();
+                    const seq_len = while_body.parameters.seq_lens.slice(0, .dynSingle(state.seq_id)).asScalar();
                     const q_offset = seq_len.sub(if_ctx.seq_num_queries);
                     const next_k_offset = state.k_page_idx.addConstant(1).scale(page_size);
 
@@ -672,12 +673,12 @@ const AttentionLoop = struct {
 
     pub fn attentionOnePage(self: While, state: State, q_offset: zml.Tensor, q_chunk: u32, page_size: u32) PartialSoftmax {
         const k_offset = state.k_page_idx.scale(page_size);
-        const active_q = self.q.dynamicSlice1d(self.q.axis(.b), .{ .start = state.slot_id, .len = q_chunk });
+        const active_q = self.q.slice(self.q.axis(.b), .dyn(state.slot_id, q_chunk));
 
-        const active_k_page_id = self.parameters.block_table.dynamicSlice(.{
-            .b = zml.Tensor.DynSlice{ .start = state.seq_id, .len = 1 },
-            .p = zml.Tensor.DynSlice{ .start = state.k_page_idx, .len = 1 },
-        }).asScalar();
+        const active_k_page_id = self.parameters.block_table.slices(
+            .{ .b, .p },
+            &.{ .dynSingle(state.seq_id), .dynSingle(state.k_page_idx) },
+        );
         const active_k, const active_v = self.kv_cache.getPage(active_k_page_id);
 
         const dtype = self.q.dtype();
@@ -800,8 +801,9 @@ pub fn partialSoftmax(self: zml.Tensor, axis: anytype) PartialSoftmax {
 pub const Mla = struct {
     pub const Options = struct {
         rope_rank: i64,
+        value_rank: i64,
         scale: ?f32 = null,
-        /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 16.
+        /// null selects automatically; 1 forces the 2D kernel; other values must be powers of two up to 128.
         num_kv_splits: ?u8 = null,
     };
 
@@ -831,14 +833,13 @@ pub const Mla = struct {
         const scores_sink = zml.Tensor.concatenate(&.{ scores, sink_.convert(scores.dtype()) }, .kv);
 
         const attn_weights = scores_sink.softmax(.kv);
-        const attn_weights_non_sink = attn_weights.slice(&.{
-            .{},
-            .{},
-            .{ .end = topk.dim(.topk) },
-        });
-        return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
+        const attn_weights_non_sink = attn_weights.slice(-1, .{ .end = topk.dim(.topk) });
+        const selected_values = selected_kv.slice(.hd, .{ .end = opts.value_rank });
+        return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
 
+    /// Computes sparse MLA scores over the complete cached key and returns
+    /// `opts.value_rank` output dimensions per head.
     pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
         const latent_kv = switch (kv_cache) {
             .latent => |latent_kv| latent_kv,
@@ -847,6 +848,8 @@ pub const Mla = struct {
 
         stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
         stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
+        stdx.debug.assert(opts.value_rank > 0, "expected MLA value rank to be positive, got {}", .{opts.value_rank});
+        stdx.debug.assert(opts.value_rank == q.dim(.hd) or opts.value_rank + opts.rope_rank == q.dim(.hd), "expected MLA value rank ({}) to cover either the complete qk head ({}) or its non-RoPE prefix ({})", .{ opts.value_rank, q.dim(.hd), q.dim(.hd) - opts.rope_rank });
         stdx.debug.assert(latent_kv.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged latent KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{latent_kv.shape()});
         stdx.debug.assert(latent_kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), latent_kv.dim(.hd) });
 
@@ -864,7 +867,7 @@ pub const Mla = struct {
     }
 };
 
-test "use mla kernel" {
+test "Triton sparse MLA value ranks and padded queries" {
     const platform = zml.testing.env();
     if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
 
@@ -874,40 +877,45 @@ test "use mla kernel" {
         .batch_size = 1,
         .seq_len = 32,
         .max_num_pages = 2,
-        .max_token_count = 1,
+        .max_token_count = 2,
         .num_heads = 16,
         .num_kv_heads = 1,
         .head_dim = 128,
-        .max_seqlen_q = 1,
+        .max_seqlen_q = 2,
     }));
-    const q_shape = zml.Shape.init(.{ .q = 1, .h = 16, .hd = 128 }, .f32);
+    const q_shape = zml.Shape.init(.{ .q = 2, .h = 16, .hd = 128 }, .f32);
     const kv_shape = zml.Shape.init(.{ .page = 2, .k_chunk = 16, .hkv = 1, .hd = 128 }, .f32);
     const sink_shape = zml.Shape.init(.{ .h = 16 }, .f32);
-    const topk_shape = zml.Shape.init(.{ .q = 1, .topk = 32 }, .i32);
-    const tokens_pos_shape = zml.Shape.init(.{ .q = 1 }, .i32);
+    const topk_shape = zml.Shape.init(.{ .q = 2, .topk = 32 }, .i32);
+    const tokens_pos_shape = zml.Shape.init(.{ .q = 2 }, .i32);
 
-    var q_data: [1][16][128]f32 = undefined;
+    var q_data: [2][16][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&q_data), 0);
+    for (&q_data[0]) |*head| head[64] = 1;
     var kv_data: [2][16][1][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&kv_data), 0);
-    for (&kv_data[1][0][0]) |*value| value.* = 10;
-    for (&kv_data[1][1][0]) |*value| value.* = 11;
+    @memset(kv_data[1][0][0][0..64], 10);
+    @memset(kv_data[1][1][0][0..64], 20);
+    kv_data[1][0][0][64] = 0;
+    kv_data[1][1][0][64] = 2;
     var sink_data: [16]f32 = undefined;
     for (&sink_data) |*value| value.* = -std.math.inf(f32);
-    var topk_data: [1][32]i32 = undefined;
+    var topk_data: [2][32]i32 = undefined;
     @memset(&topk_data[0], -1);
+    @memset(&topk_data[1], -1);
     topk_data[0][0] = 0;
     topk_data[0][1] = 1;
-    const tokens_pos_data: [1]i32 = .{31};
+    const tokens_pos_data: [2]i32 = .{ 31, 31 };
     const block_table: [1][2]i32 = .{.{ 1, 0 }};
     const seq_lens: [1]i32 = .{32};
+    // Only the first of the two statically allocated query rows is active.
     const query_start_len: [2]i32 = .{ 0, 1 };
 
     const q = zml.Tensor.init(q_shape, .f32);
     const kv: KvCache = .{ .latent = zml.Tensor.init(kv_shape, .f32) };
     const sink = zml.Tensor.init(sink_shape, .f32);
     const topk = zml.Tensor.init(topk_shape, .i32);
-    const tokens_pos = zml.Tensor.init(.{ .q = 1 }, .i32);
+    const tokens_pos = zml.Tensor.init(tokens_pos_shape, .i32);
 
     var parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
         .block_table = try .fromBytes(std.testing.io, platform, parameters.triton.block_table.shape(), .replicated, std.mem.sliceAsBytes(&block_table)),
@@ -926,23 +934,59 @@ test "use mla kernel" {
     var tokens_pos_d = try zml.Buffer.fromBytes(std.testing.io, platform, tokens_pos_shape, .replicated, std.mem.sliceAsBytes(&tokens_pos_data));
     defer tokens_pos_d.deinit();
 
-    const exe = try platform.compileFn(
-        std.testing.allocator,
-        std.testing.io,
-        Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64, .num_kv_splits = 2 } },
-        .{},
-    );
-    defer exe.deinit();
+    const TestCase = struct {
+        num_kv_splits: u8,
+        value_rank: i64,
+    };
+    inline for ([_]TestCase{
+        .{ .num_kv_splits = 2, .value_rank = 64 },
+        .{ .num_kv_splits = 1, .value_rank = 128 },
+    }) |case| {
+        var exe = try platform.compileFn(
+            std.testing.allocator,
+            std.testing.io,
+            Mla.pagedSparseAttention,
+            .{ parameters, q, kv, sink, topk, tokens_pos, .{
+                .rope_rank = 64,
+                .value_rank = case.value_rank,
+                .scale = 1,
+                .num_kv_splits = case.num_kv_splits,
+            } },
+            .{},
+        );
+        defer exe.deinit();
 
-    var output_d = try zml.testing.autoCall(
-        std.testing.allocator,
-        std.testing.io,
-        &exe,
-        Mla.pagedSparseAttention,
-        .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
-    );
-    defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
+        var output_d = try zml.testing.autoCall(
+            std.testing.allocator,
+            std.testing.io,
+            &exe,
+            Mla.pagedSparseAttention,
+            .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+        );
+        defer output_d.deinit();
+        try std.testing.expect(output_d.shape().eql(q_shape.set(.hd, case.value_rank)));
+
+        var output = try output_d.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer output.free(std.testing.allocator);
+        const active_output = output.subSlice(output.shape.axis(.q), 0, 1);
+
+        const expected_shape = q_shape.set(.q, 1).set(.hd, case.value_rank);
+        const expected_data = try std.testing.allocator.alloc(f32, expected_shape.count());
+        defer std.testing.allocator.free(expected_data);
+        const exp_two = @exp(@as(f32, 2));
+        const second_weight = exp_two / (1 + exp_two);
+        for (expected_data, 0..) |*value, i| {
+            const dim = i % @as(usize, @intCast(case.value_rank));
+            value.* = if (dim < 64)
+                10 + 10 * second_weight
+            else if (dim == 64)
+                2 * second_weight
+            else
+                0;
+        }
+        const expected = zml.Slice.init(expected_shape, std.mem.sliceAsBytes(expected_data));
+        try zml.testing.expectClose(std.testing.io, expected, active_output, .{ .absolute_tolerance = 0.001, .relative_tolerance = 0.001 });
+    }
 }
 
 test "execute stablehlo mla kernel" {
@@ -968,10 +1012,13 @@ test "execute stablehlo mla kernel" {
 
     var q_data: [1][16][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&q_data), 0);
+    for (&q_data[0]) |*head| head[64] = 1;
     var kv_data: [2][16][1][128]f32 = undefined;
     @memset(std.mem.sliceAsBytes(&kv_data), 0);
-    for (&kv_data[1][0][0]) |*value| value.* = 10;
-    for (&kv_data[1][1][0]) |*value| value.* = 11;
+    @memset(kv_data[1][0][0][0..64], 10);
+    @memset(kv_data[1][1][0][0..64], 20);
+    kv_data[1][0][0][64] = 0;
+    kv_data[1][1][0][64] = 2;
     var sink_data: [16]f32 = undefined;
     for (&sink_data) |*value| value.* = -std.math.inf(f32);
     const topk_data: [1][2]i32 = .{.{ 0, 1 }};
@@ -1007,7 +1054,11 @@ test "execute stablehlo mla kernel" {
         std.testing.allocator,
         std.testing.io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 64 } },
+        .{ parameters, q, kv, sink, topk, tokens_pos, .{
+            .rope_rank = 64,
+            .value_rank = 64,
+            .scale = 1,
+        } },
         .{},
     );
     defer exe.deinit();
@@ -1020,4 +1071,12 @@ test "execute stablehlo mla kernel" {
         .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
     );
     defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
+
+    const output_shape = q_shape.set(.hd, 64);
+    var expected_data: [1][16][64]f32 = undefined;
+    const exp_two = @exp(@as(f32, 2));
+    const expected_value = (10 + 20 * exp_two) / (1 + exp_two);
+    for (&expected_data[0]) |*head| @memset(head, expected_value);
+    const expected = zml.Slice.init(output_shape, std.mem.sliceAsBytes(&expected_data));
+    try zml.testing.expectClose(std.testing.io, expected, output_d, .{ .absolute_tolerance = 0.001, .relative_tolerance = 0.001 });
 }

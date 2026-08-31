@@ -639,7 +639,7 @@ pub const SelfAttn = struct {
 
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = zml.module.CompilationContext.current().partitioning.shardableDim(
+        const kv_head_sharding = zml.Compiler.current().partitioning.shardableDim(
             k.shape().withPartitioning(.{ .h = .model }),
             .h,
             q.dim(.h),
@@ -747,14 +747,14 @@ pub const TextRotaryEmbedding = struct {
 
     fn rotateHalf(x: zml.Tensor) zml.Tensor {
         const half_dim = @divExact(x.dim(-1), 2);
-        const x1 = x.slice1d(-1, .{ .start = 0, .end = half_dim });
-        const x2 = x.slice1d(-1, .{ .start = half_dim, .end = x.dim(-1) });
+        const x1 = x.slice(-1, .{ .start = 0, .end = half_dim });
+        const x2 = x.slice(-1, .{ .start = half_dim, .end = x.dim(-1) });
         return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     }
 
     pub fn applyRope(self: TextRotaryEmbedding, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        const x_rot = x.slice1d(-1, .{ .start = 0, .end = self.rotary_dim });
-        const x_pass = x.slice1d(-1, .{ .start = self.rotary_dim, .end = x.dim(-1) });
+        const x_rot = x.slice(-1, .{ .start = 0, .end = self.rotary_dim });
+        const x_pass = x.slice(-1, .{ .start = self.rotary_dim, .end = x.dim(-1) });
 
         const cos_x = cos.insertAxes(.hd, .{.h}).broad(x_rot.shape());
         const sin_x = sin.insertAxes(.hd, .{.h}).broad(x_rot.shape());
@@ -871,7 +871,7 @@ pub const GatedDeltaNet = struct {
 
     fn buildUpdatedConvState(input: zml.Tensor, left_pad: i64) zml.Tensor {
         const copy_len = @min(input.dim(.s), left_pad);
-        const tail = input.slice1d(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
+        const tail = input.slice(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
         if (copy_len == left_pad) return tail;
 
         const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad - copy_len, .mix = input.dim(.mix) }, input.dtype());
@@ -916,7 +916,7 @@ pub const GatedDeltaNet = struct {
             .silu();
 
         if (use_cached_state) {
-            mixed_qkv = mixed_qkv.slice1d(.s, .{ .start = mixed_qkv.dim(.s) - 1, .end = mixed_qkv.dim(.s) });
+            mixed_qkv = mixed_qkv.slice(.s, .{ .start = mixed_qkv.dim(.s) - 1, .end = mixed_qkv.dim(.s) });
         }
         mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
 
@@ -926,13 +926,13 @@ pub const GatedDeltaNet = struct {
         const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh });
 
         const query = mixed_qkv
-            .slice1d(.mix, .{ .start = 0, .end = key_dim })
+            .slice(.mix, .{ .start = 0, .end = key_dim })
             .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim });
         const key = mixed_qkv
-            .slice1d(.mix, .{ .start = key_dim, .end = 2 * key_dim })
+            .slice(.mix, .{ .start = key_dim, .end = 2 * key_dim })
             .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim });
         const value = mixed_qkv
-            .slice1d(.mix, .{ .start = 2 * key_dim, .end = 2 * key_dim + value_dim })
+            .slice(.mix, .{ .start = 2 * key_dim, .end = 2 * key_dim + value_dim })
             .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
 
         const beta = b.sigmoid();
@@ -1072,11 +1072,11 @@ pub const KvCache = struct {
         }
 
         pub fn keys(kv: SelfAttnCache) zml.Tensor {
-            return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
+            return kv.k.slice(.layer, .dynSingle(kv.layer_index));
         }
 
         pub fn values(kv: SelfAttnCache) zml.Tensor {
-            return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
+            return kv.v.slice(.layer, .dynSingle(kv.layer_index));
         }
 
         pub fn update(kv: SelfAttnCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) SelfAttnCache {
@@ -1179,11 +1179,11 @@ pub const KvCache = struct {
         }
 
         pub fn convState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.conv_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+            return self.conv_state.slice(.layer, .dynSingle(self.layer_index));
         }
 
         pub fn recurrentState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.recurrent_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+            return self.recurrent_state.slice(.layer, .dynSingle(self.layer_index));
         }
 
         pub fn update(self: GatedDeltaNetCache, new_conv_state: ?zml.Tensor, new_recurrent_state: ?zml.Tensor) GatedDeltaNetCache {

@@ -4,9 +4,9 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
+const Compiler = @import("Compiler.zig");
 const mem = @import("mem.zig");
 const meta = @import("meta.zig");
-const module = @import("module.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
@@ -305,7 +305,7 @@ pub const Exe = struct {
 
     pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
-        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
+        var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
 
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
@@ -319,7 +319,7 @@ pub const Exe = struct {
             .results = results_.flat_buffers.buffers,
             .events = events_slice,
             // this allows to tell a specific buffer shouldn't be donated,
-            // even if it has been marked as "can be donated" during compilation.
+            // even if it has been marked as "can be donated" during compiler.
             // TODO: expose it ?
             .non_donatable_input_indices = &.{},
             .context = self.context,
@@ -408,10 +408,10 @@ pub fn FnExe(comptime function_: anytype) type {
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
-            opts: module.CompilationOptions,
+            opts: Compiler.Options,
             args: std.meta.ArgsTuple(@TypeOf(function_)),
-        ) module.CompileError!Self {
-            return .{ .raw = try module.Compiler(function_).compile(allocator, io, platform, opts, args) };
+        ) Compiler.Error!Self {
+            return .{ .raw = try Compiler.Typed(function_).compile(allocator, io, platform, opts, args) };
         }
 
         pub fn deinit(self: *const Self) void {

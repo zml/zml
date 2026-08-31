@@ -357,17 +357,13 @@ fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.Layer
 }
 
 fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, backend: zml.moe.Backend) zml.moe.Metadata {
-    if (qwen_model.config.text_config.num_experts_per_tok == null) {
-        return .init(.fromBackend(backend));
-    }
-
     var w1_zero_bias_shape: ?zml.Shape = null;
     var w2_zero_bias_shape: ?zml.Shape = null;
     var first_out_shape: ?zml.Shape = null;
     var second_out_shape: ?zml.Shape = null;
 
-    const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok.?;
-    const num_experts = qwen_model.config.text_config.num_experts.?;
+    const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok;
+    const num_experts = qwen_model.config.text_config.num_experts;
 
     for (qwen_model.text_model.layers) |layer| {
         const gate_up_shape = zml.Shape.init(.{

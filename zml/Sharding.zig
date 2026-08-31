@@ -99,11 +99,21 @@ pub const Partitioning = struct {
         };
     }
 
-    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape, sharding: ?Sharding) !*const mlir.Attribute {
-        const selected_sharding = sharding orelse try self.selectSharding(shape);
+    pub fn tensorShardingAttr(
+        self: Partitioning,
+        allocator: std.mem.Allocator,
+        ctx: *mlir.Context,
+        shape: Shape,
+        sharding: Sharding,
+    ) error{OutOfMemory}!*const mlir.Attribute {
         return switch (self.partitioner) {
-            .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
-            .gspmd => try selected_sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape),
+            .shardy => (try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
+            .gspmd => sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape) catch |err| switch (err) {
+                error.WriteFailed => error.OutOfMemory, // We're writing to memory
+                error.OutOfMemory => error.OutOfMemory,
+                // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
+                error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
+            },
         };
     }
 
@@ -128,68 +138,7 @@ pub const Partitioning = struct {
         return sharding.shardableDim(shape.dim(ax), spec.axis, must_divide);
     }
 
-    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const mlir.Attribute {
-        stdx.debug.assert(self.partitioner == .shardy, "sdyPerValueShardingAttr requires shardy partitioner", .{});
-
-        const shardings = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
-        for (shapes, 0..) |shape, i| {
-            const sharding = try self.selectSharding(shape);
-            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
-        }
-        return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, shardings).asAttr();
-    }
-
-    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, in_shapes: []const Shape, out_shapes: []const Shape) !*const mlir.Attribute {
-        stdx.debug.assert(self.partitioner == .shardy, "sdyManualAxesAttr requires shardy partitioner", .{});
-
-        var axis_names = std.ArrayList([]const u8).empty;
-        defer axis_names.deinit(allocator);
-
-        const Collect = struct {
-            fn appendUnique(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, axis_name: []const u8) void {
-                for (list.items) |existing| {
-                    if (std.mem.eql(u8, existing, axis_name)) return;
-                }
-                list.append(allocator_, axis_name) catch unreachable;
-            }
-        };
-
-        for (in_shapes) |shape| {
-            const sharding = try self.selectSharding(shape);
-            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
-            for (0..attr.numReplicatedAxes()) |i| {
-                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-            }
-            for (0..attr.numDimensions()) |i| {
-                const dim = attr.dimension(i);
-                for (0..dim.numAxes()) |j| {
-                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
-                }
-            }
-        }
-        for (out_shapes) |shape| {
-            const sharding = try self.selectSharding(shape);
-            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
-            for (0..attr.numReplicatedAxes()) |i| {
-                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-            }
-            for (0..attr.numDimensions()) |i| {
-                const dim = attr.dimension(i);
-                for (0..dim.numAxes()) |j| {
-                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
-                }
-            }
-        }
-
-        const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
-        for (axis_names.items, 0..) |axis_name, i| {
-            axes[i] = mlir.StringAttribute.init(ctx, axis_name);
-        }
-
-        return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
-    }
-
-    pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
+    pub fn selectSharding(self: Partitioning, shape: Shape) error{NoSuitableSharding}!Sharding {
         return pickSharding(self.shardings, shape, .any_covering) orelse error.NoSuitableSharding;
     }
 
@@ -242,6 +191,72 @@ pub fn shardableDim(sharding: Sharding, dim: i64, logical_axis: anytype, must_di
     } else {
         return .replicated;
     }
+}
+
+pub fn sdyPerValueShardingAttr(
+    allocator: std.mem.Allocator,
+    ctx: *mlir.Context,
+    shapes: []const Shape,
+    shardings: []const Sharding,
+) error{OutOfMemory}!*const mlir.Attribute {
+    const sharding_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
+    for (sharding_attrs, shapes, shardings) |*attr, shape, sharding| {
+        attr.* = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+    }
+    return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, sharding_attrs).asAttr();
+}
+
+pub fn sdyManualAxesAttr(
+    allocator: std.mem.Allocator,
+    ctx: *mlir.Context,
+    in_shapes: []const Shape,
+    in_shardings: []const Sharding,
+    out_shapes: []const Shape,
+    out_shardings: []const Sharding,
+) error{OutOfMemory}!*const mlir.Attribute {
+    var axis_names = std.ArrayList([]const u8).empty;
+    defer axis_names.deinit(allocator);
+
+    const Collect = struct {
+        fn appendUnique(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, axis_name: []const u8) void {
+            for (list.items) |existing| {
+                if (std.mem.eql(u8, existing, axis_name)) return;
+            }
+            list.append(allocator_, axis_name) catch unreachable;
+        }
+    };
+
+    for (in_shapes, in_shardings) |shape, sharding| {
+        const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+        for (0..attr.numReplicatedAxes()) |i| {
+            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+        }
+        for (0..attr.numDimensions()) |i| {
+            const dim = attr.dimension(i);
+            for (0..dim.numAxes()) |j| {
+                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+            }
+        }
+    }
+    for (out_shapes, out_shardings) |shape, sharding| {
+        const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+        for (0..attr.numReplicatedAxes()) |i| {
+            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+        }
+        for (0..attr.numDimensions()) |i| {
+            const dim = attr.dimension(i);
+            for (0..dim.numAxes()) |j| {
+                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+            }
+        }
+    }
+
+    const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
+    for (axis_names.items, 0..) |axis_name, i| {
+        axes[i] = mlir.StringAttribute.init(ctx, axis_name);
+    }
+
+    return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
 }
 
 /// Device as part of a PhysicalMesh.
@@ -791,7 +806,7 @@ pub const PhysicalMesh = struct {
                 if (coord_placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
             }
 
-            var axis_sizes = [_]usize{1} ** MAX_MESH_RANK;
+            var axis_sizes: [MAX_MESH_RANK]usize = @splat(1);
             for (0..rank) |ax_i| {
                 var max_coord: usize = 0;
                 for (placements) |coord_placement| {
@@ -1025,7 +1040,7 @@ pub const PhysicalMesh = struct {
             });
         }
 
-        var coords_buf: [MAX_MESH_RANK]usize = [_]usize{0} ** MAX_MESH_RANK;
+        var coords_buf: [MAX_MESH_RANK]usize = @splat(0);
         var next_device: usize = 0;
 
         const Node = struct {
@@ -1460,7 +1475,7 @@ pub const Data = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
-    ) !*const dialects.shardy.TensorShardingAttribute {
+    ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
