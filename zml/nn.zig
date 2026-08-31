@@ -2,6 +2,7 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
+const dialects = @import("mlir/dialects");
 const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
@@ -1819,6 +1820,15 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 }
 
 pub const GatedDeltaNet = struct {
+    pub const Algorithm = enum {
+        recurrent,
+        chunkwise,
+    };
+
+    pub const Options = struct {
+        algorithm: Algorithm = .recurrent,
+    };
+
     /// Query tensor .{ .s, .h, .k }.
     queries: Tensor,
     /// Key tensor .{ .s, .h, .k }.
@@ -1908,6 +1918,29 @@ pub const GatedDeltaNet = struct {
         };
     }
 
+    const PreparedLogDecayInputs = struct {
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        log_decay: Tensor,
+        betas: Tensor,
+    };
+
+    fn prepareLogDecayInputs(queries: Tensor, keys: Tensor, values: Tensor, log_decay: Tensor, betas: Tensor, valid_length: Tensor) PreparedLogDecayInputs {
+        stdx.debug.assert(valid_length.rank() == 0 and valid_length.dtype().isInteger(), "GatedDeltaNet valid_length must be an integer scalar, got {f}", .{valid_length});
+        const valid_mask = Tensor.arange(.{ .end = queries.dim(.s) }, .i64)
+            .withTags(.{.s})
+            .cmp(.LT, valid_length.convert(.i64));
+        return .{
+            .queries = valid_mask.broad(queries.shape()).select(queries, .zeroes(queries.shape())),
+            .keys = valid_mask.broad(keys.shape()).select(keys, .zeroes(keys.shape())),
+            .values = valid_mask.broad(values.shape()).select(values, .zeroes(values.shape())),
+            // Log-space zero is the neutral forget decay for inactive tokens.
+            .log_decay = valid_mask.broad(log_decay.shape()).select(log_decay, .zeroes(log_decay.shape())),
+            .betas = valid_mask.broad(betas.shape()).select(betas, .zeroes(betas.shape())),
+        };
+    }
+
     /// Runs the recurrent implementation while treating positions at or beyond
     /// `valid_length` as a neutral suffix. This keeps padded compilation tails
     /// from changing active outputs or recurrent state.
@@ -1969,7 +2002,238 @@ pub const GatedDeltaNet = struct {
             .state = .{ .s = final_state.s },
         };
     }
+
+    /// Processes a prefill sequence in fixed-size chunks while preserving the
+    /// recurrent state needed by subsequent decode calls.
+    pub fn forwardChunkwiseWithLogDecay(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        log_decay: Tensor,
+        betas: Tensor,
+        initial_state: Input,
+        valid_length: Tensor,
+    ) Output {
+        const prepared = prepareLogDecayInputs(queries, keys, values, log_decay, betas, valid_length);
+        const gdn: GatedDeltaNet = .{
+            .queries = prepared.queries,
+            .keys = prepared.keys,
+            .values = prepared.values,
+            .alphas = prepared.log_decay.exp(),
+            .betas = prepared.betas,
+        };
+        validateInitialState(gdn, .{
+            .step = .scalar(0, .i32),
+            .s = initial_state.s,
+            .outputs = .zeroes(values.shape()),
+        });
+        return chunkwiseForward(
+            prepared.queries,
+            prepared.keys,
+            prepared.values,
+            prepared.log_decay,
+            prepared.betas,
+            initial_state,
+        );
+    }
+
+    const chunk_size: i64 = 64;
+    const chunk_dot_precision: dialects.stablehlo.DotPrecision = .highest;
+
+    const PreparedChunkScan = struct {
+        queries: Tensor,
+        keys: Tensor,
+        cumulative_log_decay: Tensor,
+        u: Tensor,
+        w: Tensor,
+    };
+
+    fn prepareChunkScan(queries: Tensor, keys: Tensor, values: Tensor, log_decay: Tensor, betas: Tensor) PreparedChunkScan {
+        const sequence_length = queries.dim(.s);
+        const chunk_count = @divTrunc(sequence_length + chunk_size - 1, chunk_size);
+        const padded_length = chunk_count * chunk_size;
+        const pad_count = padded_length - sequence_length;
+        const padded_q = queries.pad(0, .{ .s = Tensor.Pad{ .high = pad_count } });
+        const padded_k = keys.pad(0, .{ .s = Tensor.Pad{ .high = pad_count } });
+        const padded_v = values.pad(0, .{ .s = Tensor.Pad{ .high = pad_count } });
+        const padded_log_decay = log_decay.pad(0, .{ .s = Tensor.Pad{ .high = pad_count } });
+        const padded_beta = betas.pad(0, .{ .s = Tensor.Pad{ .high = pad_count } });
+
+        const q_chunks = padded_q.splitAxis(.s, .{ .n = chunk_count, .c = chunk_size });
+        const k_chunks = padded_k.splitAxis(.s, .{ .n = chunk_count, .c = chunk_size });
+        const v_chunks = padded_v.splitAxis(.s, .{ .n = chunk_count, .c = chunk_size });
+        const log_decay_chunks = padded_log_decay.splitAxis(.s, .{ .n = chunk_count, .c = chunk_size });
+        const beta_chunks = padded_beta.splitAxis(.s, .{ .n = chunk_count, .c = chunk_size });
+        const cumulative_log_decay = log_decay_chunks.cumulativeSum(.c);
+
+        const k_row = k_chunks.rename(.{ .c = .row });
+        const k_col = k_chunks.rename(.{ .c = .col });
+        const p_row = cumulative_log_decay.rename(.{ .c = .row });
+        const p_col = cumulative_log_decay.rename(.{ .c = .col });
+        const beta_row = beta_chunks.rename(.{ .c = .row });
+        const kkt = k_row.dotWithPrecision(k_col, .k, chunk_dot_precision);
+        const lower_strict = kkt
+            .mul(p_row.broad(kkt.shape()).sub(p_col.broad(kkt.shape())).exp())
+            .mul(beta_row.broad(kkt.shape()))
+            .triangular(.{ .row, .col }, -1)
+            .contiguous(.{ .row, .col });
+        const identity = Tensor.iota(lower_strict.shape(), .row)
+            .cmp(.EQ, Tensor.iota(lower_strict.shape(), .col))
+            .convert(lower_strict.dtype());
+        const system = lower_strict.add(identity);
+
+        const v_rhs = v_chunks.rename(.{ .c = .row })
+            .mul(beta_row.broad(v_chunks.rename(.{ .c = .row }).shape()));
+        const k_rhs = k_row
+            .mul(beta_row.broad(k_row.shape()))
+            .mul(p_row.exp().broad(k_row.shape()));
+        const rhs = Tensor.concatenate(&.{
+            v_rhs.rename(.{ .v = .rhs }),
+            k_rhs.rename(.{ .k = .rhs }),
+        }, .rhs).contiguous(.{ .row, .rhs });
+        const solved = system.triangularSolve(rhs, .{
+            .left_side = true,
+            .lower = true,
+            .unit_diagonal = true,
+            .transpose_a = .NO_TRANSPOSE,
+        });
+
+        return .{
+            .queries = q_chunks,
+            .keys = k_chunks,
+            .cumulative_log_decay = cumulative_log_decay,
+            .u = solved.slice(.rhs, .{ .start = 0, .end = values.dim(.v) }).rename(.{ .rhs = .v }),
+            .w = solved.slice(.rhs, .{ .start = values.dim(.v), .end = values.dim(.v) + keys.dim(.k) }).rename(.{ .rhs = .k }),
+        };
+    }
+
+    fn scanPreparedChunks(prepared: PreparedChunkScan, initial_state: Input) Output {
+        const Scan = struct {
+            q: Tensor,
+            k: Tensor,
+            p: Tensor,
+            u: Tensor,
+            w: Tensor,
+            chunk_count: i64,
+
+            pub const State = struct {
+                recurrent: Tensor,
+                outputs: Tensor,
+                step: Tensor,
+            };
+
+            pub fn cond(self: @This(), state: @This().State) Tensor {
+                return state.step.cmp(.LT, Tensor.scalar(self.chunk_count, .i32));
+            }
+
+            pub fn body(self: @This(), state: @This().State) @This().State {
+                const q = self.q.slice(.n, .dynSingle(state.step)).rename(.{ .c = .row }).contiguous(.{ .row, .k });
+                const k = self.k.slice(.n, .dynSingle(state.step)).rename(.{ .c = .row }).contiguous(.{ .row, .k });
+                const p = self.p.slice(.n, .dynSingle(state.step)).rename(.{ .c = .row }).contiguous(.{.row});
+                const u = self.u.slice(.n, .dynSingle(state.step));
+                const w = self.w.slice(.n, .dynSingle(state.step));
+
+                const delta = u.sub(w.dotWithPrecision(state.recurrent, .k, chunk_dot_precision));
+                const qk = q.dotWithPrecision(k.rename(.{ .row = .col }), .k, chunk_dot_precision);
+                const gamma = p.broad(qk.shape())
+                    .sub(p.rename(.{ .row = .col }).broad(qk.shape()))
+                    .exp()
+                    .triangular(.{ .row, .col }, 0);
+                const output = q.mul(p.exp().broad(q.shape()))
+                    .dotWithPrecision(state.recurrent, .k, chunk_dot_precision)
+                    .add(qk.mul(gamma).dotWithPrecision(delta.rename(.{ .row = .col }), .col, chunk_dot_precision));
+
+                const p_end = p.slice(.row, .single(-1));
+                const weighted_k = k.mul(p_end.broad(p.shape()).sub(p).exp().broad(k.shape()));
+                const recurrent = state.recurrent.mul(p_end.exp().broad(state.recurrent.shape()))
+                    .add(delta.dotWithPrecision(weighted_k, .row, chunk_dot_precision));
+                const output_chunk = output.rename(.{ .row = .c }).transpose(state.outputs.shape().drop(.n));
+                return .{
+                    .recurrent = recurrent,
+                    .outputs = state.outputs.dynamicUpdateSlice(.{ .n = state.step }, output_chunk),
+                    .step = state.step.addConstant(1),
+                };
+            }
+        };
+
+        const final = ops.@"while"(Scan, .{
+            .q = prepared.queries,
+            .k = prepared.keys,
+            .p = prepared.cumulative_log_decay,
+            .u = prepared.u,
+            .w = prepared.w,
+            .chunk_count = prepared.queries.dim(.n),
+        }, .{
+            .recurrent = initial_state.s,
+            .outputs = .zeroes(prepared.queries.shape().drop(.k).append(.{ .v = prepared.u.dim(.v) })),
+            .step = .scalar(0, .i32),
+        });
+        return .{
+            .outputs = final.outputs.merge(.{ .s = .{ .n, .c } }),
+            .state = .{ .s = final.recurrent },
+        };
+    }
+
+    fn chunkwiseForward(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        log_decay: Tensor,
+        betas: Tensor,
+        initial_state: Input,
+    ) Output {
+        switch (zml.Compiler.current().platform.target) {
+            .cpu, .cuda => {},
+            else => stdx.debug.panic("chunkwise GDN is not validated on {s}", .{@tagName(zml.Compiler.current().platform.target)}),
+        }
+
+        const sequence_length = queries.dim(.s);
+        const padded = scanPreparedChunks(
+            prepareChunkScan(queries, keys, values, log_decay, betas),
+            initial_state,
+        );
+        return .{
+            .outputs = padded.outputs.slice(.s, .{ .start = 0, .end = sequence_length }),
+            .state = padded.state,
+        };
+    }
 };
+
+const GatedDeltaNetComparison = struct {
+    recurrent: GatedDeltaNet.Output,
+    chunkwise: GatedDeltaNet.Output,
+};
+
+fn compareGatedDeltaNet(
+    queries: Tensor,
+    keys: Tensor,
+    values: Tensor,
+    log_decay: Tensor,
+    betas: Tensor,
+    initial_state: GatedDeltaNet.Input,
+    valid_length: Tensor,
+) GatedDeltaNetComparison {
+    return .{
+        .recurrent = GatedDeltaNet.forwardWithValidLength(
+            queries,
+            keys,
+            values,
+            log_decay.exp(),
+            betas,
+            initial_state,
+            valid_length,
+        ),
+        .chunkwise = GatedDeltaNet.forwardChunkwiseWithLogDecay(
+            queries,
+            keys,
+            values,
+            log_decay,
+            betas,
+            initial_state,
+            valid_length,
+        ),
+    };
+}
 
 test "gated delta net" {
     const platform = zml.testing.env();
@@ -2098,6 +2362,86 @@ test "gated delta net" {
     try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
         .absolute_tolerance = 1e-4,
         .relative_tolerance = 1e-4,
+    });
+}
+
+test "gated delta net chunkwise crosses chunk boundary" {
+    const platform = zml.testing.env();
+    if (platform.target != .cpu and platform.target != .cuda) return error.SkipZigTest;
+
+    const sequence_length = 65;
+    const queries: Tensor = .init(.{ .s = sequence_length, .h = 1, .k = 2 }, .f32);
+    const keys: Tensor = .init(.{ .s = sequence_length, .h = 1, .k = 2 }, .f32);
+    const values: Tensor = .init(.{ .s = sequence_length, .h = 1, .v = 2 }, .f32);
+    const log_decay: Tensor = .init(.{ .s = sequence_length, .h = 1 }, .f32);
+    const betas: Tensor = .init(.{ .s = sequence_length, .h = 1 }, .f32);
+    const initial_s: Tensor = .init(.{ .h = 1, .v = 2, .k = 2 }, .f32);
+    const valid_length: Tensor = .init(.{}, .u32);
+
+    var exe = try platform.compileFn(
+        std.testing.allocator,
+        std.testing.io,
+        compareGatedDeltaNet,
+        .{ queries, keys, values, log_decay, betas, .{ .s = initial_s }, valid_length },
+        .{},
+    );
+    defer exe.deinit();
+
+    var queries_data: [sequence_length][1][2]f32 = undefined;
+    var keys_data: [sequence_length][1][2]f32 = undefined;
+    var values_data: [sequence_length][1][2]f32 = undefined;
+    var log_decay_data: [sequence_length][1]f32 = undefined;
+    var betas_data: [sequence_length][1]f32 = undefined;
+    for (0..sequence_length) |i| {
+        const fi: f32 = @floatFromInt(i);
+        const alternating: f32 = if (i % 2 == 0) 1 else -1;
+        queries_data[i][0] = .{ 0.1 + 0.001 * fi, alternating * 0.15 };
+        keys_data[i][0] = .{ 0.08 + 0.0005 * fi, alternating * 0.12 };
+        values_data[i][0] = .{ 0.2 + 0.002 * fi, -0.1 + 0.001 * fi };
+        log_decay_data[i][0] = -0.01 - 0.001 * @as(f32, @floatFromInt(i % 5));
+        betas_data[i][0] = 0.2 + 0.05 * @as(f32, @floatFromInt(i % 3));
+    }
+
+    var queries_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, queries.shape(), .replicated, std.mem.sliceAsBytes(&queries_data));
+    defer queries_buffer.deinit();
+    var keys_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, keys.shape(), .replicated, std.mem.sliceAsBytes(&keys_data));
+    defer keys_buffer.deinit();
+    var values_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, values.shape(), .replicated, std.mem.sliceAsBytes(&values_data));
+    defer values_buffer.deinit();
+    var log_decay_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, log_decay.shape(), .replicated, std.mem.sliceAsBytes(&log_decay_data));
+    defer log_decay_buffer.deinit();
+    var betas_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, betas.shape(), .replicated, std.mem.sliceAsBytes(&betas_data));
+    defer betas_buffer.deinit();
+    var initial_s_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        initial_s.shape(),
+        .replicated,
+        std.mem.sliceAsBytes(&[1][2][2]f32{.{ .{ 0.1, -0.05 }, .{ 0.025, 0.075 } }}),
+    );
+    defer initial_s_buffer.deinit();
+    var valid_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, sequence_length), .u32);
+    defer valid_length_buffer.deinit();
+
+    var result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        compareGatedDeltaNet,
+        .{ queries_buffer, keys_buffer, values_buffer, log_decay_buffer, betas_buffer, .{ .s = initial_s_buffer }, valid_length_buffer },
+    );
+    defer result.recurrent.outputs.deinit();
+    defer result.recurrent.state.s.deinit();
+    defer result.chunkwise.outputs.deinit();
+    defer result.chunkwise.state.s.deinit();
+
+    try zml.testing.expectClose(std.testing.io, result.recurrent.outputs, result.chunkwise.outputs, .{
+        .absolute_tolerance = 2e-4,
+        .relative_tolerance = 2e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, result.recurrent.state.s, result.chunkwise.state.s, .{
+        .absolute_tolerance = 2e-4,
+        .relative_tolerance = 2e-4,
     });
 }
 

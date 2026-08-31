@@ -47,6 +47,7 @@ pub const RopeParameters = struct {
 pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
+    gdn_algorithm: zml.nn.GatedDeltaNet.Algorithm,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -66,6 +67,7 @@ pub const LoadedModel = struct {
         return .{
             .inner = try .init(allocator, store, parsed_config.value, options),
             .parsed_config = parsed_config,
+            .gdn_algorithm = if (generation.experimental_chunkwise_gdn) .chunkwise else .recurrent,
         };
     }
 
@@ -125,7 +127,8 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), shardings);
+        var params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), shardings);
+        params.prefill_gdn_options.algorithm = self.gdn_algorithm;
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -405,6 +408,15 @@ pub const TransformerLayer = struct {
         }
         Mlp.unloadBuffers(&self.mlp);
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+    }
+
+    pub fn withGdnOptions(self: TransformerLayer, options: zml.nn.GatedDeltaNet.Options) TransformerLayer {
+        var result = self;
+        switch (result.attn) {
+            .linear_attention => |*linear_attn| linear_attn.gdn_options = options,
+            .full_attention => {},
+        }
+        return result;
     }
 
     pub fn forward(
@@ -784,6 +796,7 @@ pub const GatedDeltaNet = struct {
     head_k_dim: i64,
     head_v_dim: i64,
     conv_kernel_size: i64,
+    gdn_options: zml.nn.GatedDeltaNet.Options = .{},
 
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype) zml.nn.Linear {
         return .init(store.createTensor("weight", .{ .dout, .d }, partitions), null, .d);
@@ -823,7 +836,7 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
-    fn recurrentGatedDeltaRule(
+    fn gatedDeltaRule(
         query: zml.Tensor,
         key: zml.Tensor,
         value: zml.Tensor,
@@ -831,16 +844,17 @@ pub const GatedDeltaNet = struct {
         beta: zml.Tensor,
         initial_state: ?zml.Tensor,
         valid_len: zml.Tensor,
+        options: zml.nn.GatedDeltaNet.Options,
     ) struct { zml.Tensor, zml.Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
 
-        const query_f32, const key_f32, const value_f32, const alpha_f32, const beta_f32 = .{
+        const query_f32, const key_f32, const value_f32, const log_decay_f32, const beta_f32 = .{
             query_norm.convert(.f32).scale(scale).rename(.{ .vh = .h, .khd = .k }),
             key_norm.convert(.f32).rename(.{ .vh = .h, .khd = .k }),
             value.convert(.f32).rename(.{ .vh = .h, .vhd = .v }),
-            g.convert(.f32).exp().rename(.{ .vh = .h }),
+            g.convert(.f32).rename(.{ .vh = .h }),
             beta.convert(.f32).rename(.{ .vh = .h }),
         };
 
@@ -857,15 +871,26 @@ pub const GatedDeltaNet = struct {
             }, .f32));
         };
 
-        const result = zml.nn.GatedDeltaNet.forwardWithValidLength(
-            query_f32,
-            key_f32,
-            value_f32,
-            alpha_f32,
-            beta_f32,
-            .{ .s = initial_recurrent_state },
-            valid_len,
-        );
+        const result = switch (options.algorithm) {
+            .chunkwise => zml.nn.GatedDeltaNet.forwardChunkwiseWithLogDecay(
+                query_f32,
+                key_f32,
+                value_f32,
+                log_decay_f32,
+                beta_f32,
+                .{ .s = initial_recurrent_state },
+                valid_len,
+            ),
+            .recurrent => zml.nn.GatedDeltaNet.forwardWithValidLength(
+                query_f32,
+                key_f32,
+                value_f32,
+                log_decay_f32.exp(),
+                beta_f32,
+                .{ .s = initial_recurrent_state },
+                valid_len,
+            ),
+        };
 
         return .{
             result.outputs.rename(.{ .h = .vh, .v = .vhd }).convert(query.dtype()),
@@ -959,7 +984,7 @@ pub const GatedDeltaNet = struct {
             break :b key.stutter1d(key.axis(.kh), self.qk_head_repetition);
         };
 
-        const core_attn_out, const last_recurrent_state = recurrentGatedDeltaRule(
+        const core_attn_out, const last_recurrent_state = gatedDeltaRule(
             query_for_rule,
             key_for_rule,
             value,
@@ -970,6 +995,7 @@ pub const GatedDeltaNet = struct {
                 break :b null;
             },
             linear_attention_valid_len,
+            self.gdn_options,
         );
 
         const core_attn_out_normed = self.norm

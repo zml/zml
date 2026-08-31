@@ -17,6 +17,7 @@ pub const CompilationParameters = struct {
     rng: zml.Tensor.Rng,
     seqlen: u32,
     shardings: common.Shardings,
+    prefill_gdn_options: zml.nn.GatedDeltaNet.Options = .{},
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
@@ -59,9 +60,9 @@ pub const CompiledModel = struct {
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, qwen_model, parameters, @intCast(parameters.prefill_tokens.dim(.s)), .prefill, progress);
+        const prefill = try compileKernel(allocator, io, platform, qwen_model, parameters, @intCast(parameters.prefill_tokens.dim(.s)), .prefill, parameters.prefill_gdn_options, progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, qwen_model, parameters, @intCast(parameters.decode_tokens.dim(.s)), .decode, progress);
+        const decode = try compileKernel(allocator, io, platform, qwen_model, parameters, @intCast(parameters.decode_tokens.dim(.s)), .decode, .{ .algorithm = .recurrent }, progress);
         return .{
             .loaded_model = loaded_model,
             .prefill = prefill,
@@ -224,6 +225,7 @@ fn compileKernel(
     parameters: CompilationOptions,
     seqlen: usize,
     phase: Phase,
+    gdn_options: zml.nn.GatedDeltaNet.Options,
     progress: *std.Progress.Node,
 ) !KernelExe {
     const full_index = findFirstLayerIndex(qwen_model.config.text_config.layer_types, .full_attention) orelse return error.MissingFullAttentionLayer;
@@ -233,7 +235,7 @@ fn compileKernel(
     errdefer embed.deinit();
     const full_attention = try compileFullAttention(allocator, io, platform, qwen_model, parameters, seqlen, full_index, phase, progress);
     errdefer full_attention.deinit();
-    const linear_attention = try compileLinearAttention(allocator, io, platform, qwen_model, parameters, seqlen, linear_index, phase, progress);
+    const linear_attention = try compileLinearAttention(allocator, io, platform, qwen_model, parameters, seqlen, linear_index, phase, gdn_options, progress);
     errdefer linear_attention.deinit();
     const sample = try compileSample(allocator, io, platform, qwen_model, parameters, seqlen, phase, progress);
     errdefer sample.deinit();
@@ -270,14 +272,14 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
     }});
 }
 
-fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationOptions, seqlen: usize, layer_index: usize, phase: Phase, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
+fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationOptions, seqlen: usize, layer_index: usize, phase: Phase, gdn_options: zml.nn.GatedDeltaNet.Options, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start(phase.startMessage("linear attention layer"), 1);
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "linear attention layer", io, from);
     return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
-        .layer = mdl.text_model.layers[layer_index],
+        .layer = mdl.text_model.layers[layer_index].withGdnOptions(gdn_options),
         .hidden = hiddenTensor(mdl, seqlen),
         .linear_attention_valid_len = parameters.linear_attention_valid_len,
         .cache = .{
