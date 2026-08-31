@@ -23,9 +23,10 @@ test {
 }
 
 pub const Tensor = struct {
-    var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
+    pub const Id = enum(u64) { _ };
+    var current_id: std.atomic.Value(u64) = .init(1);
 
-    id: usize,
+    id: Tensor.Id,
     auto_broadcast: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
@@ -36,8 +37,12 @@ pub const Tensor = struct {
         return .fromShape(.init(shape_like, dt));
     }
 
+    fn nextTensorId() Id {
+        return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
+    }
+
     pub fn fromShape(shape_: Shape) Tensor {
-        return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
+        return .{ .id = nextTensorId(), ._shape = shape_ };
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -73,11 +78,7 @@ pub const Tensor = struct {
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
-        const res: Tensor = .{
-            ._shape = sh,
-            ._value = val,
-            .id = Tensor.current_id.fetchAdd(1, .seq_cst),
-        };
+        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
 
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
@@ -105,7 +106,7 @@ pub const Tensor = struct {
         sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
         sh._partitioning.appendNTimes(.unknown, n) catch unreachable;
 
-        return .{ ._shape = sh, ._value = val, .id = Tensor.current_id.fetchAdd(1, .seq_cst) };
+        return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
     }
 
     /// Returns the dimension of axis 'axis_'.
@@ -159,14 +160,13 @@ pub const Tensor = struct {
             return res;
         };
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch |err| switch (err) {
+        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
             error.NoSuitableSharding => std.debug.panic(
                 "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
                 .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
             ),
-            error.OutOfMemory, error.WriteFailed => @panic("OOM"),
-            error.MissingDeviceInTile => @panic("TODO"),
         };
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
@@ -233,7 +233,7 @@ pub const Tensor = struct {
         ).appendTo(currentBlock());
 
         const res = _result(self._shape, op.result(0));
-        ctx.currentScope().id_to_output_memory_kind.put(ctx.currentScope().arena.allocator(), res.id, kind) catch unreachable;
+        ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
 
@@ -248,10 +248,10 @@ pub const Tensor = struct {
 
         var copy = flat_tensors;
         meta.visitFlatStruct(struct {
-            fn onMemory(k: Memory.Kind, x: *Tensor) void {
+            fn toMemory(k: Memory.Kind, x: *Tensor) void {
                 x.* = x.toMemory(k);
             }
-        }.onMemory, kind, &copy);
+        }.toMemory, kind, &copy);
         return copy;
     }
 
@@ -268,7 +268,7 @@ pub const Tensor = struct {
             return self;
         }
 
-        ctx.currentScope().id_to_input_memory_kind.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
+        ctx.currentScope().id_to_memory.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
 
         return self;
     }
@@ -313,11 +313,10 @@ pub const Tensor = struct {
     ///
     /// This will fail if used outside of a Compiler context.
     pub fn value(self: Tensor) *const mlir.Value {
-        if (Compiler.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
-            return Compiler.current().currentScope().block.argument(argument_index);
-        } else if (self._value) |v| {
-            return v;
-        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
+        const scope = Compiler.current().currentScope();
+        return scope.id_to_argument.get(self.id) orelse
+            self._value orelse
+            @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
     }
 
     /// Tell PJRT compiler that memory should be reuse between the two tensors.
@@ -330,10 +329,7 @@ pub const Tensor = struct {
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
-        if (scope.id_to_argument.get(origin.id)) |argument_index| {
-            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
-            gop.value_ptr.* = argument_index;
-        } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+        if (scope.id_to_donation.get(origin.id)) |origin_donation| {
             const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
             gop.value_ptr.* = origin_donation;
         }
@@ -350,7 +346,7 @@ pub const Tensor = struct {
         const right = Tensor.init(.{ 2, 6 }, .f32);
 
         const Local = struct {
-            pub fn memcopy(x: Tensor, y: Tensor) Tensor {
+            fn memcopy(x: Tensor, y: Tensor) Tensor {
                 return x.addConstant(1).reuseBuffer(y);
             }
         };
@@ -2754,8 +2750,8 @@ pub const Tensor = struct {
             defer comp.deactivate();
 
             const block = mlir.Block.init(&.{}, &.{});
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
@@ -2906,8 +2902,8 @@ pub const Tensor = struct {
             defer comp.deactivate();
 
             const block = mlir.Block.init(&.{}, &.{});
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{}, .{ ._ = 0 }, .{ .a = 10 } },
@@ -3132,8 +3128,8 @@ pub const Tensor = struct {
 
             const block = mlir.Block.init(&.{}, &.{});
             defer block.deinit();
-            comp.pushBlock(block);
-            defer comp.popBlock();
+            const scope = comp.pushBlock(block);
+            defer scope.pop();
 
             const idx = Local._idx;
 
@@ -3671,8 +3667,8 @@ pub const Tensor = struct {
 
         const block = mlir.Block.init(&.{}, &.{});
         defer block.deinit();
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         inline for (.{
             .{ .{ .a = 12 }, .a, 3, .{ .a = 4 } },
@@ -3724,8 +3720,8 @@ pub const Tensor = struct {
 
         const block = mlir.Block.init(&.{}, &.{});
         defer block.deinit();
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         inline for (.{
             .{ .{ .a = 10 }, .a, 3, .{ .a = 3 }, .{ .a = 1 } },
@@ -4506,20 +4502,6 @@ pub const Tensor = struct {
 
     fn currentBlock() *mlir.Block {
         return Compiler.current().currentScope().block;
-    }
-
-    /// Returns the donation data of the tensor.
-    pub fn donation(self: Tensor) ?usize {
-        return Compiler.current().currentScope().id_to_donation.get(self.id);
-    }
-
-    /// Returns the output memory kind of the tensor.
-    pub fn outputMemoryKind(self: Tensor) Memory.Kind {
-        return Compiler.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
-    }
-
-    pub fn inputMemoryKind(self: Tensor) ?Memory.Kind {
-        return Compiler.current().currentScope().id_to_input_memory_kind.get(self.id);
     }
 };
 

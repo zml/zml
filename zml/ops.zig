@@ -17,9 +17,10 @@ const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-pub const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
+const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
+const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
-pub const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
+const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
@@ -86,13 +87,12 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         const block = mlir.Block.init(&block_types, &block_locs);
         errdefer block.deinit();
 
-        ctx.pushBlock(block);
-        defer ctx.popBlock();
+        const reducer_scope = ctx.pushBlock(block);
+        defer reducer_scope.pop();
 
-        const scope = ctx.currentScope();
         inline for (0..input_tensors.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + input_tensors.len) catch unreachable;
+            reducer_scope.registerTensorAsBlockArgument(args[i].left.id, i);
+            reducer_scope.registerTensorAsBlockArgument(args[i].right.id, i + input_tensors.len);
         }
 
         var reduced_values: [input_tensors.len]*const mlir.Value = undefined;
@@ -102,14 +102,10 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         } else {
             var reduced = @call(.auto, func, args);
             var reduced_tensors: [input_tensors.len]Tensor = undefined;
-            meta.collectBuf((struct {
-                pub fn cb(t: Tensor) Tensor {
-                    return t;
-                }
-            }).cb, {}, &reduced, &reduced_tensors);
+            meta.collectBuf(stdx.meta.identity, {}, &reduced, &reduced_tensors);
 
-            inline for (0..input_tensors.len) |i| {
-                reduced_values[i] = reduced_tensors[i].value();
+            for (reduced_values, reduced_tensors) |*vi, ti| {
+                vi.* = ti.value();
             }
         }
 
@@ -208,11 +204,11 @@ pub const ReduceArgs = struct {
 };
 
 pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
-    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
-    defer arena.deinit();
+    const compiler = Compiler.current();
+    const caller_scope = compiler.currentScope();
+    const mlir_ctx = compiler.mlir_ctx;
 
-    const mlir_ctx = Compiler.current().mlir_ctx;
-
+    // Note: inputs and inits are infered to be tuple of ReduceArgs
     const reduce_block, var result = b: {
         const ArgsTypes: [inits.len]type = @splat(ReduceArgs);
         const ArgsType = std.meta.Tuple(&ArgsTypes);
@@ -231,13 +227,12 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        Compiler.current().pushBlock(reduce_block);
-        defer Compiler.current().popBlock();
+        const reduce_scope = compiler.pushBlock(reduce_block);
+        defer reduce_scope.pop();
 
-        const scope = Compiler.current().currentScope();
         inline for (0..inits.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
+            reduce_scope.registerTensorAsBlockArgument(args[i].left.id, i);
+            reduce_scope.registerTensorAsBlockArgument(args[i].right.id, i + inits.len);
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -247,13 +242,12 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx)).appendTo(reduce_block);
+        const block_result = dialects.stablehlo.returns(mlir_ctx, &result_values, .unknown(mlir_ctx));
+        _ = block_result.appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
     var input_values: [inputs.len]*const mlir.Value = undefined;
-    inline for (0..inputs.len) |i| {
-        input_values[i] = inputs[i].value();
-    }
+    inline for (0..inputs.len) |i| input_values[i] = inputs[i].value();
 
     var init_values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inits.len) |i| init_values[i] = inits[i].value();
@@ -267,7 +261,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(Compiler.current().currentScope().block);
+    }).appendTo(caller_scope.block);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -293,7 +287,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
             mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
             .unknown(mlir_ctx),
-        ).appendTo(Compiler.current().currentScope().block);
+        ).appendTo(caller_scope.block);
 
         result[i] = Tensor._result(reduced_shape, broad_op.result(0));
     }
@@ -320,10 +314,8 @@ pub fn ReduceWindowFn(N: comptime_int) type {
 }
 
 pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func: *const ReduceWindowFn(N)) [N]Tensor {
-    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
-    defer arena.deinit();
-
-    const mlir_ctx = Compiler.current().mlir_ctx;
+    const compiler = Compiler.current();
+    const mlir_ctx = compiler.mlir_ctx;
 
     const reduce_block, var result = b: {
         const Args = @Tuple(&@as([N]type, @splat(ReduceArgs)));
@@ -342,13 +334,12 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
-        Compiler.current().pushBlock(reduce_block);
-        defer Compiler.current().popBlock();
+        const reduce_scope = compiler.pushBlock(reduce_block);
+        defer reduce_scope.pop();
 
-        const scope = Compiler.current().currentScope();
         inline for (0..N) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + N) catch unreachable;
+            reduce_scope.registerTensorAsBlockArgument(args[i].left.id, i);
+            reduce_scope.registerTensorAsBlockArgument(args[i].right.id, i + N);
         }
 
         var result = @call(.auto, func, args);
@@ -386,7 +377,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(Compiler.current().currentScope().block);
+    }).appendTo(compiler.currentScope().block);
 
     inline for (0..result.len) |i| {
         result[i] = Tensor.fromMlirValue(reduce_op.result(i)).withTags(inputs[i].shape());
@@ -401,10 +392,8 @@ pub const SortArgs = struct {
 };
 
 pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
-    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
-    defer arena.deinit();
-
-    const mlir_ctx = Compiler.current().mlir_ctx;
+    const compiler = Compiler.current();
+    const mlir_ctx = compiler.mlir_ctx;
 
     const sort_block = b: {
         const ArgsTypes: [inputs.len]type = @splat(SortArgs);
@@ -424,13 +413,12 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         const sort_block = mlir.Block.init(&block_types, &block_locs);
         errdefer sort_block.deinit();
 
-        Compiler.current().pushBlock(sort_block);
-        defer Compiler.current().popBlock();
+        const scope = compiler.pushBlock(sort_block);
+        defer scope.pop();
 
-        const scope = Compiler.current().currentScope();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, 2 * i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, 2 * i + 1) catch unreachable;
+            scope.registerTensorAsBlockArgument(args[i].left.id, 2 * i);
+            scope.registerTensorAsBlockArgument(args[i].right.id, 2 * i + 1);
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -454,7 +442,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
-    }).appendTo(Compiler.current().currentScope().block);
+    }).appendTo(compiler.currentScope().block);
 
     var result: [inputs.len]Tensor = undefined;
     inline for (0..inputs.len) |i| {
@@ -514,14 +502,12 @@ pub fn @"while"(
         const block = mlir.Block.init(operands_info.items(.type), operands_info.items(.location));
         errdefer block.deinit();
 
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         // Interpret initial_state as the block argument
-        const scope = comp.currentScope();
-        scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.registerTensorAsBlockArgument(input.id, i);
         }
 
         const cond: Tensor = captured_context.cond(initial_state);
@@ -535,14 +521,13 @@ pub fn @"while"(
         const block = mlir.Block.init(operands_info.items(.type), operands_info.items(.location));
         errdefer block.deinit();
 
-        comp.pushBlock(block);
-        defer comp.popBlock();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
 
         // Interpret operands as the block argument
-        const scope = comp.currentScope();
         scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
         for (0.., flat_operands) |i, input| {
-            scope.id_to_argument.putAssumeCapacity(input.id, i);
+            scope.registerTensorAsBlockArgument(input.id, i);
         }
 
         const result: While.State = captured_context.body(initial_state);
@@ -696,8 +681,8 @@ pub fn @"if"(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        Compiler.current().pushBlock(block);
-        defer Compiler.current().popBlock();
+        const scope = Compiler.current().pushBlock(block);
+        defer scope.pop();
 
         const result = blkctx.onTrue();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
@@ -710,8 +695,8 @@ pub fn @"if"(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        Compiler.current().pushBlock(block);
-        defer Compiler.current().popBlock();
+        const scope = Compiler.current().pushBlock(block);
+        defer scope.pop();
 
         const result = blkctx.onFalse();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
@@ -789,8 +774,8 @@ pub fn if2(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        Compiler.current().pushBlock(block);
-        defer Compiler.current().popBlock();
+        const scope = Compiler.current().pushBlock(block);
+        defer scope.pop();
         _ = dialects.stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
         break :b block;
     };
@@ -801,8 +786,8 @@ pub fn if2(
         const block = mlir.Block.init(&.{}, &.{});
         errdefer block.deinit();
 
-        Compiler.current().pushBlock(block);
-        defer Compiler.current().popBlock();
+        const scope = Compiler.current().pushBlock(block);
+        defer scope.pop();
 
         _ = dialects.stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
         break :b block;
@@ -1146,13 +1131,12 @@ pub fn scatter(
         const update_block = mlir.Block.init(&block_types, &block_locs);
         errdefer update_block.deinit();
 
-        Compiler.current().pushBlock(update_block);
-        defer Compiler.current().popBlock();
+        const scope = Compiler.current().pushBlock(update_block);
+        defer scope.pop();
 
-        const scope = Compiler.current().currentScope();
         inline for (0..inputs.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].input.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].update.id, i + inputs.len) catch unreachable;
+            scope.registerTensorAsBlockArgument(args[i].input.id, i);
+            scope.registerTensorAsBlockArgument(args[i].update.id, i + inputs.len);
         }
 
         var result = @call(.auto, func, args ++ context);
@@ -1349,8 +1333,8 @@ test scatterConfig {
     defer comp.deactivate();
 
     const block = mlir.Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     const Local = struct {
         pub fn _idx(idx_shape: anytype) Tensor {
@@ -1776,7 +1760,7 @@ pub fn composite(
 
         const block = mlir.Block.init(block_types, block_locs);
 
-        ctx.pushBlock(block);
+        const scope = ctx.pushBlock(block);
         {
             const arg_tensors = ctx.alloc(Tensor, inputs.len);
             for (inputs, 0..) |t, i| {
@@ -1798,7 +1782,7 @@ pub fn composite(
 
             _ = dialects.func.returns(mlir_ctx, rvals, .unknown(mlir_ctx)).appendTo(block);
         }
-        ctx.popBlock();
+        scope.pop();
 
         _ = dialects.func.func(mlir_ctx, .{
             .name = decomp_name,
@@ -1975,8 +1959,11 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
+    const sharded_outputs: []const Tensor = manualComputationInternal(inputs_, output_shapes, body_context, body_fn) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM"),
+    };
     const ReturnT = manualComputationReturnType(body_fn);
-    return manualComputationSliceToReturn(ReturnT, manualComputationInternal(inputs_, output_shapes, body_context, body_fn));
+    return manualComputationSliceToReturn(ReturnT, sharded_outputs);
 }
 
 fn manualComputationInternal(
@@ -1984,53 +1971,71 @@ fn manualComputationInternal(
     outputs: []const Shape,
     body_context: anytype,
     comptime body_fn: anytype,
-) []Tensor {
+) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
     const BodyInputsT = stdx.meta.FnParam(body_fn, 2);
     const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 3);
 
     const ctx = Compiler.current();
-    const allocator = ctx.arena.allocator();
+    const scope = ctx.currentScope();
 
-    const input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
-    const input_values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const input_shapes = try arena.alloc(Shape, inputs.len);
+    const input_values = try arena.alloc(*const mlir.Value, inputs.len);
 
     for (inputs, 0..) |input, i| {
         input_shapes[i] = input.shape();
         input_values[i] = input.value();
     }
+    const local_input_shapes = try arena.alloc(Shape, inputs.len);
+    const local_output_shapes = try arena.alloc(Shape, outputs.len);
+    const input_shardings = try arena.alloc(Sharding, inputs.len);
+    const output_shardings = try arena.alloc(Sharding, outputs.len);
+
+    for (input_shapes, 0..) |shape, i| {
+        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
+            error.NoSuitableSharding => std.debug.panic(
+                "failed to shard manualComputation input {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
+                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
+            ),
+        };
+        input_shardings[i] = sharding;
+        local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+    }
+    for (outputs, 0..) |shape, i| {
+        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
+            error.NoSuitableSharding => std.debug.panic(
+                "failed to shard manualComputation output {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
+                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
+            ),
+        };
+        output_shardings[i] = sharding;
+        local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+    }
 
     return switch (ctx.partitioning.partitioner) {
-        .shardy => blk: {
-            const local_input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
-            const local_output_shapes = allocator.alloc(Shape, outputs.len) catch unreachable;
+        .shardy => {
+            const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings);
+            const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings, outputs, output_shardings);
 
-            for (input_shapes, 0..) |input_shape, i| {
-                local_input_shapes[i] = ctx.partitioning.localShapeForShape(input_shape) catch unreachable;
-            }
-            for (outputs, 0..) |output_shape, i| {
-                local_output_shapes[i] = ctx.partitioning.localShapeForShape(output_shape) catch unreachable;
-            }
-
-            const in_shardings_attr = ctx.partitioning.sdyPerValueShardingAttr(allocator, ctx.mlir_ctx, input_shapes) catch unreachable;
-            const out_shardings_attr = ctx.partitioning.sdyPerValueShardingAttr(allocator, ctx.mlir_ctx, outputs) catch unreachable;
-            const manual_axes_attr = ctx.partitioning.sdyManualAxesAttr(allocator, ctx.mlir_ctx, input_shapes, outputs) catch unreachable;
-
-            const block_types = allocator.alloc(*const mlir.Type, inputs.len) catch unreachable;
-            const block_locs = allocator.alloc(*const mlir.Location, inputs.len) catch unreachable;
+            const block_types = try arena.alloc(*const mlir.Type, inputs.len);
             for (local_input_shapes, 0..) |input_shape, i| {
                 block_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, input_shape);
-                block_locs[i] = mlir.Location.unknown(ctx.mlir_ctx);
             }
+            const block_locs = try arena.alloc(*const mlir.Location, inputs.len);
+            @memset(block_locs, mlir.Location.unknown(ctx.mlir_ctx));
 
-            const parent_block = ctx.currentScope().block;
             const manual_block = mlir.Block.init(block_types, block_locs);
             errdefer manual_block.deinit();
 
-            ctx.pushBlock(manual_block);
-            defer ctx.popBlock();
+            const manual_scope = ctx.pushBlock(manual_block);
+            defer manual_scope.pop();
 
-            const local_inputs = allocator.alloc(Tensor, inputs.len) catch unreachable;
+            const local_inputs = try arena.alloc(Tensor, inputs.len);
             for (0..inputs.len) |i| {
                 local_inputs[i] = Tensor._result(local_input_shapes[i], manual_block.argument(i));
             }
@@ -2040,11 +2045,11 @@ fn manualComputationInternal(
 
             const body_inputs = manualComputationInputsArg(BodyInputsT, local_inputs);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
-            const body_result = @call(.auto, body_fn, .{ body_context, allocator, body_inputs, body_output_shapes });
-            const local_outputs = manualComputationBodyToSlice(BodyReturnT, allocator, body_result);
+            const body_result = @call(.auto, body_fn, .{ body_context, arena, body_inputs, body_output_shapes });
+            const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
 
-            const local_output_values = allocator.alloc(*const mlir.Value, outputs.len) catch unreachable;
+            const local_output_values = try arena.alloc(*const mlir.Value, outputs.len);
             for (0..outputs.len) |i| {
                 stdx.debug.assert(local_outputs[i].shape().eql(local_output_shapes[i]), "manualComputation body returned shape {f}, expected {f}", .{ local_outputs[i].shape(), local_output_shapes[i] });
                 local_output_values[i] = local_outputs[i].value();
@@ -2056,7 +2061,7 @@ fn manualComputationInternal(
                 .location = .unknown(ctx.mlir_ctx),
             }).appendTo(manual_block);
 
-            const global_result_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
+            const global_result_types = try arena.alloc(*const mlir.Type, outputs.len);
             for (outputs, 0..) |output_shape, i| {
                 global_result_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
             }
@@ -2072,29 +2077,17 @@ fn manualComputationInternal(
                 },
                 .verify = true,
                 .location = .unknown(ctx.mlir_ctx),
-            }).appendTo(parent_block);
+            }).appendTo(scope.block);
 
-            const outputs_ = allocator.alloc(Tensor, outputs.len) catch unreachable;
+            // Use the compiler allocator to return memory to the parent
+            const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output, i| {
-                outputs_[i] = Tensor._result(output, op.result(i));
+                sharded_outputs[i] = Tensor._result(output, op.result(i));
             }
-            break :blk outputs_;
+            return sharded_outputs;
         },
-        .gspmd => blk: {
-            const manual_sharding = "{manual}";
-            const output_shardings = allocator.alloc(*const mlir.Attribute, outputs.len) catch unreachable;
-            const local_input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
-            const local_output_shapes = allocator.alloc(Shape, outputs.len) catch unreachable;
-
-            for (input_shapes, 0..) |input_shape, i| {
-                local_input_shapes[i] = ctx.partitioning.localShapeForShape(input_shape) catch unreachable;
-            }
-            for (outputs, 0..) |output_shape, i| {
-                local_output_shapes[i] = ctx.partitioning.localShapeForShape(output_shape) catch unreachable;
-                output_shardings[i] = ctx.partitioning.tensorShardingAttr(allocator, ctx.mlir_ctx, output_shape, null) catch unreachable;
-            }
-
-            const local_input_values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
+        .gspmd => {
+            const local_input_values = try arena.alloc(*const mlir.Value, inputs.len);
             for (0..inputs.len) |i| {
                 const local_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_input_shapes[i]);
                 const full_to_shard = dialects.stablehlo.custom_call(
@@ -2106,15 +2099,15 @@ fn manualComputationInternal(
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", .string(ctx.mlir_ctx, manual_sharding)),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", .string(ctx.mlir_ctx, "{manual}")),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
-                ).appendTo(ctx.currentScope().block);
+                ).appendTo(scope.block);
                 local_input_values[i] = full_to_shard.result(0);
             }
 
-            const local_inputs = allocator.alloc(Tensor, inputs.len) catch unreachable;
+            const local_inputs = try arena.alloc(Tensor, inputs.len);
             for (0..inputs.len) |i| {
                 local_inputs[i] = Tensor._result(local_input_shapes[i], local_input_values[i]);
             }
@@ -2123,20 +2116,21 @@ fn manualComputationInternal(
             defer ctx.manual_computation_depth -= 1;
             const body_inputs = manualComputationInputsArg(BodyInputsT, local_inputs);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
-            const body_result = @call(.auto, body_fn, .{ body_context, allocator, body_inputs, body_output_shapes });
-            const local_outputs = manualComputationBodyToSlice(BodyReturnT, allocator, body_result);
+            const body_result = @call(.auto, body_fn, .{ body_context, arena, body_inputs, body_output_shapes });
+            const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
             for (0..outputs.len) |i| {
                 stdx.debug.assert(local_outputs[i].shape().eql(local_output_shapes[i]), "manualComputation body returned shape {f}, expected {f}", .{ local_outputs[i].shape(), local_output_shapes[i] });
             }
 
-            if (outputs.len == 0) {
-                break :blk allocator.alloc(Tensor, 0) catch unreachable;
-            }
+            // Skip optimization barrier for custom call that don't return values
+            if (outputs.len == 0) return &.{};
 
-            const global_values = allocator.alloc(*const mlir.Value, outputs.len) catch unreachable;
-            const global_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
-            for (outputs, 0..) |output_shape, i| {
+            const global_values = try arena.alloc(*const mlir.Value, outputs.len);
+            const global_types = try arena.alloc(*const mlir.Type, outputs.len);
+            for (outputs, output_shardings, 0..) |output_shape, output_sharding, i| {
+                const gspmd_attr = try ctx.partitioning.tensorShardingAttr(arena, ctx.mlir_ctx, output_shape, output_sharding);
+
                 global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
                 const shard_to_full = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
@@ -2147,11 +2141,11 @@ fn manualComputationInternal(
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", output_shardings[i]),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", gspmd_attr),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
-                ).appendTo(ctx.currentScope().block);
+                ).appendTo(scope.block);
                 global_values[i] = shard_to_full.result(0);
             }
 
@@ -2160,13 +2154,13 @@ fn manualComputationInternal(
                 global_values,
                 global_types,
                 .unknown(ctx.mlir_ctx),
-            ).appendTo(ctx.currentScope().block);
+            ).appendTo(scope.block);
 
-            const outputs_ = allocator.alloc(Tensor, outputs.len) catch unreachable;
+            const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output_shape, i| {
-                outputs_[i] = Tensor._result(output_shape, barrier.result(i));
+                sharded_outputs[i] = Tensor._result(output_shape, barrier.result(i));
             }
-            break :blk outputs_;
+            return sharded_outputs;
         },
     };
 }
@@ -2245,7 +2239,7 @@ fn manualComputationOutputShapesArg(comptime OutputShapesT: type, local_output_s
     };
 }
 
-fn manualComputationSliceToReturn(comptime ReturnT: type, outputs: []Tensor) ReturnT {
+fn manualComputationSliceToReturn(comptime ReturnT: type, outputs: []const Tensor) ReturnT {
     if (ReturnT == void) {
         stdx.debug.assert(outputs.len == 0, "manualComputation expected no outputs, got {}", .{outputs.len});
         return;
@@ -2433,17 +2427,11 @@ pub fn shardingAwareTypedCustomCall(
         output_shapes[i] = @field(output, field.name);
     }
 
-    const output_tensors = manualComputationInternal(&input_tensors, &output_shapes, attributes, (struct {
+    const output_tensors: []const Tensor = manualComputationInternal(&input_tensors, &output_shapes, attributes, (struct {
         fn body(attributes_: Attributes, _: std.mem.Allocator, sharded_input_tensors: []const Tensor, sharded_output_shapes: []const Shape) []const Tensor {
-            return typedCustomCall(
-                target_name,
-                opts,
-                sharded_input_tensors,
-                sharded_output_shapes,
-                attributes_,
-            );
+            return typedCustomCall(target_name, opts, sharded_input_tensors, sharded_output_shapes, attributes_);
         }
-    }).body);
+    }).body) catch @panic("OOM");
 
     // Convert the slice back to a struct
     var out: ShapeToTensor(Output) = undefined;
@@ -2628,8 +2616,8 @@ test customCall {
     defer comp.deactivate();
 
     const block = mlir.Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(.{ ._0 = .x });
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
