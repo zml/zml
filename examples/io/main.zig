@@ -19,7 +19,7 @@ pub const std_options: std.Options = .{
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const Command = enum { cat, ls, cp, stat, realpath, safetensors, load };
+    const Command = enum { cat, ls, cp, stat, realpath, safetensors, @"dma-bench", load };
 
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
@@ -60,8 +60,8 @@ pub fn main(init: std.process.Init) !void {
     const buffer = try allocator.alignedAlloc(u8, .fromByteUnits(4 * 1024), 16 * 1024 * 1024);
     defer allocator.free(buffer);
 
-    var stdout_writer = std.Io.File.stdout().writer(io, buffer);
-    defer stdout_writer.interface.flush() catch {};
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, buffer);
+    defer stdout_writer.flush() catch {};
 
     switch (command) {
         .cat => {
@@ -154,7 +154,147 @@ pub fn main(init: std.process.Init) !void {
 
             try stdout_writer.interface.print("{s}\n", .{path});
             try printTensorTree(&stdout_writer.interface, root, "", true, true);
-            try stdout_writer.interface.flush();
+            try stdout_writer.flush();
+        },
+        .@"dma-bench" => {
+            const ShardingType = enum { replicated, sharded };
+            const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
+
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator, io);
+
+            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            defer registry.deinit();
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+            defer store.deinit();
+
+            const AllTensorsModel = struct {
+                tensors: []zml.Tensor,
+            };
+
+            const tensors = try allocator.alloc(zml.Tensor, registry.tensors.count());
+            defer allocator.free(tensors);
+            var registry_it = registry.iterator();
+            var tensor_index: usize = 0;
+            while (registry_it.next()) |entry| : (tensor_index += 1) {
+                tensors[tensor_index] = switch (sharding_type) {
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                    .sharded => if (entry.value_ptr.shape.rank() > 0)
+                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                    else
+                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                };
+            }
+            const model: AllTensorsModel = .{ .tensors = tensors };
+            const sharded_sharding: zml.Sharding = try platform.registerSharding(
+                "playground_dma_benchmark",
+                .mesh(.{ .model = .high_bandwidth }),
+            );
+
+            const option_allocator = init.arena.allocator();
+            const block_sizes = try envMibList(
+                option_allocator,
+                init.environ_map,
+                "ZML_DMA_BENCH_BLOCK_MIB",
+                &zml.io.default_dma_benchmark_block_sizes,
+            );
+            const parallelism = try envUsizeList(
+                option_allocator,
+                init.environ_map,
+                "ZML_DMA_BENCH_PARALLELISM",
+                &zml.io.default_dma_benchmark_parallelism,
+            );
+            const screen_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_SCREEN_MS", 50);
+            const verify_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_VERIFY_MS", 25);
+            const final_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_FINAL_MS", 100);
+
+            var result = try zml.io.benchmarkDma(AllTensorsModel, &model, allocator, io, platform, .{
+                .shardings = &.{sharded_sharding},
+                .block_sizes = block_sizes,
+                .parallelism = parallelism,
+                .initial_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_INITIAL_PARALLELISM", 8),
+                .screen_duration_ns = try std.math.mul(u64, screen_ms, std.time.ns_per_ms),
+                .verification_duration_ns = try std.math.mul(u64, verify_ms, std.time.ns_per_ms),
+                .finalist_duration_ns = try std.math.mul(u64, final_ms, std.time.ns_per_ms),
+                .finalist_repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_REPEATS", 3),
+                .max_pinned_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_PINNED_MIB", 2048),
+            });
+            defer result.deinit();
+
+            try stdout_writer.interface.print(
+                "dma_bench platform={s} pjrt={f} devices={d} elapsed_ms={d:.3}\n",
+                .{
+                    @tagName(platform.target),
+                    platform.pjrt_api.version(),
+                    result.devices.len,
+                    @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
+                },
+            );
+            for (result.samples) |sample| {
+                const device = platform.devices[sample.device_index];
+                try stdout_writer.interface.print(
+                    "dma_bench_sample phase={s} device_index={d} device_id={d} block_bytes={d} parallelism={d} ",
+                    .{ @tagName(sample.phase), sample.device_index, device.id(), sample.block_size, sample.parallelism },
+                );
+                if (sample.global_parallelism) |limit| {
+                    try stdout_writer.interface.print("global_parallelism={d} ", .{limit});
+                } else {
+                    try stdout_writer.interface.writeAll("global_parallelism=none ");
+                }
+                try stdout_writer.interface.print(
+                    "repeat={d} bytes={d} transfers={d} elapsed_ns={d} gib_s={d:.3} average_latency_ms={d:.3}\n",
+                    .{
+                        sample.repeat,
+                        sample.bytes,
+                        sample.transfers,
+                        sample.elapsed_ns,
+                        sample.bytesPerSecond() / zml.GiB,
+                        sample.averageLatencyNs() / std.time.ns_per_ms,
+                    },
+                );
+            }
+            for (result.devices) |recommendation| {
+                const device = platform.devices[recommendation.device_index];
+                try stdout_writer.interface.print(
+                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3}\n",
+                    .{
+                        recommendation.device_index,
+                        recommendation.device_id,
+                        device.kind(),
+                        device.debugString(),
+                        recommendation.dma_block_size,
+                        recommendation.dma_parallelism,
+                        recommendation.isolated_bytes_per_second / zml.GiB,
+                        recommendation.average_latency_ns / std.time.ns_per_ms,
+                    },
+                );
+            }
+            try stdout_writer.interface.print(
+                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} ",
+                .{
+                    result.global.searched,
+                    result.global.isolated_bytes_per_second / zml.GiB,
+                    result.global.isolated_average_latency_ns / std.time.ns_per_ms,
+                    result.global.concurrent_bytes_per_second / zml.GiB,
+                    result.global.concurrent_average_latency_ns / std.time.ns_per_ms,
+                    result.global.scaling_efficiency,
+                    result.global.latency_ratio,
+                },
+            );
+            if (result.global.parallelism) |limit| {
+                try stdout_writer.interface.print(
+                    "recommended_global_parallelism={d} recommended_gib_s={d:.3} recommended_latency_ms={d:.3}\n",
+                    .{
+                        limit,
+                        result.global.recommended_bytes_per_second.? / zml.GiB,
+                        result.global.recommended_average_latency_ns.? / std.time.ns_per_ms,
+                    },
+                );
+            } else {
+                try stdout_writer.interface.writeAll("recommended_global_parallelism=none recommended_gib_s=none recommended_latency_ms=none\n");
+            }
+            try stdout_writer.flush();
         },
         .load => {
             const ShardingType = enum { replicated, sharded };
@@ -272,6 +412,37 @@ fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default
 fn envOptionalMib(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
     const value = try envOptionalUsize(environ_map, name) orelse return null;
     return try std.math.mul(usize, value, zml.MiB);
+}
+
+fn envUsizeList(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    name: []const u8,
+    defaults: []const usize,
+) ![]const usize {
+    const value = environ_map.get(name) orelse return allocator.dupe(usize, defaults);
+    var result: std.ArrayListUnmanaged(usize) = .empty;
+    var values = std.mem.tokenizeScalar(u8, value, ',');
+    while (values.next()) |item| try result.append(allocator, try std.fmt.parseInt(usize, item, 10));
+    if (result.items.len == 0) return error.InvalidArgument;
+    return result.toOwnedSlice(allocator);
+}
+
+fn envMibList(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    name: []const u8,
+    default_bytes: []const usize,
+) ![]const usize {
+    const value = environ_map.get(name) orelse return allocator.dupe(usize, default_bytes);
+    var result: std.ArrayListUnmanaged(usize) = .empty;
+    var values = std.mem.tokenizeScalar(u8, value, ',');
+    while (values.next()) |item| {
+        const mib = try std.fmt.parseInt(usize, item, 10);
+        try result.append(allocator, try std.math.mul(usize, mib, zml.MiB));
+    }
+    if (result.items.len == 0) return error.InvalidArgument;
+    return result.toOwnedSlice(allocator);
 }
 
 const TreeCounts = struct {

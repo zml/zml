@@ -253,6 +253,303 @@ ZML_LOAD_FIXED_DMA_PARALLELISM=8 \
 bazel-bin/examples/io/playground load /var/models/google/gemma-4-31B-it/
 ```
 
+### Why the adaptive controller did not find this tuple
+
+"Adaptive" currently applies to three credits/shape controls: retained read
+parallelism, per-device DMA parallelism, and source request size. It does not
+apply to `dma_block_size`. The `DmaBlockPool` is constructed once with that
+fixed size, whose default remains 2 MiB. Consequently, no controller decision
+can change the default run's 30,650 PJRT event/callback transactions into the
+8,390 transactions produced by the winning 8 MiB block. This is the largest
+ROCm-specific gain and it is outside the controller's search space.
+
+The source-size search is also not an independent size sweep. A size candidate
+doubles one step at a time, but `modeledReadConcurrency` simultaneously
+replaces the retained read width using a per-request service-time model. In the
+profiled default run the controller did the following:
+
+```text
+start                 reads=12 request=2 MiB DMA=8
+read reduction probe  reads=6  request=2 MiB DMA=8  -> rollback
+size probe            reads=4  request=4 MiB DMA=8  -> keep
+read growth probe     reads=6  request=4 MiB DMA=8  -> keep
+finish                reads=6  request=4 MiB DMA=8
+```
+
+Thus the 2-to-4 MiB probe did not compare 12/2 against 12/4; it compared 12/2
+against 4/4. The model observes almost zero local TTFB and derives a narrow
+width from the sum of individual read service rates. That is not the same as
+the measured aggregate page-cache ceiling with sixteen disjoint readers. The
+fixed 32 MiB-request screen makes the consequence concrete: four retained
+reads reached 11.61 GiB/s, while sixteen reached 18.77 GiB/s with the same
+2 MiB DMA block and eight DMA credits. Larger request candidates can therefore
+be handicapped by an overly narrow modeled width before their batching benefit
+is measured.
+
+The controller is a cautious adjacent-probe controller, not a global tuple
+optimizer. Read growth requires greater than 10% measured DMA starvation,
+saturated reads, and no ready pressure. DMA growth additionally waits for the
+source tuple to settle and for representative fed/saturated windows. Size
+growth is sequential (2, 4, 8, 16, 32 MiB), probes require representative
+bytes/requests, and completed or rejected probes impose cooldowns. The default
+load lasts only about 7.2 seconds and then enters a finite-tail region where
+new probes are suppressed. It therefore finished after 4 MiB rather than ever
+testing the useful 8/16/32 MiB source sizes. Its DMA width remaining at eight
+was reasonable: the fixed screens show that more simultaneous PJRT events
+usually raise callback latency rather than bandwidth.
+
+Two follow-up controls show that concurrency adaptation itself is alive once
+the missing batching choices are supplied:
+
+| externally supplied setting | controller trajectory | wall result |
+|---|---|---:|
+| DMA block 8 MiB | reads 12 -> 15, request stays 8 MiB, DMA stays 8 | 12.11 GiB/s |
+| DMA block 8 MiB, initial request 32 MiB | reads 12 -> 18, request stays 32 MiB, DMA stays 8 | 18.41 GiB/s |
+
+These two controls were run while the host was still noisy, so their absolute
+rates must not be compared directly with the earlier quietest fixed median of
+24.59 GiB/s. Their controller decisions are the relevant result: it can tune
+credits around a viable starting granularity, but cannot select the physical
+DMA transaction size, and its coupled source-size/width probe does not explore
+the ROCm optimum reliably. The logs are
+`/tmp/zml-block8-adaptive.log` and
+`/tmp/zml-block8_req32-adaptive.log`.
+
+### Proposed DMA preflight calibration
+
+DMA block size and PJRT event width are backend/device properties and should
+be calibrated before weight reads, then fixed for the load. Use the exact
+`AsyncHostToDeviceTransferManager.transferData` path with prefilled DmaMapped
+memory; do not use HIP or `BufferFromHostBuffer`. Model metadata/sharding is
+already available, so synthetic submissions can reproduce the model's
+full-block/tensor-tail distribution without reading weights. A bounded ring
+may rewrite a destination only after its preceding event completes.
+
+Screen 2/4/8/16/32 MiB blocks, then widths near the best block
+(1/2/4/8/12/16/24/32), and select the smallest tuple within 3--5% of peak.
+Short 50--100 ms windows contain hundreds of callbacks; interleave three
+repeats for the top two tuples. Expected uncached cost is approximately 2--4
+seconds; a cached tuple needs only a 200--500 ms neighbor check. Measure after
+compilation and `warmupDeviceAllocators`, immediately before `loadBuffers`, so
+device autotuning cannot contaminate it. Cache keys must include PJRT/plugin,
+backend/device, visible topology, driver/runtime, and host identity.
+
+Calibrate per-device width, then validate all devices simultaneously. Do not
+add or search a global DMA cap unless aggregate throughput falls materially
+(approximately 10%) below isolated scaling or callback latency explodes.
+Independent PCIe links/copy engines should scale; the raw GPU-0/GPU-7 control
+already reached 96.86 GiB/s aggregate from 48.43 GiB/s unique throughput.
+Possible shared limits are PCIe switches/root complexes, host memory/IOMMU,
+inter-socket fabric, and PJRT callback/submission CPU. The current approximately
+35 GiB/s source ceiling is far below eight GPUs' aggregate raw DMA capacity,
+and the global pinned-memory limit already bounds buffering. With no collapse,
+the effective total limit is the sum of per-device limits and no global gate
+is needed.
+
+After preflight, keep DMA block/width fixed and adapt only source behavior
+(read concurrency and, if retained, request size). Request-size probes must be
+decoupled from modeled read-width changes; the current coupled probe handicaps
+larger source batches. First implement an `examples/io` playground calibration
+command and verify that it selects the measured ROCm 8 MiB/eight-event
+neighborhood before automatic loader integration.
+
+### NUMA diagnosis of the later 16 GiB/s result
+
+A load-window-only `perf` recording of the fixed 32 MiB-request, 8 MiB-block,
+sixteen-read/eight-DMA tuple completed at 16.27 GiB/s and attributed **74.17%**
+of sampled cycles to `_copy_to_iter`. `filemap_get_read_batch` was another
+7.44% and `filemap_read` 5.82%. The recording is
+`/tmp/zml-rocm-r32-block8-r16-d8-load-window-3.perf.data`; its log is the same
+path with `.perf.data` replaced by `.log`. This is direct evidence that the
+slow repeat is in the page-cache-to-registered-buffer copy, not a resurrected
+PJRT staging copy.
+
+The topology check showed GPU 7 (`0000:dd:00.0`) on NUMA node 1, whose CPUs are
+the odd-numbered logical CPUs. The unbound process could run read workers on
+both sockets and allocate/first-touch the lazily created registered slabs on
+either socket. Because pool blocks are subsequently recycled among arbitrary
+workers, this permits remote CPU writes into the pinned destination. It also
+permits GPU 7 to DMA from node-0 memory, although the raw HIP control below
+subsequently proved that remote GPU DMA is not itself slower on this machine.
+A combined CPU-and-memory locality control used:
+
+```text
+numactl --cpunodebind=1 --membind=1 env \
+  ROCR_VISIBLE_DEVICES=7 \
+  ZML_LOAD_DMA_BLOCK_MIB=8 \
+  ZML_LOAD_READ_REQUEST_MIB=32 \
+  ZML_LOAD_FIXED_READ_PARALLELISM=16 \
+  ZML_LOAD_FIXED_DMA_PARALLELISM=8 \
+  bazel-bin/examples/io/playground \
+  load /var/models/google/gemma-4-31B-it/
+```
+
+Two unprofiled bound runs reached **23.56 and 26.40 GiB/s**, versus the two
+immediately preceding unbound repeats at 17.00 and 16.27 GiB/s. A bound
+load-window profile reached **26.89 GiB/s** and attributed 68.18% of cycles to
+`_copy_to_iter`, 7.69% to `filemap_get_read_batch`, and 4.20% to
+`filemap_read`. It is retained at
+`/tmp/zml-rocm-numa1-r32-block8-r16-d8-load-window.perf.data` with the matching
+`.log`. At this stage the combined binding test appeared to make NUMA locality
+the main difference between the 16 GiB/s and approximately 27 GiB/s
+observations, but it did not separately quantify CPU affinity, memory policy,
+page-cache state, or concurrent host load. The later placement matrix below
+shows that this initial causal claim was too strong.
+
+This is not yet a ZML code fix. A production fix should make registered slab
+allocation and the workers filling those slabs NUMA-local to each other. The
+raw HIP control below shows that the slab does not also need to be local to the
+destination GPU on this host. Per-node pools/read lanes may still use both
+sockets' CPU and memory bandwidth for a multi-device load, but they are not
+required merely to avoid remote GPU DMA. The external `numactl` prefix is a
+valid single-visible-GPU workaround.
+The host was also busy during these controls: two `llmd` processes consumed
+roughly eighteen CPU cores in aggregate and another user was compiling ROCm
+XLA kernels, so quiet-host medians may be higher.
+
+The locality can be detected in-process without a direct HIP or ROCm-SMI
+dependency. XLA's ROCm `DeviceDescription` already obtains the PCI BDF and
+reads its sysfs NUMA node. `StreamExecutorGpuDevice` then publishes that value
+as the PJRT device attribute named `numa_node`; ZML already exposes PJRT
+description attributes through `Device.pjrt_desc.attributes`. The cached
+ROCm plugin contains both `numa_node` and `pci_bus_id` support strings, and the
+current XLA source has an explicit PJRT NUMA-attribute test for CUDA, ROCm, and
+SYCL.
+
+The clean single-device implementation is not merely to pin the `llmd` main
+thread. The loader's concurrent `preadv` calls execute on the shared Zig IO
+worker pool, and the 64 MiB registered slabs are lazily allocated and
+first-touched by those workers. A dedicated load executor could discover the
+PJRT `numa_node`, read and intersect that node's sysfs CPU list with the
+process's allowed affinity, spawn its read workers with that CPU affinity, and
+bind slab pages to the same node. Linux CPU affinity is per thread; memory
+policy can be applied per thread with `set_mempolicy`, or more robustly to each
+slab range with `mbind` before first touch. If the existing shared IO pool is
+retained, any temporary affinity/policy must be restored after the read so
+unrelated work is not accidentally pinned.
+
+For multiple visible GPUs, blindly applying one process-wide policy remains
+undesirable because it prevents using both sockets' CPU/memory resources. A
+general high-throughput design can use per-NUMA-node slab pools and node-local
+read admission, but a filled block may be transferred to a GPU on either node.
+Missing/negative attributes and single-node hosts should silently retain the
+current behavior, with an explicit override available for operators. This
+belongs in `zml.io.load`/`zml.mem`, not only in `llmd`, so every loader caller
+receives the same locality behavior.
+
+NVIDIA exposes the same attribute. CUDA's StreamExecutor obtains its PCI BDF,
+reads the sysfs NUMA node into `DeviceDescription`, and then uses the same
+generic `StreamExecutorGpuDevice` code that publishes PJRT `numa_node` for
+CUDA, ROCm, and SYCL. A ZML implementation based on the PJRT attribute is
+therefore backend-neutral across NVIDIA, AMD, and oneAPI rather than a ROCm
+special case.
+
+The eight MI300X devices on this host form an exact 4+4 split:
+
+| GPUs | PCI buses | NUMA node |
+|---|---|---:|
+| 0--3 | `1b`, `3d`, `4e`, `5f` | 0 |
+| 4--7 | `9d`, `bd`, `cd`, `dd` | 1 |
+
+The current loader cannot exploit that split correctly with one affinity
+change. `DmaBlockPool.init` selects `platform.devices[0]` and creates one
+global pool, while `VectoredReadScheduler` has one global job stream. A
+request plan can scatter different blocks to different sharded destinations;
+a mirrored/replicated block has a writer mask containing several devices and
+may span both NUMA nodes. One `preadv` executing on one CPU cannot be local to
+destination pages on both sockets.
+
+A scalable eight-GPU design can create one registered slab pool and
+read-worker/admission lane per node so the page-cache copy is always local and
+both sockets contribute CPU/memory bandwidth. PJRT DMA credits remain tracked
+separately per GPU as they are today, while global pinned-memory and source
+concurrency budgets can be divided or adaptively shared between the read
+lanes. A replicated block should be read once into either node-local lane and
+DMAed directly to all destinations, including the remote socket; the raw
+control below shows that duplicating it through a cross-node CPU copy is much
+slower. Ordinary sharded blocks may be balanced between lanes for source-stage
+throughput rather than assigned according to the destination GPU's node.
+
+### Raw HIP cross-NUMA and replication control (2026-08-31)
+
+A standalone C++/HIP benchmark, with no XLA build or PJRT involvement, bound
+two 256 MiB anonymous arenas with `mbind`, first-touched them on their intended
+nodes, and registered both with `hipHostRegister`. A `move_pages` query sampled
+every 2 MiB and confirmed all 128 samples of each arena on the requested node.
+GPU 0 was `0000:1b:00.0` on node 0 and GPU 7 was `0000:dd:00.0` on node 1.
+Each point transferred 8 GiB and three complete runs were made. At the
+loader-relevant 32 MiB size the medians were:
+
+| path | median GiB/s |
+|---|---:|
+| node 0 -> GPU 0 (local) | 49.11 |
+| node 0 -> GPU 7 (remote) | 50.03 |
+| node 1 -> GPU 7 (local) | 50.36 |
+| node 1 -> GPU 0 (remote) | 49.74 |
+| one node-0 source -> GPU 0 local and GPU 7 remote concurrently | 48.43 unique / 96.86 aggregate |
+| CPU copy node 0 -> node 1, then local GPU 7 DMA, copy CPU on node 0 | 5.15 |
+| same, copy CPU on node 1 | 5.77 |
+| feed GPU 0 locally while copying to node 1 and feeding GPU 7 locally | 5.18--5.76 unique |
+
+The 128 MiB remote/local H2D points were likewise all approximately
+49--51 GiB/s. The CPU-copy-plus-local-DMA path improved only to 7.9--9.5
+GiB/s at 128 MiB, apparently because libc selects a more favorable large-copy
+implementation, but remained far below direct remote DMA. Isolated registered
+cross-node `memcpy` reached only 7.8--9.8 GiB/s with one thread. It could reach
+roughly 30--41 GiB/s with four or eight threads and 54--74 GiB/s with sixteen,
+but that consumes many CPU cores and extra memory bandwidth; even its best
+case cannot improve on simply issuing the remote DMA. The raw output is
+retained in `/tmp/zml_rocm_numa_bench_run{1,2,3}.txt`; the temporary source was
+removed after the experiment.
+
+This changes the interpretation of the earlier `numactl` result. The combined
+binding control did not isolate host placement from GPU DMA locality. The raw
+control now does: GPU DMA locality has no measurable penalty here. The weight
+loader's possible NUMA-sensitive stage is the CPU `_copy_to_iter` that copies
+page-cache folios into the anonymous registered slabs. Worker, page-cache, and
+destination-slab placement determine whether that CPU reads or writes across
+the socket link. The measured bound-loader improvement should not be attributed
+to making the subsequent GPU DMA local.
+
+Direct I/O would remove this exact bottleneck. An aligned `O_DIRECT` read into
+the registered slab lets the storage stack DMA into those user pages and does
+not execute the buffered-read page-cache-to-user `_copy_to_iter`. NUMA can
+still matter for the storage DMA path, submission/completion CPUs, and the
+placement of the destination pages relative to each NVMe controller, but it
+is a different effect. This host's model filesystem is ext4 on an LVM volume;
+its large RAID0 member spans four NVMe devices split evenly across the sockets
+(`nvme0`/`nvme1` on node 1 and `nvme2`/`nvme3` on node 0), while the boot/LVM
+NVMe is on node 0. A RAID read may therefore originate from both nodes no
+matter where the target slab lives. Direct I/O can save the CPU copy and its
+NUMA penalty, but a hot page-cache load may still be faster overall than the
+physical disks. The direct-I/O throughput of this particular model has not
+yet been measured in this ROCm investigation.
+
+A subsequent two-run placement matrix used idle GPU 0 because GPU 7 had become
+occupied by `llmd`. It held the same fixed loader tuple and hot page cache while
+varying CPU binding and anonymous-slab memory binding independently:
+
+| CPU node | slab node | load GiB/s, two runs |
+|---:|---:|---:|
+| 0 | 0 | 23.82, 23.71 |
+| 1 | 1 | 24.22, 24.47 |
+| 0 | 1 | 24.03, 23.84 |
+| 1 | 0 | 21.79, 22.53 |
+| unbound | unbound | 24.38, 25.25 |
+
+This matrix does not support the idea that weights were fast simply because
+most cached pages happened to reside on the GPU's node. Both same-node cases
+were close, CPU 0 writing node-1 slabs was also close, and the current unbound
+runs were fastest. Only the CPU-1/node-0 direction showed a repeatable roughly
+8--10% penalty. The earlier 16-versus-27 GiB/s separation was therefore
+confounded by time-varying host contention and possibly cache residency, not a
+reproducible GPU-node locality effect. The kernel provides no cheap source-page
+NUMA location through `preadv`; an `mmap` plus `move_pages` sample could inspect
+the current cache retrospectively, but would not establish its placement
+during the older recordings. Logs are
+`/tmp/zml-rocm-cpu{0,1}-mem{0,1}-gpu0{,-repeat}.log` and
+`/tmp/zml-rocm-unbound-gpu0-repeat{1,2}.log`.
+
 No XLA build was performed. The current XLA checkout is clean at
 `92fd6518987ecdfe0471d3cc49705e8144050b1b` (`GPU: use VMM only for command
 buffer temp allocations`). The local ROCm archive currently hashes to
