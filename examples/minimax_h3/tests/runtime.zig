@@ -4,6 +4,7 @@ const geom = @import("../conditioning/geometry.zig");
 const packing = @import("../model/packing.zig");
 const conditions = @import("../runtime/conditions.zig");
 const encode = @import("../runtime/encode.zig");
+const dump = @import("../runtime/dump.zig");
 const media = @import("../runtime/media.zig");
 const request_mod = @import("../core/request.zig");
 
@@ -17,6 +18,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try testOutputTarget();
     try testExportVideo(allocator);
     try testNchwTimeLayout();
+    try testDumpRoundtrip(allocator);
 }
 
 fn expectReferenceIndices(
@@ -288,4 +290,24 @@ fn testNchwTimeLayout() !void {
     var overlap = prefix_src;
     encode.compactTimePrefixNchw(&overlap, &overlap, 2, 4, 3, 1, 1);
     try std.testing.expectEqualSlices(f32, &.{ 10, 11, 12, 20, 21, 22 }, overlap[0..6]);
+}
+
+fn testDumpRoundtrip(allocator: std.mem.Allocator) !void {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    var scratch = try media.Scratch.init(allocator);
+    defer scratch.deinit(allocator);
+    dump.setPath(scratch.path);
+    const values = [_]f32{ -1.5, 0, 0.25, 8 };
+    try dump.f32s(io, "probe", &values, &.{ 2, 2 });
+    const path = try std.fs.path.join(allocator, &.{ scratch.path, "probe.f32" });
+    defer allocator.free(path);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(raw);
+    var back: [4]f32 = undefined;
+    @memcpy(std.mem.asBytes(&back), raw[0..16]);
+    try std.testing.expectEqualSlices(f32, &values, &back);
+    const s = dump.statsF32(&values);
+    try std.testing.expectEqual(@as(usize, 4), s.finite);
+    try std.testing.expectEqual(@as(usize, 0), s.nan);
 }

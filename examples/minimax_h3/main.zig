@@ -5,6 +5,7 @@ const stdx = zml.stdx;
 
 const conditions = @import("runtime/conditions.zig");
 const config = @import("core/config.zig");
+const dump = @import("runtime/dump.zig");
 const media = @import("runtime/media.zig");
 const memory = @import("core/memory.zig");
 const pipeline = @import("runtime/pipeline.zig");
@@ -39,6 +40,7 @@ const Args = struct {
     seed: u64 = 0,
     out: []const u8 = "output.mp4",
     dit: []const u8 = "",
+    dump: []const u8 = "",
 
     pub const help =
         \\ Use minimax_h3 --model=<path> [options]
@@ -70,6 +72,7 @@ const Args = struct {
         \\   --short-edge=<n>       Adaptive/ratio short edge (default: 768)
         \\   --max-pixels=<n>       Area cap (default: 768*1344)
         \\   --dit=<path>           Transformer weights only
+        \\   --dump=<dir>           Write host tensors + stats (or H3_DUMP)
         \\
     ;
 };
@@ -133,6 +136,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    dump.setPath(dump.resolve(args.dump));
+    if (dump.enabled()) log.info("dump dir {s}", .{dump.location()});
 
     //
     // Request and canvas
@@ -318,6 +323,30 @@ pub fn main(init: std.process.Init) !void {
             args.seed,
         },
     );
+    if (dump.enabled()) {
+        try dump.u32s(init.io, "tokens", encoded.tokens, &.{@intCast(encoded.tokens.len)});
+        var meta_buf: [2048]u8 = undefined;
+        const meta = try std.fmt.bufPrint(&meta_buf, "{{\"impl\":\"zml\",\"width\":{d},\"height\":{d},\"num_frames\":{d},\"steps\":{d},\"seed\":{d},\"seq\":{d}}}\n", .{
+            geo.pixel_w,
+            geo.pixel_h,
+            geo.frames,
+            opts.steps,
+            args.seed,
+            packed_run.layout.seqLen(),
+        });
+        try dump.text(init.io, "meta.json", meta);
+        log.info(
+            "dump layout text={d} video_tokens={d} audio_tokens={d} cond_video_rows={d} cond_audio_rows={d} seq={d}",
+            .{
+                text_len,
+                geo.video_tokens,
+                geo.audio_tokens,
+                packed_run.layout.conditionVideoRows(),
+                packed_run.layout.conditionAudioRows(),
+                packed_run.layout.seqLen(),
+            },
+        );
+    }
 
     //
     // Memory plan

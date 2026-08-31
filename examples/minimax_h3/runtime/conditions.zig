@@ -5,6 +5,7 @@ const zml = @import("zml");
 const audio_vae = @import("../vae/audio.zig");
 const repository = @import("repository.zig");
 const config = @import("../core/config.zig");
+const dump = @import("dump.zig");
 const encode_mod = @import("encode.zig");
 const geom = @import("../conditioning/geometry.zig");
 const media = @import("media.zig");
@@ -338,6 +339,14 @@ pub fn prepare(
             item.h = req.geo.pixel_h;
             item.nchw = try media.rgbToNchwImagenet(allocator, item.rgb, item.h, item.w);
             item.latent_t = 1;
+            if (dump.enabled()) {
+                const name = if (item.keyframe_index == 0) "keyframe_rgb" else "keyframe_last_rgb";
+                try dump.rgbU8AsF32(allocator, io, name, item.rgb, item.h, item.w);
+                if (item.nchw) |nchw| {
+                    const nchw_name = if (item.keyframe_index == 0) "keyframe_nchw" else "keyframe_last_nchw";
+                    try dump.f32s(io, nchw_name, nchw, &.{ 3, 1, @intCast(item.h), @intCast(item.w) });
+                }
+            }
         } else {
             const raw = try media.loadRgbRaw(allocator, io, item.path);
             defer allocator.free(raw.rgb);
@@ -565,6 +574,16 @@ pub fn prepare(
             else
                 try encode_mod.encodeKeyframe(allocator, io, platform, compiled_e, &v_loaded.?, &v_bufs.?, item.nchw.?, item.h, item.w);
             encoded_visuals[n_vis].keyframe_index = item.keyframe_index;
+            if (dump.enabled()) {
+                const lat = encoded_visuals[n_vis];
+                const name = if (lat.keyframe_index == 0) "condition_latents" else "condition_latents_last";
+                try dump.f32s(io, name, lat.thwc, &.{
+                    @intCast(lat.latent_t),
+                    @intCast(lat.latent_h),
+                    @intCast(lat.latent_w),
+                    24,
+                });
+            }
             n_vis += 1;
         }
         for (audios.items, encoded_audios) |item, *out| {
@@ -618,6 +637,10 @@ pub fn prepare(
 
     const merged_out: ?[]f32 = if (merged_all.items.len == 0) null else try merged_all.toOwnedSlice(allocator);
     errdefer if (merged_out) |m| allocator.free(m);
+    if (dump.enabled()) {
+        try dump.f32s(io, "condition_rows_clean", conds.video_patches, &.{@intCast(conds.video_patches.len)});
+        if (merged_out) |m| try dump.f32s(io, "vision_merged", m, &.{@intCast(m.len)});
+    }
     log.info(
         "conditions: ok tokens={d} vision_spans={d} video_conds={d} audio_conds={d} refs={d}",
         .{ assembled.tokens.len, assembled.spans.len, conds.videos.len, conds.audios.len, conds.references.len },

@@ -4,6 +4,7 @@ const zml = @import("zml");
 
 const repository = @import("repository.zig");
 const decode = @import("decode.zig");
+const dump = @import("dump.zig");
 const dit = @import("../model/dit.zig");
 const encoder = @import("../model/encoder.zig");
 const media = @import("media.zig");
@@ -148,6 +149,8 @@ fn encodeText(
         .opts = .{ .wait = true },
     });
     errdefer hidden.deinit();
+    try dump.buffer(allocator, io, "encoder_embed", &hidden);
+    try dump.u32s(io, "tokens", tokens, &.{@intCast(tokens.len)});
 
     if (extras.vision_merged) |merged| {
         const scatter_exe = if (compiled.encode_scatter) |*exe| exe else return error.VisionScatterUncompiled;
@@ -246,6 +249,7 @@ fn encodeText(
         hidden = next;
     }
     log.info("encoder: ok tokens={d} layers={d} [{f}]", .{ tokens.len, n_layers, encode_start.untilNow(io, .awake) });
+    try dump.buffer(allocator, io, "prompt_embeds", &hidden);
     return hidden;
 }
 
@@ -289,6 +293,12 @@ fn denoise(
     errdefer allocator.free(audio);
     if (video.len != geo.video_tokens * geo.video_patch_dim) return error.VideoNoiseSize;
     if (audio.len != geo.audio_tokens * geo.audio_dim) return error.AudioNoiseSize;
+    try dump.f32s(io, "video_noise", video, &.{ 1, @intCast(geo.video_tokens), @intCast(geo.video_patch_dim) });
+    try dump.f32s(io, "audio_noise", audio, &.{ 1, @intCast(geo.audio_tokens), @intCast(geo.audio_dim) });
+    if (cond.video_patches.len != 0)
+        try dump.f32s(io, "condition_rows", cond.video_patches, &.{@intCast(cond.video_patches.len)});
+    if (cond.audio_patches.len != 0)
+        try dump.f32s(io, "condition_audio_rows", cond.audio_patches, &.{@intCast(cond.audio_patches.len)});
 
     const video_shape = zml.Shape.init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32);
     const audio_shape = zml.Shape.init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32);
@@ -333,6 +343,20 @@ fn denoise(
     defer adaln_buf.deinit();
     var time_idx = try weights.fromItems(io, platform, .init(.{ .s = seq }, .u32), all_tidx[0..seq]);
     defer time_idx.deinit();
+    try dump.f32s(io, "positions", host.positions, &.{ @intCast(seq), 3 });
+    try dump.u32s(io, "video_indices", host.video_indices, &.{@intCast(geo.video_tokens)});
+    try dump.u32s(io, "audio_indices", host.audio_indices, &.{@intCast(geo.audio_tokens)});
+    try dump.u32s(io, "text_indices", host.text_indices, &.{@intCast(text_len)});
+    try dump.u32s(io, "adaln_indices", all_adaln[0..seq], &.{@intCast(seq)});
+    try dump.u32s(io, "timestep_indices", all_tidx[0..seq], &.{@intCast(seq)});
+    if (dump.enabled()) {
+        const tags_u32 = try allocator.alloc(u32, seq);
+        defer allocator.free(tags_u32);
+        for (layout.token_tags, tags_u32) |t, *d| d.* = t;
+        try dump.u32s(io, "token_tags", tags_u32, &.{@intCast(seq)});
+    }
+    try dump.f32s(io, "timesteps", schedules.video.timesteps, &.{@intCast(schedules.video.timesteps.len)});
+    try dump.f32s(io, "audio_timesteps", schedules.audio.timesteps, &.{@intCast(schedules.audio.timesteps.len)});
 
     var text_bufs = try loaded.loadTextPrep(allocator, io, platform, store, shardings, progress);
     defer dit.TextPrep.unloadBuffers(&text_bufs, allocator);
@@ -533,6 +557,7 @@ fn denoise(
             .opts = .{ .wait = true },
         });
         defer hidden.deinit();
+        if (step_i == 0) try dump.buffer(allocator, io, "step0_embed", &hidden);
 
         var i: usize = 0;
         if (use_group) {
@@ -631,6 +656,10 @@ fn denoise(
         });
         defer video_out.deinit();
         defer audio_out.deinit();
+        if (step_i == 0) {
+            try dump.buffer(allocator, io, "step0_video_vel", &video_out);
+            try dump.buffer(allocator, io, "step0_audio_vel", &audio_out);
+        }
 
         var sigma_v = try scalarF32(io, platform, schedules.video.sigmas[step_i]);
         defer sigma_v.deinit();
@@ -675,11 +704,13 @@ fn denoise(
         audio_buf.deinit();
         audio_buf = next_audio;
 
-        log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
+        log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} sigma_v={d:.6} sigma_a={d:.6} [{f}]", .{
             step_i + 1,
             steps,
             video_t,
             audio_t,
+            schedules.video.sigmas[step_i],
+            schedules.audio.sigmas[step_i],
             step_start.untilNow(io, .awake),
         });
     }
@@ -692,6 +723,8 @@ fn denoise(
     for (cores) |*c| if (c.*) |*core| dit.BlockCore.unloadBuffers(core);
     allocator.free(cores);
 
+    try dump.f32s(io, "video_latents_final", video, &.{ 1, @intCast(geo.video_tokens), @intCast(geo.video_patch_dim) });
+    try dump.f32s(io, "audio_latents_final", audio, &.{ 1, @intCast(geo.audio_tokens), @intCast(geo.audio_dim) });
     log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
 
     if (cond.video_patches.len == 0 and cond.audio_patches.len == 0) {
@@ -875,6 +908,12 @@ pub fn generate(
         models.dit.cfg.patch_size,
     );
     defer allocator.free(thwc);
+    try dump.f32s(io, "video_latents_thwc", thwc, &.{
+        @intCast(req.canvas.latent_t),
+        @intCast(req.canvas.latent_h),
+        @intCast(req.canvas.latent_w),
+        @intCast(channels),
+    });
     var owned_cache: ?decode.VisualCache = if (cache_f) |*f| try f.await(io) else null;
     cache_taken = true;
     defer if (owned_cache) |*c| c.deinit(allocator);
@@ -893,6 +932,22 @@ pub fn generate(
         progress,
     );
     defer allocator.free(rgb);
+    if (dump.enabled()) {
+        const plane = req.canvas.pixel_h * req.canvas.pixel_w;
+        const first_nchw = try allocator.alloc(f32, 3 * plane);
+        defer allocator.free(first_nchw);
+        const last_nchw = try allocator.alloc(f32, 3 * plane);
+        defer allocator.free(last_nchw);
+        var c: u32 = 0;
+        while (c < 3) : (c += 1) {
+            const src0 = (c * req.canvas.frames) * plane;
+            @memcpy(first_nchw[c * plane ..][0..plane], rgb[src0..][0..plane]);
+            const src1 = (c * req.canvas.frames + (req.canvas.frames - 1)) * plane;
+            @memcpy(last_nchw[c * plane ..][0..plane], rgb[src1..][0..plane]);
+        }
+        try dump.f32s(io, "decoded_first_nchw", first_nchw, &.{ 3, @intCast(req.canvas.pixel_h), @intCast(req.canvas.pixel_w) });
+        try dump.f32s(io, "decoded_last_nchw", last_nchw, &.{ 3, @intCast(req.canvas.pixel_h), @intCast(req.canvas.pixel_w) });
+    }
     compiled_vae.audio = try audio_f.await(io);
     audio_taken = true;
     const wav = try decode.decodeAudio(
