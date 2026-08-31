@@ -203,13 +203,14 @@ pub const Buffer = struct {
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
