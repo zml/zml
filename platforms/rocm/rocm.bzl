@@ -98,7 +98,10 @@ def _rocm_base_build_files(loaded_packages):
         _rocm_package_name("amdrocm-blas-dev"): _glob_filegroup("headers", ["include/**"]),
         _rocm_package_name("amdrocm-blas-host"): "\n\n".join([
             _rocm_dlopen_patchelf(name = "hipblas", src = "lib/libhipblas.so.3"),
-            packages.filegroup(name = "hipblaslt", srcs = ["lib/libhipblaslt.so.1"]),
+            packages.filegroup(name = "hipblaslt", srcs = [
+                "lib/libhipblaslt.so.1",
+                "lib/liborigami.so.1",
+            ]),
             _rocm_dlopen_patchelf(name = "hipsparselt", src = "lib/libhipsparselt.so.0"),
             packages.filegroup(name = "rocblas", srcs = ["lib/librocblas.so.5"]),
             _rocm_dlopen_patchelf(name = "rocroller", src = "lib/librocroller.so.1"),
