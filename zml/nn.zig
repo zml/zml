@@ -590,16 +590,16 @@ pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     stdx.debug.assert(sin.dim(-1) == rotary_dim, "applyRotary expects cos/sin last dim to match, got {f} vs {f}", .{ cos, sin });
     stdx.debug.assert(rotary_dim <= x.dim(-1), "applyRotary rotary dim {d} exceeds {f}", .{ rotary_dim, x });
 
-    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
+    const x_rot = x.slice(-1, .{ .start = 0, .end = rotary_dim });
     const half = @divExact(rotary_dim, 2);
-    const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
-    const x2 = x_rot.slice1d(-1, .{ .start = half, .end = rotary_dim });
+    const x1 = x_rot.slice(-1, .{ .start = 0, .end = half });
+    const x2 = x_rot.slice(-1, .{ .start = half, .end = rotary_dim });
     const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     const rot_tag = x_rot.shape().tag(-1);
     const y = x_rot.mul(cos.renameTag(-1, rot_tag).broad(x_rot.shape()))
         .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
     if (rotary_dim == x.dim(-1)) return y;
-    return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
+    return Tensor.concatenate(&.{ y, x.slice(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
 
 test "applyRotary: cos=1 sin=0 is identity" {
@@ -615,7 +615,7 @@ test "applyRotary: cos=1 sin=0 is identity" {
             return applyRotary(input, ones, zeros);
         }
     };
-    var exe = try zml.module.compile(allocator, io, Local.fwd, .{x}, platform, .{});
+    var exe = try platform.compileFn(allocator, io, Local.fwd, .{x}, .{});
     defer exe.deinit();
 
     const x_h: [3][4]f32 = .{

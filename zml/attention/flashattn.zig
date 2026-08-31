@@ -378,7 +378,7 @@ pub const fa2 = struct {
             stdx.debug.assert(q_.dim(.b) == k_.dim(.b) and q_.dim(.b) == v_.dim(.b), "cu_fa2 dense expects matching batch, got q={f} k={f} v={f}", .{ q_, k_, v_ });
         }
 
-        const ctx = CompilationContext.current();
+        const ctx = zml.Compiler.current();
         var bs: i64 = 1;
         var q = q_;
         var k = k_;
