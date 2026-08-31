@@ -112,14 +112,16 @@ pub const Buffer = struct {
     pub fn from(
         io: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
+        // Use the PJRT shape for everything
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };

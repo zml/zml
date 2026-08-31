@@ -458,9 +458,17 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) error{OutOfMemory}!void {
-            const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, tensor._shape);
+            // Declare the program argument as a packed u8
+            const og_shape = tensor._shape;
+            const packed_shape = og_shape.packedShape();
+            const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, packed_shape);
+            var value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
 
-            const value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
+            // But immediately create the MLIR value corresponding to the fp4 data.
+            // That way the user code only sees a proper fp4 tensor.
+            if (tensor.dtype().bitSizeOf() < 8) {
+                value = unpack(ctx.compiler, ctx.scope, og_shape, value);
+            }
             const gop = ctx.scope.id_to_argument.getOrPutValue(ctx.scope.arena.allocator(), tensor.id, value) catch @panic("OOM");
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
 
@@ -469,15 +477,15 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
 
             defer ctx.current_argument_id += 1;
 
-            const input_sharding = ctx.compiler.partitioning.selectSharding(tensor._shape) catch |err| switch (err) {
+            const input_sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch |err| switch (err) {
                 error.NoSuitableSharding => std.debug.panic(
                     "Failed to resolve sharding for input {f}({d}) because it's using unknown sharding. Pass more shardings to `platform.compile`. Known shardings: {f}",
-                    .{ tensor._shape, ctx.current_argument_id, stdx.fmt.slice(ctx.compiler.partitioning.shardings) },
+                    .{ packed_shape, ctx.current_argument_id, stdx.fmt.slice(ctx.compiler.partitioning.shardings) },
                 ),
             };
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
-                .shape = tensor._shape,
+                .shape = og_shape,
                 .sharding = input_sharding,
                 .value = value,
             });
@@ -500,15 +508,21 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
-            const value = ctx.scope.id_to_argument.get(tensor.id) orelse
+            const og_shape = tensor.shape();
+            const packed_shape = og_shape.packedShape();
+            var value = ctx.scope.id_to_argument.get(tensor.id) orelse
                 tensor._value orelse
                 @panic("no value found for output tensor");
 
+            if (tensor.dtype().bitSizeOf() < 8) {
+                value = repack(ctx.compiler, ctx.scope, og_shape, value);
+            }
+
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
-                .shape = tensor._shape,
-                // Note: the panic should have been triggered during emitMlir or collectInputInfo
-                .sharding = ctx.compiler.partitioning.selectSharding(tensor._shape) catch @panic("failed to resolve output sharding"),
+                .shape = og_shape,
+                // Note: the panic should have been triggered during createBlockArguments or emitMlir
+                .sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch @panic("failed to resolve output sharding"),
                 .value = value,
             });
         }
@@ -570,6 +584,50 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         .input_info = input_info,
         .output_info = output_info,
     };
+}
+
+fn unpack(compiler: *Compiler, scope: *Scope, og_shape: Shape, tensor_value: *const mlir.Value) *const mlir.Value {
+    const true_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape);
+    const elem_per_bytes = @divExact(8, og_shape.dtype().bitSizeOf());
+    const intermediary_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape.splitAxis(-1, .{ -1, elem_per_bytes }));
+
+    const bit_cast_op = dialects.stablehlo.bitcast_convert(
+        compiler.mlir_ctx,
+        tensor_value,
+        intermediary_type,
+        .unknown(compiler.mlir_ctx),
+    ).appendTo(scope.block);
+
+    const reshape_op = dialects.stablehlo.reshape(
+        compiler.mlir_ctx,
+        bit_cast_op.result(0),
+        true_type,
+        .unknown(compiler.mlir_ctx),
+    ).appendTo(scope.block);
+
+    return reshape_op.result(0);
+}
+
+fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mlir.Value) *const mlir.Value {
+    const packed_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape.packedShape());
+    const elem_per_bytes = @divExact(8, og_shape.dtype().bitSizeOf());
+    const intermediary_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape.splitAxis(-1, .{ -1, elem_per_bytes }));
+
+    const reshape_op = dialects.stablehlo.reshape(
+        compiler.mlir_ctx,
+        value,
+        intermediary_type,
+        .unknown(compiler.mlir_ctx),
+    ).appendTo(scope.block);
+
+    const bit_cast_op = dialects.stablehlo.bitcast_convert(
+        compiler.mlir_ctx,
+        reshape_op.result(0),
+        packed_type,
+        .unknown(compiler.mlir_ctx),
+    ).appendTo(scope.block);
+
+    return bit_cast_op.result(0);
 }
 
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
