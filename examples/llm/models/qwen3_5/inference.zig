@@ -11,7 +11,8 @@ const Phase = common.Phase;
 pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
-    token_index: zml.Tensor,
+    generation_position: zml.Tensor,
+    linear_attention_valid_len: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     seqlen: u32,
@@ -22,7 +23,8 @@ pub const CompilationParameters = struct {
         return .{
             .prefill_tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
-            .token_index = .init(.{}, .u32),
+            .generation_position = .init(.{}, .u32),
+            .linear_attention_valid_len = .init(.{}, .u32),
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
             .rng = .init(),
             .seqlen = seqlen,
@@ -36,7 +38,8 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
-    token_index_buf: *zml.Buffer,
+    generation_position_buf: *zml.Buffer,
+    linear_attention_valid_len_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
 };
@@ -171,7 +174,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.token_index_buf.*,
+                        .token_index = args.generation_position_buf.*,
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
@@ -188,7 +191,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.token_index_buf.*,
+                        .linear_attention_valid_len = args.linear_attention_valid_len_buf.*,
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
@@ -203,12 +206,12 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
         .inputs = .{
             .hidden = hidden_buffer,
             .rng = args.rng_buffers.*,
-            .token_index = args.token_index_buf.*,
+            .token_index = args.generation_position_buf.*,
         },
         .outputs = .{
             .tokens = args.tokens_buf,
             .rng = args.rng_buffers,
-            .token_index = args.token_index_buf,
+            .token_index = args.generation_position_buf,
         },
     });
 }
@@ -258,7 +261,7 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
     return zml.FnExe(model.TransformerLayer.forwardSelfAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "full_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
-        .token_index = parameters.token_index,
+        .token_index = parameters.generation_position,
         .cache = .{
             .k = parameters.kv_cache.self_attn.k,
             .v = parameters.kv_cache.self_attn.v,
@@ -276,7 +279,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
-        .token_index = parameters.token_index,
+        .linear_attention_valid_len = parameters.linear_attention_valid_len,
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
             .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,
@@ -295,7 +298,7 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
         .sampler = mdl.sampler(),
         .hidden = hiddenTensor(mdl, seqlen),
         .rng = parameters.rng,
-        .token_index = parameters.token_index,
+        .token_index = parameters.generation_position,
     }});
 }
 
