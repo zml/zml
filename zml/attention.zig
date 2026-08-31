@@ -57,22 +57,6 @@ pub const Backend = enum {
             },
         };
     }
-
-    pub fn supportsHeadDim(backend: Backend, head_dim: i64) bool {
-        return switch (backend) {
-            .vanilla, .attnd, .nki, .metal_fa => head_dim > 0,
-            .cuda_fa2 => head_dim >= 8 and head_dim <= 256 and @rem(head_dim, 8) == 0,
-            .cuda_fa3 => head_dim == 64 or head_dim == 96 or head_dim == 128 or head_dim == 192 or head_dim == 256,
-        };
-    }
-
-    pub fn supportsDenseHeadDim(backend: Backend, head_dim: i64) bool {
-        return switch (backend) {
-            .cuda_fa2 => head_dim >= 32 and head_dim <= 256 and @rem(head_dim, 32) == 0,
-            .cuda_fa3 => backend.supportsHeadDim(head_dim),
-            else => backend.supportsHeadDim(head_dim),
-        };
-    }
 };
 
 pub const Parameters = union(Backend) {
@@ -229,7 +213,8 @@ fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backen
     if (q.dim(.q) != k.dim(.k)) return false;
     if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
     if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
-    if (!backend.supportsDenseHeadDim(q.dim(.hd))) return false;
+    const hd = q.dim(.hd);
+    if (hd < 32 or hd > 256 or @rem(hd, 32) != 0) return false;
     if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
     if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
     const compiler = zml.module.CompilationContext.currentOrNull() orelse return false;

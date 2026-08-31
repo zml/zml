@@ -507,10 +507,6 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
 pub const TokenEmbedding = struct {
     weight: Tensor,
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
-        zml.Buffer.deinitAll(TokenEmbedding, self);
-    }
-
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
@@ -555,10 +551,6 @@ pub const LayerNorm = struct {
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
-    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
-        zml.Buffer.deinitAll(LayerNorm, self);
-    }
-
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
@@ -581,10 +573,6 @@ pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
 pub const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-6,
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        zml.Buffer.deinitAll(RmsNorm, self);
-    }
 
     pub fn forward(self: RmsNorm, x: Tensor) Tensor {
         const axis = self.weight.shape().tag(0);
