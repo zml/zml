@@ -1908,6 +1908,32 @@ pub const GatedDeltaNet = struct {
         };
     }
 
+    /// Runs the recurrent implementation while treating positions at or beyond
+    /// `valid_length` as a neutral suffix. This keeps padded compilation tails
+    /// from changing active outputs or recurrent state.
+    pub fn forwardWithValidLength(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        alphas: Tensor,
+        betas: Tensor,
+        initial_state: Input,
+        valid_length: Tensor,
+    ) Output {
+        stdx.debug.assert(valid_length.rank() == 0 and valid_length.dtype().isInteger(), "GatedDeltaNet valid_length must be an integer scalar, got {f}", .{valid_length});
+        const valid_mask = Tensor.arange(.{ .end = queries.dim(.s) }, .i64)
+            .withTags(.{.s})
+            .cmp(.LT, valid_length.convert(.i64));
+        return forward(
+            valid_mask.broad(queries.shape()).select(queries, .zeroes(queries.shape())),
+            valid_mask.broad(keys.shape()).select(keys, .zeroes(keys.shape())),
+            valid_mask.broad(values.shape()).select(values, .zeroes(values.shape())),
+            valid_mask.broad(alphas.shape()).select(alphas, Tensor.constant(alphas.dtype().one()).broad(alphas.shape())),
+            valid_mask.broad(betas.shape()).select(betas, .zeroes(betas.shape())),
+            initial_state,
+        );
+    }
+
     /// Processes a sequence with Gated Delta Net recurrence using `stablehlo.while`.
     ///
     /// Shapes:
@@ -1948,18 +1974,19 @@ pub const GatedDeltaNet = struct {
 test "gated delta net" {
     const platform = zml.testing.env();
 
-    const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
-    const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
-    const values: zml.Tensor = .init(.{ .s = 2, .h = 2, .v = 2 }, .f32);
-    const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
-    const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const queries: zml.Tensor = .init(.{ .s = 3, .h = 2, .k = 2 }, .f32);
+    const keys: zml.Tensor = .init(.{ .s = 3, .h = 2, .k = 2 }, .f32);
+    const values: zml.Tensor = .init(.{ .s = 3, .h = 2, .v = 2 }, .f32);
+    const alphas: zml.Tensor = .init(.{ .s = 3, .h = 2 }, .f32);
+    const betas: zml.Tensor = .init(.{ .s = 3, .h = 2 }, .f32);
     const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+    const valid_length: zml.Tensor = .init(.{}, .u32);
 
     var exe = try platform.compileFn(
         std.testing.allocator,
         std.testing.io,
-        GatedDeltaNet.forward,
-        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
+        GatedDeltaNet.forwardWithValidLength,
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s }, valid_length },
         .{},
     );
     defer exe.deinit();
@@ -1969,9 +1996,10 @@ test "gated delta net" {
         platform,
         queries.shape(),
         .replicated,
-        std.mem.sliceAsBytes(&[2][2][2]f32{
+        std.mem.sliceAsBytes(&[3][2][2]f32{
             .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
             .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
+            .{ .{ 100, -100 }, .{ -100, 100 } },
         }),
     );
     defer queries_buffer.deinit();
@@ -1980,9 +2008,10 @@ test "gated delta net" {
         platform,
         keys.shape(),
         .replicated,
-        std.mem.sliceAsBytes(&[2][2][2]f32{
+        std.mem.sliceAsBytes(&[3][2][2]f32{
             .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
             .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+            .{ .{ -200, 200 }, .{ 200, -200 } },
         }),
     );
     defer keys_buffer.deinit();
@@ -1991,9 +2020,10 @@ test "gated delta net" {
         platform,
         values.shape(),
         .replicated,
-        std.mem.sliceAsBytes(&[2][2][2]f32{
+        std.mem.sliceAsBytes(&[3][2][2]f32{
             .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
             .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
+            .{ .{ 300, -300 }, .{ -300, 300 } },
         }),
     );
     defer values_buffer.deinit();
@@ -2002,9 +2032,10 @@ test "gated delta net" {
         platform,
         alphas.shape(),
         .replicated,
-        std.mem.sliceAsBytes(&[2][2]f32{
+        std.mem.sliceAsBytes(&[3][2]f32{
             .{ 0.5, 0.25 },
             .{ 0.8, 0.6 },
+            .{ -10, 10 },
         }),
     );
     defer alphas_buffer.deinit();
@@ -2013,9 +2044,10 @@ test "gated delta net" {
         platform,
         betas.shape(),
         .replicated,
-        std.mem.sliceAsBytes(&[2][2]f32{
+        std.mem.sliceAsBytes(&[3][2]f32{
             .{ 1.0, 0.5 },
             .{ 0.75, 1.0 },
+            .{ 20, -20 },
         }),
     );
     defer betas_buffer.deinit();
@@ -2030,22 +2062,25 @@ test "gated delta net" {
         }),
     );
     defer initial_s_buffer.deinit();
+    var valid_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 2), .u32);
+    defer valid_length_buffer.deinit();
 
     var result = try zml.testing.autoCall(
         std.testing.allocator,
         std.testing.io,
         &exe,
-        GatedDeltaNet.forward,
-        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+        GatedDeltaNet.forwardWithValidLength,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, valid_length_buffer },
     );
     defer result.outputs.deinit();
     defer result.state.s.deinit();
 
     const expected_outputs: zml.Slice = .init(
-        zml.Shape.init(.{ 2, 2, 2 }, .f32),
-        std.mem.sliceAsBytes(&[2][2][2]f32{
+        zml.Shape.init(.{ 3, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[3][2][2]f32{
             .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
             .{ .{ -11.15, 10.75 }, .{ 2.325, -1.2 } },
+            .{ .{ 0, 0 }, .{ 0, 0 } },
         }),
     );
     const expected_final_s: zml.Slice = .init(
