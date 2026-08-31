@@ -208,8 +208,17 @@ pub fn main(init: std.process.Init) !void {
             const screen_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_SCREEN_MS", 50);
             const verify_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_VERIFY_MS", 25);
             const final_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_FINAL_MS", 100);
+            const benchmark_mode = std.meta.stringToEnum(
+                zml.io.DmaBenchmarkMode,
+                init.environ_map.get("ZML_DMA_BENCH_MODE") orelse "adaptive",
+            ) orelse return error.InvalidDmaBenchmarkMode;
+            const target_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_TARGET_MS", 1000);
+            const max_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_MAX_MS", 4000);
+            const adaptive_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 20);
+            const adaptive_confirmation_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_CONFIRM_MS", 50);
 
             var result = try zml.io.benchmarkDma(AllTensorsModel, &model, allocator, io, platform, .{
+                .mode = benchmark_mode,
                 .shardings = &.{sharded_sharding},
                 .block_sizes = block_sizes,
                 .parallelism = parallelism,
@@ -217,18 +226,37 @@ pub fn main(init: std.process.Init) !void {
                 .screen_duration_ns = try std.math.mul(u64, screen_ms, std.time.ns_per_ms),
                 .verification_duration_ns = try std.math.mul(u64, verify_ms, std.time.ns_per_ms),
                 .finalist_duration_ns = try std.math.mul(u64, final_ms, std.time.ns_per_ms),
-                .finalist_repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_REPEATS", 3),
+                .finalist_repeats = try envUsize(
+                    init.environ_map,
+                    "ZML_DMA_BENCH_REPEATS",
+                    if (benchmark_mode == .exhaustive) 5 else 3,
+                ),
+                .target_sampling_ns = try std.math.mul(u64, target_ms, std.time.ns_per_ms),
+                .max_sampling_ns = try std.math.mul(u64, max_ms, std.time.ns_per_ms),
+                .confidence_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_CONFIDENCE_TOLERANCE", 0.03),
+                .adaptive_window_ns = try std.math.mul(u64, adaptive_window_ms, std.time.ns_per_ms),
+                .adaptive_confirmation_ns = try std.math.mul(u64, adaptive_confirmation_ms, std.time.ns_per_ms),
+                .adaptive_min_rounds = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_ROUNDS", 3),
+                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.15),
+                .parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_PARALLELISM_TOLERANCE", 0.05),
+                .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
+                .global_min_device_retention = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_RETENTION", 0.95),
+                .global_fairness_floor = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_FAIRNESS", 0.98),
                 .max_pinned_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_PINNED_MIB", 2048),
             });
             defer result.deinit();
 
             try stdout_writer.interface.print(
-                "dma_bench platform={s} pjrt={f} devices={d} elapsed_ms={d:.3}\n",
+                "dma_bench version=2 mode={s} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
                 .{
+                    @tagName(result.mode),
                     @tagName(platform.target),
                     platform.pjrt_api.version(),
                     result.devices.len,
                     @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.setup_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.sampling_ns)) / std.time.ns_per_ms,
+                    result.windows,
                 },
             );
             for (result.samples) |sample| {
@@ -257,7 +285,7 @@ pub fn main(init: std.process.Init) !void {
             for (result.devices) |recommendation| {
                 const device = platform.devices[recommendation.device_index];
                 try stdout_writer.interface.print(
-                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3}\n",
+                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3} confidence={s} windows={d} termination={s}\n",
                     .{
                         recommendation.device_index,
                         recommendation.device_id,
@@ -267,6 +295,9 @@ pub fn main(init: std.process.Init) !void {
                         recommendation.dma_parallelism,
                         recommendation.isolated_bytes_per_second / zml.GiB,
                         recommendation.average_latency_ns / std.time.ns_per_ms,
+                        @tagName(recommendation.confidence),
+                        recommendation.windows,
+                        @tagName(recommendation.termination),
                     },
                 );
             }
@@ -286,7 +317,7 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
             try stdout_writer.interface.print(
-                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} ",
+                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} confidence={s} windows={d} termination={s} ",
                 .{
                     result.global.searched,
                     result.global.isolated_bytes_per_second / zml.GiB,
@@ -296,6 +327,9 @@ pub fn main(init: std.process.Init) !void {
                     result.global.scaling_efficiency,
                     result.global.latency_ratio,
                     result.global.concurrent_normalized_fairness,
+                    @tagName(result.global.confidence),
+                    result.global.windows,
+                    @tagName(result.global.termination),
                 },
             );
             if (result.global.parallelism) |limit| {
@@ -416,6 +450,11 @@ pub fn main(init: std.process.Init) !void {
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     const value = environ_map.get(name) orelse return default;
     return std.fmt.parseInt(usize, value, 10);
+}
+
+fn envF64(environ_map: *const std.process.Environ.Map, name: []const u8, default: f64) !f64 {
+    const value = environ_map.get(name) orelse return default;
+    return std.fmt.parseFloat(f64, value);
 }
 
 fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
