@@ -503,7 +503,7 @@ test "slice pretty print rank 0" {
 test "slice pretty print bool" {
     const data: [2]bool = .{ true, false };
     const slice = Slice.init(.init(.{2}, .bool), std.mem.asBytes(&data));
-    const expected = "1,0";
+    const expected = "{1,0}";
     try std.testing.expectEqualSlices(bool, &data, slice.constItems(bool));
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
