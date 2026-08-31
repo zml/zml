@@ -575,14 +575,22 @@ pub const RmsNorm = struct {
     eps: f32 = 1e-6,
 
     pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+        stdx.debug.assert(self.weight.rank() == 1, "RmsNorm weight must be rank-1, got {f}", .{self.weight});
         const axis = self.weight.shape().tag(0);
+        stdx.debug.assert(axis != Shape.TagUnknown, "RmsNorm weight must be tagged, got {f}", .{self.weight});
+        stdx.debug.assert(x.shape().hasTag(axis) != null, "RmsNorm weight axis {any} missing from input {f}", .{ axis, x });
         return rmsNorm(x, axis, self.eps).mul(self.weight.convert(x.dtype()).broad(x.shape()));
     }
 };
 
-/// HuggingFace `rotate_half`: `x * cos + rotate_half(x) * sin`.
+/// Apply precomputed RoPE: `x * cos + rotate_half(x) * sin` (HuggingFace sequential layout).
+/// `cos`/`sin` last dim is the rotary width and may be smaller than `x`'s last dim.
 pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const rotary_dim = cos.dim(-1);
+    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "applyRotary expects an even rotary dim, got {d}", .{rotary_dim});
+    stdx.debug.assert(sin.dim(-1) == rotary_dim, "applyRotary expects cos/sin last dim to match, got {f} vs {f}", .{ cos, sin });
+    stdx.debug.assert(rotary_dim <= x.dim(-1), "applyRotary rotary dim {d} exceeds {f}", .{ rotary_dim, x });
+
     const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
     const half = @divExact(rotary_dim, 2);
     const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
@@ -593,6 +601,35 @@ pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
         .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
     if (rotary_dim == x.dim(-1)) return y;
     return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
+}
+
+test "applyRotary: cos=1 sin=0 is identity" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: Tensor = .init(.{ .s = 3, .hd = 4 }, .f32);
+    const Local = struct {
+        fn fwd(input: Tensor) Tensor {
+            const ones = Tensor.scalar(1, input.dtype()).broad(input.shape());
+            const zeros = Tensor.scalar(0, input.dtype()).broad(input.shape());
+            return applyRotary(input, ones, zeros);
+        }
+    };
+    var exe = try zml.module.compile(allocator, io, Local.fwd, .{x}, platform, .{});
+    defer exe.deinit();
+
+    const x_h: [3][4]f32 = .{
+        .{ 0.25, -0.5, 0.75, -1.0 },
+        .{ 1.25, 0.0, -0.25, 0.5 },
+        .{ -0.75, 1.5, 0.125, -0.375 },
+    };
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    defer x_buffer.deinit();
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, Local.fwd, .{x_buffer});
+    defer res.deinit();
+    try zml.testing.expectClose(io, x_buffer, res, .{});
 }
 
 /// Center and scale by the variance.

@@ -451,6 +451,7 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
+                /// Replace baked inputs on this runner. `bake` only appends; this resets the prefix first.
                 pub fn rebake(self: *RunnerSelf, baked: BakedInput) void {
                     self.args.baked_count = 0;
                     self.args.bake(baked);

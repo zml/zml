@@ -194,31 +194,18 @@ pub const DenseOpts = struct {
     is_causal: bool = false,
 };
 
+/// Full-sequence attention (not decode / KV-cache).
+/// `.cuda_fa2` is FlashAttention-2; other backends use `zml.nn.sdpa`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
-    if (backend == .cuda_fa2 and denseCanUseFlash(q, k, v, backend)) {
-        return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal });
+    switch (backend) {
+        .cuda_fa2 => return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+        .vanilla, .attnd, .nki, .cuda_fa3, .metal_fa => {},
     }
     const mask = if (opts.is_causal)
         zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
     else
         null;
     return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
-}
-
-fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend) bool {
-    if (!q.shape().hasTags(.{ .q, .h, .hd })) return false;
-    if (!k.shape().hasTags(.{ .k, .h, .hd })) return false;
-    if (!v.shape().hasTags(.{ .k, .h, .hd })) return false;
-    if (q.dim(.q) <= 0 or k.dim(.k) <= 0 or v.dim(.k) != k.dim(.k)) return false;
-    if (q.dim(.q) != k.dim(.k)) return false;
-    if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
-    if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
-    const hd = q.dim(.hd);
-    if (hd < 32 or hd > 256 or @rem(hd, 32) != 0) return false;
-    if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
-    if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
-    const compiler = zml.module.CompilationContext.currentOrNull() orelse return false;
-    return backend.isAvailable(compiler.platform);
 }
 
 test "attention: q=1,qh=64,kh=8" {
