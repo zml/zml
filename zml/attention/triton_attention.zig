@@ -132,8 +132,29 @@ fn sparseMlaConfig(paged_opts: paged.PagedSparseMlaOptions, topk_count: usize, c
     return config;
 }
 
+/// Largest `BLOCK_M * HEAD_SIZE_PADDED` the 2D kernel survives. That product is
+/// the shape of both the query tile and the f32 accumulator carried through the
+/// tile loop; above it the kernel faults with CUDA_ERROR_MISALIGNED_ADDRESS.
+///
+/// Measured on a GB300 with Gemma-4-31B, whose global-attention layers are
+/// head_dim 512 (its sliding ones are 256):
+///
+///   64x256, 32x512, 16x512  ok        64x512, 128x512  fault
+///
+/// The bound is on this product alone. Two things that do *not* move it, so do
+/// not reach for them if a new head size faults: TILE_SIZE, which at 64 pushes
+/// total shared memory to ~160 KB and still passes at BLOCK_M 32 while 64x512
+/// faults at 98 KB; and num_warps, where 8 halves the per-thread register share
+/// and still faults -- which is also why the obvious "the accumulator outgrows
+/// the register file" story cannot be the whole explanation. The underlying
+/// Triton codegen bug is not diagnosed; this only keeps us out of it.
+const max_query_tile_elements: usize = 16 * 1024;
+
 fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
+
+    // Until we test on other platforms, gate the fix to GB300.
+    const is_gb300 = isCudaComputeCapability("10.3");
 
     var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 
@@ -145,6 +166,14 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
             tile_size = 16;
         } else {
             block_m = 128;
+        }
+
+        if (is_gb300) {
+            // Halving BLOCK_M for every doubling of the head keeps that product
+            // constant: 128 at head_dim 128, 64 at 256, 32 at 512. The first two
+            // are the values this branch has always picked.
+            const head_dim_padded = std.math.ceilPowerOfTwoAssert(usize, options.head_dim);
+            block_m = @min(128, max_query_tile_elements / head_dim_padded);
         }
         num_stages_2d = 1;
         num_warps = 4;

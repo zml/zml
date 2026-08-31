@@ -222,13 +222,24 @@ pub fn fusedExpertsImpl(
     if (opts.expert_map) |expert_map| {
         if (expert_map.dtype() != .i32) return error.UnsupportedType;
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
+    } else if (num_experts != gate_up.dim(.expert)) {
+        return error.InvalidShape;
     }
     const routing = prepareRouting(ids, num_experts, block_size_m);
 
-    const expert_ids = if (opts.expert_map) |expert_map|
-        expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
-    else
-        routing.expert_ids;
+    const routing_id_valid = routing.expert_ids.cmp(.GE, Tensor.scalar(0, .i32))
+        .logical(.AND, routing.expert_ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
+    const safe_routing_ids = routing_id_valid.select(
+        routing.expert_ids,
+        Tensor.zeroes(routing.expert_ids.shape()),
+    );
+    const expert_ids = if (opts.expert_map) |expert_map| mapped: {
+        const local_ids = expert_map.gather(.{ .expert = safe_routing_ids }, .{}).withTags(.{.g});
+        const local_id_valid = routing_id_valid
+            .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+            .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+        break :mapped local_id_valid.select(local_ids, Tensor.scalar(-1, .i32));
+    } else routing_id_valid.select(routing.expert_ids, Tensor.scalar(-1, .i32));
 
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
@@ -236,17 +247,6 @@ pub fn fusedExpertsImpl(
     if (gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz) {
         hidden_quant, a_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden), gate_up.dtype() == .f8e4m3fnuz);
     }
-
-    const first_cfg = makeFusedMoeConfig(
-        hidden_quant,
-        gate_up,
-        options,
-        routing.naive_block_assignment,
-        ids.dim(.topk),
-        false,
-        false,
-        .bf16,
-    );
 
     const b_bias_1 =
         opts.w1_bias orelse
@@ -257,6 +257,19 @@ pub fn fusedExpertsImpl(
         (opts.w1_scale orelse return error.MissingWeightScale).convert(.f32)
     else
         opts.w1_scale orelse Tensor.scalar(1.0, .f32);
+
+    const first_cfg = makeFusedMoeConfig(
+        hidden_quant,
+        gate_up,
+        a_scale,
+        b_scale_1,
+        options,
+        routing.naive_block_assignment,
+        ids.dim(.topk),
+        false,
+        false,
+        .bf16,
+    );
 
     const first_out = callFusedMoe(
         hidden_quant,
@@ -275,10 +288,14 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated_quant, const a2_scale = if (rocm_block_fp8 and
+    const fused_swiglu_fp8 = block_fp8 and switch (zml.Compiler.current().platform.target) {
+        .cuda, .rocm => true,
+        else => false,
+    };
+    const activated_quant, const a2_scale = if (fused_swiglu_fp8 and
         options.activation == .silu and
-        down.dtype() == .f8e4m3fnuz)
-        siluAndQuantizePerTokenGroupFp8(first_out, 128, true, options.activation_threshold)
+        (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz))
+        siluAndQuantizePerTokenGroupFp8(first_out, 128, down.dtype() == .f8e4m3fnuz, options.activation_threshold)
     else blk: {
         const activated = applyActivation(first_out, options.activation, options.activation_threshold);
         var quantized = activated;
@@ -289,17 +306,6 @@ pub fn fusedExpertsImpl(
         break :blk .{ quantized, scale };
     };
 
-    const second_cfg = makeFusedMoeConfig(
-        activated_quant,
-        down,
-        options,
-        routing.naive_block_assignment,
-        1,
-        true,
-        false,
-        .bf16,
-    );
-
     const b_bias_2 =
         opts.w2_bias orelse
         metadata.w2_zero_bias orelse
@@ -309,6 +315,19 @@ pub fn fusedExpertsImpl(
         (opts.w2_scale orelse return error.MissingWeightScale).convert(.f32)
     else
         opts.w2_scale orelse Tensor.scalar(1.0, .f32);
+
+    const second_cfg = makeFusedMoeConfig(
+        activated_quant,
+        down,
+        a2_scale,
+        b_scale_2,
+        options,
+        routing.naive_block_assignment,
+        1,
+        true,
+        false,
+        .bf16,
+    );
 
     const second_out = callFusedMoe(
         activated_quant,
@@ -327,7 +346,15 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     );
 
-    const output = second_out.sum(.topk).squeeze(.topk);
+    // Negative and out-of-range routes are excluded by the alignment kernels,
+    // so no GEMM tile writes their output slots. Mask those slots explicitly
+    // before reducing instead of consuming uninitialized custom-call output.
+    const route_is_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
+        .logical(.AND, ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
+    const active_second_out = route_is_valid
+        .broad(second_out.shape().withDtype(.bool))
+        .select(second_out, Tensor.zeroes(second_out.shape()));
+    const output = active_second_out.sum(.topk).squeeze(.topk);
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }
@@ -360,8 +387,8 @@ fn callFusedMoe(
         (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
         (std.math.divCeil(i64, b.dim(1), block_size_n) catch unreachable);
 
-    const stride_asm: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) a_scale.dim(1) else 0;
-    const stride_ask: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) 1 else 0;
+    const stride_asm: i64 = if (cfg.a_scale_dtype != null and a_scale.rank() == 2) a_scale.dim(1) else 0;
+    const stride_ask: i64 = if (cfg.a_scale_dtype != null and a_scale.rank() == 2) 1 else 0;
     const stride_bse: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3)
         b_scale.dim(1) * b_scale.dim(2)
     else
@@ -625,6 +652,8 @@ fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, activ
 fn makeFusedMoeConfig(
     a: Tensor,
     b: Tensor,
+    a_scale: Tensor,
+    b_scale: Tensor,
     opts: Options,
     naive_block_assignment: bool,
     top_k: i64,
@@ -634,6 +663,8 @@ fn makeFusedMoeConfig(
 ) kernels.FusedMoe.Cfg {
     var use_fp8 = isMxFp8(opts.quant_scheme);
     if (b.dtype() == .f8e4m3fn or b.dtype() == .f8e4m3fnuz) use_fp8 = true;
+    const block_fp8 = hasBlock128Scale(b, b_scale) and
+        (b_scale.dtype() == .bf16 or b_scale.dtype() == .f32);
     const fp8_scale_dtype: ?DType = if (!use_fp8)
         null
     else if (b.dtype() == .f8e4m3fnuz)
@@ -644,8 +675,8 @@ fn makeFusedMoeConfig(
         .a_dtype = toDType(a.dtype()),
         .b_dtype = toDType(b.dtype()),
         .c_dtype = toDType(output_dtype),
-        .a_scale_dtype = fp8_scale_dtype,
-        .b_scale_dtype = fp8_scale_dtype,
+        .a_scale_dtype = if (block_fp8) toDType(a_scale.dtype()) else fp8_scale_dtype,
+        .b_scale_dtype = if (block_fp8) toDType(b_scale.dtype()) else fp8_scale_dtype,
         .b_bias_dtype = null,
         .topk_weights_dtype = null,
         .block_size_m = @intCast(opts.block_size_m),
@@ -662,6 +693,64 @@ fn makeFusedMoeConfig(
         .per_channel_quant = false,
         .has_bias = has_bias,
     };
+}
+
+test "block FP8 MoE preserves activation and weight scale dtypes" {
+    const fn_activation: Tensor = .init(.{ .token = 8, .in = 1024 }, .f8e4m3fn);
+    const fn_weight: Tensor = .init(.{ .expert = 288, .out = 2048, .in = 1024 }, .f8e4m3fn);
+    const fn_activation_scale: Tensor = .init(.{ .token = 8, .group = 8 }, .bf16);
+    const weight_scale: Tensor = .init(.{ .expert = 288, .nb = 16, .kb = 8 }, .f32);
+    const fn_cfg = makeFusedMoeConfig(
+        fn_activation,
+        fn_weight,
+        fn_activation_scale,
+        weight_scale,
+        .{ .quant_scheme = .fp8_block128 },
+        false,
+        8,
+        false,
+        false,
+        .bf16,
+    );
+
+    try std.testing.expectEqual(@as(?DType, .bf16), fn_cfg.a_scale_dtype);
+    try std.testing.expectEqual(@as(?DType, .f32), fn_cfg.b_scale_dtype);
+
+    const fnuz_activation: Tensor = .init(.{ .token = 8, .in = 1024 }, .f8e4m3fnuz);
+    const fnuz_weight: Tensor = .init(.{ .expert = 288, .out = 2048, .in = 1024 }, .f8e4m3fnuz);
+    const fnuz_activation_scale: Tensor = .init(.{ .token = 8, .group = 8 }, .f32);
+    const fnuz_cfg = makeFusedMoeConfig(
+        fnuz_activation,
+        fnuz_weight,
+        fnuz_activation_scale,
+        weight_scale,
+        .{ .quant_scheme = .fp8_block128 },
+        false,
+        8,
+        false,
+        false,
+        .bf16,
+    );
+
+    try std.testing.expectEqual(@as(?DType, .f32), fnuz_cfg.a_scale_dtype);
+    try std.testing.expectEqual(@as(?DType, .f32), fnuz_cfg.b_scale_dtype);
+
+    const mx_weight_scale: Tensor = .init(.{ .expert = 288, .out = 2048, .group = 32 }, .f8e8m0);
+    const mx_cfg = makeFusedMoeConfig(
+        fn_activation,
+        fn_weight,
+        fn_activation_scale,
+        mx_weight_scale,
+        .{ .quant_scheme = .mxfp8 },
+        false,
+        8,
+        false,
+        false,
+        .bf16,
+    );
+
+    try std.testing.expectEqual(@as(?DType, .bf16), mx_cfg.a_scale_dtype);
+    try std.testing.expectEqual(@as(?DType, .bf16), mx_cfg.b_scale_dtype);
 }
 
 const DefaultTokenBucket = struct {

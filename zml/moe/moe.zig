@@ -32,6 +32,7 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
+                .f8e4m3fn => .triton,
                 .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
                     .flashinfer_cutlass
                 else
@@ -76,6 +77,13 @@ pub const Backend = enum {
         };
     }
 };
+
+test "Backend.auto selects Triton for CUDA E4M3FN experts" {
+    var platform: zml.Platform = undefined;
+    platform.target = .cuda;
+
+    try std.testing.expectEqual(Backend.triton, try Backend.auto(&platform, .f8e4m3fn));
+}
 
 pub const Parameters = union(Backend) {
     flashinfer_cutlass: cutlass_flashinfer.Parameters,
@@ -522,8 +530,6 @@ pub fn forwardMoe(
                     topk_weights,
                     weights_gate_up,
                     weights_down,
-                    scales_gate_up,
-                    scales_down,
                 },
                 input.shape(),
                 .{
@@ -533,6 +539,8 @@ pub fn forwardMoe(
                     .bias_down = bias_down,
                     .quant_scheme = opts.quant_scheme,
                     .activation_threshold = opts.activation_threshold,
+                    .scales_gate_up = scales_gate_up,
+                    .scales_down = scales_down,
                 },
                 (struct {
                     fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -561,8 +569,8 @@ pub fn forwardMoe(
                                 .activation = ctx.activation,
                                 .global_num_experts = ctx.global_num_experts,
                                 .expert_map = expert_map,
-                                .w1_scale = sharded_inputs[5],
-                                .w2_scale = sharded_inputs[6],
+                                .w1_scale = ctx.scales_gate_up,
+                                .w2_scale = ctx.scales_down,
                                 .w1_bias = ctx.bias_gate_up,
                                 .w2_bias = ctx.bias_down,
                                 .quant_scheme = ctx.quant_scheme,

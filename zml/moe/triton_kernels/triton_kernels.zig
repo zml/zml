@@ -482,12 +482,12 @@ pub const FusedMoe = struct {
                 });
                 const a_s = b.loadOpts(a_scale_ptrs, .{
                     .mask = token_mask,
-                    .other = b.zeros(&.{block_size_m}, .f32),
-                });
+                    .other = b.zeros(&.{block_size_m}, cfg.a_scale_dtype orelse .f32),
+                }).to(.f32);
                 const b_s = b.loadOpts(b_scale_ptrs, .{
                     .mask = offs_bn.lt(n_block),
-                    .other = b.zeros(&.{block_size_n}, .f32),
-                });
+                    .other = b.zeros(&.{block_size_n}, cfg.b_scale_dtype orelse .f32),
+                }).to(.f32);
                 break :scaled acc.add(dot.mul(a_s.expandDims(1)).mul(b_s.expandDims(0)));
             } else b.dotOpts(a_val, b_val, acc, .{
                 .input_precision = .tf32,

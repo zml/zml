@@ -190,6 +190,25 @@ fn isMxScale(scale: Shape) bool {
     return scale.rank() == 2 and (scale.dtype() == .f8e8m0 or scale.dtype() == .u8);
 }
 
+/// Backend routing must also recognize a one-tile block grid. Classification
+/// intentionally treats that ambiguous shape as per-tensor FP8 instead.
+fn isBlock128ScaleGrid(weight: Shape, scale: Shape) bool {
+    if (weight.dtype() != .f8e4m3fn or weight.rank() != 2 or
+        @mod(weight.dim(1), 128) != 0 or
+        (scale.dtype() != .bf16 and scale.dtype() != .f32) or scale.rank() != 2)
+    {
+        return false;
+    }
+
+    return scale.dim(0) == std.math.divCeil(i64, weight.dim(0), 128) catch unreachable and
+        scale.dim(1) == std.math.divCeil(i64, weight.dim(1), 128) catch unreachable;
+}
+
+fn useNativeBlock128(target: zml.Target, weight: Shape, scale: Shape) bool {
+    return isBlock128ScaleGrid(weight, scale) and
+        (target != .cuda or scale.dtype() == .f32);
+}
+
 // Note: this test will evolve as we support more (INT4/8 and FP8 block-128 as a
 // scaled-dot are still open; see the scaledDot doc comment).
 test "QuantScheme.classify" {
@@ -317,6 +336,24 @@ test "QuantScheme.classify" {
         .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
         .init(.{ .dout = 1, .sc = 1 }, .bf16),
     ));
+    try std.testing.expect(isBlock128ScaleGrid(
+        .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .bf16),
+    ));
+    try std.testing.expect(!isBlock128ScaleGrid(
+        .init(.{ .dout = 64, .d = 64 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .bf16),
+    ));
+    try std.testing.expect(!useNativeBlock128(
+        .cuda,
+        .init(.{ .dout = 64, .d = 128 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .bf16),
+    ));
+    try std.testing.expect(useNativeBlock128(
+        .cuda,
+        .init(.{ .dout = 64, .d = 128 }, .f8e4m3fn),
+        .init(.{ .dout = 1, .sc = 1 }, .f32),
+    ));
 }
 
 /// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
@@ -374,12 +411,13 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN values, F32 128x128 scales on CUDA; BF16/F32 scales on ROCm
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
 /// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// 2. Triton otherwise, including native block-128 FP8 on CUDA and ROCm
+/// 3. Unsupported non-block-FP8 combos fall back to dequant + Dot
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -441,6 +479,26 @@ pub fn scaledDot(
         res_shape._partitioning.set(res_shape.rank() - 1, rhs.shape().partition(r));
     }
 
+    const platform = zml.Compiler.current().platform;
+    const block128 = useNativeBlock128(platform.target, rhs.shape(), rhs_scale.shape());
+    if ((platform.target == .cuda or platform.target == .rocm) and block128) {
+        stdx.debug.assert(lhs_scale == null, "block FP8 Triton dot quantizes its BF16 lhs internally and does not accept a precomputed lhs scale", .{});
+        stdx.debug.assert(lhs.dtype() == .bf16, "block FP8 Triton dot expects a BF16 lhs, got {f}", .{lhs.shape()});
+        stdx.debug.assert(
+            rhs_scale.dtype() == .f32 or (platform.target == .rocm and rhs_scale.dtype() == .bf16),
+            "block FP8 Triton dot expects F32 scales on CUDA and BF16 or F32 scales on ROCm, got {f}",
+            .{rhs_scale.shape()},
+        );
+        stdx.debug.assert(@mod(rhs.dim(1), 128) == 0, "block FP8 Triton dot requires K divisible by 128, got {d}", .{rhs.dim(1)});
+        stdx.debug.assert(
+            dot_axes.contracting.len == 1 and dot_axes.batching.len == 0 and
+                lhs.axis(-1) == dot_axes.contracting.get(0)[0] and rhs.axis(-1) == dot_axes.contracting.get(0)[1],
+            "block FP8 Triton dot only supports a single trailing contraction without batching; got {f} and {f}",
+            .{ lhs.shape(), rhs.shape() },
+        );
+        return block_fp8.tritonBlockScaledDot(lhs, rhs, rhs_scale, res_shape);
+    }
+
     const lhs_scale_operand = lhs_scale orelse blk: {
         break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
     };
@@ -449,18 +507,6 @@ pub fn scaledDot(
         rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
     else
         rhs_scale;
-
-    const platform = zml.Compiler.current().platform;
-    const block128 = rhs.dtype() == .f8e4m3fn and rhs.rank() == 2 and
-        rhs_scale.rank() == 2 and
-        rhs_scale.dim(0) == std.math.divCeil(i64, rhs.dim(0), 128) catch unreachable and
-        rhs_scale.dim(1) == std.math.divCeil(i64, rhs.dim(1), 128) catch unreachable;
-    if (platform.target == .rocm and block128 and dot_axes.contracting.len == 1 and
-        dot_axes.batching.len == 0 and lhs.axis(-1) == dot_axes.contracting.get(0)[0] and
-        rhs.axis(-1) == dot_axes.contracting.get(0)[1])
-    {
-        return block_fp8.tritonBlockScaledDot(lhs, rhs, rhs_scale, res_shape);
-    }
 
     const mlir_ctx = zml.Compiler.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{

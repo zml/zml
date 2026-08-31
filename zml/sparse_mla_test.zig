@@ -193,3 +193,187 @@ test "GPU sparse MLA decode geometry" {
         try zml.testing.expectClose(io, expected, stable_output, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01 });
     }
 }
+
+const GlmSparseMlaCase = struct {
+    is_prefill: bool,
+    query_count: usize,
+    splits: []const u8,
+};
+
+fn runGlmSparseMlaCase(case: GlmSparseMlaCase) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda or !paged.Backend.triton.isAvailable(platform)) return error.SkipZigTest;
+
+    const num_heads: usize = 32;
+    const value_rank: usize = 512;
+    const logical_topk: usize = 2048;
+    // The GLM indexer appends a 128-lane tail block. Only the first
+    // logical_topk lanes are ordinary top-k results; unused tail lanes are -1.
+    const physical_topk: usize = 2176;
+    const page_size: usize = 16;
+    const page_count: usize = logical_topk / page_size;
+    const sequence_count: usize = 1;
+
+    var triton_parameters = Parameters.init(.fromBackend(.{
+        .backend = .triton,
+        .is_prefill = case.is_prefill,
+        .batch_size = sequence_count,
+        .seq_len = logical_topk,
+        .max_num_pages = page_count,
+        .max_token_count = @intCast(case.query_count),
+        .num_heads = num_heads,
+        .num_kv_heads = 1,
+        .head_dim = value_rank,
+        .max_seqlen_q = @intCast(case.query_count),
+    }));
+    triton_parameters.triton.block_table = replicated(triton_parameters.triton.block_table);
+    triton_parameters.triton.seq_lens = replicated(triton_parameters.triton.seq_lens);
+    triton_parameters.triton.query_start_len = replicated(triton_parameters.triton.query_start_len);
+
+    var stable_parameters = Parameters.init(.fromBackend(.{
+        .backend = .stablehlo,
+        .is_prefill = case.is_prefill,
+        .batch_size = sequence_count,
+        .seq_len = logical_topk,
+        .max_num_pages = page_count,
+        .max_token_count = @intCast(case.query_count),
+        .num_heads = num_heads,
+        .num_kv_heads = 1,
+        .head_dim = value_rank,
+        .max_seqlen_q = @intCast(case.query_count),
+    }));
+    stable_parameters.stablehlo.block_table = replicated(stable_parameters.stablehlo.block_table);
+    stable_parameters.stablehlo.seq_lens = replicated(stable_parameters.stablehlo.seq_lens);
+    stable_parameters.stablehlo.query_start_len = replicated(stable_parameters.stablehlo.query_start_len);
+
+    const q_shape = zml.Shape.init(.{ .q = case.query_count, .h = num_heads, .hd = value_rank }, .bf16).withReplicatedPartitioning();
+    const kv_shape = zml.Shape.init(.{ .page = page_count, .k_chunk = page_size, .hkv = 1, .hd = value_rank }, .bf16).withReplicatedPartitioning();
+    const sink_shape = zml.Shape.init(.{ .h = num_heads }, .f32).withReplicatedPartitioning();
+    const topk_shape = zml.Shape.init(.{ .q = case.query_count, .topk = physical_topk }, .i32).withReplicatedPartitioning();
+    const tokens_pos_shape = zml.Shape.init(.{ .q = case.query_count }, .i32).withReplicatedPartitioning();
+
+    const q = zml.Tensor.fromShape(q_shape);
+    const kv: KvCache = .{ .latent = zml.Tensor.fromShape(kv_shape) };
+    const sink = zml.Tensor.fromShape(sink_shape);
+    const topk = zml.Tensor.fromShape(topk_shape);
+    const tokens_pos = zml.Tensor.fromShape(tokens_pos_shape);
+
+    const q_data = try allocator.alloc(zml.floats.BFloat16, q_shape.count());
+    defer allocator.free(q_data);
+    for (q_data, 0..) |*value, i| {
+        const centered: i32 = @as(i32, @intCast((i * 13 + i / value_rank) % 29)) - 14;
+        value.* = .fromF32(@as(f32, @floatFromInt(centered)) / 32.0);
+    }
+    const kv_data = try allocator.alloc(zml.floats.BFloat16, kv_shape.count());
+    defer allocator.free(kv_data);
+    for (kv_data, 0..) |*value, i| {
+        const centered: i32 = @as(i32, @intCast((i * 17 + i / value_rank) % 31)) - 15;
+        value.* = .fromF32(@as(f32, @floatFromInt(centered)) / 64.0);
+    }
+    const sink_data = try allocator.alloc(f32, sink_shape.count());
+    defer allocator.free(sink_data);
+    for (sink_data, 0..) |*value, head| value.* = 5.0 + @as(f32, @floatFromInt(head % 5)) / 16.0;
+
+    const tokens_pos_data = try allocator.alloc(i32, case.query_count);
+    defer allocator.free(tokens_pos_data);
+    for (tokens_pos_data, 0..) |*position, query| {
+        position.* = @intCast(logical_topk - case.query_count + query);
+    }
+    const topk_data = try allocator.alloc(i32, topk_shape.count());
+    defer allocator.free(topk_data);
+    for (topk_data, 0..) |*position, i| {
+        const query = i / physical_topk;
+        const column = i % physical_topk;
+        position.* = if (column >= logical_topk or column > tokens_pos_data[query] or column % 31 == 0)
+            -1
+        else
+            @intCast(column);
+    }
+
+    const block_table = try allocator.alloc(i32, sequence_count * page_count);
+    defer allocator.free(block_table);
+    for (block_table, 0..) |*physical_page, page| physical_page.* = @intCast(page);
+    const seq_lens = [_]i32{logical_topk};
+    const query_start_len = [_]i32{ 0, @intCast(case.query_count) };
+
+    var triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
+        .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, std.mem.sliceAsBytes(block_table)),
+        .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, std.mem.asBytes(&seq_lens)),
+        .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, std.mem.asBytes(&query_start_len)),
+    } };
+    defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
+    var stable_parameters_d: zml.Bufferized(Parameters) = .{ .stablehlo = .{
+        .block_table = try .fromBytes(io, platform, stable_parameters.stablehlo.block_table.shape(), .replicated, std.mem.sliceAsBytes(block_table)),
+        .seq_lens = try .fromBytes(io, platform, stable_parameters.stablehlo.seq_lens.shape(), .replicated, std.mem.asBytes(&seq_lens)),
+        .query_start_len = try .fromBytes(io, platform, stable_parameters.stablehlo.query_start_len.shape(), .replicated, std.mem.asBytes(&query_start_len)),
+    } };
+    defer zml.Buffer.deinitAll(Parameters, &stable_parameters_d);
+    var q_d = try zml.Buffer.fromBytes(io, platform, q_shape, .replicated, std.mem.sliceAsBytes(q_data));
+    defer q_d.deinit();
+    var kv_d: zml.Bufferized(KvCache) = .{ .latent = try .fromBytes(io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(kv_data)) };
+    defer zml.Buffer.deinitAll(KvCache, &kv_d);
+    var sink_d = try zml.Buffer.fromBytes(io, platform, sink_shape, .replicated, std.mem.sliceAsBytes(sink_data));
+    defer sink_d.deinit();
+    var topk_d = try zml.Buffer.fromBytes(io, platform, topk_shape, .replicated, std.mem.sliceAsBytes(topk_data));
+    defer topk_d.deinit();
+    var tokens_pos_d = try zml.Buffer.fromBytes(io, platform, tokens_pos_shape, .replicated, std.mem.sliceAsBytes(tokens_pos_data));
+    defer tokens_pos_d.deinit();
+
+    var stable_exe = try platform.compileFn(
+        allocator,
+        io,
+        Mla.pagedSparseAttention,
+        .{ stable_parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 0, .value_rank = value_rank } },
+        .{},
+    );
+    defer stable_exe.deinit();
+    var stable_output = try zml.testing.autoCall(
+        allocator,
+        io,
+        &stable_exe,
+        Mla.pagedSparseAttention,
+        .{ stable_parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+    );
+    defer stable_output.deinit();
+
+    for (case.splits) |num_splits| {
+        var triton_exe = try platform.compileFn(
+            allocator,
+            io,
+            Mla.pagedSparseAttention,
+            .{ triton_parameters, q, kv, sink, topk, tokens_pos, .{ .rope_rank = 0, .value_rank = value_rank, .num_kv_splits = num_splits } },
+            .{},
+        );
+        defer triton_exe.deinit();
+        var triton_output = try zml.testing.autoCall(
+            allocator,
+            io,
+            &triton_exe,
+            Mla.pagedSparseAttention,
+            .{ triton_parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+        );
+        defer triton_output.deinit();
+        try zml.testing.expectClose(io, stable_output, triton_output, .{
+            .absolute_tolerance = 0.02,
+            .relative_tolerance = 0.02,
+        });
+    }
+}
+
+test "CUDA sparse MLA GLM TP2 decode reducers" {
+    try runGlmSparseMlaCase(.{
+        .is_prefill = false,
+        .query_count = 1,
+        .splits = &.{ 1, 4, 64 },
+    });
+}
+
+test "CUDA sparse MLA GLM TP2 prefill multiquery" {
+    try runGlmSparseMlaCase(.{
+        .is_prefill = true,
+        .query_count = 64,
+        .splits = &.{4},
+    });
+}

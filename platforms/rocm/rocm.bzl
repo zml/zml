@@ -11,8 +11,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "7.14"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "file:///home/brabier/github/openxla/xla/bazel-bin/xla/pjrt/c/pjrt-rocm_linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "86a67903aab0e8960b1eda46572f17f357b7e4df804b3c4f3cc850333369ac78"
+_PJRT_ROCM_URL = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-20T15-30-00Z/pjrt-rocm_linux-amd64.tar.gz"
+_PJRT_ROCM_SHA256 = "6fd0515beb299550e298996f6919db09aec79859feee7362443bf2ebff900d0f"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION

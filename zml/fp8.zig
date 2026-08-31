@@ -1,15 +1,18 @@
 //! Native block-scaled FP8 operations.
 //!
-//! AMD CDNA3 matrix cores consume E4M3FNUZ. Published OCP E4M3FN weights can
-//! use the same finite nonzero encodings as FNUZ when their scale is doubled:
-//! the exponent-bias difference makes every FNUZ value one half of the
-//! corresponding FN value. Prepared checkpoints normalize the formats'
-//! differing zero and NaN sentinel encodings and adjust scales offline.
+//! AMD CDNA3 matrix cores consume E4M3FNUZ, while NVIDIA matrix cores consume
+//! OCP E4M3FN directly. Published OCP E4M3FN weights can use the same finite
+//! nonzero encodings as FNUZ when their scale is doubled: the exponent-bias
+//! difference makes every FNUZ value one half of the corresponding FN value.
+//! Prepared ROCm checkpoints normalize the formats' differing zero and NaN
+//! sentinel encodings and adjust scales offline. CUDA checkpoints retain the
+//! original E4M3FN values and scales.
 
 const std = @import("std");
 
 const stdx = @import("stdx");
 
+const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
 const ops = @import("ops.zig");
 const tri = @import("kernel.zig").triton;
@@ -18,6 +21,27 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const Builder = tri.Builder;
 const DType = tri.DType;
+
+const NativeBlockFp8 = struct {
+    dtype: DataType,
+    triton_dtype: DType,
+};
+
+fn nativeBlockFp8() NativeBlockFp8 {
+    return switch (Compiler.current().platform.target) {
+        .cuda => .{ .dtype = .f8e4m3fn, .triton_dtype = .f8e4m3fn },
+        .rocm => .{ .dtype = .f8e4m3fnuz, .triton_dtype = .f8e4m3fnuz },
+        else => |target| stdx.debug.panic("block FP8 Triton dot is unsupported on {s}", .{@tagName(target)}),
+    };
+}
+
+fn blockFp8Max(dtype: DType) f32 {
+    return switch (dtype) {
+        .f8e4m3fn => 448.0,
+        .f8e4m3fnuz => 240.0,
+        else => std.debug.panic("unsupported block FP8 dtype: {s}", .{@tagName(dtype)}),
+    };
+}
 
 /// Normalize the exceptional OCP E4M3FN encodings before a native-FNUZ
 /// bitcast. OCP negative zero (`0x80`) is FNUZ NaN, while OCP's two NaNs are
@@ -39,12 +63,13 @@ pub fn normalizeOcpEncodingForFnuz(x: Tensor) Tensor {
 const QuantizeBlock128 = struct {
     const Cfg = struct {
         input_dtype: DType,
+        fp8_dtype: DType,
         m: usize,
         k: usize,
     };
 
     const Kernel = tri.Kernel(Cfg, .{
-        .name = "quantize_block128_fp8_fnuz",
+        .name = "quantize_block128_fp8",
         .inputs = &.{"x"},
         .outputs = &.{ "q", "scale" },
         .run = run,
@@ -53,7 +78,7 @@ const QuantizeBlock128 = struct {
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const args = try b.declareArgs(.{
             .x_ptr = .{ .ptr = cfg.input_dtype },
-            .q_ptr = .{ .ptr = .f8e4m3fnuz },
+            .q_ptr = .{ .ptr = cfg.fp8_dtype },
             .scale_ptr = .{ .ptr = .f32 },
         });
 
@@ -67,12 +92,13 @@ const QuantizeBlock128 = struct {
         const offsets = b.arange(0, group_size, .i64);
         const x = b.load(args.x_ptr.addPtr(group_offset.add(offsets))).to(.f32);
         const absmax = b.max(b.absf(x)).maximum(@as(f32, 1e-6));
-        const scale = absmax.mul(@as(f32, 1.0 / 240.0));
+        const fp8_max = blockFp8Max(cfg.fp8_dtype);
+        const scale = absmax.mul(@as(f32, 1.0) / fp8_max);
         const q = b.clampf(
             x.div(scale),
-            b.splat(@as(f32, -240.0), &.{group_size}),
-            b.splat(@as(f32, 240.0), &.{group_size}),
-        ).to(.f8e4m3fnuz);
+            b.splat(-fp8_max, &.{group_size}),
+            b.splat(fp8_max, &.{group_size}),
+        ).to(cfg.fp8_dtype);
 
         b.store(args.q_ptr.addPtr(group_offset.add(offsets)), q);
         b.store(args.scale_ptr.addPtr(pid), scale);
@@ -86,10 +112,11 @@ const BlockScaledGemm = struct {
         k: usize,
         block_m: usize,
         block_n: usize,
+        fp8_dtype: DType,
     };
 
     const Kernel = tri.Kernel(Cfg, .{
-        .name = "gemm_a8w8_blockscale_fnuz",
+        .name = "gemm_a8w8_blockscale",
         .inputs = &.{ "a", "b", "a_scale", "b_scale" },
         .outputs = &.{"c"},
         .run = run,
@@ -108,10 +135,11 @@ const BlockScaledGemmSplitK = struct {
         block_m: usize,
         block_n: usize,
         split_k: usize,
+        fp8_dtype: DType,
     };
 
     const Kernel = tri.Kernel(Cfg, .{
-        .name = "gemm_a8w8_blockscale_fnuz_splitk",
+        .name = "gemm_a8w8_blockscale_splitk",
         .inputs = &.{ "a", "b", "a_scale", "b_scale" },
         .outputs = &.{"c"},
         .run = run,
@@ -124,8 +152,8 @@ const BlockScaledGemmSplitK = struct {
 
 fn runBlockScaledGemm(b: *Builder, cfg: anytype, comptime split: bool) tri.FinishError!void {
     const args = try b.declareArgs(.{
-        .a_ptr = .{ .ptr = .f8e4m3fnuz },
-        .b_ptr = .{ .ptr = .f8e4m3fnuz },
+        .a_ptr = .{ .ptr = cfg.fp8_dtype },
+        .b_ptr = .{ .ptr = cfg.fp8_dtype },
         .a_scale_ptr = .{ .ptr = .f32 },
         .b_scale_ptr = .{ .ptr = .f32 },
         .c_ptr = .{ .ptr = if (split) .f32 else .bf16 },
@@ -175,8 +203,8 @@ fn runBlockScaledGemm(b: *Builder, cfg: anytype, comptime split: bool) tri.Finis
 
     const mask_a = b.broadcastTo(b.expandDims(mask_m, 1), &.{ block_m, block_k });
     const mask_b = b.broadcastTo(b.expandDims(mask_n, 0), &.{ block_k, block_n });
-    const zero_a = b.zeros(&.{ block_m, block_k }, .f8e4m3fnuz);
-    const zero_b = b.zeros(&.{ block_k, block_n }, .f8e4m3fnuz);
+    const zero_a = b.zeros(&.{ block_m, block_k }, cfg.fp8_dtype);
+    const zero_b = b.zeros(&.{ block_k, block_n }, cfg.fp8_dtype);
 
     var loop = b.openFor(@as(i64, 0), blocks_per_split, @as(i64, 1), .{
         a_ptrs_init,
@@ -215,6 +243,48 @@ fn runBlockScaledGemm(b: *Builder, cfg: anytype, comptime split: bool) tri.Finis
     b.storeOpts(c_ptrs, if (split) loop.results[4] else loop.results[4].to(.bf16), .{ .mask = mask_c });
 }
 
+test "block FP8 Triton kernels emit E4M3FN and E4M3FNUZ TTIR" {
+    const allocator = std.testing.allocator;
+    inline for (.{
+        .{ .dtype = DType.f8e4m3fn, .needle = "f8E4M3FN" },
+        .{ .dtype = DType.f8e4m3fnuz, .needle = "f8E4M3FNUZ" },
+    }) |format| {
+        const quantize_ir = try QuantizeBlock128.Kernel.emit(allocator, .{
+            .input_dtype = .bf16,
+            .fp8_dtype = format.dtype,
+            .m = 16,
+            .k = 256,
+        });
+        defer allocator.free(quantize_ir);
+        try std.testing.expect(std.mem.indexOf(u8, quantize_ir, format.needle) != null);
+
+        const direct_ir = try BlockScaledGemm.Kernel.emit(allocator, .{
+            .m = 16,
+            .n = 64,
+            .k = 256,
+            .block_m = 16,
+            .block_n = 64,
+            .fp8_dtype = format.dtype,
+        });
+        defer allocator.free(direct_ir);
+        try std.testing.expect(std.mem.indexOf(u8, direct_ir, format.needle) != null);
+        try std.testing.expect(std.mem.indexOf(u8, direct_ir, "tt.dot") != null);
+
+        const split_ir = try BlockScaledGemmSplitK.Kernel.emit(allocator, .{
+            .m = 16,
+            .n = 64,
+            .k = 2048,
+            .block_m = 16,
+            .block_n = 64,
+            .split_k = 8,
+            .fp8_dtype = format.dtype,
+        });
+        defer allocator.free(split_ir);
+        try std.testing.expect(std.mem.indexOf(u8, split_ir, format.needle) != null);
+        try std.testing.expect(std.mem.indexOf(u8, split_ir, "tt.dot") != null);
+    }
+}
+
 const PreparedDot = struct {
     a: Tensor,
     a_scale: Tensor,
@@ -227,39 +297,62 @@ const PreparedDot = struct {
 
 fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) PreparedDot {
     stdx.debug.assert(lhs.rank() >= 1 and rhs_fn.rank() == 2, "block FP8 GEMM expects lhs rank >= 1 and rhs rank 2, got {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
+    stdx.debug.assert(rhs_fn.dtype() == .f8e4m3fn, "block FP8 GEMM expects E4M3FN weights, got {f}", .{rhs_fn.shape()});
     const k = rhs_fn.dim(1);
     const n = rhs_fn.dim(0);
     stdx.debug.assert(lhs.dim(-1) == k, "block FP8 GEMM contraction mismatch: {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
     stdx.debug.assert(@mod(k, 128) == 0, "block FP8 GEMM requires K divisible by 128, got {d}", .{k});
+    stdx.debug.assert(
+        (rhs_scale_fn.dtype() == .bf16 or rhs_scale_fn.dtype() == .f32) and rhs_scale_fn.rank() == 2,
+        "block FP8 GEMM expects a rank-2 BF16 or F32 weight scale grid, got {f}",
+        .{rhs_scale_fn.shape()},
+    );
+    stdx.debug.assert(
+        rhs_scale_fn.dim(0) == std.math.divCeil(i64, n, 128) catch unreachable and rhs_scale_fn.dim(1) == @divExact(k, 128),
+        "block FP8 GEMM scale grid mismatch for weights {f}: got {f}",
+        .{ rhs_fn.shape(), rhs_scale_fn.shape() },
+    );
 
     const m: i64 = @intCast(@divExact(lhs.shape().count(), @as(usize, @intCast(k))));
     const lhs_2d = lhs.reshape(.{ .fp8_m = m, .fp8_k = k });
     const groups_per_row = @divExact(k, 128);
+    const native_fp8 = nativeBlockFp8();
+    stdx.debug.assert(
+        native_fp8.dtype != .f8e4m3fn or rhs_scale_fn.dtype() == .f32,
+        "CUDA block FP8 GEMM requires F32 checkpoint scales, got {f}",
+        .{rhs_scale_fn.shape()},
+    );
 
     const quantized = QuantizeBlock128.Kernel.call(
         .{ .x = lhs_2d },
         .{
-            .q = Shape.init(.{ .fp8_m = m, .fp8_k = k }, .f8e4m3fnuz),
+            .q = Shape.init(.{ .fp8_m = m, .fp8_k = k }, native_fp8.dtype),
             .scale = Shape.init(.{ .fp8_m = m, .fp8_ks = groups_per_row }, .f32),
         },
         .{
-            .cfg = .{ .input_dtype = tri.from(lhs.dtype()), .m = @intCast(m), .k = @intCast(k) },
+            .cfg = .{
+                .input_dtype = tri.from(lhs.dtype()),
+                .fp8_dtype = native_fp8.triton_dtype,
+                .m = @intCast(m),
+                .k = @intCast(k),
+            },
             .grid = .{ @intCast(m * groups_per_row), 1, 1 },
             .num_stages = 1,
             .num_warps = 1,
         },
     );
 
-    // The prepared checkpoint already contains normalized FNUZ bytes and
-    // adjusted block scales, so this bitcast has no inference-time cost.
-    const rhs_fnuz = rhs_fn.bitCast(.f8e4m3fnuz);
-    const rhs_scale_fnuz = rhs_scale_fn.convert(.f32);
+    // Prepared ROCm checkpoints contain normalized FNUZ bytes and adjusted
+    // scales, so this bitcast has no inference-time cost. CUDA consumes the
+    // checkpoint's native E4M3FN values and F32 scales without conversion.
+    const rhs_native = if (native_fp8.dtype == .f8e4m3fnuz) rhs_fn.bitCast(.f8e4m3fnuz) else rhs_fn;
+    const rhs_scale_native = rhs_scale_fn.convert(.f32);
 
     return .{
         .a = quantized.q,
         .a_scale = quantized.scale,
-        .b = rhs_fnuz,
-        .b_scale = rhs_scale_fnuz,
+        .b = rhs_native,
+        .b_scale = rhs_scale_native,
         .m = m,
         .n = n,
         .k = k,
@@ -289,6 +382,7 @@ fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, 
                     .block_m = block_m,
                     .block_n = block_n,
                     .split_k = @intCast(split_k),
+                    .fp8_dtype = tri.from(prepared.a.dtype()),
                 },
                 .grid = .{ @intCast(grid_m * grid_n * split_k), 1, 1 },
                 .num_stages = 2,
@@ -308,6 +402,7 @@ fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, 
                 .k = @intCast(k),
                 .block_m = block_m,
                 .block_n = block_n,
+                .fp8_dtype = tri.from(prepared.a.dtype()),
             },
             .grid = .{ @intCast(grid_m * grid_n), 1, 1 },
             .num_stages = 2,
