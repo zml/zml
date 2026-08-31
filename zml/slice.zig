@@ -147,11 +147,12 @@ pub const Slice = struct {
     }
 
     pub fn items(slice: Slice, comptime T: type) []T {
-        stdx.debug.assertComptime(@bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
         return @ptrCast(@alignCast(slice.data()));
     }
 
     pub fn constItems(slice: Slice, comptime T: type) []const T {
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
         return @ptrCast(@alignCast(slice.constData()));
     }
 
@@ -256,7 +257,8 @@ pub const Slice = struct {
             // Special case input tensor is a scalar
             return switch (slice.dtype()) {
                 inline else => |dt| {
-                    const val: dt.toZigType() = slice.constItems(dt.toZigType())[0];
+                    const single_ptr: *const dt.toZigType() = @ptrCast(@alignCast(slice.bytes.ptr));
+                    const val = single_ptr.*;
                     return switch (comptime dt.class()) {
                         // Since we have custom floats, we need to explicitly convert to float32 ourselves.
                         .float => stdx.fmt.formatFloat(floats.floatCast(f32, val), options, writer),
@@ -495,6 +497,14 @@ test "slice pretty print rank 0" {
     const data: [1]i32 = .{0};
     const slice = Slice.init(.init(.{}, .i32), std.mem.asBytes(&data));
     const expected = "0";
+    try std.testing.expectFmt(expected, "{d}", .{slice});
+}
+
+test "slice pretty print bool" {
+    const data: [2]bool = .{ true, false };
+    const slice = Slice.init(.init(.{2}, .bool), std.mem.asBytes(&data));
+    const expected = "1,0";
+    try std.testing.expectEqualSlices(bool, &data, slice.constItems(bool));
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
 
