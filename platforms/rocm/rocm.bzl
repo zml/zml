@@ -9,10 +9,10 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 """
 
-_ROCM_VERSION = "7.14"
+_ROCM_VERSION = "10.0"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-20T15-30-00Z/pjrt-rocm_linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "6fd0515beb299550e298996f6919db09aec79859feee7362443bf2ebff900d0f"
+_PJRT_ROCM_URL = "file:///home/hugo/xla/pjrt-rocm_linux-amd64.tar.gz"
+_PJRT_ROCM_SHA256 = "e9ed81741f9b7ad9f9909f87444b8373f33527acebc48d6f646b1f2a6bf3e206"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
@@ -88,7 +88,7 @@ def _rocm_base_build_files(loaded_packages):
     return {
         _rocm_package_name("amdrocm-amdsmi"): "\n\n".join([
             packages.cc_library(name = "amdsmi", hdrs = ["include/amd_smi/amdsmi.h"], includes = ["include/amd_smi"]),
-            packages.filegroup(name = "libamd_smi", srcs = ["lib/libamd_smi.so.26"]),
+            packages.filegroup(name = "libamd_smi", srcs = ["lib/libamd_smi.so.27"]),
         ]),
         _rocm_package_name("amdrocm-base"): "\n\n".join([
             _rocm_dlopen_patchelf(name = "rocm-core", src = "lib/librocm-core.so.1"),

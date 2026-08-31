@@ -5,7 +5,7 @@ version: 1
 
 sources:
   - channel: stable main
-    url: https://repo.amd.com/rocm/packages-multi-arch/ubuntu2204
+    url: https://stable.repo.amd.com/rocm/core/packages/ubuntu2204
   - channel: jammy main
     url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
   - channel: jammy-security main
@@ -19,15 +19,15 @@ archs:
 packages:
   - "libatomic1"
   - "libdrm-common"
-  - "amdrocm-amdsmi7.14"
-  - "amdrocm-base7.14"
-  - "amdrocm-blas7.14"
-  - "amdrocm-blas-dev7.14"
-  - "amdrocm-dnn7.14"
-  - "amdrocm-fft7.14"
-  - "amdrocm-llvm7.14"
-  - "amdrocm-profiler-base7.14"
-  - "amdrocm-rccl7.14"
-  - "amdrocm-runtime-dev7.14"
-  - "amdrocm-solver7.14"
-  - "amdrocm-sparse7.14"
+  - "amdrocm-amdsmi10.0"
+  - "amdrocm-base10.0"
+  - "amdrocm-blas10.0"
+  - "amdrocm-blas-dev10.0"
+  - "amdrocm-dnn10.0"
+  - "amdrocm-fft10.0"
+  - "amdrocm-llvm10.0"
+  - "amdrocm-profiler-base10.0"
+  - "amdrocm-rccl10.0"
+  - "amdrocm-runtime-dev10.0"
+  - "amdrocm-solver10.0"
+  - "amdrocm-sparse10.0"

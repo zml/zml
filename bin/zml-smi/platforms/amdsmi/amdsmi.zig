@@ -1,15 +1,16 @@
 const std = @import("std");
+
 const c = @import("c");
-const stdx = @import("stdx");
+pub const Handle = c.amdsmi_processor_handle;
+pub const ProcInfo = c.amdsmi_proc_info_t;
+pub const name_buf_len = c.AMDSMI_MAX_STRING_LENGTH;
 const DynLib = @import("zml-smi/dynlib");
 const sandbox = @import("zml-smi/sandbox");
+const stdx = @import("stdx");
 
 const AmdSmi = @This();
 
 pub const Error = ReturnError || error{AmdSmiUnavailable};
-pub const Handle = c.amdsmi_processor_handle;
-pub const ProcInfo = c.amdsmi_proc_info_t;
-
 lib: Fns,
 gpu_handles: []c.amdsmi_processor_handle,
 
@@ -37,7 +38,7 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     const sandbox_path = sandbox.path(&path_buf) orelse return error.AmdSmiUnavailable;
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
+    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.27" });
 
     var dynlib: std.DynLib = .{ .inner = .{
         .handle = std.c.dlopen(path, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
@@ -86,8 +87,6 @@ pub fn handleByIndex(self: AmdSmi, device_id: u32) Error!Handle {
 pub fn deviceCount(self: AmdSmi) u32 {
     return @intCast(self.gpu_handles.len);
 }
-
-pub const name_buf_len = c.AMDSMI_MAX_STRING_LENGTH;
 
 pub fn name(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) Error![:0]const u8 {
     var info: c.amdsmi_asic_info_t = undefined;
