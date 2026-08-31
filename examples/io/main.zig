@@ -270,8 +270,23 @@ pub fn main(init: std.process.Init) !void {
                     },
                 );
             }
+            var uncapped_parallelism: usize = 0;
+            for (result.devices) |recommendation| uncapped_parallelism += recommendation.dma_parallelism;
+            for (result.global_candidates) |candidate| {
+                try stdout_writer.interface.print(
+                    "dma_bench_global_candidate global_parallelism={d} uncapped={} gib_s={d:.3} average_latency_ms={d:.3} min_device_retention={d:.4} normalized_fairness={d:.4}\n",
+                    .{
+                        candidate.parallelism,
+                        candidate.parallelism == uncapped_parallelism,
+                        candidate.bytes_per_second / zml.GiB,
+                        candidate.average_latency_ns / std.time.ns_per_ms,
+                        candidate.min_device_retention,
+                        candidate.normalized_fairness,
+                    },
+                );
+            }
             try stdout_writer.interface.print(
-                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} ",
+                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} ",
                 .{
                     result.global.searched,
                     result.global.isolated_bytes_per_second / zml.GiB,
@@ -280,19 +295,22 @@ pub fn main(init: std.process.Init) !void {
                     result.global.concurrent_average_latency_ns / std.time.ns_per_ms,
                     result.global.scaling_efficiency,
                     result.global.latency_ratio,
+                    result.global.concurrent_normalized_fairness,
                 },
             );
             if (result.global.parallelism) |limit| {
                 try stdout_writer.interface.print(
-                    "recommended_global_parallelism={d} recommended_gib_s={d:.3} recommended_latency_ms={d:.3}\n",
+                    "recommended_global_parallelism={d} recommended_gib_s={d:.3} recommended_latency_ms={d:.3} recommended_min_device_retention={d:.4} recommended_fairness={d:.4}\n",
                     .{
                         limit,
                         result.global.recommended_bytes_per_second.? / zml.GiB,
                         result.global.recommended_average_latency_ns.? / std.time.ns_per_ms,
+                        result.global.recommended_min_device_retention.?,
+                        result.global.recommended_normalized_fairness.?,
                     },
                 );
             } else {
-                try stdout_writer.interface.writeAll("recommended_global_parallelism=none recommended_gib_s=none recommended_latency_ms=none\n");
+                try stdout_writer.interface.writeAll("recommended_global_parallelism=none recommended_gib_s=none recommended_latency_ms=none recommended_min_device_retention=none recommended_fairness=none\n");
             }
             try stdout_writer.flush();
         },

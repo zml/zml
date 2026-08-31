@@ -17,6 +17,60 @@ This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
 
+## Fair global DMA benchmark follow-up (2026-08-31)
+
+The `dma-bench` global-cap prototype now uses benchmark-local fair admission;
+the loader and `LoadOpts` are unchanged. The old implementation put all device
+workers behind one ordinary condition-variable gate. At a four-transfer cap,
+arbitrary wakeups let one B70 receive 8.21 GiB/s while another received 24.63
+GiB/s in the same repeat, so aggregate throughput hid temporary device
+starvation. Isolated and nominally uncapped aggregate runs also crossed that
+gate even though no admission limit was needed.
+
+Capped runs now reserve grants per device under a weighted max-min scheduler.
+It balances active slots relative to each device's calibrated width, rotates
+ties, time-shares caps below the device count without starvation, and lends
+slots when a device has no waiter. Isolated and uncapped measurements bypass
+global admission entirely. Median aggregate results retain every device's
+metrics from the same repeat rather than combining independently selected
+medians.
+
+Global candidates report minimum per-device retention relative to the
+uncapped concurrent run and Jain fairness over each device's fraction of its
+isolated rate. Selection requires aggregate throughput within 2% of the
+measured peak, at least 95% retention on every device, and fairness of at least
+0.98. Candidate caps include values below the device count and balanced
+per-device multiples; a cap is still emitted only when it materially improves
+throughput or halves latency while staying inside the 2% throughput band.
+
+The exact four-B70 Qwen3.6-27B sharded command was repeated three times after
+the change. Every run selected the same 4 MiB/eight-event per-device tuple and
+recommended a fair global cap of four:
+
+| run | uncapped GiB/s | cap-4 GiB/s | cap-4 minimum retention | cap-4 fairness |
+|---:|---:|---:|---:|---:|
+| 1 | 79.921 | 79.606 | 0.9831 | 0.9997 |
+| 2 | 79.955 | 79.363 | 0.9783 | 0.9997 |
+| 3 | 79.994 | 79.706 | 0.9852 | 0.9995 |
+
+Cap four now gives each continuously backlogged B70 approximately one active
+transfer and 19.4--20.6 GiB/s instead of allowing the old 8--32 GiB/s
+per-device imbalance. Caps 8--24 remain near 80 GiB/s but only inflate event
+latency: representative cap-4, cap-8, and uncapped latencies were 0.152,
+0.303, and 1.225 ms. Removing the unnecessary gate from the uncapped path did
+not raise its approximately 80 GiB/s result, so the large gap from the roughly
+168--170 GiB/s sum of isolated rates is a real shared oneAPI/PJRT/host-path
+ceiling rather than global-gate lock contention.
+
+Validation passed:
+
+```text
+bazel test //zml:test --test_output=errors
+ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3 bazel run --config=release \
+  --@zml//platforms:oneapi=true //examples/io:playground -- \
+  dma-bench /var/models/Qwen/Qwen3.6-27B/ sharded
+```
+
 ## ROCm direct-loader addendum (2026-08-31)
 
 This is a new-host/new-backend investigation and must not be mixed with the
