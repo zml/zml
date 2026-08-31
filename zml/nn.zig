@@ -507,6 +507,10 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
 pub const TokenEmbedding = struct {
     weight: Tensor,
 
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
+        zml.Buffer.deinitAll(TokenEmbedding, self);
+    }
+
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
@@ -551,6 +555,10 @@ pub const LayerNorm = struct {
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
+    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
+        zml.Buffer.deinitAll(LayerNorm, self);
+    }
+
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
@@ -568,6 +576,35 @@ pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
     const variance = x.powByConst(2).mean(ax);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
     return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
+}
+
+pub const RmsNorm = struct {
+    weight: Tensor,
+    eps: f32 = 1e-6,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        zml.Buffer.deinitAll(RmsNorm, self);
+    }
+
+    pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+        const axis = self.weight.shape().tag(0);
+        return rmsNorm(x, axis, self.eps).mul(self.weight.convert(x.dtype()).broad(x.shape()));
+    }
+};
+
+/// HuggingFace `rotate_half`: `x * cos + rotate_half(x) * sin`.
+pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
+    const rotary_dim = cos.dim(-1);
+    const x_rot = x.slice1d(-1, .{ .start = 0, .end = rotary_dim });
+    const half = @divExact(rotary_dim, 2);
+    const x1 = x_rot.slice1d(-1, .{ .start = 0, .end = half });
+    const x2 = x_rot.slice1d(-1, .{ .start = half, .end = rotary_dim });
+    const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+    const rot_tag = x_rot.shape().tag(-1);
+    const y = x_rot.mul(cos.renameTag(-1, rot_tag).broad(x_rot.shape()))
+        .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
+    if (rotary_dim == x.dim(-1)) return y;
+    return Tensor.concatenate(&.{ y, x.slice1d(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
 }
 
 /// Center and scale by the variance.
