@@ -397,7 +397,6 @@ pub const fa2 = struct {
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
         const num_heads: i32 = @intCast(q_.dim(.h));
-        // FA2 varlen scratch last dim is a kernel workspace (128), not head_dim.
         const scratch = Metadata.init(.{ .seqlen = q.dim(.tot), .num_heads = q_.dim(.h) });
         const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
         const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());

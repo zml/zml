@@ -583,8 +583,7 @@ pub const RmsNorm = struct {
     }
 };
 
-/// Apply precomputed RoPE: `x * cos + rotate_half(x) * sin` (HuggingFace sequential layout).
-/// `cos`/`sin` last dim is the rotary width and may be smaller than `x`'s last dim.
+/// HuggingFace `rotate_half`: `x * cos + rotate_half(x) * sin`.
 pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const rotary_dim = cos.dim(-1);
     stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "applyRotary expects an even rotary dim, got {d}", .{rotary_dim});

@@ -194,8 +194,6 @@ pub const DenseOpts = struct {
     is_causal: bool = false,
 };
 
-/// Full-sequence attention (not decode / KV-cache).
-/// `.cuda_fa2` is FlashAttention-2; other backends use `zml.nn.sdpa`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
     switch (backend) {
         .cuda_fa2 => return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
