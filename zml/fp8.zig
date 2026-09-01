@@ -459,7 +459,7 @@ fn scaledDotReference(inputs: []const Tensor, output_shape: Shape) Tensor {
     );
 }
 
-fn xlaBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
+fn xlaBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
     const prepared = prepareBlockScaledDot(lhs, rhs_fn, rhs_scale_fn);
     stdx.debug.assert(@mod(prepared.n, 128) == 0, "XLA block-128 FP8 dot requires N divisible by 128, got {d}", .{prepared.n});
 
@@ -519,11 +519,7 @@ fn blockScaledDot(
         BlockDotContext{ .reduce_partials = reduce_partials },
         (struct {
             fn body(ctx: BlockDotContext, _: std.mem.Allocator, inputs: []const Tensor, local_output: Shape) Tensor {
-                const partial = switch (Compiler.current().platform.target) {
-                    .cuda => xlaBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output),
-                    .rocm => tritonBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output),
-                    else => unreachable,
-                };
+                const partial = tritonBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output);
                 return if (ctx.reduce_partials) ops.allReduce(partial, Tensor.add) else partial;
             }
         }).body,
@@ -531,7 +527,14 @@ fn blockScaledDot(
 }
 
 pub fn nativeBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
-    return blockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape);
+    return switch (Compiler.current().platform.target) {
+        // ScaledDot has a native Shardy rule. Keep it outside a manual
+        // computation so XLA partitions the value and scale operands together
+        // and only reduces a result whose contracting dimension is sharded.
+        .cuda => xlaBlockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape),
+        .rocm => blockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape),
+        else => unreachable,
+    };
 }
 
 /// Compatibility alias. CUDA now delegates the GEMM to XLA; ROCm still uses
