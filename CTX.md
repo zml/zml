@@ -1,5 +1,261 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+## Eager fixed DMA arena allocation experiment (2026-09-01)
+
+The working tree now allocates the complete host-pinned DMA workspace once,
+before calibration, using the largest feasible block candidate and the fixed
+per-device DMA width. With the defaults this is a 32 MiB maximum block and
+width eight. For each NUMA pool the arena size is therefore
+`devices_on_node * 8 * 32 MiB`, or 256 MiB per device. With eight devices this
+is 2 GiB total regardless of NUMA partitioning; a topology-unavailable system
+uses one shared arena. NUMA arenas are allocated concurrently. Calibration
+and the loader continue through the existing source/provider/block-pool
+interfaces; the pool itself has deliberately not been simplified yet.
+
+Each successful arena log now includes its mapping, touching, placement-check,
+and metadata-allocation time as `allocation_ms`. A second `DMA fixed arenas
+ready` log reports aggregate wall time across concurrently allocated NUMA
+arenas. This time is also the existing `source_registration_ms` report field.
+The diagnostic format is version 9. The ROCm runtime logs below were built
+immediately before the version-string bump and say version 8; their allocation
+behavior is identical to version 9.
+
+This makes the workspace and block-pool lifecycle substantially simpler. The
+workspace needs one allocation per NUMA node and no grow/replace/aggregate
+source path. `DmaBlockPool` no longer needs an allocation callback, slabs,
+reserves, remaining-growth accounting, retained-versus-newly-mapped arenas,
+provider refresh, or arena-tail-aware potential-growth calculations. It still
+needs a blocking free list, close/error wakeup, lease reference counting, and
+atomic NUMA-affinity assignment. In particular, replicated blocks may be
+eligible for several nodes while strict-local blocks in the same request have
+only one eligible node, so the augmenting-path assignment cannot safely be
+replaced by independent per-node queues without changing scheduling semantics.
+
+Fresh ROCm results confirmed the startup cost:
+
+| devices / topology | arenas | fixed mapped | allocation wall time |
+|---|---|---:|---:|
+| 1 / topology unavailable | one 256 MiB | 256 MiB | 185.4 ms |
+| 8 / topology unavailable | one 2 GiB | 2 GiB | 9,755.8 ms |
+| 8 / explicit nodes `0,0,0,0,1,1,1,1` | two 1 GiB | 2 GiB | 9,959.1 ms |
+
+The explicit-node arenas individually took 6,819.2 and 9,959.0 ms, so
+concurrent per-node allocation hid the faster node but did not reduce the
+critical path relative to one shared 2 GiB arena. The earlier selected-block
+eight-device run retained 1 GiB and registered it in 5,166.4 ms. Doubling the
+mapped bytes therefore added about 4.59 seconds on this run. A four-device B70
+selection at 8 MiB previously needed only 256 MiB for its device rings; this
+fixed-max design will instead register 1 GiB and needs oneAPI runtime
+confirmation. The oneAPI release build passes.
+
+All ROCm controls still selected 16 MiB / width eight / no global cap. The
+one-device full run took 2.854 seconds, including 185 ms registration and
+261 ms calibration. The eight-device shared-pool run took 15.958 seconds,
+including 9.756 seconds registration and a noisy 2.313-second confirmed
+calibration. The explicit two-NUMA run took 14.717 seconds, including 9.959
+seconds registration and 935 ms calibration. Logs are
+`/tmp/zml-dma-fixed-arena-{1gpu,8gpu}.log` and
+`/tmp/zml-dma-fixed-arena-8gpu-2numa.log`.
+
+Keep `max_mapped_bytes` only as a safety ceiling: validate that the derived
+`device_count * 8 * 32 MiB` workspace fits, rather than using the ceiling as a
+dynamic growth budget. The fixed distribution also removes today's ability to
+lend unused mapping budget from one NUMA node to another. Source-read width
+must therefore be clipped from each arena's actual selected-block capacity;
+this is conservative but matches the proposed per-NUMA ownership model.
+
+The example exposes `ZML_DMA_BENCH_MAX_MAPPED_MIB`, but it is one global safety
+ceiling, not a requested allocation per NUMA node. There is no per-NUMA byte
+environment variable. `ZML_DMA_BENCH_NUMA_NODES` controls only the device-to-
+node mapping. The actual eager arena sizes are derived from that mapping, the
+largest feasible `ZML_DMA_BENCH_BLOCK_MIB` candidate, and
+`ZML_DMA_BENCH_BLOCK_PARALLELISM`.
+
+## Fixed device width and faster default screens (2026-09-01)
+
+The working tree now implements the selected simplification. Per-device DMA
+parallelism is no longer detected: block screening and the loader use fixed
+width eight by default. `BenchTransferOptions.block_parallelism` and the CLI
+diagnostic override remain available for an explicit non-default value, but
+there is no width probe, plateau state, or width confirmation. The
+`parallelism` candidate list remains because multi-device calibration still
+uses it to construct global caps. Global-cap screening and paired confirmation
+are unchanged, preserving the measured oneAPI/B70 total-cap-four case.
+
+Local and global screen defaults are now 2 ms minimum and 32 completed
+transfers per participating device, down from 10 ms / 128. The stronger
+accuracy fallback remains 25 ms / 256 transfers and three alternating pairs.
+This is the previously measured low-complexity compromise: it selected
+16 MiB / eight events in all three full-grid MI300X controls, with about
+0.37 seconds median one-device calibration and a roughly 0.93-second
+confirmation tail. The diagnostic format is version 8.
+
+Post-change ROCm validation selected 16 MiB / eight events. The one-device run
+entered block confirmation and took 1.082 seconds of calibration, including
+0.990 seconds sampling across 21 windows; this is the known accuracy-tail path
+rather than the approximately 0.26-second unconfirmed path. The eight-device
+run emitted no global cap and took 0.956 seconds of calibration, including
+0.492 seconds sampling across 30 windows. Its pre-change accurate control used
+4.834 seconds of calibration, 3.958 seconds sampling, and 54 windows. Fixed
+width plus shorter screens therefore cut measured eight-device calibration by
+80.2% and sampling by 87.6%, while retaining the same 16 MiB / eight / no-cap
+result. Logs are `/tmp/zml-dma-v8-fixed8-default-{1gpu,8gpu}.log` (their
+pre-version-bump header still says version 7; behavior matches version 8).
+
+## DMA calibration speed/accuracy exploration (2026-09-01)
+
+This is a post-merge v7 exploration on the eight-MI300X ROCm host. It changes
+no detector code or defaults. The current release binary was rebuilt from
+`9f3b59f6`; fresh logs are under `/tmp/zml-dma-v7-*` and
+`/tmp/zml-dma-fast-{baseline,fast64,fast32,fast16,duration}-*.log`.
+
+The important distinction is between `calibration_ms` and process-visible
+`elapsed_ms`. Calibration excludes allocator warmup and DmaMapped source
+registration because the loader will need those resources. They still delay a
+short-lived process. On one MI300X they cost about 2.6--2.8 seconds; on eight
+MI300X devices they varied from 8.6 to 12.5 seconds. Faster sampling alone
+cannot remove that process-visible resource cost, although the adopted pools
+and allocations are reused by the load.
+
+### Shorter evidence with the unchanged state machine
+
+The one-device full candidate grid was repeated three times per aggressive
+setting. The accurate 10 ms / 128-transfer baseline was repeated twice in
+addition to the immediately preceding control. All runs selected 16 MiB / 8.
+
+| screen minimum / transfer target | calibration ms | sampling ms | windows | result |
+|---|---:|---:|---:|---|
+| 10 ms / 128 | 950--951 | 849--850 | 21 | 16 MiB / 8, 2/2 |
+| 5 ms / 64 | 568, 569, 1,914 | 462, 462, 1,791 | 21, 21, 33 | 16 MiB / 8, 3/3 |
+| 2 ms / 32 | 368, 375, 925 | 267, 272, 817 | 21, 21, 27 | 16 MiB / 8, 3/3 |
+| 1 ms / 16 | 290, 856, 1,493 | 180, 743, 1,378 | 21, 27, 33 | 16 MiB / 8, 3/3 |
+| 1 ms / duration only | 1,306--2,064 | 1,184--1,942 | 33--39 | 16 MiB / 8, 3/3 |
+
+Shorter screening is not monotonically faster. Noisy rounds activate the
+accuracy safeguard, whose six-window candidate/reference pairs still require
+25 ms and 256 transfers per device. A lucky 16-transfer run calibrates in
+290 ms, but two of three take 856--1,493 ms. Duration-only screening triggered
+confirmation in every run and was slower than the baseline. Of the existing
+knobs, 2 ms / 32 transfers is the best compromise observed: median calibration
+fell from about 951 ms to 375 ms with the same tuple, but its confirmation tail
+still reached 925 ms.
+
+The accurate eight-device control selected 16 MiB / 8 and no cap in 4,834 ms
+of calibration, including 3,958 ms sampling across 54 windows. A 1 ms /
+16-transfer run made the same selection in 2,746 ms calibration and 2,296 ms
+sampling across 48 windows. Its total elapsed time was nevertheless higher
+(15.26 versus 14.20 seconds) because allocator and registration timing varied
+by several seconds. The aggressive global screen also provisionally selected
+a cap and needed paired confirmation before correctly returning to no cap.
+
+### Candidate/state-machine reductions
+
+The following one-device profiles used 1 ms / 16-transfer screens:
+
+| candidates | calibration ms | sampling ms | windows | selection stability |
+|---|---:|---:|---:|---|
+| blocks 8/16/32, widths 8/12/16 | 244, 810, 817 | 155, 717, 716 | 15, 21, 21 | 16 MiB / 8, 3/3 |
+| blocks 8/16, widths 8/12 | 840--1,125 | 770--1,056 | 21 | 16 MiB / 8 twice; **8 MiB / 8 once** |
+| fixed block 16, width 8 | 65--78 | 28--29 | 3 | fixed 16 MiB / 8, 3/3 |
+
+The two-point search is a bad simplification: every run entered both block and
+width confirmation and one of three still chose the wrong block. A static
+known-device tuple is extremely fast, but it is verification rather than
+detection. On eight devices, fixed 16 MiB / 8 plus the reduced two-candidate
+global screen sampled in 134 ms and calibrated in 523 ms across nine windows;
+it correctly emitted no cap. End-to-end was still 9.17 seconds, of which
+8.65 seconds was allocator warmup plus source registration.
+
+A more portable fast profile kept the complete five-block grid and three
+rotated rounds, fixed width at eight, and used 2 ms / 32 transfers. Two of
+three runs sampled in 178--181 ms and calibrated in 263--273 ms while selecting
+16 MiB / 8. One run's round disagreement invoked block confirmation and rose
+to 993 ms sampling / 1,090 ms calibration. Raising block tolerance from 8% to
+10% produced essentially the same 2/3 fast, 1/3 confirmed distribution. The
+tail is caused by round disagreement, not only proximity to the tolerance
+boundary.
+
+### Accuracy and loader-performance cost
+
+The block is the consequential setting and should not be reduced to an
+8-versus-16 guess. Existing real-load controls measured 8 MiB at 23.84 GiB/s,
+16 MiB at 24.90 GiB/s, and 32 MiB at 25.43 GiB/s on one MI300X. More
+importantly, the replicated eight-MI300X Gemma load took 10.694 seconds at
+8 MiB versus 7.829 seconds at 16 MiB: the observed wrong two-point choice
+would make that load 36.6% longer. Conversely, blindly using the MI300X
+16 MiB profile on the B70 host would enlarge local requests from its measured
+8 MiB optimum; the post-merge B70 grid measured about 27.05 GiB/s at 8 MiB
+versus 24.21 GiB/s at 16 MiB, an approximately 10.5% goodput loss.
+
+Width eight has remained the selected DMA width in the current MI300X runs,
+and larger widths mostly add mapped memory and latency. Global-cap search has
+never emitted a cap on these MI300X measurements. The known B70 cap-four case
+held aggregate throughput nearly unchanged (about 79.4--79.7 versus
+79.9--80.0 GiB/s) while reducing synthetic event latency from about 1.225 ms
+to 0.152 ms. Thus skipping width and cap detection has little demonstrated
+load-throughput cost, but loses adaptation to an unknown device and the B70
+latency/memory optimization. An inaccurate global screen is also riskier than
+emitting no cap; uncapped remains the safe result.
+
+### Recommended fast designs
+
+1. For the smallest low-complexity change, use 2 ms / 32 transfers. Expect
+   roughly 0.37 seconds median one-device calibration instead of 0.95 seconds,
+   with the current confirmation tail still near 0.9 seconds.
+2. For a deterministic sub-300 ms target, retain the complete block grid and
+   three rounds, fix DMA width at eight, default global cap to null, and either
+   omit confirmation or reduce confirmation to the same 32-transfer evidence.
+   The measured no-confirmation local work is about 0.18 seconds sampling and
+   0.26 seconds calibration. The cost is accepting a noisy median on the rare
+   round-disagreement path; keeping a short paired confirmation is preferable
+   to removing it entirely.
+3. For the fastest startup, cache a validated profile keyed by backend,
+   device kind, device count/topology, PJRT/driver identity, and detector
+   version. A cache hit can skip sampling entirely; the fixed-tuple control
+   shows that even three verification windows cost only about 28 ms sampling.
+   Cache invalidation and first-run behavior are the complexity cost. Known
+   profiles must not be shared between MI300X and B70 because their real-load
+   block optima differ materially.
+4. Resource startup is now the larger wall-clock problem. Even zero sampling
+   would leave roughly 2.8 seconds on one MI300X and 8.6--12.5 seconds on eight
+   in these standalone runs. To improve user-visible startup, allocator warmup
+   and DmaMapped registration must overlap other model setup, persist across
+   loads, or be deferred into the real load; detector-window tuning cannot
+   recover that time.
+
+### Detectable settings
+
+The v7 default block result is one of 2, 4, 8, 16, or 32 MiB. The default
+per-device width result is one of 8, 12, 16, 24, or 32: widths 1, 2, 4, and 6
+are present in the configured list only to construct global-cap candidates,
+because `block_parallelism=8` is both the block-screen width and the minimum
+loader width. Width probing stops after two candidates leave the selected
+near-peak width unchanged, so the larger configured widths are not necessarily
+measured on every run.
+
+For `N` devices, global caps are drawn from `N * {1, 2, 4, 6, 8, 12, 16, 24,
+32}`, clipped at `N * selected_device_width`, deduplicated, and augmented with
+the uncapped total. The output can instead be null, meaning no cap; this is the
+normal MI300X result. For example, an eight-device width-eight calibration
+tests total caps 8, 16, 32, 48, and 64, then may return no cap.
+
+The CLI can replace both lists through `ZML_DMA_BENCH_BLOCK_MIB` and
+`ZML_DMA_BENCH_PARALLELISM`. Values are therefore not fundamentally limited to
+the defaults, but widths must be 1--32, the block-screen width must be 1--32,
+and each block/width tuple must fit the 2 GiB mapped budget (also configurable).
+The proposed fast design deliberately narrows the output space: it retains all
+five default block values, fixes per-device width at eight, and only emits no
+global cap.
+
+Recorded backend results must distinguish a measured recommendation from a
+default. The B70 oneAPI measurements selected eight DMA events per device; the
+four-device fair global benchmark additionally selected a total cap of four.
+Local source-read width is a separate control and ultimately used twelve on
+that host. CUDA currently has the same eight-event platform default, but no
+CUDA detector/runtime sweep is recorded in this workspace: only the CUDA
+release build and an externally reported RTX 5090 throughput were available.
+Therefore eight for CUDA is a default, not a validated detected result.
+
 ## Post-merge IO loading audit (2026-09-01)
 
 This is the active handoff after merge commit `741fa766` (`merge adaptive
