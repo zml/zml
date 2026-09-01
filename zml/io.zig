@@ -1548,12 +1548,13 @@ const VectoredLoadMetrics = struct {
         epoch: u64,
         admission_id: u64,
         bytes: usize,
+        full_request_size: usize,
     ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch.load(.acquire) or
             admission_id < self.probe_admission_start) return;
-        if (bytes == load_read_request_size)
+        if (bytes == full_request_size)
             _ = self.probe_full_read_operations.fetchAdd(1, .monotonic);
         _ = self.probe_read_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
@@ -1957,6 +1958,7 @@ const VectoredLoadPipeline = struct {
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     block_size: usize,
+    source_request_size: usize,
     device_pool_indices: []const usize,
     numa_explicit: bool,
     metrics: *VectoredLoadMetrics,
@@ -1987,6 +1989,7 @@ const VectoredLoadPipeline = struct {
         read_gate: *AdaptiveRequestGate,
         request_gate: *AdaptiveRequestGate,
         block_size: usize,
+        source_request_size: usize,
         device_pool_indices: []const usize,
         numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
@@ -2012,6 +2015,7 @@ const VectoredLoadPipeline = struct {
             .read_gate = read_gate,
             .request_gate = request_gate,
             .block_size = block_size,
+            .source_request_size = source_request_size,
             .device_pool_indices = device_pool_indices,
             .numa_explicit = numa_explicit,
             .metrics = metrics,
@@ -2491,6 +2495,7 @@ const VectoredReadRequest = struct {
             request.read_epoch,
             request.admission_id,
             request_len,
+            pipeline.source_request_size,
         );
         const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
         const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
@@ -2546,6 +2551,7 @@ const FairVectoredReadScheduler = struct {
         tensor_index: usize,
         source_offset: usize,
         len: usize,
+        predecessor: ?usize,
     };
 
     const TestJob = struct {
@@ -2564,6 +2570,7 @@ const FairVectoredReadScheduler = struct {
 
     allocator: std.mem.Allocator,
     device_count: usize,
+    request_size: usize,
     jobs: std.ArrayListUnmanaged(StoredJob) = .empty,
     physical_bytes: std.ArrayListUnmanaged(usize) = .empty,
     queues: []std.ArrayListUnmanaged(usize),
@@ -2583,6 +2590,7 @@ const FairVectoredReadScheduler = struct {
         tensors: []const *const Tensor,
         shardings: []const Sharding,
         block_size: usize,
+        request_size: usize,
     ) !FairVectoredReadScheduler {
         const device_count = platform.devices.len;
         if (device_count == 0) return error.DmaDeviceMismatch;
@@ -2602,6 +2610,7 @@ const FairVectoredReadScheduler = struct {
         var self: FairVectoredReadScheduler = .{
             .allocator = allocator,
             .device_count = device_count,
+            .request_size = request_size,
             .queues = queues,
             .cursors = cursors,
             .claimed = &.{},
@@ -2648,6 +2657,9 @@ const FairVectoredReadScheduler = struct {
         const offsets = try allocator.alloc(usize, tensors.len);
         defer allocator.free(offsets);
         @memset(offsets, 0);
+        const previous_jobs = try allocator.alloc(?usize, tensors.len);
+        defer allocator.free(previous_jobs);
+        @memset(previous_jobs, null);
         const next_active = try allocator.alloc(usize, tensors.len);
         defer allocator.free(next_active);
         // Retain unfinished tensors in a ring so job construction preserves
@@ -2669,7 +2681,7 @@ const FairVectoredReadScheduler = struct {
             const tensor_index = current_tensor;
             const tensor_size = tensor_plans[tensor_index].total;
             const source_offset = offsets[tensor_index];
-            const len = @min(load_read_request_size, tensor_size - source_offset);
+            const len = @min(request_size, tensor_size - source_offset);
             offsets[tensor_index] += len;
 
             const following_tensor = next_active[tensor_index];
@@ -2689,7 +2701,9 @@ const FairVectoredReadScheduler = struct {
                 .tensor_index = tensor_index,
                 .source_offset = source_offset,
                 .len = len,
+                .predecessor = previous_jobs[tensor_index],
             });
+            previous_jobs[tensor_index] = job_index;
             try self.physical_bytes.appendNTimes(allocator, 0, device_count);
             const row = self.physical_bytes.items[job_index * device_count ..][0..device_count];
             {
@@ -2720,7 +2734,7 @@ const FairVectoredReadScheduler = struct {
             }
             self.remaining_bytes +|= @intCast(len);
             self.remaining_jobs += 1;
-            if (len == load_read_request_size) self.remaining_full_jobs += 1;
+            if (len == request_size) self.remaining_full_jobs += 1;
         }
         self.claimed = try allocator.alloc(bool, self.jobs.items.len);
         @memset(self.claimed, false);
@@ -2748,6 +2762,7 @@ const FairVectoredReadScheduler = struct {
         var self: FairVectoredReadScheduler = .{
             .allocator = allocator,
             .device_count = device_count,
+            .request_size = load_read_request_size,
             .queues = queues,
             .cursors = cursors,
             .claimed = &.{},
@@ -2757,6 +2772,9 @@ const FairVectoredReadScheduler = struct {
             .remaining_full_jobs = 0,
         };
         errdefer self.deinit();
+        var previous_jobs = try allocator.alloc(?usize, test_jobs.len);
+        defer allocator.free(previous_jobs);
+        @memset(previous_jobs, null);
         for (test_jobs, 0..) |job, job_index| {
             if (job.physical_bytes.len != device_count or job.block_count == 0)
                 return error.InvalidTestJob;
@@ -2764,7 +2782,13 @@ const FairVectoredReadScheduler = struct {
                 .tensor_index = job.tensor_index,
                 .source_offset = 0,
                 .len = job.len,
+                .predecessor = if (job.tensor_index < previous_jobs.len)
+                    previous_jobs[job.tensor_index]
+                else
+                    null,
             });
+            if (job.tensor_index < previous_jobs.len)
+                previous_jobs[job.tensor_index] = job_index;
             try self.physical_bytes.appendSlice(allocator, job.physical_bytes);
             var destinations: usize = 0;
             for (job.physical_bytes, self.queues) |bytes, *queue| {
@@ -2779,7 +2803,7 @@ const FairVectoredReadScheduler = struct {
             );
             self.remaining_bytes +|= @intCast(job.len);
             self.remaining_jobs += 1;
-            if (job.len == load_read_request_size) self.remaining_full_jobs += 1;
+            if (job.len == self.request_size) self.remaining_full_jobs += 1;
         }
         self.claimed = try allocator.alloc(bool, test_jobs.len);
         @memset(self.claimed, false);
@@ -2803,6 +2827,7 @@ const FairVectoredReadScheduler = struct {
         if (self.remaining_jobs == 0) return null;
 
         var selected_device: ?usize = null;
+        var selected_job: ?usize = null;
         for (0..self.device_count) |offset| {
             const device_index = (self.next_device + offset) % self.device_count;
             const queue = &self.queues[device_index];
@@ -2811,22 +2836,31 @@ const FairVectoredReadScheduler = struct {
             {
                 self.cursors[device_index] += 1;
             }
-            if (self.cursors[device_index] == queue.items.len) continue;
+            var candidate: ?usize = null;
+            for (queue.items[self.cursors[device_index]..]) |job_index| {
+                if (self.claimed[job_index]) continue;
+                const predecessor = self.jobs.items[job_index].predecessor;
+                if (predecessor == null or self.claimed[predecessor.?]) {
+                    candidate = job_index;
+                    break;
+                }
+            }
+            if (candidate == null) continue;
             if (selected_device == null or
                 self.scheduled_physical_bytes[device_index] <
                     self.scheduled_physical_bytes[selected_device.?])
             {
                 selected_device = device_index;
+                selected_job = candidate;
             }
         }
         const device_index = selected_device orelse unreachable;
-        const job_index = self.queues[device_index].items[self.cursors[device_index]];
-        self.cursors[device_index] += 1;
+        const job_index = selected_job.?;
         std.debug.assert(!self.claimed[job_index]);
         self.claimed[job_index] = true;
         self.remaining_jobs -= 1;
         const stored = self.jobs.items[job_index];
-        if (stored.len == load_read_request_size) self.remaining_full_jobs -= 1;
+        if (stored.len == self.request_size) self.remaining_full_jobs -= 1;
         self.remaining_bytes -= stored.len;
         const row = self.physical_bytes.items[job_index * self.device_count ..][0..self.device_count];
         for (row, self.scheduled_physical_bytes) |bytes, *scheduled| {
@@ -2870,6 +2904,20 @@ test "fair read scheduler rotates sharded devices by scheduled bytes" {
     try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
     try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
     try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.tensor_index);
+}
+
+test "fair read scheduler preserves per-tensor request order" {
+    const jobs = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 1, .physical_bytes = &.{ 1, 0 } },
+        .{ .tensor_index = 0, .len = 2, .physical_bytes = &.{ 0, 2 } },
+        .{ .tensor_index = 1, .len = 3, .physical_bytes = &.{ 0, 3 } },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
+    defer scheduler.deinit();
+    const io = std.testing.io;
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.len);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.len);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.len);
 }
 
 test "fair read scheduler claims a replicated job once and credits every replica" {
@@ -3073,7 +3121,7 @@ const SourceReadWidthController = struct {
                 .phase = .settled,
             };
         }
-        const initial_index = @min(widthIndexAtMost(12), maximum_index);
+        const initial_index = @min(widthIndexAtMost(configured.initial()), maximum_index);
         return .{
             .adaptive = true,
             .maximum_index = maximum_index,
@@ -3406,6 +3454,12 @@ test "source read controller clips infeasible adaptive and fixed widths" {
     const fixed = SourceReadWidthController.init(.{ .fixed = 20 }, 7);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
     try std.testing.expect(fixed.currentDecision().settled);
+
+    const configured_initial = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 48, .maximum = 128 } },
+        128,
+    );
+    try std.testing.expectEqual(@as(usize, 48), configured_initial.width());
 }
 
 test "source read controller isolates generation and requires exercised clean evidence" {
@@ -3615,6 +3669,7 @@ const SourceReadRuntime = struct {
     pinned_feasible_width: usize,
     read_stats_sources: []VectoredReadStatsSource,
     source_bootstrap_enabled: bool,
+    source_request_size: usize,
     source_response_observed: bool = false,
     probe_transition_pending: bool = false,
     probe_measuring: bool = false,
@@ -3627,7 +3682,7 @@ const SourceReadRuntime = struct {
 
     fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
         var result: SourceTelemetry = .{};
-        const timing_index = readTimingBucketIndex(load_read_request_size).?;
+        const timing_index = readTimingBucketIndex(self.source_request_size).?;
         for (self.read_stats_sources) |*source| {
             const current = source.provider.snapshot();
             const delta = current.sub(source.previous);
@@ -3878,6 +3933,20 @@ fn shouldBootstrapSource(
         outstanding_requests >= read_limit and has_unscheduled;
 }
 
+fn effectiveSourceReadParallelism(configured: Parallelism, high_latency: bool) Parallelism {
+    if (high_latency or !configured.isAdaptive()) return configured;
+    // Local loads are too short for multi-window tuning to repay its cost, and
+    // the profiled 8 MiB local path reaches its stable one-device plateau at 12
+    // concurrent reads. Preserve a caller's higher initial floor and cap.
+    return .{ .fixed = @min(configured.maximum(), @max(configured.initial(), 12)) };
+}
+
+fn effectiveSourceRequestSize(source_minimum: usize, dma_block_size: usize) !usize {
+    const selected = @max(local_load_read_request_size, @max(source_minimum, dma_block_size));
+    if (selected > load_read_request_size) return error.InvalidDmaLoadConfig;
+    return selected;
+}
+
 fn effectiveDmaGlobalCap(
     calibrated: ?usize,
     used_device_count: usize,
@@ -4019,13 +4088,6 @@ fn loadVectored(
             const index = source_slots.items.len;
             const profile = VFS.readProfileForPath(io, descriptor.file_uri);
             const minimum = if (profile) |p| p.hints.minimum_request_size else 2 * 1024 * 1024;
-            if (load_read_request_size < minimum) {
-                load_log.warn("fixed source request size {Bi:.2} is below the {Bi:.2} minimum advertised by {s}", .{
-                    load_read_request_size,
-                    minimum,
-                    if (profile) |p| p.scheme else "local/default",
-                });
-            }
             try source_slots.append(allocator, .{
                 .uri = descriptor.file_uri,
                 .profile_id = if (profile) |p| p.id else 0,
@@ -4037,7 +4099,7 @@ fn loadVectored(
             load_log.debug("source profile: name={s}, minimum_request_size={Bi:.2}, mode={s}, uri={s}", .{
                 source_slots.items[index].profile_name,
                 minimum,
-                "fixed",
+                "profiled-fixed",
                 descriptor.file_uri,
             });
             break :blk index;
@@ -4061,6 +4123,12 @@ fn loadVectored(
             source_minimum,
         });
     }
+    const source_request_size = try effectiveSourceRequestSize(source_minimum, dma_config.block_size);
+    load_log.debug("source request size selected: request_size={Bi:.2}, source_minimum={Bi:.2}, dma_block_size={Bi:.2}", .{
+        source_request_size,
+        source_minimum,
+        dma_config.block_size,
+    });
     var read_stats_sources: std.ArrayListUnmanaged(VectoredReadStatsSource) = .empty;
     defer read_stats_sources.deinit(allocator);
     for (source_slots.items) |slot| {
@@ -4163,6 +4231,7 @@ fn loadVectored(
         tensors,
         opts.shardings,
         dma_config.block_size,
+        source_request_size,
     );
     defer scheduler.deinit();
     const maximum_blocks_per_job = scheduler.maximumBlocksPerJob();
@@ -4198,8 +4267,12 @@ fn loadVectored(
     });
 
     var metrics: VectoredLoadMetrics = .{};
-    const controller = SourceReadWidthController.init(
+    const source_read_parallelism = effectiveSourceReadParallelism(
         opts.read_parallelism,
+        high_latency_source,
+    );
+    const controller = SourceReadWidthController.init(
+        source_read_parallelism,
         effective_pinned_feasible_width,
     );
     const initial_gate_limits: PinnedGateLimits = .init(
@@ -4219,6 +4292,7 @@ fn loadVectored(
         &read_gate,
         &request_gate,
         dma_config.block_size,
+        source_request_size,
         dma_resources.workspace.device_pool_indices,
         strict_affinity,
         &metrics,
@@ -4240,6 +4314,7 @@ fn loadVectored(
         .pinned_feasible_width = effective_pinned_feasible_width,
         .read_stats_sources = read_stats_sources.items,
         .source_bootstrap_enabled = high_latency_source,
+        .source_request_size = source_request_size,
     };
     var controller_group: std.Io.Group = .init;
     try controller_group.concurrent(io, SourceReadRuntime.run, .{ &controller_runtime, io });
@@ -4247,7 +4322,7 @@ fn loadVectored(
     const worker_count = if (scheduler.snapshot(io).remaining_jobs == 0)
         0
     else
-        opts.read_parallelism.maximum();
+        source_read_parallelism.maximum();
     for (0..worker_count) |worker_index| {
         worker_group.concurrent(io, struct {
             fn run(
@@ -4430,7 +4505,7 @@ fn loadVectored(
         read_operations,
         metrics.request_high_water.load(.acquire),
         controller_runtime.controller.width(),
-        load_read_request_size,
+        source_request_size,
         effective_pinned_feasible_width,
         average_read,
         average_read_ms,
@@ -6111,6 +6186,7 @@ fn finishDmaBenchmarkReport(
 pub const max_load_read_parallelism: usize = 128;
 pub const max_load_dma_parallelism: usize = 32;
 pub const load_read_request_size: usize = 32 * 1024 * 1024;
+pub const local_load_read_request_size: usize = 8 * 1024 * 1024;
 
 pub const Parallelism = union(enum) {
     adaptive: Adaptive,
@@ -7411,6 +7487,8 @@ pub fn benchTransfer(
     platform: *Platform,
     opts: BenchTransferOptions,
 ) !void {
+    if (platform.target == .cpu) return;
+
     try beginPlatformDmaOperation(platform, dma_platform_calibrating);
     defer endPlatformDmaOperation(platform, dma_platform_calibrating);
 
@@ -7955,7 +8033,7 @@ pub fn loadInto(
         .global_max_in_flight = null,
         .max_mapped_bytes = 0,
     };
-    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, dma_parallelism_per_device={d}, global_dma_parallelism={?d}, read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_mapped_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, dma_parallelism_per_device={d}, global_dma_parallelism={?d}, max_read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_mapped_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         direct,
         tensor_count,
@@ -8012,6 +8090,49 @@ test "source bootstrap requires a high-latency source with no observed response"
     try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, true));
 }
 
+test "local source parallelism uses the measured fixed-width plateau" {
+    const automatic = effectiveSourceReadParallelism(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        false,
+    );
+    try std.testing.expect(!automatic.isAdaptive());
+    try std.testing.expectEqual(@as(usize, 12), automatic.initial());
+
+    const capped = effectiveSourceReadParallelism(
+        .{ .adaptive = .{ .initial = 4, .maximum = 8 } },
+        false,
+    );
+    try std.testing.expectEqual(@as(usize, 8), capped.initial());
+
+    const remote = effectiveSourceReadParallelism(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        true,
+    );
+    try std.testing.expect(remote.isAdaptive());
+
+    const explicit = effectiveSourceReadParallelism(.{ .fixed = 7 }, false);
+    try std.testing.expectEqual(@as(usize, 7), explicit.initial());
+}
+
+test "source request size follows backend minimum and DMA block" {
+    try std.testing.expectEqual(
+        local_load_read_request_size,
+        try effectiveSourceRequestSize(2 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16 * 1024 * 1024),
+        try effectiveSourceRequestSize(16 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        load_read_request_size,
+        try effectiveSourceRequestSize(32 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+    try std.testing.expectError(
+        error.InvalidDmaLoadConfig,
+        effectiveSourceRequestSize(64 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+}
+
 test "probe source capacity counts active reads rather than retained requests" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
@@ -8035,9 +8156,9 @@ test "source probe excludes pre-boundary admissions" {
     metrics.beginRead(io, 6, 40);
     metrics.prepareProbe(io, 7, 41);
     metrics.beginRead(io, 7, 40);
-    metrics.recordProbeRead(io, 7, 40, load_read_request_size);
+    metrics.recordProbeRead(io, 7, 40, load_read_request_size, load_read_request_size);
     metrics.beginRead(io, 7, 41);
-    metrics.recordProbeRead(io, 7, 41, load_read_request_size);
+    metrics.recordProbeRead(io, 7, 41, load_read_request_size, load_read_request_size);
     const admitted = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 3), admitted.active_reads);
     try std.testing.expect(admitted.probe_first_read_ns != 0);
@@ -8432,6 +8553,7 @@ test "late vectored callback failure drains and signals completion" {
         .read_gate = undefined,
         .request_gate = undefined,
         .block_size = 1,
+        .source_request_size = 1,
         .device_pool_indices = &.{0},
         .numa_explicit = false,
         .metrics = undefined,

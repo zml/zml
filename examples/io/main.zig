@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 2048),
                 .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
             });
-            const settings = (try platform.transferSettings()).?;
+            const settings = (try platform.transferSettings()) orelse return;
             try stdout_writer.interface.print(
                 "dma_settings calibrated={} block_bytes={d} parallelism={d} global_parallelism={?d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
                 .{
@@ -217,6 +217,8 @@ pub fn main(init: std.process.Init) !void {
 
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
+
+            try platform.benchTransfer(allocator, io, .{});
 
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();

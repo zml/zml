@@ -6,8 +6,8 @@ latency_ms=${LATENCY_MS:-1000}
 speed_mib=${SPEED_MIB:-100}
 aws_endpoint=http://127.0.0.1:7878
 java_bin=${JAVA_BIN:-java}
-s3proxy_jar=${S3PROXY_JAR:?Set S3PROXY_JAR to the s3proxy jar}
-s3proxy_data_dir=${S3PROXY_DATA_DIR:?Set S3PROXY_DATA_DIR to the filesystem backing directory}
+s3proxy_jar=${S3PROXY_JAR:-/home/brabier/s3proxy/s3proxy}
+s3proxy_data_dir=${S3PROXY_DATA_DIR:-/home/brabier/s3proxy/data}
 model_uri=${ZML_BENCH_MODEL_URI:-s3://lfm}
 
 if [[ ! "${latency_ms}" =~ ^[0-9]+$ ]] || [[ ! "${speed_mib}" =~ ^[0-9]+$ ]]; then

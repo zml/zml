@@ -1,5 +1,176 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+## Post-merge IO loading audit (2026-09-01)
+
+This is the active handoff after merge commit `741fa766` (`merge adaptive
+control`). The audit used the four-B70 oneAPI host and the warm 14.96 GiB
+`/var/models/meta-llama/Llama-3.1-8B-Instruct` fixture. S3 tests used the local
+`/home/brabier/s3proxy/s3proxy` fixture through `bench_s3.sh`. The existing
+user-owned `perf.data` files and prior `/tmp` recordings were not modified.
+No XLA build was performed.
+
+The core outcome is that the merge had one correctness regression and two
+important performance/control regressions. The working tree now contains the
+validated fixes in `zml/io.zig`, in addition to the pre-existing post-merge
+CPU/example/script edits in `README.md`, `examples/io/main.zig`, and
+`bench_s3.sh`.
+
+### Correctness regression: multi-device sharded deadlock
+
+The destination-debt scheduler could claim a later request of a tensor before
+its predecessor. If that later request contained the final destination chunk,
+`VectoredLoadPipeline.transferReady` correctly held it until the preceding
+destination bytes were submitted. Twelve such tails could fill the request
+lifecycle gate while their predecessors remained unscheduled. The result was
+a deterministic deadlock with no DMA submissions. A two-device diagnostic
+showed `ready_entries` rising from 1 to 12 while `active_events` remained zero;
+four-device loads exceeded 110 seconds until interrupted.
+
+The scheduler now records each job's per-tensor predecessor and only considers
+a job eligible after its predecessor has been claimed. It retains cross-tensor
+and cross-device physical-byte fairness. A focused test covers a later job on a
+different device, and `//zml:test` passes. Runtime confirmation:
+
+| devices / placement | request | width | result |
+|---|---:|---:|---:|
+| 2 B70, sharded | 32 MiB | 12 | 0.765 s, 19.51 GiB/s |
+| 4 B70, sharded | 32 MiB | 12 | 0.763 s, 19.54 GiB/s |
+| 4 B70, sharded, final policy | 8 MiB | 12 | 0.640 s, 23.36 GiB/s |
+| 4 B70, replicated, final policy | 8 MiB | 12 | 1.147 s, 59.83 GiB committed (about 52.2 GiB/s physical) |
+
+Pre-growing the initial DmaMapped wave and forcing the real loader to ignore
+the calibrated global DMA cap were rejected diagnostics: neither fixed the
+deadlock. Both diagnostics were fully removed.
+
+### Fixed request-size regression and selected policy
+
+The merged loader used one compile-time 32 MiB request for local, S3, HTTP,
+GCS, and HF. Warm one-B70 local screening showed that this is substantially
+slower than smaller reads. Each cell below is two runs at fixed read width;
+the width-12 values are the clearest request-size comparison:
+
+| local request | width | two logical goodputs (MiB/s) | pinned high-water |
+|---:|---:|---:|---:|
+| 8 MiB | 12 | 26,829.86, 27,278.13 | 96 MiB |
+| 16 MiB | 12 | 24,238.54, 24,188.83 | 192 MiB |
+| 32 MiB | 12 | 21,441.13, 21,226.06 | 384 MiB |
+
+At 32 MiB, widths 12, 16, 24, 32, 48, and 64 produced approximately 21.33,
+20.69, 18.90, 17.33, 15.05, and 13.16 GiB/s. The uncommitted post-merge local
+fixed-width experiment had chosen 16, but width 12 is repeatably about 3%
+faster and uses 25% less pinned memory. At 8 MiB, widths 12 and 16 produced
+about 27.05 and 25.68 GiB/s. Local automatic loads therefore use fixed width
+12; explicit fixed controls still win.
+
+One global 8 MiB request would regress remote sources. On S3Proxy at 10 ms
+latency and 1000 MiB/s per-request speed, the fixed-width grids were:
+
+| request | width | logical goodput (MiB/s) | pinned high-water |
+|---:|---:|---:|---:|
+| 32 MiB | 32 / 48 / 64 | 5,871.91 / 7,757.03 / 9,331.78 | 1.25 / 1.75 / 2.00 GiB |
+| 16 MiB | 32 / 64 / 96 / 128 | 5,813.39 / 9,897.15 / 11,514.82 / 11,624.34 | 560 MiB / 1.13 / 1.63 / 2.00 GiB |
+
+The selected fixed request policy is source-profile aware: 8 MiB for local,
+16 MiB for the S3/HTTP/GCS minimum, and 32 MiB for the HF minimum, always at
+least the calibrated DMA block. Mixed sources use the largest minimum. The
+maximum supported request remains 32 MiB. The scheduler, source timing bucket,
+probe accounting, diagnostics, and final logs now all use the selected runtime
+size. Final one-B70 local automatic validation selected 8 MiB / 12 reads and
+loaded at 26.10 GiB/s in 0.573 seconds with 96 MiB pinned.
+
+### Read-parallelism convergence
+
+`SourceReadWidthController.init` ignored `Parallelism.adaptive.initial` and
+always started at width 12. This made
+`ZML_LOAD_READ_INITIAL_PARALLELISM` ineffective. The controller now starts at
+the configured ladder width, clipped by the configured maximum and pinned
+feasibility. A test covers initial width 48. Default behavior remains 12.
+
+The simplified adaptive controller is still expensive on finite S3Proxy
+loads. With the final 16 MiB request at 10 ms / 1000 MiB/s, default adaptive
+took 2.420 seconds (6,330 MiB/s), peaked at source width 64 plus eight retained
+lifecycles, and settled at width 48. Fixed width 96 took 1.321 seconds
+(11,590 MiB/s). Starting adaptive at 128 is now honored and finished at 128,
+but still took 1.920 seconds versus the earlier fixed-128 1.318 seconds because
+the scored generation introduces drain/refill overhead.
+
+The proxy's default 1000 ms / 100 MiB/s profile exaggerates this effect:
+
+| mode / fixed width | load time | logical MiB/s |
+|---|---:|---:|
+| adaptive default (settled 48) | 34.331 s | 446.14 |
+| 32 | 41.657 s | 367.68 |
+| 64 | 22.442 s | 682.51 |
+| 96 | 14.650 s | 1,045.47 |
+| 128 | 11.902 s | 1,286.91 |
+
+This does **not** justify changing the production default to 128. S3Proxy
+applies its speed limit independently to every request, so aggregate throughput
+continues to scale almost linearly with concurrency. Real AWS measurements in
+the older context plateau around width 24--32 and show width 96/128 adding
+mostly latency and pinned memory. The safe conclusion is:
+
+- use `ZML_LOAD_FIXED_READ_PARALLELISM=96` or `128` when measuring the local
+  per-request-limited proxy and maximum speed is the goal;
+- keep adaptive 12/128 as the network-facing default until real S3/HF is
+  remeasured;
+- the current generation drain/refill design does not converge cheaply enough
+  for short high-latency loads, and its remote telemetry is diagnostic only;
+  it does not yet reduce width on throttles;
+- higher than 128 was not tested. At 16 MiB, width 128 already consumes the
+  full 2 GiB mapped budget, so going higher requires a larger budget or a
+  smaller request and needs real-service evidence.
+
+Four-device S3Proxy confirmation completed after the scheduler fix. At 10 ms /
+1000 MiB/s and fixed width 96, sharded placement was pinned-clipped to width 64
+and completed in 2.902 seconds; replicated placement completed in 4.799 seconds
+and committed 59.83 GiB. Both issued 1,055 physical GETs for 14.96 GiB source
+data with no retries.
+
+Every standalone `examples/io load` process currently runs DMA calibration.
+On this host it costs roughly 1.5--3.2 seconds depending on device count, often
+longer than a warm local load. Loader goodput above excludes calibration, while
+outer/script times include it. Reuse or caching of transfer settings remains a
+separate startup optimization.
+
+That elapsed time is dominated by measurement, not by allocating the DMA
+buffer. A representative one-B70 run took 1.724 seconds total: 1.248 seconds
+sampling across 27 windows, 0.343 seconds warming the device allocator, 0.069
+seconds registering the mapped source, 0.024 seconds benchmark setup, and
+0.041 seconds other benchmark overhead. A four-B70 run took 3.246 seconds:
+2.696 seconds sampling across 48 windows, 0.380 seconds allocator warmup, 0.069
+seconds registration, 0.031 seconds setup, and 0.069 seconds overhead. Although
+the nominal screen duration is 10 ms, every window must also complete at least
+128 transfers per participating device; three repeats, candidate confirmation,
+and the multi-device global-cap search therefore make the sampling time much
+larger. This is an accuracy-first calibration and is disproportionately costly
+for a short-lived CLI; a persistent cache/static device profile or a smaller
+fast-start candidate set is the relevant follow-up, rather than optimizing DMA
+buffer allocation alone.
+
+Final verification performed during this audit:
+
+```text
+./bazel.sh test --nocache_test_results //zml:test --test_output=errors
+./bazel.sh build --config=release --@zml//platforms:oneapi=true \
+  //examples/io:playground
+
+# One and four B70 local; sharded and replicated.
+ONEAPI_DEVICE_SELECTOR='level_zero:0' bazel-bin/examples/io/playground \
+  load /var/models/meta-llama/Llama-3.1-8B-Instruct sharded
+ONEAPI_DEVICE_SELECTOR='level_zero:*' bazel-bin/examples/io/playground \
+  load /var/models/meta-llama/Llama-3.1-8B-Instruct replicated
+
+# Proxy controls used throughout the audit.
+LATENCY_MS=10 SPEED_MIB=1000 ./bench_s3.sh
+LATENCY_MS=1000 SPEED_MIB=100 \
+  ZML_LOAD_FIXED_READ_PARALLELISM=128 ./bench_s3.sh
+```
+
+Fresh logs are under `/tmp/zml-local-{req*,w*,*gpu*}.log`,
+`/tmp/zml-s3-l10-s1000-*.log`, `/tmp/zml-s3-l1000-s100-*.log`, and
+`/tmp/zml-final-*.log`.
+
 > Historical performance and implementation snapshot from the adaptive-
 > concurrency branch. It is superseded by `PLAN.md` and the merged source; the
 > commit ids, artifact selection, working-tree state, measurements, and API

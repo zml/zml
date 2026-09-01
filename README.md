@@ -206,6 +206,8 @@ try platform.warmupDeviceAllocators();
 try platform.benchTransfer(allocator, io, .{});
 ```
 
+`benchTransfer` is a no-op when the selected platform is CPU.
+
 For a full walkthrough, see:
 
 - [Getting Started](./docs/tutorials/getting_started.md)
