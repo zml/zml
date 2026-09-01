@@ -170,12 +170,19 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
         shardings: []const zml.Sharding,
     ) !zml.Bufferized(Mnist) {
+        const direct = platform.target == .cuda or platform.target == .rocm or
+            platform.target == .oneapi;
+        var dma_result: ?zml.io.DmaBenchmarkResult = null;
+        defer if (dma_result) |*result| result.deinit();
+        if (direct) {
+            dma_result = try zml.io.benchmarkDma(Mnist, self, allocator, io, platform, .{
+                .shardings = shardings,
+            });
+        }
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .shardings = shardings,
             .read_parallelism = .{ .fixed = 1 },
-            .read_request_size = .{ .fixed = 16 * 1024 * 1024 },
-            .dma_block_size = 2 * 1024 * 1024,
-            .max_pinned_bytes = 16 * 1024 * 1024,
+            .dma = if (dma_result) |*result| &result.resources else null,
         });
     }
 

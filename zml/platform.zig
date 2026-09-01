@@ -185,6 +185,21 @@ pub const Device = struct {
         return self.pjrt_desc.kind(self.platform.pjrt_api);
     }
 
+    /// Returns a PJRT device-description attribute without exposing the
+    /// underlying PJRT handles. Attribute storage is owned by the platform.
+    pub fn attribute(self: Device, name: []const u8) ?pjrt.NamedValue.Value {
+        return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
+    }
+
+    /// Returns the device's NUMA node when PJRT reports a valid one.
+    pub fn numaNode(self: Device) ?usize {
+        const value = self.attribute("numa_node") orelse return null;
+        return switch (value) {
+            .int64 => |node| if (node >= 0) std.math.cast(usize, node) else null,
+            else => null,
+        };
+    }
+
     pub fn debugString(self: Device) []const u8 {
         return self.pjrt_desc.debugString(self.platform.pjrt_api);
     }

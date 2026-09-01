@@ -697,21 +697,6 @@ const VectoredRequestPlan = struct {
 };
 
 const VectoredLoadMetrics = struct {
-    const ProbeDimension = enum(u8) { none, read, request_size, dma };
-    const LocalReadTiming = struct {
-        successes: u64 = 0,
-        successful_bytes: u64 = 0,
-        service_ns: u64 = 0,
-
-        fn sub(self: LocalReadTiming, previous: LocalReadTiming) LocalReadTiming {
-            return .{
-                .successes = self.successes -| previous.successes,
-                .successful_bytes = self.successful_bytes -| previous.successful_bytes,
-                .service_ns = self.service_ns -| previous.service_ns,
-            };
-        }
-    };
-
     read_operations: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
     read_ns: std.atomic.Value(u64) = .init(0),
@@ -729,6 +714,7 @@ const VectoredLoadMetrics = struct {
     active_reads: std.atomic.Value(usize) = .init(0),
     peak_reads: std.atomic.Value(usize) = .init(0),
     outstanding_requests: std.atomic.Value(usize) = .init(0),
+    pending_source_jobs: std.atomic.Value(usize) = .init(0),
     outstanding_request_bytes: std.atomic.Value(u64) = .init(0),
     request_high_water: std.atomic.Value(usize) = .init(0),
     post_read_bytes: std.atomic.Value(u64) = .init(0),
@@ -736,123 +722,54 @@ const VectoredLoadMetrics = struct {
     weighted_request_latency_us: std.atomic.Value(u64) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
-    probe_dimension: std.atomic.Value(u8) = .init(@intFromEnum(ProbeDimension.none)),
-    probe_committed_bytes: std.atomic.Value(u64) = .init(0),
-    probe_first_ns: std.atomic.Value(u64) = .init(0),
+    probe_admission_start: u64 = std.math.maxInt(u64),
+    probe_first_read_ns: std.atomic.Value(u64) = .init(0),
     probe_active_reads: std.atomic.Value(usize) = .init(0),
     probe_peak_reads: std.atomic.Value(usize) = .init(0),
-    probe_read_operations: std.atomic.Value(u64) = .init(0),
+    probe_full_read_operations: std.atomic.Value(u64) = .init(0),
     probe_read_bytes: std.atomic.Value(u64) = .init(0),
-    local_timing_successes: [adaptive_request_sizes.len]std.atomic.Value(u64) = @splat(.init(0)),
-    local_timing_bytes: [adaptive_request_sizes.len]std.atomic.Value(u64) = @splat(.init(0)),
-    local_timing_service_ns: [adaptive_request_sizes.len]std.atomic.Value(u64) = @splat(.init(0)),
     probe_mutex: std.Io.Mutex = .init,
 
     const Snapshot = struct {
-        read_operations: u64,
-        read_bytes: u64,
-        read_ns: u64,
-        weighted_read_latency_us: u64,
-        pool_waits: u64,
-        pool_wait_ns: u64,
-        dma_submissions: u64,
-        submitted_bytes: u64,
-        committed_bytes: u64,
-        dma_ns: u64,
-        weighted_dma_latency_us: u64,
-        ready_bytes: u64,
-        ready_blocks: usize,
-        weighted_ready_age_us: u64,
-        active_reads: usize,
-        peak_reads: usize,
-        outstanding_requests: usize,
-        outstanding_request_bytes: u64,
-        post_read_bytes: u64,
-        retired_bytes: u64,
-        weighted_request_latency_us: u64,
-        config_epoch: u64,
         probe_epoch: u64,
-        probe_committed_bytes: u64,
-        probe_first_ns: u64,
-        probe_read_operations: u64,
+        active_reads: usize,
+        probe_first_read_ns: u64,
+        probe_active_reads: usize,
+        probe_peak_reads: usize,
+        probe_full_read_operations: u64,
         probe_read_bytes: u64,
-
-        fn sub(self: Snapshot, previous: Snapshot) Snapshot {
-            return .{
-                .read_operations = self.read_operations -| previous.read_operations,
-                .read_bytes = self.read_bytes -| previous.read_bytes,
-                .read_ns = self.read_ns -| previous.read_ns,
-                .weighted_read_latency_us = self.weighted_read_latency_us -| previous.weighted_read_latency_us,
-                .pool_waits = self.pool_waits -| previous.pool_waits,
-                .pool_wait_ns = self.pool_wait_ns -| previous.pool_wait_ns,
-                .dma_submissions = self.dma_submissions -| previous.dma_submissions,
-                .submitted_bytes = self.submitted_bytes -| previous.submitted_bytes,
-                .committed_bytes = self.committed_bytes -| previous.committed_bytes,
-                .dma_ns = self.dma_ns -| previous.dma_ns,
-                .weighted_dma_latency_us = self.weighted_dma_latency_us -| previous.weighted_dma_latency_us,
-                .ready_bytes = self.ready_bytes,
-                .ready_blocks = self.ready_blocks,
-                .weighted_ready_age_us = self.weighted_ready_age_us -| previous.weighted_ready_age_us,
-                .active_reads = self.active_reads,
-                .peak_reads = self.peak_reads,
-                .outstanding_requests = self.outstanding_requests,
-                .outstanding_request_bytes = self.outstanding_request_bytes,
-                .post_read_bytes = self.post_read_bytes,
-                .retired_bytes = self.retired_bytes -| previous.retired_bytes,
-                .weighted_request_latency_us = self.weighted_request_latency_us -| previous.weighted_request_latency_us,
-                .config_epoch = self.config_epoch,
-                .probe_epoch = self.probe_epoch,
-                .probe_committed_bytes = self.probe_committed_bytes,
-                .probe_first_ns = self.probe_first_ns,
-                .probe_read_operations = self.probe_read_operations,
-                .probe_read_bytes = self.probe_read_bytes,
-            };
-        }
     };
 
-    fn snapshot(self: *const VectoredLoadMetrics) Snapshot {
+    fn snapshot(self: *VectoredLoadMetrics, io: std.Io) Snapshot {
+        self.probe_mutex.lockUncancelable(io);
+        defer self.probe_mutex.unlock(io);
         return .{
-            .read_operations = self.read_operations.load(.acquire),
-            .read_bytes = self.read_bytes.load(.acquire),
-            .read_ns = self.read_ns.load(.acquire),
-            .weighted_read_latency_us = self.weighted_read_latency_us.load(.acquire),
-            .pool_waits = self.pool_waits.load(.acquire),
-            .pool_wait_ns = self.pool_wait_ns.load(.acquire),
-            .dma_submissions = self.dma_submissions.load(.acquire),
-            .submitted_bytes = self.submitted_bytes.load(.acquire),
-            .committed_bytes = self.committed_bytes.load(.acquire),
-            .dma_ns = self.dma_ns.load(.acquire),
-            .weighted_dma_latency_us = self.weighted_dma_latency_us.load(.acquire),
-            .ready_bytes = self.ready_bytes.load(.acquire),
-            .ready_blocks = self.ready_blocks.load(.acquire),
-            .weighted_ready_age_us = self.weighted_ready_age_us.load(.acquire),
-            .active_reads = self.active_reads.load(.acquire),
-            .peak_reads = self.peak_reads.load(.acquire),
-            .outstanding_requests = self.outstanding_requests.load(.acquire),
-            .outstanding_request_bytes = self.outstanding_request_bytes.load(.acquire),
-            .post_read_bytes = self.post_read_bytes.load(.acquire),
-            .retired_bytes = self.retired_bytes.load(.acquire),
-            .weighted_request_latency_us = self.weighted_request_latency_us.load(.acquire),
-            .config_epoch = self.config_epoch.load(.acquire),
             .probe_epoch = self.probe_epoch.load(.acquire),
-            .probe_committed_bytes = self.probe_committed_bytes.load(.acquire),
-            .probe_first_ns = self.probe_first_ns.load(.acquire),
-            .probe_read_operations = self.probe_read_operations.load(.acquire),
+            .active_reads = self.active_reads.load(.acquire),
+            .probe_first_read_ns = self.probe_first_read_ns.load(.acquire),
+            .probe_active_reads = self.probe_active_reads.load(.acquire),
+            .probe_peak_reads = self.probe_peak_reads.load(.acquire),
+            .probe_full_read_operations = self.probe_full_read_operations.load(.acquire),
             .probe_read_bytes = self.probe_read_bytes.load(.acquire),
         };
     }
 
-    fn beginRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64) void {
+    fn beginRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
         const active = self.active_reads.fetchAdd(1, .acq_rel) + 1;
         var peak = self.peak_reads.load(.acquire);
         while (active > peak) {
             peak = self.peak_reads.cmpxchgWeak(peak, active, .release, .acquire) orelse break;
         }
-        const dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
-        if (dimension != .read and dimension != .request_size) return;
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire)) return;
+        if (epoch != self.probe_epoch.load(.acquire) or
+            admission_id < self.probe_admission_start) return;
+        _ = self.probe_first_read_ns.cmpxchgStrong(
+            0,
+            @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1)),
+            .release,
+            .monotonic,
+        );
         const probe_active = self.probe_active_reads.fetchAdd(1, .acq_rel) + 1;
         var probe_peak = self.probe_peak_reads.load(.acquire);
         while (probe_active > probe_peak) {
@@ -860,23 +777,28 @@ const VectoredLoadMetrics = struct {
         }
     }
 
-    fn endRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64) void {
+    fn endRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
         _ = self.active_reads.fetchSub(1, .acq_rel);
-        const dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
-        if (dimension != .read and dimension != .request_size) return;
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire)) return;
+        if (epoch != self.probe_epoch.load(.acquire) or
+            admission_id < self.probe_admission_start) return;
         _ = self.probe_active_reads.fetchSub(1, .acq_rel);
     }
 
-    fn recordProbeRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, bytes: usize) void {
-        const dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
-        if (dimension != .read and dimension != .request_size) return;
+    fn recordProbeRead(
+        self: *VectoredLoadMetrics,
+        io: std.Io,
+        epoch: u64,
+        admission_id: u64,
+        bytes: usize,
+    ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire)) return;
-        _ = self.probe_read_operations.fetchAdd(1, .monotonic);
+        if (epoch != self.probe_epoch.load(.acquire) or
+            admission_id < self.probe_admission_start) return;
+        if (bytes == load_read_request_size)
+            _ = self.probe_full_read_operations.fetchAdd(1, .monotonic);
         _ = self.probe_read_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
 
@@ -884,36 +806,35 @@ const VectoredLoadMetrics = struct {
         self.peak_reads.store(self.active_reads.load(.acquire), .release);
     }
 
-    fn beginRequest(self: *VectoredLoadMetrics, epoch: u64, bytes: usize) void {
+    fn beginRequest(self: *VectoredLoadMetrics, bytes: usize) void {
         const active = self.outstanding_requests.fetchAdd(1, .acq_rel) + 1;
         _ = self.outstanding_request_bytes.fetchAdd(@intCast(bytes), .monotonic);
         var high_water = self.request_high_water.load(.acquire);
         while (active > high_water) {
             high_water = self.request_high_water.cmpxchgWeak(high_water, active, .release, .acquire) orelse break;
         }
-        _ = epoch;
     }
 
-    fn endRequest(self: *VectoredLoadMetrics, epoch: u64, bytes: usize) void {
+    fn endRequest(self: *VectoredLoadMetrics, bytes: usize) void {
         _ = self.outstanding_requests.fetchSub(1, .acq_rel);
         _ = self.outstanding_request_bytes.fetchSub(@intCast(bytes), .monotonic);
-        _ = epoch;
     }
 
-    fn prepareProbe(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, dimension: ProbeDimension) void {
+    fn prepareProbe(
+        self: *VectoredLoadMetrics,
+        io: std.Io,
+        epoch: u64,
+        admission_start: u64,
+    ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         self.probe_epoch.store(std.math.maxInt(u64), .release);
-        self.probe_dimension.store(@intFromEnum(ProbeDimension.none), .release);
-        self.probe_committed_bytes.store(0, .release);
-        self.probe_first_ns.store(0, .release);
+        self.probe_first_read_ns.store(0, .release);
         self.probe_active_reads.store(0, .release);
         self.probe_peak_reads.store(0, .release);
-        self.probe_read_operations.store(0, .release);
+        self.probe_full_read_operations.store(0, .release);
         self.probe_read_bytes.store(0, .release);
-        // Candidate attribution begins when the tuple is installed. Capacity
-        // activation gates scoring, but must not hide the tuple's fill cost.
-        self.probe_dimension.store(@intFromEnum(dimension), .release);
+        self.probe_admission_start = admission_start;
         self.probe_epoch.store(epoch, .release);
         self.config_epoch.store(epoch, .release);
     }
@@ -923,41 +844,12 @@ const VectoredLoadMetrics = struct {
         defer self.probe_mutex.unlock(io);
         if (self.probe_epoch.load(.acquire) != epoch) return;
         self.probe_epoch.store(std.math.maxInt(u64), .release);
-        self.probe_dimension.store(@intFromEnum(ProbeDimension.none), .release);
-        self.probe_committed_bytes.store(0, .release);
-        self.probe_first_ns.store(0, .release);
+        self.probe_admission_start = std.math.maxInt(u64);
+        self.probe_first_read_ns.store(0, .release);
         self.probe_active_reads.store(0, .release);
         self.probe_peak_reads.store(0, .release);
-        self.probe_read_operations.store(0, .release);
+        self.probe_full_read_operations.store(0, .release);
         self.probe_read_bytes.store(0, .release);
-    }
-
-    fn recordProbeCommit(self: *VectoredLoadMetrics, io: std.Io, dimension: ProbeDimension, epoch: u64, bytes: usize) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        const probe_epoch = self.probe_epoch.load(.acquire);
-        const active_dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
-        const matching_source_dimension = dimension == .read and active_dimension == .request_size;
-        if ((active_dimension != dimension and !matching_source_dimension) or epoch != probe_epoch) return;
-        _ = self.probe_committed_bytes.fetchAdd(@intCast(bytes), .monotonic);
-        const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
-        _ = self.probe_first_ns.cmpxchgStrong(0, now_ns, .release, .monotonic);
-    }
-
-    fn recordLocalReadTiming(self: *VectoredLoadMetrics, request_size: usize, actual_len: usize, elapsed_ns: u64) void {
-        if (actual_len != request_size) return;
-        const index = requestTimingBucketIndex(request_size) orelse return;
-        _ = self.local_timing_successes[index].fetchAdd(1, .monotonic);
-        _ = self.local_timing_bytes[index].fetchAdd(@intCast(actual_len), .monotonic);
-        _ = self.local_timing_service_ns[index].fetchAdd(elapsed_ns, .monotonic);
-    }
-
-    fn localReadTiming(self: *const VectoredLoadMetrics, index: usize) LocalReadTiming {
-        return .{
-            .successes = self.local_timing_successes[index].load(.acquire),
-            .successful_bytes = self.local_timing_bytes[index].load(.acquire),
-            .service_ns = self.local_timing_service_ns[index].load(.acquire),
-        };
     }
 };
 
@@ -1139,9 +1031,8 @@ const PinnedGateLimits = struct {
     read: usize,
     lifecycle: usize,
 
-    fn init(read: usize, request_size: usize, max_pinned_bytes: usize, requested_slack: usize) PinnedGateLimits {
-        std.debug.assert(request_size > 0 and request_size <= max_pinned_bytes);
-        const feasible_width = @max(@as(usize, 1), max_pinned_bytes / request_size);
+    fn init(read: usize, feasible_width: usize, requested_slack: usize) PinnedGateLimits {
+        std.debug.assert(feasible_width > 0);
         const effective_read = @min(read, feasible_width);
         const slack = @min(requested_slack, feasible_width - effective_read);
         return .{
@@ -1152,6 +1043,48 @@ const PinnedGateLimits = struct {
     }
 };
 
+fn dmaAdmissionLessLoaded(
+    lhs_active: usize,
+    lhs_capacity: usize,
+    rhs_active: usize,
+    rhs_capacity: usize,
+) bool {
+    std.debug.assert(lhs_capacity > 0 and rhs_capacity > 0);
+    return @as(u128, lhs_active) * @as(u128, rhs_capacity) <
+        @as(u128, rhs_active) * @as(u128, lhs_capacity);
+}
+
+fn selectLoaderDmaDevice(
+    active: []const usize,
+    per_device_limit: usize,
+    ready_mask: u64,
+    next_device: usize,
+    weighted: bool,
+) ?usize {
+    std.debug.assert(active.len > 0 and active.len <= 64);
+    std.debug.assert(per_device_limit > 0 and next_device < active.len);
+    var selected: ?usize = null;
+    for (0..active.len) |offset| {
+        const device_index = (next_device + offset) % active.len;
+        if (ready_mask & (@as(u64, 1) << @intCast(device_index)) == 0 or
+            active[device_index] >= per_device_limit)
+        {
+            continue;
+        }
+        if (selected == null or
+            (weighted and dmaAdmissionLessLoaded(
+                active[device_index],
+                per_device_limit,
+                active[selected.?],
+                per_device_limit,
+            )))
+        {
+            selected = device_index;
+        }
+    }
+    return selected;
+}
+
 const VectoredLoadPipeline = struct {
     const RequestContext = struct {
         pipeline: *VectoredLoadPipeline,
@@ -1160,7 +1093,9 @@ const VectoredLoadPipeline = struct {
         pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
         completed: std.atomic.Value(bool) = .init(false),
         successful: std.atomic.Value(bool) = .init(false),
+        source_finished: std.atomic.Value(bool) = .init(false),
         read_epoch: u64,
+        admission_id: u64 = 0,
         len: usize,
 
         fn addBlock(self: *RequestContext) void {
@@ -1171,6 +1106,7 @@ const VectoredLoadPipeline = struct {
             const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.pipeline.io, .awake).nanoseconds, 1));
             self.read_finished_at_ns.store(now_ns, .release);
             _ = self.pipeline.metrics.post_read_bytes.fetchAdd(@intCast(self.len), .monotonic);
+            self.finishSourceJob();
         }
 
         fn markSuccessful(self: *RequestContext) void {
@@ -1178,7 +1114,15 @@ const VectoredLoadPipeline = struct {
         }
 
         fn finishScheduling(self: *RequestContext) void {
+            self.finishSourceJob();
             self.completeOne();
+        }
+
+        fn finishSourceJob(self: *RequestContext) void {
+            if (!self.source_finished.swap(true, .acq_rel)) {
+                const previous = self.pipeline.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
+                std.debug.assert(previous > 0);
+            }
         }
 
         fn completeBlock(self: *RequestContext) void {
@@ -1201,14 +1145,8 @@ const VectoredLoadPipeline = struct {
                     elapsed_us *| @as(u64, @intCast(self.len)),
                     .monotonic,
                 );
-                self.pipeline.metrics.recordProbeCommit(
-                    self.pipeline.io,
-                    .read,
-                    self.read_epoch,
-                    self.len,
-                );
             }
-            self.pipeline.metrics.endRequest(self.read_epoch, self.len);
+            self.pipeline.metrics.endRequest(self.len);
             self.completed.store(true, .release);
             self.pipeline.request_gate.release(self.pipeline.io);
         }
@@ -1220,7 +1158,6 @@ const VectoredLoadPipeline = struct {
         lease: mem.DmaBlockPool.Lease,
         ready_at: std.Io.Timestamp,
         pending_submissions: usize,
-        read_epoch: u64,
         len: usize,
         completion_reported: std.atomic.Value(bool) = .init(false),
 
@@ -1249,26 +1186,7 @@ const VectoredLoadPipeline = struct {
         err: ?*pjrt.Error = null,
         submitted_at: std.Io.Timestamp,
         device_index: usize,
-        read_epoch: u64,
-        dma_epoch: u64,
         bytes: usize,
-    };
-
-    const ControlSnapshot = struct {
-        active_events: usize,
-        active_capacity: usize,
-        active_slot_ns: u64,
-        capacity_slot_ns: u64,
-        max_device_active: usize,
-        peak_device_active: usize,
-        ready_entries: usize,
-        ready_oldest_age_ns: u64,
-        ready_old_entries: usize,
-        post_read_requests: usize,
-        post_read_oldest_age_ns: u64,
-        any_device_saturated: bool,
-        probe_capacity_active: bool,
-        completed_device_mask: u64,
     };
 
     allocator: std.mem.Allocator,
@@ -1279,7 +1197,10 @@ const VectoredLoadPipeline = struct {
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     block_size: usize,
+    device_pool_indices: []const usize,
+    numa_explicit: bool,
     metrics: *VectoredLoadMetrics,
+    next_read_admission: std.atomic.Value(u64) = .init(1),
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
     requests: std.ArrayListUnmanaged(*RequestContext) = .empty,
@@ -1288,22 +1209,13 @@ const VectoredLoadPipeline = struct {
     events: std.ArrayListUnmanaged(*EventContext) = .empty,
     active_by_device: []usize,
     peak_by_device: []usize,
-    probe_active_by_device: []usize,
-    probe_peak_by_device: []usize,
-    dma_limit: std.atomic.Value(usize),
-    dma_probe_epoch: u64 = std.math.maxInt(u64),
-    dma_probe_required_mask: u64 = 0,
-    used_device_mask: u64 = 0,
-    expected_device_mask: std.atomic.Value(u64) = .init(0),
-    completed_device_mask: u64 = 0,
+    dma_limit: usize,
+    global_dma_limit: ?usize,
     next_device: usize = 0,
     pumping: bool = false,
     active_events: usize = 0,
     ready_entries: usize = 0,
     reads_finished: bool = false,
-    slot_sample_at: std.Io.Timestamp,
-    active_slot_ns: u64 = 0,
-    capacity_slot_ns: u64 = 0,
     dma_done: std.Io.Event = .unset,
 
     fn init(
@@ -1315,8 +1227,11 @@ const VectoredLoadPipeline = struct {
         read_gate: *AdaptiveRequestGate,
         request_gate: *AdaptiveRequestGate,
         block_size: usize,
+        device_pool_indices: []const usize,
+        numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
-        initial_dma_limit: usize,
+        dma_limit: usize,
+        global_dma_limit: ?usize,
     ) !VectoredLoadPipeline {
         std.debug.assert(platform.devices.len <= 64);
         const ready_queues = try allocator.alloc(std.ArrayListUnmanaged(ReadyTransfer), platform.devices.len);
@@ -1328,12 +1243,6 @@ const VectoredLoadPipeline = struct {
         const peak_by_device = try allocator.alloc(usize, platform.devices.len);
         errdefer allocator.free(peak_by_device);
         @memset(peak_by_device, 0);
-        const probe_active_by_device = try allocator.alloc(usize, platform.devices.len);
-        errdefer allocator.free(probe_active_by_device);
-        @memset(probe_active_by_device, 0);
-        const probe_peak_by_device = try allocator.alloc(usize, platform.devices.len);
-        errdefer allocator.free(probe_peak_by_device);
-        @memset(probe_peak_by_device, 0);
         return .{
             .allocator = allocator,
             .io = io,
@@ -1343,14 +1252,14 @@ const VectoredLoadPipeline = struct {
             .read_gate = read_gate,
             .request_gate = request_gate,
             .block_size = block_size,
+            .device_pool_indices = device_pool_indices,
+            .numa_explicit = numa_explicit,
             .metrics = metrics,
             .ready_queues = ready_queues,
             .active_by_device = active_by_device,
             .peak_by_device = peak_by_device,
-            .probe_active_by_device = probe_active_by_device,
-            .probe_peak_by_device = probe_peak_by_device,
-            .dma_limit = .init(initial_dma_limit),
-            .slot_sample_at = .now(io, .awake),
+            .dma_limit = dma_limit,
+            .global_dma_limit = global_dma_limit,
         };
     }
 
@@ -1375,8 +1284,6 @@ const VectoredLoadPipeline = struct {
         self.allocator.free(self.ready_queues);
         self.allocator.free(self.active_by_device);
         self.allocator.free(self.peak_by_device);
-        self.allocator.free(self.probe_active_by_device);
-        self.allocator.free(self.probe_peak_by_device);
         self.events.deinit(self.allocator);
         self.blocks.deinit(self.allocator);
         self.requests.deinit(self.allocator);
@@ -1400,26 +1307,29 @@ const VectoredLoadPipeline = struct {
         }
     }
 
-    fn registerRequest(self: *VectoredLoadPipeline, read_epoch: u64, len: usize) !*RequestContext {
+    fn registerRequest(self: *VectoredLoadPipeline, len: usize) !*RequestContext {
         const request = try self.allocator.create(RequestContext);
         errdefer self.allocator.destroy(request);
         request.* = .{
             .pipeline = self,
             .started_at = .now(self.io, .awake),
-            .read_epoch = read_epoch,
+            .read_epoch = 0,
             .len = len,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         try self.requests.append(self.allocator, request);
-        self.metrics.beginRequest(read_epoch, len);
+        self.metrics.beginRequest(len);
         return request;
     }
 
-    fn expectTensorTargets(self: *VectoredLoadPipeline, tensor: *const VectoredTensorTransfer) void {
-        for (tensor.targets) |target| {
-            _ = self.expected_device_mask.fetchOr(@as(u64, 1) << @intCast(target.device_index), .release);
-        }
+    fn reserveSourceJob(self: *VectoredLoadPipeline) void {
+        _ = self.metrics.pending_source_jobs.fetchAdd(1, .acq_rel);
+    }
+
+    fn abandonSourceJob(self: *VectoredLoadPipeline) void {
+        const previous = self.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
     }
 
     fn registerBlock(self: *VectoredLoadPipeline, request: *RequestContext, data: []u8, references: usize, len: usize) !*BlockContext {
@@ -1431,7 +1341,6 @@ const VectoredLoadPipeline = struct {
             .lease = .init(self.pool, self.io, data, references),
             .ready_at = .now(self.io, .awake),
             .pending_submissions = references,
-            .read_epoch = request.read_epoch,
             .len = len,
         };
         self.metadata_mutex.lockUncancelable(self.io);
@@ -1459,10 +1368,6 @@ const VectoredLoadPipeline = struct {
         destination_offset: usize,
         len: usize,
     ) !void {
-        var immediate: [64]ReadyTransfer = undefined;
-        var immediate_count: usize = 0;
-        var queued = false;
-        const dma_epoch = self.metrics.config_epoch.load(.acquire);
         self.metadata_mutex.lockUncancelable(self.io);
         errdefer self.metadata_mutex.unlock(self.io);
         var reserve_mask = writer_mask;
@@ -1472,7 +1377,6 @@ const VectoredLoadPipeline = struct {
             const target = &tensor.targets[writer_index];
             try self.ready_queues[target.device_index].ensureUnusedCapacity(self.allocator, 1);
         }
-        self.accountSlotsLocked();
         _ = self.metrics.ready_bytes.fetchAdd(len, .monotonic);
         _ = self.metrics.ready_blocks.fetchAdd(1, .monotonic);
         var mask = writer_mask;
@@ -1487,41 +1391,12 @@ const VectoredLoadPipeline = struct {
                 .destination_offset = destination_offset,
                 .len = len,
             };
-            self.used_device_mask |= @as(u64, 1) << @intCast(target.device_index);
             const queue = &self.ready_queues[target.device_index];
-            if (queue.items.len == 0 and self.active_by_device[target.device_index] < self.dma_limit.load(.acquire) and
-                self.transferReady(transfer))
-            {
-                immediate[immediate_count] = transfer;
-                immediate_count += 1;
-                self.active_by_device[target.device_index] += 1;
-                self.peak_by_device[target.device_index] = @max(
-                    self.peak_by_device[target.device_index],
-                    self.active_by_device[target.device_index],
-                );
-                self.active_events += 1;
-                if (dma_epoch == self.dma_probe_epoch) {
-                    self.probe_active_by_device[target.device_index] += 1;
-                    self.probe_peak_by_device[target.device_index] = @max(
-                        self.probe_peak_by_device[target.device_index],
-                        self.probe_active_by_device[target.device_index],
-                    );
-                }
-                std.debug.assert(block.pending_submissions > 0);
-                block.pending_submissions -= 1;
-            } else {
-                queue.appendAssumeCapacity(transfer);
-                self.ready_entries += 1;
-                queued = true;
-            }
-        }
-        if (block.pending_submissions == 0) {
-            _ = self.metrics.ready_bytes.fetchSub(block.len, .monotonic);
-            _ = self.metrics.ready_blocks.fetchSub(1, .monotonic);
+            queue.appendAssumeCapacity(transfer);
+            self.ready_entries += 1;
         }
         self.metadata_mutex.unlock(self.io);
-        for (immediate[0..immediate_count]) |transfer| self.submitOne(transfer, dma_epoch);
-        if (queued) self.requestPump();
+        self.requestPump();
     }
 
     fn requestPump(self: *VectoredLoadPipeline) void {
@@ -1538,35 +1413,50 @@ const VectoredLoadPipeline = struct {
     fn pump(self: *VectoredLoadPipeline) void {
         while (true) {
             var selected: ?ReadyTransfer = null;
-            var dma_epoch: u64 = 0;
             self.metadata_mutex.lockUncancelable(self.io);
-            self.accountSlotsLocked();
             if (!self.failed()) {
-                const limit = self.dma_limit.load(.acquire);
-                for (0..self.ready_queues.len) |offset| {
-                    const device_index = (self.next_device + offset) % self.ready_queues.len;
-                    if (self.active_by_device[device_index] >= limit) continue;
-                    const queue = &self.ready_queues[device_index];
-                    for (queue.items, 0..) |transfer, i| {
-                        if (!self.transferReady(transfer)) continue;
-                        // Prefer recently filled blocks: swapRemove keeps the
-                        // hot suffix moving toward the front. Controller
-                        // pressure uses an aged cohort rather than one oldest
-                        // entry so a cold tail cannot cause false backoff.
-                        selected = queue.swapRemove(i);
-                        self.next_device = (device_index + 1) % self.ready_queues.len;
-                        self.active_by_device[device_index] += 1;
-                        self.peak_by_device[device_index] = @max(self.peak_by_device[device_index], self.active_by_device[device_index]);
-                        self.active_events += 1;
-                        self.ready_entries -= 1;
-                        dma_epoch = self.metrics.config_epoch.load(.acquire);
-                        if (dma_epoch == self.dma_probe_epoch) {
-                            self.probe_active_by_device[device_index] += 1;
-                            self.probe_peak_by_device[device_index] = @max(
-                                self.probe_peak_by_device[device_index],
-                                self.probe_active_by_device[device_index],
-                            );
+                const limit = self.dma_limit;
+                const global_available = self.global_dma_limit == null or
+                    self.active_events < self.global_dma_limit.?;
+                if (global_available) {
+                    var ready_mask: u64 = 0;
+                    for (self.ready_queues, 0..) |queue, device_index| {
+                        if (self.active_by_device[device_index] >= limit) continue;
+                        for (queue.items) |transfer| {
+                            if (self.transferReady(transfer)) {
+                                ready_mask |= @as(u64, 1) << @intCast(device_index);
+                                break;
+                            }
                         }
+                    }
+                    const device_index = selectLoaderDmaDevice(
+                        self.active_by_device,
+                        limit,
+                        ready_mask,
+                        self.next_device,
+                        self.global_dma_limit != null,
+                    );
+                    if (device_index) |index| {
+                        const queue = &self.ready_queues[index];
+                        for (queue.items, 0..) |transfer, i| {
+                            if (!self.transferReady(transfer)) continue;
+                            selected = queue.orderedRemove(i);
+                            break;
+                        }
+                        std.debug.assert(selected != null);
+                        self.next_device = (index + 1) % self.ready_queues.len;
+                        self.active_by_device[index] += 1;
+                        std.debug.assert(self.active_by_device[index] <= limit);
+                        self.peak_by_device[index] = @max(
+                            self.peak_by_device[index],
+                            self.active_by_device[index],
+                        );
+                        self.active_events += 1;
+                        if (self.global_dma_limit) |global_limit| {
+                            std.debug.assert(self.active_events <= global_limit);
+                        }
+                        self.ready_entries -= 1;
+                        const transfer = selected.?;
                         std.debug.assert(transfer.block.pending_submissions > 0);
                         transfer.block.pending_submissions -= 1;
                         if (transfer.block.pending_submissions == 0) {
@@ -1574,11 +1464,12 @@ const VectoredLoadPipeline = struct {
                             _ = self.metrics.ready_blocks.fetchSub(1, .monotonic);
                             const ready_elapsed = transfer.block.ready_at.untilNow(self.io, .awake);
                             const age_us: u64 = @intCast(@max(ready_elapsed.nanoseconds, 0) / std.time.ns_per_us);
-                            _ = self.metrics.weighted_ready_age_us.fetchAdd(age_us *| @as(u64, @intCast(transfer.block.len)), .monotonic);
+                            _ = self.metrics.weighted_ready_age_us.fetchAdd(
+                                age_us *| @as(u64, @intCast(transfer.block.len)),
+                                .monotonic,
+                            );
                         }
-                        break;
                     }
-                    if (selected != null) break;
                 }
             }
             if (selected == null) {
@@ -1588,11 +1479,11 @@ const VectoredLoadPipeline = struct {
                 return;
             }
             self.metadata_mutex.unlock(self.io);
-            self.submitOne(selected.?, dma_epoch);
+            self.submitOne(selected.?);
         }
     }
 
-    fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer, dma_epoch: u64) void {
+    fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer) void {
         const is_last = transfer.destination_offset + transfer.len == transfer.target.total;
         const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
         const event = transfer.target.manager.transferData(
@@ -1604,7 +1495,7 @@ const VectoredLoadPipeline = struct {
         ) catch |err| {
             self.recordError(err);
             transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index, dma_epoch);
+            self.eventCompleted(transfer.target.device_index);
             return;
         };
         if (is_last) transfer.target.final_submitted = true;
@@ -1615,7 +1506,7 @@ const VectoredLoadPipeline = struct {
             event.deinit(self.platform.pjrt_api);
             self.recordError(error.OutOfMemory);
             transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index, dma_epoch);
+            self.eventCompleted(transfer.target.device_index);
             return;
         };
         ctx.* = .{
@@ -1624,8 +1515,6 @@ const VectoredLoadPipeline = struct {
             .pjrt_event = event,
             .submitted_at = submitted_at,
             .device_index = transfer.target.device_index,
-            .read_epoch = transfer.block.read_epoch,
-            .dma_epoch = dma_epoch,
             .bytes = transfer.len,
         };
 
@@ -1637,7 +1526,7 @@ const VectoredLoadPipeline = struct {
             self.allocator.destroy(ctx);
             self.recordError(error.OutOfMemory);
             transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index, dma_epoch);
+            self.eventCompleted(transfer.target.device_index);
             return;
         };
         self.metadata_mutex.unlock(self.io);
@@ -1656,31 +1545,24 @@ const VectoredLoadPipeline = struct {
                     _ = ctx_.pipeline.metrics.committed_bytes.fetchAdd(ctx_.bytes, .monotonic);
                     _ = ctx_.pipeline.metrics.dma_ns.fetchAdd(elapsed_ns, .monotonic);
                     _ = ctx_.pipeline.metrics.weighted_dma_latency_us.fetchAdd(elapsed_us *| @as(u64, @intCast(ctx_.bytes)), .monotonic);
-                    ctx_.pipeline.metrics.recordProbeCommit(ctx_.pipeline.io, .dma, ctx_.dma_epoch, ctx_.bytes);
                 }
                 ctx_.block.complete();
-                ctx_.pipeline.eventCompleted(ctx_.device_index, ctx_.dma_epoch);
+                ctx_.pipeline.eventCompleted(ctx_.device_index);
             }
         }.call, ctx) catch |err| {
             event.awaitRaw(self.platform.pjrt_api) catch {};
             self.recordError(err);
             transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index, dma_epoch);
+            self.eventCompleted(transfer.target.device_index);
         };
     }
 
-    fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize, dma_epoch: u64) void {
+    fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize) void {
         self.metadata_mutex.lockUncancelable(self.io);
-        self.accountSlotsLocked();
         std.debug.assert(self.active_events > 0);
         std.debug.assert(self.active_by_device[device_index] > 0);
         self.active_events -= 1;
         self.active_by_device[device_index] -= 1;
-        self.completed_device_mask |= @as(u64, 1) << @intCast(device_index);
-        if (dma_epoch == self.dma_probe_epoch) {
-            std.debug.assert(self.probe_active_by_device[device_index] > 0);
-            self.probe_active_by_device[device_index] -= 1;
-        }
         self.maybeDoneLocked();
         self.metadata_mutex.unlock(self.io);
         self.requestPump();
@@ -1713,118 +1595,14 @@ const VectoredLoadPipeline = struct {
         self.requestPump();
     }
 
-    fn setDmaLimit(self: *VectoredLoadPipeline, limit: usize) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        self.accountSlotsLocked();
-        self.dma_limit.store(limit, .release);
-        self.metadata_mutex.unlock(self.io);
-        self.requestPump();
-    }
-
-    fn beginDmaProbe(self: *VectoredLoadPipeline, epoch: u64, candidate: usize) bool {
+    fn peakDeviceActive(self: *VectoredLoadPipeline) usize {
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        var mask: u64 = 0;
-        for (self.ready_queues, 0..) |queue, device_index| {
-            var eligible: usize = 0;
-            for (queue.items) |transfer| {
-                if (self.transferReady(transfer)) eligible += 1;
-            }
-            if (self.active_by_device[device_index] + eligible >= candidate) {
-                mask |= @as(u64, 1) << @intCast(device_index);
-            }
-        }
-        if (mask == 0) return false;
-        self.dma_probe_epoch = epoch;
-        self.dma_probe_required_mask = mask;
-        @memset(self.probe_active_by_device, 0);
-        @memset(self.probe_peak_by_device, 0);
-        return true;
-    }
-
-    fn clearDmaProbe(self: *VectoredLoadPipeline, epoch: u64) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        if (self.dma_probe_epoch != epoch) return;
-        self.dma_probe_epoch = std.math.maxInt(u64);
-        self.dma_probe_required_mask = 0;
-    }
-
-    fn controlSnapshot(self: *VectoredLoadPipeline) ControlSnapshot {
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        self.accountSlotsLocked();
-        var ready_oldest_age_ns: u64 = 0;
-        var ready_old_entries: usize = 0;
-        var ready_entries: usize = 0;
-        for (self.ready_queues) |queue| {
-            for (queue.items) |transfer| {
-                // A final transfer is intentionally held until every earlier
-                // byte for its transfer manager has been submitted. It is an
-                // ordering barrier, not DMA-ready queue pressure.
-                if (!self.transferReady(transfer)) continue;
-                ready_entries += 1;
-                const age: u64 = @intCast(@max(transfer.block.ready_at.untilNow(self.io, .awake).nanoseconds, 0));
-                ready_oldest_age_ns = @max(ready_oldest_age_ns, age);
-                if (age > 250 * std.time.ns_per_ms) ready_old_entries += 1;
-            }
-        }
-        const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 1));
-        var post_read_requests: usize = 0;
-        var post_read_oldest_age_ns: u64 = 0;
-        for (self.requests.items) |request| {
-            if (request.completed.load(.acquire)) continue;
-            const read_finished_at = request.read_finished_at_ns.load(.acquire);
-            if (read_finished_at == 0) continue;
-            post_read_requests += 1;
-            post_read_oldest_age_ns = @max(post_read_oldest_age_ns, now_ns -| read_finished_at);
-        }
-        const limit = self.dma_limit.load(.acquire);
-        var max_device_active: usize = 0;
         var peak_device_active: usize = 0;
-        var any_device_saturated = false;
-        for (self.active_by_device, self.peak_by_device, self.ready_queues) |active, peak, queue| {
-            max_device_active = @max(max_device_active, active);
+        for (self.peak_by_device) |peak| {
             peak_device_active = @max(peak_device_active, peak);
-            if (active >= limit) {
-                for (queue.items) |transfer| {
-                    if (self.transferReady(transfer)) {
-                        any_device_saturated = true;
-                        break;
-                    }
-                }
-            }
         }
-        var active_mask: u64 = 0;
-        for (self.probe_peak_by_device, 0..) |peak, device_index| {
-            if (peak >= limit) active_mask |= @as(u64, 1) << @intCast(device_index);
-        }
-        return .{
-            .active_events = self.active_events,
-            .active_capacity = @popCount(self.used_device_mask) * limit,
-            .active_slot_ns = self.active_slot_ns,
-            .capacity_slot_ns = self.capacity_slot_ns,
-            .max_device_active = max_device_active,
-            .peak_device_active = peak_device_active,
-            .ready_entries = ready_entries,
-            .ready_oldest_age_ns = ready_oldest_age_ns,
-            .ready_old_entries = ready_old_entries,
-            .post_read_requests = post_read_requests,
-            .post_read_oldest_age_ns = post_read_oldest_age_ns,
-            .any_device_saturated = any_device_saturated,
-            .probe_capacity_active = self.dma_probe_required_mask != 0 and
-                (active_mask & self.dma_probe_required_mask) == self.dma_probe_required_mask,
-            .completed_device_mask = self.completed_device_mask,
-        };
-    }
-
-    fn accountSlotsLocked(self: *VectoredLoadPipeline) void {
-        const elapsed = self.slot_sample_at.untilNow(self.io, .awake);
-        const elapsed_ns: u64 = @intCast(@max(elapsed.nanoseconds, 0));
-        self.active_slot_ns +|= elapsed_ns *| @as(u64, @intCast(self.active_events));
-        const capacity = @popCount(self.used_device_mask) * self.dma_limit.load(.acquire);
-        self.capacity_slot_ns +|= elapsed_ns *| @as(u64, @intCast(capacity));
-        self.slot_sample_at = .now(self.io, .awake);
+        return peak_device_active;
     }
 
     fn maybeDoneLocked(self: *VectoredLoadPipeline) void {
@@ -1839,8 +1617,6 @@ const VectoredReadRequest = struct {
         pipeline: *VectoredLoadPipeline,
         source_offset: usize,
         request_len: usize,
-        configured_request_size: usize,
-        has_remote_timing: bool,
     ) void {
         defer request.finishScheduling();
         if (pipeline.failed()) return;
@@ -1869,7 +1645,33 @@ const VectoredReadRequest = struct {
         defer pipeline.allocator.free(leased);
         @memset(leased, &.{});
 
-        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased) catch |err| {
+        const affinities = pipeline.allocator.alloc(mem.DmaBlockPool.Affinity, plan.blocks.len) catch {
+            pipeline.recordError(error.OutOfMemory);
+            return;
+        };
+        defer pipeline.allocator.free(affinities);
+        for (plan.blocks, affinities) |block_plan, *affinity| {
+            if (!pipeline.numa_explicit) {
+                affinity.* = .{};
+                continue;
+            }
+            var eligible_nodes: u64 = 0;
+            var writer_mask = block_plan.writer_mask;
+            while (writer_mask != 0) {
+                const writer_index: usize = @intCast(@ctz(writer_mask));
+                writer_mask &= writer_mask - 1;
+                const device_index = tensor.targets[writer_index].device_index;
+                const node_index = pipeline.device_pool_indices[device_index];
+                eligible_nodes |= @as(u64, 1) << @intCast(node_index);
+            }
+            std.debug.assert(eligible_nodes != 0);
+            affinity.* = if (@popCount(eligible_nodes) == 1)
+                .node(@ctz(eligible_nodes))
+            else
+                .replicated(eligible_nodes);
+        }
+
+        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased, affinities) catch |err| {
             pipeline.recordError(err);
             return;
         };
@@ -1890,28 +1692,48 @@ const VectoredReadRequest = struct {
         }
 
         if (!pipeline.read_gate.acquire(pipeline.io)) return;
-        pipeline.metrics.beginRead(pipeline.io, request.read_epoch);
+        // Generation and admission identity belong to the source-call permit,
+        // not to earlier job claim or pinned-block waits.
+        request.read_epoch = pipeline.metrics.config_epoch.load(.acquire);
+        request.admission_id = pipeline.next_read_admission.fetchAdd(1, .monotonic);
+        pipeline.metrics.beginRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+        );
         const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
         const read_result = tensor.reader.readPositionalAllV(iovecs, source_offset);
         const read_elapsed = read_started.untilNow(pipeline.io, .awake);
-        pipeline.metrics.endRead(pipeline.io, request.read_epoch);
-        pipeline.read_gate.release(pipeline.io);
         read_result catch |err| {
+            pipeline.metrics.endRead(
+                pipeline.io,
+                request.read_epoch,
+                request.admission_id,
+            );
+            pipeline.read_gate.release(pipeline.io);
             pipeline.recordError(err);
             return;
         };
-        pipeline.metrics.recordProbeRead(pipeline.io, request.read_epoch, request_len);
+        pipeline.metrics.recordProbeRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+            request_len,
+        );
         const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
         const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
         _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
         _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
         _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
         _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(read_elapsed_us *| @as(u64, @intCast(request_len)), .monotonic);
-        if (!has_remote_timing) {
-            pipeline.metrics.recordLocalReadTiming(configured_request_size, request_len, read_elapsed_ns);
-        }
         tensor.recordReadProgress(request_len);
         request.markReadFinished();
+        pipeline.metrics.endRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+        );
+        pipeline.read_gate.release(pipeline.io);
 
         if (pipeline.failed()) return;
         for (plan.blocks, 0..) |block_plan, i| {
@@ -1938,1130 +1760,1055 @@ const VectoredReadRequest = struct {
     }
 };
 
-const VectoredReadScheduler = struct {
+/// Fixed-size source jobs scheduled by destination-device debt. A replicated
+/// job is present in every destination queue but is claimed exactly once and
+/// credits every device it serves.
+const FairVectoredReadScheduler = struct {
     const Job = struct {
         tensor_index: usize,
         source_offset: usize,
         len: usize,
-        request_size: usize,
-        epoch: u64,
+    };
+
+    const StoredJob = struct {
+        tensor_index: usize,
+        source_offset: usize,
+        len: usize,
+    };
+
+    const TestJob = struct {
+        tensor_index: usize,
+        len: usize,
+        physical_bytes: []const usize,
+        block_count: usize = 1,
     };
 
     const Snapshot = struct {
         remaining_bytes: u64,
-        request_size: usize,
-        epoch: u64,
+        remaining_jobs: usize,
+        remaining_full_jobs: usize,
         has_unscheduled: bool,
     };
 
-    const CandidateCounts = struct {
-        total: usize = 0,
-        full: usize = 0,
-    };
-
     allocator: std.mem.Allocator,
-    tensor_sizes: []const usize,
-    offsets: []usize,
-    next_tensor: usize = 0,
+    device_count: usize,
+    jobs: std.ArrayListUnmanaged(StoredJob) = .empty,
+    physical_bytes: std.ArrayListUnmanaged(usize) = .empty,
+    queues: []std.ArrayListUnmanaged(usize),
+    cursors: []usize,
+    claimed: []bool,
+    scheduled_physical_bytes: []u64,
     remaining_bytes: u64,
-    request_size: usize,
-    epoch: u64,
+    remaining_jobs: usize,
+    remaining_full_jobs: usize,
+    maximum_blocks_per_job: usize = 0,
+    next_device: usize = 0,
     mutex: std.Io.Mutex = .init,
 
     fn init(
         allocator: std.mem.Allocator,
-        tensor_sizes: []const usize,
-        request_size: usize,
-        epoch: u64,
-    ) !VectoredReadScheduler {
-        const offsets = try allocator.alloc(usize, tensor_sizes.len);
-        @memset(offsets, 0);
-        var remaining_bytes: u64 = 0;
-        for (tensor_sizes) |size| remaining_bytes +|= @intCast(size);
-        return .{
-            .allocator = allocator,
-            .tensor_sizes = tensor_sizes,
-            .offsets = offsets,
-            .remaining_bytes = remaining_bytes,
-            .request_size = request_size,
-            .epoch = epoch,
+        platform: *const Platform,
+        tensors: []const *const Tensor,
+        shardings: []const Sharding,
+        block_size: usize,
+    ) !FairVectoredReadScheduler {
+        const device_count = platform.devices.len;
+        if (device_count == 0) return error.DmaDeviceMismatch;
+        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
+        @memset(queues, .empty);
+        const cursors = allocator.alloc(usize, device_count) catch |err| {
+            allocator.free(queues);
+            return err;
         };
+        @memset(cursors, 0);
+        const scheduled = allocator.alloc(u64, device_count) catch |err| {
+            allocator.free(cursors);
+            allocator.free(queues);
+            return err;
+        };
+        @memset(scheduled, 0);
+        var self: FairVectoredReadScheduler = .{
+            .allocator = allocator,
+            .device_count = device_count,
+            .queues = queues,
+            .cursors = cursors,
+            .claimed = &.{},
+            .scheduled_physical_bytes = scheduled,
+            .remaining_bytes = 0,
+            .remaining_jobs = 0,
+            .remaining_full_jobs = 0,
+        };
+        errdefer self.deinit();
+
+        const TensorPlan = struct {
+            dispatch_spans: DispatchSpans,
+            device_indices: []usize,
+            total: usize,
+        };
+        const tensor_plans = try allocator.alloc(TensorPlan, tensors.len);
+        var initialized_plans: usize = 0;
+        defer {
+            for (tensor_plans[0..initialized_plans]) |*plan| {
+                plan.dispatch_spans.deinit(allocator);
+                allocator.free(plan.device_indices);
+            }
+            allocator.free(tensor_plans);
+        }
+        for (tensors, tensor_plans) |tensor, *plan| {
+            const shape = tensor.shape();
+            const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse
+                platform.replicated_sharding;
+            plan.* = .{
+                .dispatch_spans = try .init(allocator, shape, sharding),
+                .device_indices = &.{},
+                .total = shape.byteSize(),
+            };
+            initialized_plans += 1;
+            const ordered_devices = sharding.devicesInCanonicalOrder();
+            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
+            for (ordered_devices, plan.device_indices) |device, *device_index| {
+                device_index.* = @intCast(device.id);
+                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
+            }
+        }
+
+        const offsets = try allocator.alloc(usize, tensors.len);
+        defer allocator.free(offsets);
+        @memset(offsets, 0);
+        const next_active = try allocator.alloc(usize, tensors.len);
+        defer allocator.free(next_active);
+        // Retain unfinished tensors in a ring so job construction preserves
+        // tensor round-robin order without rescanning completed tensors.
+        var tensors_remaining: usize = 0;
+        var first_active: ?usize = null;
+        var last_active: ?usize = null;
+        for (tensor_plans, 0..) |plan, tensor_index| {
+            if (plan.total == 0) continue;
+            if (first_active == null) first_active = tensor_index;
+            if (last_active) |previous| next_active[previous] = tensor_index;
+            last_active = tensor_index;
+            tensors_remaining += 1;
+        }
+        if (last_active) |last| next_active[last] = first_active.?;
+        var current_tensor = first_active orelse 0;
+        var previous_tensor = last_active orelse 0;
+        while (tensors_remaining != 0) {
+            const tensor_index = current_tensor;
+            const tensor_size = tensor_plans[tensor_index].total;
+            const source_offset = offsets[tensor_index];
+            const len = @min(load_read_request_size, tensor_size - source_offset);
+            offsets[tensor_index] += len;
+
+            const following_tensor = next_active[tensor_index];
+            if (offsets[tensor_index] == tensor_size) {
+                tensors_remaining -= 1;
+                if (tensors_remaining != 0) {
+                    next_active[previous_tensor] = following_tensor;
+                    current_tensor = following_tensor;
+                }
+            } else {
+                previous_tensor = tensor_index;
+                current_tensor = following_tensor;
+            }
+
+            const job_index = self.jobs.items.len;
+            try self.jobs.append(allocator, .{
+                .tensor_index = tensor_index,
+                .source_offset = source_offset,
+                .len = len,
+            });
+            try self.physical_bytes.appendNTimes(allocator, 0, device_count);
+            const row = self.physical_bytes.items[job_index * device_count ..][0..device_count];
+            {
+                const request_plan = try VectoredRequestPlan.init(
+                    allocator,
+                    tensor_plans[tensor_index].dispatch_spans,
+                    source_offset,
+                    len,
+                    block_size,
+                );
+                defer request_plan.deinit(allocator);
+                self.maximum_blocks_per_job = @max(
+                    self.maximum_blocks_per_job,
+                    request_plan.blocks.len,
+                );
+                for (request_plan.blocks) |block| {
+                    var writer_mask = block.writer_mask;
+                    while (writer_mask != 0) {
+                        const writer_index: usize = @intCast(@ctz(writer_mask));
+                        writer_mask &= writer_mask - 1;
+                        const device_index = tensor_plans[tensor_index].device_indices[writer_index];
+                        row[device_index] = try std.math.add(usize, row[device_index], block.len);
+                    }
+                }
+            }
+            for (row, self.queues) |bytes, *queue| {
+                if (bytes != 0) try queue.append(allocator, job_index);
+            }
+            self.remaining_bytes +|= @intCast(len);
+            self.remaining_jobs += 1;
+            if (len == load_read_request_size) self.remaining_full_jobs += 1;
+        }
+        self.claimed = try allocator.alloc(bool, self.jobs.items.len);
+        @memset(self.claimed, false);
+        return self;
     }
 
-    fn deinit(self: *VectoredReadScheduler) void {
-        self.allocator.free(self.offsets);
+    fn initForTest(
+        allocator: std.mem.Allocator,
+        device_count: usize,
+        test_jobs: []const TestJob,
+    ) !FairVectoredReadScheduler {
+        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
+        @memset(queues, .empty);
+        const cursors = allocator.alloc(usize, device_count) catch |err| {
+            allocator.free(queues);
+            return err;
+        };
+        @memset(cursors, 0);
+        const scheduled = allocator.alloc(u64, device_count) catch |err| {
+            allocator.free(cursors);
+            allocator.free(queues);
+            return err;
+        };
+        @memset(scheduled, 0);
+        var self: FairVectoredReadScheduler = .{
+            .allocator = allocator,
+            .device_count = device_count,
+            .queues = queues,
+            .cursors = cursors,
+            .claimed = &.{},
+            .scheduled_physical_bytes = scheduled,
+            .remaining_bytes = 0,
+            .remaining_jobs = 0,
+            .remaining_full_jobs = 0,
+        };
+        errdefer self.deinit();
+        for (test_jobs, 0..) |job, job_index| {
+            if (job.physical_bytes.len != device_count or job.block_count == 0)
+                return error.InvalidTestJob;
+            try self.jobs.append(allocator, .{
+                .tensor_index = job.tensor_index,
+                .source_offset = 0,
+                .len = job.len,
+            });
+            try self.physical_bytes.appendSlice(allocator, job.physical_bytes);
+            var destinations: usize = 0;
+            for (job.physical_bytes, self.queues) |bytes, *queue| {
+                if (bytes == 0) continue;
+                try queue.append(allocator, job_index);
+                destinations += 1;
+            }
+            if (destinations == 0) return error.InvalidTestJob;
+            self.maximum_blocks_per_job = @max(
+                self.maximum_blocks_per_job,
+                job.block_count,
+            );
+            self.remaining_bytes +|= @intCast(job.len);
+            self.remaining_jobs += 1;
+            if (job.len == load_read_request_size) self.remaining_full_jobs += 1;
+        }
+        self.claimed = try allocator.alloc(bool, test_jobs.len);
+        @memset(self.claimed, false);
+        return self;
+    }
+
+    fn deinit(self: *FairVectoredReadScheduler) void {
+        for (self.queues) |*queue| queue.deinit(self.allocator);
+        self.allocator.free(self.queues);
+        self.allocator.free(self.cursors);
+        if (self.claimed.len != 0) self.allocator.free(self.claimed);
+        self.allocator.free(self.scheduled_physical_bytes);
+        self.jobs.deinit(self.allocator);
+        self.physical_bytes.deinit(self.allocator);
         self.* = undefined;
     }
 
-    fn claim(self: *VectoredReadScheduler, io: std.Io) ?Job {
+    fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Job {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        if (self.remaining_bytes == 0 or self.tensor_sizes.len == 0) return null;
+        if (self.remaining_jobs == 0) return null;
 
-        var visited: usize = 0;
-        while (visited < self.tensor_sizes.len) : (visited += 1) {
-            const tensor_index = (self.next_tensor + visited) % self.tensor_sizes.len;
-            const offset = self.offsets[tensor_index];
-            const tensor_size = self.tensor_sizes[tensor_index];
-            if (offset >= tensor_size) continue;
-
-            const len = @min(self.request_size, tensor_size - offset);
-            self.offsets[tensor_index] += len;
-            self.remaining_bytes -= len;
-            self.next_tensor = (tensor_index + 1) % self.tensor_sizes.len;
-            return .{
-                .tensor_index = tensor_index,
-                .source_offset = offset,
-                .len = len,
-                .request_size = self.request_size,
-                .epoch = self.epoch,
-            };
+        var selected_device: ?usize = null;
+        for (0..self.device_count) |offset| {
+            const device_index = (self.next_device + offset) % self.device_count;
+            const queue = &self.queues[device_index];
+            while (self.cursors[device_index] < queue.items.len and
+                self.claimed[queue.items[self.cursors[device_index]]])
+            {
+                self.cursors[device_index] += 1;
+            }
+            if (self.cursors[device_index] == queue.items.len) continue;
+            if (selected_device == null or
+                self.scheduled_physical_bytes[device_index] <
+                    self.scheduled_physical_bytes[selected_device.?])
+            {
+                selected_device = device_index;
+            }
         }
-        std.debug.assert(self.remaining_bytes == 0);
-        return null;
+        const device_index = selected_device orelse unreachable;
+        const job_index = self.queues[device_index].items[self.cursors[device_index]];
+        self.cursors[device_index] += 1;
+        std.debug.assert(!self.claimed[job_index]);
+        self.claimed[job_index] = true;
+        self.remaining_jobs -= 1;
+        const stored = self.jobs.items[job_index];
+        if (stored.len == load_read_request_size) self.remaining_full_jobs -= 1;
+        self.remaining_bytes -= stored.len;
+        const row = self.physical_bytes.items[job_index * self.device_count ..][0..self.device_count];
+        for (row, self.scheduled_physical_bytes) |bytes, *scheduled| {
+            scheduled.* +|= @intCast(bytes);
+        }
+        self.next_device = (device_index + 1) % self.device_count;
+        return .{
+            .tensor_index = stored.tensor_index,
+            .source_offset = stored.source_offset,
+            .len = stored.len,
+        };
     }
 
-    fn setTuple(self: *VectoredReadScheduler, io: std.Io, request_size: usize, epoch: u64) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.request_size = request_size;
-        self.epoch = epoch;
-    }
-
-    fn trySetCandidateTuple(
-        self: *VectoredReadScheduler,
-        io: std.Io,
-        request_size: usize,
-        epoch: u64,
-        minimum_total: usize,
-        minimum_full: usize,
-    ) bool {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        const counts = self.candidateCountsLocked(request_size);
-        if (counts.total < minimum_total or counts.full < minimum_full) return false;
-        self.request_size = request_size;
-        self.epoch = epoch;
-        return true;
-    }
-
-    fn snapshot(self: *VectoredReadScheduler, io: std.Io) Snapshot {
+    fn snapshot(self: *FairVectoredReadScheduler, io: std.Io) Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         return .{
             .remaining_bytes = self.remaining_bytes,
-            .request_size = self.request_size,
-            .epoch = self.epoch,
-            .has_unscheduled = self.remaining_bytes != 0,
+            .remaining_jobs = self.remaining_jobs,
+            .remaining_full_jobs = self.remaining_full_jobs,
+            .has_unscheduled = self.remaining_jobs != 0,
         };
     }
 
-    fn candidateCounts(self: *VectoredReadScheduler, io: std.Io, candidate_size: usize) CandidateCounts {
-        if (candidate_size == 0) return .{};
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        return self.candidateCountsLocked(candidate_size);
+    fn maximumBlocksPerJob(self: *const FairVectoredReadScheduler) usize {
+        return self.maximum_blocks_per_job;
     }
+};
 
-    fn candidateCountsLocked(self: *VectoredReadScheduler, candidate_size: usize) CandidateCounts {
-        std.debug.assert(candidate_size > 0);
-        var counts: CandidateCounts = .{};
-        for (self.tensor_sizes, self.offsets) |tensor_size, offset| {
-            const remaining = tensor_size -| offset;
-            if (remaining == 0) continue;
-            counts.total +|= std.math.divCeil(usize, remaining, candidate_size) catch std.math.maxInt(usize);
-            counts.full +|= remaining / candidate_size;
+test "fair read scheduler rotates sharded devices by scheduled bytes" {
+    const jobs = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 10, .physical_bytes = &.{ 10, 0 } },
+        .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 10, 0 } },
+        .{ .tensor_index = 2, .len = 10, .physical_bytes = &.{ 0, 10 } },
+        .{ .tensor_index = 3, .len = 10, .physical_bytes = &.{ 0, 10 } },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
+    defer scheduler.deinit();
+    const io = std.testing.io;
+    try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.tensor_index);
+}
+
+test "fair read scheduler claims a replicated job once and credits every replica" {
+    const jobs = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 20, .physical_bytes = &.{ 20, 20 } },
+        .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 10, 0 } },
+        .{ .tensor_index = 2, .len = 10, .physical_bytes = &.{ 0, 10 } },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
+    defer scheduler.deinit();
+    const io = std.testing.io;
+    try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqualSlices(u64, &.{ 20, 20 }, scheduler.scheduled_physical_bytes);
+    // The replicated entry is skipped in device 1's queue; tie rotation gives
+    // that device the next scheduling turn.
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
+    try std.testing.expect(scheduler.claim(io) == null);
+}
+
+test "fair read scheduler compares physical bytes rather than scheduling turns" {
+    const jobs = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 4, .physical_bytes = &.{ 4, 0 } },
+        .{ .tensor_index = 1, .len = 4, .physical_bytes = &.{ 4, 0 } },
+        .{ .tensor_index = 2, .len = 4, .physical_bytes = &.{ 4, 0 } },
+        .{ .tensor_index = 3, .len = 10, .physical_bytes = &.{ 0, 10 } },
+        .{ .tensor_index = 4, .len = 10, .physical_bytes = &.{ 0, 10 } },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
+    defer scheduler.deinit();
+    const io = std.testing.io;
+    try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
+    // Device 0 receives another turn because it has 8 scheduled bytes while
+    // device 1 has 10; a turn-count scheduler would alternate here.
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 4), scheduler.claim(io).?.tensor_index);
+}
+
+test "fair read scheduler tracks fixed jobs and tails" {
+    const jobs = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = load_read_request_size, .physical_bytes = &.{load_read_request_size} },
+        .{ .tensor_index = 1, .len = load_read_request_size, .physical_bytes = &.{load_read_request_size} },
+        .{ .tensor_index = 2, .len = 7, .physical_bytes = &.{7} },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &jobs);
+    defer scheduler.deinit();
+    const initial = scheduler.snapshot(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 3), initial.remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 2), initial.remaining_full_jobs);
+    _ = scheduler.claim(std.testing.io).?;
+    const after = scheduler.snapshot(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 2), after.remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 1), after.remaining_full_jobs);
+}
+
+test "fair read scheduler concurrent claims return every logical job once" {
+    var job_storage: [32]FairVectoredReadScheduler.TestJob = undefined;
+    for (&job_storage, 0..) |*job, index| job.* = .{
+        .tensor_index = index,
+        .len = 1,
+        .physical_bytes = if (index % 3 == 0) &.{ 1, 1 } else if (index % 2 == 0) &.{ 1, 0 } else &.{ 0, 1 },
+    };
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &job_storage);
+    defer scheduler.deinit();
+    var seen: std.atomic.Value(u64) = .init(0);
+    var claim_count: std.atomic.Value(usize) = .init(0);
+    var duplicate: std.atomic.Value(bool) = .init(false);
+    var group: std.Io.Group = .init;
+    for (0..8) |_| try group.concurrent(std.testing.io, struct {
+        fn run(
+            scheduler_: *FairVectoredReadScheduler,
+            seen_: *std.atomic.Value(u64),
+            claim_count_: *std.atomic.Value(usize),
+            duplicate_: *std.atomic.Value(bool),
+        ) void {
+            while (scheduler_.claim(std.testing.io)) |job| {
+                const mask = @as(u64, 1) << @intCast(job.tensor_index);
+                if (seen_.fetchOr(mask, .acq_rel) & mask != 0) duplicate_.store(true, .release);
+                _ = claim_count_.fetchAdd(1, .monotonic);
+            }
         }
-        return counts;
-    }
-};
+    }.run, .{ &scheduler, &seen, &claim_count, &duplicate });
+    try group.await(std.testing.io);
+    try std.testing.expectEqual(std.math.maxInt(u32), @as(u32, @truncate(seen.load(.acquire))));
+    try std.testing.expectEqual(job_storage.len, claim_count.load(.acquire));
+    try std.testing.expect(!duplicate.load(.acquire));
+}
 
-const adaptive_request_sizes = [_]usize{
-    2 * 1024 * 1024,
-    4 * 1024 * 1024,
-    8 * 1024 * 1024,
-    16 * 1024 * 1024,
-    32 * 1024 * 1024,
-    64 * 1024 * 1024,
-    128 * 1024 * 1024,
-};
+test "fair read scheduler validates jobs and cleans up allocation failures" {
+    const wrong_width = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 1, .physical_bytes = &.{1} },
+    };
+    try std.testing.expectError(
+        error.InvalidTestJob,
+        FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &wrong_width),
+    );
+    const no_destination = [_]FairVectoredReadScheduler.TestJob{
+        .{ .tensor_index = 0, .len = 1, .physical_bytes = &.{ 0, 0 } },
+    };
+    try std.testing.expectError(
+        error.InvalidTestJob,
+        FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &no_destination),
+    );
 
-fn requestTimingBucketIndex(request_size: usize) ?usize {
-    for (adaptive_request_sizes, 0..) |size, index| {
+    const AllocationTest = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const jobs = [_]FairVectoredReadScheduler.TestJob{
+                .{ .tensor_index = 0, .len = 1, .physical_bytes = &.{ 1, 1 } },
+                .{ .tensor_index = 1, .len = 1, .physical_bytes = &.{ 1, 0 } },
+            };
+            var scheduler = try FairVectoredReadScheduler.initForTest(allocator, 2, &jobs);
+            defer scheduler.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
+}
+
+fn readTimingBucketIndex(request_size: usize) ?usize {
+    for (VFS.read_timing_bucket_sizes, 0..) |size, index| {
         if (request_size == size) return index;
     }
     return null;
 }
 
-fn largestAdaptiveRequestAtMost(bytes: usize) usize {
-    var selected = adaptive_request_sizes[0];
-    for (adaptive_request_sizes) |size| {
-        if (size > bytes) break;
-        selected = size;
-    }
-    return selected;
-}
+const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
 
-const AdaptiveVectoredController = struct {
-    const Mode = enum { startup, steady };
-    const Dimension = enum { read, request_size, dma };
-    const ProbeKind = enum { increase, reduce_resource };
+/// Source-only adaptive state. DMA width and request size never enter its
+/// evidence or decisions.
+const SourceReadWidthController = struct {
+    const Phase = enum { baseline, upward, downward, pair_reference, pair_candidate, settled };
 
-    const Limits = struct {
-        read: usize,
-        request_size: usize = 2 * 1024 * 1024,
-        dma: usize,
-    };
+    const Evidence = struct {
+        generation: u64,
+        width: usize,
+        completed_full_requests: usize,
+        elapsed_ns: u64,
+        bytes: u64,
+        exercised_width: usize,
+        clean: bool,
+        remaining_full_jobs: usize,
 
-    const Probe = struct {
-        dimension: Dimension,
-        kind: ProbeKind,
-        baseline: Limits,
-        candidate: Limits,
-        epoch: u64,
-        baseline_goodput: f64,
-        baseline_starvation: f64,
-        activated: bool = false,
-        candidate_successes: u64 = 0,
-        candidate_bytes: u64 = 0,
-    };
+        fn scoreable(self: Evidence) bool {
+            return self.clean and self.generation != std.math.maxInt(u64) and
+                self.exercised_width >= self.width and
+                self.completed_full_requests >= @max(@as(usize, 8), self.width) and
+                self.elapsed_ns >= 100 * std.time.ns_per_ms and self.bytes != 0;
+        }
 
-    const Sample = struct {
-        now_ns: u64,
-        committed_goodput: f64 = 0,
-        logical_goodput: f64 = 0,
-        probe_goodput: f64 = 0,
-        probe_committed_bytes: u64 = 0,
-        probe_elapsed_ns: u64 = 0,
-        probe_read_operations: u64 = 0,
-        probe_read_bytes: u64 = 0,
-        dma_latency_us: f64 = 0,
-        dma_latency_reliable: bool = false,
-        read_latency_us: f64 = 0,
-        read_latency_reliable: bool = false,
-        dma_starvation_ratio: f64 = 1,
-        high_latency_source: bool = false,
-        read_saturated: bool = false,
-        source_stalled: bool = false,
-        dma_saturated: bool = false,
-        dma_probe_capacity: bool = false,
-        ready_pressure: bool = false,
-        slow_reads: bool = false,
-        source_throttled: bool = false,
-        source_failure_ratio: f64 = 0,
-        source_failure_reliable: bool = false,
-        source_timing_successes: u64 = 0,
-        source_timing_bytes: u64 = 0,
-        source_ttfb_us: f64 = 0,
-        source_body_bandwidth: f64 = 0,
-        source_timing_reliable: bool = false,
-        source_low_load: bool = false,
-        remaining_bytes: u64 = std.math.maxInt(u64),
-        remaining_candidate_requests: usize = std.math.maxInt(usize),
-        remaining_full_candidate_requests: usize = std.math.maxInt(usize),
-        estimated_remaining_ns: f64 = std.math.inf(f64),
-        hard_dma_pressure: bool = false,
-        allow_probe: bool = true,
-        allow_resource_probe: bool = true,
+        fn bytesPerSecond(self: Evidence) f64 {
+            if (self.elapsed_ns == 0) return 0;
+            return @as(f64, @floatFromInt(self.bytes)) * std.time.ns_per_s /
+                @as(f64, @floatFromInt(self.elapsed_ns));
+        }
     };
 
     const Decision = struct {
-        const Action = enum {
-            none,
-            read_bootstrap,
-            startup_settle,
-            read_probe_start,
-            read_probe_keep,
-            read_probe_rollback,
-            size_probe_start,
-            size_probe_keep,
-            size_probe_rollback,
-            dma_probe_start,
-            dma_probe_keep,
-            dma_probe_rollback,
-            read_reduce_start,
-            read_reduce_keep,
-            read_reduce_rollback,
-            dma_reduce_start,
-            dma_reduce_keep,
-            dma_reduce_rollback,
-            read_backoff,
-            dma_backoff,
-            probe_timeout,
-            probe_tail_rollback,
-        };
-
-        const Reason = enum {
-            none,
-            gain_below_threshold,
-            starvation_improved,
-            ready_pressure,
-            dma_pressure,
-            source_throttle,
-            source_failures,
-            starvation_unresolved,
-            capacity_not_exercised,
-            finite_tail,
-        };
-
-        limits: Limits,
-        epoch: u64,
+        width: usize,
+        generation: u64,
         changed: bool = false,
-        action: Action = .none,
-        reason: Reason = .none,
-        started_probe: ?Dimension = null,
-        finished_probe: bool = false,
+        settled: bool = false,
     };
 
-    mode: Mode = .startup,
-    max_read: usize,
-    max_dma: usize,
-    max_request_size: usize = 2 * 1024 * 1024,
-    max_pinned_bytes: usize = std.math.maxInt(usize),
-    bootstrap_read_limit: usize = 32,
-    read_adaptive: bool = true,
-    request_size_adaptive: bool = false,
-    dma_adaptive: bool = true,
-    limits: Limits,
-    probe: ?Probe = null,
-    epoch: u64 = 0,
-    stable_goodput: f64 = 0,
-    peak_goodput: f64 = 0,
-    stable_logical_goodput: f64 = 0,
-    peak_logical_goodput: f64 = 0,
-    stable_dma_latency_us: f64 = 0,
-    stable_read_latency_us: f64 = 0,
-    dma_started: bool = false,
-    slow_source_observed: bool = false,
-    startup_read_probes: u8 = 0,
-    max_startup_read_probes: u8 = 1,
-    representative_windows: u8 = 0,
-    dma_fed_windows: u8 = 0,
-    hard_dma_windows: u8 = 0,
-    source_failure_windows: u8 = 0,
-    source_timing_pressure_windows: u8 = 0,
-    source_timing_observed: bool = false,
-    request_size_settled: bool = true,
-    dma_settled: bool = false,
-    // A flat width result yields one turn to request-size growth and a bounded
-    // retry delay. It must not permanently suppress useful later width growth.
-    read_growth_blocked_until_ns: [adaptive_request_sizes.len]u64 = @splat(0),
-    prefer_request_size_probe: bool = false,
-    last_source_change_ns: u64 = 0,
-    ttfb_baseline_us: [7]f64 = @splat(0),
-    body_bandwidth_baseline: [7]f64 = @splat(0),
-    last_probe_ns: u64 = 0,
-    last_startup_change_ns: u64 = 0,
-    last_resource_probe_ns: u64 = 0,
-    last_dma_starvation_ns: u64 = 0,
-    performance_probe_blocked_until_ns: u64 = 0,
-    pressure_backoff_blocked_until_ns: u64 = 0,
-    resource_probe_blocked_until_ns: u64 = 0,
+    adaptive: bool,
+    fixed_width: ?usize = null,
+    maximum_index: usize,
+    current_index: usize,
+    selected_index: usize,
+    peak_index: usize,
+    generation: u64 = 0,
+    phase: Phase,
+    rates: [read_width_ladder.len]?f64 = @splat(null),
+    unchanged_candidates: usize = 0,
+    pair_resume: Phase = .upward,
+    pair_resume_index: usize = 0,
+    pair_prior_selected_index: usize = 0,
+    pair_candidate_index: usize = 0,
+    pair_reference_index: usize = 0,
+    pair_candidate_total: f64 = 0,
+    pair_reference_total: f64 = 0,
+    pair_count: usize = 0,
 
-    const probe_byte_floor: u64 = 64 * 1024 * 1024;
-    const probe_early_time_floor_ns: u64 = 100 * std.time.ns_per_ms;
-    const probe_time_floor_ns: u64 = 200 * std.time.ns_per_ms;
-
-    fn init(max_read: usize, max_dma: usize) AdaptiveVectoredController {
-        return .{
-            .max_read = max_read,
-            .max_dma = max_dma,
-            .limits = .{
-                .read = @min(12, max_read),
-                .request_size = 2 * 1024 * 1024,
-                .dma = @min(8, max_dma),
-            },
-        };
-    }
-
-    fn initConfigured(
-        read: Parallelism,
-        dma: Parallelism,
-        initial_request_size: usize,
-        maximum_request_size: usize,
-        request_size_adaptive: bool,
-        max_pinned_bytes: usize,
-    ) AdaptiveVectoredController {
-        const max_read = read.maximum();
-        const initial_read_capacity = @min(max_read, @max(@as(usize, 1), max_pinned_bytes / initial_request_size));
-        const effective_max_request_size = if (request_size_adaptive)
-            @min(maximum_request_size, largestAdaptiveRequestAtMost(max_pinned_bytes))
-        else
-            maximum_request_size;
-        return .{
-            .max_read = max_read,
-            .max_dma = dma.maximum(),
-            .max_request_size = effective_max_request_size,
-            .max_pinned_bytes = max_pinned_bytes,
-            .read_adaptive = read.isAdaptive(),
-            .request_size_adaptive = request_size_adaptive,
-            .request_size_settled = !request_size_adaptive or initial_request_size >= effective_max_request_size,
-            .dma_adaptive = dma.isAdaptive(),
-            .dma_settled = !dma.isAdaptive() or dma.initial() >= dma.maximum(),
-            .limits = .{
-                .read = @min(read.initial(), initial_read_capacity),
-                .request_size = initial_request_size,
-                .dma = dma.initial(),
-            },
-        };
-    }
-
-    fn readCapacity(self: *const AdaptiveVectoredController, request_size: usize) usize {
-        return @min(self.max_read, @max(@as(usize, 1), self.max_pinned_bytes / request_size));
-    }
-
-    fn readGrowthCapacity(self: *const AdaptiveVectoredController) usize {
-        const capacity = self.readCapacity(self.limits.request_size);
-        return if (self.source_timing_observed)
-            capacity
-        else
-            @min(capacity, self.bootstrap_read_limit);
-    }
-
-    fn readGrowthIsBlocked(
-        self: *const AdaptiveVectoredController,
-        request_size: usize,
-        now_ns: u64,
-    ) bool {
-        const index = requestTimingBucketIndex(request_size) orelse return false;
-        return now_ns < self.read_growth_blocked_until_ns[index];
-    }
-
-    fn blockReadGrowth(
-        self: *AdaptiveVectoredController,
-        request_size: usize,
-        until_ns: u64,
-    ) void {
-        const index = requestTimingBucketIndex(request_size) orelse return;
-        self.read_growth_blocked_until_ns[index] = until_ns;
-    }
-
-    fn clearReadGrowthBlock(self: *AdaptiveVectoredController, request_size: usize) void {
-        self.blockReadGrowth(request_size, 0);
-    }
-
-    fn requestSizeCanGrow(self: *const AdaptiveVectoredController) bool {
-        return self.request_size_adaptive and self.limits.request_size < self.max_request_size;
-    }
-
-    fn rearmRequestSizeGrowth(self: *AdaptiveVectoredController) void {
-        if (self.request_size_adaptive) {
-            self.request_size_settled = self.limits.request_size >= self.max_request_size;
+    fn init(configured: Parallelism, pinned_feasible_width: usize) SourceReadWidthController {
+        const configured_max = @min(configured.maximum(), pinned_feasible_width);
+        var maximum_index: usize = 0;
+        for (read_width_ladder, 0..) |candidate_width, index| {
+            if (candidate_width > configured_max) break;
+            maximum_index = index;
         }
-    }
-
-    fn modeledReadConcurrency(self: *const AdaptiveVectoredController, sample: Sample, request_size: usize) usize {
-        if (!sample.source_timing_reliable or sample.source_body_bandwidth <= 0) return 0;
-        const service_seconds = sample.source_ttfb_us / std.time.us_per_s +
-            @as(f64, @floatFromInt(request_size)) / sample.source_body_bandwidth;
-        const target_bandwidth = @max(
-            @max(self.peak_logical_goodput, sample.logical_goodput),
-            @min(sample.source_body_bandwidth, @max(self.peak_goodput, sample.committed_goodput)),
-        );
-        if (target_bandwidth <= 0 or service_seconds <= 0) return 0;
-        const modeled: usize = @max(1, @as(usize, @intFromFloat(@ceil(
-            1.2 * target_bandwidth * service_seconds / @as(f64, @floatFromInt(request_size)),
-        ))));
-        return @min(self.readCapacity(request_size), modeled);
-    }
-
-    fn sourceTupleSettled(self: *const AdaptiveVectoredController, now_ns: u64) bool {
-        if (self.mode != .steady) return false;
-        if (!self.request_size_settled) return false;
-        return now_ns -| self.last_source_change_ns >= 500 * std.time.ns_per_ms;
-    }
-
-    fn observe(self: *AdaptiveVectoredController, sample: Sample) Decision {
-        if (sample.slow_reads) self.slow_source_observed = true;
-        if (sample.source_timing_successes > 0) self.source_timing_observed = true;
-        if (sample.dma_starvation_ratio > 0.10) self.last_dma_starvation_ns = sample.now_ns;
-        if (sample.hard_dma_pressure) {
-            self.hard_dma_windows = @min(2, self.hard_dma_windows +| 1);
-        } else {
-            self.hard_dma_windows = 0;
-        }
-        if (sample.source_failure_reliable and sample.source_failure_ratio > 0.10) {
-            self.source_failure_windows = @min(2, self.source_failure_windows +| 1);
-        } else if (sample.source_failure_reliable) {
-            self.source_failure_windows = 0;
-        }
-
-        if (sample.source_timing_reliable) {
-            if (requestTimingBucketIndex(self.limits.request_size)) |index| {
-                const baseline_ttfb = self.ttfb_baseline_us[index];
-                const baseline_body_bandwidth = self.body_bandwidth_baseline[index];
-                const timing_inflated = (baseline_ttfb > 0 and sample.source_ttfb_us > 1.5 * baseline_ttfb) or
-                    (baseline_body_bandwidth > 0 and sample.source_body_bandwidth < 0.80 * baseline_body_bandwidth);
-                const goodput_flat_or_regressing = self.peak_logical_goodput > 0 and
-                    sample.logical_goodput <= 1.03 * self.peak_logical_goodput;
-                if (timing_inflated and goodput_flat_or_regressing) {
-                    self.source_timing_pressure_windows = @min(2, self.source_timing_pressure_windows +| 1);
-                } else {
-                    self.source_timing_pressure_windows = 0;
-                }
-                if (self.probe == null and (sample.source_low_load or baseline_body_bandwidth == 0)) {
-                    if (sample.source_ttfb_us > 0) {
-                        self.ttfb_baseline_us[index] = if (baseline_ttfb == 0)
-                            sample.source_ttfb_us
-                        else
-                            0.90 * baseline_ttfb + 0.10 * sample.source_ttfb_us;
-                    }
-                    if (sample.source_body_bandwidth > 0) {
-                        self.body_bandwidth_baseline[index] = if (baseline_body_bandwidth == 0)
-                            sample.source_body_bandwidth
-                        else
-                            0.90 * baseline_body_bandwidth + 0.10 * sample.source_body_bandwidth;
-                    }
-                }
-            }
-        }
-
-        const source_backoff_reason: ?Decision.Reason = if (sample.source_throttled)
-            .source_throttle
-        else if (self.source_failure_windows >= 2)
-            .source_failures
-        else
-            null;
-        if (sample.source_throttled) {
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
-            self.pressure_backoff_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
-        }
-        if (source_backoff_reason != null and self.read_adaptive and self.limits.read > 1) {
-            if (self.probe) |probe| self.limits = probe.baseline;
-            self.probe = null;
-            self.mode = .steady;
-            self.epoch += 1;
-            self.limits.read = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.limits.read))))));
-            self.last_probe_ns = sample.now_ns;
-            self.last_source_change_ns = sample.now_ns;
-            self.clearReadGrowthBlock(self.limits.request_size);
-            self.prefer_request_size_probe = false;
-            self.rearmRequestSizeGrowth();
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
-            self.pressure_backoff_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
-            self.source_failure_windows = 0;
-            return self.decision(.read_backoff, true, source_backoff_reason.?, null, true);
-        }
-
-        if (self.probe) |*active_probe| {
-            if (active_probe.dimension == .request_size) {
-                active_probe.candidate_successes +|= sample.source_timing_successes;
-                active_probe.candidate_bytes +|= sample.source_timing_bytes;
-            }
-            const probe = active_probe.*;
-            if (!probe.activated) return self.currentDecision();
-            const pressure_reason: ?Decision.Reason = if (probe.kind == .increase and
-                (probe.dimension == .read or probe.dimension == .request_size) and sample.ready_pressure and
-                (!self.slow_source_observed or sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s))
-                .ready_pressure
-            else if ((probe.dimension == .read or probe.dimension == .request_size) and sample.source_throttled)
-                .source_throttle
-            else if (probe.dimension == .dma and sample.hard_dma_pressure)
-                .dma_pressure
-            else
-                null;
-            if (pressure_reason) |reason| {
-                self.probe = null;
-                self.limits = probe.baseline;
-                self.epoch += 1;
-                self.mode = .steady;
-                self.last_probe_ns = sample.now_ns;
-                if (probe.dimension == .request_size) {
-                    self.request_size_settled = true;
-                    self.prefer_request_size_probe = false;
-                    self.last_source_change_ns = sample.now_ns;
-                } else if (probe.dimension == .read) {
-                    if (reason == .source_throttle) {
-                        self.clearReadGrowthBlock(probe.baseline.request_size);
-                        self.prefer_request_size_probe = false;
-                    } else {
-                        self.blockReadGrowth(
-                            probe.baseline.request_size,
-                            sample.now_ns +| 5 * std.time.ns_per_s,
-                        );
-                        self.prefer_request_size_probe = self.requestSizeCanGrow();
-                    }
-                    self.last_source_change_ns = sample.now_ns;
-                    self.rearmRequestSizeGrowth();
-                } else {
-                    self.dma_settled = true;
-                }
-                const cooldown_ns: u64 = if (reason == .source_throttle)
-                    5 * std.time.ns_per_s
-                else
-                    2 * std.time.ns_per_s;
-                self.pressure_backoff_blocked_until_ns = sample.now_ns +| cooldown_ns;
-                self.performance_probe_blocked_until_ns = sample.now_ns +| cooldown_ns;
-                return self.decision(probeAction(probe.dimension, probe.kind, false), true, reason, null, true);
-            }
-            const candidate_byte_floor: u64 = if (probe.dimension == .request_size)
-                @max(probe_byte_floor, @as(u64, @intCast(4 *| probe.candidate.request_size)))
-            else
-                probe_byte_floor;
-            const candidate_samples_ready = switch (probe.dimension) {
-                .read => sample.probe_read_operations >= 8 and sample.probe_read_bytes >= candidate_byte_floor,
-                .request_size => probe.candidate_successes >= 8 and probe.candidate_bytes >= candidate_byte_floor,
-                .dma => true,
+        if (!configured.isAdaptive()) {
+            const fixed = @min(configured.initial(), pinned_feasible_width);
+            const fixed_index = widthIndexAtMost(fixed);
+            return .{
+                .adaptive = false,
+                .fixed_width = @max(@as(usize, 1), fixed),
+                .maximum_index = fixed_index,
+                .current_index = fixed_index,
+                .selected_index = fixed_index,
+                .peak_index = fixed_index,
+                .phase = .settled,
             };
-            const early_time_floor_ns: u64 = if (probe.dimension == .request_size)
-                50 * std.time.ns_per_ms
-            else
-                probe_early_time_floor_ns;
-            const full_time_floor_ns: u64 = if (probe.dimension == .request_size)
-                100 * std.time.ns_per_ms
-            else
-                probe_time_floor_ns;
-            const early_score = candidate_samples_ready and sample.probe_committed_bytes >= candidate_byte_floor and
-                sample.probe_elapsed_ns >= early_time_floor_ns and
-                self.probeResultIsDecisive(probe, sample);
-            if (!early_score and
-                (!candidate_samples_ready or sample.probe_committed_bytes < candidate_byte_floor or
-                    sample.probe_elapsed_ns < full_time_floor_ns))
-            {
-                return self.currentDecision();
-            }
-            return self.scoreProbe(probe, sample);
         }
-
-        if (sample.committed_goodput > 0) {
-            self.representative_windows +|= 1;
-            self.stable_goodput = if (self.stable_goodput == 0)
-                sample.committed_goodput
-            else
-                0.90 * self.stable_goodput + 0.10 * sample.committed_goodput;
-            self.peak_goodput = @max(self.peak_goodput, self.stable_goodput);
-            if (sample.dma_latency_reliable and sample.dma_latency_us > 0) {
-                self.stable_dma_latency_us = if (self.stable_dma_latency_us == 0)
-                    sample.dma_latency_us
-                else
-                    0.95 * self.stable_dma_latency_us + 0.05 * sample.dma_latency_us;
-            }
-        }
-        if (sample.logical_goodput > 0) {
-            self.stable_logical_goodput = if (self.stable_logical_goodput == 0)
-                sample.logical_goodput
-            else
-                0.90 * self.stable_logical_goodput + 0.10 * sample.logical_goodput;
-            self.peak_logical_goodput = @max(self.peak_logical_goodput, self.stable_logical_goodput);
-        }
-        if (sample.read_latency_reliable and sample.read_latency_us > 0) {
-            self.stable_read_latency_us = if (self.stable_read_latency_us == 0)
-                sample.read_latency_us
-            else
-                0.95 * self.stable_read_latency_us + 0.05 * sample.read_latency_us;
-        }
-        if (sample.committed_goodput > 0 and sample.dma_saturated and
-            (self.dma_started or self.mode == .steady))
-        {
-            self.dma_fed_windows = @min(2, self.dma_fed_windows +| 1);
-        } else {
-            self.dma_fed_windows = 0;
-        }
-
-        if (self.dma_adaptive and self.hard_dma_windows >= 2 and self.limits.dma > 1 and sample.now_ns >= self.pressure_backoff_blocked_until_ns) {
-            self.mode = .steady;
-            self.epoch += 1;
-            self.limits.dma = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.limits.dma))))));
-            self.dma_settled = true;
-            self.last_probe_ns = sample.now_ns;
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-            self.pressure_backoff_blocked_until_ns = sample.now_ns +| 250 * std.time.ns_per_ms;
-            return self.decision(.dma_backoff, true, .dma_pressure, null, false);
-        }
-
-        const performance_due = sample.now_ns >= self.performance_probe_blocked_until_ns and
-            (self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 2 * std.time.ns_per_s);
-        const baseline = if (self.stable_goodput > 0) self.stable_goodput else sample.committed_goodput;
-        const logical_baseline = if (self.stable_logical_goodput > 0)
-            self.stable_logical_goodput
-        else
-            sample.logical_goodput;
-
-        if (!self.dma_started and sample.allow_probe and self.mode == .startup and sample.source_stalled and
-            self.read_adaptive and sample.read_saturated and
-            self.limits.read < @min(self.bootstrap_read_limit, self.readCapacity(self.limits.request_size)))
-        {
-            // There is no representative output to score yet. Double read
-            // fanout directly so high-latency sources can fill the pipe before
-            // their first response arrives.
-            self.epoch += 1;
-            self.limits.read = @min(
-                @min(self.bootstrap_read_limit, self.readCapacity(self.limits.request_size)),
-                @max(self.limits.read + 1, self.limits.read *| 2),
-            );
-            self.last_probe_ns = sample.now_ns;
-            self.last_startup_change_ns = sample.now_ns;
-            return self.decision(.read_bootstrap, true, .none, null, false);
-        }
-
-        if (self.dma_started and sample.allow_probe and self.mode == .startup and
-            self.read_adaptive and
-            self.startup_read_probes < self.max_startup_read_probes and
-            !(sample.high_latency_source and self.slow_source_observed) and
-            sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
-            !sample.ready_pressure and self.source_timing_pressure_windows < 2 and
-            self.limits.read < self.readGrowthCapacity())
-        {
-            // Remote sources have already had a chance to bootstrap while no
-            // source response existed. Slow sources first establish the
-            // bootstrap tuple's baseline; otherwise pipeline fill makes the
-            // first scored increase look artificially good. Fast sources may
-            // still take one startup step, and multi-device loads one more.
-            self.startup_read_probes += 1;
-            var candidate = self.limits;
-            const modeled = self.modeledReadConcurrency(sample, self.limits.request_size);
-            const growth_capacity = self.readGrowthCapacity();
-            const startup_step = @min(
-                growth_capacity,
-                std.math.divCeil(usize, self.limits.read *| 3, 2) catch unreachable,
-            );
-            candidate.read = @min(
-                growth_capacity,
-                @max(self.increase(self.limits.read, growth_capacity), @max(modeled, startup_step)),
-            );
-            return self.startProbe(.read, .increase, candidate, logical_baseline, sample, .read_probe_start);
-        }
-
-        if (self.dma_started and self.mode == .startup and self.representative_windows >= 2 and
-            sample.now_ns -| self.last_startup_change_ns >= 500 * std.time.ns_per_ms)
-        {
-            self.mode = .steady;
-            self.last_probe_ns = sample.now_ns;
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-            return self.decision(.startup_settle, false, .none, null, false);
-        }
-
-        if ((self.dma_started or self.mode == .steady) and sample.allow_probe and
-            self.read_adaptive and
-            self.mode == .steady and performance_due and
-            sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
-            !sample.ready_pressure and self.source_timing_pressure_windows < 2 and
-            !(self.prefer_request_size_probe and self.request_size_adaptive and
-                !self.request_size_settled and sample.source_timing_reliable and
-                self.limits.request_size < self.max_request_size) and
-            !self.readGrowthIsBlocked(self.limits.request_size, sample.now_ns) and
-            self.limits.read < self.readGrowthCapacity())
-        {
-            var candidate = self.limits;
-            const growth_capacity = self.readGrowthCapacity();
-            candidate.read = @min(
-                growth_capacity,
-                @max(
-                    self.increase(self.limits.read, growth_capacity),
-                    self.modeledReadConcurrency(sample, self.limits.request_size),
-                ),
-            );
-            return self.startProbe(.read, .increase, candidate, logical_baseline, sample, .read_probe_start);
-        }
-
-        if (self.mode == .steady and self.request_size_adaptive and
-            (!self.request_size_settled or self.dma_settled) and sample.allow_probe and performance_due and
-            sample.source_timing_reliable and self.source_timing_pressure_windows < 2 and
-            self.limits.request_size < self.max_request_size)
-        {
-            const candidate_size = @min(self.max_request_size, self.limits.request_size *| 2);
-            const fallback_total_u64 = std.math.divCeil(
-                u64,
-                sample.remaining_bytes,
-                @intCast(candidate_size),
-            ) catch std.math.maxInt(u64);
-            const fallback_full_u64 = sample.remaining_bytes / @as(u64, @intCast(candidate_size));
-            const fallback_total: usize = @intCast(@min(fallback_total_u64, std.math.maxInt(usize)));
-            const fallback_full: usize = @intCast(@min(fallback_full_u64, std.math.maxInt(usize)));
-            const candidate_requests = if (sample.remaining_candidate_requests == std.math.maxInt(usize))
-                fallback_total
-            else
-                sample.remaining_candidate_requests;
-            const full_candidate_requests = if (sample.remaining_full_candidate_requests == std.math.maxInt(usize))
-                fallback_full
-            else
-                sample.remaining_full_candidate_requests;
-            var candidate = self.limits;
-            candidate.request_size = candidate_size;
-            const capacity = self.readCapacity(candidate_size);
-            if (!self.read_adaptive and self.limits.read > capacity) {
-                self.request_size_settled = true;
-            } else {
-                const modeled = self.modeledReadConcurrency(sample, candidate_size);
-                candidate.read = if (self.read_adaptive)
-                    @min(capacity, @max(@as(usize, 1), modeled))
-                else
-                    self.limits.read;
-                const required_candidate_bytes: f64 = @floatFromInt(@max(
-                    probe_byte_floor,
-                    @as(u64, @intCast(8 *| candidate_size)),
-                ));
-                const reference_goodput = @max(
-                    @max(self.peak_logical_goodput, self.stable_logical_goodput),
-                    sample.logical_goodput,
-                );
-                const estimated_candidate_ns = if (reference_goodput > 0)
-                    required_candidate_bytes / reference_goodput * std.time.ns_per_s
-                else
-                    std.math.inf(f64);
-                const candidate_service_ns = if (sample.source_body_bandwidth > 0)
-                    sample.source_ttfb_us * std.time.ns_per_us +
-                        @as(f64, @floatFromInt(candidate_size)) / sample.source_body_bandwidth * std.time.ns_per_s
-                else
-                    std.math.inf(f64);
-                if (full_candidate_requests >= 8 and candidate_requests >= candidate.read and
-                    @max(estimated_candidate_ns, candidate_service_ns) <= 0.25 * sample.estimated_remaining_ns)
-                {
-                    return self.startProbe(
-                        .request_size,
-                        .increase,
-                        candidate,
-                        logical_baseline,
-                        sample,
-                        .size_probe_start,
-                    );
-                }
-            }
-            self.request_size_settled = true;
-            self.prefer_request_size_probe = false;
-        }
-
-        // Do not compare startup initialization or a single fed burst with a
-        // DMA candidate. Transfer-manager initialization and pipeline fill
-        // systematically reward extra event credits unless the baseline has
-        // remained both fed and saturated for two representative windows.
-        if (self.dma_adaptive and self.sourceTupleSettled(sample.now_ns) and
-            (self.dma_started or self.mode == .steady) and sample.allow_probe and performance_due and
-            self.representative_windows >= 2 and self.dma_fed_windows >= 2 and baseline > 0 and
-            sample.dma_saturated and sample.dma_probe_capacity and
-            !sample.hard_dma_pressure and self.limits.dma < self.max_dma)
-        {
-            var candidate = self.limits;
-            candidate.dma = self.increase(self.limits.dma, self.max_dma);
-            return self.startProbe(
-                .dma,
-                .increase,
-                candidate,
-                @max(baseline, sample.committed_goodput),
-                sample,
-                .dma_probe_start,
-            );
-        }
-
-        if (sample.ready_pressure and sample.dma_starvation_ratio <= 0.10 and
-            (!self.slow_source_observed or sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s) and
-            self.read_adaptive and self.limits.read > 1 and sample.now_ns >= self.pressure_backoff_blocked_until_ns)
-        {
-            self.mode = .steady;
-            self.epoch += 1;
-            self.limits.read = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.limits.read))))));
-            self.last_probe_ns = sample.now_ns;
-            self.last_source_change_ns = sample.now_ns;
-            self.clearReadGrowthBlock(self.limits.request_size);
-            self.prefer_request_size_probe = false;
-            self.rearmRequestSizeGrowth();
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-            self.pressure_backoff_blocked_until_ns = sample.now_ns +| 250 * std.time.ns_per_ms;
-            return self.decision(.read_backoff, true, .ready_pressure, null, false);
-        }
-
-        const resource_due = sample.allow_probe and sample.allow_resource_probe and self.mode == .steady and
-            sample.dma_starvation_ratio <= 0.10 and
-            sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
-            sample.now_ns >= self.resource_probe_blocked_until_ns and
-            sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s;
-        if (resource_due) {
-            if (self.read_adaptive and self.limits.read > 1) {
-                var candidate = self.limits;
-                candidate.read = @max(@as(usize, 1), std.math.divCeil(usize, self.limits.read, 2) catch unreachable);
-                const resource_baseline = @max(self.peak_logical_goodput, self.stable_logical_goodput);
-                return self.startProbe(.read, .reduce_resource, candidate, resource_baseline, sample, .read_reduce_start);
-            }
-            if (self.dma_adaptive and self.limits.dma > 1) {
-                var candidate = self.limits;
-                candidate.dma -= @max(@as(usize, 1), std.math.sqrt(self.limits.dma));
-                const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
-                return self.startProbe(.dma, .reduce_resource, candidate, resource_baseline, sample, .dma_reduce_start);
-            }
-        }
-
-        // Startup ends on a scored rollback or an explicit pressure backoff.
-        // A quiet initialization window must not force the two-second steady
-        // probe cadence before representative reads or transfers exist.
-        if (self.mode == .startup) return self.currentDecision();
-        return self.currentDecision();
-    }
-
-    fn activateProbe(self: *AdaptiveVectoredController, epoch: u64) bool {
-        if (self.probe) |*probe| {
-            if (probe.epoch != epoch or probe.activated) return false;
-            probe.activated = true;
-            return true;
-        }
-        return false;
-    }
-
-    fn markDmaStarted(self: *AdaptiveVectoredController, now_ns: u64) void {
-        if (self.dma_started) return;
-        self.dma_started = true;
-        self.representative_windows = 0;
-        self.dma_fed_windows = 0;
-        self.stable_goodput = 0;
-        self.peak_goodput = 0;
-        self.stable_logical_goodput = 0;
-        self.peak_logical_goodput = 0;
-        self.stable_dma_latency_us = 0;
-        self.stable_read_latency_us = 0;
-        self.last_startup_change_ns = now_ns;
-    }
-
-    fn rollbackTimedOutProbe(self: *AdaptiveVectoredController, now_ns: u64) ?Decision {
-        return self.rollbackProbe(now_ns, .probe_timeout, .capacity_not_exercised);
-    }
-
-    fn rollbackUnfinishedProbe(self: *AdaptiveVectoredController, now_ns: u64) ?Decision {
-        return self.rollbackProbe(now_ns, .probe_tail_rollback, .finite_tail);
-    }
-
-    fn rollbackProbe(
-        self: *AdaptiveVectoredController,
-        now_ns: u64,
-        action: Decision.Action,
-        reason: Decision.Reason,
-    ) ?Decision {
-        const probe = self.probe orelse return null;
-        self.probe = null;
-        self.limits = probe.baseline;
-        self.epoch += 1;
-        self.mode = .steady;
-        self.last_probe_ns = now_ns;
-        if (probe.dimension == .request_size) {
-            self.request_size_settled = true;
-            self.prefer_request_size_probe = false;
-        } else if (probe.dimension == .read and action == .probe_timeout) {
-            self.prefer_request_size_probe = self.requestSizeCanGrow();
-            self.rearmRequestSizeGrowth();
-        }
-        if (probe.dimension == .dma) self.dma_settled = true;
-        if (probe.dimension == .read or probe.dimension == .request_size) self.last_source_change_ns = now_ns;
-        self.performance_probe_blocked_until_ns = now_ns +| 2 * std.time.ns_per_s;
-        return self.decision(action, true, reason, null, true);
-    }
-
-    fn probeResultIsDecisive(
-        self: *const AdaptiveVectoredController,
-        probe: Probe,
-        sample: Sample,
-    ) bool {
-        _ = self;
-        if (probe.baseline_goodput <= 0 or sample.probe_goodput <= 0) {
-            return false;
-        }
-
-        // Only matching-epoch completions participate in probe decisions.
-        // Measuring from activation keeps candidate startup latency in the
-        // score instead of starting the clock at its first completion.
-        const clear_gain = sample.probe_goodput >= 1.10 * probe.baseline_goodput and
-            !sample.ready_pressure and !sample.hard_dma_pressure;
-        const clear_loss = sample.probe_goodput <= 0.90 * probe.baseline_goodput;
-        return clear_gain or clear_loss;
-    }
-
-    fn scoreProbe(self: *AdaptiveVectoredController, probe: Probe, sample: Sample) Decision {
-        const candidate_goodput = sample.probe_goodput;
-        const no_regression = probe.baseline_goodput == 0 or candidate_goodput >= 0.97 * probe.baseline_goodput;
-        const starvation_improved = probe.baseline_starvation > 0.10 and
-            sample.dma_starvation_ratio <= 0.10;
-        const starvation_unresolved = probe.baseline_starvation > 0.10 and
-            sample.dma_starvation_ratio > 0.10;
-        const read_pressure_ok = !sample.ready_pressure or
-            (self.slow_source_observed and sample.now_ns -| self.last_dma_starvation_ns < 2 * std.time.ns_per_s);
-        const dimension_peak = switch (probe.dimension) {
-            .read, .request_size => self.peak_logical_goodput,
-            .dma => self.peak_goodput,
-        };
-        const keep = switch (probe.kind) {
-            .increase => switch (probe.dimension) {
-                .read => no_regression and read_pressure_ok and
-                    (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput or
-                        starvation_improved or (self.mode == .startup and starvation_unresolved)),
-                .request_size => no_regression and read_pressure_ok and
-                    (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput),
-                .dma => !sample.hard_dma_pressure and
-                    (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput),
-            },
-            .reduce_resource => candidate_goodput >= 0.97 * @max(probe.baseline_goodput, dimension_peak) and
-                sample.dma_starvation_ratio <= 0.10 and !sample.ready_pressure and !sample.hard_dma_pressure,
-        };
-
-        self.probe = null;
-        self.last_probe_ns = sample.now_ns;
-        const action = probeAction(probe.dimension, probe.kind, keep);
-        if (keep) {
-            switch (probe.dimension) {
-                .read, .request_size => {
-                    self.stable_logical_goodput = candidate_goodput;
-                    self.peak_logical_goodput = @max(self.peak_logical_goodput, candidate_goodput);
-                },
-                .dma => {
-                    self.stable_goodput = candidate_goodput;
-                    self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
-                },
-            }
-            if (probe.kind == .reduce_resource) {
-                self.last_resource_probe_ns = sample.now_ns;
-                self.mode = .steady;
-            }
-            if (probe.dimension == .read or probe.dimension == .request_size) {
-                self.last_source_change_ns = sample.now_ns;
-                self.dma_settled = !self.dma_adaptive or self.limits.dma >= self.max_dma;
-                if (probe.dimension == .request_size) {
-                    self.clearReadGrowthBlock(self.limits.request_size);
-                    self.prefer_request_size_probe = false;
-                    self.request_size_settled = self.limits.request_size >= self.max_request_size;
-                    self.source_timing_pressure_windows = 0;
-                } else {
-                    const performance_gain = probe.baseline_goodput == 0 or
-                        candidate_goodput >= 1.03 * probe.baseline_goodput;
-                    if (performance_gain) {
-                        self.clearReadGrowthBlock(self.limits.request_size);
-                    } else {
-                        self.blockReadGrowth(
-                            self.limits.request_size,
-                            sample.now_ns +| 5 * std.time.ns_per_s,
-                        );
-                    }
-                    self.prefer_request_size_probe = self.requestSizeCanGrow();
-                    self.rearmRequestSizeGrowth();
-                }
-            } else if (probe.dimension == .dma) {
-                self.dma_settled = true;
-            }
-            const reason: Decision.Reason = if ((probe.dimension == .read or probe.dimension == .request_size) and
-                candidate_goodput < 1.03 * probe.baseline_goodput)
-                if (starvation_improved) .starvation_improved else if (starvation_unresolved) .starvation_unresolved else .none
-            else
-                .none;
-            return self.decision(action, false, reason, null, true);
-        }
-
-        self.limits = probe.baseline;
-        self.epoch += 1;
-        self.mode = .steady;
-        self.pressure_backoff_blocked_until_ns = sample.now_ns +| 250 * std.time.ns_per_ms;
-        if (probe.kind == .increase) {
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-        } else {
-            self.last_resource_probe_ns = sample.now_ns;
-            self.resource_probe_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
-        }
-        if (probe.dimension == .request_size) {
-            self.request_size_settled = true;
-            self.prefer_request_size_probe = false;
-            self.last_source_change_ns = sample.now_ns;
-            self.source_timing_pressure_windows = 0;
-        } else if (probe.dimension == .read) {
-            self.blockReadGrowth(
-                probe.baseline.request_size,
-                sample.now_ns +| 5 * std.time.ns_per_s,
-            );
-            self.prefer_request_size_probe = self.requestSizeCanGrow();
-            self.rearmRequestSizeGrowth();
-            self.last_source_change_ns = sample.now_ns;
-        } else if (probe.dimension == .dma) {
-            self.dma_settled = true;
-        }
-        const reason: Decision.Reason = if (sample.ready_pressure)
-            .ready_pressure
-        else if (sample.hard_dma_pressure)
-            .dma_pressure
-        else
-            .gain_below_threshold;
-        return self.decision(action, true, reason, null, true);
-    }
-
-    fn startProbe(
-        self: *AdaptiveVectoredController,
-        dimension: Dimension,
-        kind: ProbeKind,
-        candidate: Limits,
-        baseline_goodput: f64,
-        sample: Sample,
-        action: Decision.Action,
-    ) Decision {
-        self.epoch += 1;
-        self.probe = .{
-            .dimension = dimension,
-            .kind = kind,
-            .baseline = self.limits,
-            .candidate = candidate,
-            .epoch = self.epoch,
-            .baseline_goodput = baseline_goodput,
-            .baseline_starvation = sample.dma_starvation_ratio,
-        };
-        self.limits = candidate;
-        self.last_probe_ns = sample.now_ns;
-        if (dimension == .read or dimension == .request_size) {
-            self.last_source_change_ns = sample.now_ns;
-            self.dma_settled = !self.dma_adaptive or candidate.dma >= self.max_dma;
-            if (dimension == .request_size) {
-                self.request_size_settled = false;
-                self.source_timing_pressure_windows = 0;
-                if (requestTimingBucketIndex(candidate.request_size)) |index| {
-                    self.ttfb_baseline_us[index] = 0;
-                    self.body_bandwidth_baseline[index] = 0;
-                }
-            }
-        } else if (dimension == .dma) {
-            self.dma_settled = false;
-        }
-        if (self.mode == .startup) self.last_startup_change_ns = sample.now_ns;
-        return self.decision(action, true, .none, dimension, false);
-    }
-
-    fn increase(self: *const AdaptiveVectoredController, current: usize, maximum: usize) usize {
-        const step = if (self.mode == .startup)
-            @max(@as(usize, 4), std.math.sqrt(current))
-        else
-            @max(@as(usize, 1), std.math.sqrt(current));
-        return @min(maximum, current +| step);
-    }
-
-    fn decision(
-        self: *const AdaptiveVectoredController,
-        action: Decision.Action,
-        changed: bool,
-        reason: Decision.Reason,
-        started_probe: ?Dimension,
-        finished_probe: bool,
-    ) Decision {
+        const initial_index = @min(widthIndexAtMost(12), maximum_index);
         return .{
-            .limits = self.limits,
-            .epoch = self.epoch,
+            .adaptive = true,
+            .maximum_index = maximum_index,
+            .current_index = initial_index,
+            .selected_index = initial_index,
+            .peak_index = initial_index,
+            .phase = .baseline,
+        };
+    }
+
+    fn widthIndexAtMost(maximum: usize) usize {
+        var result: usize = 0;
+        for (read_width_ladder, 0..) |candidate_width, index| {
+            if (candidate_width > maximum) break;
+            result = index;
+        }
+        return result;
+    }
+
+    fn width(self: *const SourceReadWidthController) usize {
+        return self.fixed_width orelse read_width_ladder[self.current_index];
+    }
+
+    fn selectedWidth(self: *const SourceReadWidthController) usize {
+        return self.fixed_width orelse read_width_ladder[self.selected_index];
+    }
+
+    fn currentDecision(self: *const SourceReadWidthController) Decision {
+        return .{
+            .width = self.width(),
+            .generation = self.generation,
+            .settled = self.phase == .settled,
+        };
+    }
+
+    fn probeCost(index: usize) usize {
+        const candidate_width = read_width_ladder[index];
+        return candidate_width +| @max(@as(usize, 8), candidate_width);
+    }
+
+    fn probeFitsTail(index: usize, remaining_full_jobs: usize) bool {
+        return probeCost(index) *| 4 <= remaining_full_jobs;
+    }
+
+    fn pairFitsTail(candidate: usize, reference: usize, remaining_full_jobs: usize) bool {
+        const three_pairs = (probeCost(candidate) +| probeCost(reference)) *| 3;
+        return three_pairs *| 4 <= remaining_full_jobs;
+    }
+
+    fn restartFitsTail(self: *const SourceReadWidthController, remaining_full_jobs: usize) bool {
+        return switch (self.phase) {
+            .pair_reference => blk: {
+                const remaining_pairs = 3 -| self.pair_count;
+                const remaining_cost = remaining_pairs *|
+                    (probeCost(self.pair_reference_index) +| probeCost(self.pair_candidate_index));
+                break :blk remaining_cost *| 4 <= remaining_full_jobs;
+            },
+            .pair_candidate => blk: {
+                const remaining_pairs = 3 -| self.pair_count;
+                const remaining_cost = probeCost(self.pair_candidate_index) +|
+                    (remaining_pairs -| 1) *|
+                        (probeCost(self.pair_reference_index) +| probeCost(self.pair_candidate_index));
+                break :blk remaining_cost *| 4 <= remaining_full_jobs;
+            },
+            .settled => true,
+            else => probeFitsTail(self.current_index, remaining_full_jobs),
+        };
+    }
+
+    fn blindGrow(
+        self: *SourceReadWidthController,
+        remaining_full_jobs: usize,
+    ) ?Decision {
+        if (!self.adaptive or self.phase != .baseline or self.current_index >= self.maximum_index)
+            return null;
+        const ceiling: usize = if (self.width() < 24) 24 else if (self.width() < 32) 32 else return null;
+        const target = @min(widthIndexAtMost(ceiling), self.maximum_index);
+        if (target <= self.current_index or !probeFitsTail(target, remaining_full_jobs)) return null;
+        return self.changeTo(target);
+    }
+
+    fn observe(self: *SourceReadWidthController, evidence: Evidence) Decision {
+        if (!self.adaptive or self.phase == .settled or
+            evidence.generation != self.generation or evidence.width != self.width() or
+            !evidence.scoreable())
+            return self.currentDecision();
+        const rate = evidence.bytesPerSecond();
+        return switch (self.phase) {
+            .baseline, .upward, .downward => self.finishScore(
+                self.current_index,
+                rate,
+                evidence.remaining_full_jobs,
+                true,
+            ),
+            .pair_reference => blk: {
+                self.pair_reference_total += rate;
+                self.phase = .pair_candidate;
+                break :blk self.changeTo(self.pair_candidate_index);
+            },
+            .pair_candidate => blk: {
+                self.pair_candidate_total += rate;
+                self.pair_count += 1;
+                if (self.pair_count < 3) {
+                    self.phase = .pair_reference;
+                    break :blk self.changeTo(self.pair_reference_index);
+                }
+                const reference_average = self.pair_reference_total / 3;
+                const candidate_average = self.pair_candidate_total / 3;
+                const reference_rate = self.rates[self.pair_reference_index] orelse reference_average;
+                const normalized_candidate = if (reference_average == 0)
+                    0
+                else
+                    reference_rate * candidate_average / reference_average;
+                self.rates[self.pair_candidate_index] = normalized_candidate;
+                self.recomputePeakAndSelection();
+                self.phase = self.pair_resume;
+                self.current_index = self.pair_resume_index;
+                break :blk self.advanceAfterScore(
+                    self.pair_resume_index,
+                    self.pair_prior_selected_index,
+                    evidence.remaining_full_jobs,
+                );
+            },
+            .settled => self.currentDecision(),
+        };
+    }
+
+    fn finishScore(
+        self: *SourceReadWidthController,
+        index: usize,
+        rate: f64,
+        remaining_full_jobs: usize,
+        allow_pair: bool,
+    ) Decision {
+        const prior_selected = self.selected_index;
+        self.rates[index] = rate;
+        self.recomputePeakAndSelection();
+        const peak_rate = self.rates[self.peak_index] orelse rate;
+        const pair_candidate: ?usize = blk: {
+            // Confirm the decision made by this score first. A downward
+            // candidate just outside the band must not be hidden by an older
+            // in-band selection. If this score establishes a new peak,
+            // confirm the previously selected smaller width before discarding
+            // it. The final entry covers an older unresolved boundary.
+            for ([_]usize{ index, prior_selected, self.selected_index }) |candidate| {
+                if (candidate == self.peak_index) continue;
+                const candidate_rate = self.rates[candidate] orelse continue;
+                const retention = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
+                if (@abs(retention - 0.97) <= 0.02) break :blk candidate;
+            }
+            break :blk null;
+        };
+        if (allow_pair and pair_candidate != null and
+            pairFitsTail(pair_candidate.?, self.peak_index, remaining_full_jobs))
+        {
+            return self.startPair(
+                pair_candidate.?,
+                self.peak_index,
+                self.phase,
+                index,
+                prior_selected,
+            );
+        }
+
+        return self.advanceAfterScore(index, prior_selected, remaining_full_jobs);
+    }
+
+    fn advanceAfterScore(
+        self: *SourceReadWidthController,
+        index: usize,
+        prior_selected: usize,
+        remaining_full_jobs: usize,
+    ) Decision {
+        const peak_rate = self.rates[self.peak_index] orelse 0;
+        const index_rate = self.rates[index] orelse 0;
+        const retention = if (peak_rate == 0) 0 else index_rate / peak_rate;
+        return switch (self.phase) {
+            .baseline => blk: {
+                self.phase = .upward;
+                if (index < self.maximum_index and probeFitsTail(index + 1, remaining_full_jobs))
+                    break :blk self.changeTo(index + 1);
+                break :blk self.beginDownwardOrSettle(remaining_full_jobs);
+            },
+            .upward => blk: {
+                if (self.selected_index == prior_selected)
+                    self.unchanged_candidates += 1
+                else
+                    self.unchanged_candidates = 0;
+                if (self.unchanged_candidates >= 2 or index == self.maximum_index)
+                    break :blk self.beginDownwardOrSettle(remaining_full_jobs);
+                if (probeFitsTail(index + 1, remaining_full_jobs))
+                    break :blk self.changeTo(index + 1);
+                break :blk self.beginDownwardOrSettle(remaining_full_jobs);
+            },
+            .downward => blk: {
+                if (retention >= 0.97) self.selected_index = index;
+                if (retention < 0.97 or index == 0 or
+                    !probeFitsTail(index - 1, remaining_full_jobs))
+                    break :blk self.settle();
+                break :blk self.changeTo(index - 1);
+            },
+            else => self.currentDecision(),
+        };
+    }
+
+    fn recomputePeakAndSelection(self: *SourceReadWidthController) void {
+        var peak_index = self.peak_index;
+        var peak_rate: f64 = self.rates[peak_index] orelse 0;
+        for (self.rates, 0..) |maybe_rate, index| {
+            const rate = maybe_rate orelse continue;
+            if (rate > peak_rate) {
+                peak_rate = rate;
+                peak_index = index;
+            }
+        }
+        self.peak_index = peak_index;
+        var selected = peak_index;
+        for (self.rates, 0..) |maybe_rate, index| {
+            const rate = maybe_rate orelse continue;
+            if (rate >= peak_rate * 0.97) {
+                selected = index;
+                break;
+            }
+        }
+        self.selected_index = selected;
+    }
+
+    fn startPair(
+        self: *SourceReadWidthController,
+        candidate: usize,
+        reference: usize,
+        resume_phase: Phase,
+        resume_index: usize,
+        prior_selected: usize,
+    ) Decision {
+        self.pair_candidate_index = candidate;
+        self.pair_reference_index = reference;
+        self.pair_resume = resume_phase;
+        self.pair_resume_index = resume_index;
+        self.pair_prior_selected_index = prior_selected;
+        self.pair_candidate_total = 0;
+        self.pair_reference_total = 0;
+        self.pair_count = 0;
+        self.phase = .pair_reference;
+        return self.changeToForced(reference);
+    }
+
+    fn beginDownwardOrSettle(
+        self: *SourceReadWidthController,
+        remaining_full_jobs: usize,
+    ) Decision {
+        self.phase = .downward;
+        if (self.selected_index > 0 and probeFitsTail(self.selected_index - 1, remaining_full_jobs))
+            return self.changeTo(self.selected_index - 1);
+        return self.settle();
+    }
+
+    fn changeTo(self: *SourceReadWidthController, index: usize) Decision {
+        const changed = index != self.current_index;
+        self.current_index = index;
+        if (changed) self.generation +|= 1;
+        return .{
+            .width = self.width(),
+            .generation = self.generation,
             .changed = changed,
-            .action = action,
-            .reason = reason,
-            .started_probe = started_probe,
-            .finished_probe = finished_probe,
+            .settled = self.phase == .settled,
         };
     }
 
-    fn currentDecision(self: *const AdaptiveVectoredController) Decision {
-        return self.decision(.none, false, .none, null, false);
+    fn changeToForced(self: *SourceReadWidthController, index: usize) Decision {
+        self.current_index = index;
+        self.generation +|= 1;
+        return .{
+            .width = self.width(),
+            .generation = self.generation,
+            .changed = true,
+            .settled = self.phase == .settled,
+        };
     }
 
-    fn probeAction(dimension: Dimension, kind: ProbeKind, keep: bool) Decision.Action {
-        return switch (dimension) {
-            .read => switch (kind) {
-                .increase => if (keep) .read_probe_keep else .read_probe_rollback,
-                .reduce_resource => if (keep) .read_reduce_keep else .read_reduce_rollback,
-            },
-            .request_size => switch (kind) {
-                .increase => if (keep) .size_probe_keep else .size_probe_rollback,
-                .reduce_resource => if (keep) .size_probe_keep else .size_probe_rollback,
-            },
-            .dma => switch (kind) {
-                .increase => if (keep) .dma_probe_keep else .dma_probe_rollback,
-                .reduce_resource => if (keep) .dma_reduce_keep else .dma_reduce_rollback,
-            },
-        };
+    fn settle(self: *SourceReadWidthController) Decision {
+        self.phase = .settled;
+        return self.changeTo(self.selected_index);
+    }
+
+    fn rollbackTail(self: *SourceReadWidthController) Decision {
+        if (self.phase == .settled) return self.currentDecision();
+        if (self.phase == .pair_reference or self.phase == .pair_candidate)
+            self.selected_index = self.pair_prior_selected_index;
+        return self.settle();
     }
 };
+
+fn sourceReadTestEvidence(
+    controller: *const SourceReadWidthController,
+    rate: u64,
+    remaining_full_jobs: usize,
+) SourceReadWidthController.Evidence {
+    return .{
+        .generation = controller.generation,
+        .width = controller.width(),
+        .completed_full_requests = @max(@as(usize, 8), controller.width()),
+        .elapsed_ns = std.time.ns_per_s,
+        .bytes = rate,
+        .exercised_width = controller.width(),
+        .clean = true,
+        .remaining_full_jobs = remaining_full_jobs,
+    };
+}
+
+test "source read controller bounds blind growth at 32" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+    );
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
+    try std.testing.expectEqual(@as(usize, 24), controller.blindGrow(10_000).?.width);
+    try std.testing.expectEqual(@as(usize, 32), controller.blindGrow(10_000).?.width);
+    try std.testing.expect(controller.blindGrow(10_000) == null);
+}
+
+test "source read controller clips infeasible adaptive and fixed widths" {
+    var adaptive = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        10,
+    );
+    try std.testing.expectEqual(@as(usize, 8), adaptive.width());
+    try std.testing.expect(adaptive.blindGrow(10_000) == null);
+
+    const fixed = SourceReadWidthController.init(.{ .fixed = 20 }, 7);
+    try std.testing.expectEqual(@as(usize, 7), fixed.width());
+    try std.testing.expect(fixed.currentDecision().settled);
+}
+
+test "source read controller isolates generation and requires exercised clean evidence" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    var stale = sourceReadTestEvidence(&controller, 100, 10_000);
+    stale.generation +|= 1;
+    try std.testing.expect(!controller.observe(stale).changed);
+    var short = sourceReadTestEvidence(&controller, 100, 10_000);
+    short.elapsed_ns = 99 * std.time.ns_per_ms;
+    try std.testing.expect(!controller.observe(short).changed);
+    var unexercised = sourceReadTestEvidence(&controller, 100, 10_000);
+    unexercised.exercised_width -= 1;
+    try std.testing.expect(!controller.observe(unexercised).changed);
+    var dirty = sourceReadTestEvidence(&controller, 100, 10_000);
+    dirty.clean = false;
+    try std.testing.expect(!controller.observe(dirty).changed);
+    try std.testing.expectEqual(
+        @as(usize, 16),
+        controller.observe(sourceReadTestEvidence(&controller, 100, 10_000)).width,
+    );
+}
+
+test "source read controller selects plateau then refines downward" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 100_000));
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 94, 100_000));
+    try std.testing.expectEqual(@as(usize, 24), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 94, 100_000));
+    try std.testing.expectEqual(@as(usize, 8), controller.width());
+    const settled = controller.observe(sourceReadTestEvidence(&controller, 80, 100_000));
+    try std.testing.expect(settled.settled);
+    try std.testing.expectEqual(@as(usize, 12), controller.selectedWidth());
+}
+
+test "source read controller confirms boundary with three alternating pairs" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
+        32,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    for (0..3) |_| {
+        _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+        _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    }
+    try std.testing.expectEqual(@as(usize, 3), controller.pair_count);
+    try std.testing.expect(controller.phase != .pair_reference and controller.phase != .pair_candidate);
+}
+
+test "source read controller confirms a borderline out-of-band candidate" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
+        32,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    try std.testing.expectEqual(@as(usize, 16), read_width_ladder[controller.pair_candidate_index]);
+    try std.testing.expectEqual(@as(usize, 12), read_width_ladder[controller.pair_reference_index]);
+}
+
+test "source read controller prioritizes the newly measured boundary" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    const width8 = SourceReadWidthController.widthIndexAtMost(8);
+    const width12 = SourceReadWidthController.widthIndexAtMost(12);
+    const width16 = SourceReadWidthController.widthIndexAtMost(16);
+    controller.rates[width12] = 98;
+    controller.rates[width16] = 100;
+    controller.peak_index = width16;
+    controller.selected_index = width12;
+    controller.current_index = width8;
+    controller.phase = .downward;
+
+    _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    try std.testing.expectEqual(width8, controller.pair_candidate_index);
+    try std.testing.expectEqual(width16, controller.pair_reference_index);
+}
+
+test "source read controller confirms a prior selection displaced by a new peak" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    const width12 = SourceReadWidthController.widthIndexAtMost(12);
+    const width16 = SourceReadWidthController.widthIndexAtMost(16);
+    const width24 = SourceReadWidthController.widthIndexAtMost(24);
+    controller.rates[width12] = 98;
+    controller.rates[width16] = 100;
+    controller.peak_index = width16;
+    controller.selected_index = width12;
+    controller.current_index = width24;
+    controller.phase = .upward;
+
+    _ = controller.observe(sourceReadTestEvidence(&controller, 102, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    try std.testing.expectEqual(width12, controller.pair_candidate_index);
+    try std.testing.expectEqual(width24, controller.pair_reference_index);
+}
+
+test "source read controller rolls back an unfinished boundary pair" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
+        32,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    const rollback = controller.rollbackTail();
+    try std.testing.expect(rollback.settled);
+    try std.testing.expectEqual(@as(usize, 12), rollback.width);
+}
+
+test "source read controller charges only unfinished pair intervals on restart" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
+        32,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+    for (0..2) |_| {
+        _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+        _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    }
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_candidate, controller.phase);
+    const remaining_cost = SourceReadWidthController.probeCost(controller.pair_candidate_index);
+    try std.testing.expect(controller.restartFitsTail(remaining_cost * 4));
+    try std.testing.expect(!controller.restartFitsTail(remaining_cost * 4 - 1));
+}
+
+test "source read controller refines downward when an upward tail no longer fits" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 100_000));
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    const downward = controller.observe(sourceReadTestEvidence(&controller, 120, 100));
+    try std.testing.expectEqual(SourceReadWidthController.Phase.downward, controller.phase);
+    try std.testing.expectEqual(@as(usize, 12), downward.width);
+}
+
+test "source read controller rejects dirty probe restarts at a short tail" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    try std.testing.expect(controller.restartFitsTail(96));
+    try std.testing.expect(!controller.restartFitsTail(95));
+}
+
+test "source read controller keeps fixed width and rolls back a short tail" {
+    var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
+    try std.testing.expectEqual(@as(usize, 7), fixed.width());
+    try std.testing.expect(fixed.currentDecision().settled);
+
+    var adaptive = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    const tail = adaptive.observe(sourceReadTestEvidence(&adaptive, 100, 10));
+    try std.testing.expect(tail.settled);
+    try std.testing.expectEqual(@as(usize, 12), tail.width);
+}
 
 const VectoredReadStatsSource = struct {
     profile_id: usize,
@@ -3073,11 +2820,7 @@ const VectoredReadStatsSource = struct {
 
 const SourceTelemetry = struct {
     retries: u64 = 0,
-    attempts: u64 = 0,
     timing_successes: u64 = 0,
-    timing_bytes: u64 = 0,
-    ttfb_ns: u64 = 0,
-    body_ns: u64 = 0,
     transient_retries: u64 = 0,
     timeouts: u64 = 0,
     server_failures: u64 = 0,
@@ -3085,7 +2828,6 @@ const SourceTelemetry = struct {
     timing_timeouts: u64 = 0,
     timing_server_failures: u64 = 0,
     throttles: u64 = 0,
-    retry_delay_ns: u64 = 0,
 
     fn failures(self: SourceTelemetry) u64 {
         return self.timing_transient_retries +| self.timing_timeouts +| self.timing_server_failures;
@@ -3095,28 +2837,308 @@ const SourceTelemetry = struct {
         return self.timing_successes > 0 or self.transient_retries > 0 or self.timeouts > 0 or
             self.server_failures > 0 or self.throttles > 0;
     }
+};
 
-    fn hasActivity(self: SourceTelemetry) bool {
-        return self.attempts > 0 or self.responseObserved();
+const SourceReadRuntime = struct {
+    controller: SourceReadWidthController,
+    worker_gate: *AdaptiveRequestGate,
+    read_gate: *AdaptiveRequestGate,
+    request_gate: *AdaptiveRequestGate,
+    post_read_slack_requests: usize,
+    metrics: *VectoredLoadMetrics,
+    next_read_admission: *std.atomic.Value(u64),
+    scheduler: *FairVectoredReadScheduler,
+    pinned_feasible_width: usize,
+    read_stats_sources: []VectoredReadStatsSource,
+    source_bootstrap_enabled: bool,
+    source_response_observed: bool = false,
+    probe_dirty: bool = false,
+    probe_transition_pending: bool = false,
+    probe_measuring: bool = false,
+    scoring_pending: bool = false,
+    blind_admissions: bool = false,
+    pending_read_limit: usize = 1,
+    pending_evidence: SourceReadWidthController.Evidence = undefined,
+    last_blind_growth_ns: u64 = 0,
+    done: std.Io.Event = .unset,
+
+    fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
+        var result: SourceTelemetry = .{};
+        const timing_index = readTimingBucketIndex(load_read_request_size).?;
+        for (self.read_stats_sources) |*source| {
+            const current = source.provider.snapshot();
+            const delta = current.sub(source.previous);
+            source.previous = current;
+            result.retries +|= delta.retries;
+            result.transient_retries +|= delta.transient_retries;
+            result.timeouts +|= delta.timeouts;
+            result.server_failures +|= delta.server_failures;
+            result.throttles +|= delta.throttles;
+            const timing = delta.timing[timing_index];
+            result.timing_successes +|= timing.successes;
+            result.timing_transient_retries +|= timing.transient_retries;
+            result.timing_timeouts +|= timing.timeouts;
+            result.timing_server_failures +|= timing.server_failures;
+        }
+        return result;
     }
 
-    fn ttfbMicroseconds(self: SourceTelemetry) f64 {
-        if (self.timing_successes == 0) return 0;
-        return @as(f64, @floatFromInt(self.ttfb_ns)) /
-            @as(f64, @floatFromInt(self.timing_successes)) / std.time.ns_per_us;
+    fn telemetryClean(telemetry: SourceTelemetry) bool {
+        return telemetry.retries == 0 and telemetry.transient_retries == 0 and
+            telemetry.timeouts == 0 and telemetry.server_failures == 0 and
+            telemetry.throttles == 0 and telemetry.failures() == 0;
     }
 
-    fn bodyBandwidth(self: SourceTelemetry) f64 {
-        if (self.body_ns == 0) return 0;
-        return @as(f64, @floatFromInt(self.timing_bytes)) /
-            (@as(f64, @floatFromInt(self.body_ns)) / std.time.ns_per_s);
+    fn applyDecision(
+        self: *SourceReadRuntime,
+        io: std.Io,
+        decision: SourceReadWidthController.Decision,
+        force_probe: bool,
+    ) void {
+        const gate_limits: PinnedGateLimits = .init(
+            decision.width,
+            self.pinned_feasible_width,
+            self.post_read_slack_requests,
+        );
+        self.worker_gate.setLimit(io, gate_limits.read);
+        self.request_gate.setLimit(io, gate_limits.lifecycle);
+        if (!decision.settled and (decision.changed or force_probe)) {
+            self.read_gate.setLimit(io, 0);
+            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+            self.pending_read_limit = gate_limits.read;
+            self.probe_transition_pending = true;
+            self.probe_measuring = false;
+            self.scoring_pending = false;
+            self.blind_admissions = false;
+            self.probe_dirty = false;
+            _ = self.activatePendingProbe(io);
+        } else if (decision.settled) {
+            self.read_gate.setLimit(io, gate_limits.read);
+            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+            self.metrics.config_epoch.store(decision.generation, .release);
+            self.probe_transition_pending = false;
+            self.probe_measuring = false;
+            self.scoring_pending = false;
+            self.blind_admissions = false;
+            self.probe_dirty = false;
+        }
     }
 
-    fn addTiming(self: *SourceTelemetry, other: SourceTelemetry) void {
-        self.timing_successes +|= other.timing_successes;
-        self.timing_bytes +|= other.timing_bytes;
-        self.ttfb_ns +|= other.ttfb_ns;
-        self.body_ns +|= other.body_ns;
+    fn activatePendingProbe(self: *SourceReadRuntime, io: std.Io) bool {
+        if (!self.probe_transition_pending or
+            self.read_gate.inUse(io) != 0) return false;
+        // VFS counters are several atomics updated by the source call before
+        // it releases the gate. Snapshot once more after the drain so one
+        // logical retry cannot be split across two probe generations.
+        _ = self.takeRemoteTelemetry();
+        const admission_start = self.next_read_admission.load(.acquire);
+        self.metrics.prepareProbe(io, self.controller.generation, admission_start);
+        self.probe_transition_pending = false;
+        self.probe_measuring = true;
+        self.probe_dirty = false;
+        self.read_gate.setLimit(io, self.pending_read_limit);
+        return true;
+    }
+
+    fn applyBlindGrowth(
+        self: *SourceReadRuntime,
+        io: std.Io,
+        decision: SourceReadWidthController.Decision,
+    ) void {
+        const gate_limits: PinnedGateLimits = .init(
+            decision.width,
+            self.pinned_feasible_width,
+            self.post_read_slack_requests,
+        );
+        self.worker_gate.setLimit(io, gate_limits.read);
+        self.read_gate.setLimit(io, gate_limits.read);
+        self.request_gate.setLimit(io, gate_limits.lifecycle);
+        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+        self.metrics.config_epoch.store(decision.generation, .release);
+        self.probe_transition_pending = false;
+        self.probe_measuring = false;
+        self.scoring_pending = false;
+        self.blind_admissions = true;
+    }
+
+    fn restartDirtyProbe(
+        self: *SourceReadRuntime,
+        io: std.Io,
+        remaining_full_jobs: usize,
+    ) void {
+        if (self.controller.phase == .settled) return;
+        if (!self.controller.restartFitsTail(remaining_full_jobs)) {
+            self.applyDecision(io, self.controller.rollbackTail(), false);
+            return;
+        }
+        self.controller.generation +|= 1;
+        var decision = self.controller.currentDecision();
+        decision.changed = true;
+        self.applyDecision(io, decision, true);
+    }
+
+    fn currentEvidence(
+        self: *SourceReadRuntime,
+        io: std.Io,
+        remaining_full_jobs: usize,
+    ) SourceReadWidthController.Evidence {
+        const probe = self.metrics.snapshot(io);
+        const now_ns: u64 = @intCast(@max(
+            std.Io.Timestamp.now(io, .awake).nanoseconds,
+            1,
+        ));
+        return .{
+            .generation = probe.probe_epoch,
+            .width = self.controller.width(),
+            .completed_full_requests = @intCast(probe.probe_full_read_operations),
+            // Do not charge a candidate for prior-generation DMA drain before
+            // its first source admission can begin.
+            .elapsed_ns = if (probe.probe_first_read_ns == 0)
+                0
+            else
+                now_ns -| probe.probe_first_read_ns,
+            .bytes = probe.probe_read_bytes,
+            .exercised_width = probe.probe_peak_reads,
+            .clean = !self.probe_dirty,
+            .remaining_full_jobs = remaining_full_jobs,
+        };
+    }
+
+    fn finalize(self: *SourceReadRuntime, io: std.Io) void {
+        std.debug.assert(self.read_gate.inUse(io) == 0);
+        const telemetry = self.takeRemoteTelemetry();
+        if (!telemetryClean(telemetry)) self.probe_dirty = true;
+        if (self.controller.phase != .settled and !self.probe_dirty) {
+            const remaining_full_jobs = self.scheduler.snapshot(io).remaining_full_jobs;
+            if (self.scoring_pending) {
+                self.pending_evidence.remaining_full_jobs = remaining_full_jobs;
+                _ = self.controller.observe(self.pending_evidence);
+            } else if (self.probe_measuring) {
+                const evidence = self.currentEvidence(io, remaining_full_jobs);
+                if (evidence.scoreable()) _ = self.controller.observe(evidence);
+            }
+        }
+        if (self.controller.phase != .settled) _ = self.controller.rollbackTail();
+        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+    }
+
+    fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
+        const started: std.Io.Timestamp = .now(io, .awake);
+        self.applyDecision(io, self.controller.currentDecision(), self.controller.adaptive);
+        while (true) {
+            self.done.waitTimeout(io, .{ .duration = .{
+                .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),
+                .clock = .awake,
+            } }) catch |err| switch (err) {
+                error.Timeout => {},
+                error.Canceled => return error.Canceled,
+            };
+            if (self.done.isSet()) {
+                self.finalize(io);
+                break;
+            }
+
+            const telemetry = self.takeRemoteTelemetry();
+            if (telemetry.responseObserved()) self.source_response_observed = true;
+            if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
+            const scheduler_snapshot = self.scheduler.snapshot(io);
+            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+            if (!telemetryClean(telemetry)) self.probe_dirty = true;
+
+            // Blind admissions deliberately overlap generations so a remote
+            // source can ramp before its first response. Once any response is
+            // visible, close the read gate and start a clean generation only
+            // after every blind admission has returned.
+            if (self.blind_admissions and self.source_response_observed) {
+                self.controller.generation +|= 1;
+                var decision = self.controller.currentDecision();
+                decision.changed = true;
+                self.applyDecision(io, decision, true);
+                continue;
+            }
+
+            if (!self.source_response_observed) {
+                if (now_ns -| self.last_blind_growth_ns >= 10 * std.time.ns_per_ms and
+                    shouldBootstrapSource(
+                        self.source_bootstrap_enabled,
+                        false,
+                        self.metrics.read_bytes.load(.acquire),
+                        self.metrics.outstanding_requests.load(.acquire),
+                        self.controller.width(),
+                        scheduler_snapshot.has_unscheduled,
+                    ))
+                {
+                    self.last_blind_growth_ns = now_ns;
+                    if (self.controller.blindGrow(scheduler_snapshot.remaining_full_jobs)) |decision| {
+                        self.applyBlindGrowth(io, decision);
+                    }
+                }
+                continue;
+            }
+
+            if (self.controller.phase == .settled) continue;
+
+            // A completed score is held until all calls admitted at that
+            // width have drained. The final telemetry snapshot above can then
+            // invalidate the frozen evidence before it changes the width.
+            if (self.scoring_pending) {
+                if (self.read_gate.inUse(io) != 0) continue;
+                const drained_telemetry = self.takeRemoteTelemetry();
+                if (!telemetryClean(drained_telemetry)) self.probe_dirty = true;
+                if (self.probe_dirty) {
+                    self.scoring_pending = false;
+                    self.restartDirtyProbe(io, scheduler_snapshot.remaining_full_jobs);
+                    continue;
+                }
+                self.pending_evidence.remaining_full_jobs = scheduler_snapshot.remaining_full_jobs;
+                const decision = self.controller.observe(self.pending_evidence);
+                self.scoring_pending = false;
+                self.applyDecision(io, decision, !decision.settled);
+                continue;
+            }
+
+            if (self.probe_transition_pending) {
+                if (!scheduler_snapshot.has_unscheduled and
+                    self.metrics.pending_source_jobs.load(.acquire) == 0 and
+                    self.read_gate.inUse(io) == 0)
+                {
+                    self.applyDecision(io, self.controller.rollbackTail(), false);
+                    continue;
+                }
+                _ = self.activatePendingProbe(io);
+                continue;
+            }
+
+            if (self.probe_measuring) {
+                if (self.probe_dirty) {
+                    self.restartDirtyProbe(io, scheduler_snapshot.remaining_full_jobs);
+                    continue;
+                }
+                const evidence = self.currentEvidence(
+                    io,
+                    scheduler_snapshot.remaining_full_jobs,
+                );
+                if (evidence.scoreable()) {
+                    // Freeze a complete clean interval, then drain admissions
+                    // that raced with the snapshot. Their bytes are excluded,
+                    // but their final VFS telemetry must still be clean.
+                    self.read_gate.setLimit(io, 0);
+                    self.pending_evidence = evidence;
+                    self.probe_measuring = false;
+                    self.scoring_pending = true;
+                    continue;
+                }
+            }
+
+            if (!scheduler_snapshot.has_unscheduled and
+                self.metrics.pending_source_jobs.load(.acquire) == 0 and
+                self.read_gate.inUse(io) == 0 and
+                self.controller.phase != .settled)
+            {
+                const rollback = self.controller.rollbackTail();
+                self.applyDecision(io, rollback, false);
+            }
+        }
     }
 };
 
@@ -3131,658 +3153,6 @@ fn shouldBootstrapSource(
     return enabled and !response_observed and read_bytes == 0 and
         outstanding_requests >= read_limit and has_unscheduled;
 }
-
-const AdaptiveVectoredRuntime = struct {
-    controller: AdaptiveVectoredController,
-    pipeline: *VectoredLoadPipeline,
-    worker_gate: *AdaptiveRequestGate,
-    read_gate: *AdaptiveRequestGate,
-    request_gate: *AdaptiveRequestGate,
-    post_read_slack_requests: usize,
-    metrics: *VectoredLoadMetrics,
-    scheduler: *VectoredReadScheduler,
-    max_pinned_bytes: usize,
-    total_physical_upper_bound: u64,
-    read_stats_sources: []VectoredReadStatsSource,
-    source_bootstrap_enabled: bool,
-    source_bootstrap_interval_ns: u64,
-    last_source_bootstrap_ns: u64 = 0,
-    source_response_observed: bool = false,
-    deferred_source_timing: SourceTelemetry = .{},
-    failure_cohort_request_size: usize = 0,
-    failure_cohort_attempts: u64 = 0,
-    failure_cohort_failures: u64 = 0,
-    done: std.Io.Event = .unset,
-    probe_installed_at: std.Io.Timestamp,
-    probe_activated_at: std.Io.Timestamp,
-    source_pressure_windows: u8 = 0,
-
-    const FailureFeedback = struct {
-        ratio: f64 = 0,
-        reliable: bool = false,
-    };
-
-    fn takeRemoteTelemetry(self: *AdaptiveVectoredRuntime, request_size: usize) SourceTelemetry {
-        var result: SourceTelemetry = .{};
-        const timing_index = requestTimingBucketIndex(request_size);
-        for (self.read_stats_sources) |*source| {
-            const current = source.provider.snapshot();
-            const stats_delta = current.sub(source.previous);
-            source.previous = current;
-            result.retries +|= stats_delta.retries;
-            result.transient_retries +|= stats_delta.transient_retries;
-            result.timeouts +|= stats_delta.timeouts;
-            result.server_failures +|= stats_delta.server_failures;
-            result.throttles +|= stats_delta.throttles;
-            result.retry_delay_ns +|= stats_delta.retry_delay_ns;
-            if (timing_index) |index| {
-                const timing = stats_delta.timing[index];
-                result.attempts +|= timing.attempts;
-                result.timing_successes +|= timing.successes;
-                result.timing_bytes +|= timing.successful_bytes;
-                result.ttfb_ns +|= timing.ttfb_ns;
-                result.body_ns +|= timing.body_ns;
-                result.timing_transient_retries +|= timing.transient_retries;
-                result.timing_timeouts +|= timing.timeouts;
-                result.timing_server_failures +|= timing.server_failures;
-            }
-        }
-        return result;
-    }
-
-    fn resetFailureCohort(self: *AdaptiveVectoredRuntime, request_size: usize) void {
-        self.failure_cohort_request_size = request_size;
-        self.failure_cohort_attempts = 0;
-        self.failure_cohort_failures = 0;
-    }
-
-    fn updateFailureCohort(
-        self: *AdaptiveVectoredRuntime,
-        request_size: usize,
-        attempts: u64,
-        failures: u64,
-    ) FailureFeedback {
-        if (self.failure_cohort_request_size != request_size) {
-            self.resetFailureCohort(request_size);
-        }
-        self.failure_cohort_attempts +|= attempts;
-        self.failure_cohort_failures +|= failures;
-        const changed = attempts > 0 or failures > 0;
-        // Bound the cohort so a long clean prefix cannot permanently hide a
-        // later failure regime. Halving preserves the observed ratio while
-        // retaining attempts whose outcomes arrive in a later sample.
-        if (self.failure_cohort_attempts > 128) {
-            self.failure_cohort_attempts = std.math.divCeil(u64, self.failure_cohort_attempts, 2) catch unreachable;
-            self.failure_cohort_failures = std.math.divCeil(u64, self.failure_cohort_failures, 2) catch unreachable;
-        }
-        return .{
-            .ratio = if (self.failure_cohort_attempts == 0)
-                0
-            else
-                @as(f64, @floatFromInt(self.failure_cohort_failures)) /
-                    @as(f64, @floatFromInt(self.failure_cohort_attempts)),
-            // Do not count the same accumulated cohort as two reliable
-            // windows when no new telemetry arrived.
-            .reliable = changed and self.failure_cohort_attempts >= 8,
-        };
-    }
-
-    fn run(self: *AdaptiveVectoredRuntime, io: std.Io) std.Io.Cancelable!void {
-        const started: std.Io.Timestamp = .now(io, .awake);
-        var window_started = started;
-        var previous = self.metrics.snapshot();
-        var previous_control = self.pipeline.controlSnapshot();
-        var previous_post_read_bytes = previous.post_read_bytes;
-        var previous_local_timing: [adaptive_request_sizes.len]VectoredLoadMetrics.LocalReadTiming = undefined;
-        for (&previous_local_timing, 0..) |*timing, index| timing.* = self.metrics.localReadTiming(index);
-        load_log.debug("adaptive controller started: mode={s}, reads={d}/{d}, request_size={Bi:.2}/{Bi:.2}, feasible_width={d}, retained_request_slack={d}, dma_per_device={d}/{d}", .{
-            @tagName(self.controller.mode),
-            self.controller.limits.read,
-            self.controller.max_read,
-            self.controller.limits.request_size,
-            self.controller.max_request_size,
-            self.controller.readCapacity(self.controller.limits.request_size),
-            self.post_read_slack_requests,
-            self.controller.limits.dma,
-            self.controller.max_dma,
-        });
-        defer load_log.debug("adaptive controller stopped: mode={s}, reads={d}, request_size={Bi:.2}, feasible_width={d}, dma_per_device={d}, peak_goodput={d:.2}MiB/s", .{
-            @tagName(self.controller.mode),
-            self.controller.limits.read,
-            self.controller.limits.request_size,
-            self.controller.readCapacity(self.controller.limits.request_size),
-            self.controller.limits.dma,
-            self.controller.peak_goodput / (1024 * 1024),
-        });
-
-        while (!self.done.isSet()) {
-            const sample_interval_ms: i64 = if (!self.controller.dma_started)
-                @intCast(@min(@as(u64, 25), @max(@as(u64, 1), self.source_bootstrap_interval_ns / std.time.ns_per_ms)))
-            else
-                25;
-            self.done.waitTimeout(io, .{ .duration = .{
-                .raw = .fromMilliseconds(sample_interval_ms),
-                .clock = .awake,
-            } }) catch |err| switch (err) {
-                error.Timeout => {},
-                error.Canceled => return error.Canceled,
-            };
-            if (self.done.isSet()) break;
-
-            const now: std.Io.Timestamp = .now(io, .awake);
-            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
-            if (!self.controller.dma_started) {
-                const snapshot = self.metrics.snapshot();
-                const control = self.pipeline.controlSnapshot();
-                const source_telemetry = self.takeRemoteTelemetry(self.controller.limits.request_size);
-                self.deferred_source_timing.addTiming(source_telemetry);
-                if (snapshot.read_bytes > 0 or source_telemetry.responseObserved()) {
-                    self.source_response_observed = true;
-                }
-                const failure_feedback = self.updateFailureCohort(
-                    self.controller.limits.request_size,
-                    source_telemetry.attempts,
-                    source_telemetry.failures(),
-                );
-                if (source_telemetry.hasActivity()) {
-                    const source_timing_reliable = self.deferred_source_timing.timing_successes >= 2 and
-                        self.deferred_source_timing.timing_bytes >= @as(u64, @intCast(2 *| self.controller.limits.request_size));
-                    const feedback_decision = self.controller.observe(.{
-                        .now_ns = now_ns,
-                        .source_throttled = source_telemetry.throttles > 0,
-                        .source_failure_ratio = failure_feedback.ratio,
-                        .source_failure_reliable = failure_feedback.reliable,
-                        .source_timing_successes = self.deferred_source_timing.timing_successes,
-                        .source_timing_bytes = self.deferred_source_timing.timing_bytes,
-                        .source_ttfb_us = self.deferred_source_timing.ttfbMicroseconds(),
-                        .source_body_bandwidth = self.deferred_source_timing.bodyBandwidth(),
-                        .source_timing_reliable = source_timing_reliable,
-                        .allow_probe = false,
-                    });
-                    if (feedback_decision.changed or feedback_decision.finished_probe) {
-                        _ = self.applyDecision(io, feedback_decision, std.math.maxInt(u64));
-                    }
-                    if (source_telemetry.retries > 0 or source_telemetry.throttles > 0) {
-                        load_log.debug("pre-DMA source retry feedback: retries={d}, transient={d}, timeouts={d}, server_failures={d}, throttles={d}, failure_ratio={d:.1}%, delay={d:.1}ms", .{
-                            source_telemetry.retries,
-                            source_telemetry.transient_retries,
-                            source_telemetry.timeouts,
-                            source_telemetry.server_failures,
-                            source_telemetry.throttles,
-                            failure_feedback.ratio * 100,
-                            @as(f64, @floatFromInt(source_telemetry.retry_delay_ns)) / std.time.ns_per_ms,
-                        });
-                    }
-                }
-                const required_device_mask = self.pipeline.expected_device_mask.load(.acquire);
-                if (snapshot.committed_bytes > 0 and
-                    required_device_mask != 0 and
-                    (control.completed_device_mask & required_device_mask) == required_device_mask)
-                {
-                    self.controller.markDmaStarted(now_ns);
-                    previous = snapshot;
-                    previous_control = control;
-                    previous_post_read_bytes = snapshot.post_read_bytes;
-                    self.metrics.resetReadPeak();
-                    window_started = now;
-                    load_log.debug("adaptive baseline started after every destination completed one PJRT event: elapsed={d:.3}s, requests={d}, dma_per_device={d}", .{
-                        @as(f64, @floatFromInt(now_ns)) / std.time.ns_per_s,
-                        self.controller.limits.read,
-                        self.controller.limits.dma,
-                    });
-                    continue;
-                }
-
-                // Before the first source response, opening more requests is
-                // the only way to cover a genuinely high-latency backend. Once
-                // a read has completed, however, any lack of device progress
-                // belongs to PJRT initialization and must not inflate the
-                // source window.
-                const source_calls_fill_window = shouldBootstrapSource(
-                    self.source_bootstrap_enabled,
-                    self.source_response_observed,
-                    snapshot.read_bytes,
-                    snapshot.outstanding_requests,
-                    self.controller.limits.read,
-                    self.scheduler.snapshot(io).has_unscheduled,
-                );
-                if (source_calls_fill_window and self.controller.limits.read < @min(self.controller.max_read, self.controller.bootstrap_read_limit) and
-                    now_ns -| self.last_source_bootstrap_ns >= self.source_bootstrap_interval_ns)
-                {
-                    var decision = self.controller.observe(.{
-                        .now_ns = now_ns,
-                        .read_saturated = true,
-                        .source_stalled = true,
-                        .allow_probe = true,
-                    });
-                    if (decision.changed) {
-                        decision = self.applyDecision(io, decision, std.math.maxInt(u64));
-                    }
-                    self.last_source_bootstrap_ns = now_ns;
-                    load_log.debug("source no-progress bootstrap: requests={d}/{d}, active_source_calls={d}", .{
-                        decision.limits.read,
-                        self.controller.max_read,
-                        snapshot.active_reads,
-                    });
-                }
-                continue;
-            }
-            if (self.controller.probe) |probe| {
-                if (!probe.activated) {
-                    const control = self.pipeline.controlSnapshot();
-                    const capacity_active = switch (probe.dimension) {
-                        .read, .request_size => if (probe.kind == .increase)
-                            self.metrics.probe_peak_reads.load(.acquire) >= probe.candidate.read
-                        else
-                            self.metrics.active_reads.load(.acquire) <= probe.candidate.read,
-                        .dma => if (probe.kind == .increase)
-                            control.probe_capacity_active
-                        else
-                            control.max_device_active <= probe.candidate.dma and control.probe_capacity_active,
-                    };
-                    if (capacity_active and self.controller.activateProbe(probe.epoch)) {
-                        load_log.debug("probe capacity active: epoch={d}, dimension={s}, reads={d}, dma_per_device={d}", .{
-                            probe.epoch,
-                            @tagName(probe.dimension),
-                            probe.candidate.read,
-                            probe.candidate.dma,
-                        });
-                        previous = self.metrics.snapshot();
-                        previous_control = control;
-                        previous_post_read_bytes = previous.post_read_bytes;
-                        window_started = now;
-                        continue;
-                    }
-                    if (self.probe_installed_at.untilNow(io, .awake).nanoseconds >= 5 * std.time.ns_per_s) {
-                        const old_probe_epoch = probe.epoch;
-                        if (self.controller.rollbackTimedOutProbe(now_ns)) |decision| {
-                            const applied = self.applyDecision(io, decision, old_probe_epoch);
-                            load_log.debug("probe capacity timeout: epoch={d}, dimension={s}, reads={d}, dma_per_device={d}", .{
-                                old_probe_epoch,
-                                @tagName(probe.dimension),
-                                applied.limits.read,
-                                applied.limits.dma,
-                            });
-                        }
-                        previous = self.metrics.snapshot();
-                        previous_control = self.pipeline.controlSnapshot();
-                        previous_post_read_bytes = previous.post_read_bytes;
-                        window_started = now;
-                        continue;
-                    }
-                }
-            }
-
-            const elapsed = window_started.untilNow(io, .awake);
-            const elapsed_ns: u64 = @intCast(@max(elapsed.nanoseconds, 0));
-            const startup = self.controller.mode == .startup;
-            const size_probe_active = if (self.controller.probe) |probe|
-                probe.dimension == .request_size and probe.activated
-            else
-                false;
-            const min_ns: u64 = if (startup or size_probe_active) 50 * std.time.ns_per_ms else 100 * std.time.ns_per_ms;
-            const max_ns: u64 = if (size_probe_active)
-                100 * std.time.ns_per_ms
-            else if (startup)
-                100 * std.time.ns_per_ms
-            else
-                250 * std.time.ns_per_ms;
-            if (elapsed_ns < min_ns) continue;
-
-            const snapshot = self.metrics.snapshot();
-            const delta = snapshot.sub(previous);
-            const control = self.pipeline.controlSnapshot();
-            const progress_bytes = @max(delta.read_bytes, delta.committed_bytes);
-            const byte_floor: u64 = if (startup) 32 * 1024 * 1024 else 64 * 1024 * 1024;
-            if (progress_bytes < byte_floor and elapsed_ns < max_ns) continue;
-
-            const seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 1))) / std.time.ns_per_s;
-            const committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
-            const logical_goodput = @as(f64, @floatFromInt(delta.retired_bytes)) / seconds;
-            const read_latency_us = if (delta.read_bytes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.weighted_read_latency_us)) / @as(f64, @floatFromInt(delta.read_bytes));
-            const average_read_bytes = if (delta.read_operations == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.read_bytes)) / @as(f64, @floatFromInt(delta.read_operations));
-            const read_service_bandwidth = if (read_latency_us > 0)
-                average_read_bytes / (read_latency_us / std.time.us_per_s)
-            else
-                0;
-            const slow_reads = average_read_bytes >= 1024 * 1024 and read_service_bandwidth > 0 and
-                read_service_bandwidth < 1.5 * 1024 * 1024 * 1024;
-            const dma_latency_us = if (delta.committed_bytes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.weighted_dma_latency_us)) / @as(f64, @floatFromInt(delta.committed_bytes));
-
-            const active_slot_delta = control.active_slot_ns -| previous_control.active_slot_ns;
-            const capacity_slot_delta = control.capacity_slot_ns -| previous_control.capacity_slot_ns;
-            const integrated_dma_starvation = if (capacity_slot_delta == 0)
-                1
-            else
-                1 - @min(1, @as(f64, @floatFromInt(active_slot_delta)) / @as(f64, @floatFromInt(capacity_slot_delta)));
-            const instantaneous_dma_starvation = if (!self.controller.slow_source_observed and
-                control.ready_entries == 0 and control.active_capacity > 0)
-                1 - @min(1, @as(f64, @floatFromInt(control.active_events)) / @as(f64, @floatFromInt(control.active_capacity)))
-            else
-                0;
-            const dma_starvation_ratio = @max(integrated_dma_starvation, instantaneous_dma_starvation);
-            const source_pressure_capacity: u64 = @max(@as(u64, 1), snapshot.outstanding_request_bytes);
-            const post_read_growth = snapshot.post_read_bytes -| previous_post_read_bytes;
-            const post_read_growth_ratio = @as(f64, @floatFromInt(post_read_growth)) /
-                @as(f64, @floatFromInt(source_pressure_capacity));
-            const post_read_occupancy = @as(f64, @floatFromInt(snapshot.post_read_bytes)) /
-                @as(f64, @floatFromInt(source_pressure_capacity));
-            const post_read_age_pressure = control.post_read_requests >= 4 and
-                control.post_read_oldest_age_ns > 250 * std.time.ns_per_ms;
-            const read_latency_reliable = delta.read_bytes >= 32 * 1024 * 1024;
-            const read_latency_pressure = read_latency_reliable and self.controller.stable_read_latency_us > 0 and
-                read_latency_us > 1.5 * self.controller.stable_read_latency_us;
-            const goodput_regressed = self.controller.peak_logical_goodput > 0 and
-                logical_goodput < 0.97 * self.controller.peak_logical_goodput;
-            const raw_source_pressure = goodput_regressed and
-                (post_read_growth_ratio > 0.20 or (post_read_occupancy > 0.75 and post_read_age_pressure) or read_latency_pressure);
-            if (raw_source_pressure and dma_starvation_ratio <= 0.10) {
-                self.source_pressure_windows = @min(2, self.source_pressure_windows +| 1);
-            } else {
-                self.source_pressure_windows = 0;
-            }
-            const ready_pressure = self.source_pressure_windows >= 2;
-            const read_saturated = snapshot.peak_reads >= self.controller.limits.read and
-                self.scheduler.snapshot(io).has_unscheduled;
-            const source_stalled = startup and progress_bytes < byte_floor and read_saturated and elapsed_ns >= max_ns;
-            const dma_saturated = control.any_device_saturated and control.ready_entries > 0;
-            const dma_latency_reliable = delta.committed_bytes >= 32 * 1024 * 1024;
-            const hard_dma_pressure = dma_latency_reliable and self.controller.stable_dma_latency_us > 0 and
-                dma_latency_us > 2 * self.controller.stable_dma_latency_us and self.controller.peak_goodput > 0 and
-                committed_goodput < 0.95 * self.controller.peak_goodput and dma_saturated;
-
-            var source_telemetry = self.takeRemoteTelemetry(self.controller.limits.request_size);
-            source_telemetry.addTiming(self.deferred_source_timing);
-            self.deferred_source_timing = .{};
-            const source_retries = source_telemetry.retries;
-            var source_timing_successes: u64 = 0;
-            var source_timing_bytes: u64 = 0;
-            var source_ttfb_ns: u64 = 0;
-            var source_body_ns: u64 = 0;
-            const source_transient_retries = source_telemetry.transient_retries;
-            const source_timeouts = source_telemetry.timeouts;
-            const source_server_failures = source_telemetry.server_failures;
-            const source_throttles = source_telemetry.throttles;
-            const source_retry_delay_ns = source_telemetry.retry_delay_ns;
-            const timing_index = requestTimingBucketIndex(self.controller.limits.request_size);
-            source_timing_successes +|= source_telemetry.timing_successes;
-            source_timing_bytes +|= source_telemetry.timing_bytes;
-            source_ttfb_ns +|= source_telemetry.ttfb_ns;
-            source_body_ns +|= source_telemetry.body_ns;
-            var local_timing_delta: [adaptive_request_sizes.len]VectoredLoadMetrics.LocalReadTiming = undefined;
-            for (&local_timing_delta, &previous_local_timing, 0..) |*timing_delta, *old, index| {
-                const current = self.metrics.localReadTiming(index);
-                timing_delta.* = current.sub(old.*);
-                old.* = current;
-            }
-            if (timing_index) |index| {
-                const local = local_timing_delta[index];
-                source_timing_successes +|= local.successes;
-                source_timing_bytes +|= local.successful_bytes;
-                source_body_ns +|= local.service_ns;
-            }
-            const source_ttfb_us = if (source_timing_successes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(source_ttfb_ns)) /
-                    @as(f64, @floatFromInt(source_timing_successes)) / std.time.ns_per_us;
-            const source_body_bandwidth = if (source_body_ns == 0)
-                0
-            else
-                @as(f64, @floatFromInt(source_timing_bytes)) /
-                    (@as(f64, @floatFromInt(source_body_ns)) / std.time.ns_per_s);
-            const failure_feedback = self.updateFailureCohort(
-                self.controller.limits.request_size,
-                source_telemetry.attempts,
-                source_telemetry.failures(),
-            );
-            const source_failure_ratio = failure_feedback.ratio;
-            const source_timing_reliable = source_timing_successes >= 2 and
-                source_timing_bytes >= @as(u64, @intCast(2 *| self.controller.limits.request_size));
-
-            const remaining = self.total_physical_upper_bound -| snapshot.committed_bytes;
-            const reference_goodput = @max(committed_goodput, self.controller.peak_goodput);
-            const remaining_ns = if (reference_goodput > 0)
-                @as(f64, @floatFromInt(remaining)) / reference_goodput * std.time.ns_per_s
-            else
-                std.math.inf(f64);
-            const estimated_probe_ns = @max(
-                @as(f64, 200 * std.time.ns_per_ms),
-                @as(f64, @floatFromInt(source_ttfb_ns +| source_body_ns)) /
-                    @as(f64, @floatFromInt(@max(source_timing_successes, 1))),
-            );
-            const scheduler_snapshot = self.scheduler.snapshot(io);
-            const current_candidate_counts = self.scheduler.candidateCounts(
-                io,
-                self.controller.limits.request_size,
-            );
-            const next_request_size = @min(
-                self.controller.max_request_size,
-                self.controller.limits.request_size *| 2,
-            );
-            const next_candidate_counts = self.scheduler.candidateCounts(io, next_request_size);
-            const allow_probe = remaining_ns > 250 * std.time.ns_per_ms and
-                estimated_probe_ns <= 0.25 * remaining_ns and
-                current_candidate_counts.total >= 4;
-            const allow_resource_probe = remaining_ns > 2 * std.time.ns_per_s;
-
-            var probe_goodput: f64 = 0;
-            var probe_elapsed_ns: u64 = 0;
-            if (self.controller.probe) |probe| {
-                if (probe.activated) {
-                    probe_elapsed_ns = @intCast(@max(
-                        self.probe_activated_at.untilNow(io, .awake).nanoseconds,
-                        1,
-                    ));
-                    const probe_seconds = @as(f64, @floatFromInt(probe_elapsed_ns)) / std.time.ns_per_s;
-                    probe_goodput = @as(f64, @floatFromInt(snapshot.probe_committed_bytes)) / probe_seconds;
-                }
-            }
-
-            const probe_baseline_goodput = if (self.controller.probe) |probe| probe.baseline_goodput else 0;
-            const old_probe_epoch = if (self.controller.probe) |probe| probe.epoch else std.math.maxInt(u64);
-            var decision = self.controller.observe(.{
-                .now_ns = now_ns,
-                .committed_goodput = committed_goodput,
-                .logical_goodput = logical_goodput,
-                .probe_goodput = probe_goodput,
-                .probe_committed_bytes = snapshot.probe_committed_bytes,
-                .probe_elapsed_ns = probe_elapsed_ns,
-                .probe_read_operations = snapshot.probe_read_operations,
-                .probe_read_bytes = snapshot.probe_read_bytes,
-                .dma_latency_us = dma_latency_us,
-                .dma_latency_reliable = dma_latency_reliable,
-                .read_latency_us = read_latency_us,
-                .read_latency_reliable = read_latency_reliable,
-                .dma_starvation_ratio = dma_starvation_ratio,
-                .high_latency_source = self.source_bootstrap_enabled,
-                .read_saturated = read_saturated,
-                .source_stalled = source_stalled,
-                .dma_saturated = dma_saturated,
-                .dma_probe_capacity = control.any_device_saturated,
-                .ready_pressure = ready_pressure,
-                .slow_reads = slow_reads,
-                .source_throttled = source_throttles > 0,
-                .source_failure_ratio = source_failure_ratio,
-                .source_failure_reliable = failure_feedback.reliable,
-                .source_timing_successes = source_timing_successes,
-                .source_timing_bytes = source_timing_bytes,
-                .source_ttfb_us = source_ttfb_us,
-                .source_body_bandwidth = source_body_bandwidth,
-                .source_timing_reliable = source_timing_reliable,
-                .source_low_load = snapshot.active_reads <= @max(@as(usize, 2), self.controller.limits.read / 2),
-                .remaining_bytes = scheduler_snapshot.remaining_bytes,
-                .remaining_candidate_requests = next_candidate_counts.total,
-                .remaining_full_candidate_requests = next_candidate_counts.full,
-                .estimated_remaining_ns = remaining_ns,
-                .hard_dma_pressure = hard_dma_pressure,
-                .allow_probe = allow_probe,
-                .allow_resource_probe = allow_resource_probe,
-            });
-            if (decision.started_probe == .dma and
-                !self.pipeline.beginDmaProbe(decision.epoch, decision.limits.dma))
-            {
-                decision = self.controller.rollbackTimedOutProbe(now_ns).?;
-            }
-            if (decision.changed or decision.finished_probe) {
-                decision = self.applyDecision(io, decision, old_probe_epoch);
-            }
-
-            load_log.debug("adaptive window: action={s}, reason={s}, mode={s}, epoch={d}, requests={d}/{d} in_use={d} reading={d} saturated={}, dma_per_device={d}/{d} active={d}/{d} saturated={}, physical={d:.2}MiB/s logical={d:.2}MiB/s, dma_latency={d:.1}us, starvation={d:.1}%, post_read={Bi:.2}/{Bi:.2} age={d:.1}ms count={d} pressure={}, ready={Bi:.2}/{d}, probe={d:.2}/{d:.2}MiB/s {Bi:.2}/{d:.1}ms", .{
-                @tagName(decision.action),
-                @tagName(decision.reason),
-                @tagName(self.controller.mode),
-                decision.epoch,
-                decision.limits.read,
-                self.controller.max_read,
-                snapshot.outstanding_requests,
-                snapshot.active_reads,
-                read_saturated,
-                decision.limits.dma,
-                self.controller.max_dma,
-                control.active_events,
-                control.active_capacity,
-                dma_saturated,
-                committed_goodput / (1024 * 1024),
-                logical_goodput / (1024 * 1024),
-                dma_latency_us,
-                dma_starvation_ratio * 100,
-                snapshot.post_read_bytes,
-                source_pressure_capacity,
-                @as(f64, @floatFromInt(control.post_read_oldest_age_ns)) / std.time.ns_per_ms,
-                control.post_read_requests,
-                ready_pressure,
-                snapshot.ready_bytes,
-                control.ready_entries,
-                probe_baseline_goodput / (1024 * 1024),
-                probe_goodput / (1024 * 1024),
-                snapshot.probe_committed_bytes,
-                @as(f64, @floatFromInt(probe_elapsed_ns)) / std.time.ns_per_ms,
-            });
-            const average_body_us = if (source_timing_successes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(source_body_ns)) /
-                    @as(f64, @floatFromInt(source_timing_successes)) / std.time.ns_per_us;
-            const overhead_fraction = if (source_ttfb_us + average_body_us == 0)
-                0
-            else
-                source_ttfb_us / (source_ttfb_us + average_body_us);
-            load_log.debug("source tuple: reads={d}, request_size={Bi:.2}, feasible_width={d}, ttfb={d:.2}ms, body_bandwidth={d:.2}MiB/s, overhead={d:.1}%, timing_successes={d}, remaining={Bi:.2}", .{
-                decision.limits.read,
-                decision.limits.request_size,
-                self.controller.readCapacity(decision.limits.request_size),
-                source_ttfb_us / std.time.us_per_ms,
-                source_body_bandwidth / (1024 * 1024),
-                overhead_fraction * 100,
-                source_timing_successes,
-                scheduler_snapshot.remaining_bytes,
-            });
-            if (source_retries > 0 or source_throttles > 0) {
-                load_log.debug("source retry feedback: retries={d}, transient={d}, timeouts={d}, server_failures={d}, throttles={d}, failure_ratio={d:.1}%, delay={d:.1}ms", .{
-                    source_retries,
-                    source_transient_retries,
-                    source_timeouts,
-                    source_server_failures,
-                    source_throttles,
-                    source_failure_ratio * 100,
-                    @as(f64, @floatFromInt(source_retry_delay_ns)) / std.time.ns_per_ms,
-                });
-            }
-
-            previous = snapshot;
-            previous_control = control;
-            previous_post_read_bytes = snapshot.post_read_bytes;
-            self.metrics.resetReadPeak();
-            window_started = now;
-        }
-
-        if (self.controller.probe) |probe| {
-            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
-            if (self.controller.rollbackUnfinishedProbe(now_ns)) |decision| {
-                const applied = self.applyDecision(io, decision, probe.epoch);
-                load_log.debug("adaptive tail rollback: epoch={d}, dimension={s}, reads={d}, dma_per_device={d}", .{
-                    probe.epoch,
-                    @tagName(probe.dimension),
-                    applied.limits.read,
-                    applied.limits.dma,
-                });
-            }
-        }
-    }
-
-    fn applyDecision(
-        self: *AdaptiveVectoredRuntime,
-        io: std.Io,
-        decision: AdaptiveVectoredController.Decision,
-        old_probe_epoch: u64,
-    ) AdaptiveVectoredController.Decision {
-        var applied = decision;
-        var scheduler_tuple_installed = false;
-        if (decision.finished_probe and old_probe_epoch != std.math.maxInt(u64)) {
-            self.metrics.clearProbe(io, old_probe_epoch);
-            self.pipeline.clearDmaProbe(old_probe_epoch);
-        }
-        if (decision.started_probe) |dimension| {
-            const metrics_dimension: VectoredLoadMetrics.ProbeDimension = switch (dimension) {
-                .read => .read,
-                .request_size => .request_size,
-                .dma => .dma,
-            };
-            self.metrics.prepareProbe(io, decision.epoch, metrics_dimension);
-            self.probe_installed_at = .now(io, .awake);
-            self.probe_activated_at = self.probe_installed_at;
-            if (dimension == .request_size) {
-                scheduler_tuple_installed = self.scheduler.trySetCandidateTuple(
-                    io,
-                    decision.limits.request_size,
-                    decision.epoch,
-                    decision.limits.read,
-                    8,
-                );
-                if (!scheduler_tuple_installed) {
-                    self.metrics.clearProbe(io, decision.epoch);
-                    applied = self.controller.rollbackUnfinishedProbe(self.controller.last_probe_ns).?;
-                    self.metrics.config_epoch.store(applied.epoch, .release);
-                }
-            }
-        } else if (decision.changed) {
-            self.metrics.config_epoch.store(decision.epoch, .release);
-        }
-        if (self.failure_cohort_request_size != 0 and
-            self.failure_cohort_request_size != applied.limits.request_size)
-        {
-            self.resetFailureCohort(applied.limits.request_size);
-        } else if (applied.action == .read_backoff and
-            (applied.reason == .source_throttle or applied.reason == .source_failures))
-        {
-            self.resetFailureCohort(applied.limits.request_size);
-        }
-        if (!scheduler_tuple_installed) {
-            self.scheduler.setTuple(io, applied.limits.request_size, applied.epoch);
-        }
-        const gate_limits: PinnedGateLimits = .init(
-            applied.limits.read,
-            applied.limits.request_size,
-            self.max_pinned_bytes,
-            self.post_read_slack_requests,
-        );
-        self.worker_gate.setLimit(io, gate_limits.read);
-        self.read_gate.setLimit(io, gate_limits.read);
-        self.request_gate.setLimit(io, gate_limits.lifecycle);
-        self.pipeline.setDmaLimit(applied.limits.dma);
-        return applied;
-    }
-};
 
 fn loadVectored(
     comptime ModelType: type,
@@ -3811,8 +3181,36 @@ fn loadVectored(
         }
     }.call, .{buffers});
 
-    var pool = try mem.DmaBlockPool.init(allocator, platform, opts.dma_block_size, opts.max_pinned_bytes);
+    const dma_resources = opts.dma.?;
+    const dma_config = dma_resources.config;
+    const node_reserves = try allocator.alloc(usize, dma_resources.workspace.pools.len);
+    defer allocator.free(node_reserves);
+    @memset(node_reserves, 0);
+    for (dma_config.device_ids) |device_id| {
+        const device_index = for (platform.devices, 0..) |device, index| {
+            if (device.id() == device_id) break index;
+        } else return error.DmaDeviceMismatch;
+        const node_index = dma_resources.workspace.device_pool_indices[device_index];
+        node_reserves[node_index] = try std.math.add(
+            usize,
+            node_reserves[node_index],
+            dma_config.max_in_flight_per_device,
+        );
+    }
+    var pool = try mem.DmaBlockPool.initFromProvider(
+        allocator,
+        dma_resources.workspace.blockPoolArenaProvider(),
+        dma_config.block_size,
+        dma_config.max_mapped_bytes,
+        node_reserves,
+    );
     defer pool.deinit();
+    try dma_resources.workspace.ensureLoadBlockReserves(
+        dma_config.block_size,
+        dma_config.device_ids.len,
+        node_reserves,
+    );
+    try pool.refreshProviderArenas(io);
 
     const SourceSlot = struct {
         const uninitialized = 0;
@@ -3870,15 +3268,12 @@ fn loadVectored(
             const index = source_slots.items.len;
             const profile = VFS.readProfileForPath(io, descriptor.file_uri);
             const minimum = if (profile) |p| p.hints.minimum_request_size else 2 * 1024 * 1024;
-            switch (opts.read_request_size) {
-                .adaptive => {},
-                .fixed => |fixed| if (fixed < minimum) {
-                    load_log.warn("fixed source request size {Bi:.2} is below the {Bi:.2} minimum advertised by {s}", .{
-                        fixed,
-                        minimum,
-                        if (profile) |p| p.scheme else "local/default",
-                    });
-                },
+            if (load_read_request_size < minimum) {
+                load_log.warn("fixed source request size {Bi:.2} is below the {Bi:.2} minimum advertised by {s}", .{
+                    load_read_request_size,
+                    minimum,
+                    if (profile) |p| p.scheme else "local/default",
+                });
             }
             try source_slots.append(allocator, .{
                 .uri = descriptor.file_uri,
@@ -3891,14 +3286,14 @@ fn loadVectored(
             load_log.debug("source profile: name={s}, minimum_request_size={Bi:.2}, mode={s}, uri={s}", .{
                 source_slots.items[index].profile_name,
                 minimum,
-                @tagName(opts.read_request_size),
+                "fixed",
                 descriptor.file_uri,
             });
             break :blk index;
         };
     }
 
-    var source_minimum: usize = opts.dma_block_size;
+    var source_minimum: usize = dma_config.block_size;
     var profile_ids: std.ArrayListUnmanaged(usize) = .empty;
     defer profile_ids.deinit(allocator);
     for (source_slots.items) |slot| {
@@ -3915,21 +3310,6 @@ fn loadVectored(
             source_minimum,
         });
     }
-    const initial_request_size = resolveReadRequestSize(opts.read_request_size, source_minimum, opts.dma_block_size);
-    const maximum_request_size = switch (opts.read_request_size) {
-        .adaptive => |adaptive| adaptive.maximum,
-        .fixed => |fixed| fixed,
-    };
-    switch (opts.read_request_size) {
-        .adaptive => {
-            stdx.debug.assert(source_minimum <= max_load_read_request_size, "zml.io.load source minimum exceeds the absolute request-size limit", .{});
-            stdx.debug.assert(initial_request_size >= source_minimum, "zml.io.load adaptive request-size initial is below the source minimum", .{});
-            stdx.debug.assert(initial_request_size <= maximum_request_size, "zml.io.load source minimum/initial exceeds adaptive request-size maximum", .{});
-        },
-        .fixed => {},
-    }
-    stdx.debug.assert(initial_request_size <= opts.max_pinned_bytes, "zml.io.load initial request size exceeds max_pinned_bytes", .{});
-
     var read_stats_sources: std.ArrayListUnmanaged(VectoredReadStatsSource) = .empty;
     defer read_stats_sources.deinit(allocator);
     for (source_slots.items) |slot| {
@@ -4026,20 +3406,38 @@ fn loadVectored(
         @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
     });
 
-    var metrics: VectoredLoadMetrics = .{};
-    var controller: AdaptiveVectoredController = .initConfigured(
-        opts.read_parallelism,
-        opts.dma_parallelism,
-        initial_request_size,
-        maximum_request_size,
-        opts.read_request_size.isAdaptive(),
-        opts.max_pinned_bytes,
+    var scheduler = try FairVectoredReadScheduler.init(
+        allocator,
+        platform,
+        tensors,
+        opts.shardings,
+        dma_config.block_size,
     );
-    controller.max_startup_read_probes = if (platform.devices.len > 1) 2 else 1;
+    defer scheduler.deinit();
+    const maximum_blocks_per_job = scheduler.maximumBlocksPerJob();
+    const pinned_feasible_width = if (maximum_blocks_per_job == 0)
+        @as(usize, 1)
+    else
+        try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
+    if (pinned_feasible_width == 0) return error.DmaMappedBudgetExceeded;
+    const strict_pinned_feasible_width = if (maximum_blocks_per_job == 0)
+        @as(usize, 1)
+    else
+        try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
+    load_log.debug("DMA workspace feasibility: maximum_blocks_per_job={d}, aggregate_read_width={d}, minimum_strict_read_width={d}", .{
+        maximum_blocks_per_job,
+        pinned_feasible_width,
+        strict_pinned_feasible_width,
+    });
+
+    var metrics: VectoredLoadMetrics = .{};
+    const controller = SourceReadWidthController.init(
+        opts.read_parallelism,
+        pinned_feasible_width,
+    );
     const initial_gate_limits: PinnedGateLimits = .init(
-        controller.limits.read,
-        controller.limits.request_size,
-        opts.max_pinned_bytes,
+        controller.width(),
+        pinned_feasible_width,
         post_read_slack_requests,
     );
     var worker_gate: AdaptiveRequestGate = .init(initial_gate_limits.read);
@@ -4053,60 +3451,44 @@ fn loadVectored(
         &worker_gate,
         &read_gate,
         &request_gate,
-        opts.dma_block_size,
+        dma_config.block_size,
+        dma_resources.workspace.device_pool_indices,
+        for (dma_config.device_numa_nodes) |node| {
+            if (node != null) break true;
+        } else false,
         &metrics,
-        controller.limits.dma,
+        dma_config.max_in_flight_per_device,
+        dma_config.global_max_in_flight,
     );
     defer pipeline.deinit();
 
-    const tensor_sizes = try allocator.alloc(usize, tensor_count);
-    defer allocator.free(tensor_sizes);
-    for (tensors, tensor_sizes) |tensor, *size| size.* = tensor.byteSize();
-    var scheduler = try VectoredReadScheduler.init(allocator, tensor_sizes, controller.limits.request_size, controller.epoch);
-    defer scheduler.deinit();
     var worker_group: std.Io.Group = .init;
-    var controller_runtime: AdaptiveVectoredRuntime = .{
+    var controller_runtime: SourceReadRuntime = .{
         .controller = controller,
-        .pipeline = &pipeline,
         .worker_gate = &worker_gate,
         .read_gate = &read_gate,
         .request_gate = &request_gate,
         .post_read_slack_requests = post_read_slack_requests,
         .metrics = &metrics,
+        .next_read_admission = &pipeline.next_read_admission,
         .scheduler = &scheduler,
-        .max_pinned_bytes = opts.max_pinned_bytes,
-        .total_physical_upper_bound = 0,
+        .pinned_feasible_width = pinned_feasible_width,
         .read_stats_sources = read_stats_sources.items,
         .source_bootstrap_enabled = high_latency_source,
-        .source_bootstrap_interval_ns = if (high_latency_source)
-            10 * std.time.ns_per_ms
-        else
-            100 * std.time.ns_per_ms,
-        .probe_installed_at = .now(io, .awake),
-        .probe_activated_at = .now(io, .awake),
     };
-    // Resource/tail probes need the physical transfer total: sharded tensors
-    // transfer one logical copy in aggregate, while replicas transfer one copy
-    // to each destination.
-    var physical_upper_bound: u64 = 0;
-    for (tensors) |tensor| {
-        const sharding = Sharding.pickSharding(opts.shardings, tensor.shape(), .explicit_axis_binding) orelse
-            platform.replicated_sharding;
-        const placement = try sharding.placement(tensor.shape());
-        physical_upper_bound +|= @as(u64, @intCast(placement.shape.byteSize())) *|
-            @as(u64, @intCast(sharding.devicesInCanonicalOrder().len));
-    }
-    controller_runtime.total_physical_upper_bound = physical_upper_bound;
     var controller_group: std.Io.Group = .init;
-    try controller_group.concurrent(io, AdaptiveVectoredRuntime.run, .{ &controller_runtime, io });
+    try controller_group.concurrent(io, SourceReadRuntime.run, .{ &controller_runtime, io });
 
-    const worker_count = if (controller_runtime.total_physical_upper_bound == 0) 0 else opts.read_parallelism.maximum();
+    const worker_count = if (scheduler.snapshot(io).remaining_jobs == 0)
+        0
+    else
+        opts.read_parallelism.maximum();
     for (0..worker_count) |worker_index| {
         worker_group.concurrent(io, struct {
             fn run(
                 worker_index_: usize,
                 worker_gate_: *AdaptiveRequestGate,
-                scheduler_: *VectoredReadScheduler,
+                scheduler_: *FairVectoredReadScheduler,
                 request_gate_: *AdaptiveRequestGate,
                 pipeline_: *VectoredLoadPipeline,
                 slots_: []StateSlot,
@@ -4125,13 +3507,16 @@ fn loadVectored(
                     if (!worker_gate_.waitUntilEnabled(io_, worker_index_)) return;
                     if (pipeline_.failed()) return;
                     if (!request_gate_.acquire(io_)) return;
+                    pipeline_.reserveSourceJob();
                     const job = scheduler_.claim(io_) orelse {
+                        pipeline_.abandonSourceJob();
                         request_gate_.release(io_);
                         worker_gate_.close(io_);
                         request_gate_.close(io_);
                         return;
                     };
-                    const request = pipeline_.registerRequest(job.epoch, job.len) catch |err| {
+                    const request = pipeline_.registerRequest(job.len) catch |err| {
+                        pipeline_.abandonSourceJob();
                         request_gate_.release(io_);
                         pipeline_.recordError(err);
                         return;
@@ -4157,15 +3542,12 @@ fn loadVectored(
                         pipeline_.recordError(err);
                         return;
                     };
-                    pipeline_.expectTensorTargets(tensor);
                     VectoredReadRequest.run(
                         request,
                         tensor,
                         pipeline_,
                         job.source_offset,
                         job.len,
-                        job.request_size,
-                        source_slots_[source_indices_[job.tensor_index]].read_stats != null,
                     );
                 }
             }
@@ -4238,7 +3620,7 @@ fn loadVectored(
     const average_request_ms = if (metrics.retired_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_request_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.retired_bytes.load(.acquire))) / std.time.us_per_ms;
     const average_dma_ms = if (metrics.committed_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_dma_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.committed_bytes.load(.acquire))) / std.time.us_per_ms;
     const average_ready_ms = if (metrics.read_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_ready_age_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.read_bytes.load(.acquire))) / std.time.us_per_ms;
-    const final_control = pipeline.controlSnapshot();
+    const peak_device_active = pipeline.peakDeviceActive();
     var physical_source_requests: u64 = 0;
     var physical_source_bytes: u64 = 0;
     var source_retries: u64 = 0;
@@ -4252,16 +3634,35 @@ fn loadVectored(
         source_throttles +|= source_stats.throttles;
         source_retry_delay_ns +|= source_stats.retry_delay_ns;
     }
-    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_requests={d}, final_requests={d}, final_request_size={Bi:.2}, feasible_width={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, average_request_lifetime={d:.3}ms, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_retry_delay={d:.3}s, dma_submissions={d}, peak_dma_per_device={d}, final_dma_per_device={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, average_ready_age={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
+    for (0..pool.nodeCount()) |node_index| {
+        const stats = pool.nodeStats(node_index);
+        if (dma_resources.workspace.pools[node_index].numa_allocator.node) |node| {
+            load_log.debug("DMA workspace node: numa_node={d}, retained={Bi:.2}, newly_mapped={Bi:.2}, leased_high_water={Bi:.2}, unused_tail={Bi:.2}", .{
+                node,
+                stats.retained_mapped_bytes,
+                stats.newly_mapped_bytes,
+                stats.leased_high_water_bytes,
+                stats.unused_tail_bytes,
+            });
+        } else {
+            load_log.debug("DMA workspace node: numa_node=single, retained={Bi:.2}, newly_mapped={Bi:.2}, leased_high_water={Bi:.2}, unused_tail={Bi:.2}", .{
+                stats.retained_mapped_bytes,
+                stats.newly_mapped_bytes,
+                stats.leased_high_water_bytes,
+                stats.unused_tail_bytes,
+            });
+        }
+    }
+    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_requests={d}, final_requests={d}, final_request_size={Bi:.2}, feasible_width={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, average_request_lifetime={d:.3}ms, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_retry_delay={d:.3}s, dma_submissions={d}, peak_dma_per_device={d}, final_dma_per_device={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, average_ready_age={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, leased_high_water={Bi:.2}, mapped={Bi:.2}, newly_mapped={Bi:.2}, unused_tail={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
         tensor_count,
         loaded_bytes,
         elapsed_seconds,
         goodput / (1024 * 1024),
         read_operations,
         metrics.request_high_water.load(.acquire),
-        controller_runtime.controller.limits.read,
-        controller_runtime.controller.limits.request_size,
-        controller_runtime.controller.readCapacity(controller_runtime.controller.limits.request_size),
+        controller_runtime.controller.width(),
+        load_read_request_size,
+        pinned_feasible_width,
         average_read,
         average_read_ms,
         average_request_ms,
@@ -4271,8 +3672,8 @@ fn loadVectored(
         source_throttles,
         @as(f64, @floatFromInt(source_retry_delay_ns)) / std.time.ns_per_s,
         dma_submissions,
-        final_control.peak_device_active,
-        controller_runtime.controller.limits.dma,
+        peak_device_active,
+        dma_config.max_in_flight_per_device,
         average_dma,
         average_dma_ms,
         average_ready_ms,
@@ -4280,6 +3681,8 @@ fn loadVectored(
         metrics.committed_bytes.load(.acquire),
         pool.highWaterBytes(),
         pool.mappedBytes(),
+        pool.newlyMappedBytes(),
+        pool.unusedTailBytes(),
         metrics.pool_waits.load(.acquire),
         @as(f64, @floatFromInt(metrics.pool_wait_ns.load(.acquire))) / std.time.ns_per_s,
     });
@@ -4363,8 +3766,324 @@ pub const GlobalDmaCandidate = struct {
     normalized_fairness: f64,
 };
 
+/// Immutable DMA settings shared by every device participating in one load.
+/// The slices are owned by the enclosing `DmaLoadResources`.
+pub const DmaLoadConfig = struct {
+    device_kind: []const u8,
+    device_ids: []const u32,
+    device_numa_nodes: []const ?usize,
+    block_size: usize,
+    max_in_flight_per_device: usize,
+    global_max_in_flight: ?usize,
+    max_mapped_bytes: usize,
+};
+
+fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
+    const request_blocks = std.math.divCeil(
+        usize,
+        load_read_request_size,
+        config.block_size,
+    ) catch return error.InvalidDmaLoadConfig;
+    const maximum_request_blocks = std.math.add(
+        usize,
+        request_blocks,
+        config.device_ids.len - 1,
+    ) catch return error.InvalidDmaLoadConfig;
+    var required_blocks: usize = 0;
+    if (config.device_numa_nodes[0] == null) {
+        const feed_blocks = std.math.mul(
+            usize,
+            config.device_ids.len,
+            config.max_in_flight_per_device,
+        ) catch return error.InvalidDmaLoadConfig;
+        required_blocks = @max(feed_blocks, maximum_request_blocks);
+    } else {
+        for (config.device_numa_nodes, 0..) |maybe_node, index| {
+            const node = maybe_node.?;
+            var seen = false;
+            for (config.device_numa_nodes[0..index]) |previous| {
+                if (previous.? == node) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            var device_count: usize = 0;
+            for (config.device_numa_nodes) |candidate| {
+                if (candidate.? == node) device_count += 1;
+            }
+            const feed_blocks = std.math.mul(
+                usize,
+                device_count,
+                config.max_in_flight_per_device,
+            ) catch return error.InvalidDmaLoadConfig;
+            required_blocks = std.math.add(
+                usize,
+                required_blocks,
+                @max(feed_blocks, maximum_request_blocks),
+            ) catch return error.InvalidDmaLoadConfig;
+        }
+    }
+    return std.math.mul(usize, required_blocks, config.block_size) catch
+        error.InvalidDmaLoadConfig;
+}
+
+fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
+    if (config.device_kind.len == 0 or config.device_ids.len == 0 or
+        config.device_ids.len > 64 or
+        config.device_ids.len != config.device_numa_nodes.len or
+        config.block_size == 0 or config.max_in_flight_per_device == 0 or
+        config.max_in_flight_per_device > max_load_dma_parallelism or
+        config.block_size > load_read_request_size or
+        config.max_mapped_bytes < config.block_size)
+        return error.InvalidDmaLoadConfig;
+    const uncapped = std.math.mul(
+        usize,
+        config.device_ids.len,
+        config.max_in_flight_per_device,
+    ) catch return error.InvalidDmaLoadConfig;
+    if (config.global_max_in_flight) |limit| {
+        if (limit == 0 or limit > uncapped) return error.InvalidDmaLoadConfig;
+    }
+    var known_numa_nodes: usize = 0;
+    for (config.device_numa_nodes) |maybe_node| {
+        if (maybe_node) |node| {
+            known_numa_nodes += 1;
+            if (node >= DmaBenchmarkNumaAllocator.max_nodes)
+                return error.InvalidDmaLoadConfig;
+        }
+    }
+    if (known_numa_nodes != 0 and known_numa_nodes != config.device_numa_nodes.len)
+        return error.InvalidDmaLoadConfig;
+    if (known_numa_nodes != 0 and builtin.os.tag != .linux)
+        return error.DmaBenchmarkNumaUnsupported;
+    if (try requiredDmaWorkspaceBytes(config) > config.max_mapped_bytes)
+        return error.InvalidDmaLoadConfig;
+    for (config.device_ids, 0..) |id, index| {
+        for (config.device_ids[0..index]) |previous| {
+            if (id == previous) return error.InvalidDmaLoadConfig;
+        }
+    }
+}
+
+fn dupeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) !DmaLoadConfig {
+    try validateDmaLoadConfig(config);
+    const kind = try allocator.dupe(u8, config.device_kind);
+    errdefer allocator.free(kind);
+    const ids = try allocator.dupe(u32, config.device_ids);
+    errdefer allocator.free(ids);
+    const nodes = try allocator.dupe(?usize, config.device_numa_nodes);
+    return .{
+        .device_kind = kind,
+        .device_ids = ids,
+        .device_numa_nodes = nodes,
+        .block_size = config.block_size,
+        .max_in_flight_per_device = config.max_in_flight_per_device,
+        .global_max_in_flight = config.global_max_in_flight,
+        .max_mapped_bytes = config.max_mapped_bytes,
+    };
+}
+
+fn freeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) void {
+    allocator.free(config.device_kind);
+    allocator.free(config.device_ids);
+    allocator.free(config.device_numa_nodes);
+}
+
+test "DMA load config validates uniform caps, topology, and workspace budget" {
+    const valid: DmaLoadConfig = .{
+        .device_kind = "test",
+        .device_ids = &.{ 11, 12 },
+        .device_numa_nodes = &.{ null, null },
+        .block_size = 4 * 1024 * 1024,
+        .max_in_flight_per_device = 8,
+        .global_max_in_flight = 4,
+        .max_mapped_bytes = 64 * 1024 * 1024,
+    };
+    try validateDmaLoadConfig(valid);
+
+    var invalid = valid;
+    invalid.global_max_in_flight = 17;
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
+    invalid = valid;
+    invalid.device_ids = &.{ 11, 11 };
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
+    invalid = valid;
+    invalid.device_numa_nodes = &.{ 0, null };
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
+    invalid = valid;
+    invalid.max_mapped_bytes -= 1;
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
+}
+
+/// Owned, reusable host-DMA workspace. A workspace may be borrowed by only one
+/// load at a time; all registered arenas remain mapped until `deinit`.
+pub const DmaLoadResources = struct {
+    const idle = 0;
+    const loading = 1;
+    const destroying = 2;
+
+    config: DmaLoadConfig,
+
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    workspace: DmaBenchmarkSourcePools,
+    workload_signature: ?u64,
+    pending_workload_signature: ?u64 = null,
+    state: std.atomic.Value(u8) = .init(idle),
+
+    /// Constructs an operator-specified workspace with no retained arenas.
+    /// The first successful load binds it to that workload/sharding signature.
+    pub fn initFixed(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        config: DmaLoadConfig,
+    ) !DmaLoadResources {
+        try validateDmaLoadConfig(config);
+        const canonical_ids = try allocator.alloc(u32, config.device_ids.len);
+        defer allocator.free(canonical_ids);
+        const canonical_nodes = try allocator.alloc(?usize, config.device_numa_nodes.len);
+        defer allocator.free(canonical_nodes);
+        var canonical_len: usize = 0;
+        for (platform.devices) |device| {
+            const input_index = for (config.device_ids, 0..) |device_id, index| {
+                if (device.id() == device_id) break index;
+            } else continue;
+            if (!std.mem.eql(u8, device.kind(), config.device_kind))
+                return error.DmaDeviceKindMismatch;
+            canonical_ids[canonical_len] = config.device_ids[input_index];
+            canonical_nodes[canonical_len] = config.device_numa_nodes[input_index];
+            canonical_len += 1;
+        }
+        if (canonical_len != config.device_ids.len) return error.DmaDeviceMismatch;
+        const canonical_config: DmaLoadConfig = .{
+            .device_kind = config.device_kind,
+            .device_ids = canonical_ids,
+            .device_numa_nodes = canonical_nodes,
+            .block_size = config.block_size,
+            .max_in_flight_per_device = config.max_in_flight_per_device,
+            .global_max_in_flight = config.global_max_in_flight,
+            .max_mapped_bytes = config.max_mapped_bytes,
+        };
+        const owned_config = try dupeDmaLoadConfig(allocator, canonical_config);
+        errdefer freeDmaLoadConfig(allocator, owned_config);
+        const full_nodes = try allocator.alloc(?usize, platform.devices.len);
+        defer allocator.free(full_nodes);
+        @memset(full_nodes, null);
+        for (owned_config.device_ids, owned_config.device_numa_nodes) |device_id, node| {
+            const device_index = for (platform.devices, 0..) |device, index| {
+                if (device.id() == device_id) break index;
+            } else return error.DmaDeviceMismatch;
+            if (!std.mem.eql(u8, platform.devices[device_index].kind(), owned_config.device_kind))
+                return error.DmaDeviceKindMismatch;
+            full_nodes[device_index] = node;
+        }
+        var workspace = try DmaBenchmarkSourcePools.init(
+            allocator,
+            io,
+            platform,
+            full_nodes,
+            owned_config.max_mapped_bytes,
+        );
+        errdefer workspace.deinit();
+        return .{
+            .config = owned_config,
+            .allocator = allocator,
+            .platform = platform,
+            .workspace = workspace,
+            .workload_signature = null,
+        };
+    }
+
+    fn adopt(
+        allocator: std.mem.Allocator,
+        platform: *const Platform,
+        config: DmaLoadConfig,
+        workload_signature: u64,
+        workspace: DmaBenchmarkSourcePools,
+    ) !DmaLoadResources {
+        const owned_config = try dupeDmaLoadConfig(allocator, config);
+        return .{
+            .config = owned_config,
+            .allocator = allocator,
+            .platform = platform,
+            .workspace = workspace,
+            .workload_signature = workload_signature,
+        };
+    }
+
+    fn beginLoad(
+        self: *DmaLoadResources,
+        platform: *const Platform,
+        workload_signature: u64,
+        device_ids: []const u32,
+    ) !void {
+        if (self.state.cmpxchgStrong(idle, loading, .acq_rel, .acquire) != null)
+            return error.DmaWorkspaceBusy;
+        errdefer self.state.store(idle, .release);
+        try validateDmaLoadConfig(self.config);
+        if (platform != self.platform) return error.DmaPlatformMismatch;
+        if (!std.mem.eql(u32, self.config.device_ids, device_ids))
+            return error.DmaDeviceMismatch;
+        for (device_ids) |device_id| {
+            const device = for (platform.devices) |device| {
+                if (device.id() == device_id) break device;
+            } else return error.DmaDeviceMismatch;
+            if (!std.mem.eql(u8, device.kind(), self.config.device_kind))
+                return error.DmaDeviceKindMismatch;
+        }
+        if (self.workload_signature) |expected| {
+            if (expected != workload_signature) return error.DmaWorkloadMismatch;
+        } else {
+            self.pending_workload_signature = workload_signature;
+        }
+        if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
+            return error.DmaMappedBudgetExceeded;
+    }
+
+    fn endLoad(self: *DmaLoadResources, successful: bool) void {
+        if (successful and self.workload_signature == null) {
+            self.workload_signature = self.pending_workload_signature.?;
+        }
+        self.pending_workload_signature = null;
+        const previous_state = self.state.swap(idle, .acq_rel);
+        std.debug.assert(previous_state == loading);
+    }
+
+    pub fn retainedMappedBytes(self: *const DmaLoadResources) usize {
+        return self.workspace.allocatedBytes();
+    }
+
+    pub fn numaPoolCount(self: *const DmaLoadResources) usize {
+        return self.workspace.pools.len;
+    }
+
+    pub fn deinit(self: *DmaLoadResources) void {
+        if (self.state.cmpxchgStrong(idle, destroying, .acq_rel, .acquire) != null)
+            @panic("DmaLoadResources.deinit called while the workspace is borrowed");
+        const io = self.workspace.io;
+        const mapped_bytes = self.workspace.allocatedBytes();
+        const started = std.Io.Timestamp.now(io, .awake);
+        self.workspace.deinit();
+        const elapsed_ns: u64 = @intCast(@max(
+            started.untilNow(io, .awake).nanoseconds,
+            0,
+        ));
+        log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
+            mapped_bytes,
+            @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
+        });
+        freeDmaLoadConfig(self.allocator, self.config);
+        self.* = undefined;
+    }
+};
+
 pub const DmaBenchmarkResult = struct {
     allocator: std.mem.Allocator,
+    /// Retained calibration arenas and the immutable loader tuple. Keep this
+    /// result alive until every load borrowing `resources` has returned.
+    resources: DmaLoadResources,
     devices: []DeviceDmaRecommendation,
     samples: []DmaBenchmarkSample,
     global_candidates: []GlobalDmaCandidate,
@@ -4381,6 +4100,7 @@ pub const DmaBenchmarkResult = struct {
     windows: usize = 0,
 
     pub fn deinit(self: *DmaBenchmarkResult) void {
+        self.resources.deinit();
         self.allocator.free(self.devices);
         self.allocator.free(self.samples);
         self.allocator.free(self.global_candidates);
@@ -4417,9 +4137,9 @@ pub const DmaBenchmarkOpts = struct {
     /// Jain fairness over each device's retention relative to the uncapped run.
     global_fairness_floor: f64 = 0.98,
     max_pinned_bytes: usize = 2 * 1024 * 1024 * 1024,
-    /// Optional device-index to NUMA-node mapping. When absent, all devices use
-    /// one DmaMapped source pool. Otherwise the benchmark creates one pool per
-    /// node and gives every device a disjoint ring in its local pool.
+    /// Optional device-index to NUMA-node override. When absent, complete PJRT
+    /// `numa_node` attributes select local pools; incomplete or unsupported
+    /// topology falls back to one shared DmaMapped pool.
     device_numa_nodes: []const usize = &.{},
 };
 
@@ -4505,17 +4225,22 @@ const DmaBenchmarkSourcePools = struct {
     device_pool_indices: []usize,
     device_sources: [][]const u8,
     registration_ns: u64 = 0,
+    max_mapped_bytes: usize,
+    allocated_bytes: std.atomic.Value(usize) = .init(0),
 
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        device_numa_nodes: []const usize,
+        device_numa_nodes: []const ?usize,
+        max_mapped_bytes: usize,
     ) !DmaBenchmarkSourcePools {
         var unique_nodes: std.AutoHashMapUnmanaged(usize, void) = .empty;
         defer unique_nodes.deinit(allocator);
-        for (device_numa_nodes) |node| try unique_nodes.put(allocator, node, {});
-        const pool_count = if (device_numa_nodes.len == 0) 1 else unique_nodes.count();
+        for (device_numa_nodes) |maybe_node| {
+            if (maybe_node) |node| try unique_nodes.put(allocator, node, {});
+        }
+        const pool_count = @max(@as(usize, 1), unique_nodes.count());
         const pools = try allocator.alloc(DmaBenchmarkSourcePool, pool_count);
         errdefer allocator.free(pools);
         const device_pool_indices = try allocator.alloc(usize, platform.devices.len);
@@ -4524,7 +4249,7 @@ const DmaBenchmarkSourcePools = struct {
         errdefer allocator.free(device_sources);
         @memset(device_sources, &.{});
 
-        if (device_numa_nodes.len == 0) {
+        if (unique_nodes.count() == 0) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
             pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
@@ -4537,12 +4262,17 @@ const DmaBenchmarkSourcePools = struct {
                 .pools = pools,
                 .device_pool_indices = device_pool_indices,
                 .device_sources = device_sources,
+                .max_mapped_bytes = max_mapped_bytes,
             };
         }
 
         var nodes: std.ArrayListUnmanaged(usize) = .empty;
         defer nodes.deinit(allocator);
-        for (device_numa_nodes, 0..) |node, device_index| {
+        for (device_numa_nodes, 0..) |maybe_node, device_index| {
+            const node = maybe_node orelse {
+                device_pool_indices[device_index] = 0;
+                continue;
+            };
             var pool_index: ?usize = null;
             for (nodes.items, 0..) |existing, index| {
                 if (existing == node) {
@@ -4568,6 +4298,7 @@ const DmaBenchmarkSourcePools = struct {
             .pools = pools,
             .device_pool_indices = device_pool_indices,
             .device_sources = device_sources,
+            .max_mapped_bytes = max_mapped_bytes,
         };
     }
 
@@ -4588,6 +4319,23 @@ const DmaBenchmarkSourcePools = struct {
         const assigned = self.device_sources[device_index];
         if (assigned.len != 0) return assigned;
         return self.pools[self.device_pool_indices[device_index]].source;
+    }
+
+    fn cleanupSourceForDevice(
+        self: *const DmaBenchmarkSourcePools,
+        device_index: usize,
+        minimum_len: usize,
+    ) []const u8 {
+        const assigned = self.device_sources[device_index];
+        if (assigned.len >= minimum_len) return assigned;
+        const pool = &self.pools[self.device_pool_indices[device_index]];
+        var index = pool.allocations.items.len;
+        while (index != 0) {
+            index -= 1;
+            const arena = pool.allocations.items[index];
+            if (arena.len >= minimum_len) return arena;
+        }
+        unreachable;
     }
 
     fn verifyNumaPlacement(
@@ -4637,6 +4385,8 @@ const DmaBenchmarkSourcePools = struct {
     fn growPool(self: *DmaBenchmarkSourcePools, pool_index: usize, required_bytes: usize) !void {
         const pool = &self.pools[pool_index];
         if (required_bytes <= pool.source.len) return;
+        if (try std.math.add(usize, self.allocatedBytes(), required_bytes) > self.max_mapped_bytes)
+            return error.DmaBenchmarkPinnedBudgetExceeded;
         const started = std.Io.Timestamp.now(self.io, .awake);
         defer self.registration_ns +|= @intCast(@max(started.untilNow(self.io, .awake).nanoseconds, 0));
         try self.allocatePool(pool_index, required_bytes);
@@ -4654,6 +4404,7 @@ const DmaBenchmarkSourcePools = struct {
         @memset(replacement, 0xa5);
         const verified_pages = try self.verifyNumaPlacement(pool, replacement);
         try pool.allocations.append(self.allocator, replacement);
+        _ = self.allocated_bytes.fetchAdd(replacement.len, .release);
         pool.source = replacement;
         if (pool.numa_allocator.node) |node| {
             log.info("DMA benchmark source pool numa_node={d} address=0x{x} size={Bi:.2} verified_pages={d}", .{
@@ -4671,11 +4422,143 @@ const DmaBenchmarkSourcePools = struct {
     }
 
     fn allocatedBytes(self: *const DmaBenchmarkSourcePools) usize {
-        var total: usize = 0;
-        for (self.pools) |pool| {
-            for (pool.allocations.items) |allocation| total +|= allocation.len;
+        return self.allocated_bytes.load(.acquire);
+    }
+
+    /// Ensures every NUMA pool can feed its calibrated devices and hold one
+    /// complete fixed-size source request. Independent nodes register their
+    /// missing slabs concurrently; existing retained arenas are reused first.
+    fn ensureLoadBlockReserves(
+        self: *DmaBenchmarkSourcePools,
+        block_size: usize,
+        maximum_writer_groups: usize,
+        calibrated_reserves: []const usize,
+    ) !void {
+        if (block_size == 0 or maximum_writer_groups == 0 or
+            calibrated_reserves.len != self.pools.len)
+            return error.InvalidDmaLoadConfig;
+        const base_request_blocks = std.math.divCeil(
+            usize,
+            load_read_request_size,
+            block_size,
+        ) catch return error.InvalidDmaLoadConfig;
+        const request_blocks = std.math.add(
+            usize,
+            base_request_blocks,
+            maximum_writer_groups - 1,
+        ) catch return error.InvalidDmaLoadConfig;
+        const missing_bytes = try self.allocator.alloc(usize, self.pools.len);
+        defer self.allocator.free(missing_bytes);
+        var missing_total: usize = 0;
+        for (self.pools, calibrated_reserves, missing_bytes) |pool, reserve, *missing| {
+            var usable_blocks: usize = 0;
+            for (pool.allocations.items) |arena| {
+                usable_blocks = std.math.add(
+                    usize,
+                    usable_blocks,
+                    arena.len / block_size,
+                ) catch return error.DmaMappedBudgetExceeded;
+            }
+            const required_blocks = @max(reserve, request_blocks);
+            const missing_blocks = required_blocks -| usable_blocks;
+            missing.* = std.math.mul(usize, missing_blocks, block_size) catch
+                return error.DmaMappedBudgetExceeded;
+            missing_total = std.math.add(usize, missing_total, missing.*) catch
+                return error.DmaMappedBudgetExceeded;
         }
-        return total;
+        if (missing_total == 0) return;
+        const mapped_after_growth = std.math.add(
+            usize,
+            self.allocatedBytes(),
+            missing_total,
+        ) catch return error.DmaMappedBudgetExceeded;
+        if (mapped_after_growth > self.max_mapped_bytes)
+            return error.DmaMappedBudgetExceeded;
+
+        const Worker = struct {
+            pools: *DmaBenchmarkSourcePools,
+            pool_index: usize,
+            bytes: usize,
+            first_error: *std.atomic.Value(u16),
+
+            fn run(worker: @This()) void {
+                worker.pools.allocatePool(worker.pool_index, worker.bytes) catch |err| {
+                    _ = worker.first_error.cmpxchgStrong(
+                        0,
+                        @intFromError(err),
+                        .release,
+                        .monotonic,
+                    );
+                };
+            }
+        };
+        var first_error: std.atomic.Value(u16) = .init(0);
+        var group: std.Io.Group = .init;
+        var group_error: ?anyerror = null;
+        const registration_started = std.Io.Timestamp.now(self.io, .awake);
+        for (missing_bytes, 0..) |bytes, pool_index| {
+            if (bytes == 0) continue;
+            group.concurrent(self.io, Worker.run, .{Worker{
+                .pools = self,
+                .pool_index = pool_index,
+                .bytes = bytes,
+                .first_error = &first_error,
+            }}) catch |err| {
+                group_error = err;
+                break;
+            };
+        }
+        group.await(self.io) catch |err| if (group_error == null) {
+            group_error = err;
+        };
+        self.registration_ns +|= @intCast(@max(
+            registration_started.untilNow(self.io, .awake).nanoseconds,
+            0,
+        ));
+        if (group_error) |err| return err;
+        const error_code = first_error.load(.acquire);
+        if (error_code != 0) return @errorFromInt(error_code);
+    }
+
+    fn blockPoolArenaProvider(self: *DmaBenchmarkSourcePools) mem.DmaBlockPool.ArenaProvider {
+        return .{
+            .context = self,
+            .node_count = self.pools.len,
+            .arenaCountFn = struct {
+                fn call(context: *anyopaque, node_index: usize) usize {
+                    const pools: *DmaBenchmarkSourcePools = @ptrCast(@alignCast(context));
+                    return pools.pools[node_index].allocations.items.len;
+                }
+            }.call,
+            .arenaFn = struct {
+                fn call(context: *anyopaque, node_index: usize, arena_index: usize) []u8 {
+                    const pools: *DmaBenchmarkSourcePools = @ptrCast(@alignCast(context));
+                    return pools.pools[node_index].allocations.items[arena_index];
+                }
+            }.call,
+            .allocateFn = struct {
+                fn call(context: *anyopaque, node_index: usize, len: usize) ![]u8 {
+                    const pools: *DmaBenchmarkSourcePools = @ptrCast(@alignCast(context));
+                    if (try std.math.add(usize, pools.allocatedBytes(), len) > pools.max_mapped_bytes)
+                        return error.DmaMappedBudgetExceeded;
+                    const started = std.Io.Timestamp.now(pools.io, .awake);
+                    try pools.allocatePool(node_index, len);
+                    pools.registration_ns +|= @intCast(@max(
+                        started.untilNow(pools.io, .awake).nanoseconds,
+                        0,
+                    ));
+                    return pools.pools[node_index].allocations.items[
+                        pools.pools[node_index].allocations.items.len - 1
+                    ];
+                }
+            }.call,
+            .mappedBytesFn = struct {
+                fn call(context: *anyopaque) usize {
+                    const pools: *DmaBenchmarkSourcePools = @ptrCast(@alignCast(context));
+                    return pools.allocatedBytes();
+                }
+            }.call,
+        };
     }
 
     fn prepareAggregateSources(
@@ -4918,8 +4801,12 @@ const DmaBenchmarkFairGate = struct {
     }
 
     fn lessLoaded(self: *const DmaBenchmarkFairGate, lhs: usize, rhs: usize) bool {
-        return self.active[lhs] * self.capacities[rhs] <
-            self.active[rhs] * self.capacities[lhs];
+        return dmaAdmissionLessLoaded(
+            self.active[lhs],
+            self.capacities[lhs],
+            self.active[rhs],
+            self.capacities[rhs],
+        );
     }
 
     fn grantNextLocked(self: *DmaBenchmarkFairGate) ?usize {
@@ -5311,7 +5198,10 @@ const ReusableDmaBenchmarkSession = struct {
 
     fn deinit(self: *ReusableDmaBenchmarkSession, source_pools: *const DmaBenchmarkSourcePools) void {
         for (self.cohorts.items) |cohort| {
-            cohort.deinit(source_pools.sourceForDevice(cohort.device_index));
+            cohort.deinit(source_pools.cleanupSourceForDevice(
+                cohort.device_index,
+                cohort.block_size,
+            ));
             self.allocator.destroy(cohort);
         }
         self.cohorts.deinit(self.allocator);
@@ -5332,18 +5222,12 @@ fn finishDmaBenchmarkResult(
     const windows = session.windows;
     const source_registration_ns = source_pools.registration_ns;
     session.deinit(source_pools);
-    const cleanup_started = std.Io.Timestamp.now(io, .awake);
-    source_pools.deinit();
-    const source_cleanup_ns: u64 = @intCast(@max(
-        cleanup_started.untilNow(io, .awake).nanoseconds,
-        0,
-    ));
     const elapsed_ns: u64 = @intCast(@max(
         benchmark_started.untilNow(io, .awake).nanoseconds,
         0,
     ));
     const calibration_ns = elapsed_ns -| device_allocator_warmup_ns -|
-        source_registration_ns -| source_cleanup_ns;
+        source_registration_ns;
     result.elapsed_ns = elapsed_ns;
     result.setup_ns = device_allocator_warmup_ns +| source_registration_ns +| benchmark_setup_ns;
     result.sampling_ns = sampling_ns;
@@ -5351,14 +5235,16 @@ fn finishDmaBenchmarkResult(
     result.source_registration_ns = source_registration_ns;
     result.benchmark_setup_ns = benchmark_setup_ns;
     result.benchmark_overhead_ns = calibration_ns -| sampling_ns -| benchmark_setup_ns;
-    result.source_cleanup_ns = source_cleanup_ns;
+    // Registered source arenas are now part of result.resources. Their
+    // teardown is intentionally outside benchmark timing.
+    result.source_cleanup_ns = 0;
     result.calibration_ns = calibration_ns;
     result.windows = windows;
 }
 
 pub const max_load_read_parallelism: usize = 128;
 pub const max_load_dma_parallelism: usize = 32;
-pub const max_load_read_request_size: usize = 128 * 1024 * 1024;
+pub const load_read_request_size: usize = 32 * 1024 * 1024;
 
 pub const Parallelism = union(enum) {
     adaptive: Adaptive,
@@ -5391,53 +5277,15 @@ pub const Parallelism = union(enum) {
     }
 };
 
-pub const ReadRequestSize = union(enum) {
-    adaptive: Adaptive,
-    fixed: usize,
-
-    pub const Adaptive = struct {
-        /// Null selects the conservative source minimum.
-        initial: ?usize = null,
-        maximum: usize = max_load_read_request_size,
-    };
-
-    fn isAdaptive(self: ReadRequestSize) bool {
-        return switch (self) {
-            .adaptive => true,
-            .fixed => false,
-        };
-    }
-};
-
-fn roundUpRequestSize(bytes: usize) usize {
-    const mib = 1024 * 1024;
-    const whole_mib = std.math.divCeil(usize, @max(bytes, mib), mib) catch unreachable;
-    const rounded_mib = std.math.ceilPowerOfTwo(usize, whole_mib) catch max_load_read_request_size / mib;
-    return @min(rounded_mib *| mib, max_load_read_request_size);
-}
-
-fn resolveReadRequestSize(configured: ReadRequestSize, source_minimum: usize, dma_block_size: usize) usize {
-    return switch (configured) {
-        .adaptive => |adaptive| roundUpRequestSize(@max(adaptive.initial orelse source_minimum, @max(source_minimum, dma_block_size))),
-        .fixed => |fixed| fixed,
-    };
-}
-
 pub const LoadOpts = struct {
     pub const auto: LoadOpts = .{};
 
     /// Concurrent positional source requests.
     read_parallelism: Parallelism = .{ .adaptive = .{ .initial = 12, .maximum = max_load_read_parallelism } },
-    /// In-flight PJRT transfers on each device.
-    dma_parallelism: Parallelism = .{ .adaptive = .{ .initial = 8, .maximum = max_load_dma_parallelism } },
-    /// Logical bytes gathered by one positional source request. Automatic
-    /// sizing uses the greater of the source VFS minimum and the DMA block
-    /// size. A fixed value must be at least one DMA block.
-    read_request_size: ReadRequestSize = .{ .adaptive = .{} },
-    /// Physical transfer and pool allocation unit.
-    dma_block_size: usize = 2 * 1024 * 1024,
-    /// Client-wide hard limit for registered host memory.
-    max_pinned_bytes: usize = 2 * 1024 * 1024 * 1024,
+    /// Required for CUDA, ROCm, and oneAPI vectored loading. Keep the owning
+    /// benchmark result (or fixed resources) alive through `load`. Buffered
+    /// targets reject DMA resources so ownership mistakes are visible.
+    dma: ?*DmaLoadResources = null,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     total_bytes: ?*usize = null,
@@ -6052,8 +5900,11 @@ fn shouldRecommendGlobalDmaLimit(
         (latency_improvement and keeps_throughput);
 }
 
-fn warmupDmaBenchmarkDeviceAllocators(io: std.Io, platform: *const Platform) !void {
-    if (platform.devices.len <= 1) return platform.warmupDeviceAllocators();
+fn warmupDmaBenchmarkDeviceAllocators(
+    io: std.Io,
+    platform: *const Platform,
+    used_device_indices: []const usize,
+) !void {
     const Worker = struct {
         platform: *const Platform,
         device_index: usize,
@@ -6076,7 +5927,7 @@ fn warmupDmaBenchmarkDeviceAllocators(io: std.Io, platform: *const Platform) !vo
     };
     var first_error: std.atomic.Value(u16) = .init(0);
     var group: std.Io.Group = .init;
-    for (platform.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
+    for (used_device_indices) |device_index| try group.concurrent(io, Worker.run, .{Worker{
         .platform = platform,
         .device_index = device_index,
         .first_error = &first_error,
@@ -6084,6 +5935,128 @@ fn warmupDmaBenchmarkDeviceAllocators(io: std.Io, platform: *const Platform) !vo
     try group.await(io);
     const error_code = first_error.load(.acquire);
     if (error_code != 0) return @errorFromInt(error_code);
+}
+
+const DmaLoadIdentity = struct {
+    allocator: std.mem.Allocator,
+    signature: u64,
+    device_indices: []usize,
+    device_ids: []u32,
+
+    fn deinit(self: *DmaLoadIdentity) void {
+        self.allocator.free(self.device_indices);
+        self.allocator.free(self.device_ids);
+        self.* = undefined;
+    }
+};
+
+fn hashDmaIdentityValue(hasher: *std.hash.Wyhash, value: anytype) void {
+    hasher.update(std.mem.asBytes(&value));
+}
+
+fn dmaLoadIdentityForTensors(
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    tensors: []const *const Tensor,
+    shardings: []const Sharding,
+) !DmaLoadIdentity {
+    const used = try allocator.alloc(bool, platform.devices.len);
+    defer allocator.free(used);
+    @memset(used, false);
+    var hasher = std.hash.Wyhash.init(0x7a6d_6c6f_6164_7637);
+    hashDmaIdentityValue(&hasher, tensors.len);
+    for (tensors, 0..) |tensor, tensor_index| {
+        hashDmaIdentityValue(&hasher, tensor_index);
+        const shape = tensor.shape();
+        const dtype: u32 = @intFromEnum(shape.dtype());
+        hashDmaIdentityValue(&hasher, dtype);
+        hashDmaIdentityValue(&hasher, shape.dims().len);
+        hasher.update(std.mem.sliceAsBytes(shape.dims()));
+        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse
+            platform.replicated_sharding;
+        const placement = try sharding.placement(shape);
+        const physical_bytes = placement.shape.byteSize();
+        hashDmaIdentityValue(&hasher, physical_bytes);
+        if (physical_bytes == 0) continue;
+
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+        hashDmaIdentityValue(&hasher, ordered_devices.len);
+        for (ordered_devices) |device| {
+            const device_index: usize = @intCast(device.id);
+            if (device_index >= platform.devices.len) return error.DmaDeviceMismatch;
+            used[device_index] = true;
+            hashDmaIdentityValue(&hasher, platform.devices[device_index].id());
+        }
+
+        const dispatch_spans = try DispatchSpans.init(allocator, shape, sharding);
+        defer dispatch_spans.deinit(allocator);
+        hashDmaIdentityValue(&hasher, dispatch_spans.spans.len);
+        for (dispatch_spans.spans) |span| {
+            hashDmaIdentityValue(&hasher, span.start);
+            hashDmaIdentityValue(&hasher, span.end);
+            hashDmaIdentityValue(&hasher, span.writer_offset);
+            hashDmaIdentityValue(&hasher, span.primary_writer);
+            hashDmaIdentityValue(&hasher, span.mirror_writer_len);
+            const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
+            for (dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_end]) |writer_index| {
+                hashDmaIdentityValue(&hasher, writer_index);
+            }
+        }
+    }
+    var count: usize = 0;
+    for (used) |is_used| if (is_used) {
+        count += 1;
+    };
+    const device_indices = try allocator.alloc(usize, count);
+    errdefer allocator.free(device_indices);
+    const device_ids = try allocator.alloc(u32, count);
+    var next: usize = 0;
+    for (used, 0..) |is_used, device_index| {
+        if (!is_used) continue;
+        device_indices[next] = device_index;
+        device_ids[next] = platform.devices[device_index].id();
+        next += 1;
+    }
+    return .{
+        .allocator = allocator,
+        .signature = hasher.final(),
+        .device_indices = device_indices,
+        .device_ids = device_ids,
+    };
+}
+
+fn resolveDmaNumaNodes(
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    used_device_indices: []const usize,
+    override: []const usize,
+) ![]?usize {
+    const result = try allocator.alloc(?usize, platform.devices.len);
+    @memset(result, null);
+    if (override.len != 0) {
+        if (override.len != platform.devices.len) return error.InvalidDmaBenchmarkOptions;
+        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
+        for (override) |node| {
+            if (node >= DmaBenchmarkNumaAllocator.max_nodes)
+                return error.InvalidDmaBenchmarkOptions;
+        }
+        for (used_device_indices) |device_index| result[device_index] = override[device_index];
+        return result;
+    }
+
+    for (used_device_indices) |device_index| {
+        const node = platform.devices[device_index].numaNode() orelse {
+            @memset(result, null);
+            return result;
+        };
+        if (node >= DmaBenchmarkNumaAllocator.max_nodes) {
+            @memset(result, null);
+            return result;
+        }
+        result[device_index] = node;
+    }
+    if (comptime builtin.os.tag != .linux) @memset(result, null);
+    return result;
 }
 
 /// Benchmarks the loader's DmaMapped PJRT transfer path without reading tensor
@@ -6168,8 +6141,24 @@ pub fn benchmarkDma(
     }
     if (used_devices.items.len == 0) return error.NoDmaBenchmarkWork;
 
+    const representative_kind = platform.devices[used_devices.items[0]].kind();
+    for (used_devices.items[1..]) |device_index| {
+        if (!std.mem.eql(u8, representative_kind, platform.devices[device_index].kind()))
+            return error.HeterogeneousDmaUnsupported;
+    }
+    var identity = try dmaLoadIdentityForTensors(allocator, platform, tensors, opts.shardings);
+    defer identity.deinit();
+    std.debug.assert(std.mem.eql(usize, identity.device_indices, used_devices.items));
+    const resolved_numa_nodes = try resolveDmaNumaNodes(
+        allocator,
+        platform,
+        used_devices.items,
+        opts.device_numa_nodes,
+    );
+    defer allocator.free(resolved_numa_nodes);
+
     const device_warmup_started = std.Io.Timestamp.now(io, .awake);
-    try warmupDmaBenchmarkDeviceAllocators(io, platform);
+    try warmupDmaBenchmarkDeviceAllocators(io, platform, used_devices.items);
     const device_allocator_warmup_ns: u64 = @intCast(@max(
         device_warmup_started.untilNow(io, .awake).nanoseconds,
         0,
@@ -6178,7 +6167,8 @@ pub fn benchmarkDma(
         allocator,
         io,
         platform,
-        opts.device_numa_nodes,
+        resolved_numa_nodes,
+        opts.max_pinned_bytes,
     );
     var source_pools_active = true;
     defer if (source_pools_active) source_pools.deinit();
@@ -6199,30 +6189,19 @@ pub fn benchmarkDma(
     defer tuned.deinit(allocator);
     var recommendations: std.ArrayListUnmanaged(DeviceDmaRecommendation) = .empty;
     errdefer recommendations.deinit(allocator);
-    for (used_devices.items) |device_index| {
-        var matching_device: ?usize = null;
-        for (tuned.items, 0..) |existing, existing_index| {
-            if (std.mem.eql(
-                u8,
-                platform.devices[device_index].kind(),
-                platform.devices[existing.recommendation.device_index].kind(),
-            )) {
-                matching_device = existing_index;
-                break;
-            }
-        }
-        const device = if (matching_device) |existing_index|
-            try prepareDmaBenchmarkDevice(
-                &session,
-                device_index,
-                tuned.items[existing_index].recommendation,
-            )
-        else
+    for (used_devices.items, 0..) |device_index, used_index| {
+        const device = if (used_index == 0)
             try tuneDmaBenchmarkDevice(
                 &session,
                 opts,
                 &source_pools,
                 device_index,
+            )
+        else
+            try prepareDmaBenchmarkDevice(
+                &session,
+                device_index,
+                tuned.items[0].recommendation,
             );
         try tuned.append(allocator, device);
         try recommendations.append(allocator, device.recommendation);
@@ -6250,16 +6229,60 @@ pub fn benchmarkDma(
     if (aggregate_source_bytes > opts.max_pinned_bytes)
         return error.DmaBenchmarkPinnedBudgetExceeded;
     try source_pools.prepareAggregateSources(recommendations.items, opts.max_pinned_bytes);
+    const uniform_block_size = recommendations.items[0].dma_block_size;
+    const uniform_parallelism = recommendations.items[0].dma_parallelism;
+    const config_numa_nodes = try allocator.alloc(?usize, used_devices.items.len);
+    defer allocator.free(config_numa_nodes);
+    for (used_devices.items, config_numa_nodes) |device_index, *node| {
+        node.* = resolved_numa_nodes[device_index];
+    }
+    const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
+    defer allocator.free(calibrated_node_reserves);
+    @memset(calibrated_node_reserves, 0);
+    for (used_devices.items) |device_index| {
+        const pool_index = source_pools.device_pool_indices[device_index];
+        calibrated_node_reserves[pool_index] = try std.math.add(
+            usize,
+            calibrated_node_reserves[pool_index],
+            uniform_parallelism,
+        );
+    }
 
     if (tuned.items.len == 1) {
         const recommendation = recommendations.items[0];
+        try source_pools.ensureLoadBlockReserves(
+            uniform_block_size,
+            used_devices.items.len,
+            calibrated_node_reserves,
+        );
         const owned_devices = try recommendations.toOwnedSlice(allocator);
         errdefer allocator.free(owned_devices);
+        const owned_samples = try samples.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_samples);
+        const owned_global_candidates = try allocator.alloc(GlobalDmaCandidate, 0);
+        errdefer allocator.free(owned_global_candidates);
+        const resources = try DmaLoadResources.adopt(
+            allocator,
+            platform,
+            .{
+                .device_kind = representative_kind,
+                .device_ids = identity.device_ids,
+                .device_numa_nodes = config_numa_nodes,
+                .block_size = recommendation.dma_block_size,
+                .max_in_flight_per_device = recommendation.dma_parallelism,
+                .global_max_in_flight = null,
+                .max_mapped_bytes = opts.max_pinned_bytes,
+            },
+            identity.signature,
+            source_pools,
+        );
+        source_pools_active = false;
         var result: DmaBenchmarkResult = .{
             .allocator = allocator,
+            .resources = resources,
             .devices = owned_devices,
-            .samples = try samples.toOwnedSlice(allocator),
-            .global_candidates = try allocator.alloc(GlobalDmaCandidate, 0),
+            .samples = owned_samples,
+            .global_candidates = owned_global_candidates,
             .global = .{
                 .uncapped_bytes_per_second = recommendation.measured_bytes_per_second,
                 .uncapped_average_latency_ns = recommendation.average_latency_ns,
@@ -6434,13 +6457,42 @@ pub fn benchmarkDma(
         recommendation.windows += uncapped_verification_windows;
     }
 
+    try source_pools.ensureLoadBlockReserves(
+        uniform_block_size,
+        used_devices.items.len,
+        calibrated_node_reserves,
+    );
     const owned_devices = try recommendations.toOwnedSlice(allocator);
     errdefer allocator.free(owned_devices);
+    const owned_samples = try samples.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_samples);
+    const owned_global_candidates = try global_candidates.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_global_candidates);
+    const resources = try DmaLoadResources.adopt(
+        allocator,
+        platform,
+        .{
+            .device_kind = representative_kind,
+            .device_ids = identity.device_ids,
+            .device_numa_nodes = config_numa_nodes,
+            .block_size = uniform_block_size,
+            .max_in_flight_per_device = uniform_parallelism,
+            .global_max_in_flight = if (recommended_candidate) |candidate|
+                candidate.parallelism
+            else
+                null,
+            .max_mapped_bytes = opts.max_pinned_bytes,
+        },
+        identity.signature,
+        source_pools,
+    );
+    source_pools_active = false;
     var result: DmaBenchmarkResult = .{
         .allocator = allocator,
+        .resources = resources,
         .devices = owned_devices,
-        .samples = try samples.toOwnedSlice(allocator),
-        .global_candidates = try global_candidates.toOwnedSlice(allocator),
+        .samples = owned_samples,
+        .global_candidates = owned_global_candidates,
         .global = .{
             .searched = true,
             .parallelism = if (recommended_candidate) |candidate| candidate.parallelism else null,
@@ -6649,6 +6701,87 @@ test "DMA benchmark global fairness compares per-device uncapped retention" {
     try std.testing.expectApproxEqAbs(@as(f64, 1), baseline.normalized_fairness, 0.0001);
 }
 
+test "loader DMA admission rotates below device count and lends idle slots" {
+    const all_ready: u64 = 0b1111;
+    var active = [_]usize{ 0, 0, 0, 0 };
+    var next_device: usize = 0;
+
+    // A global cap of one still reaches every continuously-ready device.
+    for ([_]usize{ 0, 1, 2, 3, 0, 1, 2, 3 }) |expected| {
+        const selected = selectLoaderDmaDevice(
+            &active,
+            8,
+            all_ready,
+            next_device,
+            true,
+        ).?;
+        try std.testing.expectEqual(expected, selected);
+        active[selected] += 1;
+        try std.testing.expectEqual(@as(usize, 1), active[selected]);
+        next_device = (selected + 1) % active.len;
+        active[selected] -= 1;
+    }
+
+    // When other devices are idle, their share is lent to the ready device.
+    for (0..8) |_| {
+        const selected = selectLoaderDmaDevice(
+            &active,
+            8,
+            @as(u64, 1) << 2,
+            next_device,
+            true,
+        ).?;
+        try std.testing.expectEqual(@as(usize, 2), selected);
+        active[selected] += 1;
+        next_device = (selected + 1) % active.len;
+    }
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        selectLoaderDmaDevice(&active, 8, @as(u64, 1) << 2, next_device, true),
+    );
+    active[2] -= 1;
+    try std.testing.expectEqual(
+        @as(?usize, 3),
+        selectLoaderDmaDevice(&active, 8, all_ready, next_device, true),
+    );
+
+    // With one long-lived event under a global cap of two, the lending slot
+    // continues rotating among every less-loaded ready peer.
+    active = .{ 0, 1, 0, 0 };
+    next_device = 2;
+    for ([_]usize{ 2, 3, 0, 2, 3, 0 }) |expected| {
+        const selected = selectLoaderDmaDevice(
+            &active,
+            8,
+            all_ready,
+            next_device,
+            true,
+        ).?;
+        try std.testing.expectEqual(expected, selected);
+        active[selected] += 1;
+        try std.testing.expectEqual(@as(usize, 2), active[0] + active[1] + active[2] + active[3]);
+        next_device = (selected + 1) % active.len;
+        active[selected] -= 1;
+    }
+}
+
+test "loader DMA admission bypasses weighting without a global cap" {
+    const active = [_]usize{ 7, 0 };
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        selectLoaderDmaDevice(&active, 8, 0b11, 0, false),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        selectLoaderDmaDevice(&active, 8, 0b11, 0, true),
+    );
+    const saturated = [_]usize{ 8, 0 };
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        selectLoaderDmaDevice(&saturated, 8, 0b11, 0, false),
+    );
+}
+
 test "DMA benchmark fair gate balances, rotates, and lends slots" {
     const allocator = std.testing.allocator;
     const balanced_specs = [_]DmaBenchmarkRunSpec{
@@ -6852,35 +6985,38 @@ pub fn load(
 ) !Bufferized(ModelType) {
     const read_initial = opts.read_parallelism.initial();
     const read_maximum = opts.read_parallelism.maximum();
-    const dma_initial = opts.dma_parallelism.initial();
-    const dma_maximum = opts.dma_parallelism.maximum();
     stdx.debug.assert(read_initial > 0, "zml.io.load read_parallelism initial/fixed value must be greater than zero", .{});
     stdx.debug.assert(read_maximum >= read_initial, "zml.io.load read_parallelism maximum must be at least initial", .{});
     stdx.debug.assert(read_maximum <= max_load_read_parallelism, "zml.io.load read_parallelism exceeds the absolute limit", .{});
-    stdx.debug.assert(dma_initial > 0, "zml.io.load dma_parallelism initial/fixed value must be greater than zero", .{});
-    stdx.debug.assert(dma_maximum >= dma_initial, "zml.io.load dma_parallelism maximum must be at least initial", .{});
-    stdx.debug.assert(dma_maximum <= max_load_dma_parallelism, "zml.io.load dma_parallelism exceeds the absolute limit", .{});
-    switch (opts.read_request_size) {
-        .adaptive => |adaptive| {
-            if (adaptive.initial) |initial| {
-                stdx.debug.assert(initial > 0, "zml.io.load adaptive read_request_size initial must be greater than zero", .{});
-                stdx.debug.assert(initial <= adaptive.maximum, "zml.io.load adaptive read_request_size maximum must be at least initial", .{});
+
+    const direct = platform.target == .cuda or platform.target == .rocm or platform.target == .oneapi;
+    var dma_borrowed = false;
+    var dma_load_succeeded = false;
+    defer if (dma_borrowed) opts.dma.?.endLoad(dma_load_succeeded);
+    if (direct) {
+        const resources = opts.dma orelse return error.DmaResourcesRequired;
+        if (resources.config.block_size > load_read_request_size or
+            resources.config.max_mapped_bytes < load_read_request_size)
+            return error.InvalidDmaLoadConfig;
+        const identity_tensors = try allocator.alloc(*const Tensor, meta.count(Tensor, model));
+        defer allocator.free(identity_tensors);
+        meta.forEachVisit(model, *const Tensor, struct {
+            fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
+                output[i] = tensor;
             }
-            stdx.debug.assert(adaptive.maximum > 0, "zml.io.load adaptive read_request_size maximum must be greater than zero", .{});
-            stdx.debug.assert(adaptive.maximum <= max_load_read_request_size, "zml.io.load adaptive read_request_size exceeds the absolute limit", .{});
-            stdx.debug.assert(adaptive.maximum % (1024 * 1024) == 0 and std.math.isPowerOfTwo(adaptive.maximum / (1024 * 1024)), "zml.io.load adaptive read_request_size maximum must be a power-of-two MiB value", .{});
-            stdx.debug.assert(adaptive.maximum >= opts.dma_block_size, "zml.io.load adaptive read_request_size maximum must be at least dma_block_size", .{});
-        },
-        .fixed => |fixed| {
-            stdx.debug.assert(fixed > 0, "zml.io.load fixed read_request_size must be greater than zero", .{});
-            stdx.debug.assert(fixed >= opts.dma_block_size, "zml.io.load fixed read_request_size must be at least dma_block_size", .{});
-            stdx.debug.assert(fixed <= max_load_read_request_size, "zml.io.load fixed read_request_size exceeds the absolute limit", .{});
-            stdx.debug.assert(fixed <= opts.max_pinned_bytes, "zml.io.load fixed read_request_size exceeds max_pinned_bytes", .{});
-        },
+        }.call, .{identity_tensors});
+        var identity = try dmaLoadIdentityForTensors(
+            allocator,
+            platform,
+            identity_tensors,
+            opts.shardings,
+        );
+        defer identity.deinit();
+        try resources.beginLoad(platform, identity.signature, identity.device_ids);
+        dma_borrowed = true;
+    } else if (opts.dma != null) {
+        return error.DmaResourcesNotAllowed;
     }
-    stdx.debug.assert(opts.dma_block_size > 0, "zml.io.load dma_block_size must be greater than zero", .{});
-    stdx.debug.assert(opts.dma_block_size <= max_load_read_request_size, "zml.io.load dma_block_size exceeds the maximum request size", .{});
-    stdx.debug.assert(opts.max_pinned_bytes >= opts.dma_block_size, "zml.io.load max_pinned_bytes must hold at least one DMA block", .{});
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
     const tensor_count = meta.count(Tensor, model);
@@ -6901,20 +7037,25 @@ pub fn load(
         }
     }.call, .{&total_logical_bytes});
 
-    const direct = platform.target == .cuda or platform.target == .rocm or platform.target == .oneapi;
-    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, max_dma_parallelism_per_device={d}, read_request_size={s}, fixed_read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
+    const dma_config: DmaLoadConfig = if (opts.dma) |resources| resources.config else .{
+        .device_kind = "buffered",
+        .device_ids = &.{},
+        .device_numa_nodes = &.{},
+        .block_size = 0,
+        .max_in_flight_per_device = 0,
+        .global_max_in_flight = null,
+        .max_mapped_bytes = 0,
+    };
+    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, dma_parallelism_per_device={d}, global_dma_parallelism={?d}, read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_mapped_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         direct,
         tensor_count,
         read_maximum,
-        dma_maximum,
-        @tagName(opts.read_request_size),
-        switch (opts.read_request_size) {
-            .adaptive => 0,
-            .fixed => |fixed| fixed,
-        },
-        opts.dma_block_size,
-        opts.max_pinned_bytes,
+        dma_config.max_in_flight_per_device,
+        dma_config.global_max_in_flight,
+        if (direct) load_read_request_size else 0,
+        dma_config.block_size,
+        dma_config.max_mapped_bytes,
         total_logical_bytes,
     });
 
@@ -6923,22 +7064,8 @@ pub fn load(
     else
         try loadBuffered(ModelType, model, &bufferized, allocator, io, platform, store, opts);
     if (opts.total_bytes) |total_bytes| total_bytes.* = loaded_bytes;
+    dma_load_succeeded = true;
     return bufferized;
-}
-
-test "adaptive vectored request size is power-of-two and never smaller than a DMA block" {
-    try std.testing.expectEqual(
-        @as(usize, 4 * 1024 * 1024),
-        resolveReadRequestSize(.{ .adaptive = .{} }, 2 * 1024 * 1024, 4 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 16 * 1024 * 1024),
-        resolveReadRequestSize(.{ .adaptive = .{} }, 10 * 1024 * 1024, 4 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 8 * 1024 * 1024),
-        resolveReadRequestSize(.{ .fixed = 8 * 1024 * 1024 }, 16 * 1024 * 1024, 4 * 1024 * 1024),
-    );
 }
 
 test "source bootstrap requires a high-latency source with no observed response" {
@@ -6948,321 +7075,59 @@ test "source bootstrap requires a high-latency source with no observed response"
     try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, true));
 }
 
-test "source failure cohort joins attempts and failures across windows" {
-    var runtime: AdaptiveVectoredRuntime = undefined;
-    runtime.failure_cohort_request_size = 0;
-    runtime.failure_cohort_attempts = 0;
-    runtime.failure_cohort_failures = 0;
-
-    const attempts = runtime.updateFailureCohort(16 * 1024 * 1024, 12, 0);
-    try std.testing.expect(attempts.reliable);
-    try std.testing.expectEqual(@as(f64, 0), attempts.ratio);
-
-    const delayed_failures = runtime.updateFailureCohort(16 * 1024 * 1024, 0, 3);
-    try std.testing.expect(delayed_failures.reliable);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.25), delayed_failures.ratio, 0.0001);
-
-    const unchanged = runtime.updateFailureCohort(16 * 1024 * 1024, 0, 0);
-    try std.testing.expect(!unchanged.reliable);
-
-    const resized = runtime.updateFailureCohort(32 * 1024 * 1024, 8, 0);
-    try std.testing.expect(resized.reliable);
-    try std.testing.expectEqual(@as(f64, 0), resized.ratio);
-}
-
-test "vectored read scheduler applies size changes only to unscheduled ranges" {
-    const io = std.testing.io;
-    const sizes = [_]usize{ 10, 9, 8 };
-    var scheduler = try VectoredReadScheduler.init(std.testing.allocator, &sizes, 4, 1);
-    defer scheduler.deinit();
-
-    const first = scheduler.claim(io).?;
-    const second = scheduler.claim(io).?;
-    const third = scheduler.claim(io).?;
-    try std.testing.expectEqual(@as(usize, 0), first.tensor_index);
-    try std.testing.expectEqual(@as(usize, 1), second.tensor_index);
-    try std.testing.expectEqual(@as(usize, 2), third.tensor_index);
-    try std.testing.expectEqual(@as(usize, 4), first.len);
-    try std.testing.expectEqual(@as(u64, 1), first.epoch);
-
-    scheduler.setTuple(io, 6, 2);
-    const resized = scheduler.claim(io).?;
-    try std.testing.expectEqual(@as(usize, 0), resized.tensor_index);
-    try std.testing.expectEqual(@as(usize, 4), resized.source_offset);
-    try std.testing.expectEqual(@as(usize, 6), resized.len);
-    try std.testing.expectEqual(@as(usize, 6), resized.request_size);
-    try std.testing.expectEqual(@as(u64, 2), resized.epoch);
-
-    var total = first.len + second.len + third.len + resized.len;
-    while (scheduler.claim(io)) |job| total += job.len;
-    try std.testing.expectEqual(@as(usize, 27), total);
-    try std.testing.expect(!scheduler.snapshot(io).has_unscheduled);
-}
-
-test "vectored read scheduler counts full candidate ranges per tensor" {
-    const io = std.testing.io;
-    const candidate_size = 4 * 1024 * 1024;
-    const sizes = [_]usize{
-        7 * candidate_size + 1,
-        candidate_size - 1,
-        candidate_size - 1,
-    };
-    var scheduler = try VectoredReadScheduler.init(std.testing.allocator, &sizes, 2 * 1024 * 1024, 1);
-    defer scheduler.deinit();
-
-    const counts = scheduler.candidateCounts(io, candidate_size);
-    try std.testing.expectEqual(@as(usize, 10), counts.total);
-    try std.testing.expectEqual(@as(usize, 7), counts.full);
-}
-
-test "vectored read scheduler checks tail eligibility while installing a candidate" {
-    const io = std.testing.io;
-    const candidate_size = 4 * 1024 * 1024;
-    const sizes = [_]usize{8 * candidate_size};
-    var scheduler = try VectoredReadScheduler.init(std.testing.allocator, &sizes, 2, 1);
-    defer scheduler.deinit();
-
-    _ = scheduler.claim(io).?;
-    try std.testing.expect(!scheduler.trySetCandidateTuple(io, candidate_size, 2, 8, 8));
-    const unchanged = scheduler.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 2), unchanged.request_size);
-    try std.testing.expectEqual(@as(u64, 1), unchanged.epoch);
-}
-
 test "probe source capacity counts active reads rather than retained requests" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
-    metrics.prepareProbe(io, 7, .read);
-    for (0..48) |_| metrics.beginRequest(7, 1);
-    for (0..8) |_| metrics.beginRead(io, 7);
+    metrics.prepareProbe(io, 7, 10);
+    for (0..48) |_| metrics.beginRequest(1);
+    for (0..8) |index| metrics.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
 
     try std.testing.expectEqual(@as(usize, 48), metrics.outstanding_requests.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 8), metrics.probe_peak_reads.load(.acquire));
+    const active = metrics.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 8), active.probe_peak_reads);
+    try std.testing.expectEqual(@as(usize, 8), active.probe_active_reads);
 
-    for (0..8) |_| metrics.endRead(io, 7);
-    for (0..48) |_| metrics.endRequest(7, 1);
+    for (0..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
+    for (0..48) |_| metrics.endRequest(1);
+    metrics.clearProbe(io, 7);
+}
+
+test "source probe excludes pre-boundary admissions" {
+    const io = std.testing.io;
+    var metrics: VectoredLoadMetrics = .{};
+    metrics.beginRead(io, 6, 40);
+    metrics.prepareProbe(io, 7, 41);
+    metrics.beginRead(io, 7, 40);
+    metrics.recordProbeRead(io, 7, 40, load_read_request_size);
+    metrics.beginRead(io, 7, 41);
+    metrics.recordProbeRead(io, 7, 41, load_read_request_size);
+    const admitted = metrics.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 3), admitted.active_reads);
+    try std.testing.expect(admitted.probe_first_read_ns != 0);
+    try std.testing.expectEqual(@as(usize, 1), admitted.probe_active_reads);
+    try std.testing.expectEqual(@as(u64, 1), admitted.probe_full_read_operations);
+    try std.testing.expectEqual(@as(u64, load_read_request_size), admitted.probe_read_bytes);
+    metrics.endRead(io, 6, 40);
+    metrics.endRead(io, 7, 40);
+    const draining = metrics.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 1), draining.active_reads);
+    try std.testing.expectEqual(@as(usize, 1), draining.probe_active_reads);
+    metrics.endRead(io, 7, 41);
+    const drained = metrics.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 0), drained.active_reads);
+    try std.testing.expectEqual(@as(usize, 0), drained.probe_active_reads);
     metrics.clearProbe(io, 7);
 }
 
 test "pinned feasibility clips read width and remote lifecycle slack" {
-    const clipped: PinnedGateLimits = .init(128, 128 * 1024 * 1024, 2 * 1024 * 1024 * 1024, 8);
+    const clipped: PinnedGateLimits = .init(128, 16, 8);
     try std.testing.expectEqual(@as(usize, 16), clipped.feasible_width);
     try std.testing.expectEqual(@as(usize, 16), clipped.read);
     try std.testing.expectEqual(@as(usize, 16), clipped.lifecycle);
 
-    const slack: PinnedGateLimits = .init(12, 128 * 1024 * 1024, 2 * 1024 * 1024 * 1024, 8);
+    const slack: PinnedGateLimits = .init(12, 16, 8);
     try std.testing.expectEqual(@as(usize, 12), slack.read);
     try std.testing.expectEqual(@as(usize, 16), slack.lifecycle);
-}
-
-test "fixed controller dimensions remain immutable under pressure" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .fixed = 7 },
-        .{ .fixed = 5 },
-        16 * 1024 * 1024,
-        16 * 1024 * 1024,
-        false,
-        2 * 1024 * 1024 * 1024,
-    );
-    _ = controller.observe(.{
-        .now_ns = std.time.ns_per_s,
-        .source_throttled = true,
-        .hard_dma_pressure = true,
-        .ready_pressure = true,
-        .source_stalled = true,
-        .read_saturated = true,
-        .allow_probe = false,
-    });
-    const decision = controller.observe(.{
-        .now_ns = 2 * std.time.ns_per_s,
-        .source_throttled = true,
-        .hard_dma_pressure = true,
-        .ready_pressure = true,
-        .source_stalled = true,
-        .read_saturated = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 7), decision.limits.read);
-    try std.testing.expectEqual(@as(usize, 5), decision.limits.dma);
-    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), decision.limits.request_size);
-}
-
-test "adaptive controller caps no-response bootstrap at thirty two" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
-        .{ .adaptive = .{ .initial = 8, .maximum = 32 } },
-        16 * 1024 * 1024,
-        128 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    _ = controller.observe(.{ .now_ns = 10 * std.time.ns_per_ms, .source_stalled = true, .read_saturated = true });
-    _ = controller.observe(.{ .now_ns = 20 * std.time.ns_per_ms, .source_stalled = true, .read_saturated = true });
-    const capped = controller.observe(.{ .now_ns = 30 * std.time.ns_per_ms, .source_stalled = true, .read_saturated = true });
-    try std.testing.expectEqual(.none, capped.action);
-    try std.testing.expectEqual(@as(usize, 32), capped.limits.read);
-}
-
-test "adaptive controller distinguishes transient failures from throttles" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    const transient = controller.observe(.{
-        .now_ns = std.time.ns_per_s,
-        .source_failure_ratio = 0.20,
-        .source_failure_reliable = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.none, transient.action);
-    const repeated = controller.observe(.{
-        .now_ns = 2 * std.time.ns_per_s,
-        .source_failure_ratio = 0.20,
-        .source_failure_reliable = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.read_backoff, repeated.action);
-    try std.testing.expectEqual(.source_failures, repeated.reason);
-
-    var throttled: AdaptiveVectoredController = .init(32, 32);
-    const immediate = throttled.observe(.{
-        .now_ns = std.time.ns_per_s,
-        .source_throttled = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.read_backoff, immediate.action);
-    try std.testing.expectEqual(.source_throttle, immediate.reason);
-}
-
-test "adaptive request-size probes require candidate responses and matching bytes" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        .{ .fixed = 8 },
-        2 * 1024 * 1024,
-        4 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 1024 * 1024 * 1024,
-        .remaining_bytes = 1024 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.size_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), decision.limits.request_size);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .logical_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
-        .source_timing_successes = 7,
-        .source_timing_bytes = 56 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 125 * std.time.ns_per_ms,
-        .logical_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 125 * std.time.ns_per_ms,
-        .source_timing_successes = 1,
-        .source_timing_bytes = 8 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.size_probe_keep, decision.action);
-}
-
-test "adaptive request-size probes require eight remaining candidate requests" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        .{ .fixed = 8 },
-        2 * 1024 * 1024,
-        4 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 1024 * 1024 * 1024,
-        .remaining_bytes = 7 * 4 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-        .allow_resource_probe = false,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expect(controller.request_size_settled);
-}
-
-test "adaptive request-size probes require eight full per-tensor candidates" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        .{ .fixed = 8 },
-        2 * 1024 * 1024,
-        4 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 1024 * 1024 * 1024,
-        .remaining_bytes = 8 * 4 * 1024 * 1024,
-        .remaining_candidate_requests = 8,
-        .remaining_full_candidate_requests = 7,
-        .dma_starvation_ratio = 0,
-        .allow_resource_probe = false,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expect(controller.request_size_settled);
-}
-
-test "adaptive request-size probes include candidate service time in tail cost" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 32, .maximum = 32 } },
-        .{ .fixed = 8 },
-        32 * 1024 * 1024,
-        64 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 948 * 1024 * 1024;
-    controller.peak_logical_goodput = 948 * 1024 * 1024;
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 948 * 1024 * 1024,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 64 * 1024 * 1024,
-        .remaining_bytes = 2 * 1024 * 1024 * 1024,
-        .remaining_candidate_requests = 32,
-        .remaining_full_candidate_requests = 32,
-        .estimated_remaining_ns = 3 * std.time.ns_per_s,
-        .dma_starvation_ratio = 0.50,
-        .allow_resource_probe = false,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expect(controller.request_size_settled);
 }
 
 fn buildMesh2x2(
@@ -7370,861 +7235,6 @@ test "vectored final transfers wait for every prior destination submission" {
     };
     targets[0].submitted_bytes.store(0, .release);
     try std.testing.expect(pipeline.transferReady(non_final));
-}
-
-test "adaptive vectored controller scores one post-warm startup read growth" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.markDmaStarted(0);
-    var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 18), decision.limits.read);
-    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 300 * std.time.ns_per_ms,
-        .committed_goodput = 104,
-        .logical_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 18), controller.limits.read);
-
-    decision = controller.observe(.{
-        .now_ns = 350 * std.time.ns_per_ms,
-        .committed_goodput = 104,
-        .logical_goodput = 104,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 18), controller.limits.read);
-}
-
-test "adaptive vectored controller permits a second multi-device startup read probe" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.max_startup_read_probes = 2;
-    controller.markDmaStarted(0);
-    var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-    decision = controller.observe(.{
-        .now_ns = 300 * std.time.ns_per_ms,
-        .committed_goodput = 110,
-        .logical_goodput = 110,
-        .probe_goodput = 110,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.50,
-    });
-    try std.testing.expectEqual(.read_probe_keep, decision.action);
-    decision = controller.observe(.{
-        .now_ns = 350 * std.time.ns_per_ms,
-        .committed_goodput = 110,
-        .logical_goodput = 110,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 27), decision.limits.read);
-}
-
-test "adaptive vectored controller bootstraps a no-response source to the public cap" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    var decision = controller.observe(.{
-        .now_ns = 10 * std.time.ns_per_ms,
-        .source_stalled = true,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_bootstrap, decision.action);
-    try std.testing.expectEqual(@as(usize, 24), decision.limits.read);
-
-    decision = controller.observe(.{
-        .now_ns = 20 * std.time.ns_per_ms,
-        .source_stalled = true,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_bootstrap, decision.action);
-    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
-    try std.testing.expect(controller.probe == null);
-}
-
-test "adaptive vectored controller holds at thirty two until source timing arrives" {
-    var controller: AdaptiveVectoredController = .init(128, 32);
-    controller.limits.read = 32;
-    controller.markDmaStarted(0);
-
-    var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
-
-    decision = controller.observe(.{
-        .now_ns = 200 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_successes = 1,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 48), decision.limits.read);
-}
-
-test "adaptive vectored controller lets a slow bootstrap tuple settle before probing" {
-    var controller: AdaptiveVectoredController = .init(128, 32);
-    controller.limits.read = 32;
-    controller.markDmaStarted(0);
-    const decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .high_latency_source = true,
-        .read_saturated = true,
-        .slow_reads = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
-}
-
-test "adaptive vectored controller retains startup probing for a slow local source" {
-    var controller: AdaptiveVectoredController = .init(128, 32);
-    controller.limits.read = 32;
-    controller.markDmaStarted(0);
-    const decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .slow_reads = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(decision.limits.read > 32);
-}
-
-test "adaptive vectored controller advances to size after a flat read probe" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 32, .maximum = 128 } },
-        .{ .fixed = 8 },
-        16 * 1024 * 1024,
-        32 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .probe_goodput = 100,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.50,
-    });
-    try std.testing.expectEqual(.read_probe_rollback, decision.action);
-    try std.testing.expect(controller.readGrowthIsBlocked(
-        16 * 1024 * 1024,
-        4 * std.time.ns_per_s,
-    ));
-    try std.testing.expect(controller.prefer_request_size_probe);
-
-    decision = controller.observe(.{
-        .now_ns = 7 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 32 * 1024 * 1024,
-        .source_ttfb_us = 50 * std.time.us_per_ms,
-        .remaining_bytes = 8 * 1024 * 1024 * 1024,
-        .remaining_candidate_requests = 256,
-        .remaining_full_candidate_requests = 256,
-    });
-    try std.testing.expectEqual(.size_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), decision.limits.request_size);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 8 * std.time.ns_per_s,
-        .probe_goodput = 90,
-        .probe_committed_bytes = 128 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .source_timing_successes = 8,
-        .source_timing_bytes = 256 * 1024 * 1024,
-        .dma_starvation_ratio = 0.50,
-    });
-    try std.testing.expectEqual(.size_probe_rollback, decision.action);
-    try std.testing.expect(!controller.prefer_request_size_probe);
-
-    decision = controller.observe(.{
-        .now_ns = 10 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-}
-
-test "adaptive read results keep an already maximum request size settled" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 32, .maximum = 128 } },
-        .{ .fixed = 8 },
-        32 * 1024 * 1024,
-        32 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.50,
-    });
-    try std.testing.expectEqual(.read_probe_keep, decision.action);
-    try std.testing.expect(controller.request_size_settled);
-    try std.testing.expect(!controller.prefer_request_size_probe);
-    try std.testing.expect(controller.sourceTupleSettled(
-        4 * std.time.ns_per_s + 500 * std.time.ns_per_ms,
-    ));
-}
-
-test "adaptive vectored controller scores starvation-driven read growth after startup" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 15), decision.limits.read);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .committed_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.08,
-    });
-    try std.testing.expectEqual(.read_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 15), controller.limits.read);
-}
-
-test "adaptive vectored controller rolls back a flat DMA probe" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.stable_goodput = 100;
-    controller.peak_goodput = 100;
-    controller.representative_windows = 2;
-    controller.dma_fed_windows = 1;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 10), decision.limits.dma);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-    const candidate_epoch = decision.epoch;
-
-    decision = controller.observe(.{
-        .now_ns = 400 * std.time.ns_per_ms,
-        .committed_goodput = 101,
-        .probe_goodput = 101,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
-    try std.testing.expect(decision.epoch > candidate_epoch);
-}
-
-test "adaptive vectored controller scores only decisive probes at 100 ms" {
-    var gain: AdaptiveVectoredController = .init(32, 32);
-    gain.mode = .steady;
-    gain.stable_goodput = 100;
-    gain.peak_goodput = 100;
-    gain.representative_windows = 2;
-    gain.dma_fed_windows = 1;
-    var decision = gain.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expect(gain.activateProbe(decision.epoch));
-    decision = gain.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .committed_goodput = 112,
-        .probe_goodput = 112,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.dma_probe_keep, decision.action);
-
-    var ambiguous: AdaptiveVectoredController = .init(32, 32);
-    ambiguous.mode = .steady;
-    ambiguous.stable_goodput = 100;
-    ambiguous.peak_goodput = 100;
-    ambiguous.representative_windows = 2;
-    ambiguous.dma_fed_windows = 1;
-    decision = ambiguous.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expect(ambiguous.activateProbe(decision.epoch));
-    decision = ambiguous.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .committed_goodput = 105,
-        .probe_goodput = 105,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expect(ambiguous.probe != null);
-
-    var loss: AdaptiveVectoredController = .init(32, 32);
-    loss.mode = .steady;
-    loss.stable_goodput = 100;
-    loss.peak_goodput = 100;
-    loss.representative_windows = 2;
-    loss.dma_fed_windows = 1;
-    decision = loss.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expect(loss.activateProbe(decision.epoch));
-    decision = loss.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .committed_goodput = 88,
-        .probe_goodput = 88,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
-}
-
-test "adaptive vectored controller qualifies a DMA baseline before probing" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.resource_probe_blocked_until_ns = 10 * std.time.ns_per_s;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 25,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(f64, 100), controller.probe.?.baseline_goodput);
-}
-
-test "adaptive vectored controller waits for the source tuple to settle before DMA probing" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-        .slow_reads = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
-    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
-
-    controller.markDmaStarted(100 * std.time.ns_per_ms);
-    decision = controller.observe(.{
-        .now_ns = 150 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    decision = controller.observe(.{
-        .now_ns = 200 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    controller.mode = .steady;
-    decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 10), decision.limits.dma);
-}
-
-test "adaptive vectored controller settles after startup read fanout is quiet" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.markDmaStarted(0);
-    var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 300 * std.time.ns_per_ms,
-        .committed_goodput = 104,
-        .logical_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.read_probe_keep, decision.action);
-
-    decision = controller.observe(.{
-        .now_ns = 700 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.startup_settle, decision.action);
-    try std.testing.expectEqual(.steady, controller.mode);
-    try std.testing.expectEqual(@as(usize, 18), decision.limits.read);
-    try std.testing.expect(controller.probe == null);
-}
-
-test "adaptive vectored controller ignores transient DMA saturation between source bursts" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.markDmaStarted(0);
-    controller.stable_goodput = 100;
-    controller.peak_goodput = 100;
-    controller.representative_windows = 2;
-    var decision = controller.observe(.{
-        .now_ns = 50 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 150 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-}
-
-test "adaptive vectored controller respects caps and bootstraps a stalled source" {
-    var capped: AdaptiveVectoredController = .init(4, 2);
-    try std.testing.expectEqual(@as(usize, 4), capped.limits.read);
-    try std.testing.expectEqual(@as(usize, 2), capped.limits.dma);
-    const unchanged = capped.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 1,
-        .read_saturated = true,
-        .source_stalled = true,
-    });
-    try std.testing.expectEqual(.none, unchanged.action);
-
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    const decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 1,
-        .read_saturated = true,
-        .source_stalled = true,
-    });
-    try std.testing.expectEqual(.read_bootstrap, decision.action);
-    try std.testing.expectEqual(@as(usize, 24), decision.limits.read);
-    try std.testing.expect(controller.probe == null);
-    const doubled_again = controller.observe(.{
-        .now_ns = 200 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 1,
-        .read_saturated = true,
-        .source_stalled = true,
-    });
-    try std.testing.expectEqual(.read_bootstrap, doubled_again.action);
-    try std.testing.expectEqual(@as(usize, 32), doubled_again.limits.read);
-}
-
-test "adaptive vectored controller keeps a three percent DMA gain" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.stable_goodput = 100;
-    controller.peak_goodput = 100;
-    controller.representative_windows = 2;
-    controller.dma_fed_windows = 1;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .dma_saturated = true,
-        .dma_probe_capacity = true,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-    decision = controller.observe(.{
-        .now_ns = 400 * std.time.ns_per_ms,
-        .probe_goodput = 103,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 10), decision.limits.dma);
-}
-
-test "adaptive vectored controller suppresses probes at the finite tail and during cooldown" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.stable_goodput = 100;
-    controller.performance_probe_blocked_until_ns = 3 * std.time.ns_per_s;
-    var decision = controller.observe(.{
-        .now_ns = 2 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.5,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    decision = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.5,
-        .read_saturated = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-}
-
-test "adaptive vectored controller protects a slow bursty source from early read backoff" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.limits.read = 16;
-    _ = controller.observe(.{
-        .now_ns = std.time.ns_per_s,
-        .slow_reads = true,
-        .dma_starvation_ratio = 0.5,
-        .allow_probe = false,
-    });
-    const protected = controller.observe(.{
-        .now_ns = 2 * std.time.ns_per_s,
-        .dma_starvation_ratio = 0,
-        .ready_pressure = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.none, protected.action);
-    const backed_off = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .dma_starvation_ratio = 0,
-        .ready_pressure = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.read_backoff, backed_off.action);
-}
-
-test "vectored probe metrics retain install-time bytes and ignore wrong epochs" {
-    const io = std.testing.io;
-    var metrics: VectoredLoadMetrics = .{};
-    metrics.prepareProbe(io, 7, .read);
-    metrics.recordProbeCommit(io, .read, 6, 16);
-    metrics.recordProbeCommit(io, .dma, 7, 16);
-    metrics.recordProbeCommit(io, .read, 7, 32);
-    try std.testing.expectEqual(@as(u64, 32), metrics.probe_committed_bytes.load(.acquire));
-    metrics.recordProbeCommit(io, .read, 6, 64);
-    metrics.recordProbeCommit(io, .dma, 7, 64);
-    metrics.recordProbeCommit(io, .read, 7, 128);
-    try std.testing.expectEqual(@as(u64, 160), metrics.probe_committed_bytes.load(.acquire));
-    metrics.clearProbe(io, 7);
-}
-
-test "adaptive probes score only matching-epoch committed goodput" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.5,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s + 200 * std.time.ns_per_ms,
-        .probe_goodput = 96,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0.5,
-    });
-    try std.testing.expectEqual(.read_probe_rollback, decision.action);
-}
-
-test "adaptive vectored controller backs off sustained DMA pressure" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.stable_goodput = 100;
-    controller.peak_goodput = 100;
-    _ = controller.observe(.{
-        .now_ns = std.time.ns_per_s,
-        .committed_goodput = 90,
-        .hard_dma_pressure = true,
-        .allow_probe = false,
-    });
-    const decision = controller.observe(.{
-        .now_ns = std.time.ns_per_s + 100 * std.time.ns_per_ms,
-        .committed_goodput = 90,
-        .hard_dma_pressure = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.dma_backoff, decision.action);
-    try std.testing.expectEqual(@as(usize, 5), decision.limits.dma);
-}
-
-test "adaptive vectored controller backs reads off only on downstream pressure" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.limits.read = 16;
-    controller.last_dma_starvation_ns = 0;
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-        .ready_pressure = true,
-        .allow_probe = false,
-    });
-    try std.testing.expectEqual(.read_backoff, decision.action);
-    try std.testing.expectEqual(@as(usize, 11), decision.limits.read);
-}
-
-test "adaptive vectored controller keeps a lower-resource limit within three percent" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.limits.read = 8;
-    controller.stable_goodput = 100;
-    controller.peak_goodput = 100;
-    var decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.read_reduce_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.limits.read);
-    try std.testing.expect(controller.activateProbe(decision.epoch));
-
-    decision = controller.observe(.{
-        .now_ns = 4 * std.time.ns_per_s,
-        .committed_goodput = 98,
-        .probe_goodput = 98,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .probe_read_operations = 8,
-        .probe_read_bytes = 64 * 1024 * 1024,
-        .dma_starvation_ratio = 0,
-    });
-    try std.testing.expectEqual(.read_reduce_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), controller.limits.read);
-}
-
-test "adaptive vectored controller restores limits when capacity cannot activate" {
-    var controller: AdaptiveVectoredController = .init(16, 12);
-    controller.mode = .steady;
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.5,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(@as(usize, 15), decision.limits.read);
-    const rollback = controller.rollbackTimedOutProbe(6 * std.time.ns_per_s).?;
-    try std.testing.expectEqual(.probe_timeout, rollback.action);
-    try std.testing.expectEqual(@as(usize, 12), rollback.limits.read);
-    try std.testing.expectEqual(@as(usize, 8), rollback.limits.dma);
-    try std.testing.expect(!controller.readGrowthIsBlocked(
-        rollback.limits.request_size,
-        6 * std.time.ns_per_s,
-    ));
-    try std.testing.expect(!controller.prefer_request_size_probe);
-}
-
-test "an unexercised read probe yields one turn to request-size discovery" {
-    var controller: AdaptiveVectoredController = .initConfigured(
-        .{ .adaptive = .{ .initial = 32, .maximum = 128 } },
-        .{ .fixed = 8 },
-        16 * 1024 * 1024,
-        32 * 1024 * 1024,
-        true,
-        2 * 1024 * 1024 * 1024,
-    );
-    controller.mode = .steady;
-    controller.dma_started = true;
-    controller.stable_logical_goodput = 100;
-    controller.peak_logical_goodput = 100;
-    const read_probe = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_successes = 8,
-    });
-    try std.testing.expectEqual(.read_probe_start, read_probe.action);
-
-    const rollback = controller.rollbackTimedOutProbe(6 * std.time.ns_per_s).?;
-    try std.testing.expectEqual(.probe_timeout, rollback.action);
-    try std.testing.expect(controller.prefer_request_size_probe);
-    try std.testing.expect(!controller.readGrowthIsBlocked(
-        rollback.limits.request_size,
-        6 * std.time.ns_per_s,
-    ));
-
-    const size_probe = controller.observe(.{
-        .now_ns = 8 * std.time.ns_per_s,
-        .logical_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_saturated = true,
-        .source_timing_reliable = true,
-        .source_body_bandwidth = 32 * 1024 * 1024,
-        .source_ttfb_us = 50 * std.time.us_per_ms,
-        .remaining_bytes = 8 * 1024 * 1024 * 1024,
-        .remaining_candidate_requests = 256,
-        .remaining_full_candidate_requests = 256,
-    });
-    try std.testing.expectEqual(.size_probe_start, size_probe.action);
-}
-
-test "adaptive vectored controller restores the complete tuple at the finite tail" {
-    var controller: AdaptiveVectoredController = .init(32, 32);
-    controller.mode = .steady;
-    controller.limits = .{ .read = 12, .dma = 8 };
-    const decision = controller.observe(.{
-        .now_ns = 3 * std.time.ns_per_s,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.5,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    const rollback = controller.rollbackUnfinishedProbe(300 * std.time.ns_per_ms).?;
-    try std.testing.expectEqual(.probe_tail_rollback, rollback.action);
-    try std.testing.expectEqual(.finite_tail, rollback.reason);
-    try std.testing.expectEqual(@as(usize, 12), rollback.limits.read);
-    try std.testing.expectEqual(@as(usize, 8), rollback.limits.dma);
-    try std.testing.expect(!controller.readGrowthIsBlocked(
-        rollback.limits.request_size,
-        300 * std.time.ns_per_ms,
-    ));
-    try std.testing.expect(!controller.prefer_request_size_probe);
 }
 
 fn buildMesh2x2x2(
