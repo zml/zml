@@ -37,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
