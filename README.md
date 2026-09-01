@@ -145,8 +145,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
-                .bias = store.createTensor("bias", .{.d_out}, null),
+                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated),
+                .bias = store.createTensor("bias", .{.d_out}, .replicated),
             };
         }
 
@@ -195,10 +195,14 @@ const Mnist = struct {
 };
 ```
 
-GPU loaders use platform-owned 4 MiB/eight-transfer defaults automatically.
-Applications may optionally calibrate synthetic transfers once, before loading:
+Direct CUDA, ROCm, and oneAPI loaders use platform-owned 4 MiB/eight-transfer
+per-device defaults. A DMA setup failure does not change the selected platform;
+the model-wide loader reports `DmaResourcesRequired` until settings are
+available. Applications may optionally warm the device allocators and calibrate
+synthetic transfers once before loading:
 
 ```zig
+try platform.warmupDeviceAllocators();
 try platform.benchTransfer(allocator, io, .{});
 ```
 

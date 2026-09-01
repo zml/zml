@@ -74,6 +74,13 @@ pub const ApiError = error{
     Unauthenticated,
 };
 
+inline fn interpretPjrtError(api: *const Api, pjrt_error: *Error, context: []const u8) ApiError {
+    defer pjrt_error.deinit(api);
+    const err_code = pjrt_error.getCode(api).toApiError();
+    log.err("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
+    return err_code;
+}
+
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         fn inner(self: anytype) *innerT {
@@ -169,8 +176,7 @@ pub const Api = struct {
         }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
-            return pjrt_error.getCode(self).toApiError();
+            return interpretPjrtError(self, pjrt_error, @tagName(method));
         }
     }
 
@@ -1262,7 +1268,10 @@ pub const Buffer = opaque {
         const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
             .buffer = self.inner(),
         });
-        return ret.device_memory_ptr.?;
+        return ret.device_memory_ptr orelse {
+            log.err("[PJRT_Buffer_OpaqueDeviceMemoryDataPointer] plugin returned success with null device_memory_ptr", .{});
+            return error.Internal;
+        };
     }
 
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
@@ -1346,12 +1355,7 @@ pub const Event = opaque {
         }.call, &ctx);
         ctx.event.waitUncancelable(io);
 
-        if (ctx.err) |e| {
-            defer e.deinit(api);
-            const err_code = e.getCode(api).toApiError();
-            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-            return err_code;
-        }
+        if (ctx.err) |err| return interpretPjrtError(api, err, "PJRT_Event_OnReady");
     }
 
     pub fn awaitRaw(self: *const Event, api: *const Api) ApiError!void {

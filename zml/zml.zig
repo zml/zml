@@ -15,12 +15,14 @@ pub const tokenizer = @import("zml/tokenizer");
 
 pub const attention = @import("attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
+pub const Compiler = @import("Compiler.zig");
 pub const constants = @import("constants.zig");
 pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
+pub const FnExe = exe.FnExe;
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
 pub const kernel = @import("kernel.zig");
@@ -29,11 +31,9 @@ pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
-pub const module = @import("module.zig");
-pub const CompilationOptions = module.CompilationOptions;
-pub const Compiler = module.Compiler;
 pub const moe = @import("moe/moe.zig");
 pub const nn = @import("nn.zig");
+pub const Quantization = @import("quantization.zig").Quantization;
 pub const ops = @import("ops.zig");
 pub const pjrtx = @import("pjrtx.zig");
 pub const platform = @import("platform.zig");
@@ -53,6 +53,25 @@ pub const Slice = slice.Slice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
+
+/// Deprecated, use `zml.Compiler` instead
+pub const module = struct {
+    pub const CompilationContext = Compiler;
+    pub const CompileError = Compiler.Error;
+    pub const CompilationOptions = Compiler.Options;
+
+    /// Deprecated, use `platform.compileFn` or `zml.Compiler.compile`
+    pub fn compile(
+        allocator: std.mem.Allocator,
+        io_: std.Io,
+        comptime func: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(func)),
+        platform_: *const Platform,
+        opts: Compiler.Options,
+    ) Compiler.Error!Exe {
+        return Compiler.compile(allocator, io_, platform_, func, args, opts);
+    }
+};
 
 test "zml" {
     std.testing.refAllDecls(@This());

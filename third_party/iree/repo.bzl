@@ -16,6 +16,7 @@ def repo():
             "//third_party/iree:tokenizer-only.patch",
             "//third_party/iree:fix-added-token-matching.patch",
             "//third_party/iree:match-hf-tokenizer.patch",
+            "//third_party/iree:laguna-tokenizer-compat.patch",
         ],
         patch_args = ["-p1"],
     )

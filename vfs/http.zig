@@ -8,7 +8,7 @@ const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 const range_read = @import("range_read.zig");
 
-const log = std.log.scoped(.@"zml/io/vfs/http");
+const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
     pub const InitOpts = struct {

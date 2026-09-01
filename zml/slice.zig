@@ -125,7 +125,7 @@ pub const Slice = struct {
         return res;
     }
 
-    fn dropAxis(slice: Slice, axis_: anytype) Slice {
+    pub fn squeeze(slice: Slice, axis_: anytype) Slice {
         const axis = slice.shape.axis(axis_);
         var res = slice;
         res.shape = slice.shape.drop(axis);
@@ -135,26 +135,113 @@ pub const Slice = struct {
 
     pub fn data(slice: Slice) []u8 {
         std.debug.assert(slice.mutable);
-        return @constCast(slice.bytes[slice.offset_bytes..]);
+        std.debug.assert(slice.isContiguous());
+        const end = slice.offset_bytes + slice.shape.byteSize();
+        return @constCast(slice.bytes[slice.offset_bytes..end]);
     }
 
     pub fn constData(slice: Slice) []const u8 {
-        return slice.bytes[slice.offset_bytes..];
+        std.debug.assert(slice.isContiguous());
+        const end = slice.offset_bytes + slice.shape.byteSize();
+        return slice.bytes[slice.offset_bytes..end];
     }
 
     pub fn items(slice: Slice, comptime T: type) []T {
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
         return @ptrCast(@alignCast(slice.data()));
     }
 
     pub fn constItems(slice: Slice, comptime T: type) []const T {
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
         return @ptrCast(@alignCast(slice.constData()));
+    }
+
+    pub fn contiguousItemsIterator(slice: *const Slice, comptime T: type) ContiguousItemsIterator(T) {
+        std.debug.assert(slice.dtype() == DataType.fromZigType(T));
+        return .init(slice);
+    }
+
+    fn ContiguousItemsIterator(comptime T: type) type {
+        return struct {
+            slice: *const Slice,
+            contiguous_axis_start: u4,
+            contiguous_item_count: usize,
+            outer_index: usize,
+            outer_count: usize,
+            outer_coords: [constants.MAX_RANK]usize,
+            next_offset_bytes: usize,
+
+            const Iterator = @This();
+
+            fn init(slice: *const Slice) Iterator {
+                const rank = slice.shape.rank();
+                const total_count = slice.shape.count();
+                var contiguous_axis_start: u4 = rank;
+                var contiguous_item_count: usize = 1;
+                var expected_stride: i64 = @intCast(@sizeOf(T));
+
+                var axis = rank;
+                while (axis > 0) {
+                    axis -= 1;
+                    const dim = slice.shape.dim(axis);
+                    const stride = slice.byte_strides.get(axis);
+                    if (dim != 1 and stride != expected_stride) break;
+                    contiguous_axis_start = axis;
+                    contiguous_item_count *= @intCast(dim);
+                    expected_stride *= dim;
+                }
+
+                if (total_count == 0) {
+                    contiguous_item_count = 0;
+                }
+
+                return .{
+                    .slice = slice,
+                    .contiguous_axis_start = contiguous_axis_start,
+                    .contiguous_item_count = contiguous_item_count,
+                    .outer_index = 0,
+                    .outer_count = if (contiguous_item_count == 0) 0 else total_count / contiguous_item_count,
+                    .outer_coords = @splat(0),
+                    .next_offset_bytes = slice.offset_bytes,
+                };
+            }
+
+            pub fn next(self: *Iterator) ?[]const T {
+                if (self.outer_index >= self.outer_count) return null;
+
+                const start = self.next_offset_bytes;
+                self.outer_index += 1;
+                if (self.outer_index < self.outer_count) {
+                    self.advanceOuterCoords();
+                }
+
+                const byte_len = self.contiguous_item_count * @sizeOf(T);
+                return @ptrCast(@alignCast(self.slice.bytes[start..][0..byte_len]));
+            }
+
+            fn advanceOuterCoords(self: *Iterator) void {
+                var axis = self.contiguous_axis_start;
+                while (axis > 0) {
+                    axis -= 1;
+
+                    self.outer_coords[axis] += 1;
+                    self.next_offset_bytes = @intCast(@as(i64, @intCast(self.next_offset_bytes)) + self.slice.byte_strides.get(axis));
+
+                    const dim: usize = @intCast(self.slice.shape.dim(axis));
+                    if (self.outer_coords[axis] < dim) return;
+
+                    self.outer_coords[axis] = 0;
+                    self.next_offset_bytes = @intCast(@as(i64, @intCast(self.next_offset_bytes)) - @as(i64, @intCast(dim)) * self.slice.byte_strides.get(axis));
+                }
+            }
+        };
     }
 
     pub fn format(
         slice: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{slice});
+        return writer.print("Slice({f})@0x{x} [mut={}, off={d}, strides={any}]", .{ slice.shape, @intFromPtr(slice.bytes.ptr), slice.mutable, slice.offset_bytes, slice.byte_strides.slice() });
     }
 
     pub fn formatNumber(slice: Slice, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
@@ -170,7 +257,8 @@ pub const Slice = struct {
             // Special case input tensor is a scalar
             return switch (slice.dtype()) {
                 inline else => |dt| {
-                    const val: dt.toZigType() = slice.constItems(dt.toZigType())[0];
+                    const single_ptr: *const dt.toZigType() = @ptrCast(@alignCast(slice.bytes.ptr));
+                    const val = single_ptr.*;
                     return switch (comptime dt.class()) {
                         // Since we have custom floats, we need to explicitly convert to float32 ourselves.
                         .float => stdx.fmt.formatFloat(floats.floatCast(f32, val), options, writer),
@@ -188,13 +276,19 @@ pub const Slice = struct {
             try writer.splatByteAll(' ', indent_level);
             switch (slice.dtype()) {
                 inline else => |dt| {
-                    const T = dt.toZigType();
+                    const T = dt.toPackedZigType();
                     const n = slice.shape.dim(0);
+                    const elem_per_bytes: comptime_int = @max(1, 8 / comptime dt.bitSizeOf());
+                    const stride = @divExact(slice.byte_strides.get(0), @as(i64, @sizeOf(T)));
 
-                    const stride = @divExact(slice.byte_strides.get(0), @as(i64, @intCast(@sizeOf(T))));
+                    // Fetch n next elements, accounting for strides and packing
+                    const needed_len: usize = @as(usize, if (n == 0) 0 else @intCast(@abs((n - 1) * stride) + 1)) / elem_per_bytes;
 
-                    const needed_len: usize = if (n == 0) 0 else @intCast(@abs((n - 1) * stride) + 1);
-                    const values = slice.constItems(T)[0..needed_len];
+                    // The formatter consumes this physical tail using `stride`, so this
+                    // rank-1 path can read raw items without requiring contiguity.
+                    std.log.warn("Printing {} elems from offset {} out of {} total elems @ {}", .{ n, slice.offset_bytes, needed_len, stride });
+                    const raw_values: []const T = @ptrCast(@alignCast(slice.bytes[slice.offset_bytes..]));
+                    const values = raw_values[0..needed_len];
 
                     switch (comptime dt.class()) {
                         .float => try stdx.fmt.formatFloatSlice(values, options, stride, writer),
@@ -266,13 +360,60 @@ pub const Slice = struct {
         const outer_span_bytes = total_bytes / outer_len;
 
         for (0..outer_len) |i| {
-            const destination_outer = destination.subSlice(0, @intCast(i), 1).dropAxis(0);
+            const destination_outer = destination.subSlice(0, @intCast(i), 1).squeeze(0);
             const source_outer_start = i * outer_span_bytes;
             const source_outer_end = source_outer_start + outer_span_bytes;
             destination_outer.copy(source[source_outer_start..source_outer_end]);
         }
     }
 };
+
+test "slice expectClose compares dense and strided slices" {
+    const testing = @import("testing.zig");
+
+    const dense_data: [2][2]f32 = .{
+        .{ 1, 2 },
+        .{ 5, 6 },
+    };
+    const strided_data: [2][4]f32 = .{
+        .{ 1, 2, 99, 98 },
+        .{ 5, 6, 97, 96 },
+    };
+
+    const dense = Slice.init(.init(.{ 2, 2 }, .f32), std.mem.asBytes(&dense_data));
+    const storage = Slice.init(.init(.{ 2, 4 }, .f32), std.mem.asBytes(&strided_data));
+    const strided = storage.subSlice(1, 0, 2);
+
+    try std.testing.expect(!strided.isContiguous());
+    try testing.expectClose(std.testing.io, dense, strided, .exact_match);
+    try testing.expectClose(std.testing.io, strided, dense, .exact_match);
+}
+
+test "slice expectClose applies close fraction across strided slices" {
+    const testing = @import("testing.zig");
+
+    const dense_data: [2][2]f32 = .{
+        .{ 1, 2 },
+        .{ 5, 6 },
+    };
+    const strided_data: [2][4]f32 = .{
+        .{ 1, 3, 99, 98 },
+        .{ 5, 6, 97, 96 },
+    };
+
+    const dense = Slice.init(.init(.{ 2, 2 }, .f32), std.mem.asBytes(&dense_data));
+    const storage = Slice.init(.init(.{ 2, 4 }, .f32), std.mem.asBytes(&strided_data));
+    const strided = storage.subSlice(1, 0, 2);
+    const opts: testing.CompareOpts = .{
+        .absolute_tolerance = 0,
+        .relative_tolerance = 0,
+        .minimum_close_fraction = 0.75,
+    };
+
+    try std.testing.expect(!strided.isContiguous());
+    try testing.expectClose(std.testing.io, dense, strided, opts);
+    try testing.expectClose(std.testing.io, strided, dense, opts);
+}
 
 test "slice pretty print rank 3" {
     const data: [4][4][4]i32 = .{
@@ -359,6 +500,14 @@ test "slice pretty print rank 0" {
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
 
+test "slice pretty print bool" {
+    const data: [2]bool = .{ true, false };
+    const slice = Slice.init(.init(.{2}, .bool), std.mem.asBytes(&data));
+    const expected = "{1,0}";
+    try std.testing.expectEqualSlices(bool, &data, slice.constItems(bool));
+    try std.testing.expectFmt(expected, "{d}", .{slice});
+}
+
 test "slice pretty print ellipsis" {
     const data: [9][1]i32 = .{ .{0}, .{1}, .{2}, .{3}, .{4}, .{5}, .{6}, .{7}, .{8} };
     const slice = Slice.init(.init(.{ 9, 1 }, .i32), std.mem.asBytes(&data));
@@ -375,5 +524,14 @@ test "slice pretty print ellipsis" {
         \\  {8},
         \\}
     ;
+    try std.testing.expectFmt(expected, "{d}", .{slice});
+}
+
+test "slice pretty print f4" {
+    const x_f4_packed = [_]floats.Float4E2M1.Packed{ .fromF32(0, 0.5), .fromF32(1, 1.5), .fromF32(2, 3), .fromF32(4, 6) };
+    const slice = Slice.initConst(.init(.{8}, .f4e2m1), @ptrCast(&x_f4_packed));
+
+    const expected = "{0,0.5,1,1.5,2,3,4,6}";
+
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }

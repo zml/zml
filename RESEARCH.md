@@ -2,7 +2,8 @@
 
 > Historical design research. The adaptive pageable-staging controller was
 > removed in July 2026 when the loader moved to a static vectored DmaMap
-> pipeline. See `CTX.md` and `zml/io.zig` for the current architecture.
+> pipeline. `CTX.md` records a later branch snapshot; both documents are
+> superseded by `PLAN.md` and the merged source.
 
 ## Executive recommendation
 

@@ -86,6 +86,8 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
+    try platform.benchTransfer(allocator, io, .{});
+
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
@@ -132,7 +134,9 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    var compiled_model = try allocator.create(models.CompiledModel);
+    defer allocator.destroy(compiled_model);
+    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
@@ -148,8 +152,8 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(io, init.environ_map);
 
     const interactive = args.prompt == null;
-    const prompt = if (args.prompt) |prompt| b: {
-        break :b try allocator.dupe(u8, prompt);
+    const prompt = if (args.prompt) |prompt_arg| b: {
+        break :b try allocator.dupe(u8, prompt_arg);
     } else b: {
         chat.initHistory();
         const line = c.linenoise(chat.prompt_prefix) orelse return;
@@ -164,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         tokenizer,
-        &compiled_model,
+        compiled_model,
         &model_buffers,
     );
     defer llm_chat.deinit();

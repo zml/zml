@@ -16,6 +16,6 @@ zig_library(
         "//bin/zml-smi/utils:dynlib",
         "//bin/zml-smi/utils:sandbox",
         "//stdx",
-        "@amd-smi-lib//:amdsmi",
+        "@amdrocm-amdsmi//:amdsmi",
     ],
 )

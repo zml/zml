@@ -111,8 +111,8 @@ pub const LimitedGroup = struct {
     /// Runs work on the calling task while sharing this group's admission
     /// limit. This avoids a task handoff when the caller is already an
     /// appropriate worker, without allowing more work than `limit`.
-    pub fn callUncancelableAdmission(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) void {
-        Wrapper(function, false).wrapper(self, io, args) catch unreachable;
+    pub fn callUncancelableAdmission(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
+        try Wrapper(function, false).wrapper(self, io, args);
     }
 
     pub fn await(self: *LimitedGroup, io: std.Io) std.Io.Cancelable!void {
@@ -216,8 +216,25 @@ test "LimitedGroup can admit work on the calling task" {
         }
     };
 
-    group.callUncancelableAdmission(io, Worker.run, .{ &group, &observed_in_flight });
+    try group.callUncancelableAdmission(io, Worker.run, .{ &group, &observed_in_flight });
     try std.testing.expectEqual(1, observed_in_flight);
+    try std.testing.expectEqual(0, group.inFlight());
+}
+
+test "LimitedGroup calling task propagates work cancellation" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+
+    const Worker = struct {
+        fn run() std.Io.Cancelable!void {
+            return error.Canceled;
+        }
+    };
+
+    try std.testing.expectError(
+        error.Canceled,
+        group.callUncancelableAdmission(io, Worker.run, .{}),
+    );
     try std.testing.expectEqual(0, group.inFlight());
 }
 

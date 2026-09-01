@@ -8,6 +8,7 @@ const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
+const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
@@ -76,6 +77,14 @@ pub const Buffer = struct {
         }
     }
 
+    pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
+        meta.visitFlatStruct(struct {
+            fn deinit(_: void, x: *Buffer) void {
+                x.deinit();
+            }
+        }.deinit, {}, buffers);
+    }
+
     /// This Buffer shape.
     pub fn shape(self: Buffer) Shape {
         return self._shape;
@@ -103,14 +112,16 @@ pub const Buffer = struct {
     pub fn from(
         io: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
+        // Use the PJRT shape for everything
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
@@ -192,13 +203,14 @@ pub const Buffer = struct {
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };

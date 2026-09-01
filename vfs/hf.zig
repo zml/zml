@@ -8,7 +8,7 @@ const Backend = @import("base.zig").Backend;
 const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
-const log = std.log.scoped(.@"zml/io/vfs/hf");
+const log = std.log.scoped(.@"zml/vfs/hf");
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";

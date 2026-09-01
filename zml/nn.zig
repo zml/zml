@@ -1,11 +1,15 @@
 //! Common layer definition and functions for Neural Networks (NN)
 const std = @import("std");
 
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
+const quantization = @import("quantization.zig");
+pub const Quantization = quantization.Quantization;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
@@ -17,6 +21,7 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
+    quantization: ?Quantization = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -26,12 +31,191 @@ pub const Linear = struct {
         };
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight, self.tag);
+    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
+        zml.Buffer.deinitAll(Linear, self);
+    }
 
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        const y = self.forwardWeight(x);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
+
+    fn forwardWeight(self: Linear, x: Tensor) Tensor {
+        const q = self.quantization orelse return x.dot(self.weight, self.tag);
+
+        const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
+
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag) else self.weight;
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
+            q.scales.bitCast(.f8e8m0)
+        else
+            q.scales;
+
+        var lhs = x.convert(.bf16);
+        var lhs_scale: ?Tensor = null;
+        var undo_input_scale: ?Tensor = null;
+
+        const platform = zml.Compiler.current().platform;
+        if (quantization.quantizeInput(q, lhs, self.tag, platform)) |quantized_input| {
+            lhs = quantized_input.values;
+            lhs_scale = quantized_input.scales;
+            undo_input_scale = quantized_input.global_scale;
+        }
+
+        const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
+        return applyGlobalScale(acc, undo_input_scale, weight_global_scale).convert(x.dtype());
+    }
 };
+
+pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
+    return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
+}
+
+/// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
+/// which is merged with the unpacked pair and renamed to `k_tag`. Group-size agnostic:
+/// NVFP4 (16) and MXFP4 (32) share this packing.
+pub fn unpackFp4(w: Tensor, k_tag: anytype) Tensor {
+    stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
+    return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
+        .merge(.{ .kb = .{ .kw, .bitcast } })
+        .renameTag(.kb, Shape.toTag(k_tag));
+}
+
+/// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
+///
+/// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
+/// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
+/// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
+/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+///
+/// Backends:
+/// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
+/// 2. Triton otherwise
+/// 3. Unsupported combos fall back to dequant + Dot
+///
+/// CPU has no specialized path.
+pub fn scaledDot(
+    lhs: Tensor,
+    rhs: Tensor,
+    lhs_scale: ?Tensor,
+    rhs_scale: Tensor,
+    args: anytype,
+) Tensor {
+    const dot_axes = lhs.dotAxes(rhs, args);
+
+    const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
+
+    const result_dtype: DataType = switch (lhs.dtype()) {
+        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz => .bf16,
+        else => lhs.dtype(),
+    };
+    var res_shape: Shape = .{ ._dtype = result_dtype };
+    var lhs_batching_axes: Axes = .empty;
+    var rhs_batching_axes: Axes = .empty;
+    for (dot_axes.batching.constSlice()) |b_axes| {
+        const l, const r = b_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        var t = lhs._shape.tag(l);
+        if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    var lhs_contracting_axes: Axes = .empty;
+    var rhs_contracting_axes: Axes = .empty;
+    for (dot_axes.contracting.constSlice()) |c_axes| {
+        const l, const r = c_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    for (0..lhs.rank()) |l| {
+        if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+    }
+    for (0..rhs.rank()) |r| {
+        if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+    }
+
+    const lhs_scale_operand = lhs_scale orelse blk: {
+        break :blk Tensor.constantTensor(onesGrid(lhs.shape(), .bf16), DataType.bf16.one().asBytes());
+    };
+
+    const rhs_scale_operand = if (rhs_scale.rank() != rhs.rank() and rhs_scale.shape().count() == 1)
+        rhs_scale.reshape(onesGrid(rhs.shape(), rhs_scale.dtype()))
+    else
+        rhs_scale;
+
+    const mlir_ctx = zml.Compiler.current().mlir_ctx;
+    const dnums = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+        }),
+    });
+
+    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
+
+    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+    });
+
+    return outs[0];
+}
+
+/// `shape` with every dimension collapsed to 1
+fn onesGrid(shape: Shape, dt: DataType) Shape {
+    var res = shape.withDtype(dt);
+    for (0..res.rank()) |i| {
+        res = res.setDim(i, 1);
+    }
+
+    return res;
+}
+
+fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
+    return ops.customCall(
+        "zml$scaled_dot_unmatched",
+        .{ in[0], in[1], in[2], in[3] },
+        out_shape,
+        {},
+        .{ .has_side_effect = false },
+    );
+}
+
+fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
+    if (igs == null and wgs == null) {
+        return acc;
+    }
+
+    var res = acc.convert(.f32);
+    if (wgs) |w| {
+        res = res.mul(w.convert(.f32).broad(res.shape()));
+    }
+
+    if (igs) |i| {
+        res = res.mul(i.convert(.f32).broad(res.shape()));
+    }
+
+    return res.convert(acc.dtype());
+}
 
 pub const TokenEmbedding = struct {
     weight: Tensor,
@@ -127,7 +311,7 @@ test normalizeL2 {
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, .{});
     defer exe.deinit();
 
     var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
@@ -327,12 +511,12 @@ pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
 
     return switch (layout) {
         .real_im_pass, .real_pass_im_pass => .{
-            x.slice1d(-1, .{ .end = @divExact(n, 2) }),
-            x.slice1d(-1, .{ .start = @divExact(n, 2), .end = n }),
+            x.slice(-1, .{ .end = @divExact(n, 2) }),
+            x.slice(-1, .{ .start = @divExact(n, 2), .end = n }),
         },
         .interleaved => .{
-            x.slice1d(-1, .{ .start = 0, .step = 2 }),
-            x.slice1d(-1, .{ .start = 1, .step = 2 }),
+            x.slice(-1, .{ .start = 0, .step = 2 }),
+            x.slice(-1, .{ .start = 1, .step = 2 }),
         },
     };
 }
@@ -355,22 +539,22 @@ pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) str
     const half_rotary = @divExact(rotary_dim, 2);
     return switch (layout) {
         .real_im_pass => .{
-            x.slice1d(ax, .{ .end = half_rotary }),
-            x.slice1d(ax, .{ .start = half_rotary, .end = rotary_dim }),
-            .{ .real_im_pass = x.slice1d(ax, .{ .start = rotary_dim }) },
+            x.slice(ax, .{ .end = half_rotary }),
+            x.slice(ax, .{ .start = half_rotary, .end = rotary_dim }),
+            .{ .real_im_pass = x.slice(ax, .{ .start = rotary_dim }) },
         },
         .real_pass_im_pass => .{
-            x.slice1d(ax, .{ .end = half_rotary }),
-            x.slice1d(ax, .{ .start = half, .end = half + half_rotary }),
+            x.slice(ax, .{ .end = half_rotary }),
+            x.slice(ax, .{ .start = half, .end = half + half_rotary }),
             .{ .real_pass_im_pass = .{
-                x.slice1d(ax, .{ .start = half_rotary, .end = half }),
-                x.slice1d(ax, .{ .start = half + half_rotary }),
+                x.slice(ax, .{ .start = half_rotary, .end = half }),
+                x.slice(ax, .{ .start = half + half_rotary }),
             } },
         },
         .interleaved => .{
-            x.slice1d(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
-            x.slice1d(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
-            .{ .interleaved = x.slice1d(ax, .{ .start = rotary_dim }) },
+            x.slice(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
+            x.slice(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
+            .{ .interleaved = x.slice(ax, .{ .start = rotary_dim }) },
         },
     };
 }
@@ -402,7 +586,7 @@ pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: R
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
 pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
-    const allocator = zml.module.CompilationContext.current().allocator;
+    const allocator = zml.Compiler.current().allocator;
     const N_half: u32 = @intCast(@divExact(N, 2));
     const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
 
@@ -550,6 +734,27 @@ test "RopeOpts.Scaling parses proportional" {
     }
 }
 
+test "RopeOpts.Scaling parses yarn partial rotary factor" {
+    const json =
+        \\{
+        \\  "rope_type": "yarn",
+        \\  "factor": 32.0,
+        \\  "original_max_position_embeddings": 4096,
+        \\  "partial_rotary_factor": 0.5
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .yarn => |y| {
+            try std.testing.expectApproxEqRel(0.5, y.partial_rotary_factor, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
 test "RopeOpts.Scaling parses default rope type" {
     const json =
         \\{
@@ -629,7 +834,7 @@ test "real/img" {
         }
     };
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, .{});
         defer exe.deinit();
 
         var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -637,7 +842,7 @@ test "real/img" {
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, .{});
         defer exe.deinit();
 
         var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -647,7 +852,7 @@ test "real/img" {
 
     // test the function that accepts 1 void argument
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, .{});
         defer exe.deinit();
 
         var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
@@ -657,7 +862,7 @@ test "real/img" {
 
     // test the function that takes NO arguments
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
@@ -666,7 +871,7 @@ test "real/img" {
     }
 
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
@@ -700,13 +905,14 @@ test rope {
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
     const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
-    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{});
+    var exe_interleaved = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, .{});
     defer exe_interleaved.deinit();
 
-    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
+    var exe_sequential = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, .{});
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    const x_values: [5][4]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5 });
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
@@ -723,7 +929,7 @@ test "rope: Proportional" {
     const platform = zml.testing.env();
 
     const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         allocator,
         io,
         rope,
@@ -735,7 +941,6 @@ test "rope: Proportional" {
                 .scaling = .{ .proportional = .{ .partial_rotary_factor = 0.25 } },
             },
         },
-        platform,
         .{},
     );
     defer exe.deinit();
@@ -768,7 +973,7 @@ test "rope: Yarn with partial_rotary_factor" {
     const platform = zml.testing.env();
 
     const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         allocator,
         io,
         rope,
@@ -788,7 +993,6 @@ test "rope: Yarn with partial_rotary_factor" {
                 } },
             },
         },
-        platform,
         .{},
     );
     defer exe.deinit();
@@ -877,12 +1081,11 @@ test nearest {
     // 3D Tensor (basic)
     {
         const input_3d_basic: zml.Tensor = .init(.{ 1, 1, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -907,12 +1110,11 @@ test nearest {
     // 3D Tensor (advanced)
     {
         const input_3d_advanced: zml.Tensor = .init(.{ 2, 3, 4 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -945,12 +1147,11 @@ test nearest {
     // 4D Tensor (basic)
     {
         const input_4d_basic: zml.Tensor = .init(.{ 1, 1, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -975,12 +1176,11 @@ test nearest {
     // 4D Tensor (advanced)
     {
         const input_4d_advanced: zml.Tensor = .init(.{ 2, 2, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1033,12 +1233,11 @@ test nearest {
     // 5D Tensor (basic)
     {
         const input_5d: zml.Tensor = .init(.{ 1, 1, 1, 2, 2 }, .i32);
-        var exe = try zml.module.compile(
+        var exe = try platform.compileFn(
             std.testing.allocator,
             std.testing.io,
             upsample,
             .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } },
-            platform,
             .{},
         );
         defer exe.deinit();
@@ -1091,7 +1290,7 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeLinear1d(out, ax, d, child_opt);
     }
@@ -1102,14 +1301,14 @@ test resizeBilinear {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
 
     const block = @import("mlir").Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     inline for (.{
         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
@@ -1158,7 +1357,7 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
     for (new_size.constSlice(), tags_.constSlice()) |d, t| {
         const ax = image.shape().axis(t);
         const child_opt: ResizeOpts = .{
-            .original_len = if (opt.original_len) |o| o.choose1d(0, ax) else null,
+            .original_len = if (opt.original_len) |o| o.slice(0, .single(ax)) else null,
         };
         out = resizeCubic1d(out, ax, d, child_opt);
     }
@@ -1169,14 +1368,14 @@ test resizeBicubic {
     const platform = zml.testing.env();
 
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
 
     const block = @import("mlir").Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
 
     inline for (.{
         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
@@ -1268,9 +1467,7 @@ pub fn causalAttnMask(
     }
 
     if (dtype.isFloat()) {
-        const zeros = Tensor.constant(dtype.zero()).broad(mask.shape());
-        const minus_inf = Tensor.constant(dtype.minValue()).broad(mask.shape());
-        mask = Tensor.select(mask, zeros, minus_inf);
+        mask = Tensor.select(mask, .scalar(0, dtype), .scalar(-std.math.inf(f32), dtype));
     } else {
         mask = mask.convert(dtype);
     }
@@ -1335,80 +1532,92 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 }
 
 pub const GatedDeltaNet = struct {
+    /// Query tensor .{ .s, .h, .k }.
+    queries: Tensor,
+    /// Key tensor .{ .s, .h, .k }.
+    keys: Tensor,
+    /// Value tensor .{ .s, .h, .v }.
+    values: Tensor,
+    /// Forget gate .{ .s, .h }.
+    alphas: Tensor,
+    /// Delta gate .{ .s, .h }.
+    betas: Tensor,
+
     pub const State = struct {
         /// Per-head recurrent state with shape .{ .h, .v, .k }.
         s: Tensor,
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+
+        /// Current step, scalar
+        step: Tensor,
     };
 
-    pub const StepInputs = struct {
-        /// Query tensor with shape .{ .h, .k }.
-        q: Tensor,
-        /// Key tensor with shape .{ .h, .k }.
-        k: Tensor,
-        /// Value tensor with shape .{ .h, .v }.
-        v: Tensor,
-        /// Forget gate with shape .{ .h }.
-        alpha: Tensor,
-        /// Delta gate with shape .{ .h }.
-        beta: Tensor,
-    };
-
-    pub const StepOutput = struct {
-        state: State,
-        output: Tensor,
+    pub const Input = struct {
+        s: Tensor,
     };
 
     pub const Output = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        state: Input,
         /// Sequence of outputs with shape .{ .s, .h, .v }.
         outputs: Tensor,
-        state: State,
     };
 
-    fn sliceStep(input: Tensor, step_: Tensor) Tensor {
-        return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
-    }
-
-    fn validateStep(state: State, inputs: StepInputs) void {
-        const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
-        const err_args = .{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta };
-
-        stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
-        stdx.debug.assert(inputs.q.shape().hasTags(.{ .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
-        stdx.debug.assert(inputs.k.shape().hasTags(.{ .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
-        stdx.debug.assert(inputs.v.shape().hasTags(.{ .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
-        stdx.debug.assert(inputs.alpha.shape().hasTags(.{.h}), err_template ++ "alpha is missing tag {{.h}}", err_args);
-        stdx.debug.assert(inputs.beta.shape().hasTags(.{.h}), err_template ++ "beta is missing tag {{.h}}", err_args);
-
-        _ = collectDims(.{.h}, &.{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta }, .strict) catch {
-            stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.k}, &.{ state.s, inputs.q, inputs.k }, .strict) catch {
-            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.v}, &.{ state.s, inputs.v }, .strict) catch {
-            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
-        };
+    pub fn cond(gdn: GatedDeltaNet, state: State) Tensor {
+        return state.step.cmp(.LT, .scalar(gdn.queries.dim(.s), .i32));
     }
 
     /// Single-step recurrent update for Gated Delta Net.
-    ///
-    /// Shapes:
-    /// - `state.s`: .{ .h, .v, .k }
-    /// - `inputs.q`, `inputs.k`: .{ .h, .k }
-    /// - `inputs.v`: .{ .h, .v }
-    /// - `inputs.alpha`, `inputs.beta`: .{ .h }
-    pub fn step(state: State, inputs: StepInputs) StepOutput {
-        validateStep(state, inputs);
+    pub fn body(gdn: GatedDeltaNet, state: State) State {
+        // q, k: .{ .h, .k }
+        const q = sliceStep(gdn.queries, state.step);
+        const k = sliceStep(gdn.keys, state.step);
+        //  v: .{ .h, .v }
+        const v = sliceStep(gdn.values, state.step);
+        // alpha, beta: .{ .h }
+        const alpha = sliceStep(gdn.alphas, state.step);
+        const beta = sliceStep(gdn.betas, state.step);
 
-        const v_hat = state.s.dot(inputs.k, .k).mul(inputs.alpha.insertAxes(.last, .{.v}));
-        const delta = inputs.v.sub(v_hat).mul(inputs.beta.insertAxes(.last, .{.v}));
-        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(.k, .{.v}).broad(state.s.shape()));
-        const s_new = state.s.mul(inputs.alpha.insertAxes(.last, .{ .v, .k })).add(delta_k);
-        const y = s_new.dot(inputs.q, .k);
+        const hvk = state.s.shape();
+        const hv = hvk.drop(.k);
+
+        const v_hat = state.s.dot(k, .k).mul(alpha.broad(hv));
+        const delta = v.sub(v_hat).mul(beta.broad(hv));
+        const delta_k = delta.broad(hvk).mul(k.broad(hvk));
+        const s_new = state.s.mul(alpha.broad(hvk)).add(delta_k);
+        const y = s_new.dot(q, .k);
 
         return .{
-            .state = .{ .s = s_new },
-            .output = y,
+            .s = s_new,
+            .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, y),
+            .step = state.step.addConstant(1),
+        };
+    }
+
+    fn sliceStep(input: Tensor, step_: Tensor) Tensor {
+        return input.slice(.s, .dynSingle(step_));
+    }
+
+    fn validateInitialState(gdn: GatedDeltaNet, state: State) void {
+        const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
+        const err_args = .{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas };
+
+        stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
+        stdx.debug.assert(gdn.queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
+        stdx.debug.assert(gdn.alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tag {{.h}}", err_args);
+
+        _ = collectDims(.{.h}, &.{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas }, .strict) catch {
+            stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ state.s, gdn.queries, gdn.keys }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ state.s, gdn.values }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
         };
     }
 
@@ -1425,83 +1634,26 @@ pub const GatedDeltaNet = struct {
         values: Tensor,
         alphas: Tensor,
         betas: Tensor,
-        initial_state: State,
+        initial_state: Input,
     ) Output {
-        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, state: {f}) is invalid ! ";
-        const err_args = .{ queries, keys, values, alphas, betas, initial_state.s };
-
-        stdx.debug.assert(queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "queries is missing tags {{.s, .h, .k}}", err_args);
-        stdx.debug.assert(keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "keys is missing tags {{.s, .h, .k}}", err_args);
-        stdx.debug.assert(values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "values is missing tags {{.s, .h, .v}}", err_args);
-        stdx.debug.assert(alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tags {{.s, .h}}", err_args);
-        stdx.debug.assert(betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tags {{.s, .h}}", err_args);
-        stdx.debug.assert(initial_state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "initial_state.s is missing tags {{.h, .v, .k}}", err_args);
-
-        _ = collectDims(.{ .s, .h }, &.{ queries, keys, values, alphas, betas }, .strict) catch {
-            stdx.debug.panic(err_template ++ "sequence/head dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.k}, &.{ queries, keys, initial_state.s }, .strict) catch {
-            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.v}, &.{ values, initial_state.s }, .strict) catch {
-            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
-        };
-
-        const WhileContext = struct {
-            queries: Tensor,
-            keys: Tensor,
-            values: Tensor,
-            alphas: Tensor,
-            betas: Tensor,
-            seq_len: Tensor,
-        };
-        const while_context: WhileContext = .{
+        const gdn: GatedDeltaNet = .{
             .queries = queries,
             .keys = keys,
             .values = values,
             .alphas = alphas,
             .betas = betas,
-            .seq_len = Tensor.scalar(queries.dim(.s), .i32),
         };
-
-        const Local = struct {
-            fn cond(step_: Tensor, _: Tensor, _: Tensor, ctx: WhileContext) Tensor {
-                return step_.cmp(.LT, ctx.seq_len);
-            }
-
-            fn body(step_: Tensor, s_prev: Tensor, outputs_prev: Tensor, ctx: WhileContext) [3]Tensor {
-                const step_out = step(
-                    .{ .s = s_prev },
-                    .{
-                        .q = sliceStep(ctx.queries, step_),
-                        .k = sliceStep(ctx.keys, step_),
-                        .v = sliceStep(ctx.values, step_),
-                        .alpha = sliceStep(ctx.alphas, step_),
-                        .beta = sliceStep(ctx.betas, step_),
-                    },
-                );
-                const outputs_new = outputs_prev.dynamicUpdateSlice(.{ .s = step_ }, step_out.output);
-
-                return .{
-                    step_.add(Tensor.scalar(1, .i32)),
-                    step_out.state.s,
-                    outputs_new,
-                };
-            }
+        const state: GatedDeltaNet.State = .{
+            .step = .scalar(0, .i32),
+            .s = initial_state.s,
+            .outputs = .zeroes(values.shape()),
         };
-
-        const step0 = Tensor.scalar(0, .i32);
-        const outputs0 = Tensor.zeroes(values.shape());
-        const loop_state = ops.@"while"(
-            .{ step0, initial_state.s, outputs0 },
-            Local.cond,
-            Local.body,
-            .{while_context},
-        );
+        validateInitialState(gdn, state);
+        const final_state = ops.@"while"(GatedDeltaNet, gdn, state);
 
         return .{
-            .outputs = loop_state[2],
-            .state = .{ .s = loop_state[1] },
+            .outputs = final_state.outputs,
+            .state = .{ .s = final_state.s },
         };
     }
 };
@@ -1516,12 +1668,11 @@ test "gated delta net" {
     const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
 
-    var exe = try zml.module.compile(
+    var exe = try platform.compileFn(
         std.testing.allocator,
         std.testing.io,
         GatedDeltaNet.forward,
-        .{ queries, keys, values, alphas, betas, GatedDeltaNet.State{ .s = initial_s } },
-        platform,
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
         .{},
     );
     defer exe.deinit();
@@ -1671,7 +1822,7 @@ test sampleTokens {
     const rng: zml.Tensor.Rng = .init();
     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, .{});
     defer exe.deinit();
 
     var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, .replicated, 0xdeadbeef);
@@ -1787,7 +1938,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     // this propagate to probs_sum and probs_max.
     const probs = x.softmax(.topk);
     const probs_sum = probs.cumulativeSum(.topk);
-    const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
+    const probs_max = probs.slice(.topk, .{ .start = 0, .end = 1 });
 
     const top_p = opts.top_p.convert(x.dtype()).broad(x.shape());
     const min_p = opts.min_p.convert(x.dtype()).broad(probs_max.shape()).mul(probs_max).broad(x.shape());
@@ -1813,7 +1964,7 @@ test sampleTokensDynamic {
     const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
     const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, .{});
     defer exe.deinit();
 
     var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), .replicated, std.mem.sliceAsBytes(&logits_data));
@@ -1850,7 +2001,7 @@ test sampleTokensDynamic {
 
         const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
         const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
-        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{});
+        var exe_bf16 = try platform.compileFn(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, .{});
         defer exe_bf16.deinit();
 
         const boost = bf16.inf;

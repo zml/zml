@@ -67,6 +67,11 @@ inline fn statusCode(status: c.iree_status_t) u32 {
 fn checkOk(status: c.iree_status_t) !void {
     if (status == null) return;
     const code = statusCode(status);
+    var buffer: [1024]u8 = undefined;
+    var buffer_length: usize = 0;
+    if (c.iree_status_format(status, buffer.len, &buffer, &buffer_length)) {
+        log.err("IREE tokenizer error: {s}", .{buffer[0..@min(buffer_length, buffer.len - 1)]});
+    }
     _ = c.iree_status_ignore(status);
     return switch (code) {
         c.IREE_STATUS_CANCELLED => Error.Cancelled,
@@ -530,6 +535,67 @@ test "huggingface json encode/decode" {
     defer decoded.deinit();
     try decoder.decode(token_ids, &decoded.writer);
     try std.testing.expectEqualStrings("hello world", decoded.written());
+}
+
+test "loads bpe tokenizer with newline lookahead split and added unk" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "model": {
+        \\    "type": "BPE",
+        \\    "unk_token": "[UNK]",
+        \\    "vocab": {
+        \\      "<|UNK|>": 0,
+        \\      "h": 1,
+        \\      "e": 2,
+        \\      "l": 3,
+        \\      "o": 4,
+        \\      "he": 5,
+        \\      "ll": 6,
+        \\      "lo": 7,
+        \\      "hel": 8,
+        \\      "hello": 9
+        \\    },
+        \\    "merges": ["h e", "l l", "l o", "he l", "hel lo"]
+        \\  },
+        \\  "added_tokens": [
+        \\    {
+        \\      "id": 0,
+        \\      "content": "<|UNK|>",
+        \\      "single_word": false,
+        \\      "lstrip": false,
+        \\      "rstrip": false,
+        \\      "normalized": false,
+        \\      "special": true
+        \\    }
+        \\  ],
+        \\  "pre_tokenizer": {
+        \\    "type": "Sequence",
+        \\    "pretokenizers": [
+        \\      {
+        \\        "type": "Split",
+        \\        "pattern": {"Regex": "(?:\\r?\\n)+(?!\\r?\\n)"},
+        \\        "behavior": "MergedWithNext",
+        \\        "invert": false
+        \\      },
+        \\      {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true}
+        \\    ]
+        \\  },
+        \\  "decoder": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true}
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, json);
+    defer tokenizer.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), tokenizer.tokenId("<|UNK|>").?);
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const ids = try encoder.encodeAlloc(allocator, "hello");
+    defer allocator.free(ids);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 6, 4 }, ids);
 }
 
 test "writer" {

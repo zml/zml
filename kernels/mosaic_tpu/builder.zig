@@ -1380,6 +1380,9 @@ pub const Builder = struct {
     pub fn log(self: *Builder, x: Value) Value {
         return self.emit(math.log(self.ctx, x.inner, self.loc()));
     }
+    pub fn log1p(self: *Builder, x: Value) Value {
+        return self.emit(math.log1p(self.ctx, x.inner, self.loc()));
+    }
     pub fn log2(self: *Builder, x: Value) Value {
         return self.emit(math.log2(self.ctx, x.inner, self.loc()));
     }
@@ -2206,7 +2209,7 @@ pub const Builder = struct {
             defer pm.deinit();
             // `canonicalize` folds `x * 1`, `x + 0`, etc.; `cse` then
             // dedupes identical constants and subexpressions. Same
-            // pipeline `zml/module.zig` runs on every compiled module.
+            // pipeline `zml/Compiler.zig` runs on every compiled module.
             const opm = pm.asOpPassManager();
             inline for (.{ "canonicalize", "cse", "canonicalize" }) |pass| {
                 try opm.addPipeline(pass);

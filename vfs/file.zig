@@ -6,7 +6,7 @@ const stdx = @import("stdx");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 
-const log = std.log.scoped(.@"zml/io/vfs/file");
+const log = std.log.scoped(.@"zml/vfs/file");
 
 pub const DirectIoError = error{
     UnsupportedPlatform,

@@ -943,7 +943,10 @@ pub const DmaBlockPool = struct {
         }
         const node = &self.nodes[node_index];
         const block_count = arena.len / self.block_size;
-        try node.free_blocks.ensureUnusedCapacity(self.allocator, block_count);
+        // Leased blocks are absent from `free_blocks`, so reserving relative to
+        // its current length can leave too little space to return them after a
+        // slab is attached under load. Keep storage sized for total capacity.
+        try node.free_blocks.ensureTotalCapacity(self.allocator, node.capacity + block_count);
         try node.arenas.ensureUnusedCapacity(self.allocator, 1);
         node.arenas.appendAssumeCapacity(arena);
         for (0..block_count) |index| {
@@ -1114,6 +1117,21 @@ test "DmaBlockPool acquires request blocks atomically" {
     pool.releaseMany(io, &first);
     try group.await(io);
     try std.testing.expect(acquired.isSet());
+}
+
+test "DmaBlockPool retains free-list capacity when growing with blocks leased" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 9 * 64);
+    defer pool.deinit();
+    pool.slab_blocks = 1;
+
+    var held: [9][]u8 = undefined;
+    const affinities: [held.len]DmaBlockPool.Affinity = @splat(.{});
+    _ = try pool.acquireMany(io, &held, &affinities);
+
+    try std.testing.expect(pool.nodes[0].free_blocks.capacity >= pool.nodes[0].capacity);
+    pool.releaseMany(io, &held);
 }
 
 test "DmaBlockPool close wakes blocked bulk acquisitions" {
@@ -1746,8 +1764,14 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const type_info = @typeInfo(ModelBufferized);
     switch (type_info) {
         .@"struct" => |struct_type_info| {
+            var initialized_fields: usize = 0;
+            errdefer inline for (struct_type_info.fields, 0..) |field, index| {
+                if (index < initialized_fields)
+                    deinitBufferizedInner(allocator, &@field(bufferized_, field.name));
+            };
             inline for (struct_type_info.fields) |field| {
                 try bufferizeInner(allocator, @field(model, field.name), &@field(bufferized_, field.name));
+                initialized_fields += 1;
             }
         },
         .@"union" => {
@@ -1769,17 +1793,69 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         .pointer => |p| {
             switch (p.size) {
                 .slice => {
-                    bufferized_.* = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment orelse @alignOf(p.child)), model.len);
-                    for (model, bufferized_.*) |src, *dst| {
-                        try bufferizeInner(allocator, src, dst);
+                    const allocated = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment orelse @alignOf(p.child)), model.len);
+                    var initialized: usize = 0;
+                    errdefer {
+                        for (allocated[0..initialized]) |*element| deinitBufferizedInner(allocator, element);
+                        allocator.free(allocated);
                     }
+                    for (model, allocated) |src, *dst| {
+                        try bufferizeInner(allocator, src, dst);
+                        initialized += 1;
+                    }
+                    bufferized_.* = allocated;
                 },
                 else => unreachable,
+            }
+        },
+        .array => |info| {
+            var initialized: usize = 0;
+            errdefer for (bufferized_.*[0..initialized]) |*element| deinitBufferizedInner(allocator, element);
+            inline for (0..info.len) |index| {
+                try bufferizeInner(allocator, model[index], &bufferized_.*[index]);
+                initialized = index + 1;
             }
         },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
+}
+
+fn deinitBufferizedInner(allocator: std.mem.Allocator, value: anytype) void {
+    const Ptr = @TypeOf(value);
+    const T = @typeInfo(Ptr).pointer.child;
+    if (T == Buffer) {
+        const buffer: *Buffer = @constCast(value);
+        buffer.deinit();
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |info| inline for (info.fields) |field| {
+            deinitBufferizedInner(allocator, &@field(value, field.name));
+        },
+        .@"union" => switch (value.*) {
+            inline else => |*payload| deinitBufferizedInner(allocator, payload),
+        },
+        .optional => if (value.*) |*payload| {
+            deinitBufferizedInner(allocator, payload);
+        },
+        .pointer => |info| switch (info.size) {
+            .slice => {
+                for (value.*) |*element| deinitBufferizedInner(allocator, element);
+                allocator.free(value.*);
+            },
+            else => unreachable,
+        },
+        .array => for (&value.*) |*element| deinitBufferizedInner(allocator, element),
+        .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
+        else => unreachable,
+    }
+}
+
+/// Deinitializes every accelerator buffer and frees the recursive slice
+/// storage allocated by `bufferize`.
+pub fn deinitBufferized(allocator: std.mem.Allocator, comptime ModelType: type, bufferized: *Bufferized(ModelType)) void {
+    deinitBufferizedInner(allocator, bufferized);
 }
 
 /// Convert a model to its bufferized form by replacing Tensor fields with Buffer
@@ -1788,4 +1864,40 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "bufferize rolls back earlier slice fields on allocation failure" {
+    const Model = struct {
+        first: []const Tensor,
+        second: []const Tensor,
+    };
+    var tensors: [1]Tensor = undefined;
+    const model: Model = .{ .first = &tensors, .second = &tensors };
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
+
+    if (bufferize(failing.allocator(), Model, &model)) |result| {
+        var unexpected = result;
+        deinitBufferized(failing.allocator(), Model, &unexpected);
+        return error.ExpectedOutOfMemory;
+    } else |err| {
+        try std.testing.expect(err == error.OutOfMemory);
+    }
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "deinitBufferized frees recursive const slices" {
+    const Layer = struct { weights: []const Tensor };
+    const Model = struct {
+        layers: []const Layer,
+        fixed: [2]Tensor,
+    };
+    var weights: [2]Tensor = undefined;
+    const layers = [_]Layer{
+        .{ .weights = weights[0..1] },
+        .{ .weights = weights[1..2] },
+    };
+    const model: Model = .{ .layers = &layers, .fixed = undefined };
+    var bufferized = try bufferize(std.testing.allocator, Model, &model);
+    deinitBufferized(std.testing.allocator, Model, &bufferized);
 }

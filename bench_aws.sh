@@ -6,11 +6,9 @@ device_selector=${ONEAPI_DEVICE_SELECTOR:-level_zero:0}
 read_initial_parallelism=${ZML_LOAD_READ_INITIAL_PARALLELISM:-12}
 read_parallelism=${ZML_LOAD_READ_PARALLELISM:-128}
 sharding=${ZML_LOAD_SHARDING:-sharded}
+model_uri=${ZML_BENCH_MODEL_URI:?Set ZML_BENCH_MODEL_URI to the S3 model URI}
 
-export AWS_ENDPOINT_URL_S3=https://s3.eu-west-3.amazonaws.com
-export AWS_REGION=eu-west-3
-export AWS_ACCESS_KEY_ID=
-export AWS_SECRET_ACCESS_KEY=
+export AWS_REGION=${AWS_REGION:-eu-west-3}
 
 load_env=(
     "ONEAPI_DEVICE_SELECTOR=${device_selector}"
@@ -25,4 +23,4 @@ for name in ZML_LOAD_FIXED_READ_PARALLELISM; do
 done
 
 env "${load_env[@]}" \
-    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load s3://brabier-zml-models/meta-llama/Llama-3.1-8B-Instruct
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load "${model_uri}" "${sharding}"

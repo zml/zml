@@ -18,7 +18,7 @@ pub fn env() *const Platform {
             std.heap.c_allocator,
             std.testing.io,
             .{
-                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
+                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.85 } } },
             },
         ) catch @panic("Pjrt not available");
 
@@ -87,7 +87,6 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
         .f8e8m0,
         => |t| {
             const L = t.toZigType();
-            const left_data = left.constItems(L);
             switch (right.dtype()) {
                 inline .bf16,
                 .f16,
@@ -100,22 +99,24 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
                 .f8e5m2fnuz,
                 => |rt| {
                     const R = rt.toZigType();
-                    const right_data = right.constItems(R);
-                    const compare_report = try compareSlices(allocator, L, R, left_data, right_data, opts);
-                    const ok = !compare_report.nan_or_inf and compare_report.close_fraction >= opts.minimum_close_fraction;
-                    if (ok) {
-                        return;
-                    } else {
-                        try w.print("{f}\n", .{compare_report});
+                    const report: CompareOpts.Report = try .compareSlices(true, allocator, L, R, left, right, opts);
+                    if (!report.ok(opts)) {
+                        try w.print("{f}\n", .{report});
                         return error.TestUnexpectedResult;
                     }
+                    return;
                 },
                 else => unreachable,
             }
         },
         inline .bool, .u2, .u4, .u8, .u16, .u32, .u64, .i2, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
-            return std.testing.expectEqualSlices(T, left.constItems(T), right.constItems(T));
+            const report: CompareOpts.Report = try .compareSlices(false, allocator, T, T, left, right, opts);
+            if (!report.ok(opts)) {
+                try w.print("{f}\n", .{report});
+                return error.TestUnexpectedResult;
+            }
+            return;
         },
         .c64, .c128 => @panic("TODO: support comparison of complex"),
     }
@@ -133,113 +134,217 @@ pub const CompareOpts = struct {
         .epsilon_relative = 0,
         .minimum_close_fraction = 1.00,
     };
-};
 
-pub const CompareReport = struct {
-    nan_or_inf: bool,
-    max_absolute_error: f32,
-    mean_absolute_error: f32,
-    rmse: f32,
+    pub const Report = struct {
+        nan_or_inf: bool,
+        max_absolute_error: f32,
+        mean_absolute_error: f32,
+        rmse: f32,
 
-    close_fraction: f32,
+        close_fraction: f32,
 
-    p50_absolute_error: f32,
-    p90_absolute_error: f32,
-    p99_absolute_error: f32,
-    p999_absolute_error: f32,
+        p50_absolute_error: f32,
+        p90_absolute_error: f32,
+        p99_absolute_error: f32,
+        p999_absolute_error: f32,
 
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print(
-            \\    nan_or_inf: {}
-            \\    max_absolute_error: {d}
-            \\    mean_absolute_error: {d}
-            \\    rmse: {d}
-            \\    close_fraction: {d}
-            \\    p50_absolute_error: {d}
-            \\    p90_absolute_error: {d}
-            \\    p99_absolute_error: {d}
-            \\    p999_absolute_error: {d}
-        , .{
-            self.nan_or_inf,
-            self.max_absolute_error,
-            self.mean_absolute_error,
-            self.rmse,
-            self.close_fraction,
-            self.p50_absolute_error,
-            self.p90_absolute_error,
-            self.p99_absolute_error,
-            self.p999_absolute_error,
-        });
-    }
-};
-
-pub fn compareSlices(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareReport {
-    var nan_or_inf: bool = false;
-    var max_absolute_error: f32 = 0;
-    var sum_absolute_error: f64 = 0;
-    var sum_squared_error: f64 = 0;
-    var count_close: usize = 0;
-    var absolute_errors = try allocator.alloc(f32, left.len);
-    defer allocator.free(absolute_errors);
-    var relative_errors = try allocator.alloc(f32, left.len);
-    defer allocator.free(relative_errors);
-
-    for (left, right, 0..) |l, r, i| {
-        const l_f32 = zml.floats.floatCast(f32, l);
-        const r_f32 = zml.floats.floatCast(f32, r);
-        if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
-            nan_or_inf = true;
-            continue;
-        }
-        const absolute_error = @abs(l_f32 - r_f32);
-        max_absolute_error = @max(max_absolute_error, absolute_error);
-        sum_absolute_error += @as(f64, @floatCast(absolute_error));
-        sum_squared_error += @as(f64, @floatCast(absolute_error)) * @as(f64, @floatCast(absolute_error));
-
-        const scale = @max(@abs(l_f32), @abs(r_f32));
-        const tolerance = opts.absolute_tolerance + opts.relative_tolerance * scale;
-        if (absolute_error <= tolerance) {
-            count_close += 1;
+        pub fn ok(report: Report, opts: CompareOpts) bool {
+            return !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
         }
 
-        absolute_errors[i] = absolute_error;
-        const denom = @max(opts.epsilon_relative, scale);
-        relative_errors[i] = absolute_error / denom;
-    }
+        fn compareSlices(comptime float_cmp: bool, allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: Slice, right: Slice, opts: CompareOpts) !CompareOpts.Report {
+            var left_iter = (&left).contiguousItemsIterator(L);
+            var right_iter = (&right).contiguousItemsIterator(R);
+            var left_chunk: []const L = &.{};
+            var right_chunk: []const R = &.{};
+            var acc: Accumulator = if (comptime float_cmp) try .init(allocator, left.shape.count()) else .initNoQuantiles(left.shape.count());
+            defer acc.deinit(allocator);
 
-    std.sort.heap(f32, absolute_errors, {}, std.sort.asc(f32));
-    std.sort.heap(f32, relative_errors, {}, std.sort.asc(f32));
+            while (true) {
+                if (left_chunk.len == 0) {
+                    left_chunk = left_iter.next() orelse &.{};
+                }
+                if (right_chunk.len == 0) {
+                    right_chunk = right_iter.next() orelse &.{};
+                }
 
-    const q = struct {
-        pub fn q(values: []const f32, frac: f32) f32 {
-            if (values.len == 0) return 0;
-            const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
-            return values[idx];
+                if (left_chunk.len == 0 or right_chunk.len == 0) {
+                    std.debug.assert(left_chunk.len == right_chunk.len);
+                    return acc.report();
+                }
+
+                const n = @min(left_chunk.len, right_chunk.len);
+                if (comptime float_cmp) {
+                    acc.cmpFloatSlices(L, R, left_chunk[0..n], right_chunk[0..n], opts);
+                } else {
+                    acc.cmpIntSlices(L, left_chunk[0..n], right_chunk[0..n]);
+                }
+
+                left_chunk = left_chunk[n..];
+                right_chunk = right_chunk[n..];
+            }
         }
-    }.q;
 
-    const mean_absolute_error: f32 = @floatCast(sum_absolute_error / @as(f64, @floatFromInt(left.len)));
-    const rmse: f32 = @floatCast(std.math.sqrt(sum_squared_error / @as(f64, @floatFromInt(left.len))));
-    const close_fraction = @as(f32, @floatFromInt(count_close)) / @as(f32, @floatFromInt(left.len));
-
-    const report: CompareReport = .{
-        .nan_or_inf = nan_or_inf,
-        .max_absolute_error = max_absolute_error,
-        .mean_absolute_error = mean_absolute_error,
-        .rmse = rmse,
-        .close_fraction = close_fraction,
-        .p50_absolute_error = q(absolute_errors, 0.5),
-        .p90_absolute_error = q(absolute_errors, 0.9),
-        .p99_absolute_error = q(absolute_errors, 0.99),
-        .p999_absolute_error = q(absolute_errors, 0.999),
+        pub fn format(
+            self: Report,
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print(
+                \\    nan_or_inf: {}
+                \\    max_absolute_error: {d}
+                \\    mean_absolute_error: {d}
+                \\    rmse: {d}
+                \\    close_fraction: {d}
+                \\    p50_absolute_error: {d}
+                \\    p90_absolute_error: {d}
+                \\    p99_absolute_error: {d}
+                \\    p999_absolute_error: {d}
+            , .{
+                self.nan_or_inf,
+                self.max_absolute_error,
+                self.mean_absolute_error,
+                self.rmse,
+                self.close_fraction,
+                self.p50_absolute_error,
+                self.p90_absolute_error,
+                self.p99_absolute_error,
+                self.p999_absolute_error,
+            });
+        }
     };
 
-    // TODO: Move
-    //const ok = !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
-    return report;
+    const Accumulator = struct {
+        absolute_errors: []f32,
+        relative_errors: []f32,
+        expected_total_count: usize,
+        processed_count: usize = 0,
+        nan_or_inf: bool = false,
+        max_absolute_error: f32 = 0,
+        sum_absolute_error: f64 = 0,
+        sum_squared_error: f64 = 0,
+        count_close: usize = 0,
+
+        fn init(allocator: std.mem.Allocator, count: usize) !Accumulator {
+            const absolute_errors = try allocator.alloc(f32, count);
+            errdefer allocator.free(absolute_errors);
+            const relative_errors = try allocator.alloc(f32, count);
+
+            @memset(absolute_errors, 0);
+            @memset(relative_errors, 0);
+            return .{
+                .expected_total_count = count,
+                .absolute_errors = absolute_errors,
+                .relative_errors = relative_errors,
+            };
+        }
+
+        fn initNoQuantiles(count: usize) Accumulator {
+            return .{
+                .expected_total_count = count,
+                .absolute_errors = &.{},
+                .relative_errors = &.{},
+            };
+        }
+
+        fn deinit(self: *Accumulator, allocator: std.mem.Allocator) void {
+            allocator.free(self.absolute_errors);
+            allocator.free(self.relative_errors);
+        }
+
+        fn cmpFloatSlices(self: *Accumulator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) void {
+            std.debug.assert(left.len == right.len);
+            std.debug.assert(self.processed_count + left.len <= self.absolute_errors.len);
+
+            const start = self.processed_count;
+            for (left, right, 0..) |l, r, i| {
+                const l_f32 = zml.floats.floatCast(f32, l);
+                const r_f32 = zml.floats.floatCast(f32, r);
+                if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
+                    self.nan_or_inf = true;
+                    continue;
+                }
+                const absolute_error: f32 = @abs(l_f32 - r_f32);
+                self.max_absolute_error = @max(self.max_absolute_error, absolute_error);
+                self.sum_absolute_error += absolute_error;
+                self.sum_squared_error += absolute_error * absolute_error;
+
+                const scale = @max(@abs(l_f32), @abs(r_f32));
+                const tolerance = opts.absolute_tolerance + opts.relative_tolerance * scale;
+                if (absolute_error <= tolerance) {
+                    self.count_close += 1;
+                }
+
+                self.absolute_errors[start + i] = absolute_error;
+                const denom = @max(opts.epsilon_relative, scale);
+                self.relative_errors[start + i] = absolute_error / denom;
+            }
+            self.processed_count += left.len;
+        }
+
+        fn cmpIntSlices(self: *Accumulator, comptime T: type, left: []const T, right: []const T) void {
+            std.debug.assert(left.len == right.len);
+
+            for (left, right) |l, r| {
+                switch (@typeInfo(T)) {
+                    .int, .float => self.count_close += if (l == r) 1 else 0,
+                    .vector => |vec| self.count_close += @popCount(@as(@Int(.unsigned, vec.len), @bitCast(l == r))),
+                    else => @panic("cmpIntSlices expect int or vector of int"),
+                }
+            }
+            self.processed_count += left.len;
+        }
+
+        fn report(self: *Accumulator) CompareOpts.Report {
+            std.debug.assert(self.processed_count == self.expected_total_count);
+            if (self.processed_count == 0) {
+                return .{
+                    .nan_or_inf = false,
+                    .max_absolute_error = 0,
+                    .mean_absolute_error = std.math.nan(f32),
+                    .rmse = std.math.nan(f32),
+                    .close_fraction = std.math.nan(f32),
+                    .p50_absolute_error = 0,
+                    .p90_absolute_error = 0,
+                    .p99_absolute_error = 0,
+                    .p999_absolute_error = 0,
+                };
+            }
+
+            std.sort.heap(f32, self.absolute_errors, {}, std.sort.asc(f32));
+            std.sort.heap(f32, self.relative_errors, {}, std.sort.asc(f32));
+
+            const q = struct {
+                fn q(values: []const f32, frac: f32) f32 {
+                    if (values.len == 0) return 0;
+                    const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
+                    return values[idx];
+                }
+            }.q;
+
+            const mean_absolute_error = stdx.math.divFloat(f64, self.sum_absolute_error, self.processed_count);
+            const rmse = std.math.sqrt(stdx.math.divFloat(f64, self.sum_squared_error, self.processed_count));
+            const close_fraction = stdx.math.divFloat(f64, self.count_close, self.processed_count);
+
+            return .{
+                .nan_or_inf = self.nan_or_inf,
+                .max_absolute_error = self.max_absolute_error,
+                .mean_absolute_error = @floatCast(mean_absolute_error),
+                .rmse = @floatCast(rmse),
+                .close_fraction = @floatCast(close_fraction),
+                .p50_absolute_error = q(self.absolute_errors, 0.5),
+                .p90_absolute_error = q(self.absolute_errors, 0.9),
+                .p99_absolute_error = q(self.absolute_errors, 0.99),
+                .p999_absolute_error = q(self.absolute_errors, 0.999),
+            };
+        }
+    };
+};
+
+pub fn compareFloats(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareOpts.Report {
+    var acc: CompareOpts.Accumulator = try .init(allocator, left.len);
+    defer acc.deinit(allocator);
+    acc.cmpFloatSlices(true, L, R, left, right, opts);
+    return acc.report();
 }
 
 pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {
@@ -357,11 +462,7 @@ pub fn testLayer(
     defer exe_results.deinit(allocator);
 
     var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
-    defer zml.meta.visit(struct {
-        fn cb(_: void, b: *zml.Buffer) void {
-            b.deinit();
-        }
-    }.cb, {}, &args_buffers);
+    defer zml.mem.deinitBufferized(allocator, ArgsT, &args_buffers);
 
     exe_args.set(.{ layer_weights, args_buffers });
 
@@ -375,7 +476,7 @@ pub fn testLayer(
     var failed: bool = false;
     var reader_buffer: [4096]u8 = undefined;
     for (0..output_count) |i| {
-        const expected_slice = b: {
+        const expected_slice = s: {
             var buffer: [256]u8 = undefined;
             const subkey = try std.fmt.bufPrint(&buffer, "{d}", .{i});
             var reader = try store_output.getReader(subkey, io, &reader_buffer);
@@ -384,7 +485,7 @@ pub fn testLayer(
             const expected_slice: zml.Slice = try .alloc(allocator, shape);
             errdefer expected_slice.free(allocator);
             try reader.interface.readSliceAll(expected_slice.data());
-            break :b expected_slice;
+            break :s expected_slice;
         };
         defer expected_slice.free(allocator);
 

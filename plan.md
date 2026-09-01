@@ -1,5 +1,9 @@
 # Fully Adaptive Source and DMA Loader
 
+> Historical design input from the adaptive-concurrency branch. It is
+> superseded by `PLAN.md` and the merged source and does not describe the
+> controller or public API selected for this merge.
+
 ## Summary
 
 Remove the hidden HF/S3/GCS parallel_read concurrency layer. One controller will optimize a global source tuple—read concurrency and request size—plus an independent per-device DMA limit:
@@ -83,4 +87,6 @@ Require the adaptive result to be within 3% of the best static median for every 
 Require no regression from fresh local baselines and no regression from 948 MiB/s on AWS; treat improvement above that as the primary remote result.
 Verify one successful logical remote read produces one physical Range request, larger request sizes are not silently split, and observed physical concurrency never exceeds the controller’s admission.
 Run controller/unit tests, mock-server retry/timing tests, core Zig tests, release CUDA/oneAPI builds, four-B70 correctness runs, and local perf profiles. Do not build or modify XLA.
-Keep CTX.md authoritative, including convergence traces, AWS results, rejected tuples, and the final default parameters. Preserve user scripts and existing performance recordings.
+At the time of this design, `CTX.md` was the branch's authoritative record of
+convergence traces, AWS results, rejected tuples, and default parameters.
+Preserve user scripts and existing performance recordings as historical data.

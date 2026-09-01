@@ -4,10 +4,8 @@
 version: 1
 
 sources:
-  - channel: jammy main
-    url: https://repo.radeon.com/rocm/apt/7.2.2
-  - channel: jammy main
-    url: https://repo.radeon.com/graphics/7.2.1/ubuntu
+  - channel: stable main
+    url: https://repo.amd.com/rocm/packages-multi-arch/ubuntu2204
   - channel: jammy main
     url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
   - channel: jammy-security main
@@ -18,31 +16,18 @@ sources:
 archs:
   - "amd64"
 
-# readelf -d libpjrt_rocm.so | grep NEEDED
-# find $(bazel info bazel-bin)/external/+rocm_packages+libpjrt_rocm/sandbox/ -type f -name '*.so*'   -exec readelf -d {} + 2>/dev/null   | grep NEEDED   | sed -E 's/.*Shared library: \[(.*)\]/\1/'   | sort -u
 packages:
-  - "libbz2-1.0"
-  - "libdw1"
-  - "liblzma5"
-  # - "rocm-smi-lib"
-  - "amd-smi-lib"
-  - "libdrm-amdgpu-common"
-  # Do not use hsa-rocr from amdgpu repo because it is overriden by hsa-runtime-rocr4wsl-amdgpu
-  - "hsa-rocr (<< 20)"
-  - "hsa-amd-aqlprofile"
-  - "comgr"
-  - "rocprofiler-register"
-  - "rocprofiler-sdk"
-  - "miopen-hip"
-  - "rccl"
-  - "rocm-device-libs"
-  - "hip-dev"
-  - "rocblas"
-  - "rocsolver"
-  - "hipsolver"
-  - "hipfft"
-  - "roctracer"
-  - "hipblaslt"
-  - "hipblaslt-dev"
-  - "hip-runtime-amd"
-  - "rocsparse"
+  - "libatomic1"
+  - "libdrm-common"
+  - "amdrocm-amdsmi7.14"
+  - "amdrocm-base7.14"
+  - "amdrocm-blas7.14"
+  - "amdrocm-blas-dev7.14"
+  - "amdrocm-dnn7.14"
+  - "amdrocm-fft7.14"
+  - "amdrocm-llvm7.14"
+  - "amdrocm-profiler-base7.14"
+  - "amdrocm-rccl7.14"
+  - "amdrocm-runtime-dev7.14"
+  - "amdrocm-solver7.14"
+  - "amdrocm-sparse7.14"

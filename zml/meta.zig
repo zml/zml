@@ -445,12 +445,12 @@ pub fn VisitReturn(comptime cb: anytype) type {
 }
 
 const Visitor = struct {
-    pub const VisitorType = enum {
+    pub const Action = enum {
         callback,
         recurse,
     };
 
-    pub fn determineAction(comptime callback: anytype, comptime PtrTypeOfV: type) VisitorType {
+    pub fn determineAction(comptime callback: anytype, comptime PtrTypeOfV: type) Action {
         const ptr_info = switch (@typeInfo(PtrTypeOfV)) {
             .pointer => |info| info,
             else => stdx.debug.compileError("zml.meta.visit({any}) is expecting a pointer/slice input, but received: {any}", .{ @TypeOf(callback), PtrTypeOfV }),
@@ -478,10 +478,8 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
 
     const can_error = stdx.meta.FnReturnErrorSet(callback) != null;
 
-    switch (action) {
-        .callback => {
-            return if (can_error) try callback(ctx, v) else callback(ctx, v);
-        },
+    return switch (action) {
+        .callback => callback(ctx, v),
         .recurse => {
             const TargetType, const mutating_cb = switch (@typeInfo(FnParam(callback, 1))) {
                 .pointer => |info| .{ info.child, !info.is_const },
@@ -504,12 +502,14 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
                             if (can_error) try visit(callback, ctx, &@field(v, field.name)) else visit(callback, ctx, &@field(v, field.name));
                         }
                     },
-                    .array => inline for (v) |*elem| if (can_error) try visit(callback, ctx, elem) else visit(callback, ctx, elem),
-                    .optional => if (v.* != null) if (can_error) try visit(callback, ctx, &v.*.?) else visit(callback, ctx, &v.*.?),
-                    .@"union" => switch (v.*) {
-                        inline else => |*v_field| if (can_error) try visit(callback, ctx, v_field) else visit(callback, ctx, v_field),
+                    .array => for (v[0..]) |*elem| {
+                        if (can_error) try visit(callback, ctx, elem) else visit(callback, ctx, elem);
                     },
-                    .pointer => if (can_error) try visit(callback, ctx, v.*) else visit(callback, ctx, v.*),
+                    .optional => return if (v.*) |*opt| visit(callback, ctx, opt),
+                    .@"union" => return switch (v.*) {
+                        inline else => |*v_field| visit(callback, ctx, v_field),
+                    },
+                    .pointer => return visit(callback, ctx, v.*),
                     else => stdx.debug.compileError("zml.meta.visit({any}) doesn't support visiting pointer type {any}", .{ @TypeOf(callback), ChildTypeV }),
                 },
                 .slice => {
@@ -520,7 +520,7 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
                 .many, .c => stdx.debug.compileError("zml.meta.visit({any}) doesn't support [*] style pointers got {any}", .{ @TypeOf(callback), ChildTypeV }),
             }
         },
-    }
+    };
 }
 
 test visit {
@@ -529,20 +529,26 @@ test visit {
     const NestedAttr = struct { nested: Attr };
     const NestedAttrOptional = struct { nested: ?Attr };
     const SimpleStruct = struct { prop: Attr };
-    const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr };
+    const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr, prop4: []Attr };
     const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional, prop5: stdx.BoundedArray(Attr, 8) };
 
-    const LocalContext = struct { result: usize };
+    const LocalContext = struct {
+        result: usize,
+
+        fn cb(ctx: *@This(), attr: *const Attr) void {
+            ctx.result += attr.data;
+        }
+
+        fn mutCb(ctx: *@This(), attr: *Attr) void {
+            ctx.result += attr.data;
+        }
+    };
 
     {
         var context: LocalContext = .{ .result = 0 };
         const container: SimpleStruct = .{ .prop = .{ .data = 1 } };
 
-        visit((struct {
-            fn cb(ctx: *LocalContext, attr: *const Attr) void {
-                ctx.result += attr.data;
-            }
-        }).cb, &context, &container);
+        visit(LocalContext.cb, &context, &container);
 
         try std.testing.expectEqual(1, context.result);
     }
@@ -550,37 +556,28 @@ test visit {
         var context: LocalContext = .{ .result = 0 };
         var container: SimpleStruct = .{ .prop = .{ .data = 1 } };
 
-        visit((struct {
-            fn cb(ctx: *LocalContext, attr: *Attr) void {
-                ctx.result += attr.data;
-            }
-        }).cb, &context, &container);
+        visit(LocalContext.mutCb, &context, &container);
 
         try std.testing.expectEqual(1, context.result);
     }
     {
         var context: LocalContext = .{ .result = 0 };
-        var container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = null };
+        var more_props: [3]Attr = .{ .{ .data = 4 }, .{ .data = 5 }, .{ .data = 6 } };
 
-        visit((struct {
-            fn cb(ctx: *LocalContext, attr: *Attr) void {
-                ctx.result += attr.data;
-            }
-        }).cb, &context, &container);
+        var container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = null, .prop4 = &more_props };
 
-        try std.testing.expectEqual(1, context.result);
+        visit(LocalContext.mutCb, &context, &container);
+
+        try std.testing.expectEqual(1 + 4 + 5 + 6, context.result);
     }
     {
         var context: LocalContext = .{ .result = 0 };
-        const container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = .{ .data = 2 } };
+        var more_props: [3]Attr = .{ .{ .data = 4 }, .{ .data = 5 }, .{ .data = 6 } };
+        const container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = .{ .data = 2 }, .prop4 = &more_props };
 
-        visit((struct {
-            fn cb(ctx: *LocalContext, attr: *const Attr) void {
-                ctx.result += attr.data;
-            }
-        }).cb, &context, &container);
+        visit(LocalContext.cb, &context, &container);
 
-        try std.testing.expectEqual(3, context.result);
+        try std.testing.expectEqual(1 + 2 + 4 + 5 + 6, context.result);
     }
     {
         var context: LocalContext = .{ .result = 0 };
@@ -596,16 +593,144 @@ test visit {
             .prop5 = prop5, // 4 will be counted twice.
         };
 
-        visit((struct {
-            fn cb(ctx: *LocalContext, attr: *const Attr) void {
-                ctx.result += attr.data;
-            }
-        }).cb, &context, &container);
+        visit(LocalContext.cb, &context, &container);
 
         try std.testing.expectEqual(14, context.result);
     }
 }
 
+/// Similar to `visit` but doesn't follow pointers or slices.
+/// This guarantees that the given type is a flat struct.
+///
+/// see: `zml.meta.visit`
+pub fn visitFlatStruct(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) VisitReturn(callback) {
+    const action = comptime Visitor.determineAction(callback, @TypeOf(v));
+
+    const TargetType = switch (@typeInfo(FnParam(callback, 1))) {
+        .pointer => |info| info.child,
+        else => stdx.debug.compileError("zml.meta.visitStruct({any}) is expecting a callback with a pointer as second argument but found {any}", .{ @TypeOf(callback), FnParam(callback, 1) }),
+    };
+
+    const PtrTypeOfV = @TypeOf(v);
+    const ptr_info_v = @typeInfo(PtrTypeOfV).pointer;
+    const ChildTypeV = ptr_info_v.child;
+
+    const can_error = stdx.meta.FnReturnErrorSet(callback) != null;
+    const err_msg = "zml.meta.visitStruct only handles flat struct, found pointer in {}";
+    const err_args = .{ChildTypeV};
+
+    switch (action) {
+        .callback => return callback(ctx, v),
+
+        .recurse => {
+            if (comptime !Contains(ChildTypeV, TargetType)) return;
+
+            // bounded array support (like visit)
+            if (@typeInfo(ChildTypeV) == .@"struct" and @hasDecl(ChildTypeV, "constSlice") and @hasDecl(ChildTypeV, "slice")) {
+                return for (v.slice()) |*elem| {
+                    if (can_error)
+                        try visitFlatStruct(callback, ctx, elem)
+                    else
+                        visitFlatStruct(callback, ctx, elem);
+                };
+            }
+
+            return switch (ptr_info_v.size) {
+                .one => switch (@typeInfo(ChildTypeV)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime or comptime !Contains(field.type, TargetType)) continue;
+                        stdx.debug.assertComptime(@typeInfo(field.type) != .pointer, err_msg, err_args);
+
+                        if (can_error) try visitFlatStruct(callback, ctx, &@field(v, field.name)) else visitFlatStruct(callback, ctx, &@field(v, field.name));
+                    },
+                    .array => for (v[0..]) |*elem| {
+                        if (can_error) try visitFlatStruct(callback, ctx, elem) else visitFlatStruct(callback, ctx, elem);
+                    },
+                    .optional => if (v.*) |*opt| visitFlatStruct(callback, ctx, opt),
+                    .@"union" => switch (v.*) {
+                        inline else => |*v_field| visitFlatStruct(callback, ctx, v_field),
+                    },
+                    else => stdx.debug.compileError(err_msg, err_args),
+                },
+                else => stdx.debug.compileError(err_msg, err_args),
+            };
+        },
+    }
+}
+
+test visitFlatStruct {
+    const Attr = struct { data: usize };
+    const OtherAttr = struct { other: []const u8 };
+    const NestedAttr = struct { nested: Attr };
+    const NestedAttrOptional = struct { nested: ?Attr };
+    const SimpleStruct = struct { prop: Attr };
+    // Note: no slice anymore, no stdx.BoundedArray
+    const MultipleTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: ?Attr };
+    const NestedTypesStruct = struct { prop1: Attr, prop2: OtherAttr, prop3: NestedAttr, prop4: NestedAttrOptional, prop5: stdx.BoundedArray(Attr, 8) };
+
+    const LocalContext = struct {
+        result: usize,
+
+        fn cb(ctx: *@This(), attr: *const Attr) void {
+            ctx.result += attr.data;
+        }
+
+        fn mutCb(ctx: *@This(), attr: *Attr) void {
+            ctx.result += attr.data;
+        }
+    };
+
+    {
+        var context: LocalContext = .{ .result = 0 };
+        const container: SimpleStruct = .{ .prop = .{ .data = 1 } };
+
+        visitFlatStruct(LocalContext.cb, &context, &container);
+
+        try std.testing.expectEqual(1, context.result);
+    }
+    {
+        var context: LocalContext = .{ .result = 0 };
+        var container: SimpleStruct = .{ .prop = .{ .data = 1 } };
+
+        visitFlatStruct(LocalContext.mutCb, &context, &container);
+
+        try std.testing.expectEqual(1, context.result);
+    }
+    {
+        var context: LocalContext = .{ .result = 0 };
+        var container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = null };
+
+        visitFlatStruct(LocalContext.mutCb, &context, &container);
+
+        try std.testing.expectEqual(1, context.result);
+    }
+    {
+        var context: LocalContext = .{ .result = 0 };
+        const container: MultipleTypesStruct = .{ .prop1 = .{ .data = 1 }, .prop2 = .{ .other = "hello" }, .prop3 = .{ .data = 2 } };
+
+        visitFlatStruct(LocalContext.cb, &context, &container);
+
+        try std.testing.expectEqual(1 + 2, context.result);
+    }
+    {
+        var context: LocalContext = .{ .result = 0 };
+        const prop5: stdx.BoundedArray(Attr, 8) = .{
+            .buffer = @splat(.{ .data = 4 }),
+            .len = 2,
+        };
+        const container: NestedTypesStruct = .{
+            .prop1 = .{ .data = 1 },
+            .prop2 = .{ .other = "hello" },
+            .prop3 = .{ .nested = .{ .data = 2 } },
+            .prop4 = .{ .nested = .{ .data = 3 } },
+            .prop5 = prop5, // 4 will be counted twice.
+        };
+
+        visitFlatStruct(LocalContext.cb, &context, &container);
+
+        try std.testing.expectEqual(1 + 2 + 3 + 4 + 4, context.result);
+    }
+}
 pub fn count(T: type, value: anytype) u32 {
     var counter: u32 = 0;
     visit(struct {
@@ -746,6 +871,31 @@ pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out:
         }
     }).cb, &context, obj);
     std.debug.assert(context.idx == context.out.len);
+}
+
+/// Finds all X in the given object, and write their pointers into an arraylist.
+pub fn collectPtrs(
+    T: type,
+    allocator: std.mem.Allocator,
+    obj: anytype,
+) std.mem.Allocator.Error![]*const T {
+    const CollectPtrCtx = struct {
+        allocator: std.mem.Allocator,
+        out: std.ArrayList(*const T) = .empty,
+        oom: bool = false,
+
+        fn cb(ctx: *@This(), val: *const T) void {
+            if (ctx.oom) return;
+            ctx.out.append(ctx.allocator, val) catch {
+                ctx.oom = true;
+            };
+        }
+    };
+    var context = CollectPtrCtx{ .allocator = allocator };
+    visit(CollectPtrCtx.cb, &context, obj);
+    if (context.oom) return error.OutOfMemory;
+
+    return context.out.toOwnedSlice(allocator);
 }
 
 fn _CollectCtx(func: anytype) type {

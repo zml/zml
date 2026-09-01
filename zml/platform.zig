@@ -286,11 +286,53 @@ const DmaPlatformState = struct {
     settings: std.atomic.Value(?*anyopaque) = .init(null),
 };
 
+// State union tagged on target platform to handle related resources
+pub const State = union(Target) {
+    cpu: void,
+    cuda: CudaState,
+    rocm: void,
+    tpu: void,
+    neuron: void,
+    oneapi: void,
+    metal: void,
+
+    pub const CudaState = struct {
+        fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
+
+        fn deinit(self: *CudaState) void {
+            if (self.fi_cutlass_moe_runners) |runners| {
+                runners.deinit();
+                self.fi_cutlass_moe_runners = null;
+            }
+        }
+    };
+
+    pub fn init(target: Target) State {
+        return switch (target) {
+            .cpu => .{ .cpu = {} },
+            .cuda => .{ .cuda = .{} },
+            .rocm => .{ .rocm = {} },
+            .tpu => .{ .tpu = {} },
+            .neuron => .{ .neuron = {} },
+            .oneapi => .{ .oneapi = {} },
+            .metal => .{ .metal = {} },
+        };
+    }
+
+    pub fn deinit(self: *State) void {
+        switch (self.*) {
+            .cuda => |*cuda_state| cuda_state.deinit(),
+            else => {},
+        }
+    }
+};
+
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    state: State,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
@@ -305,6 +347,7 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        errdefer pjrt_client.deinit(api);
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
@@ -329,6 +372,7 @@ pub const Platform = struct {
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .state = State.init(target),
                 .shardings = .empty,
                 ._dma = .{},
                 // set below
@@ -342,6 +386,7 @@ pub const Platform = struct {
 
         const arena = platform.arena.allocator();
         errdefer platform.arena.deinit();
+        errdefer if (comptime platforms.isEnabled(.cuda)) platform.state.deinit();
         try platform.shardings.ensureTotalCapacity(arena, 8);
 
         {
@@ -367,6 +412,7 @@ pub const Platform = struct {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
+            errdefer platform.physical_mesh.deinit(arena);
             platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
         }
 
@@ -378,6 +424,16 @@ pub const Platform = struct {
                 zml.attention.flashattn.register(platform) catch {
                     log.warn("Failed to register flashattn custom call", .{});
                 };
+                if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
+                    zml.moe.cutlass_flashinfer.register(platform) catch |err| {
+                        log.warn(
+                            "Failed to register FlashInfer CUTLASS MoE custom calls: {}",
+                            .{err},
+                        );
+                    };
+                } else |err| {
+                    log.warn("Failed to load FlashInfer CUTLASS MoE: {}", .{err});
+                }
             },
             else => {},
         }
@@ -393,9 +449,7 @@ pub const Platform = struct {
         };
 
         zml.io.initPlatformDma(platform, allocator, io, options.transfer) catch |err| {
-            platform.physical_mesh.deinit(platform.arena.allocator());
-            platform.pjrt_client.deinit(platform.pjrt_api);
-            return err;
+            log.err("Failed to initialize direct-transfer DMA resources for {}; advanced model-wide loading will return DmaResourcesRequired until calibration succeeds: {}", .{ target, err });
         };
 
         return platform;
@@ -441,6 +495,7 @@ pub const Platform = struct {
 
     /// Calibrates synthetic host-to-device transfers for every addressable
     /// device and atomically publishes the selected platform-wide settings.
+    /// This is a no-op on CPU platforms.
     pub fn benchTransfer(
         self: *Platform,
         allocator: std.mem.Allocator,
@@ -575,6 +630,9 @@ pub const Platform = struct {
         _ = io;
         _ = allocator;
         zml.io.deinitPlatformDma(self);
+        if (comptime platforms.isEnabled(.cuda)) {
+            self.state.deinit();
+        }
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
@@ -589,7 +647,7 @@ pub const Platform = struct {
         args: stdx.meta.Tail(
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
         return self.compileFn(
             allocator,
@@ -607,7 +665,7 @@ pub const Platform = struct {
         comptime func: anytype,
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
@@ -618,9 +676,9 @@ pub const Platform = struct {
         io: std.Io,
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
-        return zml.module.compile(allocator, io, func, args, self, opts);
+        return zml.Compiler.compile(allocator, io, self, func, args, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -771,6 +829,9 @@ pub const CreateOptions = struct {
 
     pub const XlaGpu = struct {
         allocator: Allocator = .{ .bfc = .{} },
+        /// The PJRT C API still exposes this under legacy
+        /// `use_tfrt_gpu_client` name.
+        gpu_async_dispatch: bool = true,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
@@ -793,7 +854,7 @@ pub const CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: XlaGpu, target: Target, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
@@ -813,6 +874,10 @@ pub const CreateOptions = struct {
                     }
                 },
             }
+            switch (target) {
+                .cuda => values.appendAssumeCapacity(.init(.bool, "use_tfrt_gpu_client", self.gpu_async_dispatch)),
+                else => {},
+            }
         }
     };
 
@@ -821,7 +886,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(&values),
+            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -930,7 +995,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    std.debug.print("{s} {f} [device={d}]: {d}\n", .{ name, slice.shape, device_ordinal, slice });
+    std.debug.print("{s} [device={d}]: {d}\n", .{ name, device_ordinal, slice });
 
     return null;
 }
@@ -962,6 +1027,23 @@ test "platform transfer defaults are usable without calibration" {
             .acquire,
         ),
     );
+}
+
+test "benchTransfer is a no-op on CPU" {
+    var platform: Platform = .{
+        .arena = undefined,
+        .target = .cpu,
+        .pjrt_api = undefined,
+        .pjrt_client = undefined,
+        .state = .init(.cpu),
+        .devices = &.{},
+        .memories = &.{},
+        .physical_mesh = undefined,
+        .replicated_sharding = undefined,
+        .shardings = .empty,
+    };
+
+    try platform.benchTransfer(std.testing.allocator, std.testing.io, .{});
 }
 
 test "platform defaultMemoryLayout is boring" {

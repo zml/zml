@@ -43,9 +43,14 @@ const Mnist = struct {
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
+        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
+        errdefer unloadBuffers(&buffers);
+
+        try zml.io.loadInto(Mnist, self, &buffers, allocator, io, platform, store, .{
             .read_parallelism = .{ .fixed = 1 },
         });
+
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {

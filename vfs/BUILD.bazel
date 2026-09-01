@@ -13,8 +13,8 @@ VFS_SRCS = [
 
 zig_library(
     name = "vfs",
+    main = "vfs.zig",
     srcs = VFS_SRCS,
-    main = "index.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
@@ -25,7 +25,7 @@ zig_library(
 zig_test(
     name = "test",
     srcs = VFS_SRCS,
-    main = "index.zig",
+    main = "vfs.zig",
     deps = [
         "//stdx",
     ],

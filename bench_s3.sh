@@ -5,6 +5,10 @@ set -euo pipefail
 latency_ms=${LATENCY_MS:-1000}
 speed_mib=${SPEED_MIB:-100}
 aws_endpoint=http://127.0.0.1:7878
+java_bin=${JAVA_BIN:-java}
+s3proxy_jar=${S3PROXY_JAR:?Set S3PROXY_JAR to the s3proxy jar}
+s3proxy_data_dir=${S3PROXY_DATA_DIR:?Set S3PROXY_DATA_DIR to the filesystem backing directory}
+model_uri=${ZML_BENCH_MODEL_URI:-s3://lfm}
 
 if [[ ! "${latency_ms}" =~ ^[0-9]+$ ]] || [[ ! "${speed_mib}" =~ ^[0-9]+$ ]]; then
     echo "LATENCY_MS and SPEED_MIB must be non-negative integers" >&2
@@ -31,14 +35,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-/nix/store/q12wsgw8qhd1cvyah9gpvp1hcz13z62v-temurin-jre-bin-21.0.11/bin/java \
+"${java_bin}" \
     -Ds3proxy.authorization='none' \
     "-Ds3proxy.endpoint=${aws_endpoint}" \
     "-Ds3proxy.latency-blobstore.*.latency=${latency_ms}" \
     "-Ds3proxy.latency-blobstore.*.speed=${speed_bytes_per_ms}" \
     -Djclouds.provider='filesystem' \
-    -Djclouds.filesystem.basedir="$HOME/s3proxy/data" \
-    -jar "$HOME/s3proxy/s3proxy" \
+    "-Djclouds.filesystem.basedir=${s3proxy_data_dir}" \
+    -jar "${s3proxy_jar}" \
     --properties /dev/null &
 proxy_pid=$!
 
@@ -82,4 +86,4 @@ for name in ZML_LOAD_FIXED_READ_PARALLELISM; do
 done
 
 env "${load_env[@]}" \
-    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load s3://lfm "${sharding}"
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load "${model_uri}" "${sharding}"

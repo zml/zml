@@ -4,7 +4,7 @@ const mlir = @import("mlir");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
 const stdx = @import("stdx");
 
-const CompilationContext = @import("../module.zig").CompilationContext;
+const Compiler = @import("../Compiler.zig");
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const ragged_attention = @import("mosaic_tpu_kernels/ragged_attention.zig");
@@ -78,24 +78,6 @@ pub const mosaic_tpu = struct {
             allocation_size += self.query_start_len.byteSize();
             return allocation_size;
         }
-
-        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return .{
-                .opts = self.opts,
-                .block_table = self.block_table.onMemory(memory),
-                .seq_lens = self.seq_lens.onMemory(memory),
-                .query_start_len = self.query_start_len.onMemory(memory),
-            };
-        }
-
-        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return .{
-                .opts = self.opts,
-                .block_table = self.block_table.toMemory(memory),
-                .seq_lens = self.seq_lens.toMemory(memory),
-                .query_start_len = self.query_start_len.toMemory(memory),
-            };
-        }
     };
 
     fn raggedPagedKernelCall(
@@ -107,7 +89,7 @@ pub const mosaic_tpu = struct {
         num_seqs: zml.Tensor,
         cfg: ragged_paged.Cfg,
     ) zml.Tensor {
-        const mlir_ctx = CompilationContext.current().mlir_ctx;
+        const mlir_ctx = Compiler.current().mlir_ctx;
         const out = ragged_attention.Kernel.call(
             .{
                 .kv_lens = seq_lens,
@@ -136,8 +118,8 @@ pub const mosaic_tpu = struct {
     }
 
     fn activeSequenceCount(query_start_len: zml.Tensor) zml.Tensor {
-        const start = query_start_len.slice1d(.b, .{ .end = query_start_len.dim(.b) - 1 });
-        const end = query_start_len.slice1d(.b, .{ .start = 1 });
+        const start = query_start_len.slice(.b, .{ .end = query_start_len.dim(.b) - 1 });
+        const end = query_start_len.slice(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
             .cmp(.GT, .zeroes(query_lens.shape()))
@@ -162,7 +144,7 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention cannot restore output from head_dim {} to {}",
             .{ restored.dim(.hd), q_template.dim(.hd) },
         );
-        return restored.slice1d(.hd, .{ .end = q_template.dim(.hd) });
+        return restored.slice(.hd, .{ .end = q_template.dim(.hd) });
     }
 
     inline fn alignQueryHeadDimForKernel(q: zml.Tensor, target_head_dim: i64) zml.Tensor {

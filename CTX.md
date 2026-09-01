@@ -1,5 +1,10 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+> Historical performance and implementation snapshot from the adaptive-
+> concurrency branch. It is superseded by `PLAN.md` and the merged source; the
+> commit ids, artifact selection, working-tree state, measurements, and API
+> descriptions below are provenance, not current build or operational guidance.
+
 Snapshot: 2026-09-01. ZML HEAD is `e4b94c7f` (`final line`). The v6 DMA
 calibration changes are uncommitted in `CTX.md`, `examples/io/main.zig`, and
 `zml/io.zig`. The user's benchmark recordings remain untracked and must be
@@ -10,9 +15,9 @@ SHA-256 is
 This artifact contains the range-aware SYCL `IsHostMemoryPinned` fix and has
 been runtime-validated.
 
-This file is the authoritative handoff for the current implementation and
-measurements. `RESEARCH.md` is historical controller research; its adaptive
-staging architecture is retired.
+This file was the branch's authoritative handoff for the implementation and
+measurements captured at that snapshot. `RESEARCH.md` is older controller
+research; its adaptive staging architecture is retired.
 
 ## Completion-targeted v6 DMA calibration (2026-09-01)
 

@@ -155,7 +155,10 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
+        const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
+            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = &.{self.sharding} })
+        else
+            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
