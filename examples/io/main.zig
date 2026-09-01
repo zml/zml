@@ -220,11 +220,9 @@ pub fn main(init: std.process.Init) !void {
                 .block_sizes = block_sizes,
                 .parallelism = parallelism,
                 .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                .repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_REPEATS", 3),
-                .global_repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_REPEATS", 5),
                 .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
                 .global_duration_ns = try std.math.mul(u64, global_window_ms, std.time.ns_per_ms),
-                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.15),
+                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
                 .parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_PARALLELISM_TOLERANCE", 0.05),
                 .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
                 .global_min_device_retention = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_RETENTION", 0.95),
@@ -235,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
             defer result.deinit();
 
             try stdout_writer.interface.print(
-                "dma_bench version=4 source_layout=numa_local numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
+                "dma_bench version=5 source_layout=numa_local numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
                 .{
                     if (init.environ_map.get("ZML_DMA_BENCH_NUMA_NODES") == null) "auto" else "explicit",
                     uniqueUsizeCount(device_numa_nodes),
@@ -284,7 +282,7 @@ pub fn main(init: std.process.Init) !void {
             for (result.devices) |recommendation| {
                 const device = platform.devices[recommendation.device_index];
                 try stdout_writer.interface.print(
-                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3} windows={d}\n",
+                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} average_latency_ms={d:.3} windows={d}\n",
                     .{
                         recommendation.device_index,
                         recommendation.device_id,
@@ -292,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
                         device.debugString(),
                         recommendation.dma_block_size,
                         recommendation.dma_parallelism,
-                        recommendation.isolated_bytes_per_second / zml.GiB,
+                        recommendation.measured_bytes_per_second / zml.GiB,
                         recommendation.average_latency_ns / std.time.ns_per_ms,
                         recommendation.windows,
                     },
@@ -314,16 +312,11 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
             try stdout_writer.interface.print(
-                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} windows={d} ",
+                "dma_bench_global searched={} uncapped_gib_s={d:.3} uncapped_latency_ms={d:.3} windows={d} ",
                 .{
                     result.global.searched,
-                    result.global.isolated_bytes_per_second / zml.GiB,
-                    result.global.isolated_average_latency_ns / std.time.ns_per_ms,
-                    result.global.concurrent_bytes_per_second / zml.GiB,
-                    result.global.concurrent_average_latency_ns / std.time.ns_per_ms,
-                    result.global.scaling_efficiency,
-                    result.global.latency_ratio,
-                    result.global.concurrent_normalized_fairness,
+                    result.global.uncapped_bytes_per_second / zml.GiB,
+                    result.global.uncapped_average_latency_ns / std.time.ns_per_ms,
                     result.global.windows,
                 },
             );

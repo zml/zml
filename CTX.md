@@ -1,9 +1,9 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-09-01. The `plan.md` implementation is commit `3766cb3c`
-(`remove parallel_read`) on detached ZML HEAD. The AWS controller follow-up
-described below is uncommitted. The user's benchmark recordings remain
-untracked and must be preserved. The user moved the XLA checkout back to the
+Snapshot: 2026-09-01. ZML HEAD is `508c0825` (`simplified DMA settings
+detection`). The faster v5 calibration is uncommitted in `CTX.md`,
+`examples/io/main.zig`, and `zml/io.zig`. The user's benchmark recordings
+remain untracked and must be preserved. The user moved the XLA checkout back to the
 intended revision; it is clean at `92e7778d04` (`[XLA:GPU][oneAPI] Recognize
 DmaMapped host memory as pinned`) on top of `b0990b33b1`
 (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). ZML selects the
@@ -17,7 +17,102 @@ This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
 
-## Deterministic DMA calibration and automatic NUMA pools (2026-09-01)
+## Faster v5 DMA calibration (2026-09-01)
+
+The cold calibration path was shortened without restoring the retired adaptive
+controller or adding a persistent cache. The final algorithm keeps the complete
+block grid and three 250 ms samples per measured local candidate. It reuses the
+selected block's width-eight samples as the width baseline, then probes larger
+widths in order and stops after two consecutive candidates leave the selected
+smallest-within-5%-of-peak width unchanged. On the MI300X this measures widths
+12 and 16, then stops instead of also measuring 24 and 32.
+
+The selected tuple is no longer measured in isolation three times on every
+otherwise-identical GPU. Those runs did not affect the tuple. The first
+uncapped aggregate measurement now creates and warms the remaining device
+cohorts concurrently, exercises the chosen tuple on every GPU, and supplies
+the reported per-device rates. Capped fairness is Jain fairness over each
+device's capped/uncapped retention, so it directly rejects a cap that penalizes
+one shard without requiring isolated baselines.
+
+Every global-cap candidate is measured in rotated order for three 250 ms
+rounds. A cap is never emitted from that screen alone: a provisional
+recommendation receives three additional cap/uncapped pairs, and the final
+decision uses the median same-repeat throughput ratio. This caught a real
+false-positive prototype run where a temporarily slow 214.6 GiB/s uncapped
+median made cap 48 appear to reach 261.9 GiB/s. The paired confirmation path
+subsequently measured cap 48 at 271.5 GiB/s and uncapped at 267.9 GiB/s; the
+gain and latency reduction were insufficient, so no cap was emitted.
+
+Five-round staged cap pruning was tested and removed. It saved only about
+1--1.5 seconds while adding substantial state and candidate bookkeeping. The
+final full three-round screen is shorter and simpler, while paired confirmation
+protects the consequential action. A coarse block grid was also rejected: the
+tensor-tail response need not be unimodal, and its sub-second potential saving
+did not justify weakening the most important decision. Repeat counts are now
+fixed internally at three; the repeat-count environment options were removed.
+
+The block near-peak tolerance is now 8%, down from 15%. Three interleaved real
+single-GPU loads of the 58.25 GiB Gemma workload measured these medians with
+fixed 32 MiB reads, sixteen reads, and eight DMA events:
+
+| DMA block | median loader GiB/s |
+|---:|---:|
+| 8 MiB | 23.84 |
+| 16 MiB | 24.90 |
+| 32 MiB | 25.43 |
+
+Sixteen MiB stays approximately 2% from the loader peak without choosing the
+largest transaction. More importantly, the replicated eight-GPU load committed
+466.01 GiB in 7.829 seconds at 16 MiB, versus 10.694 seconds at 8 MiB. The old
+15% synthetic preference could still call those points tied, so it was not
+accurate enough for the multi-GPU workload.
+
+The final v5 calibration matrix used automatic NUMA-local pools unless marked
+explicit. Every run selected 16 MiB, eight events per device, and no global
+cap:
+
+| visible GPUs | NUMA placement | elapsed | sampling | windows | uncapped GiB/s |
+|---|---|---:|---:|---:|---:|
+| `0` | node 0 | 8.17 s | 5.29 s | 21 | 46.44 |
+| `7` | node 1 | 8.05 s | 5.30 s | 21 | 44.91 |
+| `0,1` | node 0 | 12.24 s | 9.09 s | 36 | 89.55 |
+| `0,4` | nodes 0/1 | 12.96 s | 9.12 s | 36 | 86.15 |
+| `0,1,2,3` | node 0 | 15.85 s | 10.61 s | 42 | 154.43 |
+| `0,1,4,5` | nodes 0/0/1/1 | 13.70 s | 9.09 s | 36 | 174.56 |
+| `0,1,4,5` | explicit 0/0/1/1 | 13.65 s | 9.09 s | 36 | 171.45 |
+| all eight | 0/0/0/0/1/1/1/1 | 19.76 s | 9.11 s | 36 | 325.46 |
+
+The 42-window four-GPU run entered paired confirmation and correctly rejected
+the provisional cap. Compared with v4, the representative cross-node two-GPU,
+split four-GPU, and all-eight wall times fell by 27.7%, 33.6%, and 25.9%.
+Eight-GPU sampling fell from 19.16 to 9.11 seconds and windows from 76 to 36.
+Setup rose from 7.48 to 10.65 seconds because the more accurate 16 MiB tuple
+requires larger disjoint NUMA-local source rings; accuracy was kept ahead of
+the more flattering 8 MiB calibration time.
+
+The benchmark output format is now version 5. Per-device output reports
+`measured_gib_s` from the concurrent uncapped cohort, while the global record
+reports `uncapped_gib_s`. The old isolated/scaling fields and repeat-count
+environment controls were removed.
+
+Validation completed after the final implementation:
+
+- `zig fmt --check zml/io.zig examples/io/main.zig`
+- `git diff --check`
+- `bazel test //zml:test --test_output=errors`
+- `bazel build -c opt --@zml//platforms:rocm=true \
+  --@zml//platforms:cpu=false //examples/io:playground`
+
+The sharded Gemma command cannot be used as another workload control because
+its tensor dimensions are incompatible with the example's eight-way explicit
+axis sharding. The prior four-B70 oneAPI cap-four measurements remain the
+available positive cap case; oneAPI hardware was not present for this v5 run.
+The paired-confirmation policy must be rechecked there when that host is
+available. Logs for this work use `/tmp/zml-dma-final-v5-*` and
+`/tmp/zml-load-{fast,8gpu}-block*.log`.
+
+## v4 deterministic DMA calibration and automatic NUMA pools (2026-09-01)
 
 The DMA benchmark now has one accuracy-first calibration path instead of the
 separate adaptive and exhaustive controllers. Every block-size and device-width
