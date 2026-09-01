@@ -97,7 +97,7 @@ pub const LoadedModel = struct {
     }
 
     pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
+        if (buffers.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
         Llama.unloadBuffers(&buffers.model, allocator);
     }
 
@@ -189,7 +189,7 @@ pub const Model = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        if (self.lm_head) |*lm_head| lm_head.weight.deinit();
+        if (self.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
         Llama.unloadBuffers(&self.model, allocator);
     }
 
@@ -480,12 +480,7 @@ const Mlp = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        self.up_proj.weight.deinit();
-        if (self.up_proj.bias) |*bias| bias.deinit();
-        self.gate_proj.weight.deinit();
-        if (self.gate_proj.bias) |*bias| bias.deinit();
-        self.down_proj.weight.deinit();
-        if (self.down_proj.bias) |*bias| bias.deinit();
+        zml.Buffer.deinitAll(Mlp, self);
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
@@ -530,17 +525,7 @@ const SelfAttn = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
-        self.q_proj.weight.deinit();
-        if (self.q_proj.bias) |*bias| bias.deinit();
-        self.k_proj.weight.deinit();
-        if (self.k_proj.bias) |*bias| bias.deinit();
-        self.v_proj.weight.deinit();
-        if (self.v_proj.bias) |*bias| bias.deinit();
-        self.o_proj.weight.deinit();
-        if (self.o_proj.bias) |*bias| bias.deinit();
-
-        if (self.q_norm) |*q_norm| RmsNorm.unloadBuffers(q_norm);
-        if (self.k_norm) |*k_norm| RmsNorm.unloadBuffers(k_norm);
+        zml.Buffer.deinitAll(SelfAttn, self);
     }
 
     /// Self zml.attention.

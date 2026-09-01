@@ -111,7 +111,7 @@ pub const LoadedModel = struct {
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
         TextModel.unloadBuffers(&buffers.text_model, allocator);
-        buffers.lm_head.weight.deinit();
+        zml.nn.Linear.unloadBuffers(&buffers.lm_head);
     }
 
     pub fn compile(
@@ -209,7 +209,7 @@ pub const Model = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
         TextModel.unloadBuffers(&self.text_model, allocator);
-        self.lm_head.weight.deinit();
+        zml.nn.Linear.unloadBuffers(&self.lm_head);
     }
     pub fn forward(
         self: Model,
@@ -517,12 +517,7 @@ pub const Mlp = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        self.up_proj.weight.deinit();
-        if (self.up_proj.bias) |*bias| bias.deinit();
-        self.gate_proj.weight.deinit();
-        if (self.gate_proj.bias) |*bias| bias.deinit();
-        self.down_proj.weight.deinit();
-        if (self.down_proj.bias) |*bias| bias.deinit();
+        zml.Buffer.deinitAll(Mlp, self);
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
@@ -577,16 +572,7 @@ pub const SelfAttn = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
-        self.q_proj.weight.deinit();
-        if (self.q_proj.bias) |*bias| bias.deinit();
-        self.k_proj.weight.deinit();
-        if (self.k_proj.bias) |*bias| bias.deinit();
-        self.v_proj.weight.deinit();
-        if (self.v_proj.bias) |*bias| bias.deinit();
-        self.o_proj.weight.deinit();
-        if (self.o_proj.bias) |*bias| bias.deinit();
-        RmsNorm.unloadBuffers(&self.q_norm);
-        RmsNorm.unloadBuffers(&self.k_norm);
+        zml.Buffer.deinitAll(SelfAttn, self);
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -810,15 +796,7 @@ pub const GatedDeltaNet = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(GatedDeltaNet)) void {
-        self.in_proj_qkv.weight.deinit();
-        self.in_proj_z.weight.deinit();
-        self.in_proj_b.weight.deinit();
-        self.in_proj_a.weight.deinit();
-        self.out_proj.weight.deinit();
-        self.conv1d_weight.deinit();
-        self.dt_bias.deinit();
-        self.aLog.deinit();
-        RmsNormGated.unloadBuffers(&self.norm);
+        zml.Buffer.deinitAll(GatedDeltaNet, self);
     }
 
     fn recurrentGatedDeltaRule(

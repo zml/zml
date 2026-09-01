@@ -150,7 +150,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.dtype();
+        const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.weight.dtype();
         log.info("Moe dtype : {}", .{moe_dtype});
         const moe_backend = try zml.moe.Backend.auto(platform, moe_dtype);
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
@@ -336,7 +336,7 @@ pub const TextModel = struct {
         }
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
-        self.lm_head.weight.deinit();
+        zml.nn.Linear.unloadBuffers(&self.lm_head);
     }
 
     pub fn sampler(self: TextModel) Sampler {
@@ -581,20 +581,7 @@ pub const SelfAttn = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
-        self.q_proj.weight.deinit();
-        if (self.q_proj.bias) |*bias| bias.deinit();
-        if (self.q_proj_scale) |*scale| scale.deinit();
-        self.k_proj.weight.deinit();
-        if (self.k_proj.bias) |*bias| bias.deinit();
-        if (self.k_proj_scale) |*scale| scale.deinit();
-        self.v_proj.weight.deinit();
-        if (self.v_proj.bias) |*bias| bias.deinit();
-        if (self.v_proj_scale) |*scale| scale.deinit();
-        self.o_proj.weight.deinit();
-        if (self.o_proj.bias) |*bias| bias.deinit();
-        if (self.o_proj_scale) |*scale| scale.deinit();
-        RmsNorm.unloadBuffers(&self.q_norm);
-        RmsNorm.unloadBuffers(&self.k_norm);
+        zml.Buffer.deinitAll(SelfAttn, self);
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -703,15 +690,7 @@ pub const Mlp = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        self.up_proj.weight.deinit();
-        if (self.up_proj.bias) |*bias| bias.deinit();
-        if (self.up_proj_scale) |*scale| scale.deinit();
-        self.gate_proj.weight.deinit();
-        if (self.gate_proj.bias) |*bias| bias.deinit();
-        if (self.gate_proj_scale) |*scale| scale.deinit();
-        self.down_proj.weight.deinit();
-        if (self.down_proj.bias) |*bias| bias.deinit();
-        if (self.down_proj_scale) |*scale| scale.deinit();
+        zml.Buffer.deinitAll(Mlp, self);
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
@@ -740,8 +719,7 @@ const Router = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Router)) void {
-        self.router.weight.deinit();
-        if (self.router.bias) |*bias| bias.deinit();
+        zml.Buffer.deinitAll(Router, self);
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -756,8 +734,8 @@ const Router = struct {
 pub const Moe = struct {
     shared_expert: Mlp,
     shared_expert_gate: zml.nn.Linear,
-    gate_up_proj: zml.Tensor,
-    down_proj: zml.Tensor,
+    gate_up_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
     router: Router,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
@@ -781,8 +759,8 @@ pub const Moe = struct {
                 store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .{ .dout = .replicated }),
                 .d,
             ),
-            .gate_up_proj = gate_up_proj_tensor,
-            .down_proj = down_proj_tensor,
+            .gate_up_proj = .init(gate_up_proj_tensor, null, .d),
+            .down_proj = .init(down_proj_tensor, null, .dout),
             .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok),
         };
     }
@@ -800,13 +778,7 @@ pub const Moe = struct {
             topk_ids,
             routing_scores,
             self.gate_up_proj,
-            null,
-            null,
             self.down_proj,
-            null,
-            null,
-            null,
-            null,
             .{},
             moe_metadata,
             moe_parameters,
@@ -824,12 +796,7 @@ pub const Moe = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Moe), allocator: std.mem.Allocator) void {
         _ = allocator;
-        Mlp.unloadBuffers(&self.shared_expert);
-        self.shared_expert_gate.weight.deinit();
-        if (self.shared_expert_gate.bias) |*bias| bias.deinit();
-        self.gate_up_proj.deinit();
-        self.down_proj.deinit();
-        Router.unloadBuffers(&self.router);
+        zml.Buffer.deinitAll(Moe, self);
     }
 };
 
@@ -957,18 +924,7 @@ pub const GatedDeltaNet = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(GatedDeltaNet)) void {
-        self.in_proj_qkv.weight.deinit();
-        if (self.in_proj_qkv_scale) |*scale| scale.deinit();
-        self.in_proj_z.weight.deinit();
-        if (self.in_proj_z_scale) |*scale| scale.deinit();
-        self.in_proj_b.weight.deinit();
-        self.in_proj_a.weight.deinit();
-        self.out_proj.weight.deinit();
-        if (self.out_proj_scale) |*scale| scale.deinit();
-        self.conv1d_weight.deinit();
-        self.dt_bias.deinit();
-        self.aLog.deinit();
-        RmsNormGated.unloadBuffers(&self.norm);
+        zml.Buffer.deinitAll(GatedDeltaNet, self);
     }
 
     fn recurrentGatedDeltaRule(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, initial_state: ?zml.Tensor) struct { zml.Tensor, zml.Tensor } {
