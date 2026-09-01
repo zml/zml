@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
@@ -205,51 +206,39 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_PARALLELISM",
                 &zml.io.default_dma_benchmark_parallelism,
             );
-            const screen_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_SCREEN_MS", 50);
-            const verify_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_VERIFY_MS", 25);
-            const final_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_FINAL_MS", 100);
-            const benchmark_mode = std.meta.stringToEnum(
-                zml.io.DmaBenchmarkMode,
-                init.environ_map.get("ZML_DMA_BENCH_MODE") orelse "adaptive",
-            ) orelse return error.InvalidDmaBenchmarkMode;
-            const target_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_TARGET_MS", 1000);
-            const max_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_MAX_MS", 4000);
-            const adaptive_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 20);
-            const adaptive_confirmation_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_CONFIRM_MS", 50);
+            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 250);
+            const global_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_WINDOW_MS", 250);
+            const device_numa_nodes = try dmaBenchmarkNumaNodes(
+                option_allocator,
+                io,
+                platform,
+                init.environ_map,
+            );
 
             var result = try zml.io.benchmarkDma(AllTensorsModel, &model, allocator, io, platform, .{
-                .mode = benchmark_mode,
                 .shardings = &.{sharded_sharding},
                 .block_sizes = block_sizes,
                 .parallelism = parallelism,
-                .initial_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_INITIAL_PARALLELISM", 8),
-                .screen_duration_ns = try std.math.mul(u64, screen_ms, std.time.ns_per_ms),
-                .verification_duration_ns = try std.math.mul(u64, verify_ms, std.time.ns_per_ms),
-                .finalist_duration_ns = try std.math.mul(u64, final_ms, std.time.ns_per_ms),
-                .finalist_repeats = try envUsize(
-                    init.environ_map,
-                    "ZML_DMA_BENCH_REPEATS",
-                    if (benchmark_mode == .exhaustive) 5 else 3,
-                ),
-                .target_sampling_ns = try std.math.mul(u64, target_ms, std.time.ns_per_ms),
-                .max_sampling_ns = try std.math.mul(u64, max_ms, std.time.ns_per_ms),
-                .confidence_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_CONFIDENCE_TOLERANCE", 0.03),
-                .adaptive_window_ns = try std.math.mul(u64, adaptive_window_ms, std.time.ns_per_ms),
-                .adaptive_confirmation_ns = try std.math.mul(u64, adaptive_confirmation_ms, std.time.ns_per_ms),
-                .adaptive_min_rounds = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_ROUNDS", 3),
+                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                .repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_REPEATS", 3),
+                .global_repeats = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_REPEATS", 5),
+                .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
+                .global_duration_ns = try std.math.mul(u64, global_window_ms, std.time.ns_per_ms),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.15),
                 .parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_PARALLELISM_TOLERANCE", 0.05),
                 .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
                 .global_min_device_retention = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_RETENTION", 0.95),
                 .global_fairness_floor = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_FAIRNESS", 0.98),
                 .max_pinned_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_PINNED_MIB", 2048),
+                .device_numa_nodes = device_numa_nodes,
             });
             defer result.deinit();
 
             try stdout_writer.interface.print(
-                "dma_bench version=2 mode={s} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
+                "dma_bench version=4 source_layout=numa_local numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
                 .{
-                    @tagName(result.mode),
+                    if (init.environ_map.get("ZML_DMA_BENCH_NUMA_NODES") == null) "auto" else "explicit",
+                    uniqueUsizeCount(device_numa_nodes),
                     @tagName(platform.target),
                     platform.pjrt_api.version(),
                     result.devices.len,
@@ -259,6 +248,16 @@ pub fn main(init: std.process.Init) !void {
                     result.windows,
                 },
             );
+            for (result.devices) |recommendation| {
+                try stdout_writer.interface.print(
+                    "dma_bench_numa device_index={d} device_id={d} numa_node={d}\n",
+                    .{
+                        recommendation.device_index,
+                        recommendation.device_id,
+                        device_numa_nodes[recommendation.device_index],
+                    },
+                );
+            }
             for (result.samples) |sample| {
                 const device = platform.devices[sample.device_index];
                 try stdout_writer.interface.print(
@@ -285,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
             for (result.devices) |recommendation| {
                 const device = platform.devices[recommendation.device_index];
                 try stdout_writer.interface.print(
-                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3} confidence={s} windows={d} termination={s}\n",
+                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} isolated_gib_s={d:.3} average_latency_ms={d:.3} windows={d}\n",
                     .{
                         recommendation.device_index,
                         recommendation.device_id,
@@ -295,9 +294,7 @@ pub fn main(init: std.process.Init) !void {
                         recommendation.dma_parallelism,
                         recommendation.isolated_bytes_per_second / zml.GiB,
                         recommendation.average_latency_ns / std.time.ns_per_ms,
-                        @tagName(recommendation.confidence),
                         recommendation.windows,
-                        @tagName(recommendation.termination),
                     },
                 );
             }
@@ -317,7 +314,7 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
             try stdout_writer.interface.print(
-                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} confidence={s} windows={d} termination={s} ",
+                "dma_bench_global searched={} isolated_gib_s={d:.3} isolated_latency_ms={d:.3} concurrent_gib_s={d:.3} concurrent_latency_ms={d:.3} scaling_efficiency={d:.4} latency_ratio={d:.3} concurrent_fairness={d:.4} windows={d} ",
                 .{
                     result.global.searched,
                     result.global.isolated_bytes_per_second / zml.GiB,
@@ -327,9 +324,7 @@ pub fn main(init: std.process.Init) !void {
                     result.global.scaling_efficiency,
                     result.global.latency_ratio,
                     result.global.concurrent_normalized_fairness,
-                    @tagName(result.global.confidence),
                     result.global.windows,
-                    @tagName(result.global.termination),
                 },
             );
             if (result.global.parallelism) |limit| {
@@ -447,6 +442,135 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+fn dmaBenchmarkNumaNodes(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    environ_map: *const std.process.Environ.Map,
+) ![]const usize {
+    if (environ_map.get("ZML_DMA_BENCH_NUMA_NODES") != null) {
+        return envUsizeList(
+            allocator,
+            environ_map,
+            "ZML_DMA_BENCH_NUMA_NODES",
+            &.{},
+        );
+    }
+    if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaMappingRequired;
+    if (platform.target != .rocm) return error.DmaBenchmarkNumaMappingRequired;
+
+    const RocmNode = struct {
+        topology_index: usize,
+        numa_node: usize,
+    };
+    var nodes: std.ArrayListUnmanaged(RocmNode) = .empty;
+    defer nodes.deinit(allocator);
+    var topology_dir = try std.Io.Dir.openDir(
+        .cwd(),
+        io,
+        "/sys/class/kfd/kfd/topology/nodes",
+        .{ .iterate = true },
+    );
+    defer topology_dir.close(io);
+    var entries = topology_dir.iterate();
+    while (try entries.next(io)) |entry| {
+        const topology_index = std.fmt.parseInt(usize, entry.name, 10) catch continue;
+        const properties_path = try std.fmt.allocPrint(
+            allocator,
+            "/sys/class/kfd/kfd/topology/nodes/{d}/properties",
+            .{topology_index},
+        );
+        defer allocator.free(properties_path);
+        const properties = std.Io.Dir.cwd().readFileAlloc(
+            io,
+            properties_path,
+            allocator,
+            .unlimited,
+        ) catch continue;
+        defer allocator.free(properties);
+        const simd_count = linuxProperty(properties, "simd_count") orelse continue;
+        if (simd_count == 0) continue;
+        const render_minor = linuxProperty(properties, "drm_render_minor") orelse
+            return error.DmaBenchmarkNumaDiscoveryFailed;
+        const numa_path = try std.fmt.allocPrint(
+            allocator,
+            "/sys/class/drm/renderD{d}/device/numa_node",
+            .{render_minor},
+        );
+        defer allocator.free(numa_path);
+        const numa_text = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            numa_path,
+            allocator,
+            .unlimited,
+        );
+        defer allocator.free(numa_text);
+        const numa_node = try std.fmt.parseInt(
+            isize,
+            std.mem.trim(u8, numa_text, &std.ascii.whitespace),
+            10,
+        );
+        if (numa_node < 0) return error.DmaBenchmarkNumaDiscoveryFailed;
+        try nodes.append(allocator, .{
+            .topology_index = topology_index,
+            .numa_node = @intCast(numa_node),
+        });
+    }
+    std.mem.sort(RocmNode, nodes.items, {}, struct {
+        fn lessThan(_: void, lhs: RocmNode, rhs: RocmNode) bool {
+            return lhs.topology_index < rhs.topology_index;
+        }
+    }.lessThan);
+
+    var visible_ordinals: std.ArrayListUnmanaged(usize) = .empty;
+    defer visible_ordinals.deinit(allocator);
+    const visibility_names = [_][]const u8{
+        "ROCR_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
+        "CUDA_VISIBLE_DEVICES",
+    };
+    for (visibility_names) |name| {
+        const visible = environ_map.get(name) orelse continue;
+        var values = std.mem.tokenizeScalar(u8, visible, ',');
+        while (values.next()) |value| {
+            try visible_ordinals.append(
+                allocator,
+                std.fmt.parseInt(usize, std.mem.trim(u8, value, &std.ascii.whitespace), 10) catch
+                    return error.DmaBenchmarkNumaMappingRequired,
+            );
+        }
+        break;
+    }
+    if (visible_ordinals.items.len != 0 and
+        visible_ordinals.items.len != platform.devices.len)
+        return error.DmaBenchmarkNumaMappingRequired;
+
+    const result = try allocator.alloc(usize, platform.devices.len);
+    errdefer allocator.free(result);
+    for (platform.devices, result, 0..) |device, *numa_node, device_index| {
+        const physical_index = if (visible_ordinals.items.len == 0)
+            std.math.cast(usize, device.localHardwareId()) orelse
+                return error.DmaBenchmarkNumaDiscoveryFailed
+        else
+            visible_ordinals.items[device_index];
+        if (physical_index >= nodes.items.len)
+            return error.DmaBenchmarkNumaDiscoveryFailed;
+        numa_node.* = nodes.items[physical_index].numa_node;
+    }
+    return result;
+}
+
+fn linuxProperty(contents: []const u8, name: []const u8) ?usize {
+    var lines = std.mem.tokenizeScalar(u8, contents, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
+        return std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch null;
+    }
+    return null;
+}
+
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     const value = environ_map.get(name) orelse return default;
     return std.fmt.parseInt(usize, value, 10);
@@ -500,6 +624,22 @@ fn envMibList(
     }
     if (result.items.len == 0) return error.InvalidArgument;
     return result.toOwnedSlice(allocator);
+}
+
+fn uniqueUsizeCount(values: []const usize) usize {
+    if (values.len == 0) return 1;
+    var count: usize = 0;
+    for (values, 0..) |value, index| {
+        var seen = false;
+        for (values[0..index]) |previous| {
+            if (previous == value) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) count += 1;
+    }
+    return count;
 }
 
 const TreeCounts = struct {

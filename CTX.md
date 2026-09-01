@@ -1,6 +1,6 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-07-24. The `plan.md` implementation is commit `3766cb3c`
+Snapshot: 2026-09-01. The `plan.md` implementation is commit `3766cb3c`
 (`remove parallel_read`) on detached ZML HEAD. The AWS controller follow-up
 described below is uncommitted. The user's benchmark recordings remain
 untracked and must be preserved. The user moved the XLA checkout back to the
@@ -16,6 +16,58 @@ been runtime-validated.
 This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
+
+## Deterministic DMA calibration and automatic NUMA pools (2026-09-01)
+
+The DMA benchmark now has one accuracy-first calibration path instead of the
+separate adaptive and exhaustive controllers. Every block-size and device-width
+candidate is measured in rotated order, and the smallest candidate within the
+configured tolerance of the median peak is selected. Device-local candidates
+use three 250 ms windows. Global-cap candidates use five 250 ms windows and
+retain all per-device metrics from the median aggregate repeat. There are no
+confidence intervals, rank-stability exits, finalist phases, dynamic budgets,
+or `budget_exhausted` states.
+
+The eight-event block screen is also the minimum width recommended to the real
+loader. Smaller widths remain in the list only as global-cap candidates. This
+is deliberate: the perfectly fed synthetic ring can make two events appear
+within 5% of peak, but it does not include the loader's source and callback
+scheduling gaps. The benchmark still verifies the selected tuple in isolation
+on every otherwise-identical device, so global fairness uses measured
+per-device rates instead of copying the first device's rate.
+
+On ROCm/Linux, `examples/io` now discovers visible-device NUMA placement from
+KFD topology and DRM sysfs. Numeric `ROCR_VISIBLE_DEVICES`,
+`HIP_VISIBLE_DEVICES`, `GPU_DEVICE_ORDINAL`, and `CUDA_VISIBLE_DEVICES` masks
+are applied before mapping devices to nodes. One DmaMapped source pool is bound
+and first-touched per detected node, disjoint rings are assigned to its local
+devices, and sampled page placement is verified. `ZML_DMA_BENCH_NUMA_NODES`
+remains the explicit override and is required for non-ROCm backends or
+nonnumeric visibility masks.
+
+The final default search consistently selected 8 MiB and eight events on the
+MI300X host across these placements:
+
+| visible GPUs | source placement | elapsed | uncapped GiB/s | recommendation |
+|---|---|---:|---:|---|
+| `0` | auto node 0 | 10.44 s | 42.55 isolated | 8 MiB / 8, no cap |
+| `0,4` | auto nodes 0/1 | 17.92 s | 77.26 | 8 MiB / 8, no cap |
+| `0,1,4,5` | auto nodes 0/0/1/1 | 20.64 s | 149.24 | 8 MiB / 8, no cap |
+| `0,1,4,5` | forced node 0 | 20.42 s | 135.45 | 8 MiB / 8, no cap |
+| all eight | auto nodes 0/0/0/0/1/1/1/1 | 26.65 s | 272.38 | 8 MiB / 8, no cap |
+
+The local two-pool four-GPU result was 10.2% faster than forcing both sockets'
+GPUs through node 0. The final eight-GPU run used 7.48 s of setup and 19.16 s
+of sampling over 76 windows. A 100 ms local window was rejected as a default:
+despite five repeats, ROCm pauses made it incorrectly select 32 MiB once.
+Three 250 ms repeats restored the known 8 MiB optimum while keeping total time
+near the earlier long accuracy-oriented runs. Global-cap selection also has a
+small hysteresis margin around the two-times latency rule, preventing a noisy
+almost-half result from becoming a machine-wide runtime constraint.
+
+The core DMA benchmark section in `zml/io.zig` is approximately 900 lines
+smaller than the previous implementation even after retaining the fair gate
+and adding NUMA source pools.
 
 ## Fair global DMA benchmark follow-up (2026-08-31)
 
@@ -70,6 +122,84 @@ ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3 bazel run --config=release \
   --@zml//platforms:oneapi=true //examples/io:playground -- \
   dma-bench /var/models/Qwen/Qwen3.6-27B/ sharded
 ```
+
+## ROCm DMA benchmark NUMA source pools (2026-09-01)
+
+The eight-MI300X host has two NUMA nodes, with devices 0--3 local to node 0
+and devices 4--7 local to node 1. Memory placement has little effect on an
+isolated device's DMA bandwidth on this machine, as the raw HIP controls below
+also show, but it materially changes aggregate bandwidth when all eight GPUs
+run concurrently. Binding the shared benchmark source to only one node favored
+the four local GPUs by approximately 29--42% and limited aggregate throughput
+to roughly 180--186 GiB/s. Page-interleaving one shared arena across both nodes
+improved aggregate throughput to approximately 215--228 GiB/s, but every GPU
+still fetched half of its pages remotely.
+
+The benchmark prototype now supports the intended design: one DmaMapped source
+pool per NUMA node, with each device using a disjoint source ring in its local
+pool. The allocator applies `MPOL_BIND` with `mbind` before first touch, faults
+the pages with `memset`, and samples up to 256 pages with `move_pages`; the
+benchmark fails if any sampled page is not on the requested node. On this host,
+the 8 MiB/eight-event device tuple allocates a 256 MiB pool on each node, for
+512 MiB total pinned source memory. Both pools passed the 256-page placement
+check.
+
+Longer combined runs with the node-local pools reached **251--263 GiB/s**,
+approximately 10--22% faster than the interleaved arena and typically about
+15% faster. Fairness remained approximately 0.999. The two pools measured
+155.591 and 163.165 GiB/s separately when uncapped, or 318.756 GiB/s summed,
+so the simultaneous result still loses 17--21% to a real shared host/PJRT
+ceiling. The important distinction is that NUMA-local pools raise that ceiling;
+they do not eliminate it.
+
+The longer aggregate cap sweep produced these representative results:
+
+| total active transfers | aggregate GiB/s, two runs |
+|---:|---:|
+| 8 | 173.322, 158.554 |
+| 16 | 237.236, 224.079 |
+| 32 | 233.592, 230.830 |
+| 48 | 252.164, 257.559 |
+| 64 / uncapped | 262.763, 250.993 |
+
+Caps 48 and 64 exchanged position between runs, so there is no stable
+beneficial machine-wide admission cap below the natural sum of the per-device
+widths. The accuracy-first recommendation remains an 8 MiB DMA chunk, eight
+events per device, and no global cap. A total cap of 48 is an economical point
+near the plateau, but it was not consistently within the configured 3% band
+and should not be emitted as an optimum.
+
+Short 20 ms screening and 50 ms confirmation windows incorrectly selected a
+global cap of 32 in two runs because ROCm/PJRT pauses contaminated individual
+windows. The longer 100 ms screening, 250 ms confirmation, 3 s target, and 8 s
+maximum runs took about 13.5 seconds end to end: approximately 6.7 seconds of
+PJRT setup and 6.8 seconds of sampling. The NUMA-pool result is reliable, but
+the fast selector still needs more robust outlier handling before its global
+cap decision is trusted from the default short run.
+
+The prototype is enabled with an explicit device-index-to-node mapping in
+PJRT device order:
+
+```text
+ZML_DMA_BENCH_NUMA_NODES=0,0,0,0,1,1,1,1 \
+ZML_DMA_BENCH_BLOCK_MIB=8 \
+ZML_DMA_BENCH_PARALLELISM=1,2,4,6,8 \
+bazel run -c opt \
+  --@zml//platforms:rocm=true \
+  --@zml//platforms:cpu=false \
+  //examples/io:playground -- \
+  dma-bench /var/models/google/gemma-4-31B-it/ replicated
+```
+
+`ZML_DMA_BENCH_NUMA_NODES` currently applies only to the adaptive benchmark.
+An empty mapping preserves the original shared source arena. Automatic
+device-to-NUMA discovery and production loader pool selection are not yet
+implemented. The eventual loader design should keep one registered pool per
+node, route each GPU to its local pool, and stage replicated data once per node
+before fanning out to the GPUs local to that node. This aggregate result does
+not contradict the single-device raw HIP result below: remote DMA is not
+slower in isolation, but eight concurrent devices need both sockets' memory
+and interconnect resources to reach the higher global rate.
 
 ## ROCm direct-loader addendum (2026-08-31)
 
