@@ -29,7 +29,7 @@ test "OCP FP8 exceptional encodings are safe to bitcast to FNUZ" {
 
 fn blockDot(x: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
     const output_shape = zml.Shape.init(.{ .m = x.dim(0), .n = weight.dim(0) }, .bf16);
-    return zml.fp8.tritonBlockScaledDot(x, weight, weight_scale, output_shape);
+    return zml.fp8.nativeBlockScaledDot(x, weight, weight_scale, output_shape);
 }
 
 fn blockDotError(x: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
@@ -95,26 +95,73 @@ fn testCudaBlockDotCase(m: i64, n: i64, k: i64) !void {
     try zml.testing.expectClose(io, expected, output, .{ .absolute_tolerance = 4.0, .relative_tolerance = 0.01 });
 }
 
-test "CUDA Triton block-scaled E4M3FN GEMM direct decode and prefill" {
+test "CUDA XLA block-scaled E4M3FN GEMM decode and prefill" {
     const platform = zml.testing.env();
     if (platform.target != .cuda) return error.SkipZigTest;
 
-    // A one-tile scale grid remains native even though scheme classification
-    // intentionally treats the ambiguous shape as per-tensor FP8.
-    try testCudaBlockDotCase(1, 64, 128);
-
-    // N=193 exercises a partially populated final 128-row scale block.
-    try testCudaBlockDotCase(1, 193, 256);
-    try testCudaBlockDotCase(65, 193, 256);
+    // XLA's block-128 W8A8 arm requires complete N and K tiles. Cover its
+    // decode, batched-decode, prefill and long-contraction geometries.
+    try testCudaBlockDotCase(1, 128, 128);
+    try testCudaBlockDotCase(1, 256, 256);
+    try testCudaBlockDotCase(16, 256, 256);
+    try testCudaBlockDotCase(65, 256, 256);
+    try testCudaBlockDotCase(1, 256, 2048);
+    try testCudaBlockDotCase(64, 256, 2048);
 }
 
-test "CUDA Triton block-scaled E4M3FN GEMM split-K decode and prefill" {
+const ShardedBlockDotOutputs = struct {
+    column: zml.Tensor,
+    row: zml.Tensor,
+};
+
+fn blockDotsSharded(
+    x: zml.Tensor,
+    column_weight: zml.Tensor,
+    column_scale: zml.Tensor,
+    row_weight: zml.Tensor,
+    row_scale: zml.Tensor,
+) ShardedBlockDotOutputs {
+    return .{
+        .column = zml.nn.scaledDot(
+            x.withPartitioning(.{ .m = .replicated, .k = .replicated }),
+            column_weight.withPartitioning(.{ .n = .model, .k = .replicated }),
+            null,
+            column_scale.withPartitioning(.{ .nb = .model, .kb = .replicated }),
+            .k,
+        ),
+        .row = zml.nn.scaledDot(
+            x.withPartitioning(.{ .m = .replicated, .k = .model }),
+            row_weight.withPartitioning(.{ .n = .replicated, .k = .model }),
+            null,
+            row_scale.withPartitioning(.{ .nb = .replicated, .kb = .model }),
+            .k,
+        ),
+    };
+}
+
+test "CUDA XLA block-scaled FP8 compiles with model sharding" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const platform = zml.testing.env();
     if (platform.target != .cuda) return error.SkipZigTest;
 
-    // K=2048 and small N select split-K; N=129 keeps the final scale block partial.
-    try testCudaBlockDotCase(1, 129, 2048);
-    try testCudaBlockDotCase(65, 129, 2048);
+    const width: i64 = @intCast(128 * platform.devices.len);
+    const blocks = @divExact(width, 128);
+    const x: zml.Tensor = .init(.{ .m = 16, .k = width }, .bf16);
+    const column_weight: zml.Tensor = .init(.{ .n = width, .k = width }, .f8e4m3fn);
+    const column_scale: zml.Tensor = .init(.{ .nb = blocks, .kb = blocks }, .f32);
+    const row_weight: zml.Tensor = .init(.{ .n = width, .k = width }, .f8e4m3fn);
+    const row_scale: zml.Tensor = .init(.{ .nb = blocks, .kb = blocks }, .f32);
+
+    const model_sharding = try @constCast(platform).registerSharding("fp8_test_model", .mesh(.{ .model = .high_bandwidth }));
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        blockDotsSharded,
+        .{ x, column_weight, column_scale, row_weight, row_scale },
+        .{ .shardings = &.{model_sharding} },
+    );
+    defer exe.deinit();
 }
 
 test "ROCm Triton block-scaled FP8 GEMM" {

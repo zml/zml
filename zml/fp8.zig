@@ -10,6 +10,7 @@
 
 const std = @import("std");
 
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const Compiler = @import("Compiler.zig");
@@ -31,7 +32,7 @@ fn nativeBlockFp8() NativeBlockFp8 {
     return switch (Compiler.current().platform.target) {
         .cuda => .{ .dtype = .f8e4m3fn, .triton_dtype = .f8e4m3fn },
         .rocm => .{ .dtype = .f8e4m3fnuz, .triton_dtype = .f8e4m3fnuz },
-        else => |target| stdx.debug.panic("block FP8 Triton dot is unsupported on {s}", .{@tagName(target)}),
+        else => |target| stdx.debug.panic("native block FP8 dot is unsupported on {s}", .{@tagName(target)}),
     };
 }
 
@@ -295,6 +296,34 @@ const PreparedDot = struct {
     k: i64,
 };
 
+const QuantizedBlock128 = struct {
+    q: Tensor,
+    scale: Tensor,
+};
+
+/// Emit CUDA's online activation quantization as StableHLO so XLA can fuse
+/// the value and scale outputs into one Triton kernel before consuming them in
+/// its block-128 W8A8 scaled-dot arm.
+fn quantizeBlock128Cuda(lhs_2d: Tensor) QuantizedBlock128 {
+    const fp8_max = 448.0;
+    const grouped = lhs_2d.convert(.f32).splitAxis(.fp8_k, .{
+        .fp8_ks = -1,
+        .fp8_block = 128,
+    });
+    const scale = grouped.abs().max(.fp8_block)
+        .maximum(.scalar(1e-6, .f32))
+        .scale(1.0 / fp8_max);
+    const q = grouped.div(scale.broad(grouped.shape()))
+        .clamp(.scalar(-fp8_max, .f32), .scalar(fp8_max, .f32))
+        .convert(.f8e4m3fn)
+        .reshape(lhs_2d.shape().withDtype(.f8e4m3fn));
+
+    return .{
+        .q = q,
+        .scale = scale.squeeze(.fp8_block),
+    };
+}
+
 fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) PreparedDot {
     stdx.debug.assert(lhs.rank() >= 1 and rhs_fn.rank() == 2, "block FP8 GEMM expects lhs rank >= 1 and rhs rank 2, got {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
     stdx.debug.assert(rhs_fn.dtype() == .f8e4m3fn, "block FP8 GEMM expects E4M3FN weights, got {f}", .{rhs_fn.shape()});
@@ -323,24 +352,31 @@ fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) Prep
         .{rhs_scale_fn.shape()},
     );
 
-    const quantized = QuantizeBlock128.Kernel.call(
-        .{ .x = lhs_2d },
-        .{
-            .q = Shape.init(.{ .fp8_m = m, .fp8_k = k }, native_fp8.dtype),
-            .scale = Shape.init(.{ .fp8_m = m, .fp8_ks = groups_per_row }, .f32),
+    const quantized: QuantizedBlock128 = switch (Compiler.current().platform.target) {
+        .cuda => quantizeBlock128Cuda(lhs_2d),
+        .rocm => blk: {
+            const out = QuantizeBlock128.Kernel.call(
+                .{ .x = lhs_2d },
+                .{
+                    .q = Shape.init(.{ .fp8_m = m, .fp8_k = k }, native_fp8.dtype),
+                    .scale = Shape.init(.{ .fp8_m = m, .fp8_ks = groups_per_row }, .f32),
+                },
+                .{
+                    .cfg = .{
+                        .input_dtype = tri.from(lhs.dtype()),
+                        .fp8_dtype = native_fp8.triton_dtype,
+                        .m = @intCast(m),
+                        .k = @intCast(k),
+                    },
+                    .grid = .{ @intCast(m * groups_per_row), 1, 1 },
+                    .num_stages = 1,
+                    .num_warps = 1,
+                },
+            );
+            break :blk .{ .q = out.q, .scale = out.scale };
         },
-        .{
-            .cfg = .{
-                .input_dtype = tri.from(lhs.dtype()),
-                .fp8_dtype = native_fp8.triton_dtype,
-                .m = @intCast(m),
-                .k = @intCast(k),
-            },
-            .grid = .{ @intCast(m * groups_per_row), 1, 1 },
-            .num_stages = 1,
-            .num_warps = 1,
-        },
-    );
+        else => unreachable,
+    };
 
     // Prepared ROCm checkpoints contain normalized FNUZ bytes and adjusted
     // scales, so this bitcast has no inference-time cost. CUDA consumes the
@@ -413,6 +449,43 @@ fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, 
     return out.reshape(output_shape);
 }
 
+fn scaledDotReference(inputs: []const Tensor, output_shape: Shape) Tensor {
+    return ops.customCall(
+        "zml$scaled_dot_unmatched",
+        .{ inputs[0], inputs[1], inputs[2], inputs[3] },
+        output_shape,
+        {},
+        .{ .has_side_effect = false },
+    );
+}
+
+fn xlaBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
+    const prepared = prepareBlockScaledDot(lhs, rhs_fn, rhs_scale_fn);
+    stdx.debug.assert(@mod(prepared.n, 128) == 0, "XLA block-128 FP8 dot requires N divisible by 128, got {d}", .{prepared.n});
+
+    const output_2d = Shape.init(.{ .fp8_m = prepared.m, .fp8_n = prepared.n }, .bf16);
+    const mlir_ctx = Compiler.current().mlir_ctx;
+    const dimension_numbers = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, &.{1}),
+            .intArray(mlir_ctx, i64, &.{1}),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, &.{}),
+            .intArray(mlir_ctx, i64, &.{}),
+        }),
+    });
+    const result = ops.composite(
+        "xla.scaled_dot",
+        &.{ prepared.a, prepared.b, prepared.a_scale, prepared.b_scale },
+        &.{output_2d},
+        scaledDotReference,
+        output_2d,
+        .{ .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dimension_numbers)} },
+    )[0];
+    return result.reshape(output_shape);
+}
+
 fn blockScaledGemmSplitK(grid_m: i64, grid_n: i64, n: i64, k: i64) i64 {
     if (k < 2048 or n >= 6144) return 1;
 
@@ -446,16 +519,24 @@ fn blockScaledDot(
         BlockDotContext{ .reduce_partials = reduce_partials },
         (struct {
             fn body(ctx: BlockDotContext, _: std.mem.Allocator, inputs: []const Tensor, local_output: Shape) Tensor {
-                const partial = tritonBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output);
+                const partial = switch (Compiler.current().platform.target) {
+                    .cuda => xlaBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output),
+                    .rocm => tritonBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], local_output),
+                    else => unreachable,
+                };
                 return if (ctx.reduce_partials) ops.allReduce(partial, Tensor.add) else partial;
             }
         }).body,
     );
 }
 
-pub fn tritonBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
+pub fn nativeBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
     return blockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape);
 }
+
+/// Compatibility alias. CUDA now delegates the GEMM to XLA; ROCm still uses
+/// the original Triton implementation.
+pub const tritonBlockScaledDot = nativeBlockScaledDot;
 
 const AbsorbedKeyDot = struct {
     const Cfg = struct {
