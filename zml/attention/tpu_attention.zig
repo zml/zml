@@ -223,34 +223,27 @@ pub const mosaic_tpu = struct {
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
-            .{
-                prepared.q,
-                prepared.kv_pages,
-                prepared.seq_lens,
-                prepared.block_table,
-                prepared.query_start_len,
-                prepared.num_seqs,
-            },
-            prepared.q.shape(),
-            .{
-                .opts = opts,
-                .parameters = parameters,
-            },
             (struct {
-                fn body(body_context: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
-                    _ = allocator;
-                    stdx.debug.assert(sharded_inputs.len == 6, "mosaic_tpu ragged paged manualComputation expects 6 inputs, got {}", .{sharded_inputs.len});
+                q: zml.Tensor,
+                kv_pages: zml.Tensor,
+                seq_lens: zml.Tensor,
+                block_table: zml.Tensor,
+                query_start_len: zml.Tensor,
+                num_seqs: zml.Tensor,
+                opts: AttentionOptions,
+                parameters: Parameters,
 
+                fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
                     const prepared_inputs: PreparedInputs = .{
-                        .q = sharded_inputs[0],
-                        .kv_pages = sharded_inputs[1],
-                        .seq_lens = sharded_inputs[2],
-                        .block_table = sharded_inputs[3],
-                        .query_start_len = sharded_inputs[4],
-                        .num_seqs = sharded_inputs[5],
+                        .q = self.q,
+                        .kv_pages = self.kv_pages,
+                        .seq_lens = self.seq_lens,
+                        .block_table = self.block_table,
+                        .query_start_len = self.query_start_len,
+                        .num_seqs = self.num_seqs,
                     };
 
-                    const cfg = buildCfg(prepared_inputs, body_context.parameters, body_context.opts);
+                    const cfg = buildCfg(prepared_inputs, self.parameters, self.opts);
                     const q_out = raggedPagedKernelCall(
                         prepared_inputs.q,
                         prepared_inputs.kv_pages,
@@ -264,6 +257,17 @@ pub const mosaic_tpu = struct {
                     return q_out;
                 }
             }).body,
+            .{
+                .q = prepared.q,
+                .kv_pages = prepared.kv_pages,
+                .seq_lens = prepared.seq_lens,
+                .block_table = prepared.block_table,
+                .query_start_len = prepared.query_start_len,
+                .num_seqs = prepared.num_seqs,
+                .opts = opts,
+                .parameters = parameters,
+            },
+            prepared.q.shape(),
         );
 
         const restored = restoreQueryHeads(q, q_out);

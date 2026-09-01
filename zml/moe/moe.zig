@@ -232,80 +232,94 @@ pub fn forwardMoe(
                 // Also, maybe pass `zml.nn.Linear` directly
                 if (expert_partition.eql(.init(.experts))) {
                     break :b zml.ops.manualComputation(
-                        .{
-                            input,
-                            topk_ids,
-                            topk_weights,
-                            gate_up_weight_unpacked,
-                            down_weight_unpacked,
-                            gate_up.quantization.?.input_scale.?.asMultiplier(),
-                            gate_up.quantization.?.scales,
-                            gate_up.quantization.?.global_scale.?.asMultiplier(),
-                            down.quantization.?.input_scale.?.asMultiplier(),
-                            down.quantization.?.scales,
-                            down.quantization.?.global_scale.?.asMultiplier(),
-                        },
-                        input.shape(),
-                        .{
-                            .activation = runner_options.activation,
-                            .enable_pdl = runner_options.enable_pdl,
-                            .gemm1_tactic = runner_options.gemm1_tactic,
-                            .gemm2_tactic = runner_options.gemm2_tactic,
-                            .workspace_query_device = runner_options.workspace_query_device,
-                        },
                         (struct {
+                            input: zml.Tensor,
+                            topk_ids: zml.Tensor,
+                            topk_weights: zml.Tensor,
+                            gate_up_weight_unpacked: zml.Tensor,
+                            down_weight_unpacked: zml.Tensor,
+                            gate_up_input_scale: zml.Tensor,
+                            gate_up_scales: zml.Tensor,
+                            gate_up_global_scale: zml.Tensor,
+                            down_input_scale: zml.Tensor,
+                            down_scales: zml.Tensor,
+                            down_global_scale: zml.Tensor,
+                            activation: cutlass_flashinfer.Activation,
+                            enable_pdl: bool,
+                            gemm1_tactic: i32,
+                            gemm2_tactic: i32,
+                            workspace_query_device: i32,
+
                             fn body(
-                                ctx: anytype,
+                                self: @This(),
                                 _: std.mem.Allocator,
-                                sharded_inputs: []const zml.Tensor,
                                 _: zml.Shape,
                             ) zml.Tensor {
-                                const local_num_experts = sharded_inputs[3].dim(.expert);
+                                const local_num_experts = self.gate_up_weight_unpacked.dim(.expert);
                                 const partition_id = zml.ops.partitionId().convert(.i32);
                                 const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                                 const expert_end = expert_start.addConstant(local_num_experts);
 
-                                const local_route_mask = sharded_inputs[1]
+                                const local_route_mask = self.topk_ids
                                     .cmp(.GE, expert_start)
-                                    .logical(.AND, sharded_inputs[1].cmp(.LT, expert_end));
+                                    .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
                                 const local_topk_ids = local_route_mask.select(
-                                    sharded_inputs[1].sub(expert_start),
+                                    self.topk_ids.sub(expert_start),
                                     zml.Tensor.scalar(0, .i32),
                                 );
                                 const local_topk_weights = local_route_mask.select(
-                                    sharded_inputs[2],
-                                    zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
+                                    self.topk_weights,
+                                    zml.Tensor.scalar(0, self.topk_weights.dtype()),
                                 );
 
                                 const local_output = cutlass_flashinfer.fusedExpertsNvfp4(
-                                    sharded_inputs[0],
-                                    sharded_inputs[3],
-                                    sharded_inputs[4],
+                                    self.input,
+                                    self.gate_up_weight_unpacked,
+                                    self.down_weight_unpacked,
                                     local_topk_weights,
                                     local_topk_ids,
-                                    sharded_inputs[5],
-                                    sharded_inputs[6],
-                                    sharded_inputs[7],
-                                    sharded_inputs[8],
-                                    sharded_inputs[9],
-                                    sharded_inputs[10],
+                                    self.gate_up_input_scale,
+                                    self.gate_up_scales,
+                                    self.gate_up_global_scale,
+                                    self.down_input_scale,
+                                    self.down_scales,
+                                    self.down_global_scale,
                                     .{
-                                        .workspace_query_device = ctx.workspace_query_device,
-                                        .activation = ctx.activation,
-                                        .enable_pdl = ctx.enable_pdl,
-                                        .gemm1_tactic = ctx.gemm1_tactic,
-                                        .gemm2_tactic = ctx.gemm2_tactic,
+                                        .workspace_query_device = self.workspace_query_device,
+                                        .activation = self.activation,
+                                        .enable_pdl = self.enable_pdl,
+                                        .gemm1_tactic = self.gemm1_tactic,
+                                        .gemm2_tactic = self.gemm2_tactic,
                                     },
                                 ) catch |err| stdx.debug.panic(
                                     "FlashInfer CUTLASS NVFP4 MoE backend failed: {}",
                                     .{err},
                                 );
                                 const local_reshaped = local_output
-                                    .reshape(sharded_inputs[0].shape().dims())
+                                    .reshape(self.input.shape().dims())
                                     .withTags(.{ .b, .s, .d });
                                 return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                             }
                         }).body,
+                        .{
+                            .input = input,
+                            .topk_ids = topk_ids,
+                            .topk_weights = topk_weights,
+                            .gate_up_weight_unpacked = gate_up_weight_unpacked,
+                            .down_weight_unpacked = down_weight_unpacked,
+                            .gate_up_input_scale = gate_up.quantization.?.input_scale.?.asMultiplier(),
+                            .gate_up_scales = gate_up.quantization.?.scales,
+                            .gate_up_global_scale = gate_up.quantization.?.global_scale.?.asMultiplier(),
+                            .down_input_scale = down.quantization.?.input_scale.?.asMultiplier(),
+                            .down_scales = down.quantization.?.scales,
+                            .down_global_scale = down.quantization.?.global_scale.?.asMultiplier(),
+                            .activation = runner_options.activation,
+                            .enable_pdl = runner_options.enable_pdl,
+                            .gemm1_tactic = runner_options.gemm1_tactic,
+                            .gemm2_tactic = runner_options.gemm2_tactic,
+                            .workspace_query_device = runner_options.workspace_query_device,
+                        },
+                        input.shape(),
                     );
                 }
 
@@ -327,62 +341,76 @@ pub fn forwardMoe(
 
             if (expert_partition.eql(.init(.experts))) {
                 break :b zml.ops.manualComputation(
-                    .{ input, topk_ids, topk_weights, gate_up.weight, down.weight },
-                    input.shape(),
-                    .{
-                        .activation = runner_options.activation,
-                        .enable_pdl = runner_options.enable_pdl,
-                        .gemm1_tactic = runner_options.gemm1_tactic,
-                        .gemm2_tactic = runner_options.gemm2_tactic,
-                        .workspace_query_device = runner_options.workspace_query_device,
-                    },
                     (struct {
+                        input: zml.Tensor,
+                        topk_ids: zml.Tensor,
+                        topk_weights: zml.Tensor,
+                        weights_gate_up: zml.Tensor,
+                        weights_down: zml.Tensor,
+                        activation: cutlass_flashinfer.Activation,
+                        enable_pdl: bool,
+                        gemm1_tactic: i32,
+                        gemm2_tactic: i32,
+                        workspace_query_device: i32,
+
                         fn body(
-                            ctx: anytype,
+                            self: @This(),
                             _: std.mem.Allocator,
-                            sharded_inputs: []const zml.Tensor,
                             _: zml.Shape,
                         ) zml.Tensor {
-                            const local_num_experts = sharded_inputs[3].dim(.expert);
+                            const local_num_experts = self.weights_gate_up.dim(.expert);
                             const partition_id = zml.ops.partitionId().convert(.i32);
                             const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                             const expert_end = expert_start.addConstant(local_num_experts);
 
-                            const local_route_mask = sharded_inputs[1]
+                            const local_route_mask = self.topk_ids
                                 .cmp(.GE, expert_start)
-                                .logical(.AND, sharded_inputs[1].cmp(.LT, expert_end));
+                                .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
                             const local_topk_ids = local_route_mask.select(
-                                sharded_inputs[1].sub(expert_start),
+                                self.topk_ids.sub(expert_start),
                                 zml.Tensor.scalar(0, .i32),
                             );
                             const local_topk_weights = local_route_mask.select(
-                                sharded_inputs[2],
-                                zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
+                                self.topk_weights,
+                                zml.Tensor.scalar(0, self.topk_weights.dtype()),
                             );
 
                             const local_output = cutlass_flashinfer.fusedExpertsBf16(
-                                sharded_inputs[0],
-                                sharded_inputs[3],
-                                sharded_inputs[4],
+                                self.input,
+                                self.weights_gate_up,
+                                self.weights_down,
                                 local_topk_weights,
                                 local_topk_ids,
                                 .{
-                                    .workspace_query_device = ctx.workspace_query_device,
-                                    .activation = ctx.activation,
-                                    .enable_pdl = ctx.enable_pdl,
-                                    .gemm1_tactic = ctx.gemm1_tactic,
-                                    .gemm2_tactic = ctx.gemm2_tactic,
+                                    .workspace_query_device = self.workspace_query_device,
+                                    .activation = self.activation,
+                                    .enable_pdl = self.enable_pdl,
+                                    .gemm1_tactic = self.gemm1_tactic,
+                                    .gemm2_tactic = self.gemm2_tactic,
                                 },
                             ) catch |err| stdx.debug.panic(
                                 "FlashInfer CUTLASS MoE backend failed: {}",
                                 .{err},
                             );
                             const local_reshaped = local_output
-                                .reshape(sharded_inputs[0].shape().dims())
+                                .reshape(self.input.shape().dims())
                                 .withTags(.{ .b, .s, .d });
                             return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                         }
                     }).body,
+                    .{
+                        .input = input,
+                        .topk_ids = topk_ids,
+                        .topk_weights = topk_weights,
+                        .weights_gate_up = gate_up.weight,
+                        .weights_down = down.weight,
+                        .activation = runner_options.activation,
+                        .enable_pdl = runner_options.enable_pdl,
+                        .gemm1_tactic = runner_options.gemm1_tactic,
+                        .gemm2_tactic = runner_options.gemm2_tactic,
+                        .workspace_query_device = runner_options.workspace_query_device,
+                    },
+                    input.shape(),
                 );
             }
 
@@ -425,28 +453,28 @@ pub fn forwardMoe(
                 );
             }
 
-            const manual_inputs: []const zml.Tensor = if (quant_scheme == .mxfp4)
-                &.{ input, topk_ids, topk_weights, gate_up.weight, down.weight, gate_up_scales.?, down_scales.? }
-            else
-                &.{ input, topk_ids, topk_weights, gate_up.weight, down.weight };
             break :b zml.ops.manualComputation(
-                manual_inputs,
-                input.shape(),
-                .{
-                    .activation = parameters.triton.activation,
-                    .global_num_experts = global_num_experts,
-                    .bias_gate_up = gate_up.bias,
-                    .bias_down = down.bias,
-                    .quant_scheme = quant_scheme,
-                    .activation_threshold = opts.activation_threshold,
-                },
                 (struct {
-                    fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                        const local_num_experts = sharded_inputs[3].dim(.expert);
+                    input: zml.Tensor,
+                    topk_ids: zml.Tensor,
+                    topk_weights: zml.Tensor,
+                    weights_gate_up: zml.Tensor,
+                    weights_down: zml.Tensor,
+                    activation: triton.Parameters.ActivationMode,
+                    global_num_experts: i64,
+                    bias_gate_up: ?zml.Tensor,
+                    bias_down: ?zml.Tensor,
+                    quant_scheme: ?zml.Quantization.Scheme,
+                    activation_threshold: ?f32,
+                    scales_gate_up: ?zml.Tensor,
+                    scales_down: ?zml.Tensor,
+
+                    fn call(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                        const local_num_experts = self.weights_gate_up.dim(.expert);
                         const partition_id = zml.ops.partitionId().convert(.i32);
                         const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                         // List of global expert ids
-                        const global_expert_ids = zml.Tensor.arange(.{ .end = ctx.global_num_experts }, .i32).withTags(.{.expert});
+                        const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
 
                         // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
                         const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
@@ -457,28 +485,44 @@ pub fn forwardMoe(
                         );
 
                         const local_output = triton.fusedExpertsImpl(
-                            sharded_inputs[0],
-                            sharded_inputs[3],
-                            sharded_inputs[4],
-                            sharded_inputs[2],
-                            sharded_inputs[1],
+                            self.input,
+                            self.weights_gate_up,
+                            self.weights_down,
+                            self.topk_weights,
+                            self.topk_ids,
                             .{},
                             .{
-                                .activation = ctx.activation,
-                                .global_num_experts = ctx.global_num_experts,
+                                .activation = self.activation,
+                                .global_num_experts = self.global_num_experts,
                                 .expert_map = expert_map,
-                                .w1_scale = if (ctx.quant_scheme == .mxfp4) sharded_inputs[5] else null,
-                                .w2_scale = if (ctx.quant_scheme == .mxfp4) sharded_inputs[6] else null,
-                                .w1_bias = ctx.bias_gate_up,
-                                .w2_bias = ctx.bias_down,
-                                .quant_scheme = ctx.quant_scheme,
-                                .activation_threshold = ctx.activation_threshold,
+                                .w1_scale = self.scales_gate_up,
+                                .w2_scale = self.scales_down,
+                                .w1_bias = self.bias_gate_up,
+                                .w2_bias = self.bias_down,
+                                .quant_scheme = self.quant_scheme,
+                                .activation_threshold = self.activation_threshold,
                             },
                         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                        const local_reshaped = local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                        const local_reshaped = local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
                         return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                     }
-                }).body,
+                }).call,
+                .{
+                    .input = input,
+                    .topk_ids = topk_ids,
+                    .topk_weights = topk_weights,
+                    .weights_gate_up = gate_up.weight,
+                    .weights_down = down.weight,
+                    .activation = parameters.triton.activation,
+                    .global_num_experts = global_num_experts,
+                    .bias_gate_up = gate_up.bias,
+                    .bias_down = down.bias,
+                    .quant_scheme = quant_scheme,
+                    .activation_threshold = opts.activation_threshold,
+                    .scales_gate_up = gate_up_scales,
+                    .scales_down = down_scales,
+                },
+                input.shape(),
             );
         },
         .mosaic_tpu => b: {
@@ -492,22 +536,24 @@ pub fn forwardMoe(
             if (expert_partition.eql(.init(.experts))) {
                 const global_num_experts = down.weight.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
-                    .{ input, topk_ids, topk_weights, gate_up.weight, down.weight },
-                    input.shape(),
-                    .{
-                        .activation = parameters.mosaic_tpu.activation,
-                        .global_num_experts = global_num_experts,
-                        .gate_up_scales = gate_up_scales,
-                        .bias_gate_up = gate_up.bias,
-                        .down_scales = down_scales,
-                        .bias_down = down.bias,
-                    },
                     (struct {
-                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                            const local_num_experts = sharded_inputs[3].dim(.expert);
+                        input: zml.Tensor,
+                        topk_ids: zml.Tensor,
+                        topk_weights: zml.Tensor,
+                        weights_gate_up: zml.Tensor,
+                        weights_down: zml.Tensor,
+                        activation: mosaic_tpu.ActivationMode,
+                        global_num_experts: i64,
+                        gate_up_scales: ?zml.Tensor,
+                        bias_gate_up: ?zml.Tensor,
+                        down_scales: ?zml.Tensor,
+                        bias_down: ?zml.Tensor,
+
+                        fn body(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                            const local_num_experts = self.weights_gate_up.dim(.expert);
                             const partition_id = zml.ops.partitionId().convert(.i32);
                             const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                            const global_expert_ids = zml.Tensor.arange(.{ .end = ctx.global_num_experts }, .i32).withTags(.{.expert});
+                            const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
 
                             const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
                                 .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
@@ -516,25 +562,39 @@ pub fn forwardMoe(
                                 zml.Tensor.scalar(-1, .i32),
                             );
                             const local_output = mosaic_tpu.fusedExpertsImpl(
-                                sharded_inputs[0],
-                                sharded_inputs[3],
-                                sharded_inputs[4],
-                                sharded_inputs[2],
-                                sharded_inputs[1],
+                                self.input,
+                                self.weights_gate_up,
+                                self.weights_down,
+                                self.topk_weights,
+                                self.topk_ids,
                                 .{},
                                 .{
-                                    .activation = ctx.activation,
-                                    .global_num_experts = ctx.global_num_experts,
+                                    .activation = self.activation,
+                                    .global_num_experts = self.global_num_experts,
                                     .expert_map = expert_map,
-                                    .w1_scale = ctx.gate_up_scales,
-                                    .w2_scale = ctx.down_scales,
-                                    .w1_bias = ctx.bias_gate_up,
-                                    .w2_bias = ctx.bias_down,
+                                    .w1_scale = self.gate_up_scales,
+                                    .w2_scale = self.down_scales,
+                                    .w1_bias = self.bias_gate_up,
+                                    .w2_bias = self.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                            return local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
                         }
                     }).body,
+                    .{
+                        .input = input,
+                        .topk_ids = topk_ids,
+                        .topk_weights = topk_weights,
+                        .weights_gate_up = gate_up.weight,
+                        .weights_down = down.weight,
+                        .activation = parameters.mosaic_tpu.activation,
+                        .global_num_experts = global_num_experts,
+                        .gate_up_scales = gate_up_scales,
+                        .bias_gate_up = gate_up.bias,
+                        .down_scales = down_scales,
+                        .bias_down = down.bias,
+                    },
+                    input.shape(),
                 );
                 break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }

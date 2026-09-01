@@ -4590,11 +4590,14 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation(input, {}, full_name, (struct {
-                    fn body(_full_name: []const u8, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
-                        ops.customCall("zml$print", sharded_input, {}, .{ .name = _full_name }, .{ .has_side_effect = true });
+                ops.manualComputation((struct {
+                    input: Tensor,
+                    name: []const u8,
+
+                    fn body(body_ctx: @This(), _: std.mem.Allocator, _: void) void {
+                        ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
-                }).body);
+                }).body, .{ .input = input, .name = full_name }, {});
             },
             .oneapi, .neuron => {},
         }
