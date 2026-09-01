@@ -560,10 +560,10 @@ pub const Tensor = struct {
     /// Solves the system of linear equations formed by the input tensors.
     pub fn triangularSolve(self: Tensor, other: Tensor, opts: dialects.stablehlo.TriangularSolveOpts) Tensor {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
-        stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
+        stdx.debug.assert(self.rank() >= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank >= 2, got {} and {}", .{ self.rank(), other.rank() });
 
         const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
-        return _result(self._shape, op.result(0));
+        return _result(other._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise rounding towards the nearest integer, breaking ties away from zero, of the input Tensor.
