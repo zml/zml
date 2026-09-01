@@ -336,12 +336,9 @@ pub fn compile(
         allocator,
         platform,
         loaded_executable,
-        @intCast(num_devices),
-        num_partitions,
         // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
-        result.input_info.items(.sharding),
         result.output_info.items(.sharding),
     );
 }
