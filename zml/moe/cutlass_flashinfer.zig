@@ -70,44 +70,25 @@ pub const Parameters = struct {
     }
 };
 
-pub const Nvfp4Scales = struct {
-    /// Dynamic activation quantization multiplier.
-    fc1_act_global: zml.Tensor,
-    /// Interleaved E4M3 scales with shape returned by fc1BlockScaleShape().
-    fc1_weight_block: zml.Tensor,
-    /// Final GEMM1 output alpha, one value per expert.
-    fc1_global: zml.Tensor,
-    /// Dynamic activation quantization multiplier.
-    fc2_act_global: zml.Tensor,
-    /// Interleaved E4M3 scales with shape returned by fc2BlockScaleShape().
-    fc2_weight_block: zml.Tensor,
-    /// Final GEMM2 output alpha, one value per expert.
-    fc2_global: zml.Tensor,
-};
-
 pub const Metadata = struct {
     variant: Variant = .bf16xbf16,
-    nvfp4_scales: ?Nvfp4Scales = null,
 
     pub const InitOptions = struct {
         variant: Variant = .bf16xbf16,
-        nvfp4_scales: ?Nvfp4Scales = null,
     };
 
     pub fn init(opts: InitOptions) Metadata {
         return .{
             .variant = opts.variant,
-            .nvfp4_scales = opts.nvfp4_scales,
         };
     }
 
     pub fn initBuffer(
-        self: Metadata,
+        _: Metadata,
         _: std.Io,
         _: *const zml.Platform,
     ) !zml.Bufferized(Metadata) {
-        if (self.nvfp4_scales != null) return error.Nvfp4ScaleBuffersRequired;
-        return .{ .nvfp4_scales = null };
+        return {};
     }
 };
 
@@ -385,6 +366,7 @@ fn computeCapability(platform: *const zml.Platform) !u16 {
 
     if (std.mem.eql(u8, compute_capability, "9.0")) return 90;
     if (std.mem.eql(u8, compute_capability, "10.0")) return 100;
+    if (std.mem.eql(u8, compute_capability, "10.3")) return 103;
     if (std.mem.eql(u8, compute_capability, "12.0")) return 120;
     return error.UnsupportedArchitecture;
 }
@@ -424,7 +406,10 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
     if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
-    return compute_capability == 100 or compute_capability == 120;
+    return switch (compute_capability) {
+        100, 103, 120 => true,
+        else => false,
+    };
 }
 
 pub fn tacticCounts(
@@ -485,7 +470,12 @@ fn validateInputs(
     fc2_weights: zml.Tensor,
     topk_weights: zml.Tensor,
     topk_ids: zml.Tensor,
-    scales: Nvfp4Scales,
+    fc1_act_global: zml.Tensor,
+    fc1_weight_block: zml.Tensor,
+    fc1_global: zml.Tensor,
+    fc2_act_global: zml.Tensor,
+    fc2_weight_block: zml.Tensor,
+    fc2_global: zml.Tensor,
     options: Options,
 ) !Attributes {
     if (hidden_states.dtype() != .bf16 or
@@ -493,10 +483,10 @@ fn validateInputs(
         fc2_weights.dtype() != .f4e2m1 or
         topk_weights.dtype() != .f32 or
         topk_ids.dtype() != .i32 or
-        scales.fc1_weight_block.dtype() != .f8e4m3fn or
-        scales.fc2_weight_block.dtype() != .f8e4m3fn or
-        scales.fc1_global.dtype() != .f32 or
-        scales.fc2_global.dtype() != .f32)
+        fc1_weight_block.dtype() != .f8e4m3fn or
+        fc2_weight_block.dtype() != .f8e4m3fn or
+        fc1_global.dtype() != .f32 or
+        fc2_global.dtype() != .f32)
     {
         return error.UnsupportedType;
     }
@@ -536,21 +526,21 @@ fn validateInputs(
         topk_weights.dim(2) != top_k or
         topk_ids.dim(0) != batch or
         topk_ids.dim(1) != sequence or
-        !scales.fc1_weight_block.shape().eql(fc1BlockScaleShape(
+        !fc1_weight_block.shape().eql(fc1BlockScaleShape(
             num_experts,
             hidden_size,
             intermediate_size,
             options.activation,
         )) or
-        !scales.fc2_weight_block.shape().eql(fc2BlockScaleShape(
+        !fc2_weight_block.shape().eql(fc2BlockScaleShape(
             num_experts,
             hidden_size,
             intermediate_size,
         )) or
-        !scales.fc1_global.shape().eql(.init(.{num_experts}, .f32)) or
-        !scales.fc2_global.shape().eql(.init(.{num_experts}, .f32)) or
-        !isGlobalOrPerExpertScale(scales.fc1_act_global, num_experts) or
-        !isGlobalOrPerExpertScale(scales.fc2_act_global, num_experts))
+        !fc1_global.shape().eql(.init(.{num_experts}, .f32)) or
+        !fc2_global.shape().eql(.init(.{num_experts}, .f32)) or
+        !isGlobalOrPerExpertScale(fc1_act_global, num_experts) or
+        !isGlobalOrPerExpertScale(fc2_act_global, num_experts))
     {
         return error.InvalidShape;
     }
@@ -563,8 +553,8 @@ fn validateInputs(
         .top_k = @intCast(top_k),
         .activation = cutlassActivation(options.activation),
         .enable_pdl = options.enable_pdl,
-        .fc1_act_per_expert = scales.fc1_act_global.rank() == 1,
-        .fc2_act_per_expert = scales.fc2_act_global.rank() == 1,
+        .fc1_act_per_expert = fc1_act_global.rank() == 1,
+        .fc2_act_per_expert = fc2_act_global.rank() == 1,
         .gemm1_tactic = options.gemm1_tactic,
         .gemm2_tactic = options.gemm2_tactic,
     };
@@ -579,7 +569,12 @@ pub fn fusedExpertsNvfp4(
     fc2_weights: zml.Tensor,
     topk_weights: zml.Tensor,
     topk_ids: zml.Tensor,
-    scales: Nvfp4Scales,
+    fc1_act_global: zml.Tensor,
+    fc1_weight_block: zml.Tensor,
+    fc1_global: zml.Tensor,
+    fc2_act_global: zml.Tensor,
+    fc2_weight_block: zml.Tensor,
+    fc2_global: zml.Tensor,
     options: Options,
 ) !zml.Tensor {
     const runners = try currentRunners();
@@ -589,7 +584,12 @@ pub fn fusedExpertsNvfp4(
         fc2_weights,
         topk_weights,
         topk_ids,
-        scales,
+        fc1_act_global,
+        fc1_weight_block,
+        fc1_global,
+        fc2_act_global,
+        fc2_weight_block,
+        fc2_global,
         options,
     );
     attributes.runners = @intFromPtr(runners);
@@ -613,12 +613,12 @@ pub fn fusedExpertsNvfp4(
             .fc2_weights = fc2_weights,
             .topk_weights = topk_weights,
             .topk_ids = topk_ids,
-            .fc1_act_global = scales.fc1_act_global,
-            .fc1_weight_block = scales.fc1_weight_block,
-            .fc1_global = scales.fc1_global,
-            .fc2_act_global = scales.fc2_act_global,
-            .fc2_weight_block = scales.fc2_weight_block,
-            .fc2_global = scales.fc2_global,
+            .fc1_act_global = fc1_act_global,
+            .fc1_weight_block = fc1_weight_block,
+            .fc1_global = fc1_global,
+            .fc2_act_global = fc2_act_global,
+            .fc2_weight_block = fc2_weight_block,
+            .fc2_global = fc2_global,
         },
         .{
             .output = hidden_states.shape(),

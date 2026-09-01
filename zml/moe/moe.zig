@@ -217,10 +217,6 @@ pub fn forwardMoe(
             if (comptime !platforms.isEnabled(.cuda)) {
                 return error.UnsupportedPlatform;
             }
-            const flashinfer_metadata = switch (metadata) {
-                .flashinfer_cutlass => |v| v,
-                else => return error.InvalidMetadata,
-            };
             if (gate_up.bias != null or down.bias != null) {
                 return error.UnsupportedBias;
             }
@@ -228,11 +224,12 @@ pub fn forwardMoe(
             const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
-            if (flashinfer_metadata.variant == .nvfp4xnvfp4) {
+            if (quant_scheme != null and quant_scheme == .nvfp4) {
                 const gate_up_weight_unpacked = unpackedWeight(gate_up);
                 const down_weight_unpacked = unpackedWeight(down);
-                const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
-                    return error.MissingNvfp4Scales;
+
+                // TODO(Corentin): Do error checking on nvfp4
+                // Also, maybe pass `zml.nn.Linear` directly
                 if (expert_partition.eql(.init(.experts))) {
                     break :b zml.ops.manualComputation(
                         .{
@@ -241,12 +238,12 @@ pub fn forwardMoe(
                             topk_weights,
                             gate_up_weight_unpacked,
                             down_weight_unpacked,
-                            nvfp4.fc1_act_global,
-                            nvfp4.fc1_weight_block,
-                            nvfp4.fc1_global,
-                            nvfp4.fc2_act_global,
-                            nvfp4.fc2_weight_block,
-                            nvfp4.fc2_global,
+                            gate_up.quantization.?.input_scale.?.asMultiplier(),
+                            gate_up.quantization.?.scales,
+                            gate_up.quantization.?.global_scale.?.asMultiplier(),
+                            down.quantization.?.input_scale.?.asMultiplier(),
+                            down.quantization.?.scales,
+                            down.quantization.?.global_scale.?.asMultiplier(),
                         },
                         input.shape(),
                         .{
@@ -286,14 +283,12 @@ pub fn forwardMoe(
                                     sharded_inputs[4],
                                     local_topk_weights,
                                     local_topk_ids,
-                                    .{
-                                        .fc1_act_global = sharded_inputs[5],
-                                        .fc1_weight_block = sharded_inputs[6],
-                                        .fc1_global = sharded_inputs[7],
-                                        .fc2_act_global = sharded_inputs[8],
-                                        .fc2_weight_block = sharded_inputs[9],
-                                        .fc2_global = sharded_inputs[10],
-                                    },
+                                    sharded_inputs[5],
+                                    sharded_inputs[6],
+                                    sharded_inputs[7],
+                                    sharded_inputs[8],
+                                    sharded_inputs[9],
+                                    sharded_inputs[10],
                                     .{
                                         .workspace_query_device = ctx.workspace_query_device,
                                         .activation = ctx.activation,
@@ -320,12 +315,14 @@ pub fn forwardMoe(
                     down_weight_unpacked,
                     topk_weights,
                     topk_ids,
-                    nvfp4,
+                    gate_up.quantization.?.input_scale.?.asMultiplier(),
+                    gate_up.quantization.?.scales,
+                    gate_up.quantization.?.global_scale.?.asMultiplier(),
+                    down.quantization.?.input_scale.?.asMultiplier(),
+                    down.quantization.?.scales,
+                    down.quantization.?.global_scale.?.asMultiplier(),
                     runner_options,
                 );
-            }
-            if (flashinfer_metadata.nvfp4_scales != null) {
-                return error.UnexpectedNvfp4Scales;
             }
 
             if (expert_partition.eql(.init(.experts))) {
