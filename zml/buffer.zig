@@ -75,10 +75,19 @@ pub const Buffer = struct {
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._platform.pjrt_api);
         }
+        self._shards = .empty;
     }
 
     pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
         meta.visitFlatStruct(struct {
+            fn deinit(_: void, x: *Buffer) void {
+                x.deinit();
+            }
+        }.deinit, {}, buffers);
+    }
+
+    pub fn freeDeviceBufferMemoryButKeepHostMetadataMemory(T: type, buffers: *mem.Bufferized(T)) void {
+        meta.visit(struct {
             fn deinit(_: void, x: *Buffer) void {
                 x.deinit();
             }
