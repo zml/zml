@@ -581,7 +581,7 @@ pub const Platform = struct {
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {{ ", .{@tagName(self.target)});
-        for (self.devices(), 0..) |device, i| {
+        for (self.devices, 0..) |device, i| {
             try writer.print("{s}(\"{s}\")", .{ device.toString(), device.kind() });
             if (i < self.devices.len - 1) try writer.writeAll(", ");
         }
