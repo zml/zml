@@ -205,18 +205,11 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (res._sharding.devicesInCanonicalOrder()) |device| {
-            const local_device = platform.addressableDeviceById(device.id) orelse
-                continue;
-            const memory = local_device.memory(opts.memory);
-            stdx.debug.assert(
-                memory != null,
-                "Device {d} doesn't have {} memory",
-                .{ device.id, opts.memory },
-            );
+            const memory = addressableMemory(platform, device.id, opts.memory) orelse continue;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
-                .dst = .{ .memory = memory.?.pjrt_memory },
+                .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -301,17 +294,10 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (res._sharding.devicesInCanonicalOrder()) |device| {
-            const local_device = platform.addressableDeviceById(device.id) orelse
-                continue;
-            const memory = local_device.memory(opts.memory);
-            stdx.debug.assert(
-                memory != null,
-                "Device {d} doesn't have {} memory",
-                .{ device.id, opts.memory },
-            );
+            const memory = addressableMemory(platform, device.id, opts.memory) orelse continue;
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
-                .dst = .{ .memory = memory.?.pjrt_memory },
+                .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -518,6 +504,14 @@ pub const Buffer = struct {
         return result;
     }
 };
+
+fn addressableMemory(platform: *const Platform, global_device_id: u32, kind: Memory.Kind) ?*const Memory {
+    const device = platform.addressableDeviceById(global_device_id) orelse return null;
+    return device.memory(kind) orelse stdx.debug.panic(
+        "Device {d} doesn't have {} memory",
+        .{ global_device_id, kind },
+    );
+}
 
 fn slicesEqual(
     left: Sharding.Placement.Slices,

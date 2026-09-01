@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
 
 const log = std.log.scoped(.zml_distributed);
 
@@ -503,8 +504,7 @@ pub const Server = struct {
     error_mutex: std.Io.Mutex = .init,
     run_error: ?Error = null,
     accept_group: std.Io.Group = .init,
-    connection_group: std.Io.Group = .init,
-    connection_slots: std.Io.Semaphore,
+    connection_group: stdx.Io.LimitedGroup,
     started: std.atomic.Value(bool) = .init(false),
     stopped: std.atomic.Value(bool) = .init(false),
 
@@ -523,7 +523,7 @@ pub const Server = struct {
             .listener = listener,
             .options = options,
             .values = .init(allocator),
-            .connection_slots = .{ .permits = options.max_connections },
+            .connection_group = .init(options.max_connections),
         };
     }
 
@@ -581,13 +581,11 @@ pub const Server = struct {
                     },
                 }
             };
-            self.connection_group.concurrent(
+            self.connection_group.async(
                 self.io,
                 handleConnection,
                 .{ self, stream },
-            ) catch {
-                self.handleConnection(stream) catch return;
-            };
+            );
         }
     }
 
@@ -596,8 +594,6 @@ pub const Server = struct {
         stream: std.Io.net.Stream,
     ) std.Io.Cancelable!void {
         defer stream.close(self.io);
-        try self.connection_slots.wait(self.io);
-        defer self.connection_slots.post(self.io);
         self.handle(stream) catch |err| {
             log.debug("connection error={s}", .{@errorName(err)});
         };
@@ -648,29 +644,24 @@ pub const Server = struct {
             return;
         }
 
-        const namespace = self.allocator.alloc(
-            u8,
+        const key_end = std.math.add(
+            usize,
             namespace_size,
-        ) catch {
-            try writeResponse(writer, .resource_exhausted, "");
-            return;
-        };
-        defer self.allocator.free(namespace);
-        reader.readSliceAll(namespace) catch return;
+            key_size,
+        ) catch return writeResponse(writer, .resource_exhausted, "");
+        const payload_len = std.math.add(
+            usize,
+            key_end,
+            value_size,
+        ) catch return writeResponse(writer, .resource_exhausted, "");
+        const payload = self.allocator.alloc(u8, payload_len) catch
+            return writeResponse(writer, .resource_exhausted, "");
+        defer self.allocator.free(payload);
+        reader.readSliceAll(payload) catch return;
 
-        const key = self.allocator.alloc(u8, key_size) catch {
-            try writeResponse(writer, .resource_exhausted, "");
-            return;
-        };
-        defer self.allocator.free(key);
-        reader.readSliceAll(key) catch return;
-
-        const value = self.allocator.alloc(u8, value_size) catch {
-            try writeResponse(writer, .resource_exhausted, "");
-            return;
-        };
-        defer self.allocator.free(value);
-        reader.readSliceAll(value) catch return;
+        const namespace = payload[0..namespace_size];
+        const key = payload[namespace_size..key_end];
+        const value = payload[key_end..];
 
         switch (operation) {
             .get => {
@@ -814,6 +805,16 @@ const test_options: Options = .{
     .max_connections = 8,
 };
 
+const RawRequestCase = struct {
+    request_magic: []const u8 = magic,
+    version: u16 = protocol_version,
+    operation: u8 = @intFromEnum(Operation.get),
+    namespace_size: usize = 1,
+    key_size: usize = 1,
+    value_size: usize = 0,
+    expected: Status,
+};
+
 test "key-value store operations, namespaces, limits, and stop" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -884,39 +885,14 @@ test "key-value store operations, namespaces, limits, and stop" {
         ),
     );
 
-    try expectRawStatus(
-        io,
-        server.address(),
-        "BAD!",
-        protocol_version,
-        @intFromEnum(Operation.get),
-        1,
-        1,
-        0,
-        .invalid_request,
-    );
-    try expectRawStatus(
-        io,
-        server.address(),
-        magic,
-        protocol_version + 1,
-        @intFromEnum(Operation.get),
-        1,
-        1,
-        0,
-        .unsupported_version,
-    );
-    try expectRawStatus(
-        io,
-        server.address(),
-        magic,
-        protocol_version,
-        @intFromEnum(Operation.get),
-        1,
-        test_options.max_key_bytes + 1,
-        0,
-        .resource_exhausted,
-    );
+    const invalid = [_]RawRequestCase{
+        .{ .request_magic = "BAD!", .expected = .invalid_request },
+        .{ .version = protocol_version + 1, .expected = .unsupported_version },
+        .{ .key_size = test_options.max_key_bytes + 1, .expected = .resource_exhausted },
+    };
+    for (invalid) |case| {
+        try expectRawStatus(io, server.address(), case);
+    }
 
     const partial_stream = try server.address().connect(io, .{
         .mode = .stream,
@@ -943,7 +919,7 @@ test "key-value client retries until the server starts" {
     reservation.deinit(io);
 
     const client: Client = .init(io, address, "retry", test_options);
-    var future = try io.concurrent(putForTest, .{&client});
+    var future = try io.concurrent(Client.put, .{ &client, "ready", "yes" });
     try io.sleep(.fromMilliseconds(20), .awake);
 
     var server = try Server.init(
@@ -992,10 +968,6 @@ test "key-value server bounds concurrent handlers" {
     try std.testing.expect(!failed.load(.acquire));
 }
 
-fn putForTest(client: *const Client) Error!void {
-    return client.put("ready", "yes");
-}
-
 fn concurrentClient(
     client: *const Client,
     allocator: std.mem.Allocator,
@@ -1025,29 +997,19 @@ fn concurrentClient(
     }
 }
 
-fn expectRawStatus(
-    io: std.Io,
-    address: std.Io.net.IpAddress,
-    request_magic: []const u8,
-    version: u16,
-    operation: u8,
-    namespace_size: usize,
-    key_size: usize,
-    value_size: usize,
-    expected: Status,
-) !void {
+fn expectRawStatus(io: std.Io, address: std.Io.net.IpAddress, case: RawRequestCase) !void {
     const stream = try address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
     var write_buffer: [128]u8 = undefined;
     var stream_writer = stream.writer(io, &write_buffer);
     const writer = &stream_writer.interface;
-    try writer.writeAll(request_magic);
-    try writer.writeInt(u16, version, .big);
-    try writer.writeInt(u8, operation, .big);
+    try writer.writeAll(case.request_magic);
+    try writer.writeInt(u16, case.version, .big);
+    try writer.writeInt(u8, case.operation, .big);
     try writer.writeInt(u8, 0, .big);
-    try writer.writeInt(u16, @intCast(namespace_size), .big);
-    try writer.writeInt(u32, @intCast(key_size), .big);
-    try writer.writeInt(u32, @intCast(value_size), .big);
+    try writer.writeInt(u16, @intCast(case.namespace_size), .big);
+    try writer.writeInt(u32, @intCast(case.key_size), .big);
+    try writer.writeInt(u32, @intCast(case.value_size), .big);
     try writer.flush();
 
     var read_buffer: [128]u8 = undefined;
@@ -1061,7 +1023,7 @@ fn expectRawStatus(
         try reader.takeInt(u16, .big),
     );
     try std.testing.expectEqual(
-        @intFromEnum(expected),
+        @intFromEnum(case.expected),
         try reader.takeInt(u8, .big),
     );
     try std.testing.expectEqual(0, try reader.takeInt(u8, .big));

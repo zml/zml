@@ -1157,27 +1157,12 @@ pub const PhysicalMesh = struct {
         };
         std.mem.sort(ProcessDevice, sorted, Sort{}, Sort.lessThan);
 
-        var counts_buffer: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
-        const device_counts = counts_buffer[0..process_count];
+        if (@mod(sorted.len, process_count) != 0) return error.InvalidDeviceTopology;
+        const devices_per_process = sorted.len / process_count;
         for (sorted, 0..) |device, index| {
-            if (device.process_index >= process_count) {
-                return error.InvalidDeviceTopology;
-            }
+            if (device.process_index != index / devices_per_process) return error.InvalidDeviceTopology;
             for (sorted[0..index]) |previous| {
-                if (previous.id == device.id) {
-                    return error.InvalidDeviceTopology;
-                }
-            }
-            device_counts[device.process_index] += 1;
-        }
-
-        const devices_per_process = device_counts[0];
-        if (devices_per_process == 0) {
-            return error.InvalidDeviceTopology;
-        }
-        for (device_counts) |count| {
-            if (count != devices_per_process) {
-                return error.InvalidDeviceTopology;
+                if (previous.id == device.id) return error.InvalidDeviceTopology;
             }
         }
 
@@ -2609,12 +2594,7 @@ test "sharding: collective groups follow logical axes" {
         .withPartitioning(.{ .batch = .data, .hidden = .model });
 
     for ([_]Target{ .cuda, .rocm }) |target| {
-        var physical = try PhysicalMesh.distributedGpu(
-            allocator,
-            target,
-            &devices,
-            2,
-        );
+        var physical = try PhysicalMesh.distributedGpu(allocator, target, &devices, 2);
         defer physical.deinit(allocator);
 
         const logical: LogicalMesh = .mesh(.{
@@ -2634,59 +2614,35 @@ test "sharding: collective groups follow logical axes" {
         const sharding: Sharding = .{ .data = &data };
         const partitioning: Partitioning = try .init(.shardy, &.{sharding});
 
-        const model = try partitioning.collectiveGroups(
-            shape,
-            &.{Shape.toTag(.model)},
-        );
-        try std.testing.expectEqual(2, model.group_count);
-        try std.testing.expectEqual(2, model.group_size);
-        try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, model.values());
+        const cases = [_]struct {
+            axes: []const Shape.Tag,
+            group_count: u16,
+            group_size: u16,
+            ids: []const i64,
+        }{
+            .{ .axes = &.{Shape.toTag(.model)}, .group_count = 2, .group_size = 2, .ids = &.{ 0, 1, 2, 3 } },
+            .{ .axes = &.{Shape.toTag(.data)}, .group_count = 2, .group_size = 2, .ids = &.{ 0, 2, 1, 3 } },
+            .{ .axes = &.{ Shape.toTag(.data), Shape.toTag(.model) }, .group_count = 1, .group_size = 4, .ids = &.{ 0, 1, 2, 3 } },
+        };
+        for (cases) |case| {
+            const groups = try partitioning.collectiveGroups(shape, case.axes);
+            try std.testing.expectEqual(case.group_count, groups.group_count);
+            try std.testing.expectEqual(case.group_size, groups.group_size);
+            try std.testing.expectEqualSlices(i64, case.ids, groups.values());
+        }
 
-        const data_groups = try partitioning.collectiveGroups(
-            shape,
-            &.{Shape.toTag(.data)},
-        );
-        try std.testing.expectEqual(2, data_groups.group_count);
-        try std.testing.expectEqual(2, data_groups.group_size);
-        try std.testing.expectEqualSlices(
-            i64,
-            &.{ 0, 2, 1, 3 },
-            data_groups.values(),
-        );
-
-        const full = try partitioning.collectiveGroups(
-            shape,
-            &.{ Shape.toTag(.data), Shape.toTag(.model) },
-        );
-        try std.testing.expectEqual(1, full.group_count);
-        try std.testing.expectEqual(4, full.group_size);
-        try std.testing.expectEqualSlices(i64, &.{ 0, 1, 2, 3 }, full.values());
-
-        try std.testing.expectError(
-            error.EmptyCollectiveAxes,
-            partitioning.collectiveGroups(shape, &.{}),
-        );
-        try std.testing.expectError(
-            error.DuplicateCollectiveAxis,
-            partitioning.collectiveGroups(
-                shape,
-                &.{ Shape.toTag(.model), Shape.toTag(.model) },
-            ),
-        );
-        try std.testing.expectError(
-            error.UnknownLogicalAxis,
-            partitioning.collectiveGroups(
-                shape,
-                &.{Shape.toTag(.unknown_axis)},
-            ),
-        );
-        try std.testing.expectError(
-            error.UnboundLogicalAxis,
-            partitioning.collectiveGroups(
-                shape,
-                &.{Shape.toTag(.unbound)},
-            ),
-        );
+        const invalid = [_]struct {
+            axes: []const Shape.Tag,
+            expected: anyerror,
+        }{
+            .{ .axes = &.{}, .expected = error.EmptyCollectiveAxes },
+            .{ .axes = &.{ Shape.toTag(.model), Shape.toTag(.model) }, .expected = error.DuplicateCollectiveAxis },
+            .{ .axes = &.{Shape.toTag(.unknown_axis)}, .expected = error.UnknownLogicalAxis },
+            .{ .axes = &.{Shape.toTag(.unbound)}, .expected = error.UnboundLogicalAxis },
+        };
+        for (invalid) |case| {
+            try std.testing.expectError(case.expected, partitioning.collectiveGroups(shape, case.axes));
+        }
     }
 }
 
@@ -2696,12 +2652,7 @@ test "sharding: collective groups support singleton and folded axes" {
         .{ .id = 9, .process_index = 0 },
         .{ .id = 3, .process_index = 1 },
     };
-    var distributed = try PhysicalMesh.distributedGpu(
-        allocator,
-        .cuda,
-        &devices,
-        2,
-    );
+    var distributed = try PhysicalMesh.distributedGpu(allocator, .cuda, &devices, 2);
     defer distributed.deinit(allocator);
     const singleton_data: Data = try .init(
         "singleton-groups",
@@ -2710,10 +2661,7 @@ test "sharding: collective groups support singleton and folded axes" {
         .parseBindings(.{ .model = .link }),
     );
     const singleton_sharding: Sharding = .{ .data = &singleton_data };
-    const singleton_partitioning: Partitioning = try .init(
-        .shardy,
-        &.{singleton_sharding},
-    );
+    const singleton_partitioning: Partitioning = try .init(.shardy, &.{singleton_sharding});
     const singleton = try singleton_partitioning.collectiveGroups(
         Shape.init(.{ .hidden = 2 }, .f32)
             .withPartitioning(.{ .hidden = .model }),
@@ -2736,10 +2684,7 @@ test "sharding: collective groups support singleton and folded axes" {
         strategy,
     );
     const folded_sharding: Sharding = .{ .data = &folded_data };
-    const folded_partitioning: Partitioning = try .init(
-        .shardy,
-        &.{folded_sharding},
-    );
+    const folded_partitioning: Partitioning = try .init(.shardy, &.{folded_sharding});
     const folded = try folded_partitioning.collectiveGroups(
         Shape.init(.{ .hidden = 16 }, .f32)
             .withPartitioning(.{ .hidden = .model }),
@@ -2747,11 +2692,7 @@ test "sharding: collective groups support singleton and folded axes" {
     );
     try std.testing.expectEqual(2, folded.group_count);
     try std.testing.expectEqual(4, folded.group_size);
-    try std.testing.expectEqualSlices(
-        i64,
-        &.{ 0, 2, 4, 6, 1, 3, 5, 7 },
-        folded.values(),
-    );
+    try std.testing.expectEqualSlices(i64, &.{ 0, 2, 4, 6, 1, 3, 5, 7 }, folded.values());
 }
 
 test "sharding: distributed GPU mesh" {
@@ -2763,12 +2704,7 @@ test "sharding: distributed GPU mesh" {
         .{ .id = 0, .process_index = 0 },
     };
     for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
-        var physical = try PhysicalMesh.distributedGpu(
-            allocator,
-            target,
-            &devices,
-            2,
-        );
+        var physical = try PhysicalMesh.distributedGpu(allocator, target, &devices, 2);
         defer physical.deinit(allocator);
 
         try std.testing.expectEqual(target, physical.target);
@@ -2777,37 +2713,16 @@ test "sharding: distributed GPU mesh" {
         const ordered = physical.devices_in_canonical_order;
         try std.testing.expectEqual(4, ordered.len);
         for (ordered, 0..) |device, id| {
-            try std.testing.expectEqual(
-                @as(u32, @intCast(id)),
-                device.id,
-            );
+            try std.testing.expectEqual(@as(u32, @intCast(id)), device.id);
         }
 
         const logical: LogicalMesh = .mesh(.{ .data = .low_bandwidth });
-        const explicit: Strategy = .parseBindings(.{
-            .data = .{ .network, .link },
-        });
-        const explicit_data: Data = try .init(
-            "distributed-explicit",
-            &physical,
-            logical,
-            explicit,
-        );
-        try std.testing.expectEqual(
-            4,
-            explicit_data.numPartitionsForLogicalAxis(.data),
-        );
+        const explicit: Strategy = .parseBindings(.{ .data = .{ .network, .link } });
+        const explicit_data: Data = try .init("distributed-explicit", &physical, logical, explicit);
+        try std.testing.expectEqual(4, explicit_data.numPartitionsForLogicalAxis(.data));
 
-        const suggested_data: Data = try .init(
-            "distributed-suggested",
-            &physical,
-            logical,
-            .suggest(logical, &physical),
-        );
-        try std.testing.expectEqual(
-            2,
-            suggested_data.numPartitionsForLogicalAxis(.data),
-        );
+        const suggested_data: Data = try .init("distributed-suggested", &physical, logical, .suggest(logical, &physical));
+        try std.testing.expectEqual(2, suggested_data.numPartitionsForLogicalAxis(.data));
     }
 }
 
@@ -2817,43 +2732,30 @@ test "sharding: distributed GPU mesh rejects invalid input" {
         .{ .id = 0, .process_index = 0 },
         .{ .id = 1, .process_index = 1 },
     };
-    try std.testing.expectError(
-        error.UnsupportedPlatform,
-        PhysicalMesh.distributedGpu(allocator, .cpu, &valid, 2),
-    );
+    try std.testing.expectError(error.UnsupportedPlatform, PhysicalMesh.distributedGpu(allocator, .cpu, &valid, 2));
+    const invalid = [_][]const ProcessDevice{
+        &.{},
+        &.{
+            .{ .id = 0, .process_index = 0 },
+            .{ .id = 0, .process_index = 1 },
+        },
+        &.{
+            .{ .id = 0, .process_index = 0 },
+            .{ .id = 1, .process_index = 0 },
+        },
+        &.{
+            .{ .id = 0, .process_index = 0 },
+            .{ .id = 1, .process_index = 1 },
+            .{ .id = 2, .process_index = 1 },
+        },
+        &.{
+            .{ .id = 0, .process_index = 0 },
+            .{ .id = 1, .process_index = 2 },
+        },
+    };
     for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
-        try std.testing.expectError(
-            error.InvalidDeviceTopology,
-            PhysicalMesh.distributedGpu(allocator, target, &.{}, 2),
-        );
-        try std.testing.expectError(
-            error.InvalidDeviceTopology,
-            PhysicalMesh.distributedGpu(allocator, target, &.{
-                .{ .id = 0, .process_index = 0 },
-                .{ .id = 0, .process_index = 1 },
-            }, 2),
-        );
-        try std.testing.expectError(
-            error.InvalidDeviceTopology,
-            PhysicalMesh.distributedGpu(allocator, target, &.{
-                .{ .id = 0, .process_index = 0 },
-                .{ .id = 1, .process_index = 0 },
-            }, 2),
-        );
-        try std.testing.expectError(
-            error.InvalidDeviceTopology,
-            PhysicalMesh.distributedGpu(allocator, target, &.{
-                .{ .id = 0, .process_index = 0 },
-                .{ .id = 1, .process_index = 1 },
-                .{ .id = 2, .process_index = 1 },
-            }, 2),
-        );
-        try std.testing.expectError(
-            error.InvalidDeviceTopology,
-            PhysicalMesh.distributedGpu(allocator, target, &.{
-                .{ .id = 0, .process_index = 0 },
-                .{ .id = 1, .process_index = 2 },
-            }, 2),
-        );
+        for (invalid) |devices| {
+            try std.testing.expectError(error.InvalidDeviceTopology, PhysicalMesh.distributedGpu(allocator, target, devices, 2));
+        }
     }
 }

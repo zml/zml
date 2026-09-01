@@ -1126,25 +1126,13 @@ pub const CreateOptions = struct {
         if (self.distributed) |config| {
             switch (target) {
                 .cuda, .rocm, .oneapi, .metal => {
-                    std.debug.assert(
-                        values.capacity - values.items.len >= 3,
-                    );
-                    values.appendAssumeCapacity(.init(
-                        .int64,
-                        "node_id",
-                        @intCast(config.process_index),
-                    ));
-                    values.appendAssumeCapacity(.init(
-                        .int64,
-                        "num_nodes",
-                        @intCast(config.process_count),
-                    ));
+                    std.debug.assert(values.capacity - values.items.len >= 3);
+                    values.appendSliceAssumeCapacity(&.{
+                        .init(.int64, "node_id", @intCast(config.process_index)),
+                        .init(.int64, "num_nodes", @intCast(config.process_count)),
+                    });
                     if (config.local_device_ids.len != 0) {
-                        values.appendAssumeCapacity(.init(
-                            .int64list,
-                            "visible_devices",
-                            config.local_device_ids,
-                        ));
+                        values.appendAssumeCapacity(.init(.int64list, "visible_devices", config.local_device_ids));
                     }
                 },
                 else => {},
@@ -1360,34 +1348,20 @@ test "platform rejects unsupported distributed options" {
     }
 
     var storage: [16]pjrt.NamedValue = undefined;
+    const expected = [_]struct { name: []const u8, value: i64 }{
+        .{ .name = "node_id", .value = 0 },
+        .{ .name = "num_nodes", .value = 2 },
+    };
     for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
         const values = (CreateOptions{
             .distributed = config,
         }).toNamedValues(target, &storage);
-        try std.testing.expectEqualStrings(
-            "node_id",
-            values[values.len - 3].name(),
-        );
-        try std.testing.expectEqual(
-            0,
-            values[values.len - 3].value().int64,
-        );
-        try std.testing.expectEqualStrings(
-            "num_nodes",
-            values[values.len - 2].name(),
-        );
-        try std.testing.expectEqual(
-            2,
-            values[values.len - 2].value().int64,
-        );
-        try std.testing.expectEqualStrings(
-            "visible_devices",
-            values[values.len - 1].name(),
-        );
-        try std.testing.expectEqualSlices(
-            i64,
-            &.{ 0, 1 },
-            values[values.len - 1].value().int64list,
-        );
+        const distributed_values = values[values.len - 3 ..];
+        for (distributed_values[0..2], expected) |actual, want| {
+            try std.testing.expectEqualStrings(want.name, actual.name());
+            try std.testing.expectEqual(want.value, actual.value().int64);
+        }
+        try std.testing.expectEqualStrings("visible_devices", distributed_values[2].name());
+        try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, distributed_values[2].value().int64list);
     }
 }

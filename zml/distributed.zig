@@ -185,47 +185,24 @@ pub const Runtime = struct {
         const deadline = std.Io.Clock.awake.now(state.client.io).addDuration(
             state.config.shutdown_timeout,
         );
-        rendezvousUntil(
-            state,
-            "shutdown-ready",
-            null,
-            deadline,
-        ) catch |err| {
+        rendezvousUntil(state, "shutdown-ready", null, deadline) catch |err| {
             pjrt_client.deinit(api);
             return err;
         };
 
         if (state.config.process_index != 0) {
             pjrt_client.deinit(api);
-            const key = try processKey(
-                state.allocator,
-                "shutdown/client-destroyed",
-                state.config.process_index,
-            );
+            const key = try processKey(state.allocator, "shutdown/client-destroyed", state.config.process_index);
             defer state.allocator.free(key);
             return state.client.putUntil(key, "", deadline);
         }
+        defer pjrt_client.deinit(api);
         for (1..state.config.process_count) |process_index| {
-            const key = processKey(
-                state.allocator,
-                "shutdown/client-destroyed",
-                process_index,
-            ) catch |err| {
-                pjrt_client.deinit(api);
-                return err;
-            };
+            const key = try processKey(state.allocator, "shutdown/client-destroyed", process_index);
             defer state.allocator.free(key);
-            const value = state.client.getUntil(
-                state.allocator,
-                key,
-                deadline,
-            ) catch |err| {
-                pjrt_client.deinit(api);
-                return err;
-            };
+            const value = try state.client.getUntil(state.allocator, key, deadline);
             state.allocator.free(value);
         }
-        pjrt_client.deinit(api);
     }
 };
 
@@ -368,25 +345,16 @@ test "distributed runtime rendezvous" {
     try std.testing.expectEqual(2, rank1.processCount());
 
     for (0..2) |_| {
-        var rank0_barrier = try io.concurrent(
-            barrierForTest,
-            .{&rank0},
-        );
+        var rank0_barrier = try io.concurrent(Runtime.barrier, .{ &rank0, "same-name" });
         try rank1.barrier("same-name");
         try rank0_barrier.await(io);
     }
 
-    var rank0_consensus = try io.concurrent(
-        consensusForTest,
-        .{ &rank0, "same-name", "same-value" },
-    );
+    var rank0_consensus = try io.concurrent(Runtime.consensus, .{ &rank0, "same-name", "same-value" });
     try rank1.consensus("same-name", "same-value");
     try rank0_consensus.await(io);
 
-    rank0_consensus = try io.concurrent(
-        consensusForTest,
-        .{ &rank0, "same-name", "rank-zero" },
-    );
+    rank0_consensus = try io.concurrent(Runtime.consensus, .{ &rank0, "same-name", "rank-zero" });
     try std.testing.expectError(
         error.InconsistentValue,
         rank1.consensus("same-name", "rank-one"),
@@ -396,25 +364,10 @@ test "distributed runtime rendezvous" {
         rank0_consensus.await(io),
     );
 
-    rank0_consensus = try io.concurrent(
-        consensusForTest,
-        .{ &rank0, "same-name", "same-again" },
-    );
+    rank0_consensus = try io.concurrent(Runtime.consensus, .{ &rank0, "same-name", "same-again" });
     try rank1.consensus("same-name", "same-again");
     try rank0_consensus.await(io);
 
     rank1.deinit();
     rank0.deinit();
-}
-
-fn barrierForTest(runtime: *Runtime) Error!void {
-    return runtime.barrier("same-name");
-}
-
-fn consensusForTest(
-    runtime: *Runtime,
-    name: []const u8,
-    value: []const u8,
-) Error!void {
-    return runtime.consensus(name, value);
 }

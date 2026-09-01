@@ -241,12 +241,16 @@ pub const Shape = struct {
 
     pub fn parseTags(v: anytype) TagsArray {
         const T = @TypeOf(v);
-        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
+        stdx.debug.assertComptime(stdx.meta.isTupleOfAny(T, isTagConvertible), "Wrong type, got {}. Expected a tuple of tags", .{T});
         var tags_: TagsArray = .empty;
-        inline for (v) |field| {
-            tags_.appendAssumeCapacity(toTag(field));
-        }
+        inline for (std.meta.fields(T)) |field| tags_.appendAssumeCapacity(toTag(@field(v, field.name)));
         return tags_;
+    }
+
+    test parseTags {
+        const tags_ = parseTags(.{ .a, toTag(.b), std.meta.fields(struct { c: u8 })[0] });
+        for (tags_.constSlice(), [_][]const u8{ "a", "b", "c" }) |actual, expected|
+            try testing.expectEqualStrings(expected, std.mem.span(actual));
     }
 
     /// Create a shape from a struct literal, eg:

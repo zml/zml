@@ -1,17 +1,9 @@
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//examples/distributed:distributed_example.bzl", "distributed_example")
 
-zig_binary(
+distributed_example(
     name = "distributed_llm",
-    main = "main.zig",
-    visibility = ["//visibility:public"],
     deps = [
         "//examples/llm:models",
         "//zml",
     ],
-)
-
-build_test(
-    name = "test",
-    targets = [":distributed_llm"],
 )
