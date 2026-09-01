@@ -344,6 +344,9 @@ pub fn main(init: std.process.Init) !void {
             } else {
                 try stdout_writer.interface.writeAll("recommended_global_parallelism=none recommended_gib_s=none recommended_latency_ms=none recommended_min_device_retention=none recommended_fairness=none\n");
             }
+            try stdout_writer.interface.print("dma_bench_total elapsed_ms={d:.3}\n", .{
+                @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
+            });
             try stdout_writer.flush();
         },
         .load => {

@@ -94,7 +94,8 @@ the more flattering 8 MiB calibration time.
 The benchmark output format is now version 5. Per-device output reports
 `measured_gib_s` from the concurrent uncapped cohort, while the global record
 reports `uncapped_gib_s`. The old isolated/scaling fields and repeat-count
-environment controls were removed.
+environment controls were removed. After all detailed records, a final
+`dma_bench_total elapsed_ms=...` line repeats the total calibration time.
 
 NUMA mapping is optional as a follow-up to v5. An empty
 `DmaBenchmarkOpts.device_numa_nodes` now means that every device shares one
