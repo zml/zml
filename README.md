@@ -170,19 +170,9 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
         shardings: []const zml.Sharding,
     ) !zml.Bufferized(Mnist) {
-        const direct = platform.target == .cuda or platform.target == .rocm or
-            platform.target == .oneapi;
-        var dma_result: ?zml.io.DmaBenchmarkResult = null;
-        defer if (dma_result) |*result| result.deinit();
-        if (direct) {
-            dma_result = try zml.io.benchmarkDma(Mnist, self, allocator, io, platform, .{
-                .shardings = shardings,
-            });
-        }
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .shardings = shardings,
             .read_parallelism = .{ .fixed = 1 },
-            .dma = if (dma_result) |*result| &result.resources else null,
         });
     }
 
@@ -203,6 +193,13 @@ const Mnist = struct {
         return x.argMax(0).indices.convert(.u8);
     }
 };
+```
+
+GPU loaders use platform-owned 4 MiB/eight-transfer defaults automatically.
+Applications may optionally calibrate synthetic transfers once, before loading:
+
+```zig
+try platform.benchTransfer(allocator, io, .{});
 ```
 
 For a full walkthrough, see:

@@ -249,6 +249,43 @@ fn sortDevicesById(target: Target, devices: []Device) void {
     }
 }
 
+/// Conservative platform-wide transfer settings used until calibration.
+/// The mapped-memory value is a ceiling; platform creation does not register
+/// host memory eagerly.
+pub const TransferConfig = struct {
+    block_size: usize = 4 * 1024 * 1024,
+    max_in_flight_per_device: usize = 8,
+    global_max_in_flight: ?usize = null,
+    max_mapped_bytes: usize = 2 * 1024 * 1024 * 1024,
+    /// Empty selects PJRT topology when it is complete, otherwise one shared
+    /// host-memory pool. Explicit entries are indexed like `Platform.devices`.
+    device_numa_nodes: []const usize = &.{},
+};
+
+/// Allocation-free diagnostic snapshot of the active platform settings.
+pub const TransferSettings = struct {
+    calibrated: bool,
+    block_size: usize,
+    max_in_flight_per_device: usize,
+    global_max_in_flight: ?usize,
+    max_mapped_bytes: usize,
+    retained_mapped_bytes: usize,
+    numa_pool_count: usize,
+};
+
+pub const BenchTransferOptions = zml.io.BenchTransferOptions;
+
+const DmaPlatformState = struct {
+    const idle = 0;
+    const inspecting = 1;
+    const calibrating = 2;
+    const loading = 3;
+    const destroying = 4;
+
+    operation: std.atomic.Value(u8) = .init(idle),
+    settings: std.atomic.Value(?*anyopaque) = .init(null),
+};
+
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
     target: Target,
@@ -259,6 +296,7 @@ pub const Platform = struct {
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    _dma: DmaPlatformState = .{},
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -292,6 +330,7 @@ pub const Platform = struct {
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
                 .shardings = .empty,
+                ._dma = .{},
                 // set below
                 .devices = undefined,
                 .memories = undefined,
@@ -353,6 +392,12 @@ pub const Platform = struct {
             log.warn("Failed to register FFI custom call \"zml$print\", error: {}", .{err});
         };
 
+        zml.io.initPlatformDma(platform, allocator, io, options.transfer) catch |err| {
+            platform.physical_mesh.deinit(platform.arena.allocator());
+            platform.pjrt_client.deinit(platform.pjrt_api);
+            return err;
+        };
+
         return platform;
     }
 
@@ -392,6 +437,22 @@ pub const Platform = struct {
             });
             buffer.deinit(self.pjrt_api);
         }
+    }
+
+    /// Calibrates synthetic host-to-device transfers for every addressable
+    /// device and atomically publishes the selected platform-wide settings.
+    pub fn benchTransfer(
+        self: *Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        opts: BenchTransferOptions,
+    ) !void {
+        return zml.io.benchTransfer(allocator, io, self, opts);
+    }
+
+    /// Returns a by-value snapshot; no loader workspace ownership escapes.
+    pub fn transferSettings(self: *Platform) !?TransferSettings {
+        return zml.io.platformTransferSettings(self);
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -513,6 +574,7 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
+        zml.io.deinitPlatformDma(self);
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
@@ -687,6 +749,7 @@ pub const CreateOptions = struct {
     };
 
     physical_mesh: PhysicalMesh = .auto,
+    transfer: TransferConfig = .{},
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
@@ -870,6 +933,35 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     std.debug.print("{s} {f} [device={d}]: {d}\n", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
+}
+
+test "platform transfer defaults are usable without calibration" {
+    const config: TransferConfig = .{};
+    try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), config.block_size);
+    try std.testing.expectEqual(@as(usize, 8), config.max_in_flight_per_device);
+    try std.testing.expectEqual(@as(?usize, null), config.global_max_in_flight);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024 * 1024), config.max_mapped_bytes);
+    try std.testing.expectEqual(@as(usize, 0), config.device_numa_nodes.len);
+
+    var state: DmaPlatformState = .{};
+    try std.testing.expectEqual(
+        @as(?u8, null),
+        state.operation.cmpxchgStrong(
+            DmaPlatformState.idle,
+            DmaPlatformState.loading,
+            .acq_rel,
+            .acquire,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, DmaPlatformState.loading),
+        state.operation.cmpxchgStrong(
+            DmaPlatformState.idle,
+            DmaPlatformState.calibrating,
+            .acq_rel,
+            .acquire,
+        ),
+    );
 }
 
 test "platform defaultMemoryLayout is boring" {

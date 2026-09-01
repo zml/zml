@@ -43,16 +43,8 @@ const Mnist = struct {
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
-        const direct = platform.target == .cuda or platform.target == .rocm or
-            platform.target == .oneapi;
-        var dma_result: ?zml.io.DmaBenchmarkResult = null;
-        defer if (dma_result) |*result| result.deinit();
-        if (direct) {
-            dma_result = try zml.io.benchmarkDma(Mnist, self, allocator, io, platform, .{});
-        }
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .read_parallelism = .{ .fixed = 1 },
-            .dma = if (dma_result) |*result| &result.resources else null,
         });
     }
 

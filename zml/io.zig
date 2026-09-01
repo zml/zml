@@ -7,11 +7,12 @@ pub const VFS = @import("io").VFS;
 
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
-const CreateOptions = @import("platform.zig").CreateOptions;
+const platform_mod = @import("platform.zig");
+const CreateOptions = platform_mod.CreateOptions;
 const mem = @import("mem.zig");
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
-const Platform = @import("platform.zig").Platform;
+const Platform = platform_mod.Platform;
 const tracer = @import("profiling/tracer.zig");
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
@@ -3154,6 +3155,18 @@ fn shouldBootstrapSource(
         outstanding_requests >= read_limit and has_unscheduled;
 }
 
+fn effectiveDmaGlobalCap(
+    calibrated: ?usize,
+    used_device_count: usize,
+    per_device: usize,
+) !?usize {
+    const uncapped = try std.math.mul(usize, used_device_count, per_device);
+    if (calibrated) |cap| {
+        if (cap < uncapped) return cap;
+    }
+    return null;
+}
+
 fn loadVectored(
     comptime ModelType: type,
     model: *const ModelType,
@@ -3163,6 +3176,8 @@ fn loadVectored(
     platform: *const Platform,
     store: *const TensorStore,
     opts: LoadOpts,
+    dma_resources: *DmaPlatformSettings,
+    used_device_ids: []const u32,
     load_started: std.Io.Timestamp,
 ) !usize {
     const tensor_count = meta.count(Tensor, model);
@@ -3181,12 +3196,16 @@ fn loadVectored(
         }
     }.call, .{buffers});
 
-    const dma_resources = opts.dma.?;
-    const dma_config = dma_resources.config;
+    var dma_config = dma_resources.config;
+    dma_config.global_max_in_flight = try effectiveDmaGlobalCap(
+        dma_config.global_max_in_flight,
+        used_device_ids.len,
+        dma_config.max_in_flight_per_device,
+    );
     const node_reserves = try allocator.alloc(usize, dma_resources.workspace.pools.len);
     defer allocator.free(node_reserves);
     @memset(node_reserves, 0);
-    for (dma_config.device_ids) |device_id| {
+    for (used_device_ids) |device_id| {
         const device_index = for (platform.devices, 0..) |device, index| {
             if (device.id() == device_id) break index;
         } else return error.DmaDeviceMismatch;
@@ -3207,7 +3226,7 @@ fn loadVectored(
     defer pool.deinit();
     try dma_resources.workspace.ensureLoadBlockReserves(
         dma_config.block_size,
-        dma_config.device_ids.len,
+        used_device_ids.len,
         node_reserves,
     );
     try pool.refreshProviderArenas(io);
@@ -3702,7 +3721,7 @@ pub const default_dma_benchmark_parallelism = [_]usize{ 1, 2, 4, 6, 8, 12, 16, 2
 const dma_benchmark_repeats = 3;
 const dma_benchmark_global_repeats = 3;
 
-pub const DmaBenchmarkPhase = enum {
+const DmaBenchmarkPhase = enum {
     block,
     block_confirmation,
     parallelism,
@@ -3711,7 +3730,7 @@ pub const DmaBenchmarkPhase = enum {
     global_limit,
 };
 
-pub const DmaBenchmarkSample = struct {
+const DmaBenchmarkSample = struct {
     phase: DmaBenchmarkPhase,
     device_index: usize,
     block_size: usize,
@@ -3736,7 +3755,7 @@ pub const DmaBenchmarkSample = struct {
     }
 };
 
-pub const DeviceDmaRecommendation = struct {
+const DeviceDmaRecommendation = struct {
     device_index: usize,
     device_id: u32,
     dma_block_size: usize,
@@ -3746,7 +3765,7 @@ pub const DeviceDmaRecommendation = struct {
     windows: usize = 0,
 };
 
-pub const GlobalDmaRecommendation = struct {
+const GlobalDmaRecommendation = struct {
     searched: bool = false,
     parallelism: ?usize = null,
     uncapped_bytes_per_second: f64 = 0,
@@ -3758,7 +3777,7 @@ pub const GlobalDmaRecommendation = struct {
     windows: usize = 0,
 };
 
-pub const GlobalDmaCandidate = struct {
+const GlobalDmaCandidate = struct {
     parallelism: usize,
     bytes_per_second: f64,
     average_latency_ns: f64,
@@ -3767,8 +3786,8 @@ pub const GlobalDmaCandidate = struct {
 };
 
 /// Immutable DMA settings shared by every device participating in one load.
-/// The slices are owned by the enclosing `DmaLoadResources`.
-pub const DmaLoadConfig = struct {
+/// The slices are owned by the enclosing platform settings.
+const DmaLoadConfig = struct {
     device_kind: []const u8,
     device_ids: []const u32,
     device_numa_nodes: []const ?usize,
@@ -3918,28 +3937,21 @@ test "DMA load config validates uniform caps, topology, and workspace budget" {
 
 /// Owned, reusable host-DMA workspace. A workspace may be borrowed by only one
 /// load at a time; all registered arenas remain mapped until `deinit`.
-pub const DmaLoadResources = struct {
-    const idle = 0;
-    const loading = 1;
-    const destroying = 2;
-
+const DmaPlatformSettings = struct {
     config: DmaLoadConfig,
 
     allocator: std.mem.Allocator,
     platform: *const Platform,
     workspace: DmaBenchmarkSourcePools,
-    workload_signature: ?u64,
-    pending_workload_signature: ?u64 = null,
-    state: std.atomic.Value(u8) = .init(idle),
+    calibrated: bool,
 
-    /// Constructs an operator-specified workspace with no retained arenas.
-    /// The first successful load binds it to that workload/sharding signature.
-    pub fn initFixed(
+    fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         config: DmaLoadConfig,
-    ) !DmaLoadResources {
+        calibrated: bool,
+    ) !DmaPlatformSettings {
         try validateDmaLoadConfig(config);
         const canonical_ids = try allocator.alloc(u32, config.device_ids.len);
         defer allocator.free(canonical_ids);
@@ -3992,7 +4004,7 @@ pub const DmaLoadResources = struct {
             .allocator = allocator,
             .platform = platform,
             .workspace = workspace,
-            .workload_signature = null,
+            .calibrated = calibrated,
         };
     }
 
@@ -4000,68 +4012,48 @@ pub const DmaLoadResources = struct {
         allocator: std.mem.Allocator,
         platform: *const Platform,
         config: DmaLoadConfig,
-        workload_signature: u64,
         workspace: DmaBenchmarkSourcePools,
-    ) !DmaLoadResources {
+    ) !DmaPlatformSettings {
         const owned_config = try dupeDmaLoadConfig(allocator, config);
         return .{
             .config = owned_config,
             .allocator = allocator,
             .platform = platform,
             .workspace = workspace,
-            .workload_signature = workload_signature,
+            .calibrated = true,
         };
     }
 
-    fn beginLoad(
-        self: *DmaLoadResources,
+    fn validateLoad(
+        self: *DmaPlatformSettings,
         platform: *const Platform,
-        workload_signature: u64,
         device_ids: []const u32,
     ) !void {
-        if (self.state.cmpxchgStrong(idle, loading, .acq_rel, .acquire) != null)
-            return error.DmaWorkspaceBusy;
-        errdefer self.state.store(idle, .release);
         try validateDmaLoadConfig(self.config);
         if (platform != self.platform) return error.DmaPlatformMismatch;
-        if (!std.mem.eql(u32, self.config.device_ids, device_ids))
-            return error.DmaDeviceMismatch;
         for (device_ids) |device_id| {
             const device = for (platform.devices) |device| {
                 if (device.id() == device_id) break device;
             } else return error.DmaDeviceMismatch;
+            for (self.config.device_ids) |configured_id| {
+                if (configured_id == device_id) break;
+            } else return error.DmaDeviceMismatch;
             if (!std.mem.eql(u8, device.kind(), self.config.device_kind))
                 return error.DmaDeviceKindMismatch;
-        }
-        if (self.workload_signature) |expected| {
-            if (expected != workload_signature) return error.DmaWorkloadMismatch;
-        } else {
-            self.pending_workload_signature = workload_signature;
         }
         if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
     }
 
-    fn endLoad(self: *DmaLoadResources, successful: bool) void {
-        if (successful and self.workload_signature == null) {
-            self.workload_signature = self.pending_workload_signature.?;
-        }
-        self.pending_workload_signature = null;
-        const previous_state = self.state.swap(idle, .acq_rel);
-        std.debug.assert(previous_state == loading);
-    }
-
-    pub fn retainedMappedBytes(self: *const DmaLoadResources) usize {
+    fn retainedMappedBytes(self: *const DmaPlatformSettings) usize {
         return self.workspace.allocatedBytes();
     }
 
-    pub fn numaPoolCount(self: *const DmaLoadResources) usize {
+    fn numaPoolCount(self: *const DmaPlatformSettings) usize {
         return self.workspace.pools.len;
     }
 
-    pub fn deinit(self: *DmaLoadResources) void {
-        if (self.state.cmpxchgStrong(idle, destroying, .acq_rel, .acquire) != null)
-            @panic("DmaLoadResources.deinit called while the workspace is borrowed");
+    fn deinit(self: *DmaPlatformSettings) void {
         const io = self.workspace.io;
         const mapped_bytes = self.workspace.allocatedBytes();
         const started = std.Io.Timestamp.now(io, .awake);
@@ -4079,11 +4071,145 @@ pub const DmaLoadResources = struct {
     }
 };
 
-pub const DmaBenchmarkResult = struct {
+const dma_platform_idle = 0;
+const dma_platform_inspecting = 1;
+const dma_platform_calibrating = 2;
+const dma_platform_loading = 3;
+const dma_platform_destroying = 4;
+
+fn isDirectTransferPlatform(platform: *const Platform) bool {
+    return platform.target == .cuda or platform.target == .rocm or
+        platform.target == .oneapi;
+}
+
+fn dmaSettingsFromOpaque(ptr: *anyopaque) *DmaPlatformSettings {
+    return @ptrCast(@alignCast(ptr));
+}
+
+fn destroyDmaPlatformSettings(settings: *DmaPlatformSettings) void {
+    const allocator = settings.allocator;
+    settings.deinit();
+    allocator.destroy(settings);
+}
+
+fn beginPlatformDmaOperation(platform: *const Platform, operation: u8) !void {
+    const mutable: *Platform = @constCast(platform);
+    if (mutable._dma.operation.cmpxchgStrong(
+        dma_platform_idle,
+        operation,
+        .acq_rel,
+        .acquire,
+    ) != null) return error.DmaWorkspaceBusy;
+}
+
+fn endPlatformDmaOperation(platform: *const Platform, operation: u8) void {
+    const mutable: *Platform = @constCast(platform);
+    const previous = mutable._dma.operation.swap(dma_platform_idle, .release);
+    std.debug.assert(previous == operation);
+}
+
+pub fn initPlatformDma(
+    platform: *Platform,
     allocator: std.mem.Allocator,
-    /// Retained calibration arenas and the immutable loader tuple. Keep this
-    /// result alive until every load borrowing `resources` has returned.
-    resources: DmaLoadResources,
+    io: std.Io,
+    defaults: platform_mod.TransferConfig,
+) !void {
+    if (!isDirectTransferPlatform(platform)) return;
+    if (platform.devices.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
+
+    const device_kind = platform.devices[0].kind();
+    for (platform.devices[1..]) |device| {
+        if (!std.mem.eql(u8, device_kind, device.kind()))
+            return error.HeterogeneousDmaUnsupported;
+    }
+
+    const device_indices = try allocator.alloc(usize, platform.devices.len);
+    defer allocator.free(device_indices);
+    const device_ids = try allocator.alloc(u32, platform.devices.len);
+    defer allocator.free(device_ids);
+    for (device_indices, device_ids, 0..) |*device_index, *device_id, index| {
+        device_index.* = index;
+        device_id.* = platform.devices[index].id();
+    }
+    const numa_nodes = try resolveDmaNumaNodes(
+        allocator,
+        platform,
+        device_indices,
+        defaults.device_numa_nodes,
+    );
+    defer allocator.free(numa_nodes);
+
+    var settings = try DmaPlatformSettings.init(
+        allocator,
+        io,
+        platform,
+        .{
+            .device_kind = device_kind,
+            .device_ids = device_ids,
+            .device_numa_nodes = numa_nodes,
+            .block_size = defaults.block_size,
+            .max_in_flight_per_device = defaults.max_in_flight_per_device,
+            .global_max_in_flight = defaults.global_max_in_flight,
+            .max_mapped_bytes = defaults.max_mapped_bytes,
+        },
+        false,
+    );
+    errdefer settings.deinit();
+    const owned = try allocator.create(DmaPlatformSettings);
+    owned.* = settings;
+    std.debug.assert(platform._dma.settings.swap(owned, .release) == null);
+}
+
+pub fn platformTransferSettings(platform: *Platform) !?platform_mod.TransferSettings {
+    if (!isDirectTransferPlatform(platform)) return null;
+    try beginPlatformDmaOperation(platform, dma_platform_inspecting);
+    defer endPlatformDmaOperation(platform, dma_platform_inspecting);
+    const raw = platform._dma.settings.load(.acquire) orelse return null;
+    const settings = dmaSettingsFromOpaque(raw);
+    return .{
+        .calibrated = settings.calibrated,
+        .block_size = settings.config.block_size,
+        .max_in_flight_per_device = settings.config.max_in_flight_per_device,
+        .global_max_in_flight = settings.config.global_max_in_flight,
+        .max_mapped_bytes = settings.config.max_mapped_bytes,
+        .retained_mapped_bytes = settings.retainedMappedBytes(),
+        .numa_pool_count = settings.numaPoolCount(),
+    };
+}
+
+pub fn deinitPlatformDma(platform: *Platform) void {
+    if (!isDirectTransferPlatform(platform)) return;
+    if (platform._dma.operation.cmpxchgStrong(
+        dma_platform_idle,
+        dma_platform_destroying,
+        .acq_rel,
+        .acquire,
+    ) != null) @panic("Platform.deinit called while DMA state is borrowed");
+    const raw = platform._dma.settings.swap(null, .acq_rel);
+    if (raw) |ptr| destroyDmaPlatformSettings(dmaSettingsFromOpaque(ptr));
+}
+
+fn acquirePlatformDmaSettings(
+    platform: *const Platform,
+    device_ids: []const u32,
+) !*DmaPlatformSettings {
+    try beginPlatformDmaOperation(platform, dma_platform_loading);
+    errdefer endPlatformDmaOperation(platform, dma_platform_loading);
+    const mutable: *Platform = @constCast(platform);
+    const raw = mutable._dma.settings.load(.acquire) orelse
+        return error.DmaResourcesRequired;
+    const settings = dmaSettingsFromOpaque(raw);
+    try settings.validateLoad(platform, device_ids);
+    return settings;
+}
+
+fn releasePlatformDmaSettings(platform: *const Platform) void {
+    endPlatformDmaOperation(platform, dma_platform_loading);
+}
+
+const DmaBenchmarkReport = struct {
+    allocator: std.mem.Allocator,
+    resources: DmaPlatformSettings,
     devices: []DeviceDmaRecommendation,
     samples: []DmaBenchmarkSample,
     global_candidates: []GlobalDmaCandidate,
@@ -4099,8 +4225,12 @@ pub const DmaBenchmarkResult = struct {
     calibration_ns: u64 = 0,
     windows: usize = 0,
 
-    pub fn deinit(self: *DmaBenchmarkResult) void {
+    fn deinit(self: *DmaBenchmarkReport) void {
         self.resources.deinit();
+        self.deinitReport();
+    }
+
+    fn deinitReport(self: *DmaBenchmarkReport) void {
         self.allocator.free(self.devices);
         self.allocator.free(self.samples);
         self.allocator.free(self.global_candidates);
@@ -4108,8 +4238,7 @@ pub const DmaBenchmarkResult = struct {
     }
 };
 
-pub const DmaBenchmarkOpts = struct {
-    shardings: []const Sharding = &.{},
+pub const BenchTransferOptions = struct {
     block_sizes: []const usize = &default_dma_benchmark_block_sizes,
     parallelism: []const usize = &default_dma_benchmark_parallelism,
     /// Width used while comparing block sizes and the minimum device width
@@ -4136,12 +4265,14 @@ pub const DmaBenchmarkOpts = struct {
     global_min_device_retention: f64 = 0.95,
     /// Jain fairness over each device's retention relative to the uncapped run.
     global_fairness_floor: f64 = 0.98,
-    max_pinned_bytes: usize = 2 * 1024 * 1024 * 1024,
+    max_mapped_bytes: usize = 2 * 1024 * 1024 * 1024,
     /// Optional device-index to NUMA-node override. When absent, complete PJRT
     /// `numa_node` attributes select local pools; incomplete or unsupported
     /// topology falls back to one shared DmaMapped pool.
     device_numa_nodes: []const usize = &.{},
 };
+
+const DmaBenchmarkOpts = BenchTransferOptions;
 
 const DmaBenchmarkNumaAllocator = struct {
     const max_nodes = 1024;
@@ -4564,7 +4695,7 @@ const DmaBenchmarkSourcePools = struct {
     fn prepareAggregateSources(
         self: *DmaBenchmarkSourcePools,
         recommendations: []const DeviceDmaRecommendation,
-        max_pinned_bytes: usize,
+        max_mapped_bytes: usize,
     ) !void {
         const missing = try self.allocator.alloc(usize, self.pools.len);
         defer self.allocator.free(missing);
@@ -4595,7 +4726,7 @@ const DmaBenchmarkSourcePools = struct {
         }
         var missing_total: usize = 0;
         for (missing) |bytes| missing_total = try std.math.add(usize, missing_total, bytes);
-        if (try std.math.add(usize, self.allocatedBytes(), missing_total) > max_pinned_bytes)
+        if (try std.math.add(usize, self.allocatedBytes(), missing_total) > max_mapped_bytes)
             return error.DmaBenchmarkPinnedBudgetExceeded;
 
         const Worker = struct {
@@ -4652,58 +4783,22 @@ const DmaBenchmarkSourcePools = struct {
     }
 };
 
-const DmaBenchmarkDeviceWorkload = struct {
-    tensor_sizes: std.ArrayListUnmanaged(usize) = .empty,
-
-    fn deinit(self: *DmaBenchmarkDeviceWorkload, allocator: std.mem.Allocator) void {
-        self.tensor_sizes.deinit(allocator);
-    }
-};
-
 const DmaBenchmarkDistribution = struct {
     block_size: usize,
-    full_blocks: u64,
-    tails: []usize,
-    total: u64,
-    stride: u64,
 
     fn init(
-        allocator: std.mem.Allocator,
-        workload: DmaBenchmarkDeviceWorkload,
+        _: std.mem.Allocator,
         block_size: usize,
     ) !DmaBenchmarkDistribution {
-        var tails: std.ArrayListUnmanaged(usize) = .empty;
-        errdefer tails.deinit(allocator);
-        var full_blocks: u64 = 0;
-        for (workload.tensor_sizes.items) |tensor_size| {
-            full_blocks +|= @intCast(tensor_size / block_size);
-            const tail = tensor_size % block_size;
-            if (tail != 0) try tails.append(allocator, tail);
-        }
-        const owned_tails = try tails.toOwnedSlice(allocator);
-        const total = full_blocks + owned_tails.len;
-        var stride = @max(@as(u64, 1), (total * 618_033) / 1_000_000);
-        while (stride < total and std.math.gcd(stride, total) != 1) stride += 1;
-        if (stride == total) stride = 1;
-        return .{
-            .block_size = block_size,
-            .full_blocks = full_blocks,
-            .tails = owned_tails,
-            .total = total,
-            .stride = stride,
-        };
+        return .{ .block_size = block_size };
     }
 
-    fn deinit(self: *DmaBenchmarkDistribution, allocator: std.mem.Allocator) void {
-        allocator.free(self.tails);
+    fn deinit(self: *DmaBenchmarkDistribution, _: std.mem.Allocator) void {
         self.* = undefined;
     }
 
-    fn at(self: DmaBenchmarkDistribution, index: u64) usize {
-        std.debug.assert(self.total > 0);
-        const wrapped = (index *% self.stride) % self.total;
-        if (wrapped < self.full_blocks) return self.block_size;
-        return self.tails[@intCast(wrapped - self.full_blocks)];
+    fn at(self: DmaBenchmarkDistribution, _: u64) usize {
+        return self.block_size;
     }
 };
 
@@ -4872,7 +4967,6 @@ const ReusableDmaBenchmarkCohort = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        workload: DmaBenchmarkDeviceWorkload,
         device_index: usize,
         block_size: usize,
     ) !ReusableDmaBenchmarkCohort {
@@ -4882,7 +4976,7 @@ const ReusableDmaBenchmarkCohort = struct {
             .platform = platform,
             .device_index = device_index,
             .block_size = block_size,
-            .distribution = try .init(allocator, workload, block_size),
+            .distribution = try .init(allocator, block_size),
         };
     }
 
@@ -5131,7 +5225,6 @@ const ReusableDmaBenchmarkSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    workloads: []const DmaBenchmarkDeviceWorkload,
     samples: *std.ArrayListUnmanaged(DmaBenchmarkSample),
     cohorts: std.ArrayListUnmanaged(*ReusableDmaBenchmarkCohort) = .empty,
     setup_ns: u64 = 0,
@@ -5149,7 +5242,6 @@ const ReusableDmaBenchmarkSession = struct {
             self.allocator,
             self.io,
             self.platform,
-            self.workloads[device_index],
             device_index,
             block_size,
         );
@@ -5209,8 +5301,8 @@ const ReusableDmaBenchmarkSession = struct {
     }
 };
 
-fn finishDmaBenchmarkResult(
-    result: *DmaBenchmarkResult,
+fn finishDmaBenchmarkReport(
+    result: *DmaBenchmarkReport,
     io: std.Io,
     benchmark_started: std.Io.Timestamp,
     device_allocator_warmup_ns: u64,
@@ -5282,10 +5374,6 @@ pub const LoadOpts = struct {
 
     /// Concurrent positional source requests.
     read_parallelism: Parallelism = .{ .adaptive = .{ .initial = 12, .maximum = max_load_read_parallelism } },
-    /// Required for CUDA, ROCm, and oneAPI vectored loading. Keep the owning
-    /// benchmark result (or fixed resources) alive through `load`. Buffered
-    /// targets reject DMA resources so ownership mistakes are visible.
-    dma: ?*DmaLoadResources = null,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     total_bytes: ?*usize = null,
@@ -5578,7 +5666,7 @@ fn tuneDmaBenchmarkDevice(
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!dmaBenchmarkTupleFeasible(opts.max_pinned_bytes, block_size, opts.block_parallelism))
+        if (!dmaBenchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
@@ -5592,7 +5680,7 @@ fn tuneDmaBenchmarkDevice(
     errdefer session.allocator.free(block_candidates);
     var block_index: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!dmaBenchmarkTupleFeasible(opts.max_pinned_bytes, block_size, opts.block_parallelism))
+        if (!dmaBenchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_candidates[block_index] = .{
             .value = block_size,
@@ -5627,7 +5715,7 @@ fn tuneDmaBenchmarkDevice(
     try appendUniqueUsize(&widths, session.allocator, opts.block_parallelism);
     for (opts.parallelism) |parallelism| {
         if (parallelism <= opts.block_parallelism or
-            !dmaBenchmarkTupleFeasible(opts.max_pinned_bytes, selected_cohort.block_size, parallelism))
+            !dmaBenchmarkTupleFeasible(opts.max_mapped_bytes, selected_cohort.block_size, parallelism))
             continue;
         try appendUniqueUsize(&widths, session.allocator, parallelism);
     }
@@ -5937,70 +6025,40 @@ fn warmupDmaBenchmarkDeviceAllocators(
     if (error_code != 0) return @errorFromInt(error_code);
 }
 
-const DmaLoadIdentity = struct {
+const DmaUsedDevices = struct {
     allocator: std.mem.Allocator,
-    signature: u64,
     device_indices: []usize,
     device_ids: []u32,
 
-    fn deinit(self: *DmaLoadIdentity) void {
+    fn deinit(self: *DmaUsedDevices) void {
         self.allocator.free(self.device_indices);
         self.allocator.free(self.device_ids);
         self.* = undefined;
     }
 };
 
-fn hashDmaIdentityValue(hasher: *std.hash.Wyhash, value: anytype) void {
-    hasher.update(std.mem.asBytes(&value));
-}
-
-fn dmaLoadIdentityForTensors(
+fn dmaUsedDevicesForTensors(
     allocator: std.mem.Allocator,
     platform: *const Platform,
     tensors: []const *const Tensor,
     shardings: []const Sharding,
-) !DmaLoadIdentity {
+) !DmaUsedDevices {
     const used = try allocator.alloc(bool, platform.devices.len);
     defer allocator.free(used);
     @memset(used, false);
-    var hasher = std.hash.Wyhash.init(0x7a6d_6c6f_6164_7637);
-    hashDmaIdentityValue(&hasher, tensors.len);
-    for (tensors, 0..) |tensor, tensor_index| {
-        hashDmaIdentityValue(&hasher, tensor_index);
+    for (tensors) |tensor| {
         const shape = tensor.shape();
-        const dtype: u32 = @intFromEnum(shape.dtype());
-        hashDmaIdentityValue(&hasher, dtype);
-        hashDmaIdentityValue(&hasher, shape.dims().len);
-        hasher.update(std.mem.sliceAsBytes(shape.dims()));
         const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse
             platform.replicated_sharding;
         const placement = try sharding.placement(shape);
         const physical_bytes = placement.shape.byteSize();
-        hashDmaIdentityValue(&hasher, physical_bytes);
         if (physical_bytes == 0) continue;
 
         const ordered_devices = sharding.devicesInCanonicalOrder();
-        hashDmaIdentityValue(&hasher, ordered_devices.len);
         for (ordered_devices) |device| {
             const device_index: usize = @intCast(device.id);
             if (device_index >= platform.devices.len) return error.DmaDeviceMismatch;
             used[device_index] = true;
-            hashDmaIdentityValue(&hasher, platform.devices[device_index].id());
-        }
-
-        const dispatch_spans = try DispatchSpans.init(allocator, shape, sharding);
-        defer dispatch_spans.deinit(allocator);
-        hashDmaIdentityValue(&hasher, dispatch_spans.spans.len);
-        for (dispatch_spans.spans) |span| {
-            hashDmaIdentityValue(&hasher, span.start);
-            hashDmaIdentityValue(&hasher, span.end);
-            hashDmaIdentityValue(&hasher, span.writer_offset);
-            hashDmaIdentityValue(&hasher, span.primary_writer);
-            hashDmaIdentityValue(&hasher, span.mirror_writer_len);
-            const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
-            for (dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_end]) |writer_index| {
-                hashDmaIdentityValue(&hasher, writer_index);
-            }
         }
     }
     var count: usize = 0;
@@ -6019,7 +6077,6 @@ fn dmaLoadIdentityForTensors(
     }
     return .{
         .allocator = allocator,
-        .signature = hasher.final(),
         .device_indices = device_indices,
         .device_ids = device_ids,
     };
@@ -6059,17 +6116,14 @@ fn resolveDmaNumaNodes(
     return result;
 }
 
-/// Benchmarks the loader's DmaMapped PJRT transfer path without reading tensor
-/// payloads. Tensor shapes and shardings are used only to reproduce each
-/// device's full-block and tensor-tail transfer distribution.
-pub fn benchmarkDma(
-    comptime ModelType: type,
-    model: *const ModelType,
+/// Benchmarks synthetic DmaMapped PJRT transfers on every addressable device.
+/// Candidate search and scoring are independent of model data and shardings.
+fn benchmarkSyntheticDma(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
     opts: DmaBenchmarkOpts,
-) !DmaBenchmarkResult {
+) !DmaBenchmarkReport {
     const benchmark_started = std.Io.Timestamp.now(io, .awake);
     if (platform.target != .cuda and platform.target != .rocm and platform.target != .oneapi)
         return error.DmaBenchmarkUnsupported;
@@ -6094,7 +6148,7 @@ pub fn benchmarkDma(
     var has_feasible_block = false;
     for (opts.block_sizes) |block_size| {
         if (block_size == 0) return error.InvalidDmaBenchmarkOptions;
-        if (dmaBenchmarkTupleFeasible(opts.max_pinned_bytes, block_size, opts.block_parallelism))
+        if (dmaBenchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
             has_feasible_block = true;
     }
     if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
@@ -6109,46 +6163,20 @@ pub fn benchmarkDma(
         }
     }
 
-    const tensor_count = meta.count(Tensor, model);
-    const tensors = try allocator.alloc(*const Tensor, tensor_count);
-    defer allocator.free(tensors);
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
-            output[i] = tensor;
-        }
-    }.call, .{tensors});
-
-    const workloads = try allocator.alloc(DmaBenchmarkDeviceWorkload, platform.devices.len);
-    defer allocator.free(workloads);
-    for (workloads) |*workload| workload.* = .{};
-    defer for (workloads) |*workload| workload.deinit(allocator);
-    for (tensors) |tensor| {
-        const sharding = Sharding.pickSharding(opts.shardings, tensor.shape(), .explicit_axis_binding) orelse
-            platform.replicated_sharding;
-        const placement = try sharding.placement(tensor.shape());
-        const bytes = placement.shape.byteSize();
-        if (bytes == 0) continue;
-        for (sharding.devicesInCanonicalOrder()) |device| {
-            try workloads[device.id].tensor_sizes.append(allocator, bytes);
-        }
-    }
-
     var used_devices: std.ArrayListUnmanaged(usize) = .empty;
     defer used_devices.deinit(allocator);
-    for (workloads, 0..) |workload, device_index| {
-        if (workload.tensor_sizes.items.len != 0)
-            try used_devices.append(allocator, device_index);
+    const platform_device_ids = try allocator.alloc(u32, platform.devices.len);
+    defer allocator.free(platform_device_ids);
+    for (platform_device_ids, 0..) |*device_id, device_index| {
+        try used_devices.append(allocator, device_index);
+        device_id.* = platform.devices[device_index].id();
     }
-    if (used_devices.items.len == 0) return error.NoDmaBenchmarkWork;
 
     const representative_kind = platform.devices[used_devices.items[0]].kind();
     for (used_devices.items[1..]) |device_index| {
         if (!std.mem.eql(u8, representative_kind, platform.devices[device_index].kind()))
             return error.HeterogeneousDmaUnsupported;
     }
-    var identity = try dmaLoadIdentityForTensors(allocator, platform, tensors, opts.shardings);
-    defer identity.deinit();
-    std.debug.assert(std.mem.eql(usize, identity.device_indices, used_devices.items));
     const resolved_numa_nodes = try resolveDmaNumaNodes(
         allocator,
         platform,
@@ -6168,7 +6196,7 @@ pub fn benchmarkDma(
         io,
         platform,
         resolved_numa_nodes,
-        opts.max_pinned_bytes,
+        opts.max_mapped_bytes,
     );
     var source_pools_active = true;
     defer if (source_pools_active) source_pools.deinit();
@@ -6179,7 +6207,6 @@ pub fn benchmarkDma(
         .allocator = allocator,
         .io = io,
         .platform = platform,
-        .workloads = workloads,
         .samples = &samples,
     };
     var session_active = true;
@@ -6226,9 +6253,9 @@ pub fn benchmarkDma(
             lane_source_bytes,
         );
     }
-    if (aggregate_source_bytes > opts.max_pinned_bytes)
+    if (aggregate_source_bytes > opts.max_mapped_bytes)
         return error.DmaBenchmarkPinnedBudgetExceeded;
-    try source_pools.prepareAggregateSources(recommendations.items, opts.max_pinned_bytes);
+    try source_pools.prepareAggregateSources(recommendations.items, opts.max_mapped_bytes);
     const uniform_block_size = recommendations.items[0].dma_block_size;
     const uniform_parallelism = recommendations.items[0].dma_parallelism;
     const config_numa_nodes = try allocator.alloc(?usize, used_devices.items.len);
@@ -6261,23 +6288,22 @@ pub fn benchmarkDma(
         errdefer allocator.free(owned_samples);
         const owned_global_candidates = try allocator.alloc(GlobalDmaCandidate, 0);
         errdefer allocator.free(owned_global_candidates);
-        const resources = try DmaLoadResources.adopt(
+        const resources = try DmaPlatformSettings.adopt(
             allocator,
             platform,
             .{
                 .device_kind = representative_kind,
-                .device_ids = identity.device_ids,
+                .device_ids = platform_device_ids,
                 .device_numa_nodes = config_numa_nodes,
                 .block_size = recommendation.dma_block_size,
                 .max_in_flight_per_device = recommendation.dma_parallelism,
                 .global_max_in_flight = null,
-                .max_mapped_bytes = opts.max_pinned_bytes,
+                .max_mapped_bytes = opts.max_mapped_bytes,
             },
-            identity.signature,
             source_pools,
         );
         source_pools_active = false;
-        var result: DmaBenchmarkResult = .{
+        var result: DmaBenchmarkReport = .{
             .allocator = allocator,
             .resources = resources,
             .devices = owned_devices,
@@ -6289,7 +6315,7 @@ pub fn benchmarkDma(
             },
             .elapsed_ns = 0,
         };
-        finishDmaBenchmarkResult(
+        finishDmaBenchmarkReport(
             &result,
             io,
             benchmark_started,
@@ -6468,12 +6494,12 @@ pub fn benchmarkDma(
     errdefer allocator.free(owned_samples);
     const owned_global_candidates = try global_candidates.toOwnedSlice(allocator);
     errdefer allocator.free(owned_global_candidates);
-    const resources = try DmaLoadResources.adopt(
+    const resources = try DmaPlatformSettings.adopt(
         allocator,
         platform,
         .{
             .device_kind = representative_kind,
-            .device_ids = identity.device_ids,
+            .device_ids = platform_device_ids,
             .device_numa_nodes = config_numa_nodes,
             .block_size = uniform_block_size,
             .max_in_flight_per_device = uniform_parallelism,
@@ -6481,13 +6507,12 @@ pub fn benchmarkDma(
                 candidate.parallelism
             else
                 null,
-            .max_mapped_bytes = opts.max_pinned_bytes,
+            .max_mapped_bytes = opts.max_mapped_bytes,
         },
-        identity.signature,
         source_pools,
     );
     source_pools_active = false;
-    var result: DmaBenchmarkResult = .{
+    var result: DmaBenchmarkReport = .{
         .allocator = allocator,
         .resources = resources,
         .devices = owned_devices,
@@ -6518,7 +6543,7 @@ pub fn benchmarkDma(
         },
         .elapsed_ns = 0,
     };
-    finishDmaBenchmarkResult(
+    finishDmaBenchmarkReport(
         &result,
         io,
         benchmark_started,
@@ -6530,6 +6555,103 @@ pub fn benchmarkDma(
     source_pools_active = false;
     return result;
 }
+
+fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkReport) void {
+    log.info("dma_bench version=7 synthetic=true numa_pools={d} retained_mapped_bytes={d} platform={s} devices={d} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} source_registration_ms={d:.3} benchmark_setup_ms={d:.3} sampling_ms={d:.3} benchmark_overhead_ms={d:.3} windows={d}", .{
+        result.resources.numaPoolCount(),
+        result.resources.retainedMappedBytes(),
+        @tagName(platform.target),
+        result.devices.len,
+        @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.source_registration_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.benchmark_setup_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.sampling_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.benchmark_overhead_ns)) / std.time.ns_per_ms,
+        result.windows,
+    });
+    for (result.devices) |recommendation| {
+        const device = platform.devices[recommendation.device_index];
+        log.info("dma_bench_numa device_index={d} device_id={d} numa_node={?d}", .{
+            recommendation.device_index,
+            recommendation.device_id,
+            result.resources.config.device_numa_nodes[recommendation.device_index],
+        });
+        log.info("dma_bench_device device_index={d} device_id={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} average_latency_ms={d:.3} windows={d}", .{
+            recommendation.device_index,
+            recommendation.device_id,
+            device.kind(),
+            recommendation.dma_block_size,
+            recommendation.dma_parallelism,
+            recommendation.measured_bytes_per_second / (1024 * 1024 * 1024),
+            recommendation.average_latency_ns / std.time.ns_per_ms,
+            recommendation.windows,
+        });
+    }
+    for (result.samples) |sample| {
+        const device = platform.devices[sample.device_index];
+        log.info("dma_bench_sample phase={s} device_index={d} device_id={d} block_bytes={d} parallelism={d} global_parallelism={?d} repeat={d} bytes={d} transfers={d} elapsed_ns={d} gib_s={d:.3} average_latency_ms={d:.3}", .{
+            @tagName(sample.phase),
+            sample.device_index,
+            device.id(),
+            sample.block_size,
+            sample.parallelism,
+            sample.global_parallelism,
+            sample.repeat,
+            sample.bytes,
+            sample.transfers,
+            sample.elapsed_ns,
+            sample.bytesPerSecond() / (1024 * 1024 * 1024),
+            sample.averageLatencyNs() / std.time.ns_per_ms,
+        });
+    }
+    var uncapped_parallelism: usize = 0;
+    for (result.devices) |recommendation| {
+        uncapped_parallelism += recommendation.dma_parallelism;
+    }
+    for (result.global_candidates) |candidate| {
+        log.info("dma_bench_global_candidate global_parallelism={d} uncapped={} gib_s={d:.3} average_latency_ms={d:.3} min_device_retention={d:.4} normalized_fairness={d:.4}", .{
+            candidate.parallelism,
+            candidate.parallelism == uncapped_parallelism,
+            candidate.bytes_per_second / (1024 * 1024 * 1024),
+            candidate.average_latency_ns / std.time.ns_per_ms,
+            candidate.min_device_retention,
+            candidate.normalized_fairness,
+        });
+    }
+    log.info("dma_bench_global searched={} uncapped_gib_s={d:.3} uncapped_latency_ms={d:.3} recommended_global_parallelism={?d} windows={d}", .{
+        result.global.searched,
+        result.global.uncapped_bytes_per_second / (1024 * 1024 * 1024),
+        result.global.uncapped_average_latency_ns / std.time.ns_per_ms,
+        result.global.parallelism,
+        result.global.windows,
+    });
+}
+
+/// Calibrates every addressable device and atomically replaces the platform's
+/// private settings. The previous/default settings remain active on failure.
+pub fn benchTransfer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *Platform,
+    opts: BenchTransferOptions,
+) !void {
+    try beginPlatformDmaOperation(platform, dma_platform_calibrating);
+    defer endPlatformDmaOperation(platform, dma_platform_calibrating);
+
+    var result = try benchmarkSyntheticDma(allocator, io, platform, opts);
+    errdefer result.deinit();
+    logDmaBenchmarkReport(platform, &result);
+
+    const replacement = try allocator.create(DmaPlatformSettings);
+    replacement.* = result.resources;
+    result.deinitReport();
+
+    const old = platform._dma.settings.swap(replacement, .acq_rel);
+    if (old) |ptr| destroyDmaPlatformSettings(dmaSettingsFromOpaque(ptr));
+}
+
 test "DMA benchmark completion target has no time cap" {
     try std.testing.expect(!dmaBenchmarkWindowComplete(9, 10, 128, 128));
     try std.testing.expect(!dmaBenchmarkWindowComplete(10, 10, 127, 128));
@@ -6538,29 +6660,14 @@ test "DMA benchmark completion target has no time cap" {
     try std.testing.expect(dmaBenchmarkWindowComplete(10, 10, 0, 0));
 }
 
-test "DMA benchmark distribution preserves full blocks and tensor tails" {
+test "DMA benchmark synthetic distribution always transfers full blocks" {
     const allocator = std.testing.allocator;
-    var workload: DmaBenchmarkDeviceWorkload = .{};
-    defer workload.deinit(allocator);
-    try workload.tensor_sizes.appendSlice(allocator, &.{ 10, 8, 3 });
-    var distribution: DmaBenchmarkDistribution = try .init(allocator, workload, 4);
+    var distribution: DmaBenchmarkDistribution = try .init(allocator, 4);
     defer distribution.deinit(allocator);
-
-    try std.testing.expectEqual(@as(u64, 4), distribution.full_blocks);
-    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, distribution.tails);
-    try std.testing.expectEqual(@as(u64, 6), distribution.total);
-    var full_count: usize = 0;
-    var tail_two_count: usize = 0;
-    var tail_three_count: usize = 0;
-    for (0..distribution.total) |i| switch (distribution.at(i)) {
-        4 => full_count += 1,
-        2 => tail_two_count += 1,
-        3 => tail_three_count += 1,
-        else => unreachable,
-    };
-    try std.testing.expectEqual(@as(usize, 4), full_count);
-    try std.testing.expectEqual(@as(usize, 1), tail_two_count);
-    try std.testing.expectEqual(@as(usize, 1), tail_three_count);
+    for (0..32) |index| try std.testing.expectEqual(
+        @as(usize, 4),
+        distribution.at(index),
+    );
     try std.testing.expectEqual(@as(usize, 4), distribution.at(6));
 }
 
@@ -6782,6 +6889,21 @@ test "loader DMA admission bypasses weighting without a global cap" {
     );
 }
 
+test "platform DMA global cap is disabled when a device subset cannot reach it" {
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        try effectiveDmaGlobalCap(4, 1, 4),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 4),
+        try effectiveDmaGlobalCap(4, 2, 4),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        try effectiveDmaGlobalCap(null, 4, 8),
+    );
+}
+
 test "DMA benchmark fair gate balances, rotates, and lends slots" {
     const allocator = std.testing.allocator;
     const balanced_specs = [_]DmaBenchmarkRunSpec{
@@ -6990,32 +7112,32 @@ pub fn load(
     stdx.debug.assert(read_maximum <= max_load_read_parallelism, "zml.io.load read_parallelism exceeds the absolute limit", .{});
 
     const direct = platform.target == .cuda or platform.target == .rocm or platform.target == .oneapi;
-    var dma_borrowed = false;
-    var dma_load_succeeded = false;
-    defer if (dma_borrowed) opts.dma.?.endLoad(dma_load_succeeded);
+    var used_devices: ?DmaUsedDevices = null;
+    defer if (used_devices) |*devices| devices.deinit();
+    var dma_resources: ?*DmaPlatformSettings = null;
+    defer if (dma_resources != null) releasePlatformDmaSettings(platform);
     if (direct) {
-        const resources = opts.dma orelse return error.DmaResourcesRequired;
-        if (resources.config.block_size > load_read_request_size or
-            resources.config.max_mapped_bytes < load_read_request_size)
-            return error.InvalidDmaLoadConfig;
-        const identity_tensors = try allocator.alloc(*const Tensor, meta.count(Tensor, model));
-        defer allocator.free(identity_tensors);
+        const placement_tensors = try allocator.alloc(*const Tensor, meta.count(Tensor, model));
+        defer allocator.free(placement_tensors);
         meta.forEachVisit(model, *const Tensor, struct {
             fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
                 output[i] = tensor;
             }
-        }.call, .{identity_tensors});
-        var identity = try dmaLoadIdentityForTensors(
+        }.call, .{placement_tensors});
+        used_devices = try dmaUsedDevicesForTensors(
             allocator,
             platform,
-            identity_tensors,
+            placement_tensors,
             opts.shardings,
         );
-        defer identity.deinit();
-        try resources.beginLoad(platform, identity.signature, identity.device_ids);
-        dma_borrowed = true;
-    } else if (opts.dma != null) {
-        return error.DmaResourcesNotAllowed;
+        const resources = try acquirePlatformDmaSettings(
+            platform,
+            used_devices.?.device_ids,
+        );
+        dma_resources = resources;
+        if (resources.config.block_size > load_read_request_size or
+            resources.config.max_mapped_bytes < load_read_request_size)
+            return error.InvalidDmaLoadConfig;
     }
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
@@ -7037,7 +7159,7 @@ pub fn load(
         }
     }.call, .{&total_logical_bytes});
 
-    const dma_config: DmaLoadConfig = if (opts.dma) |resources| resources.config else .{
+    const dma_config: DmaLoadConfig = if (dma_resources) |resources| resources.config else .{
         .device_kind = "buffered",
         .device_ids = &.{},
         .device_numa_nodes = &.{},
@@ -7060,11 +7182,22 @@ pub fn load(
     });
 
     const loaded_bytes = if (direct)
-        try loadVectored(ModelType, model, &bufferized, allocator, io, platform, store, opts, load_started)
+        try loadVectored(
+            ModelType,
+            model,
+            &bufferized,
+            allocator,
+            io,
+            platform,
+            store,
+            opts,
+            dma_resources.?,
+            used_devices.?.device_ids,
+            load_started,
+        )
     else
         try loadBuffered(ModelType, model, &bufferized, allocator, io, platform, store, opts);
     if (opts.total_bytes) |total_bytes| total_bytes.* = loaded_bytes;
-    dma_load_succeeded = true;
     return bufferized;
 }
 

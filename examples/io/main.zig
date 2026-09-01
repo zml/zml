@@ -24,7 +24,10 @@ pub fn main(init: std.process.Init) !void {
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
     const command: Command = std.meta.stringToEnum(Command, it.next() orelse return error.MissingCommand) orelse return error.CommandInvalid;
-    const path = it.next() orelse return error.MissingPath;
+    const path = if (command == .@"dma-bench")
+        ""
+    else
+        it.next() orelse return error.MissingPath;
 
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
 
@@ -157,40 +160,8 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.flush();
         },
         .@"dma-bench" => {
-            const ShardingType = enum { replicated, sharded };
-            const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
-
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
-
-            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-            defer registry.deinit();
-
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-            defer store.deinit();
-
-            const AllTensorsModel = struct {
-                tensors: []zml.Tensor,
-            };
-
-            const tensors = try allocator.alloc(zml.Tensor, registry.tensors.count());
-            defer allocator.free(tensors);
-            var registry_it = registry.iterator();
-            var tensor_index: usize = 0;
-            while (registry_it.next()) |entry| : (tensor_index += 1) {
-                tensors[tensor_index] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
-                    .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
-                    else
-                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
-                };
-            }
-            const model: AllTensorsModel = .{ .tensors = tensors };
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_dma_benchmark",
-                .mesh(.{ .model = .high_bandwidth }),
-            );
 
             const option_allocator = init.arena.allocator();
             const block_sizes = try envMibList(
@@ -207,13 +178,7 @@ pub fn main(init: std.process.Init) !void {
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 10);
             const global_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_WINDOW_MS", 10);
-            const device_numa_nodes = try dmaBenchmarkNumaNodes(
-                option_allocator,
-                init.environ_map,
-            );
-
-            var result = try zml.io.benchmarkDma(AllTensorsModel, &model, allocator, io, platform, .{
-                .shardings = &.{sharded_sharding},
+            try platform.benchTransfer(allocator, io, .{
                 .block_sizes = block_sizes,
                 .parallelism = parallelism,
                 .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
@@ -226,132 +191,22 @@ pub fn main(init: std.process.Init) !void {
                 .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
                 .global_min_device_retention = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_RETENTION", 0.95),
                 .global_fairness_floor = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_FAIRNESS", 0.98),
-                .max_pinned_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_PINNED_MIB", 2048),
-                .device_numa_nodes = device_numa_nodes,
+                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 2048),
+                .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
             });
-            defer result.deinit();
-
-            const numa_mapping = if (init.environ_map.get("ZML_DMA_BENCH_NUMA_NODES") != null)
-                "explicit"
-            else for (result.resources.config.device_numa_nodes) |node| {
-                if (node != null) break "auto";
-            } else "single";
+            const settings = (try platform.transferSettings()).?;
             try stdout_writer.interface.print(
-                "dma_bench version=7 source_layout={s} numa_mapping={s} numa_pools={d} retained_mapped_bytes={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} source_registration_ms={d:.3} benchmark_setup_ms={d:.3} sampling_ms={d:.3} benchmark_overhead_ms={d:.3} source_cleanup_ms={d:.3} windows={d}\n",
+                "dma_settings calibrated={} block_bytes={d} parallelism={d} global_parallelism={?d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
                 .{
-                    if (result.resources.numaPoolCount() == 1) "single_pool" else "numa_local",
-                    numa_mapping,
-                    result.resources.numaPoolCount(),
-                    result.resources.retainedMappedBytes(),
-                    @tagName(platform.target),
-                    platform.pjrt_api.version(),
-                    result.devices.len,
-                    @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.source_registration_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.benchmark_setup_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.sampling_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.benchmark_overhead_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.source_cleanup_ns)) / std.time.ns_per_ms,
-                    result.windows,
+                    settings.calibrated,
+                    settings.block_size,
+                    settings.max_in_flight_per_device,
+                    settings.global_max_in_flight,
+                    settings.max_mapped_bytes,
+                    settings.retained_mapped_bytes,
+                    settings.numa_pool_count,
                 },
             );
-            for (result.devices) |recommendation| {
-                try stdout_writer.interface.print(
-                    "dma_bench_numa device_index={d} device_id={d} numa_node={?d}\n",
-                    .{
-                        recommendation.device_index,
-                        recommendation.device_id,
-                        result.resources.config.device_numa_nodes[
-                            for (result.resources.config.device_ids, 0..) |id, index| {
-                                if (id == recommendation.device_id) break index;
-                            } else unreachable
-                        ],
-                    },
-                );
-            }
-            for (result.samples) |sample| {
-                const device = platform.devices[sample.device_index];
-                try stdout_writer.interface.print(
-                    "dma_bench_sample phase={s} device_index={d} device_id={d} block_bytes={d} parallelism={d} ",
-                    .{ @tagName(sample.phase), sample.device_index, device.id(), sample.block_size, sample.parallelism },
-                );
-                if (sample.global_parallelism) |limit| {
-                    try stdout_writer.interface.print("global_parallelism={d} ", .{limit});
-                } else {
-                    try stdout_writer.interface.writeAll("global_parallelism=none ");
-                }
-                try stdout_writer.interface.print(
-                    "repeat={d} bytes={d} transfers={d} elapsed_ns={d} gib_s={d:.3} average_latency_ms={d:.3}\n",
-                    .{
-                        sample.repeat,
-                        sample.bytes,
-                        sample.transfers,
-                        sample.elapsed_ns,
-                        sample.bytesPerSecond() / zml.GiB,
-                        sample.averageLatencyNs() / std.time.ns_per_ms,
-                    },
-                );
-            }
-            for (result.devices) |recommendation| {
-                const device = platform.devices[recommendation.device_index];
-                try stdout_writer.interface.print(
-                    "dma_bench_device device_index={d} device_id={d} kind=\"{s}\" debug=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} average_latency_ms={d:.3} windows={d}\n",
-                    .{
-                        recommendation.device_index,
-                        recommendation.device_id,
-                        device.kind(),
-                        device.debugString(),
-                        recommendation.dma_block_size,
-                        recommendation.dma_parallelism,
-                        recommendation.measured_bytes_per_second / zml.GiB,
-                        recommendation.average_latency_ns / std.time.ns_per_ms,
-                        recommendation.windows,
-                    },
-                );
-            }
-            var uncapped_parallelism: usize = 0;
-            for (result.devices) |recommendation| uncapped_parallelism += recommendation.dma_parallelism;
-            for (result.global_candidates) |candidate| {
-                try stdout_writer.interface.print(
-                    "dma_bench_global_candidate global_parallelism={d} uncapped={} gib_s={d:.3} average_latency_ms={d:.3} min_device_retention={d:.4} normalized_fairness={d:.4}\n",
-                    .{
-                        candidate.parallelism,
-                        candidate.parallelism == uncapped_parallelism,
-                        candidate.bytes_per_second / zml.GiB,
-                        candidate.average_latency_ns / std.time.ns_per_ms,
-                        candidate.min_device_retention,
-                        candidate.normalized_fairness,
-                    },
-                );
-            }
-            try stdout_writer.interface.print(
-                "dma_bench_global searched={} uncapped_gib_s={d:.3} uncapped_latency_ms={d:.3} windows={d} ",
-                .{
-                    result.global.searched,
-                    result.global.uncapped_bytes_per_second / zml.GiB,
-                    result.global.uncapped_average_latency_ns / std.time.ns_per_ms,
-                    result.global.windows,
-                },
-            );
-            if (result.global.parallelism) |limit| {
-                try stdout_writer.interface.print(
-                    "recommended_global_parallelism={d} recommended_gib_s={d:.3} recommended_latency_ms={d:.3} recommended_min_device_retention={d:.4} recommended_fairness={d:.4}\n",
-                    .{
-                        limit,
-                        result.global.recommended_bytes_per_second.? / zml.GiB,
-                        result.global.recommended_average_latency_ns.? / std.time.ns_per_ms,
-                        result.global.recommended_min_device_retention.?,
-                        result.global.recommended_normalized_fairness.?,
-                    },
-                );
-            } else {
-                try stdout_writer.interface.writeAll("recommended_global_parallelism=none recommended_gib_s=none recommended_latency_ms=none recommended_min_device_retention=none recommended_fairness=none\n");
-            }
-            try stdout_writer.interface.print("dma_bench_total elapsed_ms={d:.3}\n", .{
-                @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
-            });
             try stdout_writer.flush();
         },
         .load => {
@@ -421,31 +276,9 @@ pub fn main(init: std.process.Init) !void {
                     .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
                 } };
 
-            const direct = platform.target == .cuda or platform.target == .rocm or
-                platform.target == .oneapi;
-            var dma_result: ?zml.io.DmaBenchmarkResult = null;
-            defer if (dma_result) |*result| result.deinit();
-            if (direct) {
-                dma_result = try zml.io.benchmarkDma(
-                    AllTensorsModel,
-                    &model,
-                    allocator,
-                    io,
-                    platform,
-                    .{
-                        .shardings = &.{sharded_sharding},
-                        .device_numa_nodes = try dmaBenchmarkNumaNodes(
-                            init.arena.allocator(),
-                            init.environ_map,
-                        ),
-                    },
-                );
-            }
-
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
                 .read_parallelism = load_read_parallelism,
-                .dma = if (dma_result) |*result| &result.resources else null,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });
