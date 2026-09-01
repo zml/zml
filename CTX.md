@@ -1,12 +1,9 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-09-01. ZML HEAD is `60c56f10` (`faster dma bench 2`). The
-optional-NUMA fallback is uncommitted in `CTX.md`, `examples/io/main.zig`, and
+Snapshot: 2026-09-01. ZML HEAD is `e4b94c7f` (`final line`). The v6 DMA
+calibration changes are uncommitted in `CTX.md`, `examples/io/main.zig`, and
 `zml/io.zig`. The user's benchmark recordings remain untracked and must be
-preserved. The user moved the XLA checkout back to the intended revision; it
-is clean at `92e7778d04` (`[XLA:GPU][oneAPI] Recognize
-DmaMapped host memory as pinned`) on top of `b0990b33b1`
-(`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). ZML selects the
+preserved. The XLA checkout is clean at `a76ffe88dd`. ZML selects the
 user-built `pjrt-oneapi_linux-amd64-2026-07-21_22-43.tar`, whose configured
 SHA-256 is
 `91172bd90d59ab2f08d0c53e282843903fbed8ffb7ac2c7ccb215703f70af6a7`.
@@ -16,6 +13,99 @@ been runtime-validated.
 This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
+
+## Completion-targeted v6 DMA calibration (2026-09-01)
+
+The v6 detector replaces fixed-duration-only sampling with completion-targeted
+windows. A default screen window runs for at least 10 ms and continues until
+every participating device has completed at least 128 transfers. There is no
+maximum duration or calibration deadline: a slow device extends the window,
+so the speed improvement does not cap evidence or silently trade away
+accuracy. Setting the transfer target to zero and the minimum window to 250 ms
+reproduces the v5 sampling policy for diagnostics.
+
+The complete five-block grid and three rotated rounds remain. Local block and
+width candidates receive focused paired confirmation only when their
+round-level qualification disagrees or their median is within two percentage
+points of the selection boundary. Confirmation uses three alternating-order
+candidate/reference pairs, at least 25 ms and 256 completed transfers per
+device, and selects using the median same-pair throughput ratio. Block and
+width confirmation have distinct sample phases. Width plateau probing still
+uses the broad medians and confirmation runs once after the candidate set is
+known, avoiding repeated confirmation during search. Global-cap screening
+keeps the complete candidate grid, fairness/retention checks, and rotated
+three-round screen. A provisional cap is still compared against uncapped in
+three alternating pairs, now with the stronger confirmation target. Ambiguous
+or unsuccessful cap searches remain uncapped, which is the desired default.
+
+Source registration is append-only during calibration. Growing a tuning arena
+does not unmap its predecessor. Before aggregate measurement, existing current
+arenas are carved into disjoint per-device rings; only missing capacity is
+registered, with independent NUMA-node registrations launched concurrently.
+No source pages are shared between device rings. All retained registrations
+count against `max_pinned_bytes` and are released only after manager teardown.
+This removes the old sequential replace/unmap/re-register behavior while
+preserving one manager cohort per block size.
+
+Output is version 6. `elapsed_ms` now includes manager and source cleanup.
+`calibration_ms` excludes device-allocator warmup, source registration, and
+source teardown because the eventual loader must perform those resource
+operations anyway. The header also reports allocator warmup, source
+registration, benchmark setup, sampling, benchmark overhead, and source
+cleanup separately. CLI defaults are 10 ms / 128 transfers for local and
+global screens. `ZML_DMA_BENCH_MIN_TRANSFERS` and
+`ZML_DMA_BENCH_GLOBAL_MIN_TRANSFERS` override the targets; repeat counts remain
+internal.
+
+Pre-implementation exploration on one MI300X found that the v5 250 ms policy
+spent 5.293 s sampling 21 windows and 8.169 s end-to-end. Fixed 100, 50, 25,
+and 10 ms experiments retained the 16 MiB/eight-event result while reducing
+sampling to 2.146 s, 1.128 s, approximately 0.61 s, and 0.26--0.30 s. At 10 ms,
+the block candidates completed very different amounts of evidence: roughly
+125--147 transfers at 2 MiB, 99--100 at 4 MiB, 64--66 at 8 MiB, 40--41 at
+16 MiB, and 28--29 at 32 MiB. That unequal evidence is why v6 uses a transfer
+target rather than making 10 ms a hard window.
+
+Debugger timing separated the unavoidable resource work from calibration:
+one device spent about 2.408 s in PJRT device-allocator warmup, 0.102 s
+registering 128 MiB, and 0.036 s preparing/warming the cohort. Eight devices
+spent about 3.756 s warming allocators; sequential 512 MiB NUMA registrations
+cost about 2.663 s and 2.612 s. This motivated both the `calibration_ms`
+definition and append-only arena reuse. A direct v6 A/B showed substantial
+PJRT/DmaMap registration variability, but concurrency was still better for the
+same append-only allocation pattern: 8.436 s versus 9.986 s sequential for the
+complete registration phase. The implementation therefore launches missing
+NUMA arenas concurrently. Registration remains future loader work and is
+excluded from `calibration_ms`.
+
+ROCm runtime validation used the replicated Gemma workload. One MI300X selected
+16 MiB/eight events and no cap in 4.588 s end-to-end: allocator warmup was
+2.500 s, source registration 0.189 s, calibration-specific time 1.784 s,
+sampling 1.652 s, and cleanup 0.115 s over 33 windows. Both block and width
+decisions legitimately entered paired confirmation. All eight MI300X devices
+selected the same tuple and no cap. The concurrent-registration experiment
+took 16.358 s end-to-end, but calibration-specific time fell to 3.734 s from
+the v5 9.11 s sampling scale, including a real approximately 980 ms stalled
+aggregate window that the no-cap evidence rule correctly waited through. Its
+final uncapped throughput was 328.50 GiB/s. The sequential-registration
+remeasurement took 17.633 s end-to-end, 3.516 s calibration-specific, and
+293.09 GiB/s uncapped; it also correctly emitted no cap despite one device's
+stalled representative sample.
+
+Implementation validation completed:
+
+- pinned Zig 0.16 `zig fmt` on `zml/io.zig` and `examples/io/main.zig`
+- `git diff --check`
+- `bazel test //zml:test`
+- `bazel build //examples/io:playground`
+- ROCm and oneAPI optimized accelerator builds of `//examples/io:playground`
+- one- and eight-MI300X runtime calibration
+
+The core tests cover the uncapped completion rule, median selection, ambiguous
+round confirmation, paired-ratio selection, plateau stopping, pinned-budget
+math, non-unimodal candidate selection, and fair global admission. The
+four-B70 oneAPI positive-cap regression remains pending until that hardware is
+available.
 
 ## Faster v5 DMA calibration (2026-09-01)
 

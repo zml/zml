@@ -206,8 +206,8 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_PARALLELISM",
                 &zml.io.default_dma_benchmark_parallelism,
             );
-            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 250);
-            const global_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_WINDOW_MS", 250);
+            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 10);
+            const global_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_WINDOW_MS", 10);
             const device_numa_nodes = try dmaBenchmarkNumaNodes(
                 option_allocator,
                 io,
@@ -221,7 +221,9 @@ pub fn main(init: std.process.Init) !void {
                 .parallelism = parallelism,
                 .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
                 .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
+                .minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 128),
                 .global_duration_ns = try std.math.mul(u64, global_window_ms, std.time.ns_per_ms),
+                .global_minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_TRANSFERS", 128),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
                 .parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_PARALLELISM_TOLERANCE", 0.05),
                 .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
@@ -239,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
             else
                 "auto";
             try stdout_writer.interface.print(
-                "dma_bench version=5 source_layout={s} numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
+                "dma_bench version=6 source_layout={s} numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} source_registration_ms={d:.3} benchmark_setup_ms={d:.3} sampling_ms={d:.3} benchmark_overhead_ms={d:.3} source_cleanup_ms={d:.3} windows={d}\n",
                 .{
                     if (device_numa_nodes.len == 0) "single_pool" else "numa_local",
                     numa_mapping,
@@ -248,8 +250,13 @@ pub fn main(init: std.process.Init) !void {
                     platform.pjrt_api.version(),
                     result.devices.len,
                     @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(result.setup_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.source_registration_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.benchmark_setup_ns)) / std.time.ns_per_ms,
                     @as(f64, @floatFromInt(result.sampling_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.benchmark_overhead_ns)) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(result.source_cleanup_ns)) / std.time.ns_per_ms,
                     result.windows,
                 },
             );
