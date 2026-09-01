@@ -1,10 +1,10 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-09-01. ZML HEAD is `508c0825` (`simplified DMA settings
-detection`). The faster v5 calibration is uncommitted in `CTX.md`,
-`examples/io/main.zig`, and `zml/io.zig`. The user's benchmark recordings
-remain untracked and must be preserved. The user moved the XLA checkout back to the
-intended revision; it is clean at `92e7778d04` (`[XLA:GPU][oneAPI] Recognize
+Snapshot: 2026-09-01. ZML HEAD is `60c56f10` (`faster dma bench 2`). The
+optional-NUMA fallback is uncommitted in `CTX.md`, `examples/io/main.zig`, and
+`zml/io.zig`. The user's benchmark recordings remain untracked and must be
+preserved. The user moved the XLA checkout back to the intended revision; it
+is clean at `92e7778d04` (`[XLA:GPU][oneAPI] Recognize
 DmaMapped host memory as pinned`) on top of `b0990b33b1`
 (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). ZML selects the
 user-built `pjrt-oneapi_linux-amd64-2026-07-21_22-43.tar`, whose configured
@@ -96,12 +96,30 @@ The benchmark output format is now version 5. Per-device output reports
 reports `uncapped_gib_s`. The old isolated/scaling fields and repeat-count
 environment controls were removed.
 
+NUMA mapping is optional as a follow-up to v5. An empty
+`DmaBenchmarkOpts.device_numa_nodes` now means that every device shares one
+DmaMapped source pool; that pool uses the ordinary allocator and does not call
+`mbind` or verify placement with `move_pages`. Explicit or successfully
+discovered mappings retain one strictly bound and verified pool per node. The
+CLI treats non-ROCm platforms, non-Linux hosts, and failed automatic discovery
+as the single-pool case (while still propagating allocation failure), reports
+`source_layout=single_pool numa_mapping=single`, and prints assumed node zero
+for each device.
+
+Short 10 ms-window ROCm smoke runs exercised both modes. A nonnumeric GPU UUID
+visibility mask intentionally made topology discovery unavailable; the
+benchmark completed with one MI300X and with two MI300X devices spanning the
+physical NUMA nodes, using one 16--32 MiB growing source pool. A numeric `0,4`
+mask still created and verified separate node-zero and node-one pools.
+
 Validation completed after the final implementation:
 
 - `zig fmt --check zml/io.zig examples/io/main.zig`
 - `git diff --check`
 - `bazel test //zml:test --test_output=errors`
 - `bazel build -c opt --@zml//platforms:rocm=true \
+  --@zml//platforms:cpu=false //examples/io:playground`
+- `bazel build -c opt --@zml//platforms:oneapi=true \
   --@zml//platforms:cpu=false //examples/io:playground`
 
 The sharded Gemma command cannot be used as another workload control because

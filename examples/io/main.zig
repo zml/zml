@@ -232,10 +232,17 @@ pub fn main(init: std.process.Init) !void {
             });
             defer result.deinit();
 
+            const numa_mapping = if (init.environ_map.get("ZML_DMA_BENCH_NUMA_NODES") != null)
+                "explicit"
+            else if (device_numa_nodes.len == 0)
+                "single"
+            else
+                "auto";
             try stdout_writer.interface.print(
-                "dma_bench version=5 source_layout=numa_local numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
+                "dma_bench version=5 source_layout={s} numa_mapping={s} numa_pools={d} platform={s} pjrt={f} devices={d} elapsed_ms={d:.3} setup_ms={d:.3} sampling_ms={d:.3} windows={d}\n",
                 .{
-                    if (init.environ_map.get("ZML_DMA_BENCH_NUMA_NODES") == null) "auto" else "explicit",
+                    if (device_numa_nodes.len == 0) "single_pool" else "numa_local",
+                    numa_mapping,
                     uniqueUsizeCount(device_numa_nodes),
                     @tagName(platform.target),
                     platform.pjrt_api.version(),
@@ -252,7 +259,10 @@ pub fn main(init: std.process.Init) !void {
                     .{
                         recommendation.device_index,
                         recommendation.device_id,
-                        device_numa_nodes[recommendation.device_index],
+                        if (device_numa_nodes.len == 0)
+                            0
+                        else
+                            device_numa_nodes[recommendation.device_index],
                     },
                 );
             }
@@ -449,9 +459,30 @@ fn dmaBenchmarkNumaNodes(
             &.{},
         );
     }
-    if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaMappingRequired;
-    if (platform.target != .rocm) return error.DmaBenchmarkNumaMappingRequired;
+    if (comptime builtin.os.tag != .linux) return &.{};
+    if (platform.target != .rocm) return &.{};
 
+    const mapping = discoverDmaBenchmarkNumaNodes(
+        allocator,
+        io,
+        platform,
+        environ_map,
+    ) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        log.warn("unable to discover DMA benchmark NUMA mapping ({s}); using one source pool", .{
+            @errorName(err),
+        });
+        return &.{};
+    };
+    return mapping;
+}
+
+fn discoverDmaBenchmarkNumaNodes(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    environ_map: *const std.process.Environ.Map,
+) ![]const usize {
     const RocmNode = struct {
         topology_index: usize,
         numa_node: usize,

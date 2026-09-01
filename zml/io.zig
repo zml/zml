@@ -4401,9 +4401,9 @@ pub const DmaBenchmarkOpts = struct {
     /// Jain fairness over each device's retention relative to the uncapped run.
     global_fairness_floor: f64 = 0.98,
     max_pinned_bytes: usize = 2 * 1024 * 1024 * 1024,
-    /// Required device-index to NUMA-node mapping. The CLI discovers this
-    /// automatically on ROCm/Linux. The benchmark creates one DmaMapped source
-    /// pool per node and gives every device a disjoint ring in its local pool.
+    /// Optional device-index to NUMA-node mapping. When absent, all devices use
+    /// one DmaMapped source pool. Otherwise the benchmark creates one pool per
+    /// node and gives every device a disjoint ring in its local pool.
     device_numa_nodes: []const usize = &.{},
 };
 
@@ -4412,7 +4412,7 @@ const DmaBenchmarkNumaAllocator = struct {
     const mpol_bind = 2;
 
     parent: std.mem.Allocator,
-    node: usize,
+    node: ?usize,
 
     fn allocator(self: *DmaBenchmarkNumaAllocator) std.mem.Allocator {
         return .{
@@ -4429,7 +4429,7 @@ const DmaBenchmarkNumaAllocator = struct {
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *DmaBenchmarkNumaAllocator = @ptrCast(@alignCast(ctx));
         const allocation = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
-        const node = self.node;
+        const node = self.node orelse return allocation;
         if (comptime builtin.os.tag != .linux) {
             self.parent.rawFree(allocation[0..len], alignment, ret_addr);
             return null;
@@ -4494,11 +4494,24 @@ const DmaBenchmarkSourcePools = struct {
         var unique_nodes: std.AutoHashMapUnmanaged(usize, void) = .empty;
         defer unique_nodes.deinit(allocator);
         for (device_numa_nodes) |node| try unique_nodes.put(allocator, node, {});
-        const pool_count = unique_nodes.count();
+        const pool_count = if (device_numa_nodes.len == 0) 1 else unique_nodes.count();
         const pools = try allocator.alloc(DmaBenchmarkSourcePool, pool_count);
         errdefer allocator.free(pools);
         const device_pool_indices = try allocator.alloc(usize, platform.devices.len);
         errdefer allocator.free(device_pool_indices);
+
+        if (device_numa_nodes.len == 0) {
+            const pool = &pools[0];
+            pool.numa_allocator = .{ .parent = allocator, .node = null };
+            pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
+            pool.source = &.{};
+            @memset(device_pool_indices, 0);
+            return .{
+                .allocator = allocator,
+                .pools = pools,
+                .device_pool_indices = device_pool_indices,
+            };
+        }
 
         var nodes: std.ArrayListUnmanaged(usize) = .empty;
         defer nodes.deinit(allocator);
@@ -4542,7 +4555,7 @@ const DmaBenchmarkSourcePools = struct {
     }
 
     fn verifyNumaPlacement(self: *DmaBenchmarkSourcePools, pool: *const DmaBenchmarkSourcePool) !usize {
-        const node = pool.numa_allocator.node;
+        const node = pool.numa_allocator.node orelse return 0;
         if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
         const page_count = std.math.divCeil(usize, pool.source.len, std.heap.page_size_min) catch unreachable;
         const sample_count = @min(page_count, 256);
@@ -4594,12 +4607,19 @@ const DmaBenchmarkSourcePools = struct {
         if (pool.source.len != 0) dma_allocator.free(pool.source);
         pool.source = replacement;
         const verified_pages = try self.verifyNumaPlacement(pool);
-        log.info("DMA benchmark source pool numa_node={d} address=0x{x} size={Bi:.2} verified_pages={d}", .{
-            pool.numa_allocator.node,
-            @intFromPtr(pool.source.ptr),
-            pool.source.len,
-            verified_pages,
-        });
+        if (pool.numa_allocator.node) |node| {
+            log.info("DMA benchmark source pool numa_node={d} address=0x{x} size={Bi:.2} verified_pages={d}", .{
+                node,
+                @intFromPtr(pool.source.ptr),
+                pool.source.len,
+                verified_pages,
+            });
+        } else {
+            log.info("DMA benchmark source pool numa_node=single address=0x{x} size={Bi:.2}", .{
+                @intFromPtr(pool.source.ptr),
+                pool.source.len,
+            });
+        }
     }
 };
 
@@ -5717,12 +5737,15 @@ pub fn benchmarkDma(
             has_feasible_block = true;
     }
     if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
-    if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
-    if (opts.device_numa_nodes.len != platform.devices.len)
+    if (opts.device_numa_nodes.len != 0 and
+        opts.device_numa_nodes.len != platform.devices.len)
         return error.InvalidDmaBenchmarkOptions;
-    for (opts.device_numa_nodes) |node| {
-        if (node >= DmaBenchmarkNumaAllocator.max_nodes)
-            return error.InvalidDmaBenchmarkOptions;
+    if (opts.device_numa_nodes.len != 0) {
+        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
+        for (opts.device_numa_nodes) |node| {
+            if (node >= DmaBenchmarkNumaAllocator.max_nodes)
+                return error.InvalidDmaBenchmarkOptions;
+        }
     }
 
     const tensor_count = meta.count(Tensor, model);
