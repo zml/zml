@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const platforms = @import("platforms");
 
 const zml = @import("../../zml.zig");
@@ -61,7 +59,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
                 token_index: zml.Tensor,
                 parameters: Parameters,
 
-                fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                fn body(self: @This(), output: zml.Shape) zml.Tensor {
                     const kernel = self.parameters.decode_kernel;
                     return zml.ops.neuronNki(
                         .{ self.q, self.k, self.v, self.token_index },
@@ -93,7 +91,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             v: zml.Tensor,
             parameters: Parameters,
 
-            fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+            fn body(self: @This(), output: zml.Shape) zml.Tensor {
                 const kernel = self.parameters.prefill_kernel;
                 return zml.ops.neuronNki(
                     .{ self.q, self.k, self.v },

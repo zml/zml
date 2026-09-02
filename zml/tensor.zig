@@ -4594,7 +4594,7 @@ pub const Tensor = struct {
                     input: Tensor,
                     name: []const u8,
 
-                    fn body(body_ctx: @This(), _: std.mem.Allocator, _: void) void {
+                    fn body(body_ctx: @This(), _: void) void {
                         ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
                 }).body, .{ .input = input, .name = full_name }, {});

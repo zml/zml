@@ -252,7 +252,6 @@ pub fn forwardMoe(
 
                             fn body(
                                 self: @This(),
-                                _: std.mem.Allocator,
                                 _: zml.Shape,
                             ) zml.Tensor {
                                 const local_num_experts = self.gate_up_weight_unpacked.dim(.expert);
@@ -355,7 +354,6 @@ pub fn forwardMoe(
 
                         fn body(
                             self: @This(),
-                            _: std.mem.Allocator,
                             _: zml.Shape,
                         ) zml.Tensor {
                             const local_num_experts = self.weights_gate_up.dim(.expert);
@@ -469,7 +467,7 @@ pub fn forwardMoe(
                     scales_gate_up: ?zml.Tensor,
                     scales_down: ?zml.Tensor,
 
-                    fn call(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                    fn call(self: @This(), _: zml.Shape) zml.Tensor {
                         const local_num_experts = self.weights_gate_up.dim(.expert);
                         const partition_id = zml.ops.partitionId().convert(.i32);
                         const expert_start = partition_id.scale(local_num_experts).convert(.i32);
@@ -549,7 +547,7 @@ pub fn forwardMoe(
                         down_scales: ?zml.Tensor,
                         bias_down: ?zml.Tensor,
 
-                        fn body(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), _: zml.Shape) zml.Tensor {
                             const local_num_experts = self.weights_gate_up.dim(.expert);
                             const partition_id = zml.ops.partitionId().convert(.i32);
                             const expert_start = partition_id.scale(local_num_experts).convert(.i32);

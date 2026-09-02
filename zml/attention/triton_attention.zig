@@ -351,7 +351,7 @@ pub const paged = struct {
                 opts: AttentionOptions,
                 options: Options,
 
-                fn body(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
                     const parameters_: Parameters = .{
                         .block_table = self.block_table,
                         .seq_lens = self.seq_lens,
@@ -996,7 +996,7 @@ pub const paged = struct {
                 opts: MlaOptions,
                 options: Options,
 
-                fn body(self: @This(), _: std.mem.Allocator, _: zml.Shape) zml.Tensor {
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
                     const block_size = self.kv_cache.dim(.k_chunk);
 
                     const parameters_: Parameters = .{

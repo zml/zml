@@ -43,7 +43,7 @@ const DemoModel = struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
 
-                fn body(ctx: @This(), _: std.mem.Allocator, output_sharded: zml.Shape) zml.Tensor {
+                fn body(ctx: @This(), output_sharded: zml.Shape) zml.Tensor {
                     const local_result = ctx.y.relu().mul(ctx.gate);
                     return local_result.reshape(output_sharded);
                 }

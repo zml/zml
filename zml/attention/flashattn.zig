@@ -958,7 +958,7 @@ pub const paged_fa2 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,
@@ -1044,7 +1044,7 @@ pub const paged_fa2 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Prefill.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,
@@ -1119,7 +1119,7 @@ pub const paged_fa2 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,
@@ -1596,7 +1596,7 @@ pub const paged_fa3 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,
@@ -1673,7 +1673,7 @@ pub const paged_fa3 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Prefill.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,
@@ -1738,7 +1738,7 @@ pub const paged_fa3 = struct {
                         },
                         opts: zml.ops.CustomCallOptions,
 
-                        fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
                             return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
                         }
                     }).body,

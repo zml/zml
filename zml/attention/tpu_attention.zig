@@ -233,7 +233,7 @@ pub const mosaic_tpu = struct {
                 opts: AttentionOptions,
                 parameters: Parameters,
 
-                fn body(self: @This(), _: std.mem.Allocator, output: zml.Shape) zml.Tensor {
+                fn body(self: @This(), output: zml.Shape) zml.Tensor {
                     const prepared_inputs: PreparedInputs = .{
                         .q = self.q,
                         .kv_pages = self.kv_pages,
