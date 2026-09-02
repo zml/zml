@@ -23,33 +23,33 @@ jobs:
             self_hosted: false
             run_tests: true
             runner_labels:
-              - runs-on
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu
               - runner=16cpu-linux-x64
               - family=c8+c7
               - image=ubuntu24-amd64
-              - run-id=${{ github.run_id }}
+              - volume=80gb
               - extras=s3-cache
           - target: neuron
             bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
             self_hosted: false
             run_tests: false
             runner_labels:
-              - runs-on
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron
               - runner=16cpu-linux-x64
               - family=c8+c7
               - image=ubuntu24-amd64
-              - run-id=${{ github.run_id }}
+              - volume=80gb
               - extras=s3-cache
           - target: tpu
             bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
             self_hosted: false
             run_tests: false
             runner_labels:
-              - runs-on
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu
               - runner=16cpu-linux-x64
               - family=c8+c7
               - image=ubuntu24-amd64
-              - run-id=${{ github.run_id }}
+              - volume=80gb
               - extras=s3-cache
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
@@ -98,13 +98,11 @@ jobs:
 
   lint:
     runs-on:
-      [
-        "runs-on",
-        "runner=4cpu-linux-x64",
-        "image=ubuntu24-amd64",
-        "run-id=${{ github.run_id }}",
-        "extras=s3-cache",
-      ]
+      - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-lint
+      - runner=4cpu-linux-x64
+      - image=ubuntu24-amd64
+      - volume=80gb
+      - extras=s3-cache
     steps:
       - uses: runs-on/action@v2.1.0
       - name: Checkout
