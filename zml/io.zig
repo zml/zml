@@ -24,8 +24,13 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
+    pub const Binding = struct {
+        tensors: []*safetensors.Tensor,
+        transformed: bool,
+    };
+
     registry: *safetensors.TensorRegistry,
-    id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, []*safetensors.Tensor),
+    id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
@@ -44,7 +49,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
-    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
+    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
@@ -70,8 +75,8 @@ pub const TensorStore = struct {
 
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
         const sources = self.id_to_sources.get(id) orelse return null;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
-        return sources[0];
+        stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
+        return sources.tensors[0];
     }
 
     pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
@@ -80,12 +85,12 @@ pub const TensorStore = struct {
 
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         const sources = self.id_to_sources.get(id) orelse return error.NotFound;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
+        stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
 
-        return sources[0].reader(io, buffer, .{});
+        return sources.tensors[0].reader(io, buffer, .{});
     }
 
-    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?[]*safetensors.Tensor {
+    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
         return self.id_to_sources.get(id);
     }
 
@@ -170,7 +175,7 @@ pub const TensorStore = struct {
             shape = applyPartitioning(shape, partitioning);
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, sources) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
         }
@@ -229,7 +234,7 @@ pub const TensorStore = struct {
             errdefer arena.free(tensors);
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, tensors) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = true }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
         }
@@ -285,6 +290,7 @@ pub const Loader = struct {
     pinned_buffer_pools: []mem.DynamicBufferPool,
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
+    delivered: std.AutoHashMapUnmanaged(Tensor.Id, void) = .empty,
 
     pub const Opts = struct {
         pub const default: Opts = .{
@@ -324,7 +330,8 @@ pub const Loader = struct {
         };
     }
 
-    pub fn deinit(self: Loader) void {
+    pub fn deinit(self: *Loader) void {
+        self.delivered.deinit(self.allocator);
         for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
         self.allocator.free(self.pinned_buffer_pools);
         self.allocator.free(self.dma_allocators);
@@ -338,7 +345,9 @@ pub const Loader = struct {
         progress: ?*std.Progress.Node = null,
     };
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+    pub const LoadError = error{TransformedTensorNotDelivered};
+
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -351,29 +360,50 @@ pub const Loader = struct {
             }
         }.call, .{flattened_buffers});
 
-        const Ctx = struct {
-            self: *Loader,
-            io: std.Io,
-            store: *const TensorStore,
-            shardings: []const Sharding,
-            buffers: []*Buffer,
-            opts: LoadOpts,
-        };
-
-        var ctx: Ctx = .{
-            .self = self,
-            .io = io,
-            .store = store,
-            .shardings = shardings,
-            .buffers = flattened_buffers,
-            .opts = opts,
-        };
-
+        const flattened_tensors = arena.allocator().alloc(*const Tensor, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
         meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, ctx_: *Ctx) void {
-                ctx_.self.group.async(ctx_.io, defaultCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
+            fn call(i: usize, tensor: *const Tensor, flattened_tensors_: []*const Tensor) void {
+                flattened_tensors_[i] = tensor;
             }
-        }.call, .{&ctx});
+        }.call, .{flattened_tensors});
+
+        // Refuse before scheduling anything, so a failure leaves no task in flight.
+        var missing: usize = 0;
+        for (flattened_tensors) |tensor| {
+            const sources = store.getSourcesById(tensor.id) orelse continue;
+            if (!sources.transformed or self.delivered.contains(tensor.id)) {
+                continue;
+            }
+
+            missing += 1;
+            logNotDelivered(arena.allocator(), tensor, sources.tensors);
+        }
+
+        if (missing != 0) {
+            return error.TransformedTensorNotDelivered;
+        }
+
+        for (flattened_tensors, flattened_buffers) |tensor, buffer| {
+            if (store.getSourcesById(tensor.id)) |sources| {
+                if (sources.transformed) continue;
+            }
+
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, shardings, opts });
+        }
+    }
+
+    fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []const *safetensors.Tensor) void {
+        const max_names = 8;
+        var names: std.Io.Writer.Allocating = .init(arena);
+        for (sources[0..@min(sources.len, max_names)], 0..) |source, i| {
+            names.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name }) catch break;
+        }
+
+        if (sources.len > max_names) {
+            names.writer.print(" and {} more", .{sources.len - max_names}) catch {};
+        }
+
+        log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
     }
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
@@ -381,13 +411,9 @@ pub const Loader = struct {
             std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
+        stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        if (sources.len != 1) {
-            log.debug("Skipping fused tensor with {} sources; expected to be loaded via loadExecute", .{sources.len});
-            return;
-        }
-
-        self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, shardings, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
@@ -397,6 +423,7 @@ pub const Loader = struct {
         self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
+            return;
         };
         loaded.* = true;
     }
@@ -452,7 +479,7 @@ pub const Loader = struct {
         exe: *const Exe,
         opts: LoadOpts,
     ) !void {
-        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
+        const sources = (store.getSourcesById(tensor.id) orelse return error.NotFound).tensors;
         const buffers = try arena.alloc(Buffer, sources.len);
         const loaded = try arena.alloc(bool, sources.len);
         @memset(loaded, false);
@@ -485,6 +512,7 @@ pub const Loader = struct {
         exe.callOpts(io, args, &results, .{ .wait = true });
 
         buffer.* = results.get(Buffer);
+        try self.delivered.put(self.allocator, tensor.id, {});
     }
 };
 
