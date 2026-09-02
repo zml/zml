@@ -4603,6 +4603,7 @@ const GlobalDmaRecommendation = struct {
 const GlobalDmaCandidate = struct {
     parallelism: usize,
     bytes_per_second: f64,
+    baseline_bytes_per_second: f64,
     average_latency_ns: f64,
     min_device_retention: f64,
     normalized_fairness: f64,
@@ -5080,8 +5081,8 @@ pub const BenchTransferOptions = struct {
     /// Prefer a smaller transaction once it supplies enough headroom over the
     /// source pipeline instead of maximizing isolated copy-engine throughput.
     block_selection_tolerance: f64 = 0.08,
-    /// A global cap must stay much closer to peak throughput because it is a
-    /// shared runtime constraint rather than a per-device setting.
+    /// A global cap must beat uncapped throughput by this margin because it is
+    /// a persistent runtime constraint rather than a per-device setting.
     global_parallelism_selection_tolerance: f64 = 0.02,
     /// Prevent aggregate throughput from hiding one under-served shard.
     global_min_device_retention: f64 = 0.95,
@@ -5164,10 +5165,33 @@ const DmaBenchmarkNumaAllocator = struct {
     }
 };
 
+const DmaBenchmarkSourceAllocation = union(enum) {
+    dma_map: []u8,
+    pjrt_host: pjrt.Client.HostMemoryAllocation,
+
+    fn data(self: *const DmaBenchmarkSourceAllocation) []u8 {
+        return switch (self.*) {
+            .dma_map => |bytes| bytes,
+            .pjrt_host => |allocation| allocation.data,
+        };
+    }
+
+    fn deinit(
+        self: DmaBenchmarkSourceAllocation,
+        dma_map_allocator: std.mem.Allocator,
+    ) void {
+        switch (self) {
+            .dma_map => |bytes| dma_map_allocator.free(bytes),
+            .pjrt_host => |allocation| allocation.deinit(),
+        }
+    }
+};
+
 const DmaBenchmarkSourcePool = struct {
     numa_allocator: DmaBenchmarkNumaAllocator,
     dma_map_allocator: mem.DmaMapAllocator,
-    allocations: std.ArrayListUnmanaged([]u8) = .empty,
+    use_pjrt_host_allocator: bool,
+    allocations: std.ArrayListUnmanaged(DmaBenchmarkSourceAllocation) = .empty,
     source: []u8 = &.{},
 };
 
@@ -5209,6 +5233,7 @@ fn fixedDmaArenaSizes(
 const DmaBenchmarkSourcePools = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    platform: *const Platform,
     pools: []DmaBenchmarkSourcePool,
     device_pool_indices: []usize,
     device_sources: [][]const u8,
@@ -5236,17 +5261,21 @@ const DmaBenchmarkSourcePools = struct {
         const device_sources = try allocator.alloc([]const u8, platform.devices.len);
         errdefer allocator.free(device_sources);
         @memset(device_sources, &.{});
+        const use_pjrt_host_allocator =
+            platform.pjrt_api.extension(.host_memory_allocator) != null;
 
         if (unique_nodes.count() == 0) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
             pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
+            pool.use_pjrt_host_allocator = use_pjrt_host_allocator;
             pool.allocations = .empty;
             pool.source = &.{};
             @memset(device_pool_indices, 0);
             return .{
                 .allocator = allocator,
                 .io = io,
+                .platform = platform,
                 .pools = pools,
                 .device_pool_indices = device_pool_indices,
                 .device_sources = device_sources,
@@ -5274,6 +5303,7 @@ const DmaBenchmarkSourcePools = struct {
                 const pool = &pools[pool_index.?];
                 pool.numa_allocator = .{ .parent = allocator, .node = node };
                 pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
+                pool.use_pjrt_host_allocator = use_pjrt_host_allocator;
                 pool.allocations = .empty;
                 pool.source = &.{};
             }
@@ -5283,6 +5313,7 @@ const DmaBenchmarkSourcePools = struct {
         return .{
             .allocator = allocator,
             .io = io,
+            .platform = platform,
             .pools = pools,
             .device_pool_indices = device_pool_indices,
             .device_sources = device_sources,
@@ -5293,7 +5324,7 @@ const DmaBenchmarkSourcePools = struct {
     fn deinit(self: *DmaBenchmarkSourcePools) void {
         for (self.pools) |*pool| {
             for (pool.allocations.items) |allocation| {
-                pool.dma_map_allocator.allocator().free(allocation);
+                allocation.deinit(pool.dma_map_allocator.allocator());
             }
             pool.allocations.deinit(self.allocator);
         }
@@ -5320,7 +5351,7 @@ const DmaBenchmarkSourcePools = struct {
         var index = pool.allocations.items.len;
         while (index != 0) {
             index -= 1;
-            const arena = pool.allocations.items[index];
+            const arena = pool.allocations.items[index].data();
             if (arena.len >= minimum_len) return arena;
         }
         unreachable;
@@ -5339,30 +5370,45 @@ const DmaBenchmarkSourcePools = struct {
     fn allocatePool(self: *DmaBenchmarkSourcePools, pool_index: usize, required_bytes: usize) !void {
         const pool = &self.pools[pool_index];
         const started = std.Io.Timestamp.now(self.io, .awake);
-        const dma_allocator = pool.dma_map_allocator.allocator();
-        const replacement = try dma_allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(std.heap.page_size_min),
-            required_bytes,
-        );
-        errdefer dma_allocator.free(replacement);
+        var allocation: DmaBenchmarkSourceAllocation = if (pool.use_pjrt_host_allocator)
+            .{ .pjrt_host = (try self.platform.pjrt_client.hostMemoryAllocate(
+                self.platform.pjrt_api,
+                required_bytes,
+                pool.numa_allocator.node,
+            )) orelse return error.OutOfMemory }
+        else blk: {
+            const dma_map_allocator = pool.dma_map_allocator.allocator();
+            break :blk .{ .dma_map = try dma_map_allocator.alignedAlloc(
+                u8,
+                .fromByteUnits(std.heap.page_size_min),
+                required_bytes,
+            ) };
+        };
+        errdefer allocation.deinit(pool.dma_map_allocator.allocator());
         const mapped_at = std.Io.Timestamp.now(self.io, .awake);
-        try pool.allocations.append(self.allocator, replacement);
+        try pool.allocations.append(self.allocator, allocation);
+        const replacement = allocation.data();
         _ = self.allocated_bytes.fetchAdd(replacement.len, .release);
         pool.source = replacement;
         const finished_at = std.Io.Timestamp.now(self.io, .awake);
-        const map_ns: u64 = @intCast(@max(started.durationTo(mapped_at).nanoseconds, 0));
+        const map_ns: u64 = if (pool.use_pjrt_host_allocator)
+            0
+        else
+            @intCast(@max(started.durationTo(mapped_at).nanoseconds, 0));
         const elapsed_ns: u64 = @intCast(@max(started.durationTo(finished_at).nanoseconds, 0));
+        const allocation_kind = if (pool.use_pjrt_host_allocator) "pjrt_host" else "dma_map";
         if (pool.numa_allocator.node) |node| {
-            log.info("DMA mapped arena numa_node={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
+            log.info("DMA mapped arena numa_node={d} allocator={s} address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
                 node,
+                allocation_kind,
                 @intFromPtr(pool.source.ptr),
                 pool.source.len,
                 @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
                 @as(f64, @floatFromInt(map_ns)) / std.time.ns_per_ms,
             });
         } else {
-            log.info("DMA mapped arena numa_node=single address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
+            log.info("DMA mapped arena numa_node=single allocator={s} address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
+                allocation_kind,
                 @intFromPtr(pool.source.ptr),
                 pool.source.len,
                 @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
@@ -5507,7 +5553,7 @@ const DmaBenchmarkSourcePools = struct {
                 usable_blocks = std.math.add(
                     usize,
                     usable_blocks,
-                    arena.len / block_size,
+                    arena.data().len / block_size,
                 ) catch return error.DmaMappedBudgetExceeded;
             }
             const required_blocks = @max(reserve, request_blocks);
@@ -5584,7 +5630,7 @@ const DmaBenchmarkSourcePools = struct {
             .arenaFn = struct {
                 fn call(context: *anyopaque, node_index: usize, arena_index: usize) []u8 {
                     const pools: *DmaBenchmarkSourcePools = @ptrCast(@alignCast(context));
-                    return pools.pools[node_index].allocations.items[arena_index];
+                    return pools.pools[node_index].allocations.items[arena_index].data();
                 }
             }.call,
             .allocateFn = struct {
@@ -5600,7 +5646,7 @@ const DmaBenchmarkSourcePools = struct {
                     ));
                     return pools.pools[node_index].allocations.items[
                         pools.pools[node_index].allocations.items.len - 1
-                    ];
+                    ].data();
                 }
             }.call,
             .mappedBytesFn = struct {
@@ -6776,10 +6822,57 @@ fn globalDmaCandidate(
     return .{
         .parallelism = parallelism,
         .bytes_per_second = aggregate.bytesPerSecond(),
+        .baseline_bytes_per_second = combinedDmaMetrics(uncapped_metrics).bytesPerSecond(),
         .average_latency_ns = aggregate.averageLatencyNs(),
         .min_device_retention = min_device_retention,
         .normalized_fairness = normalized_fairness,
     };
+}
+
+fn globalDmaCandidatePreservesDevices(
+    candidate: GlobalDmaCandidate,
+    opts: DmaBenchmarkOpts,
+) bool {
+    if (candidate.min_device_retention < opts.global_min_device_retention)
+        return false;
+    // Fairness protects against trading one device's throughput for another's.
+    // Once every device improved, unequal gains are not a regression.
+    return candidate.min_device_retention >= 1.0 or
+        candidate.normalized_fairness >= opts.global_fairness_floor;
+}
+
+fn globalDmaLimitHasStrongEvidence(
+    uncapped: GlobalDmaCandidate,
+    candidate: GlobalDmaCandidate,
+    opts: DmaBenchmarkOpts,
+) bool {
+    if (candidate.parallelism >= uncapped.parallelism or
+        candidate.baseline_bytes_per_second == 0)
+        return false;
+    return candidate.bytes_per_second >=
+        candidate.baseline_bytes_per_second *
+            (1.0 + opts.global_parallelism_selection_tolerance) and
+        globalDmaCandidatePreservesDevices(candidate, opts);
+}
+
+fn globalDmaThroughputGain(candidate: GlobalDmaCandidate) f64 {
+    if (candidate.baseline_bytes_per_second == 0) return 0;
+    return candidate.bytes_per_second / candidate.baseline_bytes_per_second;
+}
+
+fn globalDmaRunsDoNotRegress(
+    candidate_runs: []const []const DmaBenchmarkRunMetrics,
+    uncapped_runs: []const []const DmaBenchmarkRunMetrics,
+    opts: DmaBenchmarkOpts,
+) bool {
+    std.debug.assert(candidate_runs.len == uncapped_runs.len);
+    for (candidate_runs, uncapped_runs) |candidate_metrics, uncapped_metrics| {
+        const candidate = globalDmaCandidate(1, candidate_metrics, uncapped_metrics);
+        const uncapped = globalDmaCandidate(2, uncapped_metrics, uncapped_metrics);
+        if (candidate.bytes_per_second < uncapped.bytes_per_second or
+            !globalDmaCandidatePreservesDevices(candidate, opts)) return false;
+    }
+    return true;
 }
 
 fn selectGlobalDmaCandidate(
@@ -6787,42 +6880,31 @@ fn selectGlobalDmaCandidate(
     opts: DmaBenchmarkOpts,
 ) ?GlobalDmaCandidate {
     if (candidates.len == 0) return null;
-    var peak_rate: f64 = 0;
-    for (candidates) |candidate| peak_rate = @max(peak_rate, candidate.bytes_per_second);
-    const throughput_floor = peak_rate * (1.0 - opts.global_parallelism_selection_tolerance);
     var uncapped = candidates[0];
     for (candidates[1..]) |candidate| {
         if (candidate.parallelism > uncapped.parallelism) uncapped = candidate;
     }
+
+    var peak_beneficial_gain: f64 = 0;
+    for (candidates) |candidate| {
+        if (globalDmaLimitHasStrongEvidence(uncapped, candidate, opts))
+            peak_beneficial_gain = @max(
+                peak_beneficial_gain,
+                globalDmaThroughputGain(candidate),
+            );
+    }
+    if (peak_beneficial_gain == 0) return uncapped;
+
+    const throughput_gain_floor = peak_beneficial_gain *
+        (1.0 - opts.global_parallelism_selection_tolerance);
     var selected: ?GlobalDmaCandidate = null;
     for (candidates) |candidate| {
-        if (candidate.bytes_per_second < throughput_floor or
-            candidate.min_device_retention < opts.global_min_device_retention or
-            candidate.normalized_fairness < opts.global_fairness_floor) continue;
-        if (selected == null or candidate.parallelism < selected.?.parallelism) selected = candidate;
+        if (!globalDmaLimitHasStrongEvidence(uncapped, candidate, opts) or
+            globalDmaThroughputGain(candidate) < throughput_gain_floor) continue;
+        if (selected == null or candidate.parallelism < selected.?.parallelism)
+            selected = candidate;
     }
-    return selected;
-}
-
-fn shouldRecommendGlobalDmaLimit(
-    uncapped: GlobalDmaCandidate,
-    candidate: GlobalDmaCandidate,
-    uncapped_parallelism: usize,
-    opts: DmaBenchmarkOpts,
-) bool {
-    if (candidate.parallelism >= uncapped_parallelism) return false;
-    const uncapped_rate = uncapped.bytes_per_second;
-    const candidate_rate = candidate.bytes_per_second;
-    const throughput_gain = if (uncapped_rate == 0) 0 else candidate_rate / uncapped_rate;
-    // Keep hysteresis around the two-times boundary so measurement noise does
-    // not turn an almost-half latency into a machine-wide runtime constraint.
-    const latency_improvement = candidate.average_latency_ns * 2 <=
-        uncapped.average_latency_ns *
-            (1.0 - 2.0 * opts.global_parallelism_selection_tolerance);
-    const keeps_throughput = candidate_rate >=
-        uncapped_rate * (1.0 - opts.global_parallelism_selection_tolerance);
-    return throughput_gain >= 1.0 + opts.global_parallelism_selection_tolerance or
-        (latency_improvement and keeps_throughput);
+    return selected orelse uncapped;
 }
 
 fn warmupDmaBenchmarkDeviceAllocators(
@@ -7229,26 +7311,32 @@ fn benchmarkSyntheticDma(
     errdefer global_candidates.deinit(allocator);
     for (caps.items, 0..) |cap, candidate_index| {
         const candidate_runs = runs[candidate_index * dma_benchmark_global_repeats .. (candidate_index + 1) * dma_benchmark_global_repeats];
-        const metrics = try representativeGlobalDmaRun(allocator, candidate_runs);
+        const paired_index = if (candidate_index == uncapped_index)
+            try medianCombinedDmaRunIndex(allocator, candidate_runs)
+        else
+            try medianPairedDmaRunIndex(allocator, candidate_runs, uncapped_runs);
         try global_candidates.append(allocator, globalDmaCandidate(
             cap,
-            metrics,
-            uncapped_metrics,
+            candidate_runs[paired_index],
+            uncapped_runs[paired_index],
         ));
     }
     var final_uncapped_metrics = uncapped_metrics;
     var uncapped_verification_windows: usize = dma_benchmark_global_repeats;
     var uncapped_candidate = global_candidates.items[global_candidates.items.len - 1];
     const selected_candidate = selectGlobalDmaCandidate(global_candidates.items, opts);
-    var recommended_candidate: ?GlobalDmaCandidate = if (selected_candidate) |candidate|
-        if (shouldRecommendGlobalDmaLimit(
-            uncapped_candidate,
-            candidate,
-            total_parallelism,
-            opts,
-        )) candidate else null
-    else
-        null;
+    var recommended_candidate: ?GlobalDmaCandidate = null;
+    if (selected_candidate) |candidate| {
+        if (candidate.parallelism < total_parallelism) {
+            for (caps.items, 0..) |cap, candidate_index| {
+                if (cap != candidate.parallelism) continue;
+                const candidate_runs = runs[candidate_index * dma_benchmark_global_repeats .. (candidate_index + 1) * dma_benchmark_global_repeats];
+                if (globalDmaRunsDoNotRegress(candidate_runs, uncapped_runs, opts))
+                    recommended_candidate = candidate;
+                break;
+            }
+        }
+    }
 
     var confirmation_runs: [][]DmaBenchmarkRunMetrics = &.{};
     defer {
@@ -7304,12 +7392,10 @@ fn benchmarkSyntheticDma(
         );
         recommended_candidate = if (confirmed_selection) |confirmed|
             if (confirmed.parallelism == candidate.parallelism and
-                shouldRecommendGlobalDmaLimit(
-                    uncapped_candidate,
-                    confirmed,
-                    total_parallelism,
-                    opts,
-                )) confirmed else null
+                globalDmaRunsDoNotRegress(candidate_runs, baseline_runs, opts))
+                confirmed
+            else
+                null
         else
             null;
         global_candidates.clearRetainingCapacity();
@@ -7398,7 +7484,7 @@ fn benchmarkSyntheticDma(
 }
 
 fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkReport) void {
-    log.info("dma_bench version=9 synthetic=true numa_pools={d} retained_mapped_bytes={d} platform={s} devices={d} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} source_registration_ms={d:.3} benchmark_setup_ms={d:.3} sampling_ms={d:.3} benchmark_overhead_ms={d:.3} windows={d}", .{
+    log.info("dma_bench version=11 synthetic=true numa_pools={d} retained_mapped_bytes={d} platform={s} devices={d} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} source_registration_ms={d:.3} benchmark_setup_ms={d:.3} sampling_ms={d:.3} benchmark_overhead_ms={d:.3} windows={d}", .{
         result.resources.numaPoolCount(),
         result.resources.retainedMappedBytes(),
         @tagName(platform.target),
@@ -7818,50 +7904,104 @@ test "DMA benchmark fair gate balances, rotates, and lends slots" {
     weighted.active_total = 0;
 }
 
-test "DMA benchmark global limit policy requires measured contention and benefit" {
+test "DMA benchmark global limit policy favors uncapped without throughput benefit" {
     const opts: DmaBenchmarkOpts = .{};
     const candidates = [_]GlobalDmaCandidate{
-        .{ .parallelism = 32, .bytes_per_second = 100, .average_latency_ns = 1_000, .min_device_retention = 1, .normalized_fairness = 0.999 },
-        .{ .parallelism = 4, .bytes_per_second = 96, .average_latency_ns = 300, .min_device_retention = 0.95, .normalized_fairness = 0.99 },
-        .{ .parallelism = 8, .bytes_per_second = 99, .average_latency_ns = 400, .min_device_retention = 0.97, .normalized_fairness = 0.995 },
+        .{ .parallelism = 32, .bytes_per_second = 100, .baseline_bytes_per_second = 100, .average_latency_ns = 1_000, .min_device_retention = 1, .normalized_fairness = 0.999 },
+        .{ .parallelism = 4, .bytes_per_second = 96, .baseline_bytes_per_second = 100, .average_latency_ns = 300, .min_device_retention = 0.95, .normalized_fairness = 0.99 },
+        .{ .parallelism = 8, .bytes_per_second = 99, .baseline_bytes_per_second = 100, .average_latency_ns = 400, .min_device_retention = 0.97, .normalized_fairness = 0.995 },
     };
-    const selected = selectGlobalDmaCandidate(&candidates, opts).?;
-    try std.testing.expectEqual(@as(usize, 8), selected.parallelism);
-    try std.testing.expect(shouldRecommendGlobalDmaLimit(candidates[0], selected, 32, opts));
+    try std.testing.expectEqual(
+        @as(usize, 32),
+        selectGlobalDmaCandidate(&candidates, opts).?.parallelism,
+    );
+
+    const beneficial = [_]GlobalDmaCandidate{
+        candidates[0],
+        .{ .parallelism = 4, .bytes_per_second = 103, .baseline_bytes_per_second = 100, .average_latency_ns = 300, .min_device_retention = 0.98, .normalized_fairness = 0.99 },
+        .{ .parallelism = 8, .bytes_per_second = 105, .baseline_bytes_per_second = 100, .average_latency_ns = 400, .min_device_retention = 0.99, .normalized_fairness = 0.995 },
+    };
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        selectGlobalDmaCandidate(&beneficial, opts).?.parallelism,
+    );
+
+    // Each cap is paired with its own same-round baseline. Rank the measured
+    // gains instead of absolute rates from potentially different host states.
+    const mismatched_baselines = [_]GlobalDmaCandidate{
+        .{ .parallelism = 64, .bytes_per_second = 300, .baseline_bytes_per_second = 300, .average_latency_ns = 1_000, .min_device_retention = 1, .normalized_fairness = 1 },
+        .{ .parallelism = 4, .bytes_per_second = 110, .baseline_bytes_per_second = 100, .average_latency_ns = 300, .min_device_retention = 1.05, .normalized_fairness = 0.99 },
+        .{ .parallelism = 8, .bytes_per_second = 306, .baseline_bytes_per_second = 300, .average_latency_ns = 400, .min_device_retention = 1.01, .normalized_fairness = 0.999 },
+    };
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        selectGlobalDmaCandidate(&mismatched_baselines, opts).?.parallelism,
+    );
+
+    const all_devices_improve: GlobalDmaCandidate = .{
+        .parallelism = 8,
+        .bytes_per_second = 120,
+        .baseline_bytes_per_second = 100,
+        .average_latency_ns = 300,
+        .min_device_retention = 1.01,
+        .normalized_fairness = 0.90,
+    };
+    try std.testing.expect(globalDmaCandidatePreservesDevices(all_devices_improve, opts));
+    var one_device_regresses = all_devices_improve;
+    one_device_regresses.min_device_retention = 0.99;
+    try std.testing.expect(!globalDmaCandidatePreservesDevices(one_device_regresses, opts));
 
     const starved = [_]GlobalDmaCandidate{
         candidates[0],
-        .{ .parallelism = 8, .bytes_per_second = 101, .average_latency_ns = 300, .min_device_retention = 0.80, .normalized_fairness = 0.90 },
+        .{ .parallelism = 8, .bytes_per_second = 105, .baseline_bytes_per_second = 100, .average_latency_ns = 300, .min_device_retention = 0.80, .normalized_fairness = 0.90 },
     };
     try std.testing.expectEqual(@as(usize, 32), selectGlobalDmaCandidate(&starved, opts).?.parallelism);
 
     const topology_asymmetric = [_]GlobalDmaCandidate{
-        .{ .parallelism = 16, .bytes_per_second = 90, .average_latency_ns = 600, .min_device_retention = 0.90, .normalized_fairness = 0.95 },
-        .{ .parallelism = 32, .bytes_per_second = 101, .average_latency_ns = 700, .min_device_retention = 1.02, .normalized_fairness = 0.995 },
-        .{ .parallelism = 64, .bytes_per_second = 80, .average_latency_ns = 1_000, .min_device_retention = 1, .normalized_fairness = 1 },
+        .{ .parallelism = 16, .bytes_per_second = 90, .baseline_bytes_per_second = 80, .average_latency_ns = 600, .min_device_retention = 0.90, .normalized_fairness = 0.95 },
+        .{ .parallelism = 32, .bytes_per_second = 101, .baseline_bytes_per_second = 80, .average_latency_ns = 700, .min_device_retention = 1.02, .normalized_fairness = 0.995 },
+        .{ .parallelism = 64, .bytes_per_second = 80, .baseline_bytes_per_second = 80, .average_latency_ns = 1_000, .min_device_retention = 1, .normalized_fairness = 1 },
     };
     try std.testing.expectEqual(
         @as(usize, 32),
         selectGlobalDmaCandidate(&topology_asymmetric, opts).?.parallelism,
     );
 
-    const no_benefit: GlobalDmaCandidate = .{
-        .parallelism = 16,
-        .bytes_per_second = 100,
-        .average_latency_ns = 900,
-        .min_device_retention = 0.99,
-        .normalized_fairness = 0.999,
+    const latency_only = [_]GlobalDmaCandidate{
+        candidates[0],
+        .{ .parallelism = 16, .bytes_per_second = 100, .baseline_bytes_per_second = 100, .average_latency_ns = 100, .min_device_retention = 0.99, .normalized_fairness = 0.999 },
     };
-    const borderline_latency: GlobalDmaCandidate = .{
-        .parallelism = 16,
-        .bytes_per_second = 99,
-        .average_latency_ns = 490,
-        .min_device_retention = 0.99,
-        .normalized_fairness = 0.999,
+    try std.testing.expectEqual(
+        @as(usize, 32),
+        selectGlobalDmaCandidate(&latency_only, opts).?.parallelism,
+    );
+
+    const uncapped_metrics = [_]DmaBenchmarkRunMetrics{
+        .{ .bytes = 100, .transfers = 10, .total_latency_ns = 100, .elapsed_ns = 100 },
     };
-    try std.testing.expect(!shouldRecommendGlobalDmaLimit(candidates[0], no_benefit, 32, opts));
-    try std.testing.expect(!shouldRecommendGlobalDmaLimit(candidates[0], borderline_latency, 32, opts));
-    try std.testing.expect(!shouldRecommendGlobalDmaLimit(candidates[0], candidates[0], 32, opts));
+    const faster_metrics = [_]DmaBenchmarkRunMetrics{
+        .{ .bytes = 103, .transfers = 10, .total_latency_ns = 100, .elapsed_ns = 100 },
+    };
+    const slower_metrics = [_]DmaBenchmarkRunMetrics{
+        .{ .bytes = 99, .transfers = 10, .total_latency_ns = 100, .elapsed_ns = 100 },
+    };
+    const consistent_runs = [_][]const DmaBenchmarkRunMetrics{
+        &faster_metrics,
+        &uncapped_metrics,
+        &faster_metrics,
+    };
+    const regressing_runs = [_][]const DmaBenchmarkRunMetrics{
+        &faster_metrics,
+        &slower_metrics,
+        &faster_metrics,
+    };
+    const uncapped_runs = [_][]const DmaBenchmarkRunMetrics{
+        &uncapped_metrics,
+        &uncapped_metrics,
+        &uncapped_metrics,
+    };
+    try std.testing.expect(globalDmaRunsDoNotRegress(&consistent_runs, &uncapped_runs, opts));
+    try std.testing.expect(!globalDmaRunsDoNotRegress(&regressing_runs, &uncapped_runs, opts));
 }
 
 fn loadBuffered(

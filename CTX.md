@@ -1,5 +1,137 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+## DMA-enabled XLA integration and current ROCm result (2026-09-02)
+
+The current XLA checkout is at detached commit `7a92ce868d` (`DMA support`),
+which is the required DMA change the user added to the active branch. The
+production plugin built from it makes the raw-buffer DMA path work correctly.
+On the replicated eight-MI300X Gemma load, the old plugin took 7.829 seconds;
+the DMA-enabled plugin reduced that to about 4.05 seconds before the allocator
+and topology work below. This is the relevant baseline for all new results;
+older 7.8--10.7-second model-load measurements in this file used the old
+plugin or deliberately constrained 8 MiB transfers.
+
+The XLA working tree now exposes its existing
+`PJRT_HostMemoryAllocator_Extension` from the GPU C API and constructs
+`BasicHostMemoryAllocator` with one executor allocator per unique NUMA node.
+An allocation request selects the exact NUMA allocator when available and
+falls back to the first allocator otherwise. ZML's PJRT bindings consume the
+extension, preserve its returned deleter, and request one exact-size arena per
+NUMA pool. Plugins without the extension retain the old anonymous-allocation
+plus `DmaMap` fallback. Ownership metadata is stored beside each arena rather
+than prepended to it: prepending even a small header to a 512 MiB request made
+XLA's BFC allocator round it into a larger size class and inflated two-arena
+allocation from 0.50 to 2.93 seconds.
+
+Automatic topology required a separate ZML fix. XLA publishes `numa_node` as
+a runtime `PjRtDevice::Attributes()` value, not as a static
+`PjRtDeviceDescription::Attributes()` value. ZML now uses
+`PJRT_Device_GetAttributes` for NUMA and releases the owned attribute state
+with PJRT's deleter. Static attributes such as coordinates remain on the
+description API. The automatic result correctly maps devices 0--3 to node 0
+and devices 4--7 to node 1; before this fix the missing attribute collapsed
+the benchmark into one node-0 2 GiB arena and limited synthetic throughput to
+193.6 GiB/s.
+
+With automatic topology and the default 32 MiB maximum arena sizing, two exact
+1 GiB arenas allocate concurrently in about 0.93--0.98 seconds and synthetic
+DMA reaches 339.4 GiB/s at the selected 16 MiB block, width eight, and no
+global cap. The real replicated Gemma load submitted and committed 466.01 GiB
+in 3.797 seconds and reported 3.837 seconds overall, while using both NUMA
+pools without pool growth or waits. Its detector again selected 16 MiB,
+width eight, and no cap. The synthetic setup is still dominated by roughly
+3.7--4.0 seconds of device BFC allocator warmup; that is destination-device
+memory initialization needed before the first H2D buffers, not host pinning or
+DMA calibration. A representative default run spent 0.93 seconds allocating
+the host arenas, 3.96 seconds warming device allocators, 0.89 seconds in
+calibration, and 5.78 seconds total. Diagnostic format is version 11.
+
+Running host-arena allocation concurrently with device-allocator warmup does
+not reduce that setup time. In the direct overlap control, warmup rose from
+about 3.96 to 4.96 seconds and the two-arena allocation rose from about 0.93
+to 1.56 seconds; their shared wall time was 4.96 seconds, essentially no better
+than the sequential sum and worse than the representative sequential run. The
+detector still chose 16 MiB, width eight, and no cap at 335.1 GiB/s, but the
+ROCm allocator/driver contention makes the added state machine unjustified.
+The overlap experiment was reverted.
+
+The dependency-free raw-buffer direct-enqueue scheduler experiment was not
+kept. It improved a synthetic microbenchmark by about 5.6%, but made the real
+replicated Gemma load about 3.4% slower. The current XLA diff is therefore
+limited to the host-memory allocator extension/NUMA support; it contains no
+scheduler change.
+
+The final XLA tree was formatted and rebuilt successfully with Bazel 7.7.0,
+the hermetic ROCm CI configuration, the baseline x86-64 configuration, local
+spawn strategy, and the requested disk cache. The unpatched plugin SHA-256 is
+`36fd1490b103dfefab0361951095c6f5dd64b07bfce91665e4845518c5006b2b`.
+The release-format archive is
+`/tmp/pjrt-rocm_linux-amd64.tar.gz` (127 MiB), SHA-256
+`7a0dc192bb7bd2246089318ae15cd1159856713f1f1bb304d7b0c8f64e503a7c`;
+it contains one root file named `libpjrt_rocm.so`. `platforms/rocm/rocm.bzl`
+must be switched to that archive's release URL and checksum after the archive
+is published. The local checkout has no authenticated release path, so the
+existing public artifact pin has deliberately not been replaced by an invalid
+or machine-local URL.
+
+A final run from that exact build again selected 16 MiB, width eight, and no
+global cap. The host was noisy in this run (198.1 GiB/s aggregate with a large
+node-to-node imbalance, versus 339.4 GiB/s in the representative control), so
+it triggered the conservative block-confirmation tail and took 1.91 seconds of
+calibration. Crucially, the cap policy still refused to persist a limit from
+the noisy samples.
+
+## Conservative global-cap selection and block-size controls (2026-09-02)
+
+The global DMA limit is now treated as a persistent performance constraint,
+not as a queue-latency optimization. Calibration defaults to no global cap and
+emits a smaller limit only when it has strong, repeatable evidence that the
+limit improves aggregate throughput. The representative capped result must
+beat uncapped by at least 2%, retain at least 95% of every device's uncapped
+throughput, and meet the 0.98 normalized-fairness floor. In addition, none of
+the three paired screening repeats may regress aggregate throughput, per-device
+retention, or fairness. A candidate that passes screening is measured for three
+more alternating capped/uncapped confirmation pairs and must satisfy the same
+aggregate and per-pair gates again. This is topology-independent: a real cap
+can still win, but latency alone and one unusually slow uncapped window cannot
+turn into a machine-wide runtime limit. The diagnostic format is version 10.
+
+This fixes the MI300X oscillation between cap 16/48 and uncapped 64. The source
+pool was not the cause: with the selected 16 MiB blocks, the global benchmark
+uses 64 distinct source slices (1 GiB total), one for each of eight slots on
+each of eight devices, while the fixed arenas retain 2 GiB. Every slot also has
+its own PJRT transfer manager. A cap-48 run initially appeared to win at
+344.0 versus 330.5 GiB/s, but its three screening pairs included one healthy
+regression (331.4 capped versus 334.4 uncapped), and a second full run confirmed
+uncapped at 341.6 versus 325.6 GiB/s. The stricter repeat gate rejects both
+cases without hardcoding a one-transfer-per-device or topology rule.
+
+Fresh fixed-block controls answer the 8 MiB versus 16 MiB question directly on
+this eight-MI300X machine. At 8 MiB the detector retained 512 MiB and measured
+uncapped at 292.1 GiB/s; cap 16 confirmed at only 279.2 GiB/s. At 16 MiB it
+retained 1 GiB and measured uncapped at 332.0 GiB/s. Its best screened cap was
+32 at 337.6 GiB/s, only 1.7% above uncapped and therefore below the evidence
+margin. Here 16 MiB is about 13.7% faster than 8 MiB globally, consistent with
+the replicated model-load control (7.829 seconds at 16 MiB versus 10.694
+seconds at 8 MiB). Historical accurate 8 MiB sweeps likewise had cap 16 around
+224--237 GiB/s and cap 64/uncapped around 251--263 GiB/s. There is no evidence
+that 8 MiB makes the global cap beneficial on this machine.
+
+The current XLA/PJRT ROCm path leaves measurable host-to-device performance on
+the table. Each device has one H2D stream; ZML's per-device width eight supplies
+queue depth to that stream rather than eight independently executing streams.
+For each already DMA-mapped, dependency-free copy,
+`PjRtStreamExecutorRawBuffer::CopyRawHostToDeviceAndReturnEvent` nevertheless
+posts the enqueue through XLA's unbounded async work runner, then records an
+event and schedules completion through the callback stream. Direct HIP controls
+with the same one-stream-per-device, NUMA split, and queue depth reached 390.8
+GiB/s at 16 MiB and 335.8 GiB/s at 8 MiB, versus PJRT's 332.0 and 292.1 GiB/s.
+That is a roughly 13--15% PJRT deficit. An isolated XLA experiment directly
+enqueued only dependency-free copies whose sources did not require staging;
+staged and dependent copies retained the asynchronous path. It improved the
+synthetic benchmark but regressed the real replicated model load, so it was
+reverted.
+
 ## Eager fixed DMA arena allocation experiment (2026-09-01)
 
 The working tree now allocates the complete host-pinned DMA workspace once,
@@ -183,14 +315,13 @@ direct copy control reached about 394 GiB/s. Concurrent node allocations did
 not reduce that approximately 1.28-second wall time further, but this is still
 7--9 times faster than the current ZML path without a DMA-throughput cost.
 
-The integration should use XLA ownership rather than link ZML directly to
-HIP. `RocmExecutor::HostMemoryAllocate` already calls
+The integration uses XLA ownership rather than linking ZML directly to HIP.
+`RocmExecutor::HostMemoryAllocate` already calls
 `hipHostMallocPortable`, and XLA already defines a version-zero
 `PJRT_HostMemoryAllocator_Extension` whose allocation request includes a NUMA
-node. The GPU C API does not yet add that extension to its extension chain,
-and `BasicHostMemoryAllocator` currently ignores `AllocateOptions.numa_node`
-and is constructed from the first executor only. Those are the XLA gaps to
-fix, followed by exposing the extension in ZML's PJRT bindings.
+node. The working XLA change adds that extension to the GPU API chain and makes
+`BasicHostMemoryAllocator` honor the requested node; ZML exposes and consumes
+it through its PJRT bindings.
 
 One ownership detail is essential. Calling `hipHostRegister` on a
 `hipHostMalloc` pointer returns `hipErrorHostMemoryAlreadyRegistered` in about

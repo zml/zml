@@ -187,6 +187,22 @@ pub const Api = struct {
     }
 
     pub const Extensions = struct {
+        pub const HostMemoryAllocatorAllocateArgs = extern struct {
+            struct_size: usize = @sizeOf(HostMemoryAllocatorAllocateArgs),
+            extension_start: ?*c.PJRT_Extension_Base = null,
+            client: ?*c.PJRT_Client,
+            size: usize,
+            numa_node: c_int,
+            ptr: ?[*]u8 = null,
+            deleter: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void = null,
+            deleter_arg: ?*anyopaque = null,
+        };
+
+        pub const HostMemoryAllocatorExtension = extern struct {
+            base: c.PJRT_Extension_Base,
+            allocate: *const fn (*HostMemoryAllocatorAllocateArgs) callconv(.c) ?*c.PJRT_Error,
+        };
+
         pub const Type = enum(c.PJRT_Extension_Type) {
             custom_call = c.PJRT_Extension_Type_Gpu_Custom_Call,
             profiler = c.PJRT_Extension_Type_Profiler,
@@ -197,6 +213,7 @@ pub const Api = struct {
             triton = c.PJRT_Extension_Type_Triton,
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
+            host_memory_allocator = c.PJRT_Extension_Type_HostMemoryAllocator,
             unknown = c.PJRT_Extension_Type_Unknown,
         };
 
@@ -210,6 +227,7 @@ pub const Api = struct {
             triton: *const c.PJRT_Triton_Extension,
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
+            host_memory_allocator: *const HostMemoryAllocatorExtension,
             unknown: *const c.PJRT_Extension_Base,
         };
 
@@ -577,6 +595,39 @@ pub const Client = opaque {
         });
     }
 
+    pub const HostMemoryAllocation = struct {
+        data: []u8,
+        deleter: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void,
+        deleter_arg: ?*anyopaque,
+
+        pub fn deinit(self: HostMemoryAllocation) void {
+            self.deleter(self.data.ptr, self.deleter_arg);
+        }
+    };
+
+    pub fn hostMemoryAllocate(
+        self: *const Client,
+        api: *const Api,
+        size: usize,
+        numa_node: ?usize,
+    ) ApiError!?HostMemoryAllocation {
+        const extension = api.extension(.host_memory_allocator) orelse return null;
+        var args: Api.Extensions.HostMemoryAllocatorAllocateArgs = .{
+            .client = self.inner(),
+            .size = size,
+            .numa_node = if (numa_node) |node| @intCast(node) else -1,
+        };
+        if (extension.host_memory_allocator.allocate(&args)) |pjrt_error| {
+            return interpretPjrtError(api, @ptrCast(pjrt_error), "PJRT_HostMemoryAllocator_Allocate");
+        }
+        const ptr = args.ptr orelse return null;
+        return .{
+            .data = ptr[0..size],
+            .deleter = args.deleter orelse return null,
+            .deleter_arg = args.deleter_arg,
+        };
+    }
+
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {
         shape_specs: []const ShapeSpec,
         device_layouts: ?[]*const MemoryLayout = null,
@@ -680,11 +731,47 @@ pub const Client = opaque {
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;
 
+    pub const Attributes = struct {
+        values: []const NamedValue,
+        state: *c.PJRT_Device_Attributes,
+        deleter: *const fn (?*c.PJRT_Device_Attributes) callconv(.c) void,
+
+        pub fn deinit(self: Attributes) void {
+            self.deleter(self.state);
+        }
+
+        pub fn get(self: Attributes, name: []const u8) ?NamedValue.Value {
+            for (self.values) |attribute| {
+                if (std.mem.eql(u8, attribute.name(), name))
+                    return attribute.value();
+            }
+            return null;
+        }
+    };
+
     pub fn getDescription(self: *const Device, api: *const Api) *const DeviceDescription {
         const ret = api.call(.PJRT_Device_GetDescription, .{
             .device = self.inner(),
         }) catch unreachable;
         return @ptrCast(ret.device_description.?);
+    }
+
+    /// Returns runtime device attributes. The values remain valid until the
+    /// returned owner is deinitialized.
+    pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
+        const ret = try api.call(.PJRT_Device_GetAttributes, .{
+            .device = self.inner(),
+        });
+        const state = ret.device_attributes orelse return error.Internal;
+        const deleter = ret.attributes_deleter orelse return error.Internal;
+        return .{
+            .values = if (ret.attributes == null)
+                &.{}
+            else
+                @ptrCast(ret.attributes[0..ret.num_attributes]),
+            .state = state,
+            .deleter = deleter,
+        };
     }
 
     pub fn isAddressable(self: *const Device, api: *const Api) bool {

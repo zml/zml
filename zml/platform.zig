@@ -191,9 +191,12 @@ pub const Device = struct {
         return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
     }
 
-    /// Returns the device's NUMA node when PJRT reports a valid one.
+    /// Returns the device's NUMA node when PJRT reports a valid one. NUMA is a
+    /// runtime device attribute, not part of the static topology description.
     pub fn numaNode(self: Device) ?usize {
-        const value = self.attribute("numa_node") orelse return null;
+        const attributes = self.pjrt_device.attributes(self.platform.pjrt_api) catch return null;
+        defer attributes.deinit();
+        const value = attributes.get("numa_node") orelse return null;
         return switch (value) {
             .int64 => |node| if (node >= 0) std.math.cast(usize, node) else null,
             else => null,
