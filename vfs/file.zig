@@ -131,6 +131,7 @@ pub const File = struct {
     pub fn backend(self: *File) Backend {
         return .{
             .io = self.io(),
+            .read_hints = .{ .read_chunk_size = 8 * 1024 * 1024 },
         };
     }
 

@@ -285,10 +285,12 @@ pub fn main(init: std.process.Init) !void {
                     .initial = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12),
                     .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
                 } };
+            const load_profile = try vfs.loadProfile(path);
 
             const loaded = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
                 .read_parallelism = load_read_parallelism,
+                .load_profile = load_profile,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });

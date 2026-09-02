@@ -141,7 +141,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
     try platform.warmupDeviceAllocators();
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    const load_profile = try vfs.loadProfile(args.model);
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings, load_profile);
     defer model.unloadBuffers(&model_buffers, allocator);
 
     progress.end();

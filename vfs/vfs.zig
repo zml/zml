@@ -25,10 +25,29 @@ const CWD_HANDLE: u32 = 0;
 const VFS = @This();
 const Handle = struct { handle: u32, backend_idx: ?usize, flags: std.Io.File.Flags = .{ .nonblocking = false } };
 
-pub const ReadProfile = struct {
-    id: usize,
-    scheme: []const u8,
-    hints: ReadHints,
+pub const LoadProfile = struct {
+    /// Generic fallback used by callers that do not prepare a profile from a
+    /// VFS path. This value is borrowed and does not require deinitialization.
+    pub const default: LoadProfile = .{
+        .name = "default",
+        .read_chunk_size = 16 * 1024 * 1024,
+        .high_latency = false,
+        .stats = null,
+    };
+
+    /// Local-file profile returned for paths without a registered URI scheme.
+    pub const local: LoadProfile = .{
+        .name = "local",
+        .read_chunk_size = 8 * 1024 * 1024,
+        .high_latency = false,
+        .stats = null,
+    };
+
+    name: []const u8,
+    /// Minimum source request size. The loader may increase it to match the
+    /// independently calibrated DMA block size.
+    read_chunk_size: usize,
+    high_latency: bool,
     stats: ?ReadStatsProvider,
 };
 
@@ -114,26 +133,25 @@ fn ioVTable() *const std.Io.VTable {
     });
 }
 
-/// Returns source-read information when `io_` is this VFS and `path` uses a
-/// registered backend. Other std.Io implementations retain local-file
-/// defaults without requiring a VFS wrapper.
-pub fn readProfileForPath(io_: std.Io, path: []const u8) ?ReadProfile {
-    if (io_.vtable != ioVTable()) return null;
-    const self: *VFS = @fieldParentPtr("base", VFSBase.as(io_.userdata));
-    const uri = std.Uri.parse(path) catch return null;
+/// Prepares the source tuning and feedback provider for one model load.
+/// Returned strings and providers borrow backend state, so this VFS and its
+/// registered backend must outlive the load.
+pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
+    if (std.mem.indexOf(u8, path, "://") == null) return .local;
+    const uri = std.Uri.parse(path) catch return error.VFSNotRegistered;
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
     for (self.backends.entries.items(.key), 0..) |scheme, index| {
         if (!std.mem.eql(u8, uri.scheme, scheme)) continue;
         const backend = self.backends.entries.items(.value)[index];
         return .{
-            .id = index + 1,
-            .scheme = scheme,
-            .hints = backend.read_hints,
+            .name = scheme,
+            .read_chunk_size = backend.read_hints.read_chunk_size,
+            .high_latency = backend.read_hints.high_latency,
             .stats = backend.read_stats,
         };
     }
-    return null;
+    return error.VFSNotRegistered;
 }
 
 fn openHandle(self: *VFS) !struct { u32, *Handle } {
@@ -454,17 +472,78 @@ fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.
     }
 }
 
-test "VFS exposes source read hints only for the matching registered scheme" {
+test "VFS prepares load profiles for local and registered paths" {
     var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
     defer filesystem.deinit();
     try filesystem.registerBackend("test", .{
         .io = std.testing.io,
-        .read_hints = .{ .high_latency = true },
+        .read_hints = .{
+            .read_chunk_size = 32 * 1024 * 1024,
+            .high_latency = true,
+        },
     });
 
-    const profile = VFS.readProfileForPath(filesystem.io(), "test://bucket/object").?;
-    try std.testing.expectEqualStrings("test", profile.scheme);
-    try std.testing.expect(profile.hints.high_latency);
-    try std.testing.expect(VFS.readProfileForPath(filesystem.io(), "/tmp/model.safetensors") == null);
-    try std.testing.expect(VFS.readProfileForPath(std.testing.io, "test://bucket/object") == null);
+    const profile = try filesystem.loadProfile("test://bucket/object");
+    try std.testing.expectEqualStrings("test", profile.name);
+    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.read_chunk_size);
+    try std.testing.expect(profile.high_latency);
+
+    const absolute = try filesystem.loadProfile("/tmp/model.safetensors");
+    try std.testing.expectEqualDeep(LoadProfile.local, absolute);
+    const relative = try filesystem.loadProfile("models/model.safetensors");
+    try std.testing.expectEqualDeep(LoadProfile.local, relative);
+    try std.testing.expectError(
+        error.VFSNotRegistered,
+        filesystem.loadProfile("missing://bucket/object"),
+    );
+}
+
+test "VFS reports the configured load profile for every bundled backend" {
+    var client: std.http.Client = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    defer client.deinit();
+
+    var file: File = .init(std.testing.allocator, std.testing.io, .{});
+    defer file.deinit();
+    var http = try HTTP.init(std.testing.allocator, std.testing.io, &client, .https);
+    defer http.deinit();
+    var s3 = try S3.init(std.testing.allocator, std.testing.io, &client, .{
+        .endpoint_url = "https://s3.amazonaws.com",
+        .region = "us-east-1",
+    }, .{});
+    defer s3.deinit();
+    var gcs = try GCS.init(std.testing.allocator, std.testing.io, &client, .{});
+    defer gcs.deinit();
+    var hf = try HF.init(std.testing.allocator, std.testing.io, &client, null, .{});
+    defer hf.deinit();
+
+    var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
+    defer filesystem.deinit();
+    try filesystem.registerBackend("file", file.backend());
+    try filesystem.registerBackend("https", http.backend());
+    try filesystem.registerBackend("s3", s3.backend());
+    try filesystem.registerBackend("gs", gcs.backend());
+    try filesystem.registerBackend("hf", hf.backend());
+
+    const Case = struct {
+        path: []const u8,
+        name: []const u8,
+        read_chunk_size: usize,
+        high_latency: bool,
+    };
+    const cases = [_]Case{
+        .{ .path = "file:///tmp/model", .name = "file", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
+        .{ .path = "https://example.com/model", .name = "https", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "s3://bucket/model", .name = "s3", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "gs://bucket/model", .name = "gs", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "hf://owner/model", .name = "hf", .read_chunk_size = 32 * 1024 * 1024, .high_latency = true },
+    };
+    for (cases) |case| {
+        const profile = try filesystem.loadProfile(case.path);
+        try std.testing.expectEqualStrings(case.name, profile.name);
+        try std.testing.expectEqual(case.read_chunk_size, profile.read_chunk_size);
+        try std.testing.expectEqual(case.high_latency, profile.high_latency);
+    }
 }

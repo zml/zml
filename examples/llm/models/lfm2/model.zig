@@ -80,6 +80,7 @@ pub const LoadedModel = struct {
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
         shardings: common.Shardings,
+        load_profile: zml.io.VFS.LoadProfile,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -92,6 +93,7 @@ pub const LoadedModel = struct {
         try zml.io.loadInto(Model, &self.inner, &buffers, allocator, io, platform, store, .{
             .progress = progress,
             .shardings = &all_shardings,
+            .load_profile = load_profile,
             .total_bytes = &total_bytes,
         });
 
@@ -170,6 +172,7 @@ pub const Model = struct {
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
         shardings: common.Shardings,
+        load_profile: zml.io.VFS.LoadProfile,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -181,6 +184,7 @@ pub const Model = struct {
         try zml.io.loadInto(Model, self, &buffers, allocator, io, platform, store, .{
             .progress = progress,
             .shardings = &all_shardings,
+            .load_profile = load_profile,
             .total_bytes = &total_bytes,
         });
 

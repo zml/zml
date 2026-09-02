@@ -2817,7 +2817,7 @@ const FairVectoredReadScheduler = struct {
         var self: FairVectoredReadScheduler = .{
             .allocator = allocator,
             .device_count = device_count,
-            .request_size = load_read_request_size,
+            .request_size = max_load_read_request_size,
             .queues = queues,
             .cursors = cursors,
             .claimed = &.{},
@@ -3015,8 +3015,8 @@ test "fair read scheduler compares physical bytes rather than scheduling turns" 
 
 test "fair read scheduler tracks fixed jobs and tails" {
     const jobs = [_]FairVectoredReadScheduler.TestJob{
-        .{ .tensor_index = 0, .len = load_read_request_size, .physical_bytes = &.{load_read_request_size} },
-        .{ .tensor_index = 1, .len = load_read_request_size, .physical_bytes = &.{load_read_request_size} },
+        .{ .tensor_index = 0, .len = max_load_read_request_size, .physical_bytes = &.{max_load_read_request_size} },
+        .{ .tensor_index = 1, .len = max_load_read_request_size, .physical_bytes = &.{max_load_read_request_size} },
         .{ .tensor_index = 2, .len = 7, .physical_bytes = &.{7} },
     };
     var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &jobs);
@@ -3686,8 +3686,6 @@ test "source read controller keeps fixed width and rolls back a short tail" {
 }
 
 const VectoredReadStatsSource = struct {
-    profile_id: usize,
-    name: []const u8,
     provider: VFS.ReadStatsProvider,
     initial: VFS.ReadStats,
     previous: VFS.ReadStats,
@@ -3706,6 +3704,54 @@ const SourceTelemetry = struct {
             self.throttles != 0;
     }
 };
+
+fn takeSourceTelemetry(sources: []VectoredReadStatsSource) SourceTelemetry {
+    var result: SourceTelemetry = .{};
+    for (sources) |*source| {
+        const current = source.provider.snapshot();
+        const delta = current.sub(source.previous);
+        source.previous = current;
+        result.retries +|= delta.retries;
+        result.transient_retries +|= delta.transient_retries;
+        result.timeouts +|= delta.timeouts;
+        result.server_failures +|= delta.server_failures;
+        result.throttles +|= delta.throttles;
+    }
+    return result;
+}
+
+test "one load-profile feedback cursor reports only new backpressure" {
+    const FakeProvider = struct {
+        stats: VFS.ReadStats = .{},
+
+        fn snapshot(userdata: *anyopaque) VFS.ReadStats {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return self.stats;
+        }
+    };
+
+    var fake: FakeProvider = .{};
+    const provider: VFS.ReadStatsProvider = .{
+        .userdata = &fake,
+        .snapshotFn = FakeProvider.snapshot,
+    };
+    var sources = [_]VectoredReadStatsSource{.{
+        .provider = provider,
+        .initial = provider.snapshot(),
+        .previous = provider.snapshot(),
+    }};
+
+    fake.stats.retries = 2;
+    fake.stats.throttles = 1;
+    const first = takeSourceTelemetry(&sources);
+    try std.testing.expectEqual(@as(u64, 2), first.retries);
+    try std.testing.expectEqual(@as(u64, 1), first.throttles);
+    try std.testing.expect(first.hasBackpressure());
+
+    const second = takeSourceTelemetry(&sources);
+    try std.testing.expectEqualDeep(SourceTelemetry{}, second);
+    try std.testing.expect(!second.hasBackpressure());
+}
 
 const SourceReadRuntime = struct {
     controller: SourceReadWidthController,
@@ -3729,18 +3775,7 @@ const SourceReadRuntime = struct {
     done: std.Io.Event = .unset,
 
     fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
-        var result: SourceTelemetry = .{};
-        for (self.read_stats_sources) |*source| {
-            const current = source.provider.snapshot();
-            const delta = current.sub(source.previous);
-            source.previous = current;
-            result.retries +|= delta.retries;
-            result.transient_retries +|= delta.transient_retries;
-            result.timeouts +|= delta.timeouts;
-            result.server_failures +|= delta.server_failures;
-            result.throttles +|= delta.throttles;
-        }
-        return result;
+        return takeSourceTelemetry(self.read_stats_sources);
     }
 
     fn applyDecision(
@@ -3976,6 +4011,14 @@ fn effectiveSourceReadParallelism(configured: Parallelism, high_latency: bool) P
     return .{ .fixed = @min(configured.maximum(), @max(configured.initial(), 12)) };
 }
 
+fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) !usize {
+    if (read_chunk_size == 0 or read_chunk_size > max_load_read_request_size)
+        return error.InvalidLoadProfile;
+    const selected = @max(read_chunk_size, dma_block_size);
+    if (selected > max_load_read_request_size) return error.InvalidLoadProfile;
+    return selected;
+}
+
 fn effectiveDmaGlobalCap(
     calibrated: ?usize,
     used_device_count: usize,
@@ -4068,10 +4111,6 @@ fn loadVectored(
         const failed = 3;
 
         uri: []const u8,
-        profile_id: usize,
-        profile_name: []const u8,
-        high_latency: bool,
-        read_stats: ?VFS.ReadStatsProvider,
         file: std.Io.File = undefined,
         status: std.atomic.Value(u8) = .init(uninitialized),
         error_code: std.atomic.Value(u16) = .init(0),
@@ -4114,45 +4153,34 @@ fn loadVectored(
             if (std.mem.eql(u8, slot.uri, descriptor.file_uri)) break index;
         } else blk: {
             const index = source_slots.items.len;
-            const profile = VFS.readProfileForPath(io, descriptor.file_uri);
             try source_slots.append(allocator, .{
                 .uri = descriptor.file_uri,
-                .profile_id = if (profile) |p| p.id else 0,
-                .profile_name = if (profile) |p| p.scheme else "local/default",
-                .high_latency = if (profile) |p| p.hints.high_latency else false,
-                .read_stats = if (profile) |p| p.stats else null,
-            });
-            load_log.debug("source profile: name={s}, high_latency={}, uri={s}", .{
-                source_slots.items[index].profile_name,
-                source_slots.items[index].high_latency,
-                descriptor.file_uri,
             });
             break :blk index;
         };
     }
 
-    const source_request_size = load_read_request_size;
-    load_log.debug("source request size fixed: request_size={Bi:.2}, dma_block_size={Bi:.2}", .{
+    const source_request_size = try effectiveSourceRequestSize(
+        opts.load_profile.read_chunk_size,
+        dma_config.block_size,
+    );
+    load_log.debug("source profile: name={s}, read_chunk_size={Bi:.2}, high_latency={}, request_size={Bi:.2}, dma_block_size={Bi:.2}", .{
+        opts.load_profile.name,
+        opts.load_profile.read_chunk_size,
+        opts.load_profile.high_latency,
         source_request_size,
         dma_config.block_size,
     });
-    var read_stats_sources: std.ArrayListUnmanaged(VectoredReadStatsSource) = .empty;
-    defer read_stats_sources.deinit(allocator);
-    for (source_slots.items) |slot| {
-        const provider = slot.read_stats orelse continue;
-        for (read_stats_sources.items) |source| {
-            if (source.profile_id == slot.profile_id) break;
-        } else {
-            const initial = provider.snapshot();
-            try read_stats_sources.append(allocator, .{
-                .profile_id = slot.profile_id,
-                .name = slot.profile_name,
-                .provider = provider,
-                .initial = initial,
-                .previous = initial,
-            });
-        }
-    }
+    var read_stats_source_storage: [1]VectoredReadStatsSource = undefined;
+    const read_stats_sources: []VectoredReadStatsSource = if (opts.load_profile.stats) |provider| blk: {
+        const initial = provider.snapshot();
+        read_stats_source_storage[0] = .{
+            .provider = provider,
+            .initial = initial,
+            .previous = initial,
+        };
+        break :blk &read_stats_source_storage;
+    } else read_stats_source_storage[0..0];
 
     const StateSlot = struct {
         const uninitialized = 0;
@@ -4215,10 +4243,6 @@ fn loadVectored(
         if (slot.status.load(.acquire) == StateSlot.ready) slot.state.deinit();
     };
 
-    const high_latency_source = for (source_slots.items) |slot| {
-        if (slot.high_latency) break true;
-    } else false;
-
     const coordinator_started_at: std.Io.Timestamp = .now(io, .awake);
     load_log.debug("vectored coordinator started: tensors={d}, elapsed={d:.3}s", .{
         tensors.len,
@@ -4269,7 +4293,7 @@ fn loadVectored(
     var metrics: VectoredLoadMetrics = .{};
     const source_read_parallelism = effectiveSourceReadParallelism(
         opts.read_parallelism,
-        high_latency_source,
+        opts.load_profile.high_latency,
     );
     const controller = SourceReadWidthController.init(
         source_read_parallelism,
@@ -4307,8 +4331,8 @@ fn loadVectored(
         .next_read_admission = &pipeline.next_read_admission,
         .scheduler = &scheduler,
         .pinned_feasible_width = effective_pinned_feasible_width,
-        .read_stats_sources = read_stats_sources.items,
-        .source_bootstrap_enabled = high_latency_source,
+        .read_stats_sources = read_stats_sources,
+        .source_bootstrap_enabled = opts.load_profile.high_latency,
     };
     var controller_group: std.Io.Group = .init;
     try controller_group.concurrent(io, SourceReadRuntime.run, .{ &controller_runtime, io });
@@ -4463,7 +4487,7 @@ fn loadVectored(
     var source_retries: u64 = 0;
     var source_throttles: u64 = 0;
     var source_retry_delay_ns: u64 = 0;
-    for (read_stats_sources.items) |source| {
+    for (read_stats_sources) |source| {
         const source_stats = source.provider.snapshot().sub(source.initial);
         physical_source_requests +|= source_stats.physical_requests;
         physical_source_bytes +|= source_stats.physical_bytes;
@@ -4617,7 +4641,7 @@ const DmaLoadConfig = struct {
 fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
     const request_blocks = std.math.divCeil(
         usize,
-        load_read_request_size,
+        max_load_read_request_size,
         config.block_size,
     ) catch return error.InvalidDmaLoadConfig;
     const maximum_request_blocks = std.math.add(
@@ -4670,7 +4694,7 @@ fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
         config.device_ids.len != config.device_numa_nodes.len or
         config.block_size == 0 or config.max_in_flight_per_device == 0 or
         config.max_in_flight_per_device > max_load_dma_parallelism or
-        config.block_size > load_read_request_size or
+        config.block_size > max_load_read_request_size or
         config.max_mapped_bytes < config.block_size)
         return error.InvalidDmaLoadConfig;
     const uncapped = std.math.mul(
@@ -5505,7 +5529,7 @@ const DmaBenchmarkSourcePools = struct {
             return error.InvalidDmaLoadConfig;
         const base_request_blocks = std.math.divCeil(
             usize,
-            load_read_request_size,
+            max_load_read_request_size,
             block_size,
         ) catch return error.InvalidDmaLoadConfig;
         const request_blocks = std.math.add(
@@ -6295,7 +6319,7 @@ fn finishDmaBenchmarkReport(
 
 pub const max_load_read_parallelism: usize = 128;
 pub const max_load_dma_parallelism: usize = 32;
-pub const load_read_request_size: usize = 32 * 1024 * 1024;
+pub const max_load_read_request_size: usize = 32 * 1024 * 1024;
 
 pub const Parallelism = union(enum) {
     adaptive: Adaptive,
@@ -6333,6 +6357,9 @@ pub const LoadOpts = struct {
 
     /// Concurrent positional source requests.
     read_parallelism: Parallelism = .{ .adaptive = .{ .initial = 12, .maximum = max_load_read_parallelism } },
+    /// Model-wide source tuning prepared from the VFS path. The default is a
+    /// generic 16 MiB profile for callers without an explicit VFS profile.
+    load_profile: VFS.LoadProfile = .default,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     total_bytes: ?*usize = null,
@@ -8095,6 +8122,7 @@ pub fn loadInto(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !void {
+    _ = try effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
     const read_initial = opts.read_parallelism.initial();
     const read_maximum = opts.read_parallelism.maximum();
     stdx.debug.assert(read_initial > 0, "zml.io.load read_parallelism initial/fixed value must be greater than zero", .{});
@@ -8136,8 +8164,8 @@ pub fn loadInto(
             used_devices.?.device_ids,
         );
         dma_resources = resources;
-        if (resources.config.block_size > load_read_request_size or
-            resources.config.max_mapped_bytes < load_read_request_size)
+        if (resources.config.block_size > max_load_read_request_size or
+            resources.config.max_mapped_bytes < max_load_read_request_size)
             return error.InvalidDmaLoadConfig;
     }
 
@@ -8169,7 +8197,7 @@ pub fn loadInto(
         read_maximum,
         dma_config.max_in_flight_per_device,
         dma_config.global_max_in_flight,
-        if (direct) load_read_request_size else 0,
+        if (direct) max_load_read_request_size else 0,
         dma_config.block_size,
         dma_config.max_mapped_bytes,
         total_logical_bytes,
@@ -8243,6 +8271,30 @@ test "local source parallelism uses the measured fixed-width plateau" {
     try std.testing.expectEqual(@as(usize, 7), explicit.initial());
 }
 
+test "source request size combines the VFS floor with DMA granularity" {
+    try std.testing.expectEqual(
+        @as(usize, 8 * 1024 * 1024),
+        try effectiveSourceRequestSize(8 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16 * 1024 * 1024),
+        try effectiveSourceRequestSize(8 * 1024 * 1024, 16 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16 * 1024 * 1024),
+        try effectiveSourceRequestSize(16 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        max_load_read_request_size,
+        try effectiveSourceRequestSize(32 * 1024 * 1024, 16 * 1024 * 1024),
+    );
+    try std.testing.expectError(error.InvalidLoadProfile, effectiveSourceRequestSize(0, 8 * 1024 * 1024));
+    try std.testing.expectError(
+        error.InvalidLoadProfile,
+        effectiveSourceRequestSize(max_load_read_request_size + 1, 8 * 1024 * 1024),
+    );
+}
+
 test "probe source capacity counts active reads rather than retained requests" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
@@ -8266,15 +8318,15 @@ test "source probe excludes pre-boundary admissions" {
     metrics.beginRead(io, 6, 40);
     metrics.prepareProbe(io, 7, 41);
     metrics.beginRead(io, 7, 40);
-    metrics.recordProbeRead(io, 7, 40, load_read_request_size, load_read_request_size);
+    metrics.recordProbeRead(io, 7, 40, max_load_read_request_size, max_load_read_request_size);
     metrics.beginRead(io, 7, 41);
-    metrics.recordProbeRead(io, 7, 41, load_read_request_size, load_read_request_size);
+    metrics.recordProbeRead(io, 7, 41, max_load_read_request_size, max_load_read_request_size);
     const admitted = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 3), admitted.active_reads);
     try std.testing.expect(admitted.probe_first_read_ns != 0);
     try std.testing.expectEqual(@as(usize, 1), admitted.probe_active_reads);
     try std.testing.expectEqual(@as(u64, 1), admitted.probe_full_read_operations);
-    try std.testing.expectEqual(@as(u64, load_read_request_size), admitted.probe_read_bytes);
+    try std.testing.expectEqual(@as(u64, max_load_read_request_size), admitted.probe_read_bytes);
     metrics.endRead(io, 6, 40);
     metrics.endRead(io, 7, 40);
     const draining = metrics.snapshot(io);

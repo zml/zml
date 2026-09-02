@@ -55,12 +55,12 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
-    pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings) !Buffers {
+    pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings, load_profile: zml.io.VFS.LoadProfile) !Buffers {
         return switch (self.*) {
             inline else => |*m, t| @unionInit(
                 Buffers,
                 @tagName(t),
-                try m.loadBuffers(allocator, io, platform, store, progress, shardings),
+                try m.loadBuffers(allocator, io, platform, store, progress, shardings, load_profile),
             ),
         };
     }

@@ -243,7 +243,10 @@ pub const HF = struct {
     pub fn backend(self: *HF) Backend {
         return .{
             .io = self.io(),
-            .read_hints = .{ .high_latency = true },
+            .read_hints = .{
+                .read_chunk_size = 32 * 1024 * 1024,
+                .high_latency = true,
+            },
             .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
         };
     }

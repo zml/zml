@@ -3,6 +3,10 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 pub const ReadHints = struct {
+    /// Smallest source request expected to avoid excessive per-request cost
+    /// or backend rate limiting. The loader may increase it to match the
+    /// calibrated DMA block size.
+    read_chunk_size: usize = 16 * 1024 * 1024,
     /// The backend benefits from opening enough source calls to hide request
     /// latency before the first response arrives.
     high_latency: bool = false,

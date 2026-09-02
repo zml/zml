@@ -1,6 +1,54 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-## Implemented: one fixed 32 MiB path (2026-09-02)
+## Implemented: one VFS-prepared profile per model load (2026-09-02)
+
+The fixed 32 MiB source policy has been replaced by an explicit borrowed
+`VFS.LoadProfile`. Callers prepare it once with `vfs.loadProfile(model_path)`
+and pass it through `zml.io.LoadOpts.load_profile`; `.auto` remains compatible
+through a generic 16 MiB, non-high-latency default. The profile contains the
+backend name, a minimum `read_chunk_size`, the `high_latency` admission hint,
+and an optional aggregate `ReadStatsProvider`. It borrows VFS/backend state and
+requires no deinitialization.
+
+The measured profile table is 8 MiB for local paths and `file://`, 16 MiB for
+HTTP/S3/GCS, and 32 MiB for HF. The loader selects
+`max(profile.read_chunk_size, calibrated_dma_block_size)`, with 32 MiB retained
+as the maximum supported request rather than the fixed runtime request. Zero
+or oversized profile values fail with `error.InvalidLoadProfile`.
+
+One profile now controls the complete model load. The loader no longer queries
+every shard URI, stores profile metadata in source-file slots, merges mixed
+profiles, or deduplicates stats providers. Source slots retain only URI/open
+state. One cursor snapshots the supplied aggregate provider at load start for
+retry/throttle deltas and final diagnostics. This deliberately assumes the
+load is the only user of that VFS/backend and does not promise session-scoped
+attribution. `high_latency` retains only its source-width/bootstrap role. DMA
+detection, scheduling, whole-request leasing, the one-spare lifecycle gate,
+and demand pool growth are unchanged.
+
+ROCm validation used only permitted physical devices. On GPU 7, the local
+8 MiB floor combined with the detected 16 MiB DMA block to select 16 MiB
+requests. The 14.96 GiB model loaded in 0.445 seconds at 33.65 GiB/s loader
+goodput (0.449 seconds outer), with 1,055 reads, 208 MiB leased high-water
+inside the retained 256 MiB, no mapping growth, and no pool waits. On physical
+GPUs 4--7, the same effective request loaded in 0.500 seconds at 29.93 GiB/s
+(0.505 seconds outer), with 832 MiB high-water inside the retained 1 GiB and
+again no growth or waits. That detector run selected a global DMA cap of eight;
+the source-profile result remains within roughly 3% of the adjacent uncapped
+16 MiB control at 0.486 seconds.
+
+`//vfs:test` covers ordinary paths, unregistered schemes, and the actual
+File/HTTP/S3/GCS/HF profile table. `//zml:test` covers effective source/DMA
+request selection, invalid profiles, and the single feedback cursor. Both test
+targets pass. Optimized ROCm builds of the IO and LLM examples and optimized
+CUDA/oneAPI builds of the IO example pass. Current OneAPI and remote-service
+runtime confirmation remains external.
+
+## Superseded: one fixed 32 MiB path (2026-09-02)
+
+The fixed source policy in this section is superseded by the VFS-prepared
+profile above. Its measurements and lifecycle conclusions remain historical
+evidence for the current request-size choices.
 
 Use one fixed 32 MiB logical source request for local files, `file://`, HTTP,
 S3, GCS, and HF. This deliberately accepts the measured oneAPI local
@@ -61,6 +109,32 @@ On four MI300X devices, the selected gate again reached 13 live requests,
 zero pool waits. The sharded load completed in 0.468 seconds at 31.94 GiB/s.
 These measurements supersede the earlier assumption below that pool capacity
 alone was a sufficient queue bound.
+
+### Matched 16 MiB versus 32 MiB read check
+
+A follow-up changed only `load_read_request_size`, kept the normal DMA candidate
+list (and therefore the same retained `devices * 8 * 32 MiB` workspace), and
+used the same detected 16 MiB DMA block, DMA width eight, source width twelve,
+and one-spare lifecycle gate. The 14.96 GiB Llama-3.1-8B fixture was warm.
+
+On one MI300X, two 16 MiB runs completed in 0.442--0.443 seconds at
+33.79--33.85 GiB/s loader goodput. Two immediately matched 32 MiB runs took
+0.608--0.652 seconds at 22.93--24.59 GiB/s. This is not primarily a source-read
+chunk gain: 16 MiB needs one DMA block per job, fits thirteen live jobs inside
+the retained 256 MiB, and used 208 MiB high-water with no growth. A 32 MiB job
+needs two blocks, used 416 MiB high-water, and synchronously mapped three
+64 MiB slabs during the load. Those 192 MiB of growth took 182--186 ms. After
+subtracting that mapping time, the 32 MiB runs took about 0.426--0.466 seconds,
+the same range as 16 MiB.
+
+On four MI300X devices, both layouts fit the retained 1 GiB arena and used
+832 MiB high-water with no growth. The matched results were 0.486 seconds and
+30.80 GiB/s for 16 MiB versus 0.488 seconds and 30.65 GiB/s for 32 MiB, below
+run-to-run significance. The smaller chunk made 1,055 source reads rather than
+641, but the physical DMA work was unchanged (1,864 submissions). Thus 16 MiB
+materially improves the current one-device end-to-end path only because it
+avoids initial pool growth; it does not show a multi-device transfer-speed win.
+The source constant was restored to 32 MiB after the experiment.
 
 ## Universal 32 MiB filesystem-read assessment (2026-09-02)
 
