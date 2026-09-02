@@ -187,22 +187,6 @@ pub const Api = struct {
     }
 
     pub const Extensions = struct {
-        pub const HostMemoryAllocatorAllocateArgs = extern struct {
-            struct_size: usize = @sizeOf(HostMemoryAllocatorAllocateArgs),
-            extension_start: ?*c.PJRT_Extension_Base = null,
-            client: ?*c.PJRT_Client,
-            size: usize,
-            numa_node: c_int,
-            ptr: ?[*]u8 = null,
-            deleter: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void = null,
-            deleter_arg: ?*anyopaque = null,
-        };
-
-        pub const HostMemoryAllocatorExtension = extern struct {
-            base: c.PJRT_Extension_Base,
-            allocate: *const fn (*HostMemoryAllocatorAllocateArgs) callconv(.c) ?*c.PJRT_Error,
-        };
-
         pub const Type = enum(c.PJRT_Extension_Type) {
             custom_call = c.PJRT_Extension_Type_Gpu_Custom_Call,
             profiler = c.PJRT_Extension_Type_Profiler,
@@ -213,7 +197,6 @@ pub const Api = struct {
             triton = c.PJRT_Extension_Type_Triton,
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
-            host_memory_allocator = c.PJRT_Extension_Type_HostMemoryAllocator,
             unknown = c.PJRT_Extension_Type_Unknown,
         };
 
@@ -227,7 +210,6 @@ pub const Api = struct {
             triton: *const c.PJRT_Triton_Extension,
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
-            host_memory_allocator: *const HostMemoryAllocatorExtension,
             unknown: *const c.PJRT_Extension_Base,
         };
 
@@ -593,39 +575,6 @@ pub const Client = opaque {
             .client = self.inner(),
             .data = @ptrCast(@constCast(data)),
         });
-    }
-
-    pub const HostMemoryAllocation = struct {
-        data: []u8,
-        deleter: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void,
-        deleter_arg: ?*anyopaque,
-
-        pub fn deinit(self: HostMemoryAllocation) void {
-            self.deleter(self.data.ptr, self.deleter_arg);
-        }
-    };
-
-    pub fn hostMemoryAllocate(
-        self: *const Client,
-        api: *const Api,
-        size: usize,
-        numa_node: ?usize,
-    ) ApiError!?HostMemoryAllocation {
-        const extension = api.extension(.host_memory_allocator) orelse return null;
-        var args: Api.Extensions.HostMemoryAllocatorAllocateArgs = .{
-            .client = self.inner(),
-            .size = size,
-            .numa_node = if (numa_node) |node| @intCast(node) else -1,
-        };
-        if (extension.host_memory_allocator.allocate(&args)) |pjrt_error| {
-            return interpretPjrtError(api, @ptrCast(pjrt_error), "PJRT_HostMemoryAllocator_Allocate");
-        }
-        const ptr = args.ptr orelse return null;
-        return .{
-            .data = ptr[0..size],
-            .deleter = args.deleter orelse return null,
-            .deleter_arg = args.deleter_arg,
-        };
     }
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {

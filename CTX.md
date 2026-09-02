@@ -120,7 +120,7 @@ The extension was only a performance escape hatch for a ROCm-specific driver
 cost. `PJRT_Client_DmaMap` must preserve a caller-owned pointer, so ROCm reaches
 `hipHostRegister`; on the eight-GPU machine registering 2 GiB took about 11
 seconds. CUDA registration is acceptably fast, while ZML already uses PJRT
-`pinned_host` buffers for oneAPI. The same existing standard path works for
+`pinned_host` buffers elsewhere. ZML now uses that existing standard path for
 ROCm:
 
 1. select the `pinned_host` memory space attached to a representative device
@@ -140,17 +140,43 @@ device provides the NUMA selection without changing
 composition, including using the returned pinned-host pointer as input to the
 async H2D transfer manager.
 
+The implementation is in `zml/io.zig`: each ROCm NUMA pool retains a
+`PJRT_Buffer` allocated from its representative device's `pinned_host` memory,
+holds an external reference while the writable pointer is borrowed, and drops
+the reference before destroying the buffer. CUDA and oneAPI retain their
+existing `PJRT_Client_DmaMap` arena behavior for now. The experimental
+`PJRT_HostMemoryAllocator_Extension` declarations and client helper have been
+removed from `pjrt/pjrt.zig`; no custom PJRT ABI remains in ZML.
+
 The only external requirement is the already-upstream pinned-pointer detection
 from `c3d1d50c0f` (plus the subsequent ROCm adjustment `e21e1f19a5`). A plugin
 artifact older than that change allocates quickly but mistakes the pointer for
-pageable memory and silently stages every transfer. In a direct check with the
-July ZML ROCm plugin, a 256 MiB arena allocated in 120 ms but transferred at
-only 7.7 GiB/s. With the `origin/main` plugin, the same standard-PJRT arena
-allocated in 126 ms, selected 16 MiB, and reached 44.9 GiB/s on one MI300X.
-On physical GPUs 0, 2, 3, and 4, 768 MiB on NUMA node 0 plus 256 MiB on node 1
-allocated concurrently in 575 ms; calibration selected 16 MiB / width eight /
-no global cap and measured 165.5 GiB/s aggregate. Thus the artifact must be
-updated, but there is nothing new to upstream to XLA.
+pageable memory and silently stages every transfer. The final implementation
+was validated after rebuilding the plugin from the
+clean `origin/main` worktree at `47149e4cbc` and checking that the resulting
+binary did not contain the discarded allocator extension. The normal
+five-candidate one-MI300X calibration allocated its 256 MiB arena in 99.1 ms,
+finished calibration in 264.5 ms, selected 16 MiB, and measured 46.6 GiB/s.
+The full call took 2.92 seconds, of which 2.56 seconds was the separate PJRT
+allocator warmup.
+With the candidate fixed to 16 MiB, physical GPUs 0, 2, 3, and 4 allocated
+384 MiB on NUMA node 0 and 128 MiB on node 1 concurrently in 302.4 ms, measured
+180.8 GiB/s aggregate, and selected no global cap. That call took 3.73 seconds,
+including 3.09 seconds of allocator warmup and 338.5 ms of calibration. By
+contrast, the currently
+pinned July plugin allocated the same one-device 128 MiB arena in 54.7 ms but
+measured only 6.5 GiB/s, confirming that fast allocation alone does not prove
+the plugin recognizes the pointer as pinned. `platforms/rocm/rocm.bzl` remains
+unchanged until a plugin built from a revision containing the upstream
+pinned-range detection is published; pointing the repository at a local build
+would not be an upstreamable fix.
+
+Optimized `//examples/io:playground` builds pass for ROCm, CUDA, and oneAPI
+with this change. `bazel test //zml:test` with ROCm enabled is currently
+blocked before these paths run because `zml/moe/cutlass_flashinfer.zig`
+imports the unavailable `platforms/cuda/flashinfer_cutlass_moe` module; this is
+an existing repository test-configuration issue, not a failure introduced by
+the pinned-host arena change.
 
 ### Recommended upstream order
 

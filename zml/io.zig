@@ -4552,9 +4552,49 @@ const DmaBenchmarkNumaAllocator = struct {
     }
 };
 
+const PjrtPinnedHostAllocation = struct {
+    buffer: *pjrt.Buffer,
+    api: *const pjrt.Api,
+    data: []u8,
+
+    fn init(memory: *const Memory, size: usize) !PjrtPinnedHostAllocation {
+        const api = memory.platform.pjrt_api;
+        const buffer = try memory.platform.pjrt_client.createUninitializedBuffer(api, .{
+            .dims = &.{@intCast(size)},
+            .element_type = .u8,
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = &.{0},
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+            .dst = .{ .memory = memory.pjrt_memory },
+        });
+        errdefer buffer.deinit(api);
+        if (!buffer.isOnCpu(api)) return error.PinnedHostMemoryNotHostVisible;
+
+        // The writable pointer is borrowed from PJRT. Keep both the external
+        // reference and its owning buffer alive for the arena's whole lifetime.
+        try buffer.increaseExternalReferenceCount(api);
+        errdefer buffer.decreaseExternalReferenceCount(api) catch {};
+        const ptr: [*]u8 = @ptrCast(try buffer.opaqueDeviceMemoryDataPointer(api));
+        return .{
+            .buffer = buffer,
+            .api = api,
+            .data = ptr[0..size],
+        };
+    }
+
+    fn deinit(self: PjrtPinnedHostAllocation) void {
+        self.buffer.decreaseExternalReferenceCount(self.api) catch unreachable;
+        self.buffer.deinit(self.api);
+    }
+};
+
 const DmaBenchmarkSourceAllocation = union(enum) {
     dma_map: []u8,
-    pjrt_host: pjrt.Client.HostMemoryAllocation,
+    pjrt_host: PjrtPinnedHostAllocation,
 
     fn data(self: *const DmaBenchmarkSourceAllocation) []u8 {
         return switch (self.*) {
@@ -4577,7 +4617,7 @@ const DmaBenchmarkSourceAllocation = union(enum) {
 const DmaBenchmarkSourcePool = struct {
     numa_allocator: DmaBenchmarkNumaAllocator,
     dma_map_allocator: mem.DmaMapAllocator,
-    use_pjrt_host_allocator: bool,
+    pjrt_host_memory: ?*const Memory,
     allocations: std.ArrayListUnmanaged(DmaBenchmarkSourceAllocation) = .empty,
     source: []u8 = &.{},
 };
@@ -4620,7 +4660,6 @@ fn fixedDmaArenaSizes(
 const DmaBenchmarkSourcePools = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const Platform,
     pools: []DmaBenchmarkSourcePool,
     device_pool_indices: []usize,
     device_sources: [][]const u8,
@@ -4648,20 +4687,21 @@ const DmaBenchmarkSourcePools = struct {
         const device_sources = try allocator.alloc([]const u8, platform.devices.len);
         errdefer allocator.free(device_sources);
         @memset(device_sources, &.{});
-        const use_pjrt_host_allocator =
-            platform.pjrt_api.extension(.host_memory_allocator) != null;
         if (unique_nodes.count() == 0) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
             pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
-            pool.use_pjrt_host_allocator = use_pjrt_host_allocator;
+            pool.pjrt_host_memory = if (platform.target == .rocm)
+                platform.devices[0].memory(.host_pinned) orelse
+                    return error.PinnedHostMemoryUnavailable
+            else
+                null;
             pool.allocations = .empty;
             pool.source = &.{};
             @memset(device_pool_indices, 0);
             return .{
                 .allocator = allocator,
                 .io = io,
-                .platform = platform,
                 .pools = pools,
                 .device_pool_indices = device_pool_indices,
                 .device_sources = device_sources,
@@ -4689,7 +4729,11 @@ const DmaBenchmarkSourcePools = struct {
                 const pool = &pools[pool_index.?];
                 pool.numa_allocator = .{ .parent = allocator, .node = node };
                 pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
-                pool.use_pjrt_host_allocator = use_pjrt_host_allocator;
+                pool.pjrt_host_memory = if (platform.target == .rocm)
+                    platform.devices[device_index].memory(.host_pinned) orelse
+                        return error.PinnedHostMemoryUnavailable
+                else
+                    null;
                 pool.allocations = .empty;
                 pool.source = &.{};
             }
@@ -4699,7 +4743,6 @@ const DmaBenchmarkSourcePools = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .platform = platform,
             .pools = pools,
             .device_pool_indices = device_pool_indices,
             .device_sources = device_sources,
@@ -4756,12 +4799,8 @@ const DmaBenchmarkSourcePools = struct {
     fn allocatePool(self: *DmaBenchmarkSourcePools, pool_index: usize, required_bytes: usize) !void {
         const pool = &self.pools[pool_index];
         const started = std.Io.Timestamp.now(self.io, .awake);
-        var allocation: DmaBenchmarkSourceAllocation = if (pool.use_pjrt_host_allocator)
-            .{ .pjrt_host = (try self.platform.pjrt_client.hostMemoryAllocate(
-                self.platform.pjrt_api,
-                required_bytes,
-                pool.numa_allocator.node,
-            )) orelse return error.OutOfMemory }
+        var allocation: DmaBenchmarkSourceAllocation = if (pool.pjrt_host_memory) |host_memory|
+            .{ .pjrt_host = try .init(host_memory, required_bytes) }
         else blk: {
             const dma_map_allocator = pool.dma_map_allocator.allocator();
             break :blk .{ .dma_map = try dma_map_allocator.alignedAlloc(
@@ -4777,12 +4816,12 @@ const DmaBenchmarkSourcePools = struct {
         _ = self.allocated_bytes.fetchAdd(replacement.len, .release);
         pool.source = replacement;
         const finished_at = std.Io.Timestamp.now(self.io, .awake);
-        const map_ns: u64 = if (pool.use_pjrt_host_allocator)
+        const map_ns: u64 = if (pool.pjrt_host_memory != null)
             0
         else
             @intCast(@max(started.durationTo(mapped_at).nanoseconds, 0));
         const elapsed_ns: u64 = @intCast(@max(started.durationTo(finished_at).nanoseconds, 0));
-        const allocation_kind = if (pool.use_pjrt_host_allocator) "pjrt_host" else "dma_map";
+        const allocation_kind = if (pool.pjrt_host_memory != null) "pjrt_host" else "dma_map";
         if (pool.numa_allocator.node) |node| {
             log.info("DMA mapped arena numa_node={d} allocator={s} address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
                 node,
