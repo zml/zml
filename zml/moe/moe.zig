@@ -425,14 +425,12 @@ pub fn forwardMoe(
                 );
             }
 
+            const manual_inputs: []const zml.Tensor = if (quant_scheme == .mxfp4)
+                &.{ input, topk_ids, topk_weights, gate_up.weight, down.weight, gate_up_scales.?, down_scales.? }
+            else
+                &.{ input, topk_ids, topk_weights, gate_up.weight, down.weight };
             break :b zml.ops.manualComputation(
-                .{
-                    input,
-                    topk_ids,
-                    topk_weights,
-                    gate_up.weight,
-                    down.weight,
-                },
+                manual_inputs,
                 input.shape(),
                 .{
                     .activation = parameters.triton.activation,
@@ -441,8 +439,6 @@ pub fn forwardMoe(
                     .bias_down = down.bias,
                     .quant_scheme = quant_scheme,
                     .activation_threshold = opts.activation_threshold,
-                    .scales_gate_up = gate_up_scales,
-                    .scales_down = down_scales,
                 },
                 (struct {
                     fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -471,8 +467,8 @@ pub fn forwardMoe(
                                 .activation = ctx.activation,
                                 .global_num_experts = ctx.global_num_experts,
                                 .expert_map = expert_map,
-                                .w1_scale = ctx.scales_gate_up,
-                                .w2_scale = ctx.scales_down,
+                                .w1_scale = if (ctx.quant_scheme == .mxfp4) sharded_inputs[5] else null,
+                                .w2_scale = if (ctx.quant_scheme == .mxfp4) sharded_inputs[6] else null,
                                 .w1_bias = ctx.bias_gate_up,
                                 .w2_bias = ctx.bias_down,
                                 .quant_scheme = ctx.quant_scheme,
