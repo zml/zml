@@ -1,5 +1,3 @@
-//! Runnable ZML equivalent of ../../../../gpu_mesh.py.
-
 const std = @import("std");
 
 const zml = @import("zml");

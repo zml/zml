@@ -1,5 +1,3 @@
-//! Runnable ZML equivalent of ../../../../gpu_matmul.py.
-
 const std = @import("std");
 
 const zml = @import("zml");
