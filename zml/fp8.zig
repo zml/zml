@@ -453,6 +453,26 @@ fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, 
     return out.reshape(output_shape);
 }
 
+/// Perform one native block-128 FP8 dot using operands that have already been
+/// localized by an enclosing manual computation.
+///
+/// Unlike `nativeBlockScaledDot`, this function never opens a manual region
+/// and never reduces a tensor-parallel partial result. It is intended for
+/// callers that need to combine several local results before issuing a single
+/// collective.
+pub fn nativeBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
+    stdx.debug.assert(
+        Compiler.current().manual_computation_depth > 0,
+        "nativeBlockScaledDotLocal must be called inside manualComputation",
+        .{},
+    );
+    return switch (Compiler.current().platform.target) {
+        .cuda => xlaBlockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape),
+        .rocm => tritonBlockScaledDotLocal(lhs, rhs_fn, rhs_scale_fn, output_shape),
+        else => unreachable,
+    };
+}
+
 fn scaledDotReference(inputs: []const Tensor, output_shape: Shape) Tensor {
     return ops.customCall(
         "zml$scaled_dot_unmatched",

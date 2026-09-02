@@ -351,8 +351,17 @@ pub fn fusedExpertsImpl(
     // Negative and out-of-range routes are excluded by the alignment kernels,
     // so no GEMM tile writes their output slots. Mask those slots explicitly
     // before reducing instead of consuming uninitialized custom-call output.
-    const route_is_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
+    const route_global_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
         .logical(.AND, ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
+    const route_is_valid = if (opts.expert_map) |expert_map| local: {
+        const safe_ids = route_global_valid.select(ids, Tensor.scalar(0, .i32));
+        const local_ids = expert_map
+            .gather(.{ .expert = safe_ids }, .{})
+            .withTags(ids.shape().tags());
+        break :local route_global_valid
+            .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+            .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+    } else route_global_valid;
     const active_second_out = route_is_valid
         .broad(second_out.shape().withDtype(.bool))
         .select(second_out, Tensor.zeroes(second_out.shape()));

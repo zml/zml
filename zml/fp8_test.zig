@@ -414,7 +414,10 @@ fn testFusedMoeBlockFp8(comptime tokens: usize) !void {
                 287
             else
                 selected_experts[i];
-            weight.* = if (i + 3 >= topk) 0 else 1.0 / @as(f32, @floatFromInt(topk - 3));
+            // Non-local and globally invalid routes deliberately carry a
+            // non-zero weight. Their unwritten output slots must be masked,
+            // rather than relying on routing weights to hide them.
+            weight.* = if (i + 3 >= topk) 0.25 else 1.0 / @as(f32, @floatFromInt(topk - 3));
         }
     }
 
@@ -471,4 +474,231 @@ test "CUDA and ROCm Triton fused MoE block-scaled FP8 GEMMs" {
     // exercise the naive decode assignment path and its pointer sanitization.
     try testFusedMoeBlockFp8(16);
     try testFusedMoeBlockFp8(8);
+}
+
+fn addLocalSharedExpert(
+    _: void,
+    local_input: zml.Tensor,
+    local_routed: zml.Tensor,
+    local_operands: []const zml.Tensor,
+) zml.Tensor {
+    std.debug.assert(local_operands.len == 4);
+    const gate_up_weight = local_operands[0];
+    const gate_up_scale = local_operands[1];
+    const down_weight = local_operands[2];
+    const down_scale = local_operands[3];
+
+    const gate_up_shape = local_input.shape()
+        .setDim(.d, gate_up_weight.dim(.out))
+        .setTag(.d, .out)
+        .withDtype(.bf16);
+    const gate_up = zml.fp8.nativeBlockScaledDotLocal(
+        local_input,
+        gate_up_weight,
+        gate_up_scale,
+        gate_up_shape,
+    );
+    const intermediate_size = @divExact(gate_up.dim(.out), 2);
+    const gate = gate_up.slice(.out, .{ .end = intermediate_size }).convert(.f32);
+    const up = gate_up.slice(.out, .{ .start = intermediate_size }).convert(.f32);
+    const activation = gate.silu().mul(up).convert(.bf16).rename(.{ .out = .mid });
+
+    const local_shared = zml.fp8.nativeBlockScaledDotLocal(
+        activation,
+        down_weight,
+        down_scale,
+        local_routed.shape(),
+    );
+    return local_routed.add(local_shared.convert(local_routed.dtype()));
+}
+
+fn fusedMoeWithLocalEpilogue(
+    hidden: zml.Tensor,
+    w1: zml.Tensor,
+    w1_scale: zml.Tensor,
+    w2: zml.Tensor,
+    w2_scale: zml.Tensor,
+    topk_weight: zml.Tensor,
+    topk_id: zml.Tensor,
+    shared_gate_up_weight: zml.Tensor,
+    shared_gate_up_scale: zml.Tensor,
+    shared_down_weight: zml.Tensor,
+    shared_down_scale: zml.Tensor,
+) zml.Tensor {
+    const metadata: zml.moe.Metadata = .{ .triton = .init(.{}) };
+    const parameters: zml.moe.Parameters = .{ .triton = .init(.{
+        .num_experts_per_tok = 2,
+        .activation = .silu,
+    }) };
+    return zml.moe.forwardMoeWithReduceEpilogue(
+        hidden.withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
+        topk_id.withPartitioning(.{ .b = .replicated, .s = .replicated, .top_expert = .replicated }),
+        topk_weight.withPartitioning(.{ .b = .replicated, .s = .replicated, .top_expert = .replicated }),
+        w1.withPartitioning(.{ .expert = .experts, .out = .replicated, .in = .replicated }),
+        w1_scale.withPartitioning(.{ .expert = .experts, .nb = .replicated, .kb = .replicated }),
+        null,
+        w2.withPartitioning(.{ .expert = .experts, .out = .replicated, .mid = .replicated }),
+        w2_scale.withPartitioning(.{ .expert = .experts, .nb = .replicated, .kb = .replicated }),
+        null,
+        null,
+        null,
+        .{ .quant_scheme = .fp8_block128 },
+        metadata,
+        parameters,
+        .{
+            shared_gate_up_weight.withPartitioning(.{ .out = .model, .in = .replicated }),
+            shared_gate_up_scale.withPartitioning(.{ .nb = .model, .kb = .replicated }),
+            shared_down_weight.withPartitioning(.{ .out = .replicated, .mid = .model }),
+            shared_down_scale.withPartitioning(.{ .nb = .replicated, .kb = .model }),
+        },
+        {},
+        addLocalSharedExpert,
+    ) catch unreachable;
+}
+
+test "expert-parallel FP8 MoE compiles with a model-sharded shared expert epilogue" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const experts: i64 = @intCast(platform.devices.len);
+    const hidden_size = 128;
+    const routed_intermediate_size = 128;
+    const shared_intermediate_size = 128 * experts;
+    const hidden: zml.Tensor = .init(.{ .b = 1, .s = 1, .d = hidden_size }, .bf16);
+    const w1: zml.Tensor = .init(.{ .expert = experts, .out = 2 * routed_intermediate_size, .in = hidden_size }, .f8e4m3fn);
+    const w1_scale: zml.Tensor = .init(.{ .expert = experts, .nb = 2, .kb = 1 }, .f32);
+    const w2: zml.Tensor = .init(.{ .expert = experts, .out = hidden_size, .mid = routed_intermediate_size }, .f8e4m3fn);
+    const w2_scale: zml.Tensor = .init(.{ .expert = experts, .nb = 1, .kb = 1 }, .f32);
+    const topk_weight: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .f32);
+    const topk_id: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .i32);
+    const shared_gate_up_weight: zml.Tensor = .init(.{ .out = 2 * shared_intermediate_size, .in = hidden_size }, .f8e4m3fn);
+    const shared_gate_up_scale: zml.Tensor = .init(.{ .nb = 2 * experts, .kb = 1 }, .f32);
+    const shared_down_weight: zml.Tensor = .init(.{ .out = hidden_size, .mid = shared_intermediate_size }, .f8e4m3fn);
+    const shared_down_scale: zml.Tensor = .init(.{ .nb = 1, .kb = experts }, .f32);
+
+    const expert_sharding = try @constCast(platform).registerSharding(
+        "fp8_test_mixed_experts",
+        .mesh(.{ .experts = .high_bandwidth }),
+    );
+    const model_sharding = try @constCast(platform).registerSharding(
+        "fp8_test_mixed_model",
+        .mesh(.{ .model = .high_bandwidth }),
+    );
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        fusedMoeWithLocalEpilogue,
+        .{
+            hidden,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            topk_weight,
+            topk_id,
+            shared_gate_up_weight,
+            shared_gate_up_scale,
+            shared_down_weight,
+            shared_down_scale,
+        },
+        .{ .shardings = &.{ expert_sharding, model_sharding } },
+    );
+    defer exe.deinit();
+}
+
+const MixedScaleMoeOutputs = struct {
+    w1_only: zml.Tensor,
+    w2_only: zml.Tensor,
+};
+
+fn fusedMoeWithMixedScalePresence(
+    hidden: zml.Tensor,
+    fp8_w1: zml.Tensor,
+    w1_scale: zml.Tensor,
+    bf16_w1: zml.Tensor,
+    fp8_w2: zml.Tensor,
+    w2_scale: zml.Tensor,
+    bf16_w2: zml.Tensor,
+    topk_weight: zml.Tensor,
+    topk_id: zml.Tensor,
+) MixedScaleMoeOutputs {
+    const metadata: zml.moe.Metadata = .{ .triton = .init(.{}) };
+    const parameters: zml.moe.Parameters = .{ .triton = .init(.{
+        .num_experts_per_tok = 2,
+        .activation = .silu,
+    }) };
+    const local_hidden = hidden.withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated });
+    const local_topk_id = topk_id.withPartitioning(.{ .b = .replicated, .s = .replicated, .top_expert = .replicated });
+    const local_topk_weight = topk_weight.withPartitioning(.{ .b = .replicated, .s = .replicated, .top_expert = .replicated });
+    const options: zml.moe.Options = .{};
+
+    return .{
+        .w1_only = zml.moe.forwardMoe(
+            local_hidden,
+            local_topk_id,
+            local_topk_weight,
+            fp8_w1.withPartitioning(.{ .expert = .experts, .out = .replicated, .in = .replicated }),
+            w1_scale.withPartitioning(.{}),
+            null,
+            bf16_w2.withPartitioning(.{ .expert = .experts, .out = .replicated, .mid = .replicated }),
+            null,
+            null,
+            null,
+            null,
+            options,
+            metadata,
+            parameters,
+        ) catch unreachable,
+        .w2_only = zml.moe.forwardMoe(
+            local_hidden,
+            local_topk_id,
+            local_topk_weight,
+            bf16_w1.withPartitioning(.{ .expert = .experts, .out = .replicated, .in = .replicated }),
+            null,
+            null,
+            fp8_w2.withPartitioning(.{ .expert = .experts, .out = .replicated, .mid = .replicated }),
+            w2_scale.withPartitioning(.{}),
+            null,
+            null,
+            null,
+            options,
+            metadata,
+            parameters,
+        ) catch unreachable,
+    };
+}
+
+test "expert-parallel Triton MoE compiles with either FP8 stage scaled" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const experts: i64 = @intCast(platform.devices.len);
+    const hidden_size = 128;
+    const intermediate_size = 128;
+    const hidden: zml.Tensor = .init(.{ .b = 8, .s = 1, .d = hidden_size }, .bf16);
+    const fp8_w1: zml.Tensor = .init(.{ .expert = experts, .out = 2 * intermediate_size, .in = hidden_size }, .f8e4m3fn);
+    const w1_scale: zml.Tensor = .init(.{}, .bf16);
+    const bf16_w1: zml.Tensor = .init(.{ .expert = experts, .out = 2 * intermediate_size, .in = hidden_size }, .bf16);
+    const fp8_w2: zml.Tensor = .init(.{ .expert = experts, .out = hidden_size, .mid = intermediate_size }, .f8e4m3fn);
+    const w2_scale: zml.Tensor = .init(.{}, .bf16);
+    const bf16_w2: zml.Tensor = .init(.{ .expert = experts, .out = hidden_size, .mid = intermediate_size }, .bf16);
+    const topk_weight: zml.Tensor = .init(.{ .b = 8, .s = 1, .top_expert = 2 }, .f32);
+    const topk_id: zml.Tensor = .init(.{ .b = 8, .s = 1, .top_expert = 2 }, .i32);
+
+    const expert_sharding = try @constCast(platform).registerSharding(
+        "fp8_test_mixed_scale_experts",
+        .mesh(.{ .experts = .high_bandwidth }),
+    );
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        fusedMoeWithMixedScalePresence,
+        .{ hidden, fp8_w1, w1_scale, bf16_w1, fp8_w2, w2_scale, bf16_w2, topk_weight, topk_id },
+        .{ .shardings = &.{expert_sharding} },
+    );
+    defer exe.deinit();
 }
