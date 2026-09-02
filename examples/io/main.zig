@@ -287,13 +287,18 @@ pub fn main(init: std.process.Init) !void {
                 } };
             const load_profile = try vfs.loadProfile(path);
 
-            const loaded = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
+            var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
+            errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
+            var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
                 .read_parallelism = load_read_parallelism,
                 .load_profile = load_profile,
                 .progress = &progress,
-                .total_bytes = &total_bytes,
             });
+            defer loader.deinit();
+            try loader.load(AllTensorsModel, &model, &loaded);
+            try loader.await();
+            total_bytes = loader.bytesLoaded();
             defer {
                 for (loaded.tensors) |*buffer_| buffer_.deinit();
                 init.arena.allocator().free(loaded.tensors);

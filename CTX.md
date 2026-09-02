@@ -1,5 +1,241 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+## Upstream inventory against `origin/master` (2026-09-02)
+
+The useful upstream baseline is `origin/master` at `e1e983c8`; the local
+`master` ref is older at `a46e4cac` and would incorrectly include three changes
+that are already upstream. Against `origin/master`, the branch changes 39 files
+and adds roughly 12,000 production/test lines excluding the research notes and
+benchmark scripts. The size is concentrated in `zml/io.zig` (the model-wide
+loader and DMA calibrator), `zml/mem.zig` (the DMA block pool), the safetensor
+positional-read path, and the HTTP-family VFS backends.
+
+The current architecture consists of the following upstreamable layers:
+
+1. `TensorReader.readPositionalAllV` adds exact bounded positional scatter
+   reads, checked tensor/file offsets, short-read resumption, local `IOV_MAX`
+   batching, and borrowed readers over a shared open file. The model-wide
+   loader opens each distinct safetensor object once rather than once per
+   tensor.
+2. HTTP, S3, GCS, and HF now implement one whole Range request per admitted
+   positional call. The hidden backend `parallel_read` pools are removed;
+   retries are serial inside the caller's source credit. Shared range code
+   validates covering `Content-Range`, handles servers that answer `200` and
+   ignore Range, scatters directly into caller buffers, applies jittered retry,
+   and publishes aggregate request/retry/throttle counters. The loopback HTTP
+   acceptance target covers exact scatter, retries, and physical concurrency.
+3. The new model-wide `zml.io.load`/`loadInto` path replaces the examples'
+   per-tensor streaming loader on CUDA, ROCm, and oneAPI. A request planner maps
+   source-order tensor ranges onto fixed-size final-destination DMA blocks,
+   preserving sharding, folded layouts, and replication. A fair scheduler
+   interleaves tensors and balances scheduled physical bytes across devices.
+   Requests can read and finish out of order; per-target submitted-prefix
+   accounting preserves PJRT final-transfer ordering.
+4. The direct pipeline leases all blocks for one logical request atomically,
+   reads straight into those DmaMapped blocks, then publishes per-device ready
+   entries. Per-device width and an optional global cap admit PJRT events.
+   Replicas share one host lease until every device callback completes. Error
+   handling closes gates, drains callbacks and queues, returns every lease, and
+   terminally errors unfinished transfer managers through the new PJRT helper.
+   A lifecycle gate of `active reads + one shared spare`, clipped by pinned
+   feasibility, lets the next read advance while DMA owns prior blocks.
+5. `DmaBlockPool` is a load-scoped view over platform-owned arenas. It supplies
+   blocking atomic multi-block acquisition, reference-counted callback leases,
+   a hard mapped-byte ceiling, demand growth, per-NUMA reserves, and an
+   augmenting-path assignment for mixtures of strict-local and replicated
+   affinities. This matching is real correctness logic: greedily placing a
+   replicated block can consume the only block available to a later strict
+   request.
+6. DMA resources and settings now belong to `Platform`. Conservative defaults
+   make loading usable without calibration; `benchTransfer` atomically replaces
+   them with measured settings, and the retained calibration arenas become the
+   loader's initial pool. Platform state prevents calibration, loading,
+   inspection, and destruction from borrowing the workspace concurrently.
+   Runtime NUMA placement comes from owned `PJRT_Device_GetAttributes` state.
+7. Synthetic DMA detection measures block sizes from 2 through 32 MiB at fixed
+   per-device width eight. Default screens require 2 ms and 32 completions;
+   borderline results use 25 ms / 256-transfer alternating confirmation. An
+   8% near-peak policy favors a smaller block. On multiple devices it compares
+   total caps with uncapped operation and emits a cap only after three paired
+   screens plus three paired confirmations show at least 2% aggregate gain,
+   at least 95% retention for every device, and adequate fairness. The loader
+   applies a calibrated cap only when the current load actually uses enough
+   devices to exceed it.
+8. Source concurrency remains adaptive only for `high_latency` profiles. It
+   starts at twelve, can bootstrap blindly to 24 then 32 before the first
+   response, explores a fixed ladder through 128 using clean 100 ms generations,
+   selects the smallest width within 3% of the peak, confirms borderline
+   boundaries with alternating pairs, and rolls unfinished probes back at the
+   finite tail. Local/default profiles deliberately turn the default adaptive
+   request into fixed width twelve. Three gates separate the stable worker set,
+   clean read-measurement generations, and complete request lifecycles.
+9. `VFS.loadProfile(path)` prepares one borrowed model-wide `LoadProfile`.
+   Profiles carry a diagnostic name, a minimum request size, `high_latency`,
+   and one optional aggregate feedback provider. Local/file use 8 MiB;
+   HTTP/S3/GCS use 16 MiB; HF uses 32 MiB. The loader uses
+   `max(profile.read_chunk_size, calibrated DMA block size)`, capped at the
+   supported 32 MiB maximum. There is no per-shard profile lookup or mixed-VFS
+   merge logic.
+10. The public loading API now owns allocation rollback and reporting.
+    `mem.bufferize` handles arrays and recursively unwinds partially allocated
+    slices; `mem.deinitBufferized` provides the matching generic teardown.
+    LLM, IO, MNIST, and test call sites use `loadInto`/`load`, pass the prepared
+    profile, and report the loader's actual logical byte count.
+
+"Vectored" therefore means considerably more than using `preadv`: it is the
+model-wide positional scatter/DMA pipeline in items 1--5. The old public
+`Loader`, `DirectMemoryWriter`, flip-flop `DirectShardWriter`, per-device
+`DynamicBufferPool`, and fused-tensor `loadExecute` path remain in the file for
+compatibility. No in-tree caller now uses that public `Loader`; all current
+examples use the model-wide path. This leaves two direct-load architectures to
+maintain until compatibility policy is decided.
+
+The following explored mechanisms are **not** in the current design: adaptive
+DMA width, adaptive request size, per-shard VFS profile merging, backend-local
+parallel read pools, source-specific post-read slack, streaming remote buffer
+callbacks, and mid-read DMA-block yielding. Whole-request leasing and scatter
+remain deliberate. The yielding prototype reduced pinned high-water in some
+cases but did not improve measured load throughput and would require a much
+more complex resumable remote contract to reduce HTTP workspace.
+
+### External XLA/PJRT prerequisite
+
+The XLA dependency was re-audited against freshly fetched `origin/main` at
+`47149e4cbc5e20a47654a9a2065bc0dc3720cacf` on 2026-09-02. The local
+`7a92ce868d` (`DMA support`) change must **not** be upstreamed: its behavior is
+already in main as `c3d1d50c0f`. CUDA and ROCm staging detection now query
+driver pointer attributes through `IsHostMemoryPinned`, so pinned allocations
+and their subranges bypass the hidden pageable staging copy. Main also has the
+subsequent ROCm test adjustment `e21e1f19a5` and oneAPI support in
+`0d717d8858`.
+
+No additional PJRT API or XLA implementation change is required. An initial
+upstream attempt prepared `77c5ad470f` to advertise the existing
+`PJRT_HostMemoryAllocator_Extension` from the GPU plugin and `e80456700e` to
+route that allocator's NUMA hint. That was the wrong abstraction for ZML and
+both commits have been discarded. The `zml/dma-upstream-main` worktree now
+points exactly at `origin/main` with no local commits.
+
+The extension was only a performance escape hatch for a ROCm-specific driver
+cost. `PJRT_Client_DmaMap` must preserve a caller-owned pointer, so ROCm reaches
+`hipHostRegister`; on the eight-GPU machine registering 2 GiB took about 11
+seconds. CUDA registration is acceptably fast, while ZML already uses PJRT
+`pinned_host` buffers for oneAPI. The same existing standard path works for
+ROCm:
+
+1. select the `pinned_host` memory space attached to a representative device
+   on the target NUMA node;
+2. allocate a byte buffer with `PJRT_Client_CreateUninitializedBuffer`;
+3. hold an external reference with
+   `PJRT_Buffer_IncreaseExternalReferenceCount` and obtain the writable address
+   with `PJRT_Buffer_OpaqueDeviceMemoryDataPointer`;
+4. retain the `PJRT_Buffer` as the arena owner and release the reference and
+   buffer at teardown.
+
+This allocation is handled by the host allocator registered for that device's
+memory space and reaches ROCm `hipHostMalloc`; choosing the representative
+device provides the NUMA selection without changing
+`BasicHostMemoryAllocator`. XLA's existing GPU test
+`StreamExecutorGpuClientTest.OpaqueDeviceMemoryDataPointer` exercises the same
+composition, including using the returned pinned-host pointer as input to the
+async H2D transfer manager.
+
+The only external requirement is the already-upstream pinned-pointer detection
+from `c3d1d50c0f` (plus the subsequent ROCm adjustment `e21e1f19a5`). A plugin
+artifact older than that change allocates quickly but mistakes the pointer for
+pageable memory and silently stages every transfer. In a direct check with the
+July ZML ROCm plugin, a 256 MiB arena allocated in 120 ms but transferred at
+only 7.7 GiB/s. With the `origin/main` plugin, the same standard-PJRT arena
+allocated in 126 ms, selected 16 MiB, and reached 44.9 GiB/s on one MI300X.
+On physical GPUs 0, 2, 3, and 4, 768 MiB on NUMA node 0 plus 256 MiB on node 1
+allocated concurrently in 575 ms; calibration selected 16 MiB / width eight /
+no global cap and measured 165.5 GiB/s aggregate. Thus the artifact must be
+updated, but there is nothing new to upstream to XLA.
+
+### Recommended upstream order
+
+1. Upstream the exact safetensor positional-scatter API and VFS Range/retry
+   conversion, including deletion of `parallel_read` and the acceptance tests.
+2. Publish/update the ZML ROCm plugin pin to an XLA revision containing the
+   already-upstream pinned-range detection, and allocate ROCm arenas through
+   the existing `pinned_host` buffer API. No PJRT extension change is needed.
+3. Upstream platform-owned DMA resources, NUMA arena allocation, and
+   `DmaBlockPool` independently of policy calibration.
+4. Upstream the model-wide vectored planner/scheduler/pipeline and the
+   `load`/`loadInto` plus `deinitBufferized` API migration, initially with
+   conservative fixed DMA settings.
+5. Upstream DMA calibration as a separate policy change: fixed width eight,
+   block selection, and conservative global-cap detection.
+6. Upstream adaptive remote read width and aggregate VFS feedback separately;
+   it is large policy machinery and is easier to review after the fixed-width
+   data plane is established.
+7. Upstream `LoadProfile` and its model-wrapper plumbing either with the VFS
+   conversion or immediately after it. The profile itself is small; most of
+   its apparent diff is call-site threading.
+
+`CTX.md`, both plan files, and `RESEARCH.md` are development records rather
+than production changes. The benchmark scripts are useful for reviewer
+reproduction but do not need to be in the same changesets as the core loader.
+
+### Complexity still worth evaluating before upstream
+
+1. **Stage calibration arenas.** The current detector still allocates
+   `devices_on_node * 8 * 32 MiB` before it tunes even the first device. Device
+   tuning is sequential and needs only one `8 * 32 MiB` ring per NUMA node.
+   After block selection, the pools can grow to
+   `devices_on_node * 8 * selected_block`. On the 4+4 MI300X host selecting
+   16 MiB, this would make the initial allocation 512 MiB and the final global
+   workspace 1 GiB instead of allocating 2 GiB up front. This design is already
+   worked out below but is not implemented.
+2. **Pre-grow the initial load working set.** Demand growth is intentional and
+   must remain, but `DmaBlockPool.acquireMany` currently invokes provider
+   allocation while holding the pool mutex. The scheduler knows the initial
+   read width, one-spare lifecycle width, exact maximum blocks per job, and DMA
+   reserve before workers start. Pre-growing that initial requirement outside
+   the timed load would avoid a synchronous all-reader stall, especially for a
+   32 MiB HF request over a selected 16 MiB DMA block. Growth can remain as the
+   bounded fallback.
+3. **Define post-convergence backpressure behavior.** The aggregate VFS cursor
+   currently rolls back an unsettled read-width probe when retries or throttles
+   appear. Once the controller reaches `settled`, telemetry is sampled but does
+   not reduce concurrency. If the intended side channel is ongoing protection
+   against service throttling, this is incomplete; if it only protects
+   calibration evidence, the API/comments should say so. The provider is also
+   aggregate rather than load-tagged and assumes this load is the VFS's only
+   active user.
+4. **Decide the compatibility loader boundary.** Keeping the old public
+   `Loader` is safe for an initial upstream series, but there are no in-tree
+   users. Deprecating/removing it later would eliminate the second direct writer
+   state machine and most `DynamicBufferPool` maintenance. Fused tensors still
+   rely conceptually on `loadExecute`; the model-wide API currently skips
+   multi-source tensors, so that capability must be migrated before removal.
+5. **Remove abandoned adaptive infrastructure.** The runtime-adjustable and
+   uncancelable additions to `stdx.Io.LimitedGroup` have no production caller;
+   the model-wide loader uses its own `AdaptiveRequestGate`. Likewise
+   `DynamicBufferPool.setLimit`, `trim`, and wait telemetry are only tested, the
+   standalone allocator mode of `DmaBlockPool` is test-only in production, and
+   `VectoredLoadMetrics.resetReadPeak` is dead. These can be removed without a
+   policy decision.
+6. **Split modules before review.** `zml/io.zig` is now nearly 9,000 lines, with
+   roughly 3,200 lines for vectored loading and 3,500 for DMA calibration plus
+   tests. Moving the data plane, calibration, and block pool into dedicated
+   modules would not change runtime behavior but would make ownership and the
+   upstream series much easier to review.
+7. **Decide calibration reuse and sampling scope.** Every explicit
+   `benchTransfer` process still recalibrates. On eight MI300X devices the
+   representative total was about 5.78 seconds: roughly 3.96 seconds of device
+   allocator warmup, 0.93 seconds of host-arena allocation, and 0.89 seconds of
+   calibration. Warmup is also required by the eventual load, but a cache keyed
+   by backend/driver/device topology could skip sampling on stable systems. The
+   block screen currently measures only the first device and assumes a
+   homogeneous device kind; accuracy-oriented general support may instead
+   sample one representative per NUMA/link class before reusing the result.
+
+The first three items are behavioral and should be decided before declaring
+the design finished. Items 4--6 are primarily upstream hygiene. Item 7 is a
+startup-versus-state tradeoff and can follow if explicit per-process
+calibration remains acceptable.
+
 ## Implemented: one VFS-prepared profile per model load (2026-09-02)
 
 The fixed 32 MiB source policy has been replaced by an explicit borrowed
@@ -548,28 +784,33 @@ overlapped well enough to drain only 2 ms after reads ended, but the current
 gate/pool rules do not provide that behavior as an invariant for sharded or
 larger multi-block jobs.
 
-## DMA-enabled XLA integration and current ROCm result (2026-09-02)
+## DMA-enabled XLA integration and ROCm result (2026-09-02)
 
-The current XLA checkout is at detached commit `7a92ce868d` (`DMA support`),
-which is the required DMA change the user added to the active branch. The
-production plugin built from it makes the raw-buffer DMA path work correctly.
+These measurements began with the XLA checkout at local commit `7a92ce868d`
+(`DMA support`) and continued after adding `cf58829aa1` for allocator exposure
+and NUMA selection. The upstream audit near the top of this file supersedes
+those local integration commits: pinned detection is already on XLA main, and
+the allocator extension is unnecessary because the standard PJRT
+`pinned_host` buffer path provides owned, host-visible storage. The production
+plugin built from the local branch made the raw-buffer DMA path work correctly,
+but only its pinned-pointer detection behavior is required.
 On the replicated eight-MI300X Gemma load, the old plugin took 7.829 seconds;
 the DMA-enabled plugin reduced that to about 4.05 seconds before the allocator
 and topology work below. This is the relevant baseline for all new results;
 older 7.8--10.7-second model-load measurements in this file used the old
 plugin or deliberately constrained 8 MiB transfers.
 
-The XLA working tree now exposes its existing
-`PJRT_HostMemoryAllocator_Extension` from the GPU C API and constructs
-`BasicHostMemoryAllocator` with one executor allocator per unique NUMA node.
-An allocation request selects the exact NUMA allocator when available and
-falls back to the first allocator otherwise. ZML's PJRT bindings consume the
-extension, preserve its returned deleter, and request one exact-size arena per
-NUMA pool. Plugins without the extension retain the old anonymous-allocation
-plus `DmaMap` fallback. Ownership metadata is stored beside each arena rather
-than prepended to it: prepending even a small header to a 512 MiB request made
-XLA's BFC allocator round it into a larger size class and inflated two-arena
-allocation from 0.50 to 2.93 seconds.
+The original prototype exposed XLA's existing
+`PJRT_HostMemoryAllocator_Extension` from the GPU C API and made
+`BasicHostMemoryAllocator` route NUMA hints. That design is no longer intended
+for upstream. ZML can instead create a standard uninitialized byte buffer in
+the `pinned_host` memory space attached to one representative GPU per NUMA
+pool, retain the buffer and an external reference, and write through
+`PJRT_Buffer_OpaqueDeviceMemoryDataPointer`. This reaches the same fast
+`hipHostMalloc` implementation and gets locality from the selected device.
+Ownership metadata must remain outside the allocation: prepending even a small
+header to a 512 MiB request made XLA's BFC allocator round it into a larger
+size class and inflated two-arena allocation from 0.50 to 2.93 seconds.
 
 Automatic topology required a separate ZML fix. XLA publishes `numa_node` as
 a runtime `PjRtDevice::Attributes()` value, not as a static
@@ -605,9 +846,10 @@ The overlap experiment was reverted.
 
 The dependency-free raw-buffer direct-enqueue scheduler experiment was not
 kept. It improved a synthetic microbenchmark by about 5.6%, but made the real
-replicated Gemma load about 3.4% slower. The current XLA diff is therefore
-limited to the host-memory allocator extension/NUMA support; it contains no
-scheduler change.
+replicated Gemma load about 3.4% slower. The retained local experimental XLA
+diff at that point was limited to host-memory allocator extension/NUMA support;
+it contained no scheduler change. The later upstream audit discarded that
+remaining diff as well in favor of standard PJRT `pinned_host` buffers.
 
 The final XLA tree was formatted and rebuilt successfully with Bazel 7.7.0,
 the hermetic ROCm CI configuration, the baseline x86-64 configuration, local
@@ -862,24 +1104,24 @@ direct copy control reached about 394 GiB/s. Concurrent node allocations did
 not reduce that approximately 1.28-second wall time further, but this is still
 7--9 times faster than the current ZML path without a DMA-throughput cost.
 
-The integration uses XLA ownership rather than linking ZML directly to HIP.
-`RocmExecutor::HostMemoryAllocate` already calls
-`hipHostMallocPortable`, and XLA already defines a version-zero
-`PJRT_HostMemoryAllocator_Extension` whose allocation request includes a NUMA
-node. The working XLA change adds that extension to the GPU API chain and makes
-`BasicHostMemoryAllocator` honor the requested node; ZML exposes and consumes
-it through its PJRT bindings.
+The integration should use XLA ownership rather than link ZML directly to HIP.
+`RocmExecutor` already allocates the per-device PJRT `pinned_host` memory space
+with `hipHostMalloc`. The standard `PJRT_Client_CreateUninitializedBuffer`,
+external-reference, and opaque-pointer calls therefore provide the required
+writable arena without advertising another GPU extension. Selecting the
+`pinned_host` space attached to a representative GPU on each node supplies
+NUMA locality.
 
 One ownership detail is essential. Calling `hipHostRegister` on a
 `hipHostMalloc` pointer returns `hipErrorHostMemoryAlreadyRegistered` in about
 0.03 ms. Calling `hipHostUnregister` on it succeeds, but then `hipHostFree`
 fails with `hipErrorInvalidValue`; the unregister consumed registration owned
-by the allocation. XLA's DMA-range registry must therefore be able to mark a
-host-allocator range as already mapped and make `DmaUnmap` erase that range
-without invoking `HostMemoryUnregister`. With that state recorded,
-`ShouldStageHostToDeviceTransfers` recognizes the range as direct-DMA memory,
-while the host allocator's returned deleter remains the sole owner of
-`hipHostFree`.
+by the allocation. PJRT-owned pinned-host buffers must therefore never be
+passed through `DmaMap` or `DmaUnmap`; the retained `PJRT_Buffer` is their sole
+owner. The already-upstream driver pointer query lets
+`ShouldStageHostToDeviceTransfers` recognize the `hipHostMalloc` range as
+direct-DMA memory, and destroying the PJRT buffer eventually performs the
+matching `hipHostFree`.
 
 ## Fixed device width and faster default screens (2026-09-01)
 

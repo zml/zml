@@ -20,7 +20,6 @@ const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Placement = Sharding.Placement;
-const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
@@ -291,337 +290,6 @@ pub const TensorStore = struct {
     };
 };
 
-pub const Loader = struct {
-    allocator: std.mem.Allocator,
-    platform: *const Platform,
-    dma_allocators: []const mem.DmaAllocator,
-    dma_chunk_size: usize,
-    pinned_buffer_pools: []mem.DynamicBufferPool,
-    group: stdx.Io.LimitedGroup,
-    bytes_loaded: std.atomic.Value(usize) = .init(0),
-
-    pub const Opts = struct {
-        pub const default: Opts = .{
-            .parallelism = 1,
-            .dma_chunks = 2,
-            .dma_chunk_size = 4096,
-        };
-        parallelism: usize,
-        dma_chunks: usize,
-        dma_chunk_size: usize,
-    };
-
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) !Loader {
-        const pool_count = platform.devices.len;
-        const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
-        errdefer allocator.free(dma_allocators);
-        for (platform.devices, 0..) |*device, i| {
-            dma_allocators[i] = .init(allocator, device);
-        }
-
-        const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
-        errdefer allocator.free(buffer_pools);
-        for (buffer_pools) |*pool_| {
-            pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
-        }
-        errdefer for (buffer_pools, 0..) |*pool_, i| {
-            pool_.deinit(dma_allocators[i].allocator());
-        };
-
-        return .{
-            .allocator = allocator,
-            .platform = platform,
-            .dma_allocators = dma_allocators,
-            .dma_chunk_size = opts.dma_chunk_size,
-            .pinned_buffer_pools = buffer_pools,
-            .group = .init(opts.parallelism),
-        };
-    }
-
-    pub fn deinit(self: Loader) void {
-        for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
-        self.allocator.free(self.pinned_buffer_pools);
-        self.allocator.free(self.dma_allocators);
-    }
-
-    pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
-        return self.group.await(io);
-    }
-
-    pub const LoadOpts = struct {
-        progress: ?*std.Progress.Node = null,
-    };
-
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: Loader.LoadOpts) void {
-        const tensor_count = meta.count(Tensor, model);
-
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-
-        const flattened_buffers = arena.allocator().alloc(*Buffer, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
-        meta.forEachVisit(buffers, *Buffer, struct {
-            fn call(i: usize, buffer: *Buffer, flattened_buffers_: []*Buffer) void {
-                flattened_buffers_[i] = buffer;
-            }
-        }.call, .{flattened_buffers});
-
-        const Ctx = struct {
-            self: *Loader,
-            io: std.Io,
-            store: *const TensorStore,
-            shardings: []const Sharding,
-            buffers: []*Buffer,
-            opts: Loader.LoadOpts,
-        };
-
-        var ctx: Ctx = .{
-            .self = self,
-            .io = io,
-            .store = store,
-            .shardings = shardings,
-            .buffers = flattened_buffers,
-            .opts = opts,
-        };
-
-        meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, ctx_: *Ctx) void {
-                ctx_.self.group.async(ctx_.io, defaultCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
-            }
-        }.call, .{&ctx});
-    }
-
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: Loader.LoadOpts) void {
-        const sources = store.getSourcesById(tensor.id) orelse {
-            std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
-            return;
-        };
-
-        if (sources.len != 1) {
-            log.debug("Skipping fused tensor with {} sources; expected to be loaded via loadExecute", .{sources.len});
-            return;
-        }
-
-        self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
-            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
-            unreachable;
-        };
-    }
-
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: Loader.LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
-            log.err("Failed to load tensor {s}: {}", .{ source.name, e });
-            loaded.* = false;
-            return;
-        };
-        loaded.* = true;
-    }
-
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: Loader.LoadOpts) !void {
-        var reader = try source.reader(io, &.{}, .{});
-        defer reader.deinit();
-
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-            break :blk self.platform.replicated_sharding;
-        };
-
-        var writer = try MemoryWriter.init(
-            self.allocator,
-            io,
-            self.platform,
-            self.pinned_buffer_pools,
-            self.dma_allocators,
-            self.dma_chunk_size,
-            shape,
-            sharding,
-            buffer,
-        );
-        defer writer.deinit(self.allocator);
-
-        const scale = 1024;
-
-        if (opts.progress) |progress| {
-            var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-            defer node.end();
-            writer.setProgress(&node);
-            defer writer.setProgress(null);
-            var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-            const total = try reader.interface.streamRemaining(&progress_writer.interface);
-            try progress_writer.interface.flush();
-            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-        } else {
-            const total = try reader.interface.streamRemaining(writer.interface());
-            try writer.interface().flush();
-            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-        }
-    }
-
-    pub fn loadExecute(
-        self: *Loader,
-        arena: std.mem.Allocator,
-        io: std.Io,
-        tensor: Tensor,
-        buffer: *Buffer,
-        store: *const TensorStore,
-        shardings: []const Sharding,
-        exe: *const Exe,
-        opts: Loader.LoadOpts,
-    ) !void {
-        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
-        const buffers = try arena.alloc(Buffer, sources.len);
-        const loaded = try arena.alloc(bool, sources.len);
-        @memset(loaded, false);
-        defer for (buffers, loaded) |*b, l| if (l) b.deinit();
-
-        var node = if (opts.progress) |progress| b: {
-            var writer = std.Io.Writer.Allocating.init(arena);
-            try writer.writer.writeAll("Running executable on ");
-            for (sources, 0..) |source, i| {
-                try writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name });
-            }
-
-            break :b progress.start(writer.written(), 1);
-        } else null;
-        defer if (node) |*n| n.end();
-
-        for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
-        }
-        try self.group.await(io);
-
-        if (std.mem.findScalar(bool, loaded, false)) |_| {
-            return error.LoadFailed;
-        }
-
-        var args = try exe.args(arena);
-        var results = try exe.results(arena);
-
-        args.set(.{buffers});
-        exe.callOpts(io, args, &results, .{ .wait = true });
-
-        buffer.* = results.get(Buffer);
-    }
-};
-
-pub const ProgressWriter = struct {
-    inner: *std.Io.Writer,
-    progress: *std.Progress.Node,
-    interface: std.Io.Writer,
-    total: usize = 0,
-    scale: usize,
-
-    pub const InitOpts = struct {
-        scale: usize = 1,
-    };
-
-    pub fn init(inner_: *std.Io.Writer, progress_: *std.Progress.Node, opts: InitOpts) ProgressWriter {
-        return .{
-            .inner = inner_,
-            .progress = progress_,
-            .scale = opts.scale,
-            .interface = .{
-                .buffer = inner_.buffer,
-                .end = inner_.end,
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                    .sendFile = sendFile,
-                },
-            },
-        };
-    }
-
-    pub fn pre(self: *ProgressWriter) usize {
-        self.inner.buffer = self.interface.buffer;
-        self.inner.end = self.interface.end;
-        return self.inner.end;
-    }
-
-    pub fn post(self: *ProgressWriter, len_pre: usize, total: usize) void {
-        self.interface.buffer = self.inner.buffer;
-        self.interface.end = self.inner.end;
-        const drained_pre = len_pre -| self.interface.end;
-        self.total += drained_pre + total;
-        self.progress.setCompletedItems(self.total / self.scale);
-    }
-
-    pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
-        const len_pre = self.pre();
-        errdefer self.post(len_pre, 0);
-        const total = try self.inner.vtable.drain(self.inner, data, splat);
-        self.post(len_pre, total);
-        return total;
-    }
-
-    pub fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
-        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
-        const len_pre = self.pre();
-        errdefer self.post(len_pre, 0);
-        const total = try self.inner.vtable.sendFile(self.inner, file_reader, limit);
-        self.post(len_pre, total);
-        return total;
-    }
-
-    pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
-        const len_pre = self.pre();
-        defer self.post(len_pre, 0);
-        try self.inner.vtable.flush(self.inner);
-    }
-
-    pub fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
-        const len_pre = self.pre();
-        defer self.post(len_pre, 0);
-        try self.inner.vtable.rebase(self.inner, preserve, capacity);
-    }
-};
-
-pub const MemoryWriter = union(enum) {
-    direct: DirectMemoryWriter,
-    buffered: BufferedMemoryWriter,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-    ) !MemoryWriter {
-        return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
-        };
-    }
-
-    pub fn interface(self: *MemoryWriter) *std.Io.Writer {
-        return switch (self.*) {
-            .direct => &self.direct.interface,
-            .buffered => &self.buffered.interface,
-        };
-    }
-
-    pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .direct => self.direct.deinit(),
-            .buffered => self.buffered.deinit(allocator),
-        }
-    }
-
-    pub fn setProgress(self: *MemoryWriter, progress: ?*std.Progress.Node) void {
-        switch (self.*) {
-            .direct => self.direct.setProgress(progress),
-            .buffered => {},
-        }
-    }
-};
-
 pub const BufferedMemoryWriter = struct {
     io: std.Io,
     platform: *const Platform,
@@ -665,190 +333,6 @@ pub const BufferedMemoryWriter = struct {
             @ptrCast(self.interface.buffer),
             .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
-    }
-};
-
-const DirectShardWriter = struct {
-    const EventContext = struct {
-        self: *DirectShardWriter,
-        err: ?*pjrt.Error = null,
-        pjrt_event: *pjrt.Event,
-        event: std.Io.Event = .unset,
-        buffer: []u8,
-    };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    memory: *const Memory,
-    pool: *mem.DynamicBufferPool,
-    total: usize,
-    pjrt_buffer: *pjrt.Buffer,
-
-    transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
-    offset: usize = 0,
-
-    interface: std.Io.Writer,
-    flip_flop: u1 = 0,
-    events_contexts: [2]?EventContext = @splat(null),
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
-        const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
-            memory.platform.pjrt_api,
-            .{
-                .shape_specs = &.{shape_spec},
-                .memory = memory.pjrt_memory,
-            },
-        );
-
-        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
-
-        const buf = try pool.get(allocator, io);
-
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .memory = memory,
-            .pool = pool,
-            .total = shape.byteSize(),
-            .pjrt_buffer = pjrt_buffer,
-            .transfer_manager = transfer_manager,
-            .interface = .{
-                .buffer = buf[0..@min(buf.len, shape.byteSize())],
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
-            },
-        };
-    }
-
-    pub fn deinit(self: *DirectShardWriter) void {
-        self.transfer_manager.deinit(self.memory.platform.pjrt_api);
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        const chunk = data[0];
-        if (chunk.len > self.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
-        if (chunk.len > self.total - (self.offset + self.interface.end)) return std.Io.Writer.Error.WriteFailed;
-
-        const needs_fresh_buffer = chunk.len > self.interface.buffer.len - self.interface.end;
-        if (needs_fresh_buffer) {
-            try self.interface.flush();
-        }
-
-        @memcpy(self.interface.buffer[self.interface.end..][0..chunk.len], chunk);
-        self.interface.end += chunk.len;
-
-        const buffer_full = self.interface.end == self.interface.buffer.len;
-        if (buffer_full) {
-            try self.interface.flush();
-        }
-
-        return chunk.len;
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-        try self.flushBuffered();
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-        if (self.interface.buffer.len - self.interface.end >= capacity) return;
-        if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
-        try self.interface.flush();
-    }
-
-    fn flushBuffered(self: *DirectShardWriter) std.Io.Writer.Error!void {
-        if (self.offset >= self.total) return;
-
-        const pjrt_api = self.memory.platform.pjrt_api;
-
-        const current_buffer = self.interface.buffer;
-        const buffered = self.interface.buffered();
-
-        const slice = buffered[0..@min(buffered.len, self.total - self.offset)];
-        if (slice.len == 0) return;
-        const is_last = (self.offset + slice.len) >= self.total;
-
-        const transfer_event = self.transfer_manager.transferData(pjrt_api, 0, slice, @intCast(self.offset), is_last) catch |err| {
-            log.err("error when transferring data to device: {any}", .{err});
-            return std.Io.Writer.Error.WriteFailed;
-        };
-
-        const ctx = &self.events_contexts[@intCast(self.flip_flop)];
-        ctx.* = .{
-            .self = self,
-            .buffer = current_buffer,
-            .pjrt_event = transfer_event,
-        };
-
-        transfer_event.onReady(pjrt_api, EventContext, struct {
-            fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
-                ctx_.self.pool.put(ctx_.self.io, ctx_.buffer);
-                ctx_.err = err;
-                ctx_.event.set(ctx_.self.io);
-            }
-        }.call, &(ctx.*.?)) catch |err| {
-            log.err("error when setting up transfer completion callback: {any}", .{err});
-            return std.Io.Writer.Error.WriteFailed;
-        };
-
-        if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
-            defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
-            ctx_previous.event.waitUncancelable(self.io);
-            defer ctx_previous.pjrt_event.deinit(pjrt_api);
-            if (ctx_previous.err) |e| {
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
-        }
-
-        if (is_last) {
-            defer ctx.* = null;
-            defer self.interface = .failing;
-            const ctx_ = &ctx.*.?;
-            ctx_.event.waitUncancelable(self.io);
-            defer ctx_.pjrt_event.deinit(pjrt_api);
-            if (ctx_.err) |e| {
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
-        } else {
-            self.interface.end = 0;
-            const buf = self.pool.get(self.allocator, self.io) catch |err| {
-                log.err("unable to get a new buffer from the pool: {any}", .{err});
-                return std.Io.Writer.Error.WriteFailed;
-            };
-            self.interface.buffer = buf[0..@min(buf.len, self.total - (self.offset + slice.len))];
-        }
-        self.flip_flop ^= 1;
-        self.offset += slice.len;
-    }
-};
-
-const ShardProgress = struct {
-    const scale: usize = 1024;
-
-    node: std.Progress.Node,
-    label: [32]u8 = undefined,
-    completed: usize = 0,
-
-    fn set(self: *ShardProgress, completed: usize) void {
-        self.completed = completed;
-        self.node.setCompletedItems(std.math.divCeil(usize, self.completed, scale) catch unreachable);
     }
 };
 
@@ -1080,251 +564,6 @@ const DispatchSpans = struct {
 // Direct load writer state machine used by the compatibility `Loader` on
 // CUDA and oneAPI. The model-wide vectored loader below has separate state and
 // admission control; retaining this path preserves master's Loader behavior.
-pub const DirectMemoryWriter = struct {
-    allocator: std.mem.Allocator,
-    shard_writers: []DirectShardWriter,
-    dispatch_spans: DispatchSpans,
-    span_index: usize = 0,
-    byte_cursor: usize = 0,
-    active_writer_index: usize,
-    window_start: usize,
-    dma_chunk_size: usize,
-    shard_progress: ?[]ShardProgress = null,
-    interface: std.Io.Writer,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-    ) !DirectMemoryWriter {
-        const ordered_devices = sharding.devicesInCanonicalOrder();
-        const shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
-        errdefer allocator.free(shard_writers);
-
-        var initialized: usize = 0;
-        errdefer for (shard_writers[0..initialized]) |*writer| {
-            writer.deinit();
-        };
-
-        var pjrt_buffers: Buffer.Shards = .empty;
-        const placement = try sharding.placement(shape);
-        for (ordered_devices, 0..) |device, i| {
-            defer initialized += 1;
-
-            const pool = &pools[device.id];
-            const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(.default).?;
-
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
-
-            pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
-        }
-
-        buffer.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
-
-        const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
-        errdefer dispatch_spans.deinit(allocator);
-
-        const first_span = dispatch_spans.spans[0];
-        const first_writer = &shard_writers[first_span.primary_writer];
-        const first_window = @min(dma_chunk_size, first_writer.interface.buffer.len);
-
-        return .{
-            .allocator = allocator,
-            .shard_writers = shard_writers,
-            .dispatch_spans = dispatch_spans,
-            .active_writer_index = first_span.primary_writer,
-            .window_start = first_writer.interface.end,
-            .dma_chunk_size = dma_chunk_size,
-            .interface = .{
-                .buffer = first_writer.interface.buffer[0..first_window],
-                .end = 0,
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
-            },
-        };
-    }
-
-    pub fn deinit(self: *DirectMemoryWriter) void {
-        self.setProgress(null);
-        for (self.shard_writers) |*writer| {
-            writer.deinit();
-        }
-        self.allocator.free(self.shard_writers);
-        self.dispatch_spans.deinit(self.allocator);
-    }
-
-    pub fn setProgress(self: *DirectMemoryWriter, progress: ?*std.Progress.Node) void {
-        const parent = progress orelse {
-            const states = self.shard_progress orelse return;
-            for (states) |*s| {
-                s.node.end();
-            }
-            self.allocator.free(states);
-            self.shard_progress = null;
-            return;
-        };
-
-        std.debug.assert(self.shard_progress == null);
-        const states = self.allocator.alloc(ShardProgress, self.shard_writers.len) catch return;
-        for (states, self.shard_writers, 0..) |*state, writer, i| {
-            state.completed = 0;
-            const label = std.fmt.bufPrint(&state.label, "shard[{d}]", .{i}) catch unreachable;
-            const total_items = std.math.divCeil(usize, writer.total, ShardProgress.scale) catch unreachable;
-            state.node = parent.start(label, total_items);
-            state.node.setCompletedItems(0);
-        }
-        self.shard_progress = states;
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        const chunk = data[0];
-        try self.commitWindow();
-
-        const writable = self.interface.buffer.len - self.interface.end;
-        if (writable == 0) return std.Io.Writer.Error.WriteFailed;
-
-        const n = @min(writable, chunk.len);
-        @memcpy(self.interface.buffer[self.interface.end..][0..n], chunk[0..n]);
-        self.interface.end += n;
-        try self.commitWindow();
-
-        return n;
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        if (self.span_index < self.dispatch_spans.spans.len) {
-            try self.commitWindow();
-        }
-
-        for (self.shard_writers, 0..) |*shard_writer, i| {
-            try shard_writer.interface.flush();
-            if (self.shard_progress) |states| {
-                states[i].set(shard_writer.total);
-            }
-        }
-
-        self.interface = .failing;
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        if (self.interface.buffer.len - self.interface.end >= capacity) return;
-        if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
-
-        try self.commitWindow();
-        if (self.interface.buffer.len - self.interface.end < capacity) return std.Io.Writer.Error.WriteFailed;
-    }
-
-    fn commitWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
-        }
-
-        const source = self.interface.buffer[self.window_start..self.interface.end];
-        if (source.len == 0) return;
-
-        var consumed: usize = 0;
-        while (consumed < source.len) {
-            if (self.span_index >= self.dispatch_spans.spans.len) return std.Io.Writer.Error.WriteFailed;
-
-            const span = self.dispatch_spans.spans[self.span_index];
-            if (self.byte_cursor < span.start or self.byte_cursor >= span.end) return std.Io.Writer.Error.WriteFailed;
-
-            const n = @min(source.len - consumed, span.end - self.byte_cursor);
-            const chunk = source[consumed..][0..n];
-
-            if (span.primary_writer == self.active_writer_index and consumed == 0) {
-                self.shard_writers[span.primary_writer].interface.end += n;
-            } else {
-                const primary_writer = &self.shard_writers[span.primary_writer];
-                if (span.primary_writer == self.active_writer_index) {
-                    @memmove(primary_writer.interface.buffer[primary_writer.interface.end..][0..n], chunk);
-                    primary_writer.interface.end += n;
-                } else {
-                    try primary_writer.interface.writeAll(chunk);
-                }
-            }
-            if (self.shard_progress) |states| {
-                states[span.primary_writer].set(states[span.primary_writer].completed + n);
-            }
-
-            const mirror_writer_end = span.mirror_writer_start + span.mirror_writer_len;
-            for (self.dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
-                const mirror_writer = &self.shard_writers[mirror_writer_index];
-                if (mirror_writer_index == self.active_writer_index) {
-                    @memmove(mirror_writer.interface.buffer[mirror_writer.interface.end..][0..n], chunk);
-                    mirror_writer.interface.end += n;
-                } else {
-                    try mirror_writer.interface.writeAll(chunk);
-                }
-                if (self.shard_progress) |states| {
-                    states[mirror_writer_index].set(states[mirror_writer_index].completed + n);
-                }
-            }
-
-            self.byte_cursor += n;
-            consumed += n;
-            if (self.byte_cursor == span.end) {
-                self.span_index += 1;
-            }
-        }
-
-        for (self.shard_writers) |*writer| {
-            if (writer.interface.end == writer.interface.buffer.len) {
-                try writer.interface.flush();
-            }
-        }
-
-        if (@mod(self.byte_cursor, self.dma_chunk_size) == 0) {
-            for (self.shard_writers) |*writer| {
-                try writer.interface.flush();
-            }
-        }
-
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
-        }
-
-        const next_span = self.dispatch_spans.spans[self.span_index];
-        const next_writer = &self.shard_writers[next_span.primary_writer];
-        self.active_writer_index = next_span.primary_writer;
-        self.window_start = next_writer.interface.end;
-
-        const total = self.dispatch_spans.spans[self.dispatch_spans.spans.len - 1].end;
-        const buffer_remaining = next_writer.interface.buffer.len - self.window_start;
-        const chunk_offset = @mod(self.byte_cursor, self.dma_chunk_size);
-        const chunk_remaining = if (chunk_offset == 0) self.dma_chunk_size else self.dma_chunk_size - chunk_offset;
-        const tensor_remaining = total - self.byte_cursor;
-        const visible_remaining = @min(buffer_remaining, @min(chunk_remaining, tensor_remaining));
-        if (visible_remaining == 0) return std.Io.Writer.Error.WriteFailed;
-
-        self.interface.buffer = next_writer.interface.buffer[0 .. self.window_start + visible_remaining];
-        self.interface.end = self.window_start;
-    }
-};
-
-/// Pure description of one source request. `segments` are in file order and
-/// identify where each source fragment lands inside a DMA block. `blocks` are
-/// independently contiguous in every destination selected by `writer_mask`.
 const VectoredRequestPlan = struct {
     const Block = struct {
         writer_mask: u64,
@@ -1638,14 +877,39 @@ const VectoredTensorTransfer = struct {
         output: *Buffer,
         progress_parent: ?*std.Progress.Node,
     ) !VectoredTensorTransfer {
-        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file);
-        errdefer reader.deinit();
-
+        const source = store.getPtrFromId(tensor.id) orelse return error.NotFound;
         const shape = tensor.shape();
         const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ source.name, shape });
             break :blk platform.replicated_sharding;
         };
+        return initResolved(
+            allocator,
+            io,
+            platform,
+            source,
+            source_file,
+            shape,
+            sharding,
+            output,
+            progress_parent,
+        );
+    }
+
+    fn initResolved(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        source: *const safetensors.Tensor,
+        source_file: std.Io.File,
+        shape: Shape,
+        sharding: Sharding,
+        output: *Buffer,
+        progress_parent: ?*std.Progress.Node,
+    ) !VectoredTensorTransfer {
+        var reader: safetensors.TensorReader = .initBorrowedPositional(io, source.*, source_file);
+        errdefer reader.deinit();
+
         const packed_shape = shape.packedShape();
         const dispatch_spans = try DispatchSpans.init(allocator, packed_shape, sharding);
         errdefer dispatch_spans.deinit(allocator);
@@ -1717,6 +981,112 @@ const VectoredTensorTransfer = struct {
         if (self.progress) |*progress| {
             progress.setCompletedItems(std.math.divCeil(usize, completed, 1024) catch unreachable);
         }
+    }
+};
+
+const LoaderSourceSlot = struct {
+    const uninitialized = 0;
+    const initializing = 1;
+    const ready = 2;
+    const failed = 3;
+
+    uri: []const u8,
+    file: std.Io.File = undefined,
+    status: std.atomic.Value(u8) = .init(uninitialized),
+    error_code: std.atomic.Value(u16) = .init(0),
+    initialized: std.Io.Event = .unset,
+
+    fn ensure(self: *LoaderSourceSlot, io: std.Io) !std.Io.File {
+        while (true) switch (self.status.load(.acquire)) {
+            uninitialized => {
+                if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
+                self.file = std.Io.Dir.openFile(.cwd(), io, self.uri, .{ .mode = .read_only }) catch |err| {
+                    self.error_code.store(@intFromError(err), .release);
+                    self.status.store(failed, .release);
+                    self.initialized.set(io);
+                    return err;
+                };
+                self.status.store(ready, .release);
+                self.initialized.set(io);
+                return self.file;
+            },
+            initializing => self.initialized.waitUncancelable(io),
+            ready => return self.file,
+            failed => return @errorFromInt(self.error_code.load(.acquire)),
+            else => unreachable,
+        };
+    }
+
+    fn deinit(self: *LoaderSourceSlot, io: std.Io) void {
+        if (self.status.load(.acquire) == ready) self.file.close(io);
+    }
+};
+
+const LoaderLoadItem = struct {
+    const StateSlot = struct {
+        const uninitialized = 0;
+        const initializing = 1;
+        const ready = 2;
+        const failed = 3;
+
+        state: VectoredTensorTransfer = undefined,
+        status: std.atomic.Value(u8) = .init(uninitialized),
+        error_code: std.atomic.Value(u16) = .init(0),
+        initialized: std.Io.Event = .unset,
+
+        fn ensure(self: *StateSlot, item: *LoaderLoadItem, direct: *DirectLoader) !*VectoredTensorTransfer {
+            while (true) switch (self.status.load(.acquire)) {
+                uninitialized => {
+                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
+                    const source_file = item.source_slot.ensure(direct.io) catch |err| {
+                        self.error_code.store(@intFromError(err), .release);
+                        self.status.store(failed, .release);
+                        self.initialized.set(direct.io);
+                        return err;
+                    };
+                    self.state = VectoredTensorTransfer.initResolved(
+                        direct.allocator,
+                        direct.io,
+                        direct.platform,
+                        item.source,
+                        source_file,
+                        item.shape,
+                        item.sharding,
+                        item.output,
+                        direct.opts.progress,
+                    ) catch |err| {
+                        self.error_code.store(@intFromError(err), .release);
+                        self.status.store(failed, .release);
+                        self.initialized.set(direct.io);
+                        return err;
+                    };
+                    self.status.store(ready, .release);
+                    self.initialized.set(direct.io);
+                    return &self.state;
+                },
+                initializing => self.initialized.waitUncancelable(direct.io),
+                ready => return &self.state,
+                failed => return @errorFromInt(self.error_code.load(.acquire)),
+                else => unreachable,
+            };
+        }
+
+        fn deinit(self: *StateSlot) void {
+            if (self.status.load(.acquire) == ready) self.state.deinit();
+        }
+    };
+
+    source: *const safetensors.Tensor,
+    source_slot: *LoaderSourceSlot,
+    shape: Shape,
+    sharding: Sharding,
+    output: *Buffer,
+    state: StateSlot = .{},
+    job_count: usize = 0,
+
+    fn deinit(self: *LoaderLoadItem, allocator: std.mem.Allocator) void {
+        self.state.deinit();
+        allocator.destroy(self);
     }
 };
 
@@ -1851,6 +1221,7 @@ const VectoredLoadPipeline = struct {
         read_epoch: u64,
         admission_id: u64 = 0,
         len: usize,
+        epoch_tracked: bool = false,
 
         fn addBlock(self: *RequestContext) void {
             _ = self.pending.fetchAdd(1, .acq_rel);
@@ -1903,6 +1274,7 @@ const VectoredLoadPipeline = struct {
             self.pipeline.metrics.endRequest(self.len);
             self.completed.store(true, .release);
             self.pipeline.request_gate.release(self.pipeline.io);
+            if (self.epoch_tracked) self.pipeline.completeEpochJob();
         }
     };
 
@@ -1972,6 +1344,10 @@ const VectoredLoadPipeline = struct {
     ready_entries: usize = 0,
     reads_finished: bool = false,
     dma_done: std.Io.Event = .unset,
+    epoch_jobs: std.atomic.Value(usize) = .init(0),
+    epoch_drained: std.Io.Event = .is_set,
+    track_epoch_jobs: bool = false,
+    live_scheduler: ?*FairVectoredReadScheduler = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -2057,10 +1433,15 @@ const VectoredLoadPipeline = struct {
 
     fn recordError(self: *VectoredLoadPipeline, err: anyerror) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
+            if (self.live_scheduler) |scheduler| {
+                const abandoned = scheduler.fail(self.io);
+                self.cancelEpochJobs(abandoned);
+            }
             self.pool.close(self.io);
             self.worker_gate.close(self.io);
             self.read_gate.close(self.io);
             self.request_gate.close(self.io);
+            self.abortReady();
         }
     }
 
@@ -2072,12 +1453,71 @@ const VectoredLoadPipeline = struct {
             .started_at = .now(self.io, .awake),
             .read_epoch = 0,
             .len = len,
+            .epoch_tracked = self.track_epoch_jobs,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         try self.requests.append(self.allocator, request);
         self.metrics.beginRequest(len);
         return request;
+    }
+
+    fn beginEpochJobs(self: *VectoredLoadPipeline, count: usize) void {
+        if (count == 0) return;
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
+        std.debug.assert(self.track_epoch_jobs);
+        if (self.epoch_jobs.load(.acquire) == 0) self.epoch_drained.reset();
+        _ = self.epoch_jobs.fetchAdd(count, .acq_rel);
+    }
+
+    fn cancelEpochJobs(self: *VectoredLoadPipeline, count: usize) void {
+        if (count == 0) return;
+        const previous = self.epoch_jobs.fetchSub(count, .acq_rel);
+        std.debug.assert(previous >= count);
+        if (previous == count) self.epoch_drained.set(self.io);
+    }
+
+    fn completeEpochJob(self: *VectoredLoadPipeline) void {
+        const previous = self.epoch_jobs.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        if (previous == 1) self.epoch_drained.set(self.io);
+    }
+
+    fn waitEpochDrained(self: *VectoredLoadPipeline) void {
+        self.epoch_drained.waitUncancelable(self.io);
+    }
+
+    fn setGlobalDmaLimit(self: *VectoredLoadPipeline, limit: ?usize) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        self.global_dma_limit = limit;
+        self.metadata_mutex.unlock(self.io);
+        self.requestPump();
+    }
+
+    fn reapCompleted(self: *VectoredLoadPipeline) void {
+        std.debug.assert(self.epoch_jobs.load(.acquire) == 0);
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
+        std.debug.assert(self.active_events == 0 and self.ready_entries == 0);
+        for (self.events.items) |ctx| {
+            ctx.pjrt_event.deinit(self.platform.pjrt_api);
+            if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
+            self.allocator.destroy(ctx);
+        }
+        for (self.blocks.items) |block| {
+            std.debug.assert(block.lease.isComplete());
+            std.debug.assert(block.completion_reported.load(.acquire));
+            self.allocator.destroy(block);
+        }
+        for (self.requests.items) |request| {
+            std.debug.assert(request.completed.load(.acquire));
+            self.allocator.destroy(request);
+        }
+        self.events.clearRetainingCapacity();
+        self.blocks.clearRetainingCapacity();
+        self.requests.clearRetainingCapacity();
+        @memset(self.peak_by_device, 0);
     }
 
     fn reserveSourceJob(self: *VectoredLoadPipeline) void {
@@ -2598,12 +2038,14 @@ const VectoredReadRequest = struct {
 const FairVectoredReadScheduler = struct {
     const Job = struct {
         tensor_index: usize,
+        item: ?*LoaderLoadItem = null,
         source_offset: usize,
         len: usize,
     };
 
     const StoredJob = struct {
         tensor_index: usize,
+        item: ?*LoaderLoadItem = null,
         source_offset: usize,
         len: usize,
         predecessor: ?usize,
@@ -2623,6 +2065,24 @@ const FairVectoredReadScheduler = struct {
         has_unscheduled: bool,
     };
 
+    const PreparedBatch = struct {
+        allocator: std.mem.Allocator,
+        jobs: []StoredJob,
+        physical_bytes: []usize,
+        queues: []std.ArrayListUnmanaged(usize),
+        remaining_bytes: u64,
+        remaining_full_jobs: usize,
+        maximum_blocks_per_job: usize,
+
+        fn deinit(self: *PreparedBatch) void {
+            for (self.queues) |*queue| queue.deinit(self.allocator);
+            self.allocator.free(self.queues);
+            self.allocator.free(self.physical_bytes);
+            self.allocator.free(self.jobs);
+            self.* = undefined;
+        }
+    };
+
     allocator: std.mem.Allocator,
     device_count: usize,
     request_size: usize,
@@ -2630,14 +2090,18 @@ const FairVectoredReadScheduler = struct {
     physical_bytes: std.ArrayListUnmanaged(usize) = .empty,
     queues: []std.ArrayListUnmanaged(usize),
     cursors: []usize,
-    claimed: []bool,
+    claimed: std.ArrayListUnmanaged(bool) = .empty,
     scheduled_physical_bytes: []u64,
     remaining_bytes: u64,
     remaining_jobs: usize,
     remaining_full_jobs: usize,
     maximum_blocks_per_job: usize = 0,
     next_device: usize = 0,
+    persistent: bool = false,
+    sealed: bool = true,
+    stopping: bool = false,
     mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -2668,7 +2132,6 @@ const FairVectoredReadScheduler = struct {
             .request_size = request_size,
             .queues = queues,
             .cursors = cursors,
-            .claimed = &.{},
             .scheduled_physical_bytes = scheduled,
             .remaining_bytes = 0,
             .remaining_jobs = 0,
@@ -2791,9 +2254,257 @@ const FairVectoredReadScheduler = struct {
             self.remaining_jobs += 1;
             if (len == request_size) self.remaining_full_jobs += 1;
         }
-        self.claimed = try allocator.alloc(bool, self.jobs.items.len);
-        @memset(self.claimed, false);
+        try self.claimed.appendNTimes(allocator, false, self.jobs.items.len);
         return self;
+    }
+
+    fn initAppendable(
+        allocator: std.mem.Allocator,
+        device_count: usize,
+        request_size: usize,
+    ) !FairVectoredReadScheduler {
+        if (device_count == 0 or device_count > 64) return error.DmaDeviceMismatch;
+        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
+        errdefer allocator.free(queues);
+        @memset(queues, .empty);
+        const cursors = try allocator.alloc(usize, device_count);
+        errdefer allocator.free(cursors);
+        @memset(cursors, 0);
+        const scheduled = try allocator.alloc(u64, device_count);
+        errdefer allocator.free(scheduled);
+        @memset(scheduled, 0);
+        return .{
+            .allocator = allocator,
+            .device_count = device_count,
+            .request_size = request_size,
+            .queues = queues,
+            .cursors = cursors,
+            .scheduled_physical_bytes = scheduled,
+            .remaining_bytes = 0,
+            .remaining_jobs = 0,
+            .remaining_full_jobs = 0,
+            .persistent = true,
+            .sealed = false,
+        };
+    }
+
+    fn prepareBatch(
+        allocator: std.mem.Allocator,
+        device_count: usize,
+        items: []const *LoaderLoadItem,
+        block_size: usize,
+        request_size: usize,
+    ) !PreparedBatch {
+        const TensorPlan = struct {
+            dispatch_spans: DispatchSpans,
+            device_indices: []usize,
+            total: usize,
+        };
+        const plans = try allocator.alloc(TensorPlan, items.len);
+        var initialized_plans: usize = 0;
+        defer {
+            for (plans[0..initialized_plans]) |*plan| {
+                plan.dispatch_spans.deinit(allocator);
+                allocator.free(plan.device_indices);
+            }
+            allocator.free(plans);
+        }
+        var job_count: usize = 0;
+        for (items, plans) |item, *plan| {
+            const packed_shape = item.shape.packedShape();
+            plan.* = .{
+                .dispatch_spans = try .init(allocator, packed_shape, item.sharding),
+                .device_indices = &.{},
+                .total = packed_shape.byteSize(),
+            };
+            initialized_plans += 1;
+            const ordered_devices = item.sharding.devicesInCanonicalOrder();
+            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
+            for (ordered_devices, plan.device_indices) |device, *device_index| {
+                device_index.* = @intCast(device.id);
+                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
+            }
+            const count = std.math.divCeil(usize, plan.total, request_size) catch unreachable;
+            item.job_count = count;
+            job_count = try std.math.add(usize, job_count, count);
+        }
+
+        const jobs = try allocator.alloc(StoredJob, job_count);
+        errdefer allocator.free(jobs);
+        const physical_bytes = try allocator.alloc(usize, job_count * device_count);
+        errdefer allocator.free(physical_bytes);
+        @memset(physical_bytes, 0);
+        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
+        errdefer allocator.free(queues);
+        @memset(queues, .empty);
+        errdefer for (queues) |*queue| queue.deinit(allocator);
+
+        const offsets = try allocator.alloc(usize, items.len);
+        defer allocator.free(offsets);
+        @memset(offsets, 0);
+        const previous_jobs = try allocator.alloc(?usize, items.len);
+        defer allocator.free(previous_jobs);
+        @memset(previous_jobs, null);
+        const next_active = try allocator.alloc(usize, items.len);
+        defer allocator.free(next_active);
+
+        var remaining_items: usize = 0;
+        var first_active: ?usize = null;
+        var last_active: ?usize = null;
+        for (plans, 0..) |plan, item_index| {
+            if (plan.total == 0) continue;
+            if (first_active == null) first_active = item_index;
+            if (last_active) |previous| next_active[previous] = item_index;
+            last_active = item_index;
+            remaining_items += 1;
+        }
+        if (last_active) |last| next_active[last] = first_active.?;
+
+        var current_item = first_active orelse 0;
+        var previous_item = last_active orelse 0;
+        var next_job: usize = 0;
+        var remaining_bytes: u64 = 0;
+        var remaining_full_jobs: usize = 0;
+        var maximum_blocks_per_job: usize = 0;
+        while (remaining_items != 0) {
+            const item_index = current_item;
+            const total = plans[item_index].total;
+            const source_offset = offsets[item_index];
+            const len = @min(request_size, total - source_offset);
+            offsets[item_index] += len;
+
+            const following_item = next_active[item_index];
+            if (offsets[item_index] == total) {
+                remaining_items -= 1;
+                if (remaining_items != 0) {
+                    next_active[previous_item] = following_item;
+                    current_item = following_item;
+                }
+            } else {
+                previous_item = item_index;
+                current_item = following_item;
+            }
+
+            jobs[next_job] = .{
+                .tensor_index = item_index,
+                .item = items[item_index],
+                .source_offset = source_offset,
+                .len = len,
+                .predecessor = previous_jobs[item_index],
+            };
+            previous_jobs[item_index] = next_job;
+            const row = physical_bytes[next_job * device_count ..][0..device_count];
+            const request_plan = try VectoredRequestPlan.init(
+                allocator,
+                plans[item_index].dispatch_spans,
+                source_offset,
+                len,
+                block_size,
+            );
+            defer request_plan.deinit(allocator);
+            maximum_blocks_per_job = @max(maximum_blocks_per_job, request_plan.blocks.len);
+            for (request_plan.blocks) |block| {
+                var writer_mask = block.writer_mask;
+                while (writer_mask != 0) {
+                    const writer_index: usize = @intCast(@ctz(writer_mask));
+                    writer_mask &= writer_mask - 1;
+                    const device_index = plans[item_index].device_indices[writer_index];
+                    row[device_index] = try std.math.add(usize, row[device_index], block.len);
+                }
+            }
+            for (row, queues) |bytes, *queue| {
+                if (bytes != 0) try queue.append(allocator, next_job);
+            }
+            remaining_bytes +|= @intCast(len);
+            if (len == request_size) remaining_full_jobs += 1;
+            next_job += 1;
+        }
+        std.debug.assert(next_job == job_count);
+        return .{
+            .allocator = allocator,
+            .jobs = jobs,
+            .physical_bytes = physical_bytes,
+            .queues = queues,
+            .remaining_bytes = remaining_bytes,
+            .remaining_full_jobs = remaining_full_jobs,
+            .maximum_blocks_per_job = maximum_blocks_per_job,
+        };
+    }
+
+    fn appendPrepared(self: *FairVectoredReadScheduler, io: std.Io, batch: *const PreparedBatch) !void {
+        std.debug.assert(self.persistent);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.stopping) return error.LoaderShuttingDown;
+        if (self.sealed) return error.LoaderEpochSealed;
+
+        try self.jobs.ensureUnusedCapacity(self.allocator, batch.jobs.len);
+        try self.claimed.ensureUnusedCapacity(self.allocator, batch.jobs.len);
+        try self.physical_bytes.ensureUnusedCapacity(self.allocator, batch.physical_bytes.len);
+        for (self.queues, batch.queues) |*queue, prepared| {
+            try queue.ensureUnusedCapacity(self.allocator, prepared.items.len);
+        }
+
+        const base = self.jobs.items.len;
+        for (batch.jobs) |job| {
+            var stored = job;
+            if (stored.predecessor) |predecessor| stored.predecessor = base + predecessor;
+            self.jobs.appendAssumeCapacity(stored);
+            self.claimed.appendAssumeCapacity(false);
+        }
+        self.physical_bytes.appendSliceAssumeCapacity(batch.physical_bytes);
+        for (self.queues, batch.queues) |*queue, prepared| {
+            for (prepared.items) |job_index| queue.appendAssumeCapacity(base + job_index);
+        }
+        self.remaining_bytes +|= batch.remaining_bytes;
+        self.remaining_jobs += batch.jobs.len;
+        self.remaining_full_jobs += batch.remaining_full_jobs;
+        self.maximum_blocks_per_job = @max(self.maximum_blocks_per_job, batch.maximum_blocks_per_job);
+        self.condition.broadcast(io);
+    }
+
+    fn seal(self: *FairVectoredReadScheduler, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.sealed = true;
+        self.condition.broadcast(io);
+    }
+
+    fn reopen(self: *FairVectoredReadScheduler, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.persistent and self.remaining_jobs == 0 and !self.stopping);
+        self.jobs.clearRetainingCapacity();
+        self.claimed.clearRetainingCapacity();
+        self.physical_bytes.clearRetainingCapacity();
+        for (self.queues) |*queue| queue.clearRetainingCapacity();
+        @memset(self.cursors, 0);
+        @memset(self.scheduled_physical_bytes, 0);
+        self.maximum_blocks_per_job = 0;
+        self.next_device = 0;
+        self.sealed = false;
+        self.condition.broadcast(io);
+    }
+
+    fn stop(self: *FairVectoredReadScheduler, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.stopping = true;
+        self.sealed = true;
+        self.condition.broadcast(io);
+    }
+
+    fn fail(self: *FairVectoredReadScheduler, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const abandoned = self.remaining_jobs;
+        self.remaining_jobs = 0;
+        self.remaining_bytes = 0;
+        self.remaining_full_jobs = 0;
+        self.stopping = true;
+        self.sealed = true;
+        self.condition.broadcast(io);
+        return abandoned;
     }
 
     fn initForTest(
@@ -2820,7 +2531,6 @@ const FairVectoredReadScheduler = struct {
             .request_size = max_load_read_request_size,
             .queues = queues,
             .cursors = cursors,
-            .claimed = &.{},
             .scheduled_physical_bytes = scheduled,
             .remaining_bytes = 0,
             .remaining_jobs = 0,
@@ -2860,16 +2570,72 @@ const FairVectoredReadScheduler = struct {
             self.remaining_jobs += 1;
             if (job.len == self.request_size) self.remaining_full_jobs += 1;
         }
-        self.claimed = try allocator.alloc(bool, test_jobs.len);
-        @memset(self.claimed, false);
+        try self.claimed.appendNTimes(allocator, false, test_jobs.len);
         return self;
+    }
+
+    fn appendTestJobs(
+        self: *FairVectoredReadScheduler,
+        io: std.Io,
+        test_jobs: []const TestJob,
+    ) !void {
+        std.debug.assert(self.persistent);
+        const jobs = try self.allocator.alloc(StoredJob, test_jobs.len);
+        defer self.allocator.free(jobs);
+        const bytes = try self.allocator.alloc(usize, test_jobs.len * self.device_count);
+        defer self.allocator.free(bytes);
+        const queues = try self.allocator.alloc(std.ArrayListUnmanaged(usize), self.device_count);
+        defer self.allocator.free(queues);
+        @memset(queues, .empty);
+        defer for (queues) |*queue| queue.deinit(self.allocator);
+        const previous = try self.allocator.alloc(?usize, test_jobs.len);
+        defer self.allocator.free(previous);
+        @memset(previous, null);
+        var remaining_bytes: u64 = 0;
+        var remaining_full_jobs: usize = 0;
+        var maximum_blocks: usize = 0;
+        for (test_jobs, jobs, 0..) |job, *stored, job_index| {
+            if (job.physical_bytes.len != self.device_count or job.block_count == 0)
+                return error.InvalidTestJob;
+            stored.* = .{
+                .tensor_index = job.tensor_index,
+                .source_offset = 0,
+                .len = job.len,
+                .predecessor = if (job.tensor_index < previous.len)
+                    previous[job.tensor_index]
+                else
+                    null,
+            };
+            if (job.tensor_index < previous.len) previous[job.tensor_index] = job_index;
+            @memcpy(bytes[job_index * self.device_count ..][0..self.device_count], job.physical_bytes);
+            var destinations: usize = 0;
+            for (job.physical_bytes, queues) |physical, *queue| {
+                if (physical == 0) continue;
+                try queue.append(self.allocator, job_index);
+                destinations += 1;
+            }
+            if (destinations == 0) return error.InvalidTestJob;
+            remaining_bytes +|= @intCast(job.len);
+            if (job.len == self.request_size) remaining_full_jobs += 1;
+            maximum_blocks = @max(maximum_blocks, job.block_count);
+        }
+        const batch: PreparedBatch = .{
+            .allocator = self.allocator,
+            .jobs = jobs,
+            .physical_bytes = bytes,
+            .queues = queues,
+            .remaining_bytes = remaining_bytes,
+            .remaining_full_jobs = remaining_full_jobs,
+            .maximum_blocks_per_job = maximum_blocks,
+        };
+        try self.appendPrepared(io, &batch);
     }
 
     fn deinit(self: *FairVectoredReadScheduler) void {
         for (self.queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.queues);
         self.allocator.free(self.cursors);
-        if (self.claimed.len != 0) self.allocator.free(self.claimed);
+        self.claimed.deinit(self.allocator);
         self.allocator.free(self.scheduled_physical_bytes);
         self.jobs.deinit(self.allocator);
         self.physical_bytes.deinit(self.allocator);
@@ -2887,15 +2653,15 @@ const FairVectoredReadScheduler = struct {
             const device_index = (self.next_device + offset) % self.device_count;
             const queue = &self.queues[device_index];
             while (self.cursors[device_index] < queue.items.len and
-                self.claimed[queue.items[self.cursors[device_index]]])
+                self.claimed.items[queue.items[self.cursors[device_index]]])
             {
                 self.cursors[device_index] += 1;
             }
             var candidate: ?usize = null;
             for (queue.items[self.cursors[device_index]..]) |job_index| {
-                if (self.claimed[job_index]) continue;
+                if (self.claimed.items[job_index]) continue;
                 const predecessor = self.jobs.items[job_index].predecessor;
-                if (predecessor == null or self.claimed[predecessor.?]) {
+                if (predecessor == null or self.claimed.items[predecessor.?]) {
                     candidate = job_index;
                     break;
                 }
@@ -2911,8 +2677,8 @@ const FairVectoredReadScheduler = struct {
         }
         const device_index = selected_device orelse unreachable;
         const job_index = selected_job.?;
-        std.debug.assert(!self.claimed[job_index]);
-        self.claimed[job_index] = true;
+        std.debug.assert(!self.claimed.items[job_index]);
+        self.claimed.items[job_index] = true;
         self.remaining_jobs -= 1;
         const stored = self.jobs.items[job_index];
         if (stored.len == self.request_size) self.remaining_full_jobs -= 1;
@@ -2922,11 +2688,22 @@ const FairVectoredReadScheduler = struct {
             scheduled.* +|= @intCast(bytes);
         }
         self.next_device = (device_index + 1) % self.device_count;
+        if (self.remaining_jobs == 0) self.condition.broadcast(io);
         return .{
             .tensor_index = stored.tensor_index,
+            .item = stored.item,
             .source_offset = stored.source_offset,
             .len = stored.len,
         };
+    }
+
+    fn waitForWork(self: *FairVectoredReadScheduler, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.remaining_jobs == 0 and !self.stopping) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        return !self.stopping;
     }
 
     fn snapshot(self: *FairVectoredReadScheduler, io: std.Io) Snapshot {
@@ -3090,6 +2867,52 @@ test "fair read scheduler validates jobs and cleans up allocation failures" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
+}
+
+test "appendable fair scheduler admits late jobs by cumulative device debt" {
+    const io = std.testing.io;
+    var scheduler = try FairVectoredReadScheduler.initAppendable(
+        std.testing.allocator,
+        2,
+        max_load_read_request_size,
+    );
+    defer scheduler.deinit();
+    try scheduler.appendTestJobs(io, &.{
+        .{ .tensor_index = 0, .len = 10, .physical_bytes = &.{ 10, 0 } },
+        .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 10, 0 } },
+    });
+    try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
+    try scheduler.appendTestJobs(io, &.{
+        .{ .tensor_index = 2, .len = 10, .physical_bytes = &.{ 0, 10 } },
+    });
+    // The late device-1 job joins immediately because device 0 already owes
+    // ten scheduled bytes. The already-claimed request is never pre-empted.
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
+}
+
+test "appendable fair scheduler resets debt only at a reusable epoch barrier" {
+    const io = std.testing.io;
+    var scheduler = try FairVectoredReadScheduler.initAppendable(
+        std.testing.allocator,
+        2,
+        max_load_read_request_size,
+    );
+    defer scheduler.deinit();
+    try scheduler.appendTestJobs(io, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{ 8, 0 } },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{ 0, 8 } },
+    });
+    _ = scheduler.claim(io).?;
+    _ = scheduler.claim(io).?;
+    scheduler.seal(io);
+    try std.testing.expectEqualSlices(u64, &.{ 8, 8 }, scheduler.scheduled_physical_bytes);
+    scheduler.reopen(io);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, scheduler.scheduled_physical_bytes);
+    try scheduler.appendTestJobs(io, &.{
+        .{ .tensor_index = 2, .len = 4, .physical_bytes = &.{ 0, 4 } },
+    });
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
 }
 
 const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
@@ -3772,6 +3595,12 @@ const SourceReadRuntime = struct {
     pending_read_limit: usize = 1,
     pending_evidence: SourceReadWidthController.Evidence = undefined,
     last_blind_growth_ns: u64 = 0,
+    persistent: bool = false,
+    scheduler_idle: bool = false,
+    reported_width: std.atomic.Value(usize) = .init(1),
+    epoch_barrier_requested: std.atomic.Value(bool) = .init(false),
+    epoch_barrier_done: std.Io.Event = .unset,
+    control: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
 
     fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
@@ -3785,6 +3614,7 @@ const SourceReadRuntime = struct {
         force_probe: bool,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        self.reported_width.store(decision.width, .release);
         self.worker_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
         if (!decision.settled and (decision.changed or force_probe)) {
@@ -3826,6 +3656,7 @@ const SourceReadRuntime = struct {
         decision: SourceReadWidthController.Decision,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        self.reported_width.store(decision.width, .release);
         self.worker_gate.setLimit(io, limits.read);
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
@@ -3867,6 +3698,10 @@ const SourceReadRuntime = struct {
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
         std.debug.assert(self.read_gate.inUse(io) == 0);
         _ = self.takeRemoteTelemetry();
+        if (self.persistent) {
+            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+            return;
+        }
         if (self.controller.phase != .settled) {
             const remaining_full_jobs = self.scheduler.snapshot(io).remaining_full_jobs;
             if (self.scoring_pending) {
@@ -3881,17 +3716,44 @@ const SourceReadRuntime = struct {
         self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
     }
 
+    fn finishIdleMeasurement(self: *SourceReadRuntime, io: std.Io) void {
+        _ = self.takeRemoteTelemetry();
+        if (self.controller.phase != .settled) {
+            if (self.scoring_pending) {
+                self.pending_evidence.remaining_full_jobs = std.math.maxInt(usize);
+                _ = self.controller.observe(self.pending_evidence);
+            } else if (self.probe_measuring) {
+                const evidence = self.currentEvidence(io, std.math.maxInt(usize));
+                if (evidence.scoreable()) _ = self.controller.observe(evidence);
+            }
+        }
+        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+        self.probe_transition_pending = false;
+        self.probe_measuring = false;
+        self.scoring_pending = false;
+        self.blind_admissions = false;
+        self.reported_width.store(self.controller.selectedWidth(), .release);
+    }
+
+    fn epochBarrier(self: *SourceReadRuntime, io: std.Io) void {
+        self.epoch_barrier_done.reset();
+        self.epoch_barrier_requested.store(true, .release);
+        self.control.set(io);
+        self.epoch_barrier_done.waitUncancelable(io);
+    }
+
     fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
         const started: std.Io.Timestamp = .now(io, .awake);
         self.applyDecision(io, self.controller.currentDecision(), self.controller.adaptive);
         while (true) {
-            self.done.waitTimeout(io, .{ .duration = .{
+            self.control.waitTimeout(io, .{ .duration = .{
                 .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),
                 .clock = .awake,
             } }) catch |err| switch (err) {
                 error.Timeout => {},
                 error.Canceled => return error.Canceled,
             };
+            if (self.control.isSet()) self.control.reset();
             if (self.done.isSet()) {
                 self.finalize(io);
                 break;
@@ -3905,6 +3767,32 @@ const SourceReadRuntime = struct {
             if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
             const scheduler_snapshot = self.scheduler.snapshot(io);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+
+            if (self.persistent) {
+                const idle = !scheduler_snapshot.has_unscheduled and
+                    self.metrics.pending_source_jobs.load(.acquire) == 0 and
+                    self.read_gate.inUse(io) == 0;
+                if (idle) {
+                    if (!self.scheduler_idle) {
+                        self.finishIdleMeasurement(io);
+                        self.scheduler_idle = true;
+                    }
+                    if (self.epoch_barrier_requested.swap(false, .acq_rel)) {
+                        _ = self.takeRemoteTelemetry();
+                        self.epoch_barrier_done.set(io);
+                    }
+                    continue;
+                }
+                if (self.scheduler_idle) {
+                    self.scheduler_idle = false;
+                    self.applyDecision(
+                        io,
+                        self.controller.currentDecision(),
+                        self.controller.phase != .settled,
+                    );
+                    continue;
+                }
+            }
 
             // Blind admissions deliberately overlap generations so a remote
             // source can ramp before its first response. Once any response is
@@ -3956,6 +3844,7 @@ const SourceReadRuntime = struct {
                     self.metrics.pending_source_jobs.load(.acquire) == 0 and
                     self.read_gate.inUse(io) == 0)
                 {
+                    if (self.persistent) continue;
                     self.applyDecision(io, self.controller.rollbackTail(), false);
                     continue;
                 }
@@ -3982,7 +3871,7 @@ const SourceReadRuntime = struct {
             if (!scheduler_snapshot.has_unscheduled and
                 self.metrics.pending_source_jobs.load(.acquire) == 0 and
                 self.read_gate.inUse(io) == 0 and
-                self.controller.phase != .settled)
+                self.controller.phase != .settled and !self.persistent)
             {
                 const rollback = self.controller.rollbackTail();
                 self.applyDecision(io, rollback, false);
@@ -4029,525 +3918,6 @@ fn effectiveDmaGlobalCap(
         if (cap < uncapped) return cap;
     }
     return null;
-}
-
-fn loadVectored(
-    comptime ModelType: type,
-    model: *const ModelType,
-    bufferized: *Bufferized(ModelType),
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: LoadOpts,
-    dma_resources: *DmaPlatformSettings,
-    used_device_ids: []const u32,
-    load_started: std.Io.Timestamp,
-) !usize {
-    const tensor_count = meta.count(Tensor, model);
-    const all_tensors = try allocator.alloc(*const Tensor, tensor_count);
-    defer allocator.free(all_tensors);
-    const all_buffers = try allocator.alloc(*Buffer, tensor_count);
-    defer allocator.free(all_buffers);
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
-            output[i] = tensor;
-        }
-    }.call, .{all_tensors});
-    meta.forEachVisit(bufferized, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-            output[i] = buffer;
-        }
-    }.call, .{all_buffers});
-
-    var single_source_count: usize = 0;
-    for (all_tensors, all_buffers) |tensor, buffer| {
-        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
-        if (sources.len != 1) {
-            load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
-            continue;
-        }
-        all_tensors[single_source_count] = tensor;
-        all_buffers[single_source_count] = buffer;
-        single_source_count += 1;
-    }
-    const tensors = all_tensors[0..single_source_count];
-    const buffers = all_buffers[0..single_source_count];
-    if (tensors.len == 0) return 0;
-
-    var dma_config = dma_resources.config;
-    dma_config.global_max_in_flight = try effectiveDmaGlobalCap(
-        dma_config.global_max_in_flight,
-        used_device_ids.len,
-        dma_config.max_in_flight_per_device,
-    );
-    const node_reserves = try allocator.alloc(usize, dma_resources.workspace.pools.len);
-    defer allocator.free(node_reserves);
-    @memset(node_reserves, 0);
-    for (used_device_ids) |device_id| {
-        const device_index = for (platform.devices, 0..) |device, index| {
-            if (device.id() == device_id) break index;
-        } else return error.DmaDeviceMismatch;
-        const node_index = dma_resources.workspace.device_pool_indices[device_index];
-        node_reserves[node_index] = try std.math.add(
-            usize,
-            node_reserves[node_index],
-            dma_config.max_in_flight_per_device,
-        );
-    }
-    var pool = try mem.DmaBlockPool.initFromProvider(
-        allocator,
-        dma_resources.workspace.blockPoolArenaProvider(),
-        dma_config.block_size,
-        dma_config.max_mapped_bytes,
-        node_reserves,
-    );
-    defer pool.deinit();
-
-    const SourceSlot = struct {
-        const uninitialized = 0;
-        const initializing = 1;
-        const ready = 2;
-        const failed = 3;
-
-        uri: []const u8,
-        file: std.Io.File = undefined,
-        status: std.atomic.Value(u8) = .init(uninitialized),
-        error_code: std.atomic.Value(u16) = .init(0),
-        initialized: std.Io.Event = .unset,
-
-        fn ensure(self: *@This(), io_: std.Io) !std.Io.File {
-            while (true) switch (self.status.load(.acquire)) {
-                uninitialized => {
-                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
-                    self.file = std.Io.Dir.openFile(.cwd(), io_, self.uri, .{ .mode = .read_only }) catch |err| {
-                        self.error_code.store(@intFromError(err), .release);
-                        self.status.store(failed, .release);
-                        self.initialized.set(io_);
-                        return err;
-                    };
-                    self.status.store(ready, .release);
-                    self.initialized.set(io_);
-                    return self.file;
-                },
-                initializing => self.initialized.waitUncancelable(io_),
-                ready => return self.file,
-                failed => return @errorFromInt(self.error_code.load(.acquire)),
-                else => unreachable,
-            };
-        }
-    };
-
-    var source_slots: std.ArrayListUnmanaged(SourceSlot) = .empty;
-    defer {
-        for (source_slots.items) |*slot| {
-            if (slot.status.load(.acquire) == SourceSlot.ready) slot.file.close(io);
-        }
-        source_slots.deinit(allocator);
-    }
-    const tensor_source_indices = try allocator.alloc(usize, tensors.len);
-    defer allocator.free(tensor_source_indices);
-    for (tensors, tensor_source_indices) |tensor, *source_index| {
-        const descriptor = store.getPtrFromId(tensor.id) orelse return error.NotFound;
-        source_index.* = for (source_slots.items, 0..) |slot, index| {
-            if (std.mem.eql(u8, slot.uri, descriptor.file_uri)) break index;
-        } else blk: {
-            const index = source_slots.items.len;
-            try source_slots.append(allocator, .{
-                .uri = descriptor.file_uri,
-            });
-            break :blk index;
-        };
-    }
-
-    const source_request_size = try effectiveSourceRequestSize(
-        opts.load_profile.read_chunk_size,
-        dma_config.block_size,
-    );
-    load_log.debug("source profile: name={s}, read_chunk_size={Bi:.2}, high_latency={}, request_size={Bi:.2}, dma_block_size={Bi:.2}", .{
-        opts.load_profile.name,
-        opts.load_profile.read_chunk_size,
-        opts.load_profile.high_latency,
-        source_request_size,
-        dma_config.block_size,
-    });
-    var read_stats_source_storage: [1]VectoredReadStatsSource = undefined;
-    const read_stats_sources: []VectoredReadStatsSource = if (opts.load_profile.stats) |provider| blk: {
-        const initial = provider.snapshot();
-        read_stats_source_storage[0] = .{
-            .provider = provider,
-            .initial = initial,
-            .previous = initial,
-        };
-        break :blk &read_stats_source_storage;
-    } else read_stats_source_storage[0..0];
-
-    const StateSlot = struct {
-        const uninitialized = 0;
-        const initializing = 1;
-        const ready = 2;
-        const failed = 3;
-
-        state: VectoredTensorTransfer = undefined,
-        status: std.atomic.Value(u8) = .init(uninitialized),
-        error_code: std.atomic.Value(u16) = .init(0),
-        initialized: std.Io.Event = .unset,
-
-        fn ensure(
-            self: *@This(),
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const Platform,
-            store_: *const TensorStore,
-            tensor_: *const Tensor,
-            source_file_: std.Io.File,
-            shardings_: []const Sharding,
-            buffer_: *Buffer,
-            progress_: ?*std.Progress.Node,
-        ) !*VectoredTensorTransfer {
-            while (true) switch (self.status.load(.acquire)) {
-                uninitialized => {
-                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
-                    self.state = VectoredTensorTransfer.init(
-                        allocator_,
-                        io_,
-                        platform_,
-                        store_,
-                        tensor_,
-                        source_file_,
-                        shardings_,
-                        buffer_,
-                        progress_,
-                    ) catch |err| {
-                        self.error_code.store(@intFromError(err), .release);
-                        self.status.store(failed, .release);
-                        self.initialized.set(io_);
-                        return err;
-                    };
-                    self.status.store(ready, .release);
-                    self.initialized.set(io_);
-                    return &self.state;
-                },
-                initializing => self.initialized.waitUncancelable(io_),
-                ready => return &self.state,
-                failed => return @errorFromInt(self.error_code.load(.acquire)),
-                else => unreachable,
-            };
-        }
-    };
-
-    const state_slots = try allocator.alloc(StateSlot, tensors.len);
-    defer allocator.free(state_slots);
-    for (state_slots) |*slot| slot.* = .{};
-    defer for (state_slots) |*slot| {
-        if (slot.status.load(.acquire) == StateSlot.ready) slot.state.deinit();
-    };
-
-    const coordinator_started_at: std.Io.Timestamp = .now(io, .awake);
-    load_log.debug("vectored coordinator started: tensors={d}, elapsed={d:.3}s", .{
-        tensors.len,
-        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
-    });
-
-    var scheduler = try FairVectoredReadScheduler.init(
-        allocator,
-        platform,
-        tensors,
-        opts.shardings,
-        dma_config.block_size,
-        source_request_size,
-    );
-    defer scheduler.deinit();
-    const pinned_blocks_per_job = scheduler.maximumBlocksPerJob();
-    if (pinned_blocks_per_job != 0) {
-        try dma_resources.workspace.ensureExactLoadBlockReserves(
-            dma_config.block_size,
-            pinned_blocks_per_job,
-            node_reserves,
-        );
-        try pool.refreshProviderArenas(io);
-    }
-    const pinned_feasible_width = if (pinned_blocks_per_job == 0)
-        @as(usize, 1)
-    else
-        try pool.aggregatePotentialRequestWidth(pinned_blocks_per_job);
-    if (pinned_feasible_width == 0) return error.DmaMappedBudgetExceeded;
-    const strict_pinned_feasible_width = if (pinned_blocks_per_job == 0)
-        @as(usize, 1)
-    else
-        try pool.minimumStrictAffinityRequestWidth(pinned_blocks_per_job);
-    const strict_affinity = for (dma_config.device_numa_nodes) |node| {
-        if (node != null) break true;
-    } else false;
-    const effective_pinned_feasible_width = if (strict_affinity)
-        @min(pinned_feasible_width, strict_pinned_feasible_width)
-    else
-        pinned_feasible_width;
-    if (effective_pinned_feasible_width == 0) return error.DmaMappedBudgetExceeded;
-    load_log.debug("DMA workspace feasibility: blocks_per_job={d}, aggregate_read_width={d}, minimum_strict_read_width={d}", .{
-        pinned_blocks_per_job,
-        pinned_feasible_width,
-        strict_pinned_feasible_width,
-    });
-
-    var metrics: VectoredLoadMetrics = .{};
-    const source_read_parallelism = effectiveSourceReadParallelism(
-        opts.read_parallelism,
-        opts.load_profile.high_latency,
-    );
-    const controller = SourceReadWidthController.init(
-        source_read_parallelism,
-        effective_pinned_feasible_width,
-    );
-    const initial_limits: RequestGateLimits = .init(controller.width(), effective_pinned_feasible_width);
-    var worker_gate: AdaptiveRequestGate = .init(initial_limits.read);
-    var read_gate: AdaptiveRequestGate = .init(initial_limits.read);
-    var request_gate: AdaptiveRequestGate = .init(initial_limits.lifecycle);
-    var pipeline = try VectoredLoadPipeline.init(
-        allocator,
-        io,
-        platform,
-        &pool,
-        &worker_gate,
-        &read_gate,
-        &request_gate,
-        dma_config.block_size,
-        source_request_size,
-        dma_resources.workspace.device_pool_indices,
-        strict_affinity,
-        &metrics,
-        dma_config.max_in_flight_per_device,
-        dma_config.global_max_in_flight,
-    );
-    defer pipeline.deinit();
-
-    var worker_group: std.Io.Group = .init;
-    var controller_runtime: SourceReadRuntime = .{
-        .controller = controller,
-        .worker_gate = &worker_gate,
-        .read_gate = &read_gate,
-        .request_gate = &request_gate,
-        .metrics = &metrics,
-        .next_read_admission = &pipeline.next_read_admission,
-        .scheduler = &scheduler,
-        .pinned_feasible_width = effective_pinned_feasible_width,
-        .read_stats_sources = read_stats_sources,
-        .source_bootstrap_enabled = opts.load_profile.high_latency,
-    };
-    var controller_group: std.Io.Group = .init;
-    try controller_group.concurrent(io, SourceReadRuntime.run, .{ &controller_runtime, io });
-
-    const worker_count = if (scheduler.snapshot(io).remaining_jobs == 0)
-        0
-    else
-        source_read_parallelism.maximum();
-    for (0..worker_count) |worker_index| {
-        worker_group.concurrent(io, struct {
-            fn run(
-                worker_index_: usize,
-                worker_gate_: *AdaptiveRequestGate,
-                scheduler_: *FairVectoredReadScheduler,
-                request_gate_: *AdaptiveRequestGate,
-                pipeline_: *VectoredLoadPipeline,
-                slots_: []StateSlot,
-                tensors_: []const *const Tensor,
-                buffers_: []*Buffer,
-                source_slots_: []SourceSlot,
-                source_indices_: []const usize,
-                allocator_: std.mem.Allocator,
-                io_: std.Io,
-                platform_: *const Platform,
-                store_: *const TensorStore,
-                shardings_: []const Sharding,
-                progress_: ?*std.Progress.Node,
-            ) void {
-                while (true) {
-                    if (!worker_gate_.waitUntilEnabled(io_, worker_index_)) return;
-                    if (pipeline_.failed()) return;
-                    if (!request_gate_.acquire(io_)) return;
-                    pipeline_.reserveSourceJob();
-                    const job = scheduler_.claim(io_) orelse {
-                        pipeline_.abandonSourceJob();
-                        request_gate_.release(io_);
-                        worker_gate_.close(io_);
-                        request_gate_.close(io_);
-                        return;
-                    };
-                    const request = pipeline_.registerRequest(job.len) catch |err| {
-                        pipeline_.abandonSourceJob();
-                        request_gate_.release(io_);
-                        pipeline_.recordError(err);
-                        return;
-                    };
-                    const source_file = source_slots_[source_indices_[job.tensor_index]].ensure(io_) catch |err| {
-                        request.finishScheduling();
-                        pipeline_.recordError(err);
-                        return;
-                    };
-                    const tensor = slots_[job.tensor_index].ensure(
-                        allocator_,
-                        io_,
-                        platform_,
-                        store_,
-                        tensors_[job.tensor_index],
-                        source_file,
-                        shardings_,
-                        buffers_[job.tensor_index],
-                        progress_,
-                    ) catch |err| {
-                        request.finishScheduling();
-                        pipeline_.recordError(err);
-                        return;
-                    };
-                    VectoredReadRequest.run(
-                        request,
-                        tensor,
-                        pipeline_,
-                        job.source_offset,
-                        job.len,
-                    );
-                }
-            }
-        }.run, .{
-            worker_index,
-            &worker_gate,
-            &scheduler,
-            &request_gate,
-            &pipeline,
-            state_slots,
-            tensors,
-            buffers,
-            source_slots.items,
-            tensor_source_indices,
-            allocator,
-            io,
-            platform,
-            store,
-            opts.shardings,
-            opts.progress,
-        }) catch |err| {
-            pipeline.recordError(err);
-            break;
-        };
-    }
-    worker_group.await(io) catch |err| pipeline.recordError(err);
-    const reads_finished_at: std.Io.Timestamp = .now(io, .awake);
-    load_log.debug("vectored reads submitted: elapsed={d:.3}s, read_phase={d:.3}s, committed={Bi:.2}", .{
-        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
-        @as(f64, @floatFromInt(coordinator_started_at.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
-        metrics.committed_bytes.load(.acquire),
-    });
-
-    pipeline.finishReads();
-    if (pipeline.failed()) {
-        pipeline.abortReady();
-    }
-
-    pipeline.dma_done.waitUncancelable(io);
-    if (pipeline.failed()) {
-        // No callback or queued transfer remains at this point, so it is safe
-        // to terminally fail managers that never received their final chunk.
-        for (state_slots) |*slot| {
-            if (slot.status.load(.acquire) != StateSlot.ready) continue;
-            for (slot.state.targets) |*target| {
-                if (!target.final_submitted) {
-                    target.manager.setBufferErrorUnknown(platform.pjrt_api, 0, "vectored load failed") catch {};
-                }
-            }
-        }
-    }
-    controller_runtime.done.set(io);
-    controller_group.await(io) catch |err| pipeline.recordError(err);
-    load_log.debug("vectored DMA drained: elapsed={d:.3}s, drain_phase={d:.3}s", .{
-        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
-        @as(f64, @floatFromInt(reads_finished_at.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
-    });
-    if (pipeline.errorValue()) |err| return err;
-
-    var loaded_bytes: usize = 0;
-    for (state_slots) |*slot| {
-        std.debug.assert(slot.status.load(.acquire) == StateSlot.ready);
-        for (slot.state.targets) |target| std.debug.assert(target.final_submitted);
-        loaded_bytes += slot.state.total;
-    }
-    const elapsed = load_started.untilNow(io, .awake);
-    const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
-    const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
-    const average_read = if (metrics.read_operations.load(.acquire) == 0) 0 else metrics.read_bytes.load(.acquire) / metrics.read_operations.load(.acquire);
-    const average_dma = if (metrics.dma_submissions.load(.acquire) == 0) 0 else metrics.submitted_bytes.load(.acquire) / metrics.dma_submissions.load(.acquire);
-    const read_operations = metrics.read_operations.load(.acquire);
-    const dma_submissions = metrics.dma_submissions.load(.acquire);
-    const average_read_ms = if (metrics.read_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_read_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.read_bytes.load(.acquire))) / std.time.us_per_ms;
-    const average_request_ms = if (metrics.retired_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_request_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.retired_bytes.load(.acquire))) / std.time.us_per_ms;
-    const average_dma_ms = if (metrics.committed_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_dma_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.committed_bytes.load(.acquire))) / std.time.us_per_ms;
-    const average_ready_ms = if (metrics.read_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_ready_age_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.read_bytes.load(.acquire))) / std.time.us_per_ms;
-    const peak_device_active = pipeline.peakDeviceActive();
-    var physical_source_requests: u64 = 0;
-    var physical_source_bytes: u64 = 0;
-    var source_retries: u64 = 0;
-    var source_throttles: u64 = 0;
-    var source_retry_delay_ns: u64 = 0;
-    for (read_stats_sources) |source| {
-        const source_stats = source.provider.snapshot().sub(source.initial);
-        physical_source_requests +|= source_stats.physical_requests;
-        physical_source_bytes +|= source_stats.physical_bytes;
-        source_retries +|= source_stats.retries;
-        source_throttles +|= source_stats.throttles;
-        source_retry_delay_ns +|= source_stats.retry_delay_ns;
-    }
-    for (0..pool.nodeCount()) |node_index| {
-        const stats = pool.nodeStats(node_index);
-        if (dma_resources.workspace.pools[node_index].numa_allocator.node) |node| {
-            load_log.debug("DMA workspace node: numa_node={d}, retained={Bi:.2}, newly_mapped={Bi:.2}, leased_high_water={Bi:.2}, unused_tail={Bi:.2}", .{
-                node,
-                stats.retained_mapped_bytes,
-                stats.newly_mapped_bytes,
-                stats.leased_high_water_bytes,
-                stats.unused_tail_bytes,
-            });
-        } else {
-            load_log.debug("DMA workspace node: numa_node=single, retained={Bi:.2}, newly_mapped={Bi:.2}, leased_high_water={Bi:.2}, unused_tail={Bi:.2}", .{
-                stats.retained_mapped_bytes,
-                stats.newly_mapped_bytes,
-                stats.leased_high_water_bytes,
-                stats.unused_tail_bytes,
-            });
-        }
-    }
-    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_requests={d}, final_requests={d}, final_request_size={Bi:.2}, feasible_width={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, average_request_lifetime={d:.3}ms, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_retry_delay={d:.3}s, dma_submissions={d}, peak_dma_per_device={d}, final_dma_per_device={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, average_ready_age={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, leased_high_water={Bi:.2}, mapped={Bi:.2}, newly_mapped={Bi:.2}, unused_tail={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
-        tensors.len,
-        loaded_bytes,
-        elapsed_seconds,
-        goodput / (1024 * 1024),
-        read_operations,
-        metrics.request_high_water.load(.acquire),
-        controller_runtime.controller.width(),
-        source_request_size,
-        effective_pinned_feasible_width,
-        average_read,
-        average_read_ms,
-        average_request_ms,
-        physical_source_requests,
-        physical_source_bytes,
-        source_retries,
-        source_throttles,
-        @as(f64, @floatFromInt(source_retry_delay_ns)) / std.time.ns_per_s,
-        dma_submissions,
-        peak_device_active,
-        dma_config.max_in_flight_per_device,
-        average_dma,
-        average_dma_ms,
-        average_ready_ms,
-        metrics.submitted_bytes.load(.acquire),
-        metrics.committed_bytes.load(.acquire),
-        pool.highWaterBytes(),
-        pool.mappedBytes(),
-        pool.newlyMappedBytes(),
-        pool.unusedTailBytes(),
-        metrics.pool_waits.load(.acquire),
-        @as(f64, @floatFromInt(metrics.pool_wait_ns.load(.acquire))) / std.time.ns_per_s,
-    });
-    return loaded_bytes;
 }
 
 pub const default_dma_benchmark_block_sizes = [_]usize{
@@ -5280,7 +4650,6 @@ const DmaBenchmarkSourcePools = struct {
         @memset(device_sources, &.{});
         const use_pjrt_host_allocator =
             platform.pjrt_api.extension(.host_memory_allocator) != null;
-
         if (unique_nodes.count() == 0) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
@@ -6352,17 +5721,923 @@ pub const Parallelism = union(enum) {
     }
 };
 
-pub const LoadOpts = struct {
-    pub const auto: LoadOpts = .{};
+pub const Loader = struct {
+    allocator: std.mem.Allocator,
+    backend: Backend,
 
-    /// Concurrent positional source requests.
-    read_parallelism: Parallelism = .{ .adaptive = .{ .initial = 12, .maximum = max_load_read_parallelism } },
-    /// Model-wide source tuning prepared from the VFS path. The default is a
-    /// generic 16 MiB profile for callers without an explicit VFS profile.
-    load_profile: VFS.LoadProfile = .default,
-    shardings: []const Sharding = &.{},
-    progress: ?*std.Progress.Node = null,
-    total_bytes: ?*usize = null,
+    const Backend = union(enum) {
+        direct: *DirectLoader,
+        buffered: *BufferedLoader,
+    };
+
+    pub const Opts = struct {
+        pub const auto: Opts = .{};
+
+        /// Concurrent positional source requests.
+        read_parallelism: Parallelism = .{ .adaptive = .{ .initial = 12, .maximum = max_load_read_parallelism } },
+        /// Model-wide source tuning prepared from the VFS path. The default is
+        /// generic for callers that do not have an explicit VFS profile.
+        load_profile: VFS.LoadProfile = .default,
+        shardings: []const Sharding = &.{},
+        progress: ?*std.Progress.Node = null,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Opts,
+    ) !Loader {
+        try validateLoaderOpts(opts);
+        return .{
+            .allocator = allocator,
+            .backend = if (isDirectTransferPlatform(platform))
+                .{ .direct = try DirectLoader.create(allocator, io, platform, store, opts) }
+            else
+                .{ .buffered = try BufferedLoader.create(allocator, io, platform, store, opts) },
+        };
+    }
+
+    /// Atomically publishes all single-source tensors in `model`. Work may
+    /// start before this method returns. Multi-source bindings remain explicit
+    /// and must be submitted with `loadExecute`.
+    pub fn load(
+        self: *Loader,
+        comptime ModelType: type,
+        model: *const ModelType,
+        buffers: *Bufferized(ModelType),
+    ) !void {
+        return switch (self.backend) {
+            .direct => |direct| direct.load(ModelType, model, buffers),
+            .buffered => |buffered| buffered.load(ModelType, model, buffers),
+        };
+    }
+
+    /// Loads every source associated with `tensor`, drains the loader-wide
+    /// epoch, and executes `exe` synchronously. The returned output is ready.
+    pub fn loadExecute(
+        self: *Loader,
+        tensor: Tensor,
+        output: *Buffer,
+        exe: *const Exe,
+    ) !void {
+        return switch (self.backend) {
+            .direct => |direct| direct.loadExecute(tensor, output, exe),
+            .buffered => |buffered| buffered.loadExecute(tensor, output, exe),
+        };
+    }
+
+    /// Drains the current epoch and reopens the loader for later submissions.
+    pub fn await(self: *Loader) !void {
+        return switch (self.backend) {
+            .direct => |direct| direct.await(),
+            .buffered => |buffered| buffered.await(),
+        };
+    }
+
+    pub fn bytesLoaded(self: *const Loader) usize {
+        return switch (self.backend) {
+            .direct => |direct| direct.bytes_loaded.load(.acquire),
+            .buffered => |buffered| buffered.bytes_loaded.load(.acquire),
+        };
+    }
+
+    pub fn deinit(self: *Loader) void {
+        switch (self.backend) {
+            .direct => |direct| direct.destroy(),
+            .buffered => |buffered| buffered.destroy(),
+        }
+        self.* = undefined;
+    }
+};
+
+fn validateLoaderOpts(opts: Loader.Opts) !void {
+    _ = try effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
+    const initial = opts.read_parallelism.initial();
+    const maximum = opts.read_parallelism.maximum();
+    if (initial == 0 or maximum < initial or maximum > max_load_read_parallelism)
+        return error.InvalidLoadParallelism;
+}
+
+fn validateExecutableBinding(
+    platform: *const Platform,
+    tensor: Tensor,
+    sources: []const *safetensors.Tensor,
+    exe: *const Exe,
+    expected_output_sharding: Sharding,
+) !void {
+    if (exe.platform != platform) return error.ExecutablePlatformMismatch;
+    if (exe.output_shapes.len != 1 or exe.output_shardings.len != 1)
+        return error.InvalidExecutableOutputs;
+    if (exe.input_shapes.len != sources.len or exe.input_shardings.len != sources.len)
+        return error.InvalidExecutableInputs;
+    if (!tensor.shape().eql(exe.output_shapes[0])) return error.ExecutableOutputShapeMismatch;
+    for (sources, exe.input_shapes, exe.input_shardings) |source, shape, sharding| {
+        if (!source.shape.eql(shape)) return error.ExecutableInputShapeMismatch;
+        try validateExecutableSharding(platform, sharding, exe.num_devices);
+    }
+    try validateExecutableSharding(platform, exe.output_shardings[0], exe.num_devices);
+    try validateSamePlacement(
+        tensor.shape(),
+        expected_output_sharding.resolve(platform),
+        exe.output_shardings[0].resolve(platform),
+    );
+}
+
+fn validateExecutableSharding(
+    platform: *const Platform,
+    unresolved: Sharding,
+    expected_devices: usize,
+) !void {
+    const sharding = unresolved.resolve(platform);
+    const devices = sharding.devicesInCanonicalOrder();
+    if (devices.len != expected_devices) return error.ExecutablePlacementMismatch;
+    for (devices) |device| {
+        if (device.id >= platform.devices.len) return error.ExecutablePlacementMismatch;
+    }
+}
+
+fn validateSamePlacement(shape: Shape, expected: Sharding, actual: Sharding) !void {
+    const expected_devices = expected.devicesInCanonicalOrder();
+    const actual_devices = actual.devicesInCanonicalOrder();
+    if (expected_devices.len != actual_devices.len) return error.ExecutablePlacementMismatch;
+    const expected_placement = try expected.placement(shape);
+    const actual_placement = try actual.placement(shape);
+    if (!expected_placement.shape.eql(actual_placement.shape))
+        return error.ExecutablePlacementMismatch;
+    for (expected_devices, actual_devices) |expected_device, actual_device| {
+        const expected_slices = expected_placement.slices(expected_device.coords);
+        const actual_slices = actual_placement.slices(actual_device.coords);
+        if (expected_device.id != actual_device.id or
+            !std.mem.eql(Placement.Slice1d, expected_slices.constSlice(), actual_slices.constSlice()))
+        {
+            return error.ExecutablePlacementMismatch;
+        }
+    }
+}
+
+const BufferedLoader = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: Loader.Opts,
+    group: stdx.Io.LimitedGroup,
+    bytes_loaded: std.atomic.Value(usize) = .init(0),
+    first_error: std.atomic.Value(u16) = .init(0),
+
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Loader.Opts,
+    ) !*BufferedLoader {
+        const self = try allocator.create(BufferedLoader);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .store = store,
+            .opts = opts,
+            .group = .init(opts.read_parallelism.initial()),
+        };
+        return self;
+    }
+
+    fn recordError(self: *BufferedLoader, err: anyerror) void {
+        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+    }
+
+    fn checkOpen(self: *BufferedLoader) !void {
+        const code = self.first_error.load(.acquire);
+        if (code != 0) return @errorFromInt(code);
+    }
+
+    fn submitOne(
+        self: *BufferedLoader,
+        source: *safetensors.Tensor,
+        shape: Shape,
+        sharding: Sharding,
+        output: *Buffer,
+    ) void {
+        self.group.async(self.io, struct {
+            fn run(
+                loader: *BufferedLoader,
+                source_: *safetensors.Tensor,
+                shape_: Shape,
+                sharding_: Sharding,
+                output_: *Buffer,
+            ) void {
+                if (loader.first_error.load(.acquire) != 0) return;
+                var reader = source_.reader(loader.io, &.{}, .{}) catch |err| {
+                    loader.recordError(err);
+                    return;
+                };
+                defer reader.deinit();
+                var writer = BufferedMemoryWriter.init(
+                    loader.allocator,
+                    loader.io,
+                    loader.platform,
+                    shape_,
+                    sharding_,
+                    output_,
+                ) catch |err| {
+                    loader.recordError(err);
+                    return;
+                };
+                defer writer.deinit(loader.allocator);
+                const total = reader.interface.streamRemaining(&writer.interface) catch |err| {
+                    loader.recordError(err);
+                    return;
+                };
+                writer.interface.flush() catch |err| {
+                    loader.recordError(err);
+                    return;
+                };
+                _ = loader.bytes_loaded.fetchAdd(total, .monotonic);
+            }
+        }.run, .{ self, source, shape, sharding, output });
+    }
+
+    fn load(
+        self: *BufferedLoader,
+        comptime ModelType: type,
+        model: *const ModelType,
+        buffers: *Bufferized(ModelType),
+    ) !void {
+        try self.checkOpen();
+        const tensor_count = meta.count(Tensor, model);
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const flattened = try arena.allocator().alloc(*Buffer, tensor_count);
+        meta.forEachVisit(buffers, *Buffer, struct {
+            fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+                output[i] = buffer;
+            }
+        }.call, .{flattened});
+        const Prepared = struct {
+            source: *safetensors.Tensor,
+            shape: Shape,
+            sharding: Sharding,
+            output: *Buffer,
+        };
+        const prepared = try arena.allocator().alloc(Prepared, tensor_count);
+        const Ctx = struct {
+            loader: *BufferedLoader,
+            buffers: []*Buffer,
+            prepared: []Prepared,
+            count: usize = 0,
+            err: ?anyerror = null,
+        };
+        var ctx: Ctx = .{ .loader = self, .buffers = flattened, .prepared = prepared };
+        meta.forEachVisit(model, *const Tensor, struct {
+            fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
+                if (context.err != null) return;
+                const sources = context.loader.store.getSourcesById(tensor.id) orelse {
+                    context.err = error.NotFound;
+                    return;
+                };
+                if (sources.len != 1) {
+                    load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
+                    return;
+                }
+                const shape = tensor.shape();
+                const sharding = Sharding.pickSharding(
+                    context.loader.opts.shardings,
+                    shape,
+                    .explicit_axis_binding,
+                ) orelse context.loader.platform.replicated_sharding;
+                context.prepared[context.count] = .{
+                    .source = sources[0],
+                    .shape = shape,
+                    .sharding = sharding,
+                    .output = context.buffers[i],
+                };
+                context.count += 1;
+            }
+        }.call, .{&ctx});
+        if (ctx.err) |err| return err;
+        for (prepared[0..ctx.count]) |item| {
+            self.submitOne(item.source, item.shape, item.sharding, item.output);
+        }
+    }
+
+    fn await(self: *BufferedLoader) !void {
+        self.group.await(self.io) catch |err| self.recordError(err);
+        try self.checkOpen();
+    }
+
+    fn loadExecute(self: *BufferedLoader, tensor: Tensor, output: *Buffer, exe: *const Exe) !void {
+        try self.checkOpen();
+        const sources = self.store.getSourcesById(tensor.id) orelse return error.NotFound;
+        const output_sharding = Sharding.pickSharding(
+            self.opts.shardings,
+            tensor.shape(),
+            .explicit_axis_binding,
+        ) orelse self.platform.replicated_sharding;
+        try validateExecutableBinding(self.platform, tensor, sources, exe, output_sharding);
+        const inputs = try self.allocator.alloc(Buffer, sources.len);
+        defer self.allocator.free(inputs);
+        for (inputs, exe.input_shapes, exe.input_shardings) |*input, shape, sharding| {
+            input.* = .{
+                ._platform = self.platform,
+                ._shape = shape,
+                ._sharding = sharding.resolve(self.platform),
+                ._shards = .empty,
+            };
+        }
+        defer for (inputs) |*input| input.deinit();
+        for (sources, exe.input_shapes, exe.input_shardings, inputs) |source, shape, sharding, *input| {
+            self.submitOne(source, shape, sharding.resolve(self.platform), input);
+        }
+        try self.await();
+        try executeLoadedBinding(self.allocator, self.io, inputs, output, exe);
+    }
+
+    fn destroy(self: *BufferedLoader) void {
+        self.await() catch {};
+        self.allocator.destroy(self);
+    }
+};
+
+fn executeLoadedBinding(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    inputs: []Buffer,
+    output: *Buffer,
+    exe: *const Exe,
+) !void {
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+    args.set(.{inputs});
+    exe.callOpts(io, args, &results, .{ .wait = true });
+    output.* = results.get(Buffer);
+}
+
+const DirectLoader = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: Loader.Opts,
+    dma_resources: *DmaPlatformSettings,
+    pool: mem.DmaBlockPool,
+    scheduler: FairVectoredReadScheduler,
+    metrics: VectoredLoadMetrics = .{},
+    worker_gate: AdaptiveRequestGate,
+    read_gate: AdaptiveRequestGate,
+    request_gate: AdaptiveRequestGate,
+    pipeline: VectoredLoadPipeline,
+    controller_runtime: SourceReadRuntime,
+    worker_group: std.Io.Group = .init,
+    controller_group: std.Io.Group = .init,
+    source_slots: std.ArrayListUnmanaged(*LoaderSourceSlot) = .empty,
+    epoch_items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty,
+    bytes_loaded: std.atomic.Value(usize) = .init(0),
+    epoch_logical_bytes: usize = 0,
+    epoch_started_at: ?std.Io.Timestamp = null,
+    epoch_number: usize = 0,
+    logged_read_operations: u64 = 0,
+    logged_dma_submissions: u64 = 0,
+    diagnostic_stats: ?VFS.ReadStats = null,
+    active_device_mask: u64 = 0,
+    epoch_active: bool = false,
+    source_request_size: usize,
+    maximum_blocks_per_job: usize,
+    effective_pinned_feasible_width: usize,
+    read_stats_storage: [1]VectoredReadStatsSource = undefined,
+    read_stats_len: usize = 0,
+    workers_started: bool = false,
+    controller_started: bool = false,
+    cleaned: bool = false,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Loader.Opts,
+    ) !*DirectLoader {
+        if (platform.devices.len == 0 or platform.devices.len > 64)
+            return error.DmaDeviceMismatch;
+        const device_ids = try allocator.alloc(u32, platform.devices.len);
+        defer allocator.free(device_ids);
+        for (platform.devices, device_ids) |device, *device_id| device_id.* = device.id();
+        const resources = try acquirePlatformDmaSettings(platform, device_ids);
+        errdefer releasePlatformDmaSettings(platform);
+        const config = resources.config;
+        if (config.block_size > max_load_read_request_size or
+            config.max_mapped_bytes < max_load_read_request_size)
+            return error.InvalidDmaLoadConfig;
+
+        const request_size = try effectiveSourceRequestSize(
+            opts.load_profile.read_chunk_size,
+            config.block_size,
+        );
+        const maximum_blocks_per_job = try std.math.add(
+            usize,
+            std.math.divCeil(usize, request_size, config.block_size) catch
+                return error.InvalidDmaLoadConfig,
+            platform.devices.len - 1,
+        );
+        const node_reserves = try allocator.alloc(usize, resources.workspace.pools.len);
+        defer allocator.free(node_reserves);
+        @memset(node_reserves, 0);
+        for (platform.devices, 0..) |_, device_index| {
+            const node_index = resources.workspace.device_pool_indices[device_index];
+            node_reserves[node_index] = try std.math.add(
+                usize,
+                node_reserves[node_index],
+                config.max_in_flight_per_device,
+            );
+        }
+        // The per-node reserves are deliberately non-materialized. They keep
+        // enough mapped-budget capacity available for devices that join a
+        // later submission without paying their allocation cost at init.
+        var pool = try mem.DmaBlockPool.initFromProvider(
+            allocator,
+            resources.workspace.blockPoolArenaProvider(),
+            config.block_size,
+            config.max_mapped_bytes,
+            node_reserves,
+        );
+        var pool_moved = false;
+        errdefer if (!pool_moved) pool.deinit();
+        const aggregate_width = try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
+        const strict_width = try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
+        const strict_affinity = for (config.device_numa_nodes) |node| {
+            if (node != null) break true;
+        } else false;
+        const feasible_width = if (strict_affinity)
+            @min(aggregate_width, strict_width)
+        else
+            aggregate_width;
+        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
+
+        var scheduler = try FairVectoredReadScheduler.initAppendable(
+            allocator,
+            platform.devices.len,
+            request_size,
+        );
+        var scheduler_moved = false;
+        errdefer if (!scheduler_moved) scheduler.deinit();
+        const source_parallelism = effectiveSourceReadParallelism(
+            opts.read_parallelism,
+            opts.load_profile.high_latency,
+        );
+        const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
+        const limits: RequestGateLimits = .init(controller.width(), feasible_width);
+
+        const self = try allocator.create(DirectLoader);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .store = store,
+            .opts = opts,
+            .dma_resources = resources,
+            .pool = pool,
+            .scheduler = scheduler,
+            .worker_gate = .init(limits.read),
+            .read_gate = .init(limits.read),
+            .request_gate = .init(limits.lifecycle),
+            .pipeline = undefined,
+            .controller_runtime = undefined,
+            .source_request_size = request_size,
+            .maximum_blocks_per_job = maximum_blocks_per_job,
+            .effective_pinned_feasible_width = feasible_width,
+        };
+        // Ownership moved into the stable heap object.
+        pool_moved = true;
+        scheduler_moved = true;
+        errdefer {
+            self.scheduler.deinit();
+            self.pool.deinit();
+        }
+
+        self.pipeline = try VectoredLoadPipeline.init(
+            allocator,
+            io,
+            platform,
+            &self.pool,
+            &self.worker_gate,
+            &self.read_gate,
+            &self.request_gate,
+            config.block_size,
+            request_size,
+            resources.workspace.device_pool_indices,
+            strict_affinity,
+            &self.metrics,
+            config.max_in_flight_per_device,
+            null,
+        );
+        errdefer self.pipeline.deinit();
+        self.pipeline.track_epoch_jobs = true;
+        self.pipeline.live_scheduler = &self.scheduler;
+
+        if (opts.load_profile.stats) |provider| {
+            const initial = provider.snapshot();
+            self.read_stats_storage[0] = .{
+                .provider = provider,
+                .initial = initial,
+                .previous = initial,
+            };
+            self.read_stats_len = 1;
+            self.diagnostic_stats = initial;
+        }
+        self.controller_runtime = .{
+            .controller = controller,
+            .worker_gate = &self.worker_gate,
+            .read_gate = &self.read_gate,
+            .request_gate = &self.request_gate,
+            .metrics = &self.metrics,
+            .next_read_admission = &self.pipeline.next_read_admission,
+            .scheduler = &self.scheduler,
+            .pinned_feasible_width = feasible_width,
+            .read_stats_sources = self.read_stats_storage[0..self.read_stats_len],
+            .source_bootstrap_enabled = opts.load_profile.high_latency,
+            .persistent = true,
+        };
+        errdefer self.stopWorkers();
+        try self.startWorkers(source_parallelism.maximum());
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, feasible_width={d}, mapped={Bi:.2}", .{
+            @tagName(platform.target),
+            opts.load_profile.name,
+            request_size,
+            config.block_size,
+            source_parallelism.maximum(),
+            feasible_width,
+            self.pool.mappedBytes(),
+        });
+        return self;
+    }
+
+    fn startWorkers(self: *DirectLoader, worker_count: usize) !void {
+        try self.controller_group.concurrent(
+            self.io,
+            SourceReadRuntime.run,
+            .{ &self.controller_runtime, self.io },
+        );
+        self.controller_started = true;
+        self.workers_started = true;
+        for (0..worker_count) |worker_index| {
+            self.worker_group.concurrent(self.io, workerMain, .{ self, worker_index }) catch |err| {
+                self.stopWorkers();
+                return err;
+            };
+        }
+    }
+
+    fn workerMain(self: *DirectLoader, worker_index: usize) void {
+        while (true) {
+            if (!self.scheduler.waitForWork(self.io)) return;
+            if (!self.worker_gate.waitUntilEnabled(self.io, worker_index)) return;
+            if (self.pipeline.failed()) return;
+            if (!self.request_gate.acquire(self.io)) return;
+            const job = self.scheduler.claim(self.io) orelse {
+                self.request_gate.release(self.io);
+                continue;
+            };
+            self.pipeline.reserveSourceJob();
+            const request = self.pipeline.registerRequest(job.len) catch |err| {
+                self.pipeline.abandonSourceJob();
+                self.request_gate.release(self.io);
+                self.pipeline.completeEpochJob();
+                self.pipeline.recordError(err);
+                return;
+            };
+            const item = job.item orelse {
+                request.finishScheduling();
+                self.pipeline.recordError(error.InvalidLoaderJob);
+                return;
+            };
+            const transfer = item.state.ensure(item, self) catch |err| {
+                request.finishScheduling();
+                self.pipeline.recordError(err);
+                return;
+            };
+            VectoredReadRequest.run(request, transfer, &self.pipeline, job.source_offset, job.len);
+        }
+    }
+
+    fn stopWorkers(self: *DirectLoader) void {
+        self.scheduler.stop(self.io);
+        self.worker_gate.close(self.io);
+        self.read_gate.close(self.io);
+        self.request_gate.close(self.io);
+        if (self.controller_started) {
+            self.controller_runtime.done.set(self.io);
+            self.controller_runtime.control.set(self.io);
+        }
+        if (self.workers_started) self.worker_group.await(self.io) catch {};
+        if (self.controller_started) self.controller_group.await(self.io) catch {};
+        self.workers_started = false;
+        self.controller_started = false;
+    }
+
+    fn checkOpen(self: *DirectLoader) !void {
+        if (self.cleaned) return error.LoaderShuttingDown;
+        if (self.pipeline.errorValue()) |err| return err;
+        if (self.scheduler.sealed) return error.LoaderEpochSealed;
+    }
+
+    fn sourceSlot(self: *DirectLoader, uri: []const u8) !*LoaderSourceSlot {
+        for (self.source_slots.items) |slot| {
+            if (std.mem.eql(u8, slot.uri, uri)) return slot;
+        }
+        const slot = try self.allocator.create(LoaderSourceSlot);
+        errdefer self.allocator.destroy(slot);
+        slot.* = .{ .uri = uri };
+        try self.source_slots.append(self.allocator, slot);
+        return slot;
+    }
+
+    fn createItem(
+        self: *DirectLoader,
+        source: *safetensors.Tensor,
+        shape: Shape,
+        sharding: Sharding,
+        output: *Buffer,
+    ) !*LoaderLoadItem {
+        const item = try self.allocator.create(LoaderLoadItem);
+        errdefer self.allocator.destroy(item);
+        item.* = .{
+            .source = source,
+            .source_slot = try self.sourceSlot(source.file_uri),
+            .shape = shape,
+            .sharding = sharding.resolve(self.platform),
+            .output = output,
+        };
+        return item;
+    }
+
+    fn appendItems(self: *DirectLoader, items: []const *LoaderLoadItem) !void {
+        try self.checkOpen();
+        var batch = try FairVectoredReadScheduler.prepareBatch(
+            self.allocator,
+            self.platform.devices.len,
+            items,
+            self.dma_resources.config.block_size,
+            self.source_request_size,
+        );
+        defer batch.deinit();
+        if (batch.maximum_blocks_per_job > self.maximum_blocks_per_job)
+            return error.InvalidDmaLoadConfig;
+        try self.epoch_items.ensureUnusedCapacity(self.allocator, items.len);
+
+        var new_mask = self.active_device_mask;
+        var logical_bytes: usize = 0;
+        for (items) |item| {
+            const placement = try item.sharding.placement(item.shape.packedShape());
+            if (placement.shape.byteSize() != 0) {
+                for (item.sharding.devicesInCanonicalOrder()) |device| {
+                    if (device.id >= self.platform.devices.len) return error.DmaDeviceMismatch;
+                    new_mask |= @as(u64, 1) << @intCast(device.id);
+                }
+            }
+            logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
+        }
+        const global_limit = try effectiveDmaGlobalCap(
+            self.dma_resources.config.global_max_in_flight,
+            @popCount(new_mask),
+            self.dma_resources.config.max_in_flight_per_device,
+        );
+        const new_epoch_logical_bytes = try std.math.add(
+            usize,
+            self.epoch_logical_bytes,
+            logical_bytes,
+        );
+        if (!self.epoch_active) {
+            self.epoch_started_at = .now(self.io, .awake);
+            if (self.opts.load_profile.stats) |provider| {
+                // Exclude aggregate backend traffic that happened while this
+                // loader had no active epoch from the next diagnostic delta.
+                self.diagnostic_stats = provider.snapshot();
+            }
+        }
+        self.pipeline.setGlobalDmaLimit(global_limit);
+        self.pipeline.beginEpochJobs(batch.jobs.len);
+        self.scheduler.appendPrepared(self.io, &batch) catch |err| {
+            self.pipeline.cancelEpochJobs(batch.jobs.len);
+            return err;
+        };
+        for (items) |item| self.epoch_items.appendAssumeCapacity(item);
+        self.active_device_mask = new_mask;
+        self.epoch_logical_bytes = new_epoch_logical_bytes;
+        self.epoch_active = true;
+    }
+
+    fn load(
+        self: *DirectLoader,
+        comptime ModelType: type,
+        model: *const ModelType,
+        buffers: *Bufferized(ModelType),
+    ) !void {
+        try self.checkOpen();
+        const count = meta.count(Tensor, model);
+        const flattened = try self.allocator.alloc(*Buffer, count);
+        defer self.allocator.free(flattened);
+        meta.forEachVisit(buffers, *Buffer, struct {
+            fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+                output[i] = buffer;
+            }
+        }.call, .{flattened});
+        var items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty;
+        defer items.deinit(self.allocator);
+        errdefer for (items.items) |item| item.deinit(self.allocator);
+        const Ctx = struct {
+            loader: *DirectLoader,
+            buffers: []*Buffer,
+            items: *std.ArrayListUnmanaged(*LoaderLoadItem),
+            err: ?anyerror = null,
+        };
+        var ctx: Ctx = .{ .loader = self, .buffers = flattened, .items = &items };
+        meta.forEachVisit(model, *const Tensor, struct {
+            fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
+                if (context.err != null) return;
+                const sources = context.loader.store.getSourcesById(tensor.id) orelse {
+                    context.err = error.NotFound;
+                    return;
+                };
+                if (sources.len != 1) {
+                    load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
+                    return;
+                }
+                const shape = tensor.shape();
+                const sharding = Sharding.pickSharding(
+                    context.loader.opts.shardings,
+                    shape,
+                    .explicit_axis_binding,
+                ) orelse context.loader.platform.replicated_sharding;
+                const item = context.loader.createItem(
+                    sources[0],
+                    shape,
+                    sharding,
+                    context.buffers[i],
+                ) catch |err| {
+                    context.err = err;
+                    return;
+                };
+                context.items.append(context.loader.allocator, item) catch |err| {
+                    item.deinit(context.loader.allocator);
+                    context.err = err;
+                };
+            }
+        }.call, .{&ctx});
+        if (ctx.err) |err| return err;
+        try self.appendItems(items.items);
+        items.clearRetainingCapacity();
+    }
+
+    fn await(self: *DirectLoader) !void {
+        if (self.cleaned) return error.LoaderShuttingDown;
+        if (!self.epoch_active) {
+            if (self.pipeline.errorValue()) |err| return err;
+            return;
+        }
+        self.scheduler.seal(self.io);
+        self.pipeline.waitEpochDrained();
+        self.controller_runtime.epochBarrier(self.io);
+        if (self.pipeline.errorValue()) |_| {
+            for (self.epoch_items.items) |item| {
+                if (item.state.status.load(.acquire) != LoaderLoadItem.StateSlot.ready) continue;
+                for (item.state.state.targets) |*target| {
+                    if (!target.final_submitted) {
+                        target.manager.setBufferErrorUnknown(
+                            self.platform.pjrt_api,
+                            0,
+                            "live loader failed",
+                        ) catch {};
+                    }
+                }
+            }
+        }
+        self.pipeline.reapCompleted();
+        for (self.epoch_items.items) |item| item.deinit(self.allocator);
+        self.epoch_items.clearRetainingCapacity();
+        self.logEpoch(self.pipeline.errorValue() == null);
+        if (self.pipeline.errorValue()) |err| {
+            self.epoch_logical_bytes = 0;
+            self.epoch_started_at = null;
+            self.epoch_active = false;
+            return err;
+        }
+        _ = self.bytes_loaded.fetchAdd(self.epoch_logical_bytes, .monotonic);
+        self.epoch_logical_bytes = 0;
+        self.epoch_started_at = null;
+        self.epoch_active = false;
+        self.active_device_mask = 0;
+        self.pipeline.setGlobalDmaLimit(null);
+        self.scheduler.reopen(self.io);
+    }
+
+    fn logEpoch(self: *DirectLoader, successful: bool) void {
+        const read_operations = self.metrics.read_operations.load(.acquire);
+        const dma_submissions = self.metrics.dma_submissions.load(.acquire);
+        const epoch_reads = read_operations -| self.logged_read_operations;
+        const epoch_dma = dma_submissions -| self.logged_dma_submissions;
+        self.logged_read_operations = read_operations;
+        self.logged_dma_submissions = dma_submissions;
+        var source_requests: u64 = 0;
+        var source_bytes: u64 = 0;
+        var source_retries: u64 = 0;
+        var source_throttles: u64 = 0;
+        if (self.opts.load_profile.stats) |provider| {
+            const current = provider.snapshot();
+            if (self.diagnostic_stats) |previous| {
+                const delta = current.sub(previous);
+                source_requests = delta.physical_requests;
+                source_bytes = delta.physical_bytes;
+                source_retries = delta.retries;
+                source_throttles = delta.throttles;
+            }
+            self.diagnostic_stats = current;
+        }
+        const elapsed_seconds: f64 = if (self.epoch_started_at) |started|
+            @as(f64, @floatFromInt(started.untilNow(self.io, .awake).nanoseconds)) /
+                std.time.ns_per_s
+        else
+            0;
+        load_log.debug("epoch completed: epoch={d}, successful={}, logical_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, dma_submissions={d}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+            self.epoch_number,
+            successful,
+            self.epoch_logical_bytes,
+            elapsed_seconds,
+            epoch_reads,
+            self.controller_runtime.reported_width.load(.acquire),
+            self.source_request_size,
+            source_requests,
+            source_bytes,
+            source_retries,
+            source_throttles,
+            epoch_dma,
+            self.pool.highWaterBytes(),
+            self.pool.mappedBytes(),
+        });
+        self.epoch_number += 1;
+    }
+
+    fn loadExecute(self: *DirectLoader, tensor: Tensor, output: *Buffer, exe: *const Exe) !void {
+        try self.checkOpen();
+        const sources = self.store.getSourcesById(tensor.id) orelse return error.NotFound;
+        const output_sharding = Sharding.pickSharding(
+            self.opts.shardings,
+            tensor.shape(),
+            .explicit_axis_binding,
+        ) orelse self.platform.replicated_sharding;
+        try validateExecutableBinding(self.platform, tensor, sources, exe, output_sharding);
+        const inputs = try self.allocator.alloc(Buffer, sources.len);
+        defer self.allocator.free(inputs);
+        for (inputs, exe.input_shapes, exe.input_shardings) |*input, shape, sharding| {
+            input.* = .{
+                ._platform = self.platform,
+                ._shape = shape,
+                ._sharding = sharding.resolve(self.platform),
+                ._shards = .empty,
+            };
+        }
+        defer for (inputs) |*input| input.deinit();
+
+        const items = try self.allocator.alloc(*LoaderLoadItem, sources.len);
+        defer self.allocator.free(items);
+        var initialized: usize = 0;
+        errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
+        for (sources, exe.input_shapes, exe.input_shardings, inputs, items) |source, shape, sharding, *input, *item| {
+            item.* = try self.createItem(source, shape, sharding, input);
+            initialized += 1;
+        }
+        try self.appendItems(items);
+        initialized = 0;
+        try self.await();
+        try executeLoadedBinding(self.allocator, self.io, inputs, output, exe);
+    }
+
+    fn destroy(self: *DirectLoader) void {
+        if (!self.cleaned) {
+            if (self.epoch_active) self.await() catch {};
+            self.stopWorkers();
+            self.pipeline.reapCompleted();
+            for (self.epoch_items.items) |item| item.deinit(self.allocator);
+            self.epoch_items.deinit(self.allocator);
+            for (self.source_slots.items) |slot| {
+                slot.deinit(self.io);
+                self.allocator.destroy(slot);
+            }
+            self.source_slots.deinit(self.allocator);
+            self.pipeline.deinit();
+            self.scheduler.deinit();
+            self.pool.deinit();
+            releasePlatformDmaSettings(self.platform);
+            self.cleaned = true;
+        }
+        const allocator = self.allocator;
+        allocator.destroy(self);
+    }
 };
 
 const DmaBenchmarkCandidate = struct {
@@ -8023,223 +8298,6 @@ test "DMA benchmark global limit policy favors uncapped without throughput benef
     try std.testing.expect(!globalDmaRunsDoNotRegress(&regressing_runs, &uncapped_runs, opts));
 }
 
-fn loadBuffered(
-    comptime ModelType: type,
-    model: *const ModelType,
-    bufferized: *Bufferized(ModelType),
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: LoadOpts,
-) !usize {
-    const tensor_count = meta.count(Tensor, model);
-    const Ctx = struct {
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        store: *const TensorStore,
-        shardings: []const Sharding,
-        progress: ?*std.Progress.Node,
-        buffers: []*Buffer,
-        group: stdx.Io.LimitedGroup,
-        total: std.atomic.Value(usize) = .init(0),
-        first_error: std.atomic.Value(u16) = .init(0),
-
-        fn recordError(self: *@This(), err: anyerror) void {
-            _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-        }
-    };
-    var ctx: Ctx = .{
-        .allocator = allocator,
-        .io = io,
-        .platform = platform,
-        .store = store,
-        .shardings = opts.shardings,
-        .progress = opts.progress,
-        .buffers = try allocator.alloc(*Buffer, tensor_count),
-        .group = .init(opts.read_parallelism.initial()),
-    };
-    defer allocator.free(ctx.buffers);
-    meta.forEachVisit(bufferized, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-            output[i] = buffer;
-        }
-    }.call, .{ctx.buffers});
-
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
-            const sources = context.store.getSourcesById(tensor.id) orelse {
-                context.recordError(error.NotFound);
-                return;
-            };
-            if (sources.len != 1) {
-                load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
-                return;
-            }
-            context.group.concurrent(context.io, struct {
-                fn run(i_: usize, tensor_: *const Tensor, context_: *Ctx) void {
-                    if (context_.first_error.load(.acquire) != 0) return;
-                    var reader = context_.store.getReaderById(tensor_.id, context_.io, &.{}) catch |err| {
-                        context_.recordError(err);
-                        return;
-                    };
-                    defer reader.deinit();
-                    const shape = tensor_.shape();
-                    const sharding = Sharding.pickSharding(context_.shardings, shape, .explicit_axis_binding) orelse context_.platform.replicated_sharding;
-                    var writer = BufferedMemoryWriter.init(context_.allocator, context_.io, context_.platform, shape, sharding, context_.buffers[i_]) catch |err| {
-                        context_.recordError(err);
-                        return;
-                    };
-                    defer writer.deinit(context_.allocator);
-
-                    const total = reader.interface.streamRemaining(&writer.interface) catch |err| {
-                        context_.recordError(err);
-                        return;
-                    };
-                    writer.interface.flush() catch |err| {
-                        context_.recordError(err);
-                        return;
-                    };
-                    _ = context_.total.fetchAdd(total, .monotonic);
-                }
-            }.run, .{ i, tensor, context }) catch |err| context.recordError(err);
-        }
-    }.call, .{&ctx});
-    ctx.group.await(io) catch |err| ctx.recordError(err);
-    const error_code = ctx.first_error.load(.acquire);
-    if (error_code != 0) return @errorFromInt(error_code);
-    return ctx.total.load(.acquire);
-}
-
-pub fn loadInto(
-    comptime ModelType: type,
-    model: *const ModelType,
-    bufferized: *Bufferized(ModelType),
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: LoadOpts,
-) !void {
-    _ = try effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
-    const read_initial = opts.read_parallelism.initial();
-    const read_maximum = opts.read_parallelism.maximum();
-    stdx.debug.assert(read_initial > 0, "zml.io.load read_parallelism initial/fixed value must be greater than zero", .{});
-    stdx.debug.assert(read_maximum >= read_initial, "zml.io.load read_parallelism maximum must be at least initial", .{});
-    stdx.debug.assert(read_maximum <= max_load_read_parallelism, "zml.io.load read_parallelism exceeds the absolute limit", .{});
-
-    const direct = platform.target == .cuda or platform.target == .rocm or platform.target == .oneapi;
-    var used_devices: ?DmaUsedDevices = null;
-    defer if (used_devices) |*devices| devices.deinit();
-    var dma_resources: ?*DmaPlatformSettings = null;
-    defer if (dma_resources != null) releasePlatformDmaSettings(platform);
-    if (direct) {
-        const placement_tensors = try allocator.alloc(*const Tensor, meta.count(Tensor, model));
-        defer allocator.free(placement_tensors);
-        meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
-                output[i] = tensor;
-            }
-        }.call, .{placement_tensors});
-        var placement_count: usize = 0;
-        for (placement_tensors) |tensor| {
-            const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
-            if (sources.len != 1) continue;
-            placement_tensors[placement_count] = tensor;
-            placement_count += 1;
-        }
-        if (placement_count == 0) {
-            if (opts.total_bytes) |total_bytes| total_bytes.* = 0;
-            return;
-        }
-        used_devices = try dmaUsedDevicesForTensors(
-            allocator,
-            platform,
-            placement_tensors[0..placement_count],
-            opts.shardings,
-        );
-        const resources = try acquirePlatformDmaSettings(
-            platform,
-            used_devices.?.device_ids,
-        );
-        dma_resources = resources;
-        if (resources.config.block_size > max_load_read_request_size or
-            resources.config.max_mapped_bytes < max_load_read_request_size)
-            return error.InvalidDmaLoadConfig;
-    }
-
-    const load_started: std.Io.Timestamp = .now(io, .awake);
-    const tensor_count = meta.count(Tensor, model);
-    var span = tracer.span("zml.io.load", .{ .tensor_count = tensor_count });
-    defer span.end();
-
-    var total_logical_bytes: u64 = 0;
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(_: usize, tensor: *const Tensor, total: *u64) void {
-            total.* += tensor.byteSize();
-        }
-    }.call, .{&total_logical_bytes});
-
-    const dma_config: DmaLoadConfig = if (dma_resources) |resources| resources.config else .{
-        .device_kind = "buffered",
-        .device_ids = &.{},
-        .device_numa_nodes = &.{},
-        .block_size = 0,
-        .max_in_flight_per_device = 0,
-        .global_max_in_flight = null,
-        .max_mapped_bytes = 0,
-    };
-    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, dma_parallelism_per_device={d}, global_dma_parallelism={?d}, max_read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_mapped_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
-        @tagName(platform.target),
-        direct,
-        tensor_count,
-        read_maximum,
-        dma_config.max_in_flight_per_device,
-        dma_config.global_max_in_flight,
-        if (direct) max_load_read_request_size else 0,
-        dma_config.block_size,
-        dma_config.max_mapped_bytes,
-        total_logical_bytes,
-    });
-
-    const loaded_bytes = if (direct)
-        try loadVectored(
-            ModelType,
-            model,
-            bufferized,
-            allocator,
-            io,
-            platform,
-            store,
-            opts,
-            dma_resources.?,
-            used_devices.?.device_ids,
-            load_started,
-        )
-    else
-        try loadBuffered(ModelType, model, bufferized, allocator, io, platform, store, opts);
-    if (opts.total_bytes) |total_bytes| total_bytes.* = loaded_bytes;
-}
-
-/// Allocates and loads a complete bufferized model. The caller owns the
-/// returned accelerator buffers and recursive slice storage and may release
-/// both with `mem.deinitBufferized` when no model-specific unload helper exists.
-pub fn load(
-    comptime ModelType: type,
-    model: *const ModelType,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: LoadOpts,
-) !Bufferized(ModelType) {
-    var bufferized = try mem.bufferize(allocator, ModelType, model);
-    errdefer mem.deinitBufferized(allocator, ModelType, &bufferized);
-    try loadInto(ModelType, model, &bufferized, allocator, io, platform, store, opts);
-    return bufferized;
-}
-
 test "source bootstrap requires a high-latency source with no observed response" {
     try std.testing.expect(shouldBootstrapSource(true, false, 0, 12, 12, true));
     try std.testing.expect(!shouldBootstrapSource(false, false, 0, 12, 12, true));
@@ -8367,250 +8425,6 @@ fn buildMesh2x2(
     });
 
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
-}
-
-const DirectMemoryWriterDeviceTest = struct {
-    const WriteMode = enum {
-        stream_remaining,
-        writable_slice_greedy,
-    };
-
-    pub const Scenario = struct {
-        name: []const u8,
-        create_options: CreateOptions,
-        shape: Shape,
-        logical_mesh: Sharding.LogicalMesh,
-        strategy: Sharding.Strategy,
-        write_mode: WriteMode = .stream_remaining,
-        writable_slice_min_len: usize = 128,
-        pool_chunks: usize = 4,
-        pool_chunk_size: usize = 1 << 20,
-    };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
-
-    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
-        var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
-        defer platform.deinit(self.allocator, self.io);
-
-        const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
-        try self.runDirectMemoryWriter(
-            platform,
-            scenario.shape,
-            .{ .data = &sharding },
-            scenario.write_mode,
-            scenario.writable_slice_min_len,
-            scenario.pool_chunks,
-            scenario.pool_chunk_size,
-        );
-    }
-
-    fn runDirectMemoryWriter(
-        self: DirectMemoryWriterDeviceTest,
-        platform: *const Platform,
-        shape: Shape,
-        sharding: Sharding,
-        write_mode: WriteMode,
-        writable_slice_min_len: usize,
-        pool_chunks: usize,
-        pool_chunk_size: usize,
-    ) !void {
-        const slice = try Slice.alloc(self.allocator, shape);
-        defer slice.free(self.allocator);
-
-        for (slice.items(f32), 0..) |*e, i| {
-            e.* = @as(f32, @floatFromInt(i));
-        }
-
-        const pool_count = platform.devices.len;
-        const dma_allocators = try self.allocator.alloc(mem.DmaAllocator, pool_count);
-        defer self.allocator.free(dma_allocators);
-        for (platform.devices, 0..) |*device, i| {
-            dma_allocators[i] = .init(self.allocator, device);
-        }
-
-        const pools = try self.allocator.alloc(mem.DynamicBufferPool, pool_count);
-        defer self.allocator.free(pools);
-        for (pools) |*pool| {
-            pool.* = .init(pool_chunks, pool_chunk_size);
-        }
-        defer for (pools, 0..) |*pool, i| {
-            pool.deinit(dma_allocators[i].allocator());
-        };
-
-        var written_buffer: Buffer = undefined;
-        var writer: DirectMemoryWriter = try .init(
-            self.allocator,
-            self.io,
-            platform,
-            pools,
-            dma_allocators,
-            pool_chunk_size,
-            shape,
-            sharding,
-            &written_buffer,
-        );
-        defer writer.deinit();
-        defer written_buffer.deinit();
-
-        switch (write_mode) {
-            .stream_remaining => {
-                var reader: std.Io.Reader = .fixed(slice.constData());
-                const streamed = try reader.streamRemaining(&writer.interface);
-                try std.testing.expectEqual(slice.constData().len, streamed);
-            },
-            .writable_slice_greedy => {
-                var offset: usize = 0;
-                while (offset < slice.constData().len) {
-                    const min_len = @max(@as(usize, 1), writable_slice_min_len);
-                    const dest = try writer.interface.writableSliceGreedy(min_len);
-                    const to_write = @min(dest.len, slice.constData().len - offset);
-                    if (to_write == 0) return std.Io.Writer.Error.WriteFailed;
-                    @memcpy(dest[0..to_write], slice.constData()[offset..][0..to_write]);
-                    writer.interface.advance(to_write);
-                    offset += to_write;
-                }
-            },
-        }
-
-        try writer.interface.flush();
-        try written_buffer.await(self.io);
-
-        var written_slice = try written_buffer.toSliceAlloc(self.allocator, self.io);
-        defer written_slice.free(self.allocator);
-        try std.testing.expectEqualSlices(u8, slice.constData(), written_slice.constData());
-    }
-};
-
-test "DirectMemoryWriter: replicated with auto topology" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "replicated_auto",
-        .create_options = .{
-            .physical_mesh = .auto,
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
-        .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .x = .link_x }),
-    });
-}
-
-test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-    });
-}
-
-test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "batch_model_2d_torus",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
-            .withPartitioning(.{ .batch = .batch, .model = .model }),
-        .logical_mesh = .mesh(.{
-            .batch = .low_bandwidth,
-            .model = .high_bandwidth,
-        }),
-        .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
-    });
-}
-
-test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_folded_2d_torus",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
-            strategy.addFold(.link_x, &.{ .link_x, .link_y });
-            break :blk strategy;
-        },
-    });
-}
-
-test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto_writable_slice",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-        .write_mode = .writable_slice_greedy,
-        .writable_slice_min_len = 64,
-        .pool_chunk_size = 1024,
-    });
-}
-
-test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "topology_3d_folded_model",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2x2 },
-            .cpu = .{ .device_count = 8 },
-        },
-        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
-            .withPartitioning(.{ .batch = .replicated, .model = .model }),
-        .logical_mesh = .mesh(.{
-            .batch = .low_bandwidth,
-            .model = .high_bandwidth,
-        }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
-            strategy.addFold(.link_x, &.{ .link_x, .link_z });
-            break :blk strategy;
-        },
-    });
 }
 
 test "adaptive request gate reductions drain without cancelling active requests" {

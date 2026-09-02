@@ -46,9 +46,12 @@ const Mnist = struct {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
         errdefer unloadBuffers(&buffers);
 
-        try zml.io.loadInto(Mnist, self, &buffers, allocator, io, platform, store, .{
+        var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
             .read_parallelism = .{ .fixed = 1 },
         });
+        defer loader.deinit();
+        try loader.load(Mnist, self, &buffers);
+        try loader.await();
 
         return buffers;
     }

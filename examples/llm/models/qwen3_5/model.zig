@@ -91,13 +91,15 @@ pub const LoadedModel = struct {
         errdefer self.unloadBuffers(&buffers, allocator);
 
         const all_shardings = shardings.all();
-        var total_bytes: usize = 0;
-        try zml.io.loadInto(Model, &self.inner, &buffers, allocator, io, platform, store, .{
+        var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
             .progress = progress,
             .shardings = &all_shardings,
             .load_profile = load_profile,
-            .total_bytes = &total_bytes,
         });
+        defer loader.deinit();
+        try loader.load(Model, &self.inner, &buffers);
+        try loader.await();
+        const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);
         const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
@@ -186,13 +188,15 @@ pub const Model = struct {
         const now: std.Io.Timestamp = .now(io, .awake);
         var buffers = try zml.mem.bufferize(allocator, Model, self);
         errdefer Model.unloadBuffers(&buffers, allocator);
-        var total_bytes: usize = 0;
-        try zml.io.loadInto(Model, self, &buffers, allocator, io, platform, store, .{
+        var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
             .progress = progress,
             .shardings = shardings,
             .load_profile = load_profile,
-            .total_bytes = &total_bytes,
         });
+        defer loader.deinit();
+        try loader.load(Model, self, &buffers);
+        try loader.await();
+        const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);
         const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
