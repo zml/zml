@@ -23,6 +23,8 @@ const Tensor = @import("tensor.zig").Tensor;
 const Builder = tri.Builder;
 const DType = tri.DType;
 
+const rawScaleEpsilon: f32 = 1e-10;
+
 const NativeBlockFp8 = struct {
     dtype: DataType,
     triton_dtype: DType,
@@ -39,7 +41,9 @@ fn nativeBlockFp8() NativeBlockFp8 {
 fn blockFp8Max(dtype: DType) f32 {
     return switch (dtype) {
         .f8e4m3fn => 448.0,
-        .f8e4m3fnuz => 240.0,
+        // Match vLLM's dynamic-quantization guard: the FNUZ 0x7f value
+        // (240) is avoided because it causes accuracy regressions on ROCm.
+        .f8e4m3fnuz => 224.0,
         else => std.debug.panic("unsupported block FP8 dtype: {s}", .{@tagName(dtype)}),
     };
 }
@@ -92,7 +96,7 @@ const QuantizeBlock128 = struct {
 
         const offsets = b.arange(0, group_size, .i64);
         const x = b.load(args.x_ptr.addPtr(group_offset.add(offsets))).to(.f32);
-        const absmax = b.max(b.absf(x)).maximum(@as(f32, 1e-6));
+        const absmax = b.max(b.absf(x)).maximum(rawScaleEpsilon);
         const fp8_max = blockFp8Max(cfg.fp8_dtype);
         const scale = absmax.mul(@as(f32, 1.0) / fp8_max);
         const q = b.clampf(
@@ -311,7 +315,7 @@ fn quantizeBlock128Cuda(lhs_2d: Tensor) QuantizedBlock128 {
         .fp8_block = 128,
     });
     const scale = grouped.abs().max(.fp8_block)
-        .maximum(.scalar(1e-6, .f32))
+        .maximum(.scalar(rawScaleEpsilon, .f32))
         .scale(1.0 / fp8_max);
     const q = grouped.div(scale.broad(grouped.shape()))
         .clamp(.scalar(-fp8_max, .f32), .scalar(fp8_max, .f32))
@@ -609,11 +613,11 @@ const AbsorbedKeyDot = struct {
                 .mask = mask_x,
                 .other = b.zeros(&.{ block_m, block_k }, cfg.input_dtype),
             }).to(.f32);
-            const x_scale = b.maxOpts(b.absf(x), .{ .axis = 1, .keep_dims = true }).maximum(@as(f32, 1e-6)).mul(@as(f32, 1.0 / 240.0));
+            const x_scale = b.maxOpts(b.absf(x), .{ .axis = 1, .keep_dims = true }).maximum(rawScaleEpsilon).mul(@as(f32, 1.0 / 224.0));
             const x_q = b.clampf(
                 x.div(x_scale),
-                b.splat(@as(f32, -240.0), &.{ block_m, block_k }),
-                b.splat(@as(f32, 240.0), &.{ block_m, block_k }),
+                b.splat(@as(f32, -224.0), &.{ block_m, block_k }),
+                b.splat(@as(f32, 224.0), &.{ block_m, block_k }),
             ).to(.f8e4m3fnuz);
 
             const weight_rows_1d = offs_k.add(pid_h.mul(head_stride).add(q_offset));
@@ -715,11 +719,11 @@ const AbsorbedValueDot = struct {
                 .mask = mask_x,
                 .other = b.zeros(&.{ block_m, block_k }, cfg.input_dtype),
             }).to(.f32);
-            const x_scale = b.maxOpts(b.absf(x), .{ .axis = 1, .keep_dims = true }).maximum(@as(f32, 1e-6)).mul(@as(f32, 1.0 / 240.0));
+            const x_scale = b.maxOpts(b.absf(x), .{ .axis = 1, .keep_dims = true }).maximum(rawScaleEpsilon).mul(@as(f32, 1.0 / 224.0));
             const x_q = b.clampf(
                 x.div(x_scale),
-                b.splat(@as(f32, -240.0), &.{ block_m, block_k }),
-                b.splat(@as(f32, 240.0), &.{ block_m, block_k }),
+                b.splat(@as(f32, -224.0), &.{ block_m, block_k }),
+                b.splat(@as(f32, 224.0), &.{ block_m, block_k }),
             ).to(.f8e4m3fnuz);
 
             const weight_rows_1d = offs_n.add(pid_h.mul(head_stride).add(key_dim));

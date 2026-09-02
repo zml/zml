@@ -634,28 +634,44 @@ pub const LayerNorm = struct {
     eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
-        const normed = normalizeVariance(x, self.eps);
+        const normed = normalizeVarianceF32(x, self.eps);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
+        var out = normed.mul(self.weight.convert(.f32).broadcast(x.shape(), &.{ax}));
+        if (self.bias) |bias| out = out.add(bias.convert(.f32).broadcast(x.shape(), &.{ax}));
 
-        return out;
+        return out.convert(x.dtype());
     }
 };
 
 pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
+    return rmsNormF32(x_, axis, eps).convert(x_.dtype());
+}
+
+/// RMS normalization followed by an affine weight multiplication. The normalization and
+/// multiplication are performed in f32 before converting once to the input dtype.
+pub fn rmsNormWithWeight(x_: Tensor, weight: Tensor, axis: anytype, eps: f32) Tensor {
+    const ax = x_.axis(axis);
+    const normed = rmsNormF32(x_, ax, eps);
+    return normed.mul(weight.convert(.f32).broadcast(x_.shape(), &.{ax})).convert(x_.dtype());
+}
+
+fn rmsNormF32(x_: Tensor, axis: anytype, eps: f32) Tensor {
     const ax = x_.axis(axis);
     // upcast to improve precision
-    var x = x_.convert(.f32);
+    const x = x_.convert(.f32);
     const variance = x.powByConst(2).mean(ax);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
-    return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
+    return x.mul(rsqrt.broad(x.shape()));
 }
 
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
 pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
+    return normalizeVarianceF32(x, eps).convert(x.dtype());
+}
+
+fn normalizeVarianceF32(x: Tensor, eps: f32) Tensor {
     const N: f32 = @floatFromInt(x.dim(-1));
 
     // Upcast to improve precision
@@ -665,7 +681,95 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
     const variance = mean_dev.mul(mean_dev).sum(-1).divByConst(N);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
-    return mean_dev.mul(rsqrt).convert(x.dtype());
+    return mean_dev.mul(rsqrt);
+}
+
+test "normalization keeps affine operations in f32" {
+    const platform = zml.testing.env();
+    const bf16 = zml.floats.BFloat16;
+
+    const input: Tensor = .init(.{ .b = 1, .d = 8 }, .bf16);
+    const weight: Tensor = .init(.{ .d = 8 }, .bf16);
+    const bias: Tensor = .init(.{ .d = 8 }, .bf16);
+
+    const Local = struct {
+        fn layerNorm(x: Tensor, w: Tensor, b: Tensor) Tensor {
+            return (LayerNorm{ .weight = w, .bias = b, .eps = 0 }).forward(x);
+        }
+
+        fn rmsNorm(x: Tensor, w: Tensor) Tensor {
+            return rmsNormWithWeight(x, w, .d, 0);
+        }
+    };
+
+    var layer_norm_exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.layerNorm, .{ input, weight, bias }, .{});
+    defer layer_norm_exe.deinit();
+    var rms_norm_exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.rmsNorm, .{ input, weight }, .{});
+    defer rms_norm_exe.deinit();
+
+    const layer_norm_input_h = [_]bf16{
+        bf16.fromF32(-6),
+        bf16.fromF32(-4),
+        bf16.fromF32(0),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+    };
+    const rms_norm_input_h = [_]bf16{
+        bf16.fromF32(1),
+        bf16.fromF32(1),
+        bf16.fromF32(1),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(3),
+        bf16.fromF32(4),
+        bf16.fromF32(6),
+    };
+    const weight_h: [8]bf16 = @splat(bf16.fromF32(10));
+    // These inputs have an exactly representable variance of 9. The affine values
+    // straddle separate BF16 rounding boundaries before and after the bias addition.
+    const bias_h: [8]bf16 = @splat(bf16.fromF32(-1.9921875));
+
+    var layer_norm_input = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&layer_norm_input_h));
+    defer layer_norm_input.deinit();
+    var rms_norm_input = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&rms_norm_input_h));
+    defer rms_norm_input.deinit();
+    var weight_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(&weight_h));
+    defer weight_buffer.deinit();
+    var bias_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, bias.shape(), .replicated, std.mem.sliceAsBytes(&bias_h));
+    defer bias_buffer.deinit();
+
+    var layer_norm_result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &layer_norm_exe, Local.layerNorm, .{ layer_norm_input, weight_buffer, bias_buffer });
+    defer layer_norm_result.deinit();
+    const expected_layer_norm_h = [_]bf16{
+        bf16.fromF32(-22),
+        bf16.fromF32(-15.3125),
+        bf16.fromF32(-1.9921875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+    };
+    const expected_layer_norm: Slice = .init(input.shape(), std.mem.sliceAsBytes(&expected_layer_norm_h));
+    try zml.testing.expectClose(std.testing.io, expected_layer_norm, layer_norm_result, .exact_match);
+
+    var rms_norm_result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &rms_norm_exe, Local.rmsNorm, .{ rms_norm_input, weight_buffer });
+    defer rms_norm_result.deinit();
+    const expected_rms_norm_h = [_]bf16{
+        bf16.fromF32(3.328125),
+        bf16.fromF32(3.328125),
+        bf16.fromF32(3.328125),
+        bf16.fromF32(6.65625),
+        bf16.fromF32(6.65625),
+        bf16.fromF32(10),
+        bf16.fromF32(13.3125),
+        bf16.fromF32(20),
+    };
+    const expected_rms_norm: Slice = .init(input.shape(), std.mem.sliceAsBytes(&expected_rms_norm_h));
+    try zml.testing.expectClose(std.testing.io, expected_rms_norm, rms_norm_result, .exact_match);
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html

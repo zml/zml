@@ -15,6 +15,7 @@ const a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
 const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.moe_triton);
+const rawScaleEpsilon: f32 = 1e-10;
 
 test {
     std.testing.refAllDecls(@This());
@@ -246,7 +247,7 @@ pub fn fusedExpertsImpl(
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
 
     if (gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz) {
-        hidden_quant, a_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden), gate_up.dtype() == .f8e4m3fnuz);
+        hidden_quant, a_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden), gate_up.dtype() == .f8e4m3fnuz, block_fp8);
     }
 
     const b_bias_1 =
@@ -302,7 +303,7 @@ pub fn fusedExpertsImpl(
         var quantized = activated;
         var scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
         if (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz) {
-            quantized, scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated), down.dtype() == .f8e4m3fnuz);
+            quantized, scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated), down.dtype() == .f8e4m3fnuz, block_fp8);
         }
         break :blk .{ quantized, scale };
     };
@@ -572,14 +573,14 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
 }
 
-fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool) struct { Tensor, Tensor } {
+fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, block_fp8: bool) struct { Tensor, Tensor } {
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
     stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
 
     const groups_per_row = @divExact(x.dim(1), group_size);
     const output_dtype: DataType = if (fnuz) .f8e4m3fnuz else .f8e4m3fn;
-    const scale_dtype: DataType = if (fnuz) .f32 else .bf16;
-    const fp8_max: f32 = if (fnuz) 240.0 else 448.0;
+    const scale_dtype: DataType = if (fnuz or block_fp8) .f32 else .bf16;
+    const fp8_max: f32 = if (fnuz) 224.0 else 448.0;
     const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, output_dtype));
     const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype));
 
@@ -589,7 +590,7 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool) struct { Ten
             .group_size_ptr = Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
             .y_num_columns_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            .eps_ptr = Tensor.scalar(1e-6, .f32),
+            .eps_ptr = Tensor.scalar(rawScaleEpsilon, .f32),
         },
         .{ .y_q = quantized.shape(), .y_s = scales.shape() },
         .{
@@ -618,8 +619,8 @@ fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, activ
 
     const groups_per_row = @divExact(output_columns, group_size);
     const output_dtype: DataType = if (fnuz) .f8e4m3fnuz else .f8e4m3fn;
-    const scale_dtype: DataType = if (fnuz) .f32 else .bf16;
-    const fp8_max: f32 = if (fnuz) 240.0 else 448.0;
+    const scale_dtype: DataType = .f32;
+    const fp8_max: f32 = if (fnuz) 224.0 else 448.0;
     const outs = kernels.SiluAndQuantizePerTokenGroupFp8.Kernel.call(
         .{ .x = x },
         .{
@@ -636,6 +637,7 @@ fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, activ
                 .block = @intCast(group_size),
                 .fp8_min = -fp8_max,
                 .fp8_max = fp8_max,
+                .eps = rawScaleEpsilon,
                 .activation_threshold = activation_threshold,
             },
             .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
@@ -699,7 +701,7 @@ fn makeFusedMoeConfig(
 test "block FP8 MoE preserves activation and weight scale dtypes" {
     const fn_activation: Tensor = .init(.{ .token = 8, .in = 1024 }, .f8e4m3fn);
     const fn_weight: Tensor = .init(.{ .expert = 288, .out = 2048, .in = 1024 }, .f8e4m3fn);
-    const fn_activation_scale: Tensor = .init(.{ .token = 8, .group = 8 }, .bf16);
+    const fn_activation_scale: Tensor = .init(.{ .token = 8, .group = 8 }, .f32);
     const weight_scale: Tensor = .init(.{ .expert = 288, .nb = 16, .kb = 8 }, .f32);
     const fn_cfg = makeFusedMoeConfig(
         fn_activation,
@@ -714,7 +716,7 @@ test "block FP8 MoE preserves activation and weight scale dtypes" {
         .bf16,
     );
 
-    try std.testing.expectEqual(@as(?DType, .bf16), fn_cfg.a_scale_dtype);
+    try std.testing.expectEqual(@as(?DType, .f32), fn_cfg.a_scale_dtype);
     try std.testing.expectEqual(@as(?DType, .f32), fn_cfg.b_scale_dtype);
 
     const fnuz_activation: Tensor = .init(.{ .token = 8, .in = 1024 }, .f8e4m3fnuz);
@@ -737,10 +739,11 @@ test "block FP8 MoE preserves activation and weight scale dtypes" {
     try std.testing.expectEqual(@as(?DType, .f32), fnuz_cfg.b_scale_dtype);
 
     const mx_weight_scale: Tensor = .init(.{ .expert = 288, .out = 2048, .group = 32 }, .f8e8m0);
+    const mx_activation_scale: Tensor = .init(.{ .token = 8, .group = 8 }, .bf16);
     const mx_cfg = makeFusedMoeConfig(
         fn_activation,
         fn_weight,
-        fn_activation_scale,
+        mx_activation_scale,
         mx_weight_scale,
         .{ .quant_scheme = .mxfp8 },
         false,

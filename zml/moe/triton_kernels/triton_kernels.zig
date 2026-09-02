@@ -132,6 +132,7 @@ pub const SiluAndQuantizePerTokenGroupFp8 = struct {
         block: usize,
         fp8_min: f32,
         fp8_max: f32,
+        eps: f32,
         activation_threshold: ?f32,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
@@ -167,7 +168,7 @@ pub const SiluAndQuantizePerTokenGroupFp8 = struct {
         }
         const sigmoid = b.ones(&.{block}, .f32).add(b.exp(b.negf(gate)));
         const activated = gate.div(sigmoid).mul(up);
-        const absmax = b.max(b.absf(activated)).maximum(@as(f32, 1e-6));
+        const absmax = b.max(b.absf(activated)).maximum(cfg.eps);
         const scale = absmax.mul(1.0 / cfg.fp8_max);
         const quantized = b.clampf(
             activated.div(scale),
