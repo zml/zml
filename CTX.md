@@ -12,49 +12,60 @@ uses one shared arena. NUMA arenas are allocated concurrently. Calibration
 and the loader continue through the existing source/provider/block-pool
 interfaces; the pool itself has deliberately not been simplified yet.
 
-Each successful arena log now includes its mapping, touching, placement-check,
-and metadata-allocation time as `allocation_ms`. A second `DMA fixed arenas
-ready` log reports aggregate wall time across concurrently allocated NUMA
-arenas. This time is also the existing `source_registration_ms` report field.
-The diagnostic format is version 9. The ROCm runtime logs below were built
-immediately before the version-string bump and say version 8; their allocation
-behavior is identical to version 9.
+Each successful arena log now reports `allocation_ms` and the portion spent in
+PJRT as `dma_map_ms`. A second `DMA fixed arenas ready` log reports aggregate
+wall time across concurrently allocated NUMA arenas. This time is also the
+existing `source_registration_ms` report field. The arena is not initialized:
+its bytes are irrelevant to the synthetic transfer and real reads overwrite
+them. Normal allocation also no longer queries placement with `move_pages`;
+the code trusts successful `mbind` and PJRT registration. The diagnostic
+format is version 9.
 
-This makes the workspace and block-pool lifecycle substantially simpler. The
-workspace needs one allocation per NUMA node and no grow/replace/aggregate
-source path. `DmaBlockPool` no longer needs an allocation callback, slabs,
-reserves, remaining-growth accounting, retained-versus-newly-mapped arenas,
-provider refresh, or arena-tail-aware potential-growth calculations. It still
-needs a blocking free list, close/error wakeup, lease reference counting, and
-atomic NUMA-affinity assignment. In particular, replicated blocks may be
-eligible for several nodes while strict-local blocks in the same request have
-only one eligible node, so the augmenting-path assignment cannot safely be
-replaced by independent per-node queues without changing scheduling semantics.
+This allocation policy makes the dynamic workspace and block-pool growth paths
+dormant under the default full-budget configuration, but those paths remain in
+the code for this isolated experiment. A follow-up simplification can remove
+the allocation callback, slabs, reserves, remaining-growth accounting,
+retained-versus-newly-mapped arenas, provider refresh, and arena-tail-aware
+potential-growth calculations. The pool must still retain a blocking free
+list, close/error wakeup, lease reference counting, and atomic NUMA-affinity
+assignment. In particular, replicated blocks may be eligible for several
+nodes while strict-local blocks in the same request have only one eligible
+node, so the augmenting-path assignment cannot safely be replaced by
+independent per-node queues without changing scheduling semantics.
 
 Fresh ROCm results confirmed the startup cost:
 
 | devices / topology | arenas | fixed mapped | allocation wall time |
 |---|---|---:|---:|
-| 1 / topology unavailable | one 256 MiB | 256 MiB | 185.4 ms |
-| 8 / topology unavailable | one 2 GiB | 2 GiB | 9,755.8 ms |
-| 8 / explicit nodes `0,0,0,0,1,1,1,1` | two 1 GiB | 2 GiB | 9,959.1 ms |
+| 1 / topology unavailable | one 256 MiB | 256 MiB | 127.0 ms |
+| 8 / topology unavailable | one 2 GiB | 2 GiB | 10,998.6 ms |
+| 8 / explicit nodes `0,0,0,0,1,1,1,1` | two 1 GiB | 2 GiB | 9,478.4 ms |
 
-The explicit-node arenas individually took 6,819.2 and 9,959.0 ms, so
-concurrent per-node allocation hid the faster node but did not reduce the
-critical path relative to one shared 2 GiB arena. The earlier selected-block
-eight-device run retained 1 GiB and registered it in 5,166.4 ms. Doubling the
-mapped bytes therefore added about 4.59 seconds on this run. A four-device B70
-selection at 8 MiB previously needed only 256 MiB for its device rings; this
-fixed-max design will instead register 1 GiB and needs oneAPI runtime
-confirmation. The oneAPI release build passes.
+The explicit-node arenas individually took 6,251.2 and 9,478.3 ms. Every case
+spent effectively all allocation time inside `dmaMap`: the shared 2 GiB arena
+reported 10,998.447 ms in `dmaMap` out of 10,998.460 ms total. XLA's
+`PjRtStreamExecutorClient::DmaMap` calls the first local device executor's
+`HostMemoryRegister`; ROCm implements that as `hipHostRegister` with
+`hipHostRegisterPortable`. Thus the cost is driver registration/pinning of the
+whole range, not allocator metadata, initialization, or placement sampling.
+Removing the full-memory write reduced the one-device 256 MiB control from
+185.4 to 126.9 ms, but cannot remove registration cost. The earlier
+selected-block eight-device run retained 1 GiB and registered it in 5,166.4
+ms, consistent with the roughly linear byte cost of the new 2 GiB mapping. A
+four-device B70 selection at 8 MiB previously needed only 256 MiB for its
+device rings; this fixed-max design will instead register 1 GiB and needs
+oneAPI runtime confirmation. The oneAPI release build passes.
 
-All ROCm controls still selected 16 MiB / width eight / no global cap. The
-one-device full run took 2.854 seconds, including 185 ms registration and
-261 ms calibration. The eight-device shared-pool run took 15.958 seconds,
-including 9.756 seconds registration and a noisy 2.313-second confirmed
-calibration. The explicit two-NUMA run took 14.717 seconds, including 9.959
-seconds registration and 935 ms calibration. Logs are
-`/tmp/zml-dma-fixed-arena-{1gpu,8gpu}.log` and
+The final no-touch controls all selected a 16 MiB block and width eight. The
+one-device run took 3.437 seconds, including 127 ms registration and a
+970-millisecond block-confirmation tail. The eight-device shared-pool run took
+15.846 seconds, including 10.999 seconds registration and 1.367 seconds
+calibration, and emitted no global cap. The explicit two-NUMA run took 14.817
+seconds, including 9.478 seconds registration and 1.585 seconds calibration;
+this noisy run recommended global cap 16 rather than the earlier MI300X no-cap
+result. Logs are `/tmp/zml-dma-fixed-arena-no-touch-{1gpu,8gpu}.log` and
+`/tmp/zml-dma-fixed-arena-no-touch-8gpu-2numa.log`. The earlier initialized
+controls remain at `/tmp/zml-dma-fixed-arena-{1gpu,8gpu}.log` and
 `/tmp/zml-dma-fixed-arena-8gpu-2numa.log`.
 
 Keep `max_mapped_bytes` only as a safety ceiling: validate that the derived
@@ -70,6 +81,127 @@ environment variable. `ZML_DMA_BENCH_NUMA_NODES` controls only the device-to-
 node mapping. The actual eager arena sizes are derived from that mapping, the
 largest feasible `ZML_DMA_BENCH_BLOCK_MIB` candidate, and
 `ZML_DMA_BENCH_BLOCK_PARALLELISM`.
+
+### ROCm registration perf diagnosis
+
+An isolated HIP benchmark confirms that the surprising time is ROCm mapping
+the registered range to every visible GPU, not ZML allocation work. It uses
+the same 2 MiB alignment, `MADV_HUGEPAGE`, untouched anonymous memory, and
+`hipHostRegisterPortable` as the PJRT path. Registering a fixed 256 MiB range
+scaled strongly with the number of visible MI300X devices:
+
+| visible GPUs | `hipHostRegister` time |
+|---:|---:|
+| 1 | 67.8 ms |
+| 2 | 132.9 ms |
+| 4 | 358.3 ms |
+| 8 | 1,177.1 ms |
+
+On all eight devices the same direct benchmark took 2,768.3 ms for 512 MiB,
+6,315.6 ms for 1 GiB, and 11,443.2 ms for 2 GiB. This reproduces the ZML
+2 GiB result without PJRT, allocator metadata, calibration, transfers, NUMA
+verification, or initialization. `hipHostRegisterDefault`,
+`hipHostRegisterPortable`, and `hipHostRegisterMapped` were indistinguishable
+(1,148--1,168 ms for 256 MiB on eight devices). AMD HIP documents default
+registration as mapped and portable and says portable is always assumed
+because HIP supports one context, so these flags do not provide a
+current-device-only escape hatch.
+
+An isolated `perf record` attributes 88.3% of sampled cycles to
+`hipHostRegister`. The complete hot call chain is
+`hsa_amd_memory_lock_to_pool` -> `KfdDriver::MakeMemoryResident` ->
+`hsaKmtMapMemoryToGPUNodes` -> KFD's SVM ioctl ->
+`svm_range_validate_and_map`. Beneath it, 49.5% inclusive is in
+`dma_map_page_attrs`, 48.8% in `__iommu_dma_map`, 43.4% in `iommu_map`, and
+36.9% in `intel_iommu_iotlb_sync_map`; another 10.0% is below the AMDGPU VM
+page-table update path. These are overlapping inclusive percentages, but they
+make the bottleneck unambiguous: KFD/AMDGPU and the host Intel IOMMU are
+building GPU-visible mappings for the entire range. The isolated profile is
+`/tmp/zml-hip-register-256m.perf.data`; the full ZML profile is
+`/tmp/zml-dma-map-2g.perf.data`.
+
+`MADV_HUGEPAGE` is not responsible for the regression. The registered
+256 MiB mapping reports all 256 MiB as `AnonHugePages`, and perf sees
+`do_huge_pmd_anonymous_page`. Nevertheless registration incurs 65,539 minor
+faults, essentially one per 4 KiB of the range, and the KFD/IOMMU mapping path
+still performs page-granular work. Three eight-GPU controls had median
+registration times of 1,180.8 ms with the huge-page hint, 1,303.1 ms with no
+advice, and 1,297.4 ms with `MADV_NOHUGEPAGE`: the hint improves this case by
+about 9%, it does not hurt it. Pre-touching reduced faults inside registration
+but left total process time unchanged at about 1.4 seconds; it merely moved
+the same work before the timer.
+
+The roughly 200 ms oneAPI result for 1 GiB is therefore a genuine backend and
+driver difference. The ROCm cost also means that separate NUMA arenas do not
+divide registration work by locality: HIP registration exposes each arena to
+all visible GPUs, and concurrent registrations can contend in the KFD/IOMMU
+path. Within the existing anonymous-allocation plus `DmaMap` design, the only
+material application-level optimization is to register fewer bytes; removing
+`MADV_HUGEPAGE`, pre-touching, changing HIP registration flags, or simplifying
+block-pool metadata does not address the driver work. The XLA-owned pinned
+allocation path below avoids that slow registration implementation entirely.
+
+Registering many 32 MiB allocations does not materially improve the exact
+eight-GPU case, even when registrations overlap. For 256 MiB total, one large
+range took 1,105.9 ms. Eight 32 MiB ranges took 1,378.8 ms with one worker,
+1,151.6 ms with two, 1,383.6 ms with four, and 1,519.3 ms with eight. For
+1 GiB, a single range was stable at 6,436--6,519 ms; 32 MiB ranges were noisy
+at 5,445--6,850 ms with one worker, 5,217--5,948 ms with two, 5,577--5,997 ms
+with four, and 6,303 ms with eight. The exact 2 GiB / 64-block case took
+10,913.3 ms with one worker, 11,149.7 ms with two, and 12,365.1 ms with four,
+compared with 10,998.4 ms for ZML's one large arena and 11,443.2 ms in the
+direct one-range control. Two workers can occasionally win a little on a
+1 GiB run, but at the intended 2 GiB size the difference is noise and more
+parallel calls increase KFD/IOMMU contention. Many separately registered
+blocks therefore add allocation/ownership complexity without recovering the
+multi-second cost.
+
+### Fast XLA/ROCm-owned pinned allocation path
+
+ROCm's allocation API is dramatically faster than registering an existing
+anonymous mapping. Direct `hipHostMalloc` controls with all eight GPUs visible
+took 193--204 ms for 256 MiB, 612--714 ms for 1 GiB, and 1,148--1,152 ms for
+2 GiB. In contrast, `hipHostRegister` took about 1.18, 6.3, and 11.4 seconds
+for the same sizes. The loaded 6.19.14 AMDGPU DKMS source explains the
+difference: `svm_range_dma_map` loops over every accessible GPU and
+`svm_range_dma_map_dev` then calls `dma_map_page(..., PAGE_SIZE, ...)` once per
+4 KiB page. This is exactly the visible-device multiplier seen in perf.
+`amdgpu.svm_default_granularity=9` already gives SVM a 2 MiB range granularity,
+but it does not change this inner per-page DMA mapping loop. A kernel/AMDGPU
+change to batch physically contiguous pages through the DMA/IOMMU API would be
+the lower-level fix, but ZML does not need to wait for it.
+
+NUMA-local `hipHostMalloc` arenas preserve transfer performance. A single
+1 GiB allocation made from device 0 landed entirely on node 0 and limited the
+eight-device direct-copy control to about 166 GiB/s. Two 512 MiB allocations,
+made from device contexts 0 and 4 under node-specific memory policies, landed
+exactly on N0 and N1 and produced 310--403 GiB/s over three runs. The
+interleaved `hipHostRegister` control reached 283 GiB/s. On one GPU the two
+allocation types were equivalent at 50.3 versus 51.4 GiB/s. At the proposed
+maximum size, two NUMA-local 1 GiB arenas allocated in 1,280--1,291 ms and the
+direct copy control reached about 394 GiB/s. Concurrent node allocations did
+not reduce that approximately 1.28-second wall time further, but this is still
+7--9 times faster than the current ZML path without a DMA-throughput cost.
+
+The integration should use XLA ownership rather than link ZML directly to
+HIP. `RocmExecutor::HostMemoryAllocate` already calls
+`hipHostMallocPortable`, and XLA already defines a version-zero
+`PJRT_HostMemoryAllocator_Extension` whose allocation request includes a NUMA
+node. The GPU C API does not yet add that extension to its extension chain,
+and `BasicHostMemoryAllocator` currently ignores `AllocateOptions.numa_node`
+and is constructed from the first executor only. Those are the XLA gaps to
+fix, followed by exposing the extension in ZML's PJRT bindings.
+
+One ownership detail is essential. Calling `hipHostRegister` on a
+`hipHostMalloc` pointer returns `hipErrorHostMemoryAlreadyRegistered` in about
+0.03 ms. Calling `hipHostUnregister` on it succeeds, but then `hipHostFree`
+fails with `hipErrorInvalidValue`; the unregister consumed registration owned
+by the allocation. XLA's DMA-range registry must therefore be able to mark a
+host-allocator range as already mapped and make `DmaUnmap` erase that range
+without invoking `HostMemoryUnregister`. With that state recorded,
+`ShouldStageHostToDeviceTransfers` recognizes the range as direct-DMA memory,
+while the host allocator's returned deleter remains the sole owner of
+`hipHostFree`.
 
 ## Fixed device width and faster default screens (2026-09-01)
 
