@@ -217,7 +217,15 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
-            try platform.benchTransfer(allocator, io, .{});
+            const load_dma_block_sizes = try envMibList(
+                init.arena.allocator(),
+                init.environ_map,
+                "ZML_DMA_BENCH_BLOCK_MIB",
+                &zml.io.default_dma_benchmark_block_sizes,
+            );
+            try platform.benchTransfer(allocator, io, .{
+                .block_sizes = load_dma_block_sizes,
+            });
 
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();

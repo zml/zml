@@ -131,7 +131,6 @@ pub const File = struct {
     pub fn backend(self: *File) Backend {
         return .{
             .io = self.io(),
-            .read_hints = .{ .minimum_request_size = 2 * 1024 * 1024 },
         };
     }
 

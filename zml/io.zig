@@ -102,13 +102,10 @@ pub const TensorStore = struct {
         id: Tensor.Id,
         io: std.Io,
         file: std.Io.File,
-        batch_iovecs: bool,
     ) !safetensors.TensorReader {
         const sources = self.id_to_sources.get(id) orelse return error.NotFound;
         if (sources.len != 1) return error.MultipleTensorSources;
-        return .initBorrowedPositionalWithOptions(io, sources[0].*, file, .{
-            .batch_iovecs = batch_iovecs,
-        });
+        return .initBorrowedPositional(io, sources[0].*, file);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -1637,12 +1634,11 @@ const VectoredTensorTransfer = struct {
         store: *const TensorStore,
         tensor: *const Tensor,
         source_file: std.Io.File,
-        batch_iovecs: bool,
         shardings: []const Sharding,
         output: *Buffer,
         progress_parent: ?*std.Progress.Node,
     ) !VectoredTensorTransfer {
-        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file, batch_iovecs);
+        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file);
         errdefer reader.deinit();
 
         const shape = tensor.shape();
@@ -1787,19 +1783,16 @@ const AdaptiveRequestGate = struct {
     }
 };
 
-const PinnedGateLimits = struct {
-    feasible_width: usize,
+const RequestGateLimits = struct {
     read: usize,
     lifecycle: usize,
 
-    fn init(read: usize, feasible_width: usize, requested_slack: usize) PinnedGateLimits {
+    fn init(read: usize, feasible_width: usize) RequestGateLimits {
         std.debug.assert(feasible_width > 0);
         const effective_read = @min(read, feasible_width);
-        const slack = @min(requested_slack, feasible_width - effective_read);
         return .{
-            .feasible_width = feasible_width,
             .read = effective_read,
-            .lifecycle = effective_read + slack,
+            .lifecycle = @min(feasible_width, effective_read +| 1),
         };
     }
 };
@@ -2387,6 +2380,169 @@ const VectoredLoadPipeline = struct {
 };
 
 const VectoredReadRequest = struct {
+    fn fillAffinities(
+        tensor: *const VectoredTensorTransfer,
+        pipeline: *const VectoredLoadPipeline,
+        blocks: []const VectoredRequestPlan.Block,
+        affinities: []mem.DmaBlockPool.Affinity,
+    ) void {
+        std.debug.assert(blocks.len == affinities.len);
+        for (blocks, affinities) |block_plan, *affinity| {
+            if (!pipeline.numa_explicit) {
+                affinity.* = .{};
+                continue;
+            }
+            var eligible_nodes: u64 = 0;
+            var writer_mask = block_plan.writer_mask;
+            while (writer_mask != 0) {
+                const writer_index: usize = @intCast(@ctz(writer_mask));
+                writer_mask &= writer_mask - 1;
+                const device_index = tensor.targets[writer_index].device_index;
+                const node_index = pipeline.device_pool_indices[device_index];
+                eligible_nodes |= @as(u64, 1) << @intCast(node_index);
+            }
+            std.debug.assert(eligible_nodes != 0);
+            affinity.* = if (@popCount(eligible_nodes) == 1)
+                .node(@ctz(eligible_nodes))
+            else
+                .replicated(eligible_nodes);
+        }
+    }
+
+    fn recordPoolWait(pipeline: *VectoredLoadPipeline, pool_wait_ns: u64) void {
+        if (pool_wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
+        _ = pipeline.metrics.pool_wait_ns.fetchAdd(pool_wait_ns, .monotonic);
+    }
+
+    fn enqueue(
+        request: *VectoredLoadPipeline.RequestContext,
+        tensor: *VectoredTensorTransfer,
+        pipeline: *VectoredLoadPipeline,
+        block_plan: VectoredRequestPlan.Block,
+        leased: *[]u8,
+    ) bool {
+        const references: usize = @popCount(block_plan.writer_mask);
+        const block = pipeline.registerBlock(request, leased.*, references, block_plan.len) catch {
+            pipeline.recordError(error.OutOfMemory);
+            return false;
+        };
+        leased.* = &.{};
+        pipeline.enqueueBlock(
+            tensor,
+            block,
+            block_plan.writer_mask,
+            block_plan.destination_offset,
+            block_plan.len,
+        ) catch |err| {
+            var remaining = references;
+            while (remaining > 0) : (remaining -= 1) block.complete();
+            pipeline.recordError(err);
+            return false;
+        };
+        return true;
+    }
+
+    fn beginRead(
+        request: *VectoredLoadPipeline.RequestContext,
+        pipeline: *VectoredLoadPipeline,
+    ) bool {
+        if (!pipeline.read_gate.acquire(pipeline.io)) return false;
+        // Generation and admission identity belong to the source-call permit,
+        // not to earlier job claim or pinned-block waits.
+        request.read_epoch = pipeline.metrics.config_epoch.load(.acquire);
+        request.admission_id = pipeline.next_read_admission.fetchAdd(1, .monotonic);
+        pipeline.metrics.beginRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+        );
+        return true;
+    }
+
+    fn endRead(
+        request: *VectoredLoadPipeline.RequestContext,
+        pipeline: *VectoredLoadPipeline,
+    ) void {
+        pipeline.metrics.endRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+        );
+        pipeline.read_gate.release(pipeline.io);
+    }
+
+    fn recordReadSuccess(
+        request: *VectoredLoadPipeline.RequestContext,
+        tensor: *VectoredTensorTransfer,
+        pipeline: *VectoredLoadPipeline,
+        request_len: usize,
+        read_elapsed: std.Io.Duration,
+    ) void {
+        pipeline.metrics.recordProbeRead(
+            pipeline.io,
+            request.read_epoch,
+            request.admission_id,
+            request_len,
+            pipeline.source_request_size,
+        );
+        const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
+        const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
+        _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
+        _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
+        _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
+        _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(
+            read_elapsed_us *| @as(u64, @intCast(request_len)),
+            .monotonic,
+        );
+        tensor.recordReadProgress(request_len);
+        request.markReadFinished();
+    }
+
+    fn readWhole(
+        request: *VectoredLoadPipeline.RequestContext,
+        tensor: *VectoredTensorTransfer,
+        pipeline: *VectoredLoadPipeline,
+        plan: VectoredRequestPlan,
+        affinities: []const mem.DmaBlockPool.Affinity,
+        leased: [][]u8,
+        source_offset: usize,
+        request_len: usize,
+    ) bool {
+        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased, affinities) catch |err| {
+            pipeline.recordError(err);
+            return false;
+        };
+        recordPoolWait(pipeline, pool_wait_ns);
+        if (pipeline.failed()) return false;
+
+        const iovecs = pipeline.allocator.alloc([]u8, plan.segments.len) catch {
+            pipeline.recordError(error.OutOfMemory);
+            return false;
+        };
+        defer pipeline.allocator.free(iovecs);
+        for (plan.segments, iovecs) |segment, *iovec| {
+            iovec.* = leased[segment.block_index][segment.block_offset..][0..segment.len];
+        }
+
+        if (!beginRead(request, pipeline)) return false;
+        const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
+        const read_result = tensor.reader.readPositionalAllV(iovecs, source_offset);
+        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
+        read_result catch |err| {
+            endRead(request, pipeline);
+            pipeline.recordError(err);
+            return false;
+        };
+        recordReadSuccess(request, tensor, pipeline, request_len, read_elapsed);
+        endRead(request, pipeline);
+
+        if (pipeline.failed()) return false;
+        for (plan.blocks, 0..) |block_plan, i| {
+            if (!enqueue(request, tensor, pipeline, block_plan, &leased[i])) return false;
+        }
+        return true;
+    }
+
     fn run(
         request: *VectoredLoadPipeline.RequestContext,
         tensor: *VectoredTensorTransfer,
@@ -2426,114 +2582,13 @@ const VectoredReadRequest = struct {
             return;
         };
         defer pipeline.allocator.free(affinities);
-        for (plan.blocks, affinities) |block_plan, *affinity| {
-            if (!pipeline.numa_explicit) {
-                affinity.* = .{};
-                continue;
-            }
-            var eligible_nodes: u64 = 0;
-            var writer_mask = block_plan.writer_mask;
-            while (writer_mask != 0) {
-                const writer_index: usize = @intCast(@ctz(writer_mask));
-                writer_mask &= writer_mask - 1;
-                const device_index = tensor.targets[writer_index].device_index;
-                const node_index = pipeline.device_pool_indices[device_index];
-                eligible_nodes |= @as(u64, 1) << @intCast(node_index);
-            }
-            std.debug.assert(eligible_nodes != 0);
-            affinity.* = if (@popCount(eligible_nodes) == 1)
-                .node(@ctz(eligible_nodes))
-            else
-                .replicated(eligible_nodes);
-        }
-
-        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased, affinities) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
-        if (pool_wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.pool_wait_ns.fetchAdd(pool_wait_ns, .monotonic);
+        fillAffinities(tensor, pipeline, plan.blocks, affinities);
         defer for (leased) |block| {
             if (block.len != 0) pipeline.pool.release(pipeline.io, block);
         };
-        if (pipeline.failed()) return;
 
-        const iovecs = pipeline.allocator.alloc([]u8, plan.segments.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(iovecs);
-        for (plan.segments, iovecs) |segment, *iovec| {
-            iovec.* = leased[segment.block_index][segment.block_offset..][0..segment.len];
-        }
-
-        if (!pipeline.read_gate.acquire(pipeline.io)) return;
-        // Generation and admission identity belong to the source-call permit,
-        // not to earlier job claim or pinned-block waits.
-        request.read_epoch = pipeline.metrics.config_epoch.load(.acquire);
-        request.admission_id = pipeline.next_read_admission.fetchAdd(1, .monotonic);
-        pipeline.metrics.beginRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-        );
-        const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
-        const read_result = tensor.reader.readPositionalAllV(iovecs, source_offset);
-        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
-        read_result catch |err| {
-            pipeline.metrics.endRead(
-                pipeline.io,
-                request.read_epoch,
-                request.admission_id,
-            );
-            pipeline.read_gate.release(pipeline.io);
-            pipeline.recordError(err);
-            return;
-        };
-        pipeline.metrics.recordProbeRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-            request_len,
-            pipeline.source_request_size,
-        );
-        const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
-        const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
-        _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
-        _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
-        _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(read_elapsed_us *| @as(u64, @intCast(request_len)), .monotonic);
-        tensor.recordReadProgress(request_len);
-        request.markReadFinished();
-        pipeline.metrics.endRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-        );
-        pipeline.read_gate.release(pipeline.io);
-
-        if (pipeline.failed()) return;
-        for (plan.blocks, 0..) |block_plan, i| {
-            const references: usize = @popCount(block_plan.writer_mask);
-            const block = pipeline.registerBlock(request, leased[i], references, block_plan.len) catch {
-                pipeline.recordError(error.OutOfMemory);
-                return;
-            };
-            leased[i] = &.{};
-            pipeline.enqueueBlock(
-                tensor,
-                block,
-                block_plan.writer_mask,
-                block_plan.destination_offset,
-                block_plan.len,
-            ) catch |err| {
-                var remaining = references;
-                while (remaining > 0) : (remaining -= 1) block.complete();
-                pipeline.recordError(err);
-                return;
-            };
-        }
-        request.markSuccessful();
+        const successful = readWhole(request, tensor, pipeline, plan, affinities, leased, source_offset, request_len);
+        if (successful) request.markSuccessful();
     }
 };
 
@@ -3035,13 +3090,6 @@ test "fair read scheduler validates jobs and cleans up allocation failures" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
-}
-
-fn readTimingBucketIndex(request_size: usize) ?usize {
-    for (VFS.read_timing_bucket_sizes, 0..) |size, index| {
-        if (request_size == size) return index;
-    }
-    return null;
 }
 
 const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
@@ -3647,14 +3695,16 @@ const VectoredReadStatsSource = struct {
 
 const SourceTelemetry = struct {
     retries: u64 = 0,
-    timing_successes: u64 = 0,
     transient_retries: u64 = 0,
     timeouts: u64 = 0,
     server_failures: u64 = 0,
-    timing_transient_retries: u64 = 0,
-    timing_timeouts: u64 = 0,
-    timing_server_failures: u64 = 0,
     throttles: u64 = 0,
+
+    fn hasBackpressure(self: SourceTelemetry) bool {
+        return self.retries != 0 or self.transient_retries != 0 or
+            self.timeouts != 0 or self.server_failures != 0 or
+            self.throttles != 0;
+    }
 };
 
 const SourceReadRuntime = struct {
@@ -3662,14 +3712,12 @@ const SourceReadRuntime = struct {
     worker_gate: *AdaptiveRequestGate,
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
-    post_read_slack_requests: usize,
     metrics: *VectoredLoadMetrics,
     next_read_admission: *std.atomic.Value(u64),
     scheduler: *FairVectoredReadScheduler,
     pinned_feasible_width: usize,
     read_stats_sources: []VectoredReadStatsSource,
     source_bootstrap_enabled: bool,
-    source_request_size: usize,
     source_response_observed: bool = false,
     probe_transition_pending: bool = false,
     probe_measuring: bool = false,
@@ -3682,7 +3730,6 @@ const SourceReadRuntime = struct {
 
     fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
         var result: SourceTelemetry = .{};
-        const timing_index = readTimingBucketIndex(self.source_request_size).?;
         for (self.read_stats_sources) |*source| {
             const current = source.provider.snapshot();
             const delta = current.sub(source.previous);
@@ -3692,11 +3739,6 @@ const SourceReadRuntime = struct {
             result.timeouts +|= delta.timeouts;
             result.server_failures +|= delta.server_failures;
             result.throttles +|= delta.throttles;
-            const timing = delta.timing[timing_index];
-            result.timing_successes +|= timing.successes;
-            result.timing_transient_retries +|= timing.transient_retries;
-            result.timing_timeouts +|= timing.timeouts;
-            result.timing_server_failures +|= timing.server_failures;
         }
         return result;
     }
@@ -3707,24 +3749,20 @@ const SourceReadRuntime = struct {
         decision: SourceReadWidthController.Decision,
         force_probe: bool,
     ) void {
-        const gate_limits: PinnedGateLimits = .init(
-            decision.width,
-            self.pinned_feasible_width,
-            self.post_read_slack_requests,
-        );
-        self.worker_gate.setLimit(io, gate_limits.read);
-        self.request_gate.setLimit(io, gate_limits.lifecycle);
+        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        self.worker_gate.setLimit(io, limits.read);
+        self.request_gate.setLimit(io, limits.lifecycle);
         if (!decision.settled and (decision.changed or force_probe)) {
             self.read_gate.setLimit(io, 0);
             self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
-            self.pending_read_limit = gate_limits.read;
+            self.pending_read_limit = limits.read;
             self.probe_transition_pending = true;
             self.probe_measuring = false;
             self.scoring_pending = false;
             self.blind_admissions = false;
             _ = self.activatePendingProbe(io);
         } else if (decision.settled) {
-            self.read_gate.setLimit(io, gate_limits.read);
+            self.read_gate.setLimit(io, limits.read);
             self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
             self.metrics.config_epoch.store(decision.generation, .release);
             self.probe_transition_pending = false;
@@ -3752,14 +3790,10 @@ const SourceReadRuntime = struct {
         io: std.Io,
         decision: SourceReadWidthController.Decision,
     ) void {
-        const gate_limits: PinnedGateLimits = .init(
-            decision.width,
-            self.pinned_feasible_width,
-            self.post_read_slack_requests,
-        );
-        self.worker_gate.setLimit(io, gate_limits.read);
-        self.read_gate.setLimit(io, gate_limits.read);
-        self.request_gate.setLimit(io, gate_limits.lifecycle);
+        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        self.worker_gate.setLimit(io, limits.read);
+        self.read_gate.setLimit(io, limits.read);
+        self.request_gate.setLimit(io, limits.lifecycle);
         self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
         self.metrics.config_epoch.store(decision.generation, .release);
         self.probe_transition_pending = false;
@@ -3829,9 +3863,10 @@ const SourceReadRuntime = struct {
             }
 
             const telemetry = self.takeRemoteTelemetry();
-            // Backend counters include unrelated traffic. Keep them for final
-            // diagnostics, but do not let them change this load's controller.
-            _ = telemetry;
+            if (telemetry.hasBackpressure() and self.controller.phase != .settled) {
+                self.applyDecision(io, self.controller.rollbackTail(), false);
+                continue;
+            }
             if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
             const scheduler_snapshot = self.scheduler.snapshot(io);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
@@ -3941,12 +3976,6 @@ fn effectiveSourceReadParallelism(configured: Parallelism, high_latency: bool) P
     return .{ .fixed = @min(configured.maximum(), @max(configured.initial(), 12)) };
 }
 
-fn effectiveSourceRequestSize(source_minimum: usize, dma_block_size: usize) !usize {
-    const selected = @max(local_load_read_request_size, @max(source_minimum, dma_block_size));
-    if (selected > load_read_request_size) return error.InvalidDmaLoadConfig;
-    return selected;
-}
-
 fn effectiveDmaGlobalCap(
     calibrated: ?usize,
     used_device_count: usize,
@@ -4041,7 +4070,6 @@ fn loadVectored(
         uri: []const u8,
         profile_id: usize,
         profile_name: []const u8,
-        minimum_request_size: usize,
         high_latency: bool,
         read_stats: ?VFS.ReadStatsProvider,
         file: std.Io.File = undefined,
@@ -4087,46 +4115,25 @@ fn loadVectored(
         } else blk: {
             const index = source_slots.items.len;
             const profile = VFS.readProfileForPath(io, descriptor.file_uri);
-            const minimum = if (profile) |p| p.hints.minimum_request_size else 2 * 1024 * 1024;
             try source_slots.append(allocator, .{
                 .uri = descriptor.file_uri,
                 .profile_id = if (profile) |p| p.id else 0,
                 .profile_name = if (profile) |p| p.scheme else "local/default",
-                .minimum_request_size = minimum,
                 .high_latency = if (profile) |p| p.hints.high_latency else false,
                 .read_stats = if (profile) |p| p.stats else null,
             });
-            load_log.debug("source profile: name={s}, minimum_request_size={Bi:.2}, mode={s}, uri={s}", .{
+            load_log.debug("source profile: name={s}, high_latency={}, uri={s}", .{
                 source_slots.items[index].profile_name,
-                minimum,
-                "profiled-fixed",
+                source_slots.items[index].high_latency,
                 descriptor.file_uri,
             });
             break :blk index;
         };
     }
 
-    var source_minimum: usize = dma_config.block_size;
-    var profile_ids: std.ArrayListUnmanaged(usize) = .empty;
-    defer profile_ids.deinit(allocator);
-    for (source_slots.items) |slot| {
-        source_minimum = @max(source_minimum, slot.minimum_request_size);
-        for (profile_ids.items) |profile_id| {
-            if (profile_id == slot.profile_id) break;
-        } else {
-            try profile_ids.append(allocator, slot.profile_id);
-        }
-    }
-    if (profile_ids.items.len > 1) {
-        load_log.warn("mixed source profiles use one conservative adaptive tuple: profiles={d}, minimum_request_size={Bi:.2}", .{
-            profile_ids.items.len,
-            source_minimum,
-        });
-    }
-    const source_request_size = try effectiveSourceRequestSize(source_minimum, dma_config.block_size);
-    load_log.debug("source request size selected: request_size={Bi:.2}, source_minimum={Bi:.2}, dma_block_size={Bi:.2}", .{
+    const source_request_size = load_read_request_size;
+    load_log.debug("source request size fixed: request_size={Bi:.2}, dma_block_size={Bi:.2}", .{
         source_request_size,
-        source_minimum,
         dma_config.block_size,
     });
     var read_stats_sources: std.ArrayListUnmanaged(VectoredReadStatsSource) = .empty;
@@ -4166,7 +4173,6 @@ fn loadVectored(
             store_: *const TensorStore,
             tensor_: *const Tensor,
             source_file_: std.Io.File,
-            batch_iovecs_: bool,
             shardings_: []const Sharding,
             buffer_: *Buffer,
             progress_: ?*std.Progress.Node,
@@ -4181,7 +4187,6 @@ fn loadVectored(
                         store_,
                         tensor_,
                         source_file_,
-                        batch_iovecs_,
                         shardings_,
                         buffer_,
                         progress_,
@@ -4213,11 +4218,6 @@ fn loadVectored(
     const high_latency_source = for (source_slots.items) |slot| {
         if (slot.high_latency) break true;
     } else false;
-    // Remote backends need their active source-call cap to remain fully
-    // occupied while the preceding requests spend a short time queued or in
-    // PJRT. Eight retained lifecycles are 128 MiB for S3/GCS and 256 MiB for
-    // HF; local reads keep strict lane-style coupling with no slack.
-    const post_read_slack_requests: usize = if (high_latency_source) 8 else 0;
 
     const coordinator_started_at: std.Io.Timestamp = .now(io, .awake);
     load_log.debug("vectored coordinator started: tensors={d}, elapsed={d:.3}s", .{
@@ -4234,24 +4234,24 @@ fn loadVectored(
         source_request_size,
     );
     defer scheduler.deinit();
-    const maximum_blocks_per_job = scheduler.maximumBlocksPerJob();
-    if (maximum_blocks_per_job != 0) {
+    const pinned_blocks_per_job = scheduler.maximumBlocksPerJob();
+    if (pinned_blocks_per_job != 0) {
         try dma_resources.workspace.ensureExactLoadBlockReserves(
             dma_config.block_size,
-            maximum_blocks_per_job,
+            pinned_blocks_per_job,
             node_reserves,
         );
         try pool.refreshProviderArenas(io);
     }
-    const pinned_feasible_width = if (maximum_blocks_per_job == 0)
+    const pinned_feasible_width = if (pinned_blocks_per_job == 0)
         @as(usize, 1)
     else
-        try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
+        try pool.aggregatePotentialRequestWidth(pinned_blocks_per_job);
     if (pinned_feasible_width == 0) return error.DmaMappedBudgetExceeded;
-    const strict_pinned_feasible_width = if (maximum_blocks_per_job == 0)
+    const strict_pinned_feasible_width = if (pinned_blocks_per_job == 0)
         @as(usize, 1)
     else
-        try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
+        try pool.minimumStrictAffinityRequestWidth(pinned_blocks_per_job);
     const strict_affinity = for (dma_config.device_numa_nodes) |node| {
         if (node != null) break true;
     } else false;
@@ -4260,8 +4260,8 @@ fn loadVectored(
     else
         pinned_feasible_width;
     if (effective_pinned_feasible_width == 0) return error.DmaMappedBudgetExceeded;
-    load_log.debug("DMA workspace feasibility: maximum_blocks_per_job={d}, aggregate_read_width={d}, minimum_strict_read_width={d}", .{
-        maximum_blocks_per_job,
+    load_log.debug("DMA workspace feasibility: blocks_per_job={d}, aggregate_read_width={d}, minimum_strict_read_width={d}", .{
+        pinned_blocks_per_job,
         pinned_feasible_width,
         strict_pinned_feasible_width,
     });
@@ -4275,14 +4275,10 @@ fn loadVectored(
         source_read_parallelism,
         effective_pinned_feasible_width,
     );
-    const initial_gate_limits: PinnedGateLimits = .init(
-        controller.width(),
-        effective_pinned_feasible_width,
-        post_read_slack_requests,
-    );
-    var worker_gate: AdaptiveRequestGate = .init(initial_gate_limits.read);
-    var read_gate: AdaptiveRequestGate = .init(initial_gate_limits.read);
-    var request_gate: AdaptiveRequestGate = .init(initial_gate_limits.lifecycle);
+    const initial_limits: RequestGateLimits = .init(controller.width(), effective_pinned_feasible_width);
+    var worker_gate: AdaptiveRequestGate = .init(initial_limits.read);
+    var read_gate: AdaptiveRequestGate = .init(initial_limits.read);
+    var request_gate: AdaptiveRequestGate = .init(initial_limits.lifecycle);
     var pipeline = try VectoredLoadPipeline.init(
         allocator,
         io,
@@ -4307,14 +4303,12 @@ fn loadVectored(
         .worker_gate = &worker_gate,
         .read_gate = &read_gate,
         .request_gate = &request_gate,
-        .post_read_slack_requests = post_read_slack_requests,
         .metrics = &metrics,
         .next_read_admission = &pipeline.next_read_admission,
         .scheduler = &scheduler,
         .pinned_feasible_width = effective_pinned_feasible_width,
         .read_stats_sources = read_stats_sources.items,
         .source_bootstrap_enabled = high_latency_source,
-        .source_request_size = source_request_size,
     };
     var controller_group: std.Io.Group = .init;
     try controller_group.concurrent(io, SourceReadRuntime.run, .{ &controller_runtime, io });
@@ -4373,7 +4367,6 @@ fn loadVectored(
                         store_,
                         tensors_[job.tensor_index],
                         source_file,
-                        !source_slots_[source_indices_[job.tensor_index]].high_latency,
                         shardings_,
                         buffers_[job.tensor_index],
                         progress_,
@@ -6303,7 +6296,6 @@ fn finishDmaBenchmarkReport(
 pub const max_load_read_parallelism: usize = 128;
 pub const max_load_dma_parallelism: usize = 32;
 pub const load_read_request_size: usize = 32 * 1024 * 1024;
-pub const local_load_read_request_size: usize = 8 * 1024 * 1024;
 
 pub const Parallelism = union(enum) {
     adaptive: Adaptive,
@@ -8251,25 +8243,6 @@ test "local source parallelism uses the measured fixed-width plateau" {
     try std.testing.expectEqual(@as(usize, 7), explicit.initial());
 }
 
-test "source request size follows backend minimum and DMA block" {
-    try std.testing.expectEqual(
-        local_load_read_request_size,
-        try effectiveSourceRequestSize(2 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 16 * 1024 * 1024),
-        try effectiveSourceRequestSize(16 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        load_read_request_size,
-        try effectiveSourceRequestSize(32 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-    try std.testing.expectError(
-        error.InvalidDmaLoadConfig,
-        effectiveSourceRequestSize(64 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-}
-
 test "probe source capacity counts active reads rather than retained requests" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
@@ -8314,15 +8287,14 @@ test "source probe excludes pre-boundary admissions" {
     metrics.clearProbe(io, 7);
 }
 
-test "pinned feasibility clips read width and remote lifecycle slack" {
-    const clipped: PinnedGateLimits = .init(128, 16, 8);
-    try std.testing.expectEqual(@as(usize, 16), clipped.feasible_width);
-    try std.testing.expectEqual(@as(usize, 16), clipped.read);
-    try std.testing.expectEqual(@as(usize, 16), clipped.lifecycle);
+test "request lifecycle gate permits one shared spare request" {
+    const normal: RequestGateLimits = .init(12, 64);
+    try std.testing.expectEqual(@as(usize, 12), normal.read);
+    try std.testing.expectEqual(@as(usize, 13), normal.lifecycle);
 
-    const slack: PinnedGateLimits = .init(12, 16, 8);
-    try std.testing.expectEqual(@as(usize, 12), slack.read);
-    try std.testing.expectEqual(@as(usize, 16), slack.lifecycle);
+    const clipped: RequestGateLimits = .init(32, 32);
+    try std.testing.expectEqual(@as(usize, 32), clipped.read);
+    try std.testing.expectEqual(@as(usize, 32), clipped.lifecycle);
 }
 
 fn buildMesh2x2(

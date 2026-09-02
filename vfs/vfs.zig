@@ -10,10 +10,8 @@ pub const S3 = @import("s3.zig").S3;
 const base_module = @import("base.zig");
 pub const Backend = base_module.Backend;
 pub const ReadHints = base_module.ReadHints;
-pub const ReadTimingBucket = base_module.ReadTimingBucket;
 pub const ReadStats = base_module.ReadStats;
 pub const ReadStatsProvider = base_module.ReadStatsProvider;
-pub const read_timing_bucket_sizes = base_module.read_timing_bucket_sizes;
 pub const VFSBase = base_module.VFSBase;
 
 test {
@@ -461,12 +459,11 @@ test "VFS exposes source read hints only for the matching registered scheme" {
     defer filesystem.deinit();
     try filesystem.registerBackend("test", .{
         .io = std.testing.io,
-        .read_hints = .{ .minimum_request_size = 32 * 1024 * 1024, .high_latency = true },
+        .read_hints = .{ .high_latency = true },
     });
 
     const profile = VFS.readProfileForPath(filesystem.io(), "test://bucket/object").?;
     try std.testing.expectEqualStrings("test", profile.scheme);
-    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.hints.minimum_request_size);
     try std.testing.expect(profile.hints.high_latency);
     try std.testing.expect(VFS.readProfileForPath(filesystem.io(), "/tmp/model.safetensors") == null);
     try std.testing.expect(VFS.readProfileForPath(std.testing.io, "test://bucket/object") == null);

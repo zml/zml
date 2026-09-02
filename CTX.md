@@ -1,5 +1,479 @@
 # Adaptive Vectored DmaMapped Loader Context
 
+## Implemented: one fixed 32 MiB path (2026-09-02)
+
+Use one fixed 32 MiB logical source request for local files, `file://`, HTTP,
+S3, GCS, and HF. This deliberately accepts the measured oneAPI local
+throughput and pinned-memory regression for now in exchange for substantially
+less loader/VFS policy. DMA block size remains independently detected; a
+32 MiB request is a scatter read into `ceil(request_len / dma_block_size)`
+pool blocks, not a requirement to select a 32 MiB DMA block.
+
+The only loader-specific VFS metadata that remains is:
+
+- a `high_latency` hint, used only for source-call width/bootstrap behavior;
+- an optional retry/throttle feedback provider used for congestion response
+  and diagnostics.
+
+`minimum_request_size`, backend-specific request-size fields and options,
+mixed-profile request sizing, the public/runtime request-size selection, and
+conditional exact-fill scatter behavior have been removed. All sources use the
+ordinary resumable positional-read contract. HTTP-family backends continue to
+turn a successful complete scatter call into one Range request and keep their
+retry/authentication mechanics internal.
+
+Each request atomically leases all of its DMA blocks, performs the full scatter
+read, then enqueues the completed blocks. The default-off source-order
+block-yielding prototype, its live-block planning/telemetry, the public request
+size controls, and the source-specific post-read slack have been removed.
+
+The pool is still the memory-capacity backpressure mechanism, but it cannot by
+itself bound the number of completed reads queued behind DMA: every worker can
+acquire another request after its predecessor returns and demand growth can
+then fill the complete 2 GiB limit. The implemented generic lifecycle gate
+therefore permits the active source-read width plus one shared spare request,
+clipped by exact pool feasibility. The credit is independent of source type;
+it lets the reader advance while DMA owns the preceding request without
+retaining one or two extra requests per worker. A request returns its credit
+only after every DMA block from that request completes.
+
+The implementation is complete. `//vfs:test` and `//zml:test` pass, and release
+builds of `//examples/io:playground` pass for ROCm, oneAPI, and CUDA. The local
+S3Proxy fixture is absent on this host, so the final latency/throttle runtime
+check remains for the OneAPI machine.
+
+### Lifecycle-gate measurements
+
+The gate was selected empirically rather than retained by assumption. On one
+MI300X with a detected 16 MiB DMA block, per-device DMA width eight, and local
+source-read width twelve:
+
+- no lifecycle bound grew to the full 2 GiB, reached 92 live requests, and
+  loaded at only 2.65 GiB/s;
+- a generic two-wave bound retained 768 MiB, reached 24 live requests, and
+  loaded at 3.06 GiB/s;
+- the active-read width plus one shared spare reached 13 live requests,
+  416 MiB leased high-water and 448 MiB mapped, with zero pool waits. It loaded
+  Llama-3.1-8B in 0.697 seconds at 21.47 GiB/s logical goodput.
+
+On four MI300X devices, the selected gate again reached 13 live requests,
+832 MiB leased high-water inside the retained 1 GiB workspace, zero growth and
+zero pool waits. The sharded load completed in 0.468 seconds at 31.94 GiB/s.
+These measurements supersede the earlier assumption below that pool capacity
+alone was a sufficient queue bound.
+
+## Universal 32 MiB filesystem-read assessment (2026-09-02)
+
+A 32 MiB `preadv` is not intrinsically problematic for Linux or the local
+filesystem: it is comfortably below the kernel vectored-I/O limit, reduces
+syscall overhead, and the filesystem/page cache still services it internally
+in smaller units. It is nevertheless not a performance-neutral loader policy.
+The important costs occur at the DMA-pool and scheduling boundary, not at the
+VFS API boundary.
+
+The strongest current cross-platform evidence shows the cost now deliberately
+accepted for this simplification. On the B70 oneAPI host, fixed-width-12 local
+loads reached about
+27.05 GiB/s with 8 MiB requests and about 21.33 GiB/s with 32 MiB requests, a
+roughly 21% regression; pinned high-water rose from 96 MiB to 384 MiB. Earlier
+request/block-separated ROCm measurements showed the opposite tendency:
+32 MiB source batches with 8 MiB DMA blocks reached a 24.59 GiB/s median, and
+were faster than an adjacent 16 MiB screen. Thus the result is a real backend
+pipeline interaction rather than a universal filesystem transfer-size rule.
+
+With whole-request acquisition, a 32 MiB local read also leases the full
+32 MiB before issuing the read and does not make the first DMA block ready
+until that read returns. Twelve active readers therefore require 384 MiB of
+pinned workspace instead of 96 MiB for 8 MiB requests, and each completion can
+publish several DMA blocks at once. The latter changes cache locality and PJRT
+queue burstiness; the B70 measurements show that reduced syscall count does
+not repay those effects. Demand-growing the pool avoids eager allocation but
+does not remove this live-set or scheduling cost.
+
+The earlier recommendation was consequently to keep smaller local reads. The
+current decision supersedes it: use 32 MiB everywhere for now, measure the
+known cost, and revisit only if load performance requires it. Do not confuse
+this source request size with the DMA block size, which remains independently
+detected.
+
+### VFS simplification from universal 32 MiB
+
+Accepting the measured local-performance and pinned-memory cost would remove
+almost all loader-specific VFS policy. The desired contract would be ordinary
+`std.Io` positional reads with a fixed 32 MiB logical request, a `high_latency`
+admission hint, and an optional source-feedback provider for retry/throttle
+backpressure. Backend
+retry, authentication, and Range-request mechanics remain backend internals,
+not loader specialization.
+
+Concretely, `ReadHints.minimum_request_size`, the per-scheme request-size
+options and stored fields, mixed-profile sizing, and conditional exact-fill
+scatter selection go away. `ReadHints.high_latency` remains as the one
+admission hint. A standards-shaped
+local positional read may resume a short result; the HTTP-family backends may
+continue fulfilling the same call internally with their retry logic. With a
+32 MiB request and the supported DMA block range, the scatter list is also far
+below the local `IOV_MAX`, so it does not need a backend hint.
+
+The pre-simplification loader used `high_latency` for blind source-width
+bootstrap, eight post-read lifecycle credits, remote adaptive read
+parallelism, disabling local yielding, and one-call exact-fill mode. The
+implemented simplification retains only its source-width/bootstrap role.
+Scatter/read ownership is identical for every source, and a generic one-spare
+lifecycle credit bounds the source-to-DMA queue independently of the hint.
+
+Clarification after reviewing the intended whole-request design: those were
+descriptions of implementation branches, not requirements that should survive.
+If every 32 MiB request receives its complete DMA scatter list up front, the
+local block-yielding prototype is obsolete. The initial pool-only replacement
+was implemented and measured, but it allowed completed reads to accumulate
+until the full 2 GiB mapped limit. It was replaced by the source-agnostic
+one-shared-spare lifecycle gate described above.
+
+Remote source-width bootstrap is still a throughput concern because several
+HTTP Range calls may be needed to hide latency, but it is not a VFS-interface
+requirement. A unified controller can start from one common width and use lack
+of read progress to open more source calls; retry/throttle feedback provides
+the negative signal. Exact-fill selection can likewise be unified by using the
+normal positional-read contract and resuming a short result where necessary.
+The design could infer this behavior without a hint, but the implementation keeps
+`high_latency` explicitly because it is a useful and small source-admission
+signal. It must not select request size, memory layout, or scatter semantics.
+
+The feedback provider remains backend-global and can include unrelated traffic.
+The controller treats a retry/throttle delta as backend-wide congestion and
+rolls back only an unsettled probe; it cannot disturb an already settled width.
+A future file/load-scoped provider would improve attribution, but was not added
+because it would reintroduce lifecycle/API complexity that this change is
+intended to remove.
+
+## Fixed 32 MiB direct reads with demand growth (2026-09-02)
+
+The 128 MiB remote streaming-writer design below and the later split local/
+remote request policy are superseded. Every source uses one 32 MiB positional
+scatter read directly into the DMA blocks supplied by the loader. The existing
+VFS API already turns that scatter list into one HTTP Range request, retries the
+complete request before any DMA is submitted, and therefore needs no
+positional-to-writer extension, pageable staging copy, partial-response
+continuation, or ETag state machine.
+
+The pool retains demand growth rather than eagerly allocate a strict second
+32 MiB request for every reader. Retained calibration arenas are the starting
+capacity. `DmaBlockPool.acquireMany` detects an atomic affinity assignment that
+cannot be satisfied from the current free lists, grows an eligible NUMA pool in
+block-aligned slabs while `max_mapped_bytes` permits it, and waits for a lease
+return only when growth is not possible. One shared lifecycle credit above the
+active read width supplies the normal read/DMA overlap without making
+`64 MiB * active_readers` an upfront requirement or allowing arbitrary queued
+growth. The example's global limit remains `ZML_DMA_BENCH_MAX_MAPPED_MIB`
+(2 GiB by default); no per-NUMA byte limit exists.
+
+Demand growth currently uses a 64 MiB target slab, clipped to the remaining
+block budget and protected node reserves. Two implementation details must stay
+visible in future work: allocation occurs synchronously while the pool mutex is
+held, and an acquisition satisfied only after growth currently returns zero
+pool-wait time. The arena provider logs each mapped allocation and its duration,
+while load completion reports `newly_mapped_bytes`; on ROCm, `DmaMap` can still
+make growth an important stall. Move provider allocation outside the pool lock
+if runtime growth is observed to be material. Do not silently fold mapping time
+into DMA or source-read latency.
+
+## Superseded: separate remote request size from DMA workspace (2026-09-02)
+
+Remote transaction size, DMA block size, and live pinned workspace are three
+independent quantities. A future S3-like source may use a 128 MiB Range request
+to amortize request overhead and avoid request-rate limits, while continuing to
+use the independently calibrated 8--32 MiB DMA block. The loader must not
+interpret the 128 MiB transaction as a requirement to lease 128 MiB of pinned
+memory per active source call.
+
+The intended remote path is the same timing as `DirectShardWriter`'s flip-flop,
+but within one HTTP response. For the common sequential layout, reserve two DMA
+blocks for an admitted source stream. Fill A, submit A to PJRT, immediately let
+the still-open response fill B, and only consult A's completion when B fills.
+Because source throughput is expected to be lower than DMA throughput, A should
+normally already be reusable. Thus a 128 MiB response can rotate through two
+16 MiB blocks rather than preleasing eight. Local files do not need the large
+remote transaction: reading and yielding one calibrated DMA block per `pread`
+is already a suitably large filesystem operation.
+
+The existing `readPositionalAllV` path cannot express this memory behavior. It
+does scatter one HTTP response directly into caller buffers, but every buffer
+is supplied and leased up front. A completion callback alone starts DMA early
+yet still reserves the complete 128 MiB. The remote backend instead needs a
+writer-like positional destination which exposes only the next source-ordered
+DMA segment, commits a completed DMA block, then rotates its writable buffer
+while the same response remains open. Zig's `std.Io.Reader`/`Writer` pumping
+model can provide the byte-transfer mechanism; the missing part is an internal
+VFS positional-to-writer capability and a vectored DMA writer that follows the
+precomputed source-order block plan.
+
+For arbitrary interleaved shard layouts, one writable block is not always
+enough. Admission should reserve a bounded rolling window derived from the
+plan's maximum source-order live set, conservatively two alternating live sets,
+instead of `request_size / block_size` blocks. Those reservations must be real
+pool credits (including NUMA feasibility), so another source request cannot
+steal the buffer required for an admitted reader's next rotation. A finite pool
+cannot guarantee that a reader never waits if DMA stalls or becomes slower than
+the source indefinitely; the correct invariant is zero buffer waits while the
+measured DMA-faster assumption holds, with bounded backpressure otherwise.
+
+Partial-response retry must advance from the number of bytes already committed
+to the DMA writer. The current backends retry the original range into the
+original fixed buffers, which is invalid after a prefix has been submitted to
+DMA. A streaming retry should request only the uncommitted suffix and continue
+the partially filled current block; normal successful operation still uses one
+HTTP request for the entire logical 128 MiB transaction.
+
+## Source-order DMA block-yielding prototype (2026-09-02)
+
+A local-file block-yielding prototype is now implemented behind the default-off
+`LoadOpts.yield_dma_blocks` option. `LoadOpts.read_request_size` provides a
+fixed logical request size for controlled comparisons. The `examples/io`
+loader exposes these as `ZML_LOAD_YIELD_DMA_BLOCKS=1` and
+`ZML_LOAD_READ_REQUEST_MIB`; its `load` command now also honors the existing
+`ZML_DMA_BENCH_BLOCK_MIB` list so matched fixed-block comparisons are possible.
+The first attempted 8 MiB comparison was discarded because this last control
+was not yet connected and the two runs calibrated different block sizes.
+
+The prototype preserves source order. It partitions one logical scheduler job
+into waves ending when the last source segment of at least one destination DMA
+block has arrived. For each wave it atomically leases only newly touched
+blocks, issues one positional vectored read for that contiguous source range,
+immediately enqueues every completed destination block, and continues reading
+the next wave while PJRT owns the previous block. Request fairness, read-width
+admission, controller telemetry, and request retirement remain at the original
+logical-job granularity. The scheduling sentinel already present in
+`RequestContext` safely keeps the request alive when an early DMA callback
+finishes before the source job does.
+
+`VectoredRequestPlan.maximumLiveBlocks()` measures the peak number of
+simultaneously writable blocks in source order. The completed scheduler now
+retains both the total and live maxima; yielding uses the live maximum for pool
+feasibility and reserve selection. This is materially different from assuming
+one live block unconditionally: arbitrary shard layouts can interleave source
+fragments for several destinations. The implementation keeps atomic multi-block
+acquisition within a wave, so such layouts retain correctness and cannot be
+silently forced through one pathological out-of-order tiny read per fragment.
+
+High-latency sources deliberately retain the whole-request path. The HTTP,
+S3, GCS, and HF backends already stream one range response directly across the
+supplied scatter buffers; they do not need or allocate one contiguous buffer as
+large as the HTTP request. The limitation is ownership and completion: the
+fixed iovec list is supplied up front and `readPositionalAllV` returns only
+after the complete list is filled, so the loader cannot enqueue one full block
+and recycle it while that same response continues. Early DMA with the complete
+iovec list would overlap work but would not reduce the initial reservation.
+Reducing the live reservation below the request size needs a narrow dynamic
+buffer-provider/completion hook so the response reader can request the next
+block after completing the current one. It also needs a retry contract: today a
+truncated response retries the original range into the original buffers, which
+would overwrite any prefix already handed to DMA. A yielding implementation
+must instead retain ownership until success or resume a failed request from the
+first uncommitted byte without touching yielded blocks. A production local
+version would also precompute wave boundaries and reuse worker scratch storage;
+the prototype currently allocates its wave metadata per logical request to keep
+the experiment isolated.
+
+### Eight-MI300X replicated measurements
+
+These runs completed before GPU 1 was reserved for another user. No further
+eight-GPU experiments should be run while that constraint remains.
+
+With four 8 MiB blocks per 32 MiB request and eight fixed readers, two matched
+pairs gave:
+
+| Path | Vectored load seconds | Peak leased DMA | Mid-read DMA |
+|---|---:|---:|---:|
+| whole request | 5.624, 5.475 | 256 MiB, 256 MiB | 0 |
+| source-order yield | 5.624, 5.318 | 192 MiB, 208 MiB | 44.05 GiB |
+
+The median speed effect was about +1.4% for yielding and is too small to call a
+throughput win, but the 19--25% peak-memory reduction was repeatable. There
+were no pool waits. Both paths issued the same 67,120 DMA submissions and
+transferred the same 466.01 GiB, so the comparison changes source/DMA overlap,
+not transfer granularity or output work.
+
+At the currently preferred 16 MiB block and a 32 MiB request, one fixed-eight
+pair measured 5.243 seconds and 256 MiB for whole-request versus 5.091 seconds
+and 224 MiB for yielding. This is a 2.9% screen and a 12.5% memory reduction,
+not enough repetitions to establish a speed gain. At twelve readers the same
+two-block request reached 384 MiB in both modes: while the second 16 MiB block
+was being filled, the first was still owned by DMA, so the useful flip-flop
+itself consumed both blocks. Whole-request took 4.226 seconds and yielding
+4.284 seconds in that pair. In other words, yielding cannot make a two-block
+pipeline use one block when actual overlap is present.
+
+The automatic local configuration currently chooses a request at least as
+large as the DMA block and, on this machine, normally exactly the selected
+16 MiB block. Such a job has one block and offers nothing to yield. A
+32 MiB-request/16 MiB-block design is a separate batching tradeoff; yielding
+does not automatically make its working set as small as today's 16/16 path.
+One fixed-twelve 16/16 run peaked at 192 MiB, compared with 384 MiB for both
+32/16 modes. Their wall times were collected under visibly changing host load
+and must not be used as a reliable request-size comparison.
+
+### Four-MI300X sharded measurements
+
+After GPU 1 became unavailable, all further runs used only physical GPUs 4--7.
+A sharded Llama-3.1-8B load with 16 MiB blocks, 32 MiB requests, and eight
+readers produced four total destination blocks per largest job but only one
+source-order live block. This model-axis layout therefore has sequential block
+completion rather than the feared interleaved live set.
+
+The first whole-request run was cold at 2.705 seconds and was excluded. Warm
+whole-request runs took 0.742 and 0.729 seconds; yielding runs took 0.792 and
+0.704 seconds (an earlier post-cold yielding run was 0.744 seconds). The warm
+medians are about 0.736 versus 0.744 seconds, effectively neutral at this noise
+level and approximately 1% slower for yielding. Peak leasing was always
+512 MiB for whole-request and 336--368 MiB for yielding, a repeatable 28--34%
+reduction. Yielding started 9.65 GiB of the 14.96 GiB physical load before the
+enclosing logical reads finished. There were no pool waits and both modes made
+1,864 identical DMA submissions.
+
+### Design consequences
+
+The experiment validates the source-order wave design but narrows its benefit:
+
+1. It is primarily a live-memory optimization when a logical request contains
+   several sequentially completable DMA blocks. Throughput was neutral within
+   noise; splitting one `preadv` into wave calls can lose syscall batching even
+   as earlier DMA reduces ready-queue age.
+2. It does not reduce the current retained arena. The global calibration still
+   needs distinct `devices * 8 * selected_block` source slots: 512 MiB for the
+   four-GPU 16 MiB run, 1 GiB for eight GPUs at 16 MiB. The loader reuses that
+   already mapped arena, so a lower 336--368 MiB high-water mark does not save
+   an allocation unless calibration storage can later be released, shrunk, or
+   separated from a smaller load workspace.
+3. `maximum_live_blocks_per_job` covers writable blocks, not DMA-owned blocks.
+   A hard no-bubble guarantee still needs an additive reserve for the DMA
+   working set plus active readers' live writable sets. The current reserve
+   growth remains `max(feed, request)` and the dynamic pool is the safety
+   fallback; the experiment had enough retained calibration memory and never
+   exercised growth.
+4. Interleaved sharding can require more than one live block. The Llama layout
+   happened to have live=1, but the planner test covers an interleaved live=2
+   case. A strict one-block-at-a-time destination-order implementation would
+   avoid that memory at the cost of many small, nonsequential reads and is not
+   a sound general design.
+5. Turning waves into independent scheduler jobs would remove much of the new
+   per-request state, but would also change fairness/controller observations
+   and reintroduce the lifecycle-gate problem: all reader slots could be held
+   by DMA-complete lifecycles before a worker starts the next wave. Keeping
+   waves inside one logical job is the cleaner flip-flop semantic.
+
+The prototype should remain opt-in until OneAPI is checked and the allocation
+policy is decided. If the goal is only today's automatic 16/16 local path, the
+added state machine has no benefit. If larger logical reads are desired for
+source batching, source-order yielding is a correct general mechanism and
+meaningfully reduces peak leasing for three-or-more-block requests, but the
+retained calibration arena must be addressed separately to turn that into
+actual host-memory allocation savings.
+
+## Staged calibration allocation and loader read-ahead analysis (2026-09-02)
+
+The eager calibration allocation is larger than the per-device phase needs.
+Device block tuning and preparation run sequentially, so every device on a
+NUMA node can reuse one source ring. The initial allocation therefore only
+needs `width * maximum_candidate_block`, currently `8 * 32 MiB = 256 MiB`,
+per participating NUMA node. Distinct rings are required only for the global
+limit benchmark, where all devices and all eight slots run concurrently. Once
+the block size has been selected, grow each node to
+`devices_on_node * 8 * selected_block_size`, reusing the initial arena. On the
+eight-MI300X 4+4 topology this changes initial allocation from 2 GiB to 512 MiB.
+If 16 MiB is selected, the global phase then grows to 1 GiB total; if 32 MiB
+is selected, it grows to the same 2 GiB total used today. Keeping distinct
+per-slot source slices in the global phase remains important for an accurate
+contention measurement.
+
+The loader does need capacity beyond a completely occupied DMA working set if
+the reader must begin the next operation while DMA is in flight, but blindly
+doubling the DMA ring is neither the minimum requirement nor by itself
+sufficient. In the current implementation, a source block remains leased from
+before `readPositionalAllV` until every PJRT callback referencing it completes.
+The worker atomically leases every block in a logical job, performs one
+synchronous vectored read, and only enqueues DMA after the entire call returns.
+For this current batched implementation, the block-space requirement is:
+
+`DMA working-set blocks + desired read-ahead requests * maximum blocks per read job`
+
+The exact `maximum_blocks_per_job` is computed by the completed fair scheduler
+and includes dispatch/writer boundaries. It is not a read-ahead setting; it is
+the amount of memory the current all-at-once read call requires. A full second
+DMA ring is justified only when the desired read-ahead set is as large as the
+DMA working set. Replicated blocks make doubling even more conservative because
+one source block can occupy a slot on several devices.
+
+That formula is not the desired flip-flop architecture. Read request size and
+DMA block size are logically separate, although `effectiveSourceRequestSize`
+currently chooses at least the DMA block size and local requests therefore
+usually equal one DMA block. To reproduce the old writer invariant, a logical
+read job should yield block-sized parts: acquire one writable block, fill it,
+enqueue it immediately, and rotate to another block while DMA owns the first.
+Then the read-side reserve is the source-order live writable set per actively
+advancing reader, not a complete `maximum_blocks_per_job` set. This is one block
+for sequentially completable layouts, but can be larger when shard fragments
+interleave. With `R` active readers and maximum live set `L`, the robust pool
+target is `DMA working-set blocks + R * L writable blocks`. Under the stated
+assumption that DMA is faster than reading, this provides the useful two-stage
+pipeline; finite buffering still necessarily backpressures if that assumption
+is violated for long enough.
+
+The current synchronous `readPositionalAllV` API cannot expose an early iovec
+as soon as it is full. The low-complexity local-file implementation can split a
+logical scheduler job into block-sized positional reads while preserving the
+job as the unit of fairness and telemetry. Remote backends already scatter one
+HTTP response into multiple caller buffers, so no contiguous request-sized
+buffer is involved. A per-iovec completion callback would permit early DMA but,
+because every destination buffer is still supplied before the call, would not
+reduce the upfront live reservation. Preserving one 16--32 MiB HTTP request
+while leasing fewer blocks needs the backend to obtain the next destination
+buffer dynamically as the response advances, plus resumable retry semantics so
+a partial failure never overwrites a yielded prefix. Without that capability,
+the loader must retain the present whole-job reservation or pay for multiple
+range requests.
+
+Memory alone does not currently guarantee the overlap. The local loader sets
+`post_read_slack_requests` to zero, and `PinnedGateLimits` makes the request
+lifecycle limit equal to the active read limit. Once that many completed reads
+are waiting for DMA, no worker may begin the next request even if unused pool
+blocks exist. Moreover, when requested slack does exist, `PinnedGateLimits`
+first lets the read width consume the entire feasible width and only assigns
+slack from what remains. `requiredDmaWorkspaceBytes` and
+`ensureBlockReserves` likewise use `max(DMA reserve, request reserve)`, whereas
+the no-bubble guarantee requires additive read-ahead capacity. Any memory
+change must therefore be paired with admission-policy changes.
+
+The original `DirectShardWriter` confirms the intended semantics: its default
+pool has two chunks. While one chunk is owned by a PJRT event, the reader fills
+the other; after submitting the second, it waits for the first before rotating.
+That is one DMA chunk plus one read-ahead chunk, not a general requirement to
+double an eight-event ring.
+
+The recommended low-complexity design is:
+
+1. Allocate one 256 MiB maximum-candidate ring per NUMA node for device tuning.
+2. After selecting the block size, grow to the exact distinct-ring requirement
+   for the global benchmark.
+3. For the present whole-job reader, grow by its exact computed deficit. In the
+   preferred block-yielding reader, reserve the measured maximum live writable
+   set per active local reader instead of one complete job.
+4. Reserve that writable slack before clipping active read width, and permit the
+   lifecycle gate to include it. Continue using the existing per-block lease
+   pool rather than introduce two fixed banks; fixed banks add swap barriers
+   and make the slowest device hold up unrelated completed blocks.
+5. Keep the pool's dynamic growth path as a safety fallback, but pre-grow the
+   computed amount before timed loading so allocation never stalls the reader.
+
+The existing replicated Gemma measurement shows why allocation should be
+derived rather than doubled: with 16 MiB blocks, eight devices, and uncapped
+width eight, 2 GiB was retained but peak leasing was only 192 MiB total
+(96 MiB per NUMA node), with zero pool waits. The scheduler's exact maximum was
+one block per job and the request high-water mark was 12. This run already
+overlapped well enough to drain only 2 ms after reads ended, but the current
+gate/pool rules do not provide that behavior as an invariant for sharded or
+larger multi-block jobs.
+
 ## DMA-enabled XLA integration and current ROCm result (2026-09-02)
 
 The current XLA checkout is at detached commit `7a92ce868d` (`DMA support`),
@@ -200,12 +674,11 @@ result. Logs are `/tmp/zml-dma-fixed-arena-no-touch-{1gpu,8gpu}.log` and
 controls remain at `/tmp/zml-dma-fixed-arena-{1gpu,8gpu}.log` and
 `/tmp/zml-dma-fixed-arena-8gpu-2numa.log`.
 
-Keep `max_mapped_bytes` only as a safety ceiling: validate that the derived
-`device_count * 8 * 32 MiB` workspace fits, rather than using the ceiling as a
-dynamic growth budget. The fixed distribution also removes today's ability to
-lend unused mapping budget from one NUMA node to another. Source-read width
-must therefore be clipped from each arena's actual selected-block capacity;
-this is conservative but matches the proposed per-NUMA ownership model.
+This experiment proposed keeping `max_mapped_bytes` only as a safety ceiling
+and removing dynamic growth. That conclusion is superseded by the current
+32 MiB direct-read decision: the retained arenas remain the initial capacity,
+while the unused portion of `max_mapped_bytes` stays available to the block
+pool for demand growth under read/DMA contention.
 
 The example exposes `ZML_DMA_BENCH_MAX_MAPPED_MIB`, but it is one global safety
 ceiling, not a requested allocation per NUMA node. There is no per-NUMA byte

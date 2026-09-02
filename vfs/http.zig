@@ -12,7 +12,6 @@ const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
     pub const InitOpts = struct {
-        minimum_request_size: usize = 16 << 20,
         max_retries: usize = 5,
         retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
         retry_max_delay: std.Io.Duration = .fromSeconds(30),
@@ -52,7 +51,6 @@ pub const HTTP = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     protocol: Protocol,
-    minimum_request_size: usize,
     max_retries: usize,
     retry_initial_delay: std.Io.Duration,
     retry_max_delay: std.Io.Duration,
@@ -72,14 +70,13 @@ pub const HTTP = struct {
         protocol: Protocol,
         opts: InitOpts,
     ) !HTTP {
-        range_read.assertValidOptions(opts.minimum_request_size, opts.retry_initial_delay, opts.retry_max_delay);
+        range_read.assertValidOptions(opts.retry_initial_delay, opts.retry_max_delay);
 
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
             .protocol = protocol,
-            .minimum_request_size = opts.minimum_request_size,
             .max_retries = opts.max_retries,
             .retry_initial_delay = opts.retry_initial_delay,
             .retry_max_delay = opts.retry_max_delay,
@@ -129,10 +126,7 @@ pub const HTTP = struct {
     pub fn backend(self: *HTTP) Backend {
         return .{
             .io = self.io(),
-            .read_hints = .{
-                .minimum_request_size = self.minimum_request_size,
-                .high_latency = true,
-            },
+            .read_hints = .{ .high_latency = true },
             .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
         };
     }
@@ -408,10 +402,10 @@ pub const HTTP = struct {
 
         var attempt: usize = 0;
         while (true) {
-            switch (try self.performReadAttempt(uri, url, data, offset, read_size, attempt == 0)) {
+            switch (try self.performReadAttempt(uri, url, data, offset, read_size)) {
                 .success => return read_size,
                 .retry => |retry| {
-                    self.read_stats.recordFailure(read_size, retry.failure);
+                    self.read_stats.recordFailure(retry.failure);
                     if (attempt >= self.max_retries) return error.RetriesExhausted;
 
                     self.read_stats.recordRetry();
@@ -421,7 +415,7 @@ pub const HTTP = struct {
                         self.retry_max_delay,
                         attempt,
                     );
-                    self.read_stats.recordRetryDelay(read_size, delay);
+                    self.read_stats.recordRetryDelay(delay);
                     self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
                     attempt += 1;
                 },
@@ -436,7 +430,6 @@ pub const HTTP = struct {
         data: []const []u8,
         offset: u64,
         read_size: usize,
-        include_timing_sample: bool,
     ) !range_read.AttemptResult {
         var range_buf: [64]u8 = undefined;
         const range_header = std.fmt.bufPrint(
@@ -445,8 +438,7 @@ pub const HTTP = struct {
             .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
         ) catch unreachable;
 
-        self.read_stats.recordAttempt(read_size);
-        const attempt_started: std.Io.Timestamp = .now(self.base.inner, .awake);
+        self.read_stats.recordAttempt();
         var req = self.client.request(.GET, uri, .{
             .redirect_behavior = .not_allowed,
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
@@ -543,12 +535,7 @@ pub const HTTP = struct {
                 return err;
             },
         };
-        self.read_stats.recordSuccess(
-            read_size,
-            timing.ttfbNanoseconds(attempt_started),
-            timing.bodyNanoseconds(),
-            include_timing_sample,
-        );
+        self.read_stats.recordSuccess(read_size);
         return .{ .success = timing };
     }
 

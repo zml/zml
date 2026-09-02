@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const HTTP = @import("http.zig").HTTP;
-const base = @import("base.zig");
 
 const MockServer = struct {
     const Options = struct {
@@ -222,9 +221,7 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{
-        .minimum_request_size = request_size,
-    });
+    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{});
     defer http.deinit();
     const http_io = http.io();
     const stats = http.backend().read_stats.?;
@@ -257,7 +254,7 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
     try std.testing.expectEqual(@as(u64, request_size), delta.physical_bytes);
 }
 
-test "generic HTTP retries serially and reports typed timing counters" {
+test "generic HTTP retries serially and reports aggregate retry counters" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const request_size = 2 * 1024 * 1024;
@@ -277,7 +274,6 @@ test "generic HTTP retries serially and reports typed timing counters" {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{
-        .minimum_request_size = request_size,
         .max_retries = 1,
         .retry_initial_delay = .fromNanoseconds(0),
         .retry_max_delay = .fromNanoseconds(0),
@@ -298,16 +294,10 @@ test "generic HTTP retries serially and reports typed timing counters" {
         try file.readPositional(http_io, &one_buffer, 0),
     );
     const retried = stats.snapshot().sub(before);
-    const bucket_index = base.timingBucketIndex(request_size).?;
-    const retried_bucket = retried.timing[bucket_index];
-
     try std.testing.expectEqual(@as(u64, 2), retried.physical_requests);
     try std.testing.expectEqual(@as(u64, request_size), retried.physical_bytes);
     try std.testing.expectEqual(@as(u64, 1), retried.retries);
     try std.testing.expectEqual(@as(u64, 1), retried.server_failures);
-    try std.testing.expectEqual(@as(u64, 2), retried_bucket.attempts);
-    try std.testing.expectEqual(@as(u64, 0), retried_bucket.successes);
-    try std.testing.expectEqual(@as(u64, 1), retried_bucket.server_failures);
     try std.testing.expectEqual(@as(usize, 1), server.peak_gets.load(.acquire));
 
     const before_clean = stats.snapshot();
@@ -316,13 +306,9 @@ test "generic HTTP retries serially and reports typed timing counters" {
         try file.readPositional(http_io, &one_buffer, 0),
     );
     const clean = stats.snapshot().sub(before_clean);
-    const clean_bucket = clean.timing[bucket_index];
     try std.testing.expectEqual(@as(u64, 1), clean.physical_requests);
     try std.testing.expectEqual(@as(u64, request_size), clean.physical_bytes);
     try std.testing.expectEqual(@as(u64, 0), clean.retries);
-    try std.testing.expectEqual(@as(u64, 1), clean_bucket.attempts);
-    try std.testing.expectEqual(@as(u64, 1), clean_bucket.successes);
-    try std.testing.expectEqual(@as(u64, request_size), clean_bucket.successful_bytes);
     try std.testing.expectEqualSlices(u8, object, output);
 
     server_group.cancel(io);
@@ -352,9 +338,7 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{
-        .minimum_request_size = read_size,
-    });
+    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{});
     defer http.deinit();
     const http_io = http.io();
     const stats = http.backend().read_stats.?;

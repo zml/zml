@@ -157,11 +157,9 @@ pub fn fullJitterDelay(
 }
 
 pub fn assertValidOptions(
-    minimum_request_size: usize,
     retry_initial_delay: std.Io.Duration,
     retry_max_delay: std.Io.Duration,
 ) void {
-    std.debug.assert(minimum_request_size > 0);
     std.debug.assert(retry_initial_delay.nanoseconds >= 0);
     std.debug.assert(retry_max_delay.nanoseconds >= retry_initial_delay.nanoseconds);
 }
