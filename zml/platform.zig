@@ -258,7 +258,6 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 pub const TransferConfig = struct {
     block_size: usize = 4 * 1024 * 1024,
     max_in_flight_per_device: usize = 8,
-    global_max_in_flight: ?usize = null,
     max_mapped_bytes: usize = 2 * 1024 * 1024 * 1024,
     /// Empty selects PJRT topology when it is complete, otherwise one shared
     /// host-memory pool. Explicit entries are indexed like `Platform.devices`.
@@ -270,7 +269,6 @@ pub const TransferSettings = struct {
     calibrated: bool,
     block_size: usize,
     max_in_flight_per_device: usize,
-    global_max_in_flight: ?usize,
     max_mapped_bytes: usize,
     retained_mapped_bytes: usize,
     numa_pool_count: usize,
@@ -1007,7 +1005,6 @@ test "platform transfer defaults are usable without calibration" {
     const config: TransferConfig = .{};
     try std.testing.expectEqual(@as(usize, 4 * 1024 * 1024), config.block_size);
     try std.testing.expectEqual(@as(usize, 8), config.max_in_flight_per_device);
-    try std.testing.expectEqual(@as(?usize, null), config.global_max_in_flight);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024 * 1024), config.max_mapped_bytes);
     try std.testing.expectEqual(@as(usize, 0), config.device_numa_nodes.len);
 

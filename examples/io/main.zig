@@ -171,37 +171,23 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_BLOCK_MIB",
                 &zml.io.default_dma_benchmark_block_sizes,
             );
-            const parallelism = try envUsizeList(
-                option_allocator,
-                init.environ_map,
-                "ZML_DMA_BENCH_PARALLELISM",
-                &zml.io.default_dma_benchmark_parallelism,
-            );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            const global_window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_WINDOW_MS", 2);
             try platform.benchTransfer(allocator, io, .{
                 .block_sizes = block_sizes,
-                .parallelism = parallelism,
                 .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
                 .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
                 .minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
-                .global_duration_ns = try std.math.mul(u64, global_window_ms, std.time.ns_per_ms),
-                .global_minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_TRANSFERS", 32),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
-                .global_parallelism_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_TOLERANCE", 0.02),
-                .global_min_device_retention = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_MIN_RETENTION", 0.95),
-                .global_fairness_floor = try envF64(init.environ_map, "ZML_DMA_BENCH_GLOBAL_FAIRNESS", 0.98),
                 .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 2048),
                 .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
             });
             const settings = (try platform.transferSettings()) orelse return;
             try stdout_writer.interface.print(
-                "dma_settings calibrated={} block_bytes={d} parallelism={d} global_parallelism={?d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
+                "dma_settings calibrated={} block_bytes={d} parallelism={d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
                 .{
                     settings.calibrated,
                     settings.block_size,
                     settings.max_in_flight_per_device,
-                    settings.global_max_in_flight,
                     settings.max_mapped_bytes,
                     settings.retained_mapped_bytes,
                     settings.numa_pool_count,
