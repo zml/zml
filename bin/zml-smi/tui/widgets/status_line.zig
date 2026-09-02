@@ -8,6 +8,7 @@ const StatusLine = @This();
 
 viewing_device: ?u16,
 use_braille: bool,
+can_kill: bool,
 
 const Binding = struct {
     key: []const u8,
@@ -30,10 +31,18 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     if (self.viewing_device != null) {
         bindings_buf[n] = .{ .key = "Esc", .desc = "back" };
         n += 1;
+        bindings_buf[n] = .{ .key = "\u{2191}\u{2193}/jk", .desc = "select" };
+        n += 1;
     } else {
         bindings_buf[n] = .{ .key = "v", .desc = chart_label };
         n += 1;
-        bindings_buf[n] = .{ .key = "click", .desc = "device details" };
+        bindings_buf[n] = .{ .key = "\u{2191}\u{2193}/jk", .desc = "select" };
+        n += 1;
+        bindings_buf[n] = .{ .key = "enter/click", .desc = "open device" };
+        n += 1;
+    }
+    if (self.can_kill) {
+        bindings_buf[n] = .{ .key = "x", .desc = "kill process" };
         n += 1;
     }
     bindings_buf[n] = .{ .key = "q", .desc = "quit" };
@@ -65,11 +74,9 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     const surf = try rich.draw(ui.fixedSize(ctx, w, 1));
 
     // Fill background across full width
-    if (surf.buffer.len > 0) {
-        for (surf.buffer) |*cell| {
-            if (cell.style.bg == .default) {
-                cell.style.bg = bg_style.bg;
-            }
+    for (surf.buffer) |*cell| {
+        if (cell.style.bg == .default) {
+            cell.style.bg = bg_style.bg;
         }
     }
 
