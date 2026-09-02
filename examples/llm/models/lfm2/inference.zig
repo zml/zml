@@ -96,11 +96,69 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
+const SamplingHead = struct {
+    pub const Input = struct {
+        lm_head: model.LmHead,
+        embed_tokens: model.TokenEmbedding,
+        hidden: zml.Tensor,
+        tokens: zml.Tensor,
+        actual_seq_len: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        phase: Phase,
+    };
+
+    pub fn forward(input: Input) model.LmHead.Output {
+        if (input.phase == .decode) {
+            return model.LmHead.forward(.{
+                .lm_head = input.lm_head,
+                .embed_tokens = input.embed_tokens,
+                .hidden = input.hidden,
+                .tokens = input.tokens,
+                .rng = input.rng,
+            });
+        }
+
+        const normalized = input.lm_head.embedding_norm.forward(input.hidden);
+        const last_index = input.actual_seq_len.subConstant(1);
+        const last_hidden = normalized.slice(.seq, .dyn(last_index, 1));
+        const logits = input.embed_tokens.unembed(last_hidden);
+        const strategy = input.lm_head.sampling_strategy;
+        if (strategy.topk <= 1) {
+            const next_token = logits.argMax(.voc).indices.squeeze(.voc);
+            const tokens = input.tokens.dynamicUpdateSlice(
+                .{ .seq = last_index },
+                next_token.convert(input.tokens.dtype()),
+            ).reuseBuffer(input.tokens);
+            return .{ .tokens = tokens, .rng = input.rng };
+        }
+
+        const topk = logits.topK(.{ .topk = .voc }, strategy.topk, .{});
+        var scores = topk.values;
+        if (strategy.temperature != 1.0) {
+            scores = scores.scale(1 / strategy.temperature);
+        }
+
+        // The old prefill sampled every compiled position. Generate the same
+        // amount of noise, then select the last valid row, so the selected
+        // noise and returned RNG state remain unchanged.
+        const full_noise_shape = scores.shape().setDim(.seq, input.tokens.dim(.seq));
+        const new_rng, const full_noise = input.rng.gumbel(full_noise_shape);
+        const noise = full_noise.slice(.seq, .dyn(last_index, 1));
+        const topk_index = scores.add(noise).argMax(.topk).indices.squeeze(.topk);
+        const next_token = topk.indices.gather(.{ .topk = topk_index }, .{});
+        const tokens = input.tokens.dynamicUpdateSlice(
+            .{ .seq = last_index },
+            next_token.convert(input.tokens.dtype()),
+        ).reuseBuffer(input.tokens);
+        return .{ .tokens = tokens, .rng = new_rng };
+    }
+};
+
 pub const KernelExe = struct {
     embed: zml.FnExe(model.TokenEmbedding.forward),
     conv: zml.FnExe(model.DecoderLayer.forward),
     self_attn: zml.FnExe(model.DecoderLayer.forward),
-    sample: zml.FnExe(model.LmHead.forward),
+    sample: zml.FnExe(SamplingHead.forward),
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
@@ -113,7 +171,7 @@ pub const KernelExe = struct {
 pub const KernelRunner = struct {
     embed: zml.FnExe(model.TokenEmbedding.forward).Runner(.{.embedding}),
     layers: []zml.FnExe(model.DecoderLayer.forward).Runner(.{.layer}),
-    sample: zml.FnExe(model.LmHead.forward).Runner(.{ .lm_head, .embed_tokens }),
+    sample: zml.FnExe(SamplingHead.forward).Runner(.{ .lm_head, .embed_tokens }),
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
         var embed = try zml.FnExe(model.TokenEmbedding.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{ .embedding = buffers.embed_tokens });
@@ -132,7 +190,7 @@ pub const KernelRunner = struct {
             initialized_layers += 1;
         }
 
-        var sample = try zml.FnExe(model.LmHead.forward).Runner(.{ .lm_head, .embed_tokens }).init(&exe.sample, allocator, .{
+        var sample = try zml.FnExe(SamplingHead.forward).Runner(.{ .lm_head, .embed_tokens }).init(&exe.sample, allocator, .{
             .lm_head = buffers.lm_head,
             .embed_tokens = buffers.embed_tokens,
         });
@@ -188,6 +246,7 @@ pub fn run(
         .inputs = .{
             .hidden = hidden_buffer,
             .tokens = args.tokens_buf.*,
+            .actual_seq_len = args.actual_seq_len_buf.*,
             .rng = args.rng_buf.*,
         },
         .outputs = .{
@@ -298,14 +357,14 @@ fn compileSample(
     seqlen: u32,
     phase: Phase,
     progress: *std.Progress.Node,
-) !zml.FnExe(model.LmHead.forward) {
+) !zml.FnExe(SamplingHead.forward) {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start(phase.startMessage("lm_head"), 1);
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "lm_head", io, from);
 
-    return zml.FnExe(model.LmHead.forward).compile(allocator, io, platform, .{
+    return zml.FnExe(SamplingHead.forward).compile(allocator, io, platform, .{
         .shardings = &opts.shardings.all(),
         .program_name = phase.programName("lfm2", "lm_head"),
     }, .{.{
@@ -313,6 +372,8 @@ fn compileSample(
         .embed_tokens = mdl.embed_tokens,
         .hidden = zml.Tensor.init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype()),
         .tokens = zml.Tensor.init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32),
+        .actual_seq_len = zml.Tensor.init(.{}, .u32),
         .rng = opts.rng,
+        .phase = phase,
     }});
 }
