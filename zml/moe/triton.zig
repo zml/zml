@@ -189,16 +189,17 @@ pub fn fusedExpertsImpl(
         );
     }
 
-    var options = applyJsonTokenConfig(opts, hidden_states.dim(0)) catch |err| fallback: {
+    const b = hidden_states.dim(.b);
+    const s = hidden_states.dim(.s);
+    const num_tokens = b * s;
+    var options = applyJsonTokenConfig(opts, num_tokens) catch |err| fallback: {
         log.warn("Failed to load MoE launch config from JSON ({}), falling back to built-in token heuristic", .{err});
-        break :fallback applyDefaultTokenConfig(opts, hidden_states.dim(0), w1.dim(0));
+        break :fallback applyDefaultTokenConfig(opts, num_tokens, w1.dim(0));
     };
     const block_fp8 = hasBlock128Scale(w1, opts.w1_scale) and hasBlock128Scale(w2, opts.w2_scale);
     if (block_fp8) options.block_size_k = 128;
     const rocm_block_fp8 = block_fp8 and zml.Compiler.current().platform.target == .rocm;
-    const b = hidden_states.dim(.b);
-    const s = hidden_states.dim(.s);
-    if (rocm_block_fp8 and b * s <= 16) {
+    if (rocm_block_fp8 and num_tokens <= 16) {
         options.block_size_m = 16;
         options.block_size_n = 64;
         options.block_size_k = 128;
@@ -207,13 +208,13 @@ pub fn fusedExpertsImpl(
         options.num_stages = 3;
     }
 
-    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up_fn = w1.withTags(.{ .expert, .out, .in });
     const down_fn = w2.withTags(.{ .expert, .out, .mid });
     const gate_up = if (rocm_block_fp8 and gate_up_fn.dtype() == .f8e4m3fn) gate_up_fn.bitCast(.f8e4m3fnuz) else gate_up_fn;
     const down = if (rocm_block_fp8 and down_fn.dtype() == .f8e4m3fn) down_fn.bitCast(.f8e4m3fnuz) else down_fn;
-    const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     try validateInputs(hidden, gate_up, down, weights, ids);
 
