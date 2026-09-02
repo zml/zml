@@ -72,7 +72,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Nrt {
         var dev: ?*c.ndl_device_t = null;
         var t: c.struct_ndl_device_init_param = .{
             .initialize_device = false,
-            .num_dram_regions = 0,
             .map_hbm = false,
             .skip_copy_bufs = true,
         };

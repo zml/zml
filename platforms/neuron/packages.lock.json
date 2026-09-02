@@ -128,13 +128,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "aws-neuronx-runtime-lib_2.32.31.0-0234f5ed2_amd64",
+			"key": "aws-neuronx-runtime-lib_2.33.10.0-3dcef56f0_amd64",
 			"name": "aws-neuronx-runtime-lib",
-			"sha256": "ed69354674b926490d917a6aeb7dea8b6300278a37958ee9a412e2cd89c41792",
+			"sha256": "05f1290b9a0d936e6d2b4facf314f4987d3c11813ee25e9909d8bb269fea7efa",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.32.31.0-0234f5ed2_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-runtime-lib/aws-neuronx-runtime-lib_2.33.10.0-3dcef56f0_amd64.deb"
 			],
-			"version": "2.32.31.0-0234f5ed2"
+			"version": "2.33.10.0-3dcef56f0"
 		},
 		{
 			"arch": "amd64",
@@ -150,9 +150,24 @@
 					"version": "2.4.7-7~deb12u1"
 				},
 				{
-					"key": "libltdl7_2.4.7-7_deb12u1_amd64",
-					"name": "libltdl7",
-					"version": "2.4.7-7~deb12u1"
+					"key": "automake_1-1.16.5-1.3_amd64",
+					"name": "automake",
+					"version": "1:1.16.5-1.3"
+				},
+				{
+					"key": "autotools-dev_20220109.1_amd64",
+					"name": "autotools-dev",
+					"version": "20220109.1"
+				},
+				{
+					"key": "autoconf_2.71-3_amd64",
+					"name": "autoconf",
+					"version": "2.71-3"
+				},
+				{
+					"key": "debianutils_5.7-0.5_deb12u1_amd64",
+					"name": "debianutils",
+					"version": "5.7-0.5~deb12u1"
 				},
 				{
 					"key": "libc6_2.36-9-p-deb12u10_amd64",
@@ -168,6 +183,106 @@
 					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
 					"name": "gcc-12-base",
 					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "m4_1.4.19-3_amd64",
+					"name": "m4",
+					"version": "1.4.19-3"
+				},
+				{
+					"key": "perl_5.36.0-7-p-deb12u2_amd64",
+					"name": "perl",
+					"version": "5.36.0-7+deb12u2"
+				},
+				{
+					"key": "libperl5.36_5.36.0-7-p-deb12u2_amd64",
+					"name": "libperl5.36",
+					"version": "5.36.0-7+deb12u2"
+				},
+				{
+					"key": "perl-modules-5.36_5.36.0-7-p-deb12u2_amd64",
+					"name": "perl-modules-5.36",
+					"version": "5.36.0-7+deb12u2"
+				},
+				{
+					"key": "perl-base_5.36.0-7-p-deb12u2_amd64",
+					"name": "perl-base",
+					"version": "5.36.0-7+deb12u2"
+				},
+				{
+					"key": "dpkg_1.21.22_amd64",
+					"name": "dpkg",
+					"version": "1.21.22"
+				},
+				{
+					"key": "tar_1.34-p-dfsg-1.2-p-deb12u1_amd64",
+					"name": "tar",
+					"version": "1.34+dfsg-1.2+deb12u1"
+				},
+				{
+					"key": "libselinux1_3.4-1-p-b6_amd64",
+					"name": "libselinux1",
+					"version": "3.4-1+b6"
+				},
+				{
+					"key": "libpcre2-8-0_10.42-1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.42-1"
+				},
+				{
+					"key": "libacl1_2.3.1-3_amd64",
+					"name": "libacl1",
+					"version": "2.3.1-3"
+				},
+				{
+					"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.13.dfsg-1"
+				},
+				{
+					"key": "libzstd1_1.5.4-p-dfsg2-5_amd64",
+					"name": "libzstd1",
+					"version": "1.5.4+dfsg2-5"
+				},
+				{
+					"key": "libmd0_1.0.4-2_amd64",
+					"name": "libmd0",
+					"version": "1.0.4-2"
+				},
+				{
+					"key": "liblzma5_5.4.1-1_amd64",
+					"name": "liblzma5",
+					"version": "5.4.1-1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5-p-b1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5+b1"
+				},
+				{
+					"key": "libcrypt1_1-4.4.33-2_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.33-2"
+				},
+				{
+					"key": "libgdbm6_1.23-3_amd64",
+					"name": "libgdbm6",
+					"version": "1.23-3"
+				},
+				{
+					"key": "libgdbm-compat4_1.23-3_amd64",
+					"name": "libgdbm-compat4",
+					"version": "1.23-3"
+				},
+				{
+					"key": "libdb5.3_5.3.28-p-dfsg2-1_amd64",
+					"name": "libdb5.3",
+					"version": "5.3.28+dfsg2-1"
+				},
+				{
+					"key": "libltdl7_2.4.7-7_deb12u1_amd64",
+					"name": "libltdl7",
+					"version": "2.4.7-7~deb12u1"
 				},
 				{
 					"key": "libnuma-dev_2.0.16-1_amd64",
@@ -250,11 +365,6 @@
 					"version": "1:4.4.33-2"
 				},
 				{
-					"key": "libcrypt1_1-4.4.33-2_amd64",
-					"name": "libcrypt1",
-					"version": "1:4.4.33-2"
-				},
-				{
 					"key": "linux-libc-dev_6.1.137-1_amd64",
 					"name": "linux-libc-dev",
 					"version": "6.1.137-1"
@@ -280,13 +390,13 @@
 					"version": "252.36-1~deb12u1"
 				}
 			],
-			"key": "aws-neuronx-collectives_2.32.28.0-452cba8de_amd64",
+			"key": "aws-neuronx-collectives_2.33.10.0-068180c7a_amd64",
 			"name": "aws-neuronx-collectives",
-			"sha256": "ec737c6647b6fbd38550e11f25e27d0f1a96dbb2cd28ae5bbf3f827faba5bdc7",
+			"sha256": "26a02e961565d63f8eaf95bb5a8a32ce097afadb75948d6310abdfdab5bd7161",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.32.28.0-452cba8de_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-collectives/aws-neuronx-collectives_2.33.10.0-068180c7a_amd64.deb"
 			],
-			"version": "2.32.28.0-452cba8de"
+			"version": "2.33.10.0-068180c7a"
 		},
 		{
 			"arch": "amd64",
@@ -309,6 +419,248 @@
 				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libt/libtool/libltdl-dev_2.4.7-7~deb12u1_amd64.deb"
 			],
 			"version": "2.4.7-7~deb12u1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "automake_1-1.16.5-1.3_amd64",
+			"name": "automake",
+			"sha256": "f9a5758d87b5389bf2dbb00cc9c48e0cf59bb0ac842c5ce25d41e4bfa3f2f962",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/a/automake-1.16/automake_1.16.5-1.3_all.deb"
+			],
+			"version": "1:1.16.5-1.3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "autotools-dev_20220109.1_amd64",
+			"name": "autotools-dev",
+			"sha256": "4d66dcb9c312566f1ca8d46ef0fb06fa4d4786c20b072c81f9d313b64ef981d0",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/a/autotools-dev/autotools-dev_20220109.1_all.deb"
+			],
+			"version": "20220109.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "autoconf_2.71-3_amd64",
+			"name": "autoconf",
+			"sha256": "7d798ed8c21fc7387127de1dfdb4640003d8ba033ae5a1ff29559610cbd0c323",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/a/autoconf/autoconf_2.71-3_all.deb"
+			],
+			"version": "2.71-3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "debianutils_5.7-0.5_deb12u1_amd64",
+			"name": "debianutils",
+			"sha256": "55f951359670eb3236c9e2ccd5fac9ccb3db734f5a22aff21589e7a30aee48c9",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/d/debianutils/debianutils_5.7-0.5~deb12u1_amd64.deb"
+			],
+			"version": "5.7-0.5~deb12u1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "m4_1.4.19-3_amd64",
+			"name": "m4",
+			"sha256": "b2dd7bfca426712416e651bb5ff6dabe7d05e4caebbac61d714dbe261b31e4c3",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/m/m4/m4_1.4.19-3_amd64.deb"
+			],
+			"version": "1.4.19-3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl_5.36.0-7-p-deb12u2_amd64",
+			"name": "perl",
+			"sha256": "e7d388dbad823eb0c9531157ef864cdaea67a934f825f28cb47046e858e9c7eb",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/p/perl/perl_5.36.0-7+deb12u2_amd64.deb"
+			],
+			"version": "5.36.0-7+deb12u2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libperl5.36_5.36.0-7-p-deb12u2_amd64",
+			"name": "libperl5.36",
+			"sha256": "cb2388a58ebd97dea96bb21bcb38c03c9fdeefcba3abb86bcbda3deda2163a99",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/p/perl/libperl5.36_5.36.0-7+deb12u2_amd64.deb"
+			],
+			"version": "5.36.0-7+deb12u2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl-modules-5.36_5.36.0-7-p-deb12u2_amd64",
+			"name": "perl-modules-5.36",
+			"sha256": "194ed338a28423b279df2fcc08dee31610950316f491ad549f5c4ef37dfa5032",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/p/perl/perl-modules-5.36_5.36.0-7+deb12u2_all.deb"
+			],
+			"version": "5.36.0-7+deb12u2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "perl-base_5.36.0-7-p-deb12u2_amd64",
+			"name": "perl-base",
+			"sha256": "b04e8b75aebcb65bc52d2f16ec86f374043bcbb9564f92e7fb7c88fce9f8d56b",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/p/perl/perl-base_5.36.0-7+deb12u2_amd64.deb"
+			],
+			"version": "5.36.0-7+deb12u2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "dpkg_1.21.22_amd64",
+			"name": "dpkg",
+			"sha256": "9d97f27d8a8a06dd4800e8e0291337ca02e11cdfd7df09a4566a982a6d9fe4c4",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/d/dpkg/dpkg_1.21.22_amd64.deb"
+			],
+			"version": "1.21.22"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "tar_1.34-p-dfsg-1.2-p-deb12u1_amd64",
+			"name": "tar",
+			"sha256": "24fb92e98c2969171f81a8b589263d705f6b1670f95d121cd74c810d4605acc3",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/t/tar/tar_1.34+dfsg-1.2+deb12u1_amd64.deb"
+			],
+			"version": "1.34+dfsg-1.2+deb12u1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libselinux1_3.4-1-p-b6_amd64",
+			"name": "libselinux1",
+			"sha256": "2b07f5287b9105f40158b56e4d70cc1652dac56a408f3507b4ab3d061eed425f",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libs/libselinux/libselinux1_3.4-1+b6_amd64.deb"
+			],
+			"version": "3.4-1+b6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpcre2-8-0_10.42-1_amd64",
+			"name": "libpcre2-8-0",
+			"sha256": "030db54f4d76cdfe2bf0e8eb5f9efea0233ab3c7aa942d672c7b63b52dbaf935",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/p/pcre2/libpcre2-8-0_10.42-1_amd64.deb"
+			],
+			"version": "10.42-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libacl1_2.3.1-3_amd64",
+			"name": "libacl1",
+			"sha256": "8be9df5795114bfe90e2be3d208ef47a5edd3fc7b3e20d387a597486d444e5e2",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/a/acl/libacl1_2.3.1-3_amd64.deb"
+			],
+			"version": "2.3.1-3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libzstd1_1.5.4-p-dfsg2-5_amd64",
+			"name": "libzstd1",
+			"sha256": "6315b5ac38b724a710fb96bf1042019398cb656718b1522279a5185ed39318fa",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libz/libzstd/libzstd1_1.5.4+dfsg2-5_amd64.deb"
+			],
+			"version": "1.5.4+dfsg2-5"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libmd0_1.0.4-2_amd64",
+			"name": "libmd0",
+			"sha256": "03539fd30c509e27101d13a56e52eda9062bdf1aefe337c07ab56def25a13eab",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libm/libmd/libmd0_1.0.4-2_amd64.deb"
+			],
+			"version": "1.0.4-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "liblzma5_5.4.1-1_amd64",
+			"name": "liblzma5",
+			"sha256": "d321b9502b16aac534e1c691afbe3dc5e125e5091aa35bea026c59b25ebe82e7",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/x/xz-utils/liblzma5_5.4.1-1_amd64.deb"
+			],
+			"version": "5.4.1-1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libbz2-1.0_1.0.8-5-p-b1_amd64",
+			"name": "libbz2-1.0",
+			"sha256": "54149da3f44b22d523b26b692033b84503d822cc5122fed606ea69cc83ca5aeb",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-5+b1_amd64.deb"
+			],
+			"version": "1.0.8-5+b1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libcrypt1_1-4.4.33-2_amd64",
+			"name": "libcrypt1",
+			"sha256": "f5f60a5cdfd4e4eaa9438ade5078a57741a7a78d659fcb0c701204f523e8bd29",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libx/libxcrypt/libcrypt1_4.4.33-2_amd64.deb"
+			],
+			"version": "1:4.4.33-2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libgdbm6_1.23-3_amd64",
+			"name": "libgdbm6",
+			"sha256": "95fe4a1336532450e67bd067892f46eaa484139919ea8d067a9ffcbf5a4bf883",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gdbm/libgdbm6_1.23-3_amd64.deb"
+			],
+			"version": "1.23-3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libgdbm-compat4_1.23-3_amd64",
+			"name": "libgdbm-compat4",
+			"sha256": "4af36a590b68d415a78d9238b932b6a4579f515ec8a8016597498acff5b515a4",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/g/gdbm/libgdbm-compat4_1.23-3_amd64.deb"
+			],
+			"version": "1.23-3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libdb5.3_5.3.28-p-dfsg2-1_amd64",
+			"name": "libdb5.3",
+			"sha256": "7dc5127b8dd0da80e992ba594954c005ae4359d839a24eb65d0d8129b5235c84",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/d/db5.3/libdb5.3_5.3.28+dfsg2-1_amd64.deb"
+			],
+			"version": "5.3.28+dfsg2-1"
 		},
 		{
 			"arch": "amd64",
@@ -500,17 +852,6 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libcrypt1_1-4.4.33-2_amd64",
-			"name": "libcrypt1",
-			"sha256": "f5f60a5cdfd4e4eaa9438ade5078a57741a7a78d659fcb0c701204f523e8bd29",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250529T205323Z/pool/main/libx/libxcrypt/libcrypt1_4.4.33-2_amd64.deb"
-			],
-			"version": "1:4.4.33-2"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
 			"key": "linux-libc-dev_6.1.137-1_amd64",
 			"name": "linux-libc-dev",
 			"sha256": "0fc664e6e81677598e8bfa41cf377ebd353a6e50ad2099bc4603b9f66c9b854b",
@@ -566,13 +907,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "aws-neuronx-tools_2.30.10.0-39feaa591_amd64",
+			"key": "aws-neuronx-tools_2.31.13.0-a9e473f33_amd64",
 			"name": "aws-neuronx-tools",
-			"sha256": "b972e4db5e84a429aa237d1eb9347fcaa78c19e848049a3495efef734a0b240f",
+			"sha256": "046599ad07e8851c4c6ae334905a621bd26714df559765448a16ccf09c043db8",
 			"urls": [
-				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-tools/aws-neuronx-tools_2.30.10.0-39feaa591_amd64.deb"
+				"https://apt.repos.neuron.amazonaws.com/pool/main/a/aws-neuronx-tools/aws-neuronx-tools_2.31.13.0-a9e473f33_amd64.deb"
 			],
-			"version": "2.30.10.0-39feaa591"
+			"version": "2.31.13.0-a9e473f33"
 		}
 	],
 	"version": 1
