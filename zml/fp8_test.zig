@@ -608,6 +608,252 @@ test "expert-parallel FP8 MoE compiles with a model-sharded shared expert epilog
     defer exe.deinit();
 }
 
+fn expectedConstantBlockFp8MlpPartial(gate_up_scale: f32, down_scale: f32, routed_weight: f32) f32 {
+    const BFloat16 = zml.floats.BFloat16;
+    // The test input sums to one over each 128-wide contraction. Both the
+    // gate and up blocks use the same scale, so account for each BF16 output
+    // boundary in the two block-FP8 dots.
+    const gate_up = BFloat16.fromF32(gate_up_scale).toF32();
+    const activation = BFloat16.fromF32(gate_up / (1.0 + @exp(-gate_up)) * gate_up).toF32();
+    return BFloat16.fromF32(128.0 * activation * down_scale * routed_weight).toF32();
+}
+
+test "CUDA expert-parallel FP8 MoE numerically combines routed and model-sharded shared experts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda or platform.devices.len != 2) return error.SkipZigTest;
+
+    const experts = 2;
+    const hidden_size = 128;
+    const routed_intermediate_size = 128;
+    const shared_intermediate_size = 256;
+    const hidden: zml.Tensor = .init(.{ .b = 1, .s = 1, .d = hidden_size }, .bf16);
+    const w1: zml.Tensor = zml.Tensor.init(
+        .{ .expert = experts, .out = 2 * routed_intermediate_size, .in = hidden_size },
+        .f8e4m3fn,
+    ).withPartitioning(.{ .expert = .experts, .out = .replicated, .in = .replicated });
+    const w1_scale: zml.Tensor = zml.Tensor.init(
+        .{ .expert = experts, .nb = 2, .kb = 1 },
+        .f32,
+    ).withPartitioning(.{ .expert = .experts, .nb = .replicated, .kb = .replicated });
+    const w2: zml.Tensor = zml.Tensor.init(
+        .{ .expert = experts, .out = hidden_size, .mid = routed_intermediate_size },
+        .f8e4m3fn,
+    ).withPartitioning(.{ .expert = .experts, .out = .replicated, .mid = .replicated });
+    const w2_scale: zml.Tensor = zml.Tensor.init(
+        .{ .expert = experts, .nb = 1, .kb = 1 },
+        .f32,
+    ).withPartitioning(.{ .expert = .experts, .nb = .replicated, .kb = .replicated });
+    const topk_weight: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .f32);
+    const topk_id: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .i32);
+    const shared_gate_up_weight: zml.Tensor = zml.Tensor.init(
+        .{ .out = 2 * shared_intermediate_size, .in = hidden_size },
+        .f8e4m3fn,
+    ).withPartitioning(.{ .out = .model, .in = .replicated });
+    const shared_gate_up_scale: zml.Tensor = zml.Tensor.init(
+        .{ .nb = 4, .kb = 1 },
+        .f32,
+    ).withPartitioning(.{ .nb = .model, .kb = .replicated });
+    const shared_down_weight: zml.Tensor = zml.Tensor.init(
+        .{ .out = hidden_size, .mid = shared_intermediate_size },
+        .f8e4m3fn,
+    ).withPartitioning(.{ .out = .replicated, .mid = .model });
+    const shared_down_scale: zml.Tensor = zml.Tensor.init(
+        .{ .nb = 1, .kb = 2 },
+        .f32,
+    ).withPartitioning(.{ .nb = .replicated, .kb = .model });
+
+    const expert_sharding = try @constCast(platform).registerSharding(
+        "fp8_test_numerical_experts",
+        .mesh(.{ .experts = .high_bandwidth }),
+    );
+    const model_sharding = try @constCast(platform).registerSharding(
+        "fp8_test_numerical_model",
+        .mesh(.{ .model = .high_bandwidth }),
+    );
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        fusedMoeWithLocalEpilogue,
+        .{
+            hidden,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            topk_weight,
+            topk_id,
+            shared_gate_up_weight,
+            shared_gate_up_scale,
+            shared_down_weight,
+            shared_down_scale,
+        },
+        .{ .shardings = &.{ expert_sharding, model_sharding } },
+    );
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const Float8 = zml.floats.Float8E4M3FN;
+    const one_fp8 = Float8.fromF32(1.0);
+    const zero_fp8 = Float8.fromF32(0.0);
+
+    const hidden_host = try allocator.alloc(BFloat16, hidden.shape().count());
+    defer allocator.free(hidden_host);
+    @memset(hidden_host, BFloat16.fromF32(1.0 / 128.0));
+
+    const w1_host = try allocator.alloc(Float8, w1.shape().count());
+    defer allocator.free(w1_host);
+    @memset(w1_host, one_fp8);
+    const w1_scale_host = [_][2][1]f32{
+        .{ .{1.0}, .{1.0} },
+        .{ .{2.0}, .{2.0} },
+    };
+
+    const w2_host = try allocator.alloc(Float8, w2.shape().count());
+    defer allocator.free(w2_host);
+    @memset(w2_host, zero_fp8);
+    for (0..experts) |expert| {
+        for (0..hidden_size / 2) |out| {
+            const start = (expert * hidden_size + out) * routed_intermediate_size;
+            @memset(w2_host[start .. start + routed_intermediate_size], one_fp8);
+        }
+    }
+    const w2_scale_host = [_][1][1]f32{
+        .{.{1.0}},
+        .{.{1.0}},
+    };
+
+    const topk_weight_host = [1][1][2]f32{.{.{ 1.0, 1.0 }}};
+    const topk_id_host = [1][1][2]i32{.{.{ 0, 1 }}};
+
+    const shared_gate_up_weight_host = try allocator.alloc(Float8, shared_gate_up_weight.shape().count());
+    defer allocator.free(shared_gate_up_weight_host);
+    @memset(shared_gate_up_weight_host, one_fp8);
+    // Each rank receives two consecutive output blocks (one local gate and
+    // one local up block). The 1x versus 4x scales make rank-0 scale reuse on
+    // rank 1 produce a large, deterministic numerical error.
+    const shared_gate_up_scale_host = [4][1]f32{ .{1.0}, .{1.0}, .{4.0}, .{4.0} };
+
+    const shared_down_weight_host = try allocator.alloc(Float8, shared_down_weight.shape().count());
+    defer allocator.free(shared_down_weight_host);
+    @memset(shared_down_weight_host, zero_fp8);
+    for (hidden_size / 2..hidden_size) |out| {
+        const start = out * shared_intermediate_size;
+        @memset(shared_down_weight_host[start .. start + shared_intermediate_size], one_fp8);
+    }
+    // The contracted scale axis is model-sharded: rank 0 receives 1x and
+    // rank 1 receives 2x. This independently catches scale broadcasting in
+    // the shared down projection.
+    const shared_down_scale_host = [1][2]f32{.{ 1.0, 2.0 }};
+
+    var hidden_buffer: zml.Buffer = try .fromBytes(io, platform, hidden.shape(), .replicated, std.mem.sliceAsBytes(hidden_host));
+    defer hidden_buffer.deinit();
+    var w1_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        w1.shape(),
+        expert_sharding,
+        std.mem.sliceAsBytes(w1_host),
+    );
+    defer w1_buffer.deinit();
+    var w1_scale_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        w1_scale.shape(),
+        expert_sharding,
+        std.mem.asBytes(&w1_scale_host),
+    );
+    defer w1_scale_buffer.deinit();
+    var w2_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        w2.shape(),
+        expert_sharding,
+        std.mem.sliceAsBytes(w2_host),
+    );
+    defer w2_buffer.deinit();
+    var w2_scale_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        w2_scale.shape(),
+        expert_sharding,
+        std.mem.asBytes(&w2_scale_host),
+    );
+    defer w2_scale_buffer.deinit();
+    var topk_weight_buffer: zml.Buffer = try .fromBytes(io, platform, topk_weight.shape(), .replicated, std.mem.asBytes(&topk_weight_host));
+    defer topk_weight_buffer.deinit();
+    var topk_id_buffer: zml.Buffer = try .fromBytes(io, platform, topk_id.shape(), .replicated, std.mem.asBytes(&topk_id_host));
+    defer topk_id_buffer.deinit();
+    var shared_gate_up_weight_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        shared_gate_up_weight.shape(),
+        model_sharding,
+        std.mem.sliceAsBytes(shared_gate_up_weight_host),
+    );
+    defer shared_gate_up_weight_buffer.deinit();
+    var shared_gate_up_scale_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        shared_gate_up_scale.shape(),
+        model_sharding,
+        std.mem.asBytes(&shared_gate_up_scale_host),
+    );
+    defer shared_gate_up_scale_buffer.deinit();
+    var shared_down_weight_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        shared_down_weight.shape(),
+        model_sharding,
+        std.mem.sliceAsBytes(shared_down_weight_host),
+    );
+    defer shared_down_weight_buffer.deinit();
+    var shared_down_scale_buffer: zml.Buffer = try .fromBytes(
+        io,
+        platform,
+        shared_down_scale.shape(),
+        model_sharding,
+        std.mem.asBytes(&shared_down_scale_host),
+    );
+    defer shared_down_scale_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, fusedMoeWithLocalEpilogue, .{
+        hidden_buffer,
+        w1_buffer,
+        w1_scale_buffer,
+        w2_buffer,
+        w2_scale_buffer,
+        topk_weight_buffer,
+        topk_id_buffer,
+        shared_gate_up_weight_buffer,
+        shared_gate_up_scale_buffer,
+        shared_down_weight_buffer,
+        shared_down_scale_buffer,
+    });
+    defer output.deinit();
+
+    const routed_expected_f32 = BFloat16.fromF32(
+        expectedConstantBlockFp8MlpPartial(1.0, 1.0, 1.0) +
+            expectedConstantBlockFp8MlpPartial(2.0, 1.0, 1.0),
+    ).toF32();
+    const shared_expected_f32 = BFloat16.fromF32(
+        expectedConstantBlockFp8MlpPartial(1.0, 1.0, 1.0) +
+            expectedConstantBlockFp8MlpPartial(4.0, 2.0, 1.0),
+    ).toF32();
+    var expected_host: [hidden_size]BFloat16 = undefined;
+    for (&expected_host, 0..) |*value, out| {
+        value.* = BFloat16.fromF32(if (out < hidden_size / 2) routed_expected_f32 else shared_expected_f32);
+    }
+    const expected: zml.Slice = .init(output.shape(), std.mem.asBytes(&expected_host));
+    try zml.testing.expectClose(
+        io,
+        expected,
+        output,
+        .{ .absolute_tolerance = 8.0, .relative_tolerance = 0.02, .minimum_close_fraction = 1.0 },
+    );
+}
+
 const MixedScaleMoeOutputs = struct {
     w1_only: zml.Tensor,
     w2_only: zml.Tensor,

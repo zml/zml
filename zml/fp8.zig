@@ -466,8 +466,12 @@ pub fn nativeBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tens
         "nativeBlockScaledDotLocal must be called inside manualComputation",
         .{},
     );
+    // Keep the CUDA local contract opaque to the SPMD partitioner. Exposing
+    // xla.scaled_dot here lets it reconcile already-local scale grids across
+    // ranks, introducing collectives and potentially selecting another rank's
+    // scale shard.
     return switch (Compiler.current().platform.target) {
-        .cuda => xlaBlockScaledDot(lhs, rhs_fn, rhs_scale_fn, output_shape),
+        .cuda => tritonBlockScaledDotLocal(lhs, rhs_fn, rhs_scale_fn, output_shape),
         .rocm => tritonBlockScaledDotLocal(lhs, rhs_fn, rhs_scale_fn, output_shape),
         else => unreachable,
     };
