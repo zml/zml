@@ -2,17 +2,10 @@ const std = @import("std");
 const Nvml = @import("nvml.zig");
 const pi = @import("zml-smi/info").process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Collector = @import("zml-smi/collector").Collector;
 
-pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u16) !void {
-    const device_count: u32 = nvml.deviceCount() catch 0;
-    const last_seen_ts = try collector.arena.alloc(u64, device_count);
-    @memset(last_seen_ts, 0);
+pub const List = ProcessDoubleBuffer;
 
-    try collector.spawnPoll(pollOnce, .{ collector.gpa, list, nvml, dev_offset, device_count, last_seen_ts });
-}
-
-fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u16, device_count: u32, last_seen_ts: []u64) void {
+pub fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u16, device_count: u32, last_seen_ts: []u64) void {
     const back = list.back();
 
     back.clearRetainingCapacity();
@@ -29,9 +22,8 @@ fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *con
         defer if (graphics.len > 0) allocator.free(graphics);
         collectFromQuery(allocator, back, idx, graphics);
 
-        // Apply utilization samples
         const last_ts = last_seen_ts[dev_idx];
-        const utils = nvml.processUtilization(allocator, handle, last_ts) catch continue;
+        const utils = nvml.processUtilization(allocator, handle, last_ts) catch &.{};
         defer if (utils.len > 0) allocator.free(utils);
 
         for (utils) |sample| {
