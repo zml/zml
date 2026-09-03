@@ -226,6 +226,117 @@ fn writeZerosToOutput(
 }
 
 // =============================================================================
+// reduce_expert_routes_top8
+// =============================================================================
+
+/// Applies FP32 router weights to materialized BF16 expert outputs, reducing
+/// the eight routes in source order and narrowing only the final result.
+/// Invalid and non-local routes are skipped before their output or weight is
+/// loaded, matching vLLM's DeepGemm gather semantics.
+pub const ReduceExpertRoutesTop8 = struct {
+    pub const Cfg = struct {
+        num_tokens: usize,
+        hidden_size: usize,
+        global_num_experts: usize,
+        local_num_experts: usize,
+        block_d: usize,
+        has_expert_map: bool,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "reduce_expert_routes_top8",
+        .inputs = &.{ "routes", "weights", "topk_ids", "expert_map" },
+        .outputs = &.{"output"},
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        if (cfg.num_tokens == 0 or
+            cfg.hidden_size == 0 or
+            cfg.global_num_experts == 0 or
+            cfg.local_num_experts == 0 or
+            cfg.block_d == 0 or
+            !std.math.isPowerOfTwo(cfg.block_d) or
+            @mod(cfg.hidden_size, cfg.block_d) != 0)
+        {
+            log.err("reduce_expert_routes_top8: invalid config", .{});
+            return error.InvalidMlir;
+        }
+
+        const a = try b.declareArgs(.{
+            .routes_ptr = .{ .ptr = .bf16 },
+            .weights_ptr = .{ .ptr = .f32 },
+            .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_map_ptr = .{ .ptr = .i32 },
+            .output_ptr = .{ .ptr = .bf16 },
+        });
+
+        const top_k: i64 = 8;
+        const num_tokens: i64 = @intCast(cfg.num_tokens);
+        const hidden_size: i64 = @intCast(cfg.hidden_size);
+        const global_num_experts: i32 = @intCast(cfg.global_num_experts);
+        const local_num_experts: i32 = @intCast(cfg.local_num_experts);
+        const block_d: i64 = @intCast(cfg.block_d);
+
+        const feature_block = b.programId(.x).to(.i64);
+        const token_start = b.programId(.y).to(.i64);
+        const token_stride = b.numPrograms(.y).to(.i64);
+        const offsets_d = feature_block.mul(block_d).add(b.arange(0, block_d, .i64));
+
+        var token_loop = b.openFor(token_start, num_tokens, token_stride, .{});
+        {
+            const token = token_loop.iv;
+            const route_row = token.mul(top_k);
+            var accumulator = b.zeros(&.{block_d}, .f32);
+
+            // Keep this unrolled: each result is the sole input accumulator
+            // of the following route, fixing the eight FP32 additions in
+            // source order without depending on a loop-unroll pass.
+            inline for (0..8) |topk_index| {
+                const route_index = route_row.add(topk_index);
+                const global_expert_id = b.load(a.topk_ids_ptr.addPtr(route_index));
+                const global_valid = global_expert_id
+                    .ge(0)
+                    .bitAnd(global_expert_id.lt(global_num_experts));
+                const local_expert_id = if (cfg.has_expert_map) mapped: {
+                    // Guard the map lookup itself so negative and out-of-range
+                    // global ids cannot form an invalid memory access.
+                    var map_if = b.openIfElse(global_valid, .{b.scalarTy(.i32)});
+                    {
+                        map_if.yieldThen(.{b.load(a.expert_map_ptr.addPtr(global_expert_id))});
+                    }
+                    {
+                        map_if.yieldElse(.{b.liftAs(-1, .i32)});
+                    }
+                    break :mapped map_if.results[0];
+                } else global_expert_id;
+                const route_valid = global_valid
+                    .bitAnd(local_expert_id.ge(0))
+                    .bitAnd(local_expert_id.lt(local_num_experts));
+
+                // Keep the loads and multiply inside the branch. In particular,
+                // an invalid route with a NaN/Inf weight must leave the FP32
+                // accumulator unchanged rather than evaluating zero * weight.
+                var route_if = b.openIfElse(route_valid, .{b.tensorTy(&.{block_d}, .f32)});
+                {
+                    const route_offset = route_index.mul(hidden_size).add(offsets_d);
+                    const route = b.load(a.routes_ptr.addPtr(route_offset)).to(.f32);
+                    const weight = b.load(a.weights_ptr.addPtr(route_index));
+                    route_if.yieldThen(.{accumulator.add(route.mul(weight))});
+                }
+                {
+                    route_if.yieldElse(.{accumulator});
+                }
+                accumulator = route_if.results[0];
+            }
+
+            const output_offset = token.mul(hidden_size).add(offsets_d);
+            b.store(a.output_ptr.addPtr(output_offset), accumulator.to(.bf16));
+            token_loop.yield(.{});
+        }
+    }
+};
+
+// =============================================================================
 // fused_moe_kernel
 // =============================================================================
 

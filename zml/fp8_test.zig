@@ -340,6 +340,209 @@ fn fusedMoe(
     ) catch unreachable;
 }
 
+fn reduceExpertRoutes(routes: zml.Tensor, weights: zml.Tensor) zml.Tensor {
+    return zml.moe.triton.reduceExpertRoutes(routes, weights);
+}
+
+fn reduceExpertRoutesTop8NoMap(routes: zml.Tensor, weights: zml.Tensor, ids: zml.Tensor) zml.Tensor {
+    return zml.moe.triton.reduceExpertRoutesTop8(routes, weights, ids, null, 8, 8);
+}
+
+fn reduceExpertRoutesTop8WithMap(routes: zml.Tensor, weights: zml.Tensor, ids: zml.Tensor, expert_map: zml.Tensor) zml.Tensor {
+    return zml.moe.triton.reduceExpertRoutesTop8(routes, weights, ids, expert_map, 4, 2);
+}
+
+test "Triton MoE applies router weights and reduces routes in FP32" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+
+    const routes: zml.Tensor = .init(.{ .token = 1, .topk = 2, .out = 1 }, .bf16);
+    const weights: zml.Tensor = .init(.{ .token = 1, .topk = 2 }, .f32);
+    var exe = try platform.compileFn(allocator, io, reduceExpertRoutes, .{ routes, weights }, .{});
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const one = BFloat16.fromF32(1.0);
+    const routes_host = [2]BFloat16{ one, one };
+    const weights_host = [2]f32{ 0.001, 0.3 };
+    var routes_buffer: zml.Buffer = try .fromBytes(io, platform, routes.shape(), .replicated, std.mem.asBytes(&routes_host));
+    defer routes_buffer.deinit();
+    var weights_buffer: zml.Buffer = try .fromBytes(io, platform, weights.shape(), .replicated, std.mem.asBytes(&weights_host));
+    defer weights_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, reduceExpertRoutes, .{ routes_buffer, weights_buffer });
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+
+    const expected = BFloat16.fromF32(weights_host[0] + weights_host[1]);
+    const prematurely_rounded = BFloat16.fromF32(
+        BFloat16.fromF32(weights_host[0]).toF32() +
+            BFloat16.fromF32(weights_host[1]).toF32(),
+    );
+    try std.testing.expect(@as(u16, @bitCast(expected)) != @as(u16, @bitCast(prematurely_rounded)));
+    try std.testing.expectEqual(
+        @as(u16, @bitCast(expected)),
+        @as(u16, @bitCast(output_host.items(BFloat16)[0])),
+    );
+}
+
+test "CUDA Triton MoE top-8 route reduction preserves sequential FP32 association" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const hidden_size = 4096;
+    const routes: zml.Tensor = .init(.{ .token = 1, .topk = 8, .out = hidden_size }, .bf16);
+    const weights: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .f32);
+    const ids: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .i32);
+    var exe = try platform.compileFn(allocator, io, reduceExpertRoutesTop8NoMap, .{ routes, weights, ids }, .{});
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    // With weights of 1/8 these become [2^30, 1, -2^30, 1, ...].
+    // A sequential FP32 fold produces 5, while a balanced reduction can
+    // produce 4 by associating the two large cancellation branches last.
+    const route_values = [8]f32{ 8589934592.0, 8.0, -8589934592.0, 8.0, 8.0, 8.0, 8.0, 8.0 };
+    const weights_host: [8]f32 = @splat(0.125);
+    const ids_host = [8]i32{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    const routes_host = try allocator.alloc(BFloat16, routes.shape().count());
+    defer allocator.free(routes_host);
+    for (route_values, 0..) |value, route| {
+        @memset(routes_host[route * hidden_size .. (route + 1) * hidden_size], BFloat16.fromF32(value));
+    }
+
+    var routes_buffer: zml.Buffer = try .fromBytes(io, platform, routes.shape(), .replicated, std.mem.sliceAsBytes(routes_host));
+    defer routes_buffer.deinit();
+    var weights_buffer: zml.Buffer = try .fromBytes(io, platform, weights.shape(), .replicated, std.mem.asBytes(&weights_host));
+    defer weights_buffer.deinit();
+    var ids_buffer: zml.Buffer = try .fromBytes(io, platform, ids.shape(), .replicated, std.mem.asBytes(&ids_host));
+    defer ids_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, reduceExpertRoutesTop8NoMap, .{ routes_buffer, weights_buffer, ids_buffer });
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+
+    const expected_bits: u16 = @bitCast(BFloat16.fromF32(5.0));
+    for (output_host.items(BFloat16)) |value| {
+        try std.testing.expectEqual(expected_bits, @as(u16, @bitCast(value)));
+    }
+}
+
+test "CUDA Triton MoE top-8 route reduction preserves FP32 router weights" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const hidden_size = 1024;
+    const routes: zml.Tensor = .init(.{ .token = 1, .topk = 8, .out = hidden_size }, .bf16);
+    const weights: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .f32);
+    const ids: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .i32);
+    var exe = try platform.compileFn(allocator, io, reduceExpertRoutesTop8NoMap, .{ routes, weights, ids }, .{});
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const routes_host = try allocator.alloc(BFloat16, routes.shape().count());
+    defer allocator.free(routes_host);
+    @memset(routes_host, BFloat16.fromF32(1.0));
+    const weights_host = [8]f32{ 0.001, 0.3, 0, 0, 0, 0, 0, 0 };
+    const ids_host = [8]i32{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    var routes_buffer: zml.Buffer = try .fromBytes(io, platform, routes.shape(), .replicated, std.mem.sliceAsBytes(routes_host));
+    defer routes_buffer.deinit();
+    var weights_buffer: zml.Buffer = try .fromBytes(io, platform, weights.shape(), .replicated, std.mem.asBytes(&weights_host));
+    defer weights_buffer.deinit();
+    var ids_buffer: zml.Buffer = try .fromBytes(io, platform, ids.shape(), .replicated, std.mem.asBytes(&ids_host));
+    defer ids_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, reduceExpertRoutesTop8NoMap, .{ routes_buffer, weights_buffer, ids_buffer });
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+
+    const expected = BFloat16.fromF32(weights_host[0] + weights_host[1]);
+    const prematurely_rounded = BFloat16.fromF32(
+        BFloat16.fromF32(weights_host[0]).toF32() +
+            BFloat16.fromF32(weights_host[1]).toF32(),
+    );
+    const expected_bits: u16 = @bitCast(expected);
+    try std.testing.expect(expected_bits != @as(u16, @bitCast(prematurely_rounded)));
+    for (output_host.items(BFloat16)) |value| {
+        try std.testing.expectEqual(expected_bits, @as(u16, @bitCast(value)));
+    }
+}
+
+test "CUDA Triton MoE top-8 route reduction skips invalid non-finite routes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const hidden_size = 1024;
+    const routes: zml.Tensor = .init(.{ .token = 1, .topk = 8, .out = hidden_size }, .bf16);
+    const weights: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .f32);
+    const ids: zml.Tensor = .init(.{ .token = 1, .topk = 8 }, .i32);
+    const expert_map: zml.Tensor = .init(.{ .expert = 4 }, .i32);
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        reduceExpertRoutesTop8WithMap,
+        .{ routes, weights, ids, expert_map },
+        .{},
+    );
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const routes_host = try allocator.alloc(BFloat16, routes.shape().count());
+    defer allocator.free(routes_host);
+    @memset(routes_host, BFloat16.fromF32(std.math.nan(f32)));
+    @memset(routes_host[0 * hidden_size .. 1 * hidden_size], BFloat16.fromF32(2.0));
+    @memset(routes_host[4 * hidden_size .. 5 * hidden_size], BFloat16.fromF32(4.0));
+    const weights_host = [8]f32{
+        0.25,
+        std.math.nan(f32),
+        std.math.inf(f32),
+        -std.math.inf(f32),
+        0.125,
+        std.math.nan(f32),
+        std.math.inf(f32),
+        -std.math.inf(f32),
+    };
+    // Expert 1 maps to -1 and expert 3 maps past the local range, while -1,
+    // -2, 4, and 99 exercise globally invalid ids without an OOB map lookup.
+    const ids_host = [8]i32{ 0, 1, -1, 4, 2, 3, -2, 99 };
+    const expert_map_host = [4]i32{ 0, -1, 1, 2 };
+
+    var routes_buffer: zml.Buffer = try .fromBytes(io, platform, routes.shape(), .replicated, std.mem.sliceAsBytes(routes_host));
+    defer routes_buffer.deinit();
+    var weights_buffer: zml.Buffer = try .fromBytes(io, platform, weights.shape(), .replicated, std.mem.asBytes(&weights_host));
+    defer weights_buffer.deinit();
+    var ids_buffer: zml.Buffer = try .fromBytes(io, platform, ids.shape(), .replicated, std.mem.asBytes(&ids_host));
+    defer ids_buffer.deinit();
+    var expert_map_buffer: zml.Buffer = try .fromBytes(io, platform, expert_map.shape(), .replicated, std.mem.asBytes(&expert_map_host));
+    defer expert_map_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, reduceExpertRoutesTop8WithMap, .{
+        routes_buffer,
+        weights_buffer,
+        ids_buffer,
+        expert_map_buffer,
+    });
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+
+    const expected_bits: u16 = @bitCast(BFloat16.fromF32(1.0));
+    for (output_host.items(BFloat16)) |value| {
+        try std.testing.expectEqual(expected_bits, @as(u16, @bitCast(value)));
+    }
+}
+
 fn testFusedMoeBlockFp8(comptime tokens: usize) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -414,10 +617,17 @@ fn testFusedMoeBlockFp8(comptime tokens: usize) !void {
                 287
             else
                 selected_experts[i];
-            // Non-local and globally invalid routes deliberately carry a
-            // non-zero weight. Their unwritten output slots must be masked,
-            // rather than relying on routing weights to hide them.
-            weight.* = if (i + 3 >= topk) 0.25 else 1.0 / @as(f32, @floatFromInt(topk - 3));
+            // Non-local and globally invalid routes deliberately carry
+            // non-finite weights. They must be skipped like vLLM does, rather
+            // than allowing a masked zero route times NaN/Inf to propagate.
+            weight.* = if (i + 1 == topk)
+                std.math.nan(f32)
+            else if (i + 2 == topk)
+                std.math.inf(f32)
+            else if (i + 3 == topk)
+                -std.math.inf(f32)
+            else
+                1.0 / @as(f32, @floatFromInt(topk - 3));
         }
     }
 
@@ -527,7 +737,7 @@ fn fusedMoeWithLocalEpilogue(
 ) zml.Tensor {
     const metadata: zml.moe.Metadata = .{ .triton = .init(.{}) };
     const parameters: zml.moe.Parameters = .{ .triton = .init(.{
-        .num_experts_per_tok = 2,
+        .num_experts_per_tok = @intCast(topk_id.dim(.top_expert)),
         .activation = .silu,
     }) };
     return zml.moe.forwardMoeWithReduceEpilogue(
@@ -556,7 +766,7 @@ fn fusedMoeWithLocalEpilogue(
     ) catch unreachable;
 }
 
-test "expert-parallel FP8 MoE compiles with a model-sharded shared expert epilogue" {
+test "expert-parallel FP8 MoE compiles top-8 reduction with a model-sharded shared expert epilogue" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
@@ -571,8 +781,8 @@ test "expert-parallel FP8 MoE compiles with a model-sharded shared expert epilog
     const w1_scale: zml.Tensor = .init(.{ .expert = experts, .nb = 2, .kb = 1 }, .f32);
     const w2: zml.Tensor = .init(.{ .expert = experts, .out = hidden_size, .mid = routed_intermediate_size }, .f8e4m3fn);
     const w2_scale: zml.Tensor = .init(.{ .expert = experts, .nb = 1, .kb = 1 }, .f32);
-    const topk_weight: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .f32);
-    const topk_id: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 2 }, .i32);
+    const topk_weight: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 8 }, .f32);
+    const topk_id: zml.Tensor = .init(.{ .b = 1, .s = 1, .top_expert = 8 }, .i32);
     const shared_gate_up_weight: zml.Tensor = .init(.{ .out = 2 * shared_intermediate_size, .in = hidden_size }, .f8e4m3fn);
     const shared_gate_up_scale: zml.Tensor = .init(.{ .nb = 2 * experts, .kb = 1 }, .f32);
     const shared_down_weight: zml.Tensor = .init(.{ .out = hidden_size, .mid = shared_intermediate_size }, .f8e4m3fn);

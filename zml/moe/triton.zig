@@ -326,7 +326,7 @@ pub fn fusedExpertsImpl(
         options,
         routing.naive_block_assignment,
         1,
-        true,
+        false,
         false,
         .bf16,
     );
@@ -348,26 +348,114 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     );
 
-    // Negative and out-of-range routes are excluded by the alignment kernels,
-    // so no GEMM tile writes their output slots. Mask those slots explicitly
-    // before reducing instead of consuming uninitialized custom-call output.
-    const route_global_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
-        .logical(.AND, ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
-    const route_is_valid = if (opts.expert_map) |expert_map| local: {
-        const safe_ids = route_global_valid.select(ids, Tensor.scalar(0, .i32));
-        const local_ids = expert_map
-            .gather(.{ .expert = safe_ids }, .{})
-            .withTags(ids.shape().tags());
-        break :local route_global_valid
-            .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
-            .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
-    } else route_global_valid;
-    const active_second_out = route_is_valid
-        .broad(second_out.shape().withDtype(.bool))
-        .select(second_out, Tensor.zeroes(second_out.shape()));
-    const output = active_second_out.sum(.topk).squeeze(.topk);
+    // Match vLLM's unpermute/reduce precision: materialize each expert's down
+    // projection as BF16, then apply the router weights and accumulate all
+    // routes in FP32. The CUDA top-8 path also preserves vLLM's source-order
+    // association and skips invalid/non-local routes before loading them.
+    const ordered_top8 = zml.Compiler.current().platform.target == .cuda and
+        ids.dim(.topk) == 8 and weights.dtype() == .f32;
+    const output = if (ordered_top8)
+        reduceExpertRoutesTop8(
+            second_out,
+            weights,
+            ids,
+            opts.expert_map,
+            num_experts,
+            gate_up.dim(.expert),
+        )
+    else fallback: {
+        // Negative, out-of-range, and non-local routes can leave output slots
+        // unwritten. Mask both operands so invalid NaN/Inf weights cannot
+        // propagate through a zero route.
+        const route_global_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
+            .logical(.AND, ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
+        const route_is_valid = if (opts.expert_map) |expert_map| local: {
+            const safe_ids = route_global_valid.select(ids, Tensor.scalar(0, .i32));
+            const local_ids = expert_map
+                .gather(.{ .expert = safe_ids }, .{})
+                .withTags(ids.shape().tags());
+            break :local route_global_valid
+                .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+                .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+        } else route_global_valid;
+        const active_second_out = route_is_valid
+            .broad(second_out.shape().withDtype(.bool))
+            .select(second_out, Tensor.zeroes(second_out.shape()));
+        const active_weights = route_is_valid.select(weights, Tensor.zeroes(weights.shape()));
+        break :fallback reduceExpertRoutes(active_second_out, active_weights);
+    };
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
+}
+
+/// Applies router weights to materialized BF16 expert outputs, accumulates the
+/// route dimension in FP32, and narrows only the final per-token result.
+pub fn reduceExpertRoutes(routes: Tensor, weights: Tensor) Tensor {
+    stdx.debug.assert(routes.dtype() == .bf16, "expected BF16 expert routes, got {}", .{routes.dtype()});
+    stdx.debug.assert(weights.dtype() == .f32 or weights.dtype() == .bf16, "expected FP32 or BF16 router weights, got {}", .{weights.dtype()});
+    stdx.debug.assert(routes.dim(.token) == weights.dim(.token), "route and weight token counts differ", .{});
+    stdx.debug.assert(routes.dim(.topk) == weights.dim(.topk), "route and weight top-k counts differ", .{});
+
+    const weighted_routes = routes
+        .convert(.f32)
+        .mul(weights.convert(.f32).broad(routes.shape().withDtype(.f32)));
+    return weighted_routes.sum(.topk).squeeze(.topk).convert(.bf16);
+}
+
+/// CUDA implementation of vLLM's ordered DeepGemm route gather for the
+/// GLM-compatible BF16-route, FP32-weight, top-8 case.
+pub fn reduceExpertRoutesTop8(
+    routes: Tensor,
+    weights: Tensor,
+    ids: Tensor,
+    expert_map: ?Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+) Tensor {
+    stdx.debug.assert(routes.dtype() == .bf16, "expected BF16 expert routes, got {}", .{routes.dtype()});
+    stdx.debug.assert(weights.dtype() == .f32, "expected FP32 router weights, got {}", .{weights.dtype()});
+    stdx.debug.assert(ids.dtype() == .i32, "expected I32 expert ids, got {}", .{ids.dtype()});
+    stdx.debug.assert(routes.rank() == 3 and weights.rank() == 2 and ids.rank() == 2, "expected [token,topk,out] routes and [token,topk] weights/ids", .{});
+    stdx.debug.assert(routes.dim(.topk) == 8 and weights.dim(.topk) == 8 and ids.dim(.topk) == 8, "ordered route reduction requires top-k 8", .{});
+    stdx.debug.assert(routes.dim(.token) == weights.dim(.token) and routes.dim(.token) == ids.dim(.token), "route, weight, and id token counts differ", .{});
+    stdx.debug.assert(global_num_experts > 0 and local_num_experts > 0, "expert counts must be positive", .{});
+    if (expert_map) |map| {
+        stdx.debug.assert(map.dtype() == .i32 and map.rank() == 1 and map.dim(.expert) == global_num_experts, "invalid expert map", .{});
+    } else {
+        stdx.debug.assert(global_num_experts == local_num_experts, "an expert map is required when global and local expert counts differ", .{});
+    }
+
+    stdx.debug.assert(routes.dim(.token) > 0 and routes.dim(.out) > 0, "token and output dimensions must be positive", .{});
+    const num_tokens: usize = @intCast(routes.dim(.token));
+    const hidden_size: usize = @intCast(routes.dim(.out));
+    const block_d: usize = @intCast(std.math.gcd(@as(u64, @intCast(hidden_size)), 1024));
+    const map_operand = expert_map orelse ids;
+    return kernels.ReduceExpertRoutesTop8.Kernel.call(
+        .{
+            .routes = routes,
+            .weights = weights,
+            .topk_ids = ids,
+            .expert_map = map_operand,
+        },
+        .{ .output = routes.shape().remove(.topk).withDtype(.bf16) },
+        .{
+            .cfg = .{
+                .num_tokens = num_tokens,
+                .hidden_size = hidden_size,
+                .global_num_experts = @intCast(global_num_experts),
+                .local_num_experts = @intCast(local_num_experts),
+                .block_d = block_d,
+                .has_expert_map = expert_map != null,
+            },
+            .grid = .{
+                @intCast(@divExact(hidden_size, block_d)),
+                @intCast(@min(num_tokens, 1024)),
+                1,
+            },
+            .num_warps = 2,
+            .num_stages = 1,
+        },
+    ).output;
 }
 
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
