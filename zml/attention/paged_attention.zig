@@ -402,7 +402,6 @@ test pagedAttention {
         .max_seqlen_q = 16 * 2,
     };
     const triton_parameters: Parameters = .init(.fromBackend(triton_options_args));
-    const attn_opts: AttentionOptions = .{ .is_causal = true };
     var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
     defer q.deinit();
     var new_k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
@@ -448,110 +447,140 @@ test pagedAttention {
     } };
     defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
 
-    var results_per_backend: std.enums.EnumArray(Backend, ?zml.Slice) = .initFill(null);
-    defer {
+    const all_backends = std.enums.values(Backend);
+    // stablehlo ignores these options, cuda_fa3 has no materializer in this fixture, and
+    // mosaic_tpu requires a dense KV cache instead of the split cache used by this test.
+    const option_sensitive_backends = [_]Backend{ .cuda_fa2, .triton, .metal };
+    const test_cases = [_]struct {
+        name: []const u8,
+        attention_options: AttentionOptions,
+        backends: []const Backend,
+    }{
+        .{
+            .name = "unbounded",
+            .attention_options = .{ .is_causal = true },
+            .backends = all_backends,
+        },
+        .{
+            .name = "non_causal",
+            .attention_options = .{ .is_causal = false },
+            .backends = &option_sensitive_backends,
+        },
+        .{
+            .name = "sliding_window",
+            .attention_options = .{ .is_causal = true, .sliding_window = page_size },
+            .backends = &option_sensitive_backends,
+        },
+    };
+
+    for (test_cases) |test_case| {
+        var results_per_backend: std.enums.EnumArray(Backend, ?zml.Slice) = .initFill(null);
+        defer {
+            for (std.enums.values(Backend)) |backend| {
+                if (results_per_backend.get(backend)) |slice| slice.free(allocator);
+            }
+        }
+
+        for (test_case.backends) |backend| {
+            if (!backend.isAvailable(platform)) {
+                std.log.warn("paged_attention backend {t} not available", .{backend});
+                continue;
+            }
+            std.log.warn("Testing paged_attention {s} with backend {t}", .{ test_case.name, backend });
+
+            var backend_options_args = triton_options_args;
+            backend_options_args.backend = backend;
+            const parameters: Parameters = .init(.fromBackend(backend_options_args));
+
+            const exe = try platform.compileFn(
+                allocator,
+                io,
+                pagedAttention,
+                .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options },
+                .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .shardings = shardings },
+            );
+            defer exe.deinit();
+
+            var parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
+                // No materializer implemented for cuda fa3
+                .cuda_fa3 => continue,
+                .cuda_fa2 => |params| cuda_fa2: {
+                    var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
+                    @memcpy(&block_table_prefill, block_table[0..num_prefill]);
+                    var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
+                    @memcpy(&block_table_decode, block_table[num_prefill .. num_prefill + num_decode]);
+
+                    var cu_seqlens_q_prefill: [num_prefill + 1]i32 = undefined;
+                    @memcpy(&cu_seqlens_q_prefill, query_start_len[0 .. num_prefill + 1]);
+                    var cu_seqlens_q_decode: [num_decode + 1]i32 = undefined;
+                    for (&cu_seqlens_q_decode, query_start_len[num_prefill .. num_prefill + num_decode + 1]) |*decode_len, query_start| {
+                        decode_len.* = query_start - prefill_token_count;
+                    }
+
+                    var seqused_k_prefill: [num_prefill]i32 = undefined;
+                    @memcpy(&seqused_k_prefill, seq_lens[0..num_prefill]);
+                    var seqused_k_decode: [num_decode]i32 = undefined;
+                    @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
+
+                    break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
+                        .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
+                        .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
+                        .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
+
+                        .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
+                        .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
+                        .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
+
+                        .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
+                    } } };
+                },
+                .triton => triton_parameters_d,
+                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                    .block_table = triton_parameters_d.triton.block_table,
+                    .seq_lens = triton_parameters_d.triton.seq_lens,
+                    .query_start_len = triton_parameters_d.triton.query_start_len,
+                }),
+            };
+            // cu_fa2 creates new buffers while other reuse triton buffers.
+            defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
+
+            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
+            defer output_d.deinit();
+            results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
+        }
+
+        const reference_backend: Backend = .triton;
+        const reference = results_per_backend.get(reference_backend) orelse return error.SkipZigTest;
+
+        var num_failed: u32 = 0;
         for (std.enums.values(Backend)) |backend| {
-            if (results_per_backend.get(backend)) |slice| slice.free(allocator);
+            if (backend == reference_backend) continue;
+            const output_h = results_per_backend.get(backend) orelse continue;
+
+            const tolerance: zml.testing.CompareOpts = .{
+                .absolute_tolerance = 1e-2,
+                .relative_tolerance = 1e-2,
+                .epsilon_relative = 1e-6,
+            };
+
+            zml.testing.expectClose(io, reference, output_h, tolerance) catch |err| switch (err) {
+                error.TestUnexpectedResult => {
+                    num_failed += 1;
+                    std.log.err("test pagedAttention {s} failed on backend {t}\n--> reference ({t}): {d:32.3}\n--> pagedAttention({t}): {d:32.3}", .{
+                        test_case.name,
+                        backend,
+                        reference_backend,
+                        reference.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
+                        backend,
+                        output_h.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
+                    });
+                },
+                else => |e| return e,
+            };
         }
+
+        if (num_failed > 0) return error.TestUnexpectedResult;
     }
-
-    for (std.enums.values(Backend)) |backend| {
-        if (!backend.isAvailable(platform)) {
-            std.log.warn("paged_attention backend {t} not available", .{backend});
-            continue;
-        }
-        std.log.warn("Testing paged_attention with backend {t}", .{backend});
-
-        var backend_options_args = triton_options_args;
-        backend_options_args.backend = backend;
-        const parameters: Parameters = .init(.fromBackend(backend_options_args));
-
-        const exe = try platform.compileFn(
-            allocator,
-            io,
-            pagedAttention,
-            .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts },
-            .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{t}", .{backend}), .shardings = shardings },
-        );
-        defer exe.deinit();
-
-        var parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
-            // No materializer implemented for cuda fa3
-            .cuda_fa3 => continue,
-            .cuda_fa2 => |params| cuda_fa2: {
-                var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
-                @memcpy(&block_table_prefill, block_table[0..num_prefill]);
-                var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
-                @memcpy(&block_table_decode, block_table[num_prefill .. num_prefill + num_decode]);
-
-                var cu_seqlens_q_prefill: [num_prefill + 1]i32 = undefined;
-                @memcpy(&cu_seqlens_q_prefill, query_start_len[0 .. num_prefill + 1]);
-                var cu_seqlens_q_decode: [num_decode + 1]i32 = undefined;
-                for (&cu_seqlens_q_decode, query_start_len[num_prefill .. num_prefill + num_decode + 1]) |*decode_len, query_start| {
-                    decode_len.* = query_start - prefill_token_count;
-                }
-
-                var seqused_k_prefill: [num_prefill]i32 = undefined;
-                @memcpy(&seqused_k_prefill, seq_lens[0..num_prefill]);
-                var seqused_k_decode: [num_decode]i32 = undefined;
-                @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
-
-                break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
-                    .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
-                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
-                    .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
-
-                    .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
-                    .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
-                    .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
-
-                    .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
-                } } };
-            },
-            .triton => triton_parameters_d,
-            inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
-                .block_table = triton_parameters_d.triton.block_table,
-                .seq_lens = triton_parameters_d.triton.seq_lens,
-                .query_start_len = triton_parameters_d.triton.query_start_len,
-            }),
-        };
-        // cu_fa2 creates new buffers while other reuse triton buffers.
-        defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
-
-        var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
-        defer output_d.deinit();
-        results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
-    }
-
-    const reference_backend: Backend = .triton;
-    const reference = results_per_backend.get(reference_backend) orelse return error.SkipZigTest;
-
-    var num_failed: u32 = 0;
-    for (std.enums.values(Backend)) |backend| {
-        if (backend == reference_backend) continue;
-        const output_h = results_per_backend.get(backend) orelse continue;
-
-        const tolerance: zml.testing.CompareOpts = .{
-            .absolute_tolerance = 1e-2,
-            .relative_tolerance = 1e-2,
-            .epsilon_relative = 1e-6,
-        };
-
-        zml.testing.expectClose(io, reference, output_h, tolerance) catch |err| switch (err) {
-            error.TestUnexpectedResult => {
-                num_failed += 1;
-                std.log.err("test pagedAttention failed on backend {0t}\n--> reference ({1t}): {2d:32.3}\n--> pagedAttention({0t}): {3d:32.3}", .{
-                    backend,
-                    reference_backend,
-                    reference.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
-                    output_h.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
-                });
-            },
-            else => |e| return e,
-        };
-    }
-
-    if (num_failed > 0) return error.TestUnexpectedResult;
 }
 
 fn stablehlo_pagedAttention(
