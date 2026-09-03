@@ -772,7 +772,7 @@ pub const Device = opaque {
         const ret = try api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
         });
-        return .fromCStruct(@bitCast(ret));
+        return .fromCStruct(ret);
     }
 };
 
