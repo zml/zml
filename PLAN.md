@@ -49,7 +49,7 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 
 - [x] 0. Baseline capture and pack instrument in the playground.
 - [x] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
-- [ ] 2. Per-batch completion behind the existing single slot.
+- [x] 2. Per-batch completion behind the existing single slot.
 - [ ] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
 - [ ] 4. Controller continuity across submissions (minimal).
 - [ ] 5. Monorepo migration and Laguna window measurement.
@@ -82,8 +82,9 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - Regression oracle at every task: three-host matrix at packs=0 (Llama
   14.96 GiB, one GPU). Pack instrument (`ZML_LOAD_PACKS=64
   ZML_LOAD_PACK_WIDTH=64 ZML_LOAD_PACK_WINDOW=K ZML_LOAD_PACK_PAIRS=1`) from
-  task 0 onward. DeepSeek-V4-Flash on the CUDA host for planner-touching tasks
-  (planned jobs must stay 9,524 and transfers 69,572).
+  task 0 onward. DeepSeek-V4-Flash on the MI300 host for planner-touching
+  tasks (it does not fit one 32 GB RTX 5090); planned jobs must stay 9,524
+  and transfers 69,572 at 16 MiB requests.
 - Test commands (verified 2026-09-03, ~20 s warm):
   `bazel test --@zml//platforms:cpu=true --@zml//platforms:cuda=true //zml:test --test_output=errors`,
   `bazel test //vfs:test //stdx:test --test_output=errors`,
@@ -187,6 +188,35 @@ pack check ok, total 1.017/1.012/1.024 s. Unchanged from the task-0 baseline.
   200-batch sequential stress test.
 - Validation: full test set; matrix packs=0 and packs=64 within spread.
 
+Result (2026-09-04): `Batch{allocator, io, jobs, transfers, items, remaining,
+done, requests, blocks, events, diagnostics, freeing(debug)}` owns one plan,
+its items and every request/block/event context; `finishJobs(n)` releases
+completion units and the last one sets `done`. Units are released at the
+`RequestContext` 1->0 transition (`completeOne`, final statement after the
+gate release), by the worker when `registerRequest` fails after a claim, and
+by `scheduler.fail` for unclaimed jobs (a cursor swap under the scheduler
+mutex partitions claims exactly). `claim` returns `Claim{batch, job}`. The
+PJRT ready callback and the `submitOne` failure path (`submitTransfer`) copy
+`pipeline`/`device_index`/`block` into locals, call `eventCompleted`, then
+`block.complete()` last; `abortReady` holds `metadata_mutex`, under which
+`retireBatch` destroys contexts, so it cannot race the free;
+`abandonSubmissions` runs under the worker's scheduling sentinel. `await`
+waits `batch.done`, debug-asserts the scheduler is exhausted, drains the
+lifecycle gate (only permits of workers that claimed nothing), runs the
+controller barrier, empties the slot (`finishEpoch` rendezvous, still needed
+because `claim` reads the slot before it holds a unit), retires and destroys
+the batch. Deleted: `reapCompleted`, the loader-wide context lists and their
+duplicate `deinit` loops, `epoch_items`, `epoch_active` (`current: ?*Batch`),
+`resetEpoch`; `logEpoch` reads the batch's diagnostics. Tests 228 -> 232
+passed, 3 skipped: N-request completion, claimed-then-abandoned job, `fail`
+in three cursor states, the late-callback failure now drives a real pool
+lease through `abortReady` to `done`, and 200 sequential batches with four
+concurrent claimers through `waitForWork`/`finishEpoch`/`retireBatch`. Local
+B70, Llama, 3 runs: packs=0 0.783/0.777/0.782 s (19.11/19.24/19.14 GiB/s,
+width 12); packs=64 width 16: pack phase 0.901/0.891/0.917 s
+(14.42/14.59/14.17 GiB/s), pack check ok, total 1.016/1.008/1.037 s.
+Unchanged from the task-1 numbers.
+
 ### 3. FIFO scheduler, Handle API, multi-binding submissions, Window
 
 - Scheduler: `queue: []*Batch`, `head`, `unclaimed_total`, `stopping`, one
@@ -266,9 +296,10 @@ pack check ok, total 1.017/1.012/1.024 s. Unchanged from the task-0 baseline.
   `publish` immediately; seal at the end (sentinel). Skip `fairOrder` for
   `device_count == 1` (assert identity in a test). Per-batch diagnostics gain
   `first_read_at` and per-file planning time.
-- Validation: DeepSeek on CUDA: jobs 9,524 and transfers 69,572 unchanged,
-  median at or below the anchor (target 3.6 to 3.8 s); multi-device sharded
-  medians within spread. Fallback: whole-model planning for `device_count > 1`.
+- Validation: DeepSeek on MI300: jobs 9,524 and transfers 69,572 unchanged,
+  median at or below the 7.4-7.6 s epoch baseline (planning 0.32 s is the
+  upper bound of the win); multi-device sharded medians within spread.
+  Fallback: whole-model planning for `device_count > 1`.
 
 ### 7. VFS throttle classification and two-class backpressure
 

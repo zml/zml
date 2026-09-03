@@ -122,8 +122,9 @@ simplification pass.
   counted across every consuming PJRT event; its final completion both releases
   the block and completes the parent request. It is released only after all child
   transfers finish or are abandoned. Source/allocation/enqueue/PJRT failures
-  close scheduling, fail unfinished buffers, drain the epoch, and release each
-  reference exactly once.
+  close scheduling, retire the batch's unclaimed jobs, fail unfinished
+  buffers, and release each reference exactly once; the batch still reaches
+  `done` through its normal completion units.
 - `enqueueBlocks` reserves all affected destination queue capacity before
   mutation, publishes a complete source job under one metadata lock, and pumps
   once. The prior per-piece enqueue caused roughly 69k--79k locks and pumps.
@@ -149,14 +150,24 @@ simplification pass.
   per-target submitted-prefix accounting preserve ordering while unrelated
   reads and DMA complete out of order.
 - Persistent direct-loader workers rendezvous in their idle wait before the
-  drained epoch plan is freed. They remain alive for the next sequential
-  `loadExecute` or `load` epoch; append/seal/reopen scheduler states are gone.
-- Epoch completion has one ownership model: `await` waits for the immutable
-  scheduler to hand out every job, then for the lifecycle gate to become empty.
-  A lifecycle credit spans claim through the request's final DMA callback.
-  There is no parallel epoch-job counter, completion event, abandoned-job
-  adjustment, or request tracking flag. The controller generation barrier and
-  worker idle rendezvous still precede request/plan reclamation.
+  slot is emptied and the batch freed: `claim` reads the slot before it holds
+  a completion unit. They remain alive for the next sequential `loadExecute`
+  or `load` epoch; append/seal/reopen scheduler states are gone.
+- A `Batch` owns its plan (jobs, transfers), its items and every request,
+  block and event context created for it. It completes when `remaining`
+  (one publish sentinel plus one unit per job) reaches zero and sets `done`.
+  A job's unit is released exactly once: at the request's final reference
+  drop (last DMA callback or abandonment; `completeOne` releases the
+  lifecycle credit first and calls `finishJobs` last), by the worker when
+  `registerRequest` fails after a claim, or by `scheduler.fail` for unclaimed
+  jobs. Callback order rule: the PJRT ready callback and the submission
+  failure path copy `pipeline`, `device_index` and `block` into locals,
+  call `eventCompleted`, then `block.complete()` last, because the block's
+  completion may free the batch. `await` waits `done`, drains the lifecycle
+  gate (only permits of workers that claimed nothing), runs the controller
+  barrier, empties the slot after the worker rendezvous, retires the batch's
+  contexts under `metadata_mutex` (so `abortReady` cannot race the free),
+  and frees items and plan. There is no loader-wide context list or reap.
 - Source concurrency is adaptive for every direct-loader profile. The old
   conversion of local/default `.adaptive` to `.fixed = 12` was removed.
   `high_latency` only permits blind pre-response bootstrap to 24 then 32.
@@ -557,7 +568,7 @@ decoupled, low pinned memory.
   device memory is freed when async operations complete. zml passes an empty
   `non_donatable_input_indices`, so inputs may be donated: never reuse them.
 - Event destroy from another thread after the callback returned is current
-  practice (`reapCompleted`, `Buffer.await`); never inside the callback.
+  practice (`retireBatch`, `Buffer.await`); never inside the callback.
   Manager destroy before its transfers complete is undocumented: destroy only
   after completion, which per-batch retirement guarantees.
 - No blanket thread-safety statement; concurrent `Execute` on one executable
@@ -611,6 +622,20 @@ decoupled, low pinned memory.
   remaining 1.96 GiB bulk loads at 17.4-18.3 GiB/s; each pack epoch is under
   110 ms, never scored, and runs at the bootstrap width 12. Total wall
   1.005-1.086 s versus 0.77-0.79 s for the same bytes as one bulk load.
+- CUDA host, quiet, tree after task 1 (2026-09-04): plain Llama 0.599 /
+  0.603 / 0.607 / 0.612 s (one 1.235 s outlier on the first run after a
+  sync), width 24, pinned high-water 264 MiB; pack instrument width 16:
+  pack phase 0.644-0.650 s at 20.0-20.2 GiB/s, bulk remainder 1.96 GiB at
+  20 GiB/s, total 0.750-0.757 s, content checks ok. DeepSeek-V4-Flash does
+  NOT fit one 32 GB RTX 5090 (`ResourceExhausted` after ~28 GiB, the epoch
+  failed cleanly and reported `successful=false`); DeepSeek measurements use
+  the MI300 host (192 GB) from now on, and the CTX "CUDA DeepSeek" anchors
+  predate this host configuration.
+- MI300 host, quiet, tree after task 1 (2026-09-04): plain Llama 0.918 /
+  0.919 / 0.984 s (15.2-16.3 GiB/s, better than the day before), width 24,
+  pinned high-water 784 MiB; pack instrument width 16: pack phase
+  0.805-0.859 s at 15.1-16.2 GiB/s, bulk remainder at 17-18 GiB/s, total
+  0.957-1.024 s, content checks ok.
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 

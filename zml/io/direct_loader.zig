@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
@@ -434,9 +435,100 @@ fn selectLoaderDmaDevice(
     return null;
 }
 
+/// One planned submission: the immutable plan the scheduler hands out, the
+/// per-tensor items it writes, and every request, block and event context
+/// created while loading it. `remaining` counts completion units: one per
+/// job plus a publish sentinel. A job's unit is released exactly once, by
+/// whichever of these happens: its request's last reference drops (final DMA
+/// callback or abandonment), a worker abandons the claimed job before a
+/// request exists, or `FairVectoredReadScheduler.fail` retires it unclaimed.
+/// The batch is done when `remaining` reaches zero; the awaiting task then
+/// retires it, so releasing a unit is the last permitted access to the batch.
+const Batch = struct {
+    const Diagnostics = struct {
+        logical_bytes: usize = 0,
+        source_bytes: u64 = 0,
+        source_jobs: usize = 0,
+        source_runs: usize = 0,
+        source_items: usize = 0,
+        planned_transfers: usize = 0,
+        planning_ns: u64 = 0,
+        started_at: ?std.Io.Timestamp = null,
+        /// Aggregate source statistics at publish; the completion log reports
+        /// the delta against them.
+        source_stats: ?VFS.ReadStats = null,
+    };
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    jobs: []FairVectoredReadScheduler.Job,
+    transfers: []VectoredLoadPipeline.PlannedTransfer,
+    /// Owned once published; empty before so an unpublished batch can be
+    /// destroyed while the caller still owns the items.
+    items: []*LoaderLoadItem = &.{},
+    remaining: std.atomic.Value(usize),
+    done: std.Io.Event = .unset,
+    requests: std.ArrayListUnmanaged(*VectoredLoadPipeline.RequestContext) = .empty,
+    blocks: std.ArrayListUnmanaged(*VectoredLoadPipeline.BlockContext) = .empty,
+    events: std.ArrayListUnmanaged(*VectoredLoadPipeline.EventContext) = .empty,
+    diagnostics: Diagnostics,
+    /// Set by retirement so a unit released after `done` trips `finishJobs`.
+    freeing: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
+
+    /// Takes ownership of the plan's jobs and transfers. The sentinel keeps
+    /// the batch from completing before the publisher has made it visible.
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        plan: *FairVectoredReadScheduler.PreparedBatch,
+        diagnostics: Diagnostics,
+    ) !*Batch {
+        const self = try allocator.create(Batch);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .jobs = plan.jobs,
+            .transfers = plan.transfers,
+            .remaining = .init(1 + plan.jobs.len),
+            .diagnostics = diagnostics,
+        };
+        plan.* = undefined;
+        return self;
+    }
+
+    /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
+    /// caller's final access to the batch and to anything it owns (requests,
+    /// blocks, events, items, jobs, transfers). The last unit sets `done`,
+    /// and the awaiting task frees all of it as soon as it observes the event.
+    fn finishJobs(self: *Batch, count: usize) void {
+        if (count == 0) return;
+        if (builtin.mode == .Debug) std.debug.assert(!self.freeing);
+        const previous = self.remaining.fetchSub(count, .acq_rel);
+        std.debug.assert(previous >= count);
+        if (previous == count) self.done.set(self.io);
+    }
+
+    /// Frees the items and the plan. Contexts must already have been retired
+    /// by `VectoredLoadPipeline.retireBatch`.
+    fn destroy(self: *Batch) void {
+        std.debug.assert(self.requests.items.len == 0);
+        std.debug.assert(self.blocks.items.len == 0);
+        std.debug.assert(self.events.items.len == 0);
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+        self.allocator.free(self.transfers);
+        self.allocator.free(self.jobs);
+        self.requests.deinit(self.allocator);
+        self.blocks.deinit(self.allocator);
+        self.events.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+};
+
 const VectoredLoadPipeline = struct {
     const RequestContext = struct {
         pipeline: *VectoredLoadPipeline,
+        batch: *Batch,
         pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
         completed: std.atomic.Value(bool) = .init(false),
         source_finished: std.atomic.Value(bool) = .init(false),
@@ -472,9 +564,14 @@ const VectoredLoadPipeline = struct {
             std.debug.assert(previous > 0);
             if (previous != 1) return;
 
-            self.pipeline.metrics.endRequest();
+            // Locals first: releasing the batch unit may complete the batch
+            // that owns this request, so nothing is touched after it.
+            const pipeline = self.pipeline;
+            const batch = self.batch;
             self.completed.store(true, .release);
-            self.pipeline.request_gate.release(self.pipeline.io);
+            pipeline.metrics.endRequest();
+            pipeline.request_gate.release(pipeline.io);
+            batch.finishJobs(1);
         }
     };
 
@@ -527,10 +624,7 @@ const VectoredLoadPipeline = struct {
     next_read_admission: std.atomic.Value(u64) = .init(1),
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
-    requests: std.ArrayListUnmanaged(*RequestContext) = .empty,
-    blocks: std.ArrayListUnmanaged(*BlockContext) = .empty,
     ready_queues: []std.ArrayListUnmanaged(ReadyTransfer),
-    events: std.ArrayListUnmanaged(*EventContext) = .empty,
     active_by_device: []usize,
     dma_limit: usize,
     next_device: usize = 0,
@@ -578,27 +672,14 @@ const VectoredLoadPipeline = struct {
     }
 
     fn deinit(self: *VectoredLoadPipeline) void {
+        // Every batch was retired: no DMA event, queued transfer or request
+        // context may outlive its batch.
         std.debug.assert(self.active_events == 0);
         std.debug.assert(self.ready_entries == 0);
-        for (self.events.items) |ctx| {
-            ctx.pjrt_event.deinit(self.platform.pjrt_api);
-            if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
-            self.allocator.destroy(ctx);
-        }
-        for (self.blocks.items) |block| {
-            std.debug.assert(block.lease.isComplete());
-            self.allocator.destroy(block);
-        }
-        for (self.requests.items) |request| {
-            std.debug.assert(request.completed.load(.acquire));
-            self.allocator.destroy(request);
-        }
+        std.debug.assert(self.metrics.outstanding_requests.load(.acquire) == 0);
         for (self.ready_queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.ready_queues);
         self.allocator.free(self.active_by_device);
-        self.events.deinit(self.allocator);
-        self.blocks.deinit(self.allocator);
-        self.requests.deinit(self.allocator);
     }
 
     fn failed(self: *const VectoredLoadPipeline) bool {
@@ -620,40 +701,46 @@ const VectoredLoadPipeline = struct {
         }
     }
 
-    fn registerRequest(self: *VectoredLoadPipeline) !*RequestContext {
+    fn registerRequest(self: *VectoredLoadPipeline, batch: *Batch) !*RequestContext {
         const request = try self.allocator.create(RequestContext);
         errdefer self.allocator.destroy(request);
         request.* = .{
             .pipeline = self,
+            .batch = batch,
             .read_epoch = 0,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        try self.requests.append(self.allocator, request);
+        try batch.requests.append(self.allocator, request);
         self.metrics.beginRequest();
         return request;
     }
 
-    fn reapCompleted(self: *VectoredLoadPipeline) void {
+    /// Destroys every context a done batch owns. Runs under `metadata_mutex`
+    /// so an `abortReady` still iterating queued entries cannot race the free.
+    /// PJRT events are destroyed here, from the awaiting task after their
+    /// callbacks fired, exactly as `pjrt.Event.await` does.
+    fn retireBatch(self: *VectoredLoadPipeline, batch: *Batch) void {
+        std.debug.assert(batch.done.isSet());
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        std.debug.assert(self.active_events == 0 and self.ready_entries == 0);
-        for (self.events.items) |ctx| {
+        if (builtin.mode == .Debug) batch.freeing = true;
+        for (batch.events.items) |ctx| {
             ctx.pjrt_event.deinit(self.platform.pjrt_api);
             if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
             self.allocator.destroy(ctx);
         }
-        for (self.blocks.items) |block| {
+        for (batch.blocks.items) |block| {
             std.debug.assert(block.lease.isComplete());
             self.allocator.destroy(block);
         }
-        for (self.requests.items) |request| {
+        for (batch.requests.items) |request| {
             std.debug.assert(request.completed.load(.acquire));
             self.allocator.destroy(request);
         }
-        self.events.clearRetainingCapacity();
-        self.blocks.clearRetainingCapacity();
-        self.requests.clearRetainingCapacity();
+        batch.events.clearRetainingCapacity();
+        batch.blocks.clearRetainingCapacity();
+        batch.requests.clearRetainingCapacity();
     }
 
     fn reserveSourceJob(self: *VectoredLoadPipeline) void {
@@ -680,7 +767,7 @@ const VectoredLoadPipeline = struct {
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        try self.blocks.append(self.allocator, block);
+        try request.batch.blocks.append(self.allocator, block);
         request.addBlock();
         return block;
     }
@@ -732,12 +819,16 @@ const VectoredLoadPipeline = struct {
         self.requestPump();
     }
 
-    fn reserveBlockCapacity(self: *VectoredLoadPipeline, count: usize) !void {
+    fn reserveBlockCapacity(self: *VectoredLoadPipeline, batch: *Batch, count: usize) !void {
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        try self.blocks.ensureUnusedCapacity(self.allocator, count);
+        try batch.blocks.ensureUnusedCapacity(self.allocator, count);
     }
 
+    /// Drops `count` never-submitted references of a registered block. Only
+    /// the worker that still holds the request's scheduling sentinel calls
+    /// this, so the request cannot reach zero here and the batch stays alive
+    /// until that worker's `finishScheduling`.
     fn abandonSubmissions(
         block: *BlockContext,
         count: usize,
@@ -804,30 +895,38 @@ const VectoredLoadPipeline = struct {
         }
     }
 
+    /// MEMORY-ORDER RULE: `transfer.target` and `transfer.block` belong to a
+    /// batch, and the block's final completion may complete that batch, after
+    /// which the awaiting task frees it. Every path therefore copies what it
+    /// needs into locals, retires the DMA slot with `eventCompleted`, and
+    /// calls `block.complete()` last.
     fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer) void {
+        const device_index = transfer.target.device_index;
+        const block = transfer.block;
+        self.submitTransfer(transfer) catch |err| {
+            self.recordError(err);
+            self.eventCompleted(device_index);
+            block.complete();
+        };
+    }
+
+    fn submitTransfer(self: *VectoredLoadPipeline, transfer: ReadyTransfer) !void {
+        const api = self.platform.pjrt_api;
         const is_last = transfer.destination_offset + transfer.len == transfer.target.total;
-        const event = transfer.target.manager.transferData(
-            self.platform.pjrt_api,
+        const event = try transfer.target.manager.transferData(
+            api,
             0,
             transfer.block.lease.data[transfer.source_offset..][0..transfer.len],
             @intCast(transfer.destination_offset),
             is_last,
-        ) catch |err| {
-            self.recordError(err);
-            transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index);
-            return;
-        };
+        );
         if (is_last) transfer.target.final_submitted = true;
         _ = transfer.target.submitted_bytes.fetchAdd(transfer.len, .release);
 
-        const ctx = self.allocator.create(EventContext) catch {
-            event.awaitRaw(self.platform.pjrt_api) catch {};
-            event.deinit(self.platform.pjrt_api);
-            self.recordError(error.OutOfMemory);
-            transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index);
-            return;
+        const ctx = self.allocator.create(EventContext) catch |err| {
+            event.awaitRaw(api) catch {};
+            event.deinit(api);
+            return err;
         };
         ctx.* = .{
             .pipeline = self,
@@ -836,34 +935,39 @@ const VectoredLoadPipeline = struct {
             .device_index = transfer.target.device_index,
         };
 
+        const batch = transfer.block.request.batch;
         self.metadata_mutex.lockUncancelable(self.io);
-        self.events.append(self.allocator, ctx) catch {
+        batch.events.append(self.allocator, ctx) catch |err| {
             self.metadata_mutex.unlock(self.io);
-            event.awaitRaw(self.platform.pjrt_api) catch {};
-            event.deinit(self.platform.pjrt_api);
+            event.awaitRaw(api) catch {};
+            event.deinit(api);
             self.allocator.destroy(ctx);
-            self.recordError(error.OutOfMemory);
-            transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index);
-            return;
+            return err;
         };
         self.metadata_mutex.unlock(self.io);
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
-        event.onReady(self.platform.pjrt_api, EventContext, struct {
+        event.onReady(api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
+                // MEMORY-ORDER RULE: the batch owns `ctx_` and its block, and
+                // `block.complete()` may complete that batch, after which the
+                // awaiting task frees the context, the block and the batch.
+                // Load every field first, store the error, retire the DMA
+                // slot, and complete the block last.
+                const pipeline = ctx_.pipeline;
+                const device_index = ctx_.device_index;
+                const block = ctx_.block;
                 ctx_.err = err;
                 if (err) |pjrt_error| {
-                    ctx_.pipeline.recordError(pjrt_error.getCode(ctx_.pipeline.platform.pjrt_api).toApiError());
+                    pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
                 }
-                ctx_.block.complete();
-                ctx_.pipeline.eventCompleted(ctx_.device_index);
+                pipeline.eventCompleted(device_index);
+                block.complete();
             }
         }.call, ctx) catch |err| {
-            event.awaitRaw(self.platform.pjrt_api) catch {};
-            self.recordError(err);
-            transfer.block.complete();
-            self.eventCompleted(transfer.target.device_index);
+            // The batch owns `ctx` and destroys the event at retirement.
+            event.awaitRaw(api) catch {};
+            return err;
         };
     }
 
@@ -884,6 +988,9 @@ const VectoredLoadPipeline = struct {
             self.requestPump();
     }
 
+    /// Force-completes every queued transfer. A completion here may finish
+    /// its batch, but the batch is retired under `metadata_mutex`, which this
+    /// holds, so no queued entry is touched after its block completes.
     fn abortReady(self: *VectoredLoadPipeline) void {
         self.metadata_mutex.lockUncancelable(self.io);
         for (self.ready_queues) |*queue| {
@@ -1064,7 +1171,7 @@ const VectoredReadRequest = struct {
             }
         }
 
-        pipeline.reserveBlockCapacity(block_count) catch |err| {
+        pipeline.reserveBlockCapacity(request.batch, block_count) catch |err| {
             pipeline.recordError(err);
             return;
         };
@@ -1170,6 +1277,14 @@ const FairVectoredReadScheduler = struct {
         remaining_jobs: usize,
     };
 
+    /// A claimed job and the batch that owns it. The claim holds one of the
+    /// batch's completion units until the worker releases it.
+    const Claim = struct {
+        batch: *Batch,
+        job: Job,
+    };
+
+    /// The planner's output; `Batch.create` takes ownership of it.
     const PreparedBatch = struct {
         allocator: std.mem.Allocator,
         jobs: []Job,
@@ -1185,7 +1300,9 @@ const FairVectoredReadScheduler = struct {
     };
 
     worker_count: usize,
-    plan: ?PreparedBatch = null,
+    /// The published batch. The scheduler never frees it: the awaiting task
+    /// retires it after `finishEpoch` has emptied the slot.
+    plan: ?*Batch = null,
     cursor: std.atomic.Value(usize) = .init(0),
     waiting_workers: usize = 0,
     stopping: bool = false,
@@ -1579,24 +1696,25 @@ const FairVectoredReadScheduler = struct {
         };
     }
 
-    fn publish(self: *FairVectoredReadScheduler, io: std.Io, batch: *PreparedBatch) !void {
+    fn publish(self: *FairVectoredReadScheduler, io: std.Io, batch: *Batch) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.stopping) return error.LoaderShuttingDown;
         if (self.plan != null) return error.LoaderEpochActive;
-        self.plan = batch.*;
-        batch.* = undefined;
+        self.plan = batch;
         self.cursor.store(0, .release);
         self.condition.broadcast(io);
     }
 
+    /// Empties the slot once every worker is idle. `claim` reads the slot
+    /// before it holds a completion unit, so a batch may only be freed after
+    /// this rendezvous.
     fn finishEpoch(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         while (!self.stopping and self.waiting_workers != self.worker_count) {
             self.condition.waitUncancelable(io, &self.mutex);
         }
-        if (self.plan) |*plan| plan.deinit();
         self.plan = null;
         self.cursor.store(0, .release);
     }
@@ -1608,12 +1726,20 @@ const FairVectoredReadScheduler = struct {
         self.condition.broadcast(io);
     }
 
+    /// Stops claims and retires the published batch's unclaimed units so it
+    /// still reaches `done`. Claims and this swap are read-modify-writes on
+    /// the cursor, so they partition the jobs exactly: every claim that won a
+    /// position keeps its unit, every later claim returns null.
     fn fail(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        if (self.plan) |plan| self.cursor.store(plan.jobs.len, .release);
         self.stopping = true;
         self.condition.broadcast(io);
+        const batch = self.plan orelse return;
+        const claimed = @min(self.cursor.swap(batch.jobs.len, .acq_rel), batch.jobs.len);
+        // The slot keeps the batch alive: `finishEpoch` empties it under this
+        // mutex before the awaiting task frees the batch.
+        batch.finishJobs(batch.jobs.len - claimed);
     }
 
     fn initForTest(
@@ -1675,42 +1801,45 @@ const FairVectoredReadScheduler = struct {
                 .len = test_job.len,
             };
         }
+        var plan: PreparedBatch = .{
+            .allocator = allocator,
+            .jobs = jobs,
+            .transfers = &.{},
+            .source_bytes = source_bytes,
+            .source_runs = test_jobs.len,
+        };
+        const batch = try Batch.create(allocator, std.testing.io, &plan, .{});
+        // Published: drop the sentinel as `appendItems` does.
+        batch.finishJobs(1);
         for (queues) |*queue| queue.deinit(allocator);
         allocator.free(queues);
-        return .{
-            .worker_count = 0,
-            .plan = .{
-                .allocator = allocator,
-                .jobs = jobs,
-                .transfers = &.{},
-                .source_bytes = source_bytes,
-                .source_runs = test_jobs.len,
-            },
-        };
+        return .{ .worker_count = 0, .plan = batch };
     }
 
     fn deinit(self: *FairVectoredReadScheduler) void {
-        if (self.plan) |*plan| plan.deinit();
+        // The loader empties the slot before destroying the scheduler; only
+        // tests leave a batch behind.
+        if (self.plan) |batch| batch.destroy();
         self.* = undefined;
     }
 
-    fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Job {
-        const plan = if (self.plan) |*value| value else return null;
+    fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Claim {
+        const batch = self.plan orelse return null;
         const position = self.cursor.fetchAdd(1, .monotonic);
-        if (position >= plan.jobs.len) return null;
-        if (position + 1 == plan.jobs.len) {
+        if (position >= batch.jobs.len) return null;
+        if (position + 1 == batch.jobs.len) {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
             self.condition.broadcast(io);
         }
-        return plan.jobs[position];
+        return .{ .batch = batch, .job = batch.jobs[position] };
     }
 
     fn waitExhausted(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        while (self.plan) |plan| {
-            if (self.cursor.load(.acquire) >= plan.jobs.len) return;
+        while (self.plan) |batch| {
+            if (self.cursor.load(.acquire) >= batch.jobs.len) return;
             self.condition.waitUncancelable(io, &self.mutex);
         }
     }
@@ -1732,9 +1861,9 @@ const FairVectoredReadScheduler = struct {
     fn snapshot(self: *FairVectoredReadScheduler, io: std.Io) Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const plan = self.plan orelse return .{ .remaining_jobs = 0 };
-        const position = @min(self.cursor.load(.acquire), plan.jobs.len);
-        return .{ .remaining_jobs = plan.jobs.len - position };
+        const batch = self.plan orelse return .{ .remaining_jobs = 0 };
+        const position = @min(self.cursor.load(.acquire), batch.jobs.len);
+        return .{ .remaining_jobs = batch.jobs.len - position };
     }
 };
 
@@ -1748,10 +1877,10 @@ test "fair read scheduler rotates sharded devices by scheduled bytes" {
     var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
     defer scheduler.deinit();
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 3), scheduler.claim(io).?.file_offset);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 3), scheduler.claim(io).?.job.file_offset);
 }
 
 test "source batch coalesces exact adjacent and overlapping tensor ranges" {
@@ -1883,9 +2012,9 @@ test "fair read scheduler preserves per-tensor request order" {
     var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
     defer scheduler.deinit();
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.len);
-    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.len);
-    try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.len);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.job.len);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.job.len);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.claim(io).?.job.len);
 }
 
 test "fair read scheduler claims a replicated job once and credits every replica" {
@@ -1897,11 +2026,11 @@ test "fair read scheduler claims a replicated job once and credits every replica
     var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
     defer scheduler.deinit();
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.file_offset);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.job.file_offset);
     // The replicated entry is skipped in device 1's queue; tie rotation gives
     // that device the next scheduling turn.
-    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.file_offset);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.job.file_offset);
     try std.testing.expect(scheduler.claim(io) == null);
 }
 
@@ -1916,13 +2045,13 @@ test "fair read scheduler compares physical bytes rather than scheduling turns" 
     var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &jobs);
     defer scheduler.deinit();
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 3), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.file_offset);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 3), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.claim(io).?.job.file_offset);
     // Device 0 receives another turn because it has 8 scheduled bytes while
     // device 1 has 10; a turn-count scheduler would alternate here.
-    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.file_offset);
-    try std.testing.expectEqual(@as(u64, 4), scheduler.claim(io).?.file_offset);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 4), scheduler.claim(io).?.job.file_offset);
 }
 
 test "fair read scheduler tracks fixed jobs and tails" {
@@ -1989,8 +2118,8 @@ test "fair read scheduler concurrent claims return every logical job once" {
             claim_count_: *std.atomic.Value(usize),
             duplicate_: *std.atomic.Value(bool),
         ) void {
-            while (scheduler_.claim(std.testing.io)) |job| {
-                const mask = @as(u64, 1) << @intCast(job.file_offset);
+            while (scheduler_.claim(std.testing.io)) |claim| {
+                const mask = @as(u64, 1) << @intCast(claim.job.file_offset);
                 if (seen_.fetchOr(mask, .acq_rel) & mask != 0) duplicate_.store(true, .release);
                 _ = claim_count_.fetchAdd(1, .monotonic);
             }
@@ -2041,10 +2170,7 @@ test "fair scheduler rejects a second immutable epoch plan" {
         .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 0, 10 } },
     });
     defer pending.deinit();
-    var plan = pending.plan.?;
-    pending.plan = null;
-    defer plan.deinit();
-    try std.testing.expectError(error.LoaderEpochActive, scheduler.publish(io, &plan));
+    try std.testing.expectError(error.LoaderEpochActive, scheduler.publish(io, pending.plan.?));
 }
 
 test "fair scheduler publishes a new plan only after the epoch barrier" {
@@ -2054,19 +2180,22 @@ test "fair scheduler publishes a new plan only after the epoch barrier" {
         .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{ 0, 8 } },
     });
     defer scheduler.deinit();
+    const first = scheduler.claim(io).?.batch;
     _ = scheduler.claim(io).?;
-    _ = scheduler.claim(io).?;
+    first.finishJobs(2);
+    try std.testing.expect(first.done.isSet());
     scheduler.finishEpoch(io);
+    first.destroy();
     try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
 
     var next = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &.{
         .{ .tensor_index = 2, .len = 4, .physical_bytes = &.{ 0, 4 } },
     });
     defer next.deinit();
-    var plan = next.plan.?;
+    const plan = next.plan.?;
     next.plan = null;
-    try scheduler.publish(io, &plan);
-    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.file_offset);
+    try scheduler.publish(io, plan);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.claim(io).?.job.file_offset);
 }
 
 const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
@@ -2886,32 +3015,13 @@ fn shouldBootstrapSource(
         outstanding_requests >= read_limit and remaining_jobs != 0;
 }
 
+/// Loader-wide log cursors; the per-batch facts live in `Batch.Diagnostics`.
 const DirectLoaderDiagnostics = struct {
-    logical_bytes: usize = 0,
-    source_bytes: u64 = 0,
-    source_jobs: usize = 0,
-    source_runs: usize = 0,
-    source_items: usize = 0,
-    planned_transfers: usize = 0,
-    planning_ns: u64 = 0,
-    started_at: ?std.Io.Timestamp = null,
     epoch_number: usize = 0,
     logged_read_operations: u64 = 0,
     logged_source_calls: u64 = 0,
     logged_transfer_pieces: u64 = 0,
     logged_dma_submissions: u64 = 0,
-    source_stats: ?VFS.ReadStats = null,
-
-    fn resetEpoch(self: *DirectLoaderDiagnostics) void {
-        self.logical_bytes = 0;
-        self.source_bytes = 0;
-        self.source_jobs = 0;
-        self.source_runs = 0;
-        self.source_items = 0;
-        self.planned_transfers = 0;
-        self.planning_ns = 0;
-        self.started_at = null;
-    }
 };
 
 pub const DirectLoader = struct {
@@ -2931,10 +3041,10 @@ pub const DirectLoader = struct {
     worker_group: std.Io.Group = .init,
     controller_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*LoaderSourceSlot) = .empty,
-    epoch_items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty,
+    /// The published batch until `await` retires it; one at a time for now.
+    current: ?*Batch = null,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     diagnostics: DirectLoaderDiagnostics = .{},
-    epoch_active: bool = false,
     source_request_size: usize,
     maximum_blocks_per_job: usize,
     effective_pinned_feasible_width: usize,
@@ -3028,9 +3138,6 @@ pub const DirectLoader = struct {
             .source_request_size = request_size,
             .maximum_blocks_per_job = maximum_blocks_per_job,
             .effective_pinned_feasible_width = feasible_width,
-            .diagnostics = .{
-                .source_stats = if (read_stats) |cursor| cursor.previous else null,
-            },
         };
         // Ownership moved into the stable heap object.
         pool_moved = true;
@@ -3112,24 +3219,29 @@ pub const DirectLoader = struct {
             if (!self.scheduler.waitForWork(self.io)) return;
             if (self.pipeline.failed()) return;
             if (!self.request_gate.acquire(self.io)) return;
-            const job = self.scheduler.claim(self.io) orelse {
+            const claim = self.scheduler.claim(self.io) orelse {
                 self.request_gate.release(self.io);
                 continue;
             };
             self.pipeline.reserveSourceJob();
-            const request = self.pipeline.registerRequest() catch |err| {
+            const request = self.pipeline.registerRequest(claim.batch) catch |err| {
                 self.pipeline.abandonSourceJob();
                 self.request_gate.release(self.io);
+                // The job is claimed, so `fail` will not retire its unit;
+                // release it here (last access to the batch) before failing.
+                claim.batch.finishJobs(1);
                 self.pipeline.recordError(err);
                 return;
             };
+            // The request's scheduling sentinel keeps the batch, and with it
+            // `job.transfers`, alive until `runCoalesced` returns.
             VectoredReadRequest.runCoalesced(
                 request,
-                job.source_slot,
+                claim.job.source_slot,
                 &self.pipeline,
-                job.file_offset,
-                job.len,
-                job.transfers,
+                claim.job.file_offset,
+                claim.job.len,
+                claim.job.transfers,
                 self,
                 &scratch,
             );
@@ -3153,7 +3265,7 @@ pub const DirectLoader = struct {
     pub fn checkOpen(self: *DirectLoader) !void {
         if (self.cleaned) return error.LoaderShuttingDown;
         if (self.pipeline.errorValue()) |err| return err;
-        if (self.epoch_active) return error.LoaderEpochActive;
+        if (self.current != null) return error.LoaderEpochActive;
     }
 
     fn sourceSlot(self: *DirectLoader, uri: []const u8) !*LoaderSourceSlot {
@@ -3184,10 +3296,16 @@ pub const DirectLoader = struct {
         return item;
     }
 
-    fn appendItems(self: *DirectLoader, items: []const *LoaderLoadItem) !void {
+    /// Plans and publishes `items` as one batch. On success the batch owns
+    /// the slice and the items; on failure the caller still does.
+    fn appendItems(self: *DirectLoader, items: []*LoaderLoadItem) !void {
         try self.checkOpen();
+        var logical_bytes: usize = 0;
+        for (items) |item| {
+            logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
+        }
         const planning_started: std.Io.Timestamp = .now(self.io, .awake);
-        var batch = try FairVectoredReadScheduler.prepareBatch(
+        var plan = try FairVectoredReadScheduler.prepareBatch(
             self.allocator,
             self.platform.devices.len,
             items,
@@ -3195,68 +3313,64 @@ pub const DirectLoader = struct {
             self.source_request_size,
         );
         const planning_elapsed = planning_started.untilNow(self.io, .awake);
-        var batch_owned = true;
-        defer if (batch_owned) batch.deinit();
-        const batch_transfer_count = batch.transfers.len;
-        const batch_job_count = batch.jobs.len;
-        const batch_source_bytes = batch.source_bytes;
-        const batch_source_runs = batch.source_runs;
-        try self.epoch_items.ensureUnusedCapacity(self.allocator, items.len);
-
-        var logical_bytes: usize = 0;
-        for (items) |item| {
-            logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
-        }
-        self.diagnostics.started_at = .now(self.io, .awake);
-        if (self.load_profile.stats) |provider| {
+        const batch = Batch.create(self.allocator, self.io, &plan, .{
+            .logical_bytes = logical_bytes,
+            .source_bytes = plan.source_bytes,
+            .source_jobs = plan.jobs.len,
+            .source_runs = plan.source_runs,
+            .source_items = items.len,
+            .planned_transfers = plan.transfers.len,
+            .planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0)),
+            .started_at = .now(self.io, .awake),
             // Exclude aggregate backend traffic that happened while this
-            // loader had no active epoch from the next diagnostic delta.
-            self.diagnostics.source_stats = provider.snapshot();
-        }
-        try self.scheduler.publish(self.io, &batch);
-        batch_owned = false;
-        for (items) |item| self.epoch_items.appendAssumeCapacity(item);
-        self.diagnostics.logical_bytes = logical_bytes;
-        self.diagnostics.source_bytes = batch_source_bytes;
-        self.diagnostics.source_jobs = batch_job_count;
-        self.diagnostics.source_runs = batch_source_runs;
-        self.diagnostics.source_items = items.len;
-        self.diagnostics.planned_transfers = batch_transfer_count;
-        self.diagnostics.planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0));
-        self.epoch_active = true;
+            // loader had no active epoch from the completion delta.
+            .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
+        }) catch |err| {
+            plan.deinit();
+            return err;
+        };
+        errdefer batch.destroy();
+        try self.scheduler.publish(self.io, batch);
+        batch.items = items;
+        self.current = batch;
+        // The plan is visible: drop the publish sentinel. A batch without
+        // jobs completes right here.
+        batch.finishJobs(1);
     }
 
     pub fn loadPrepared(self: *DirectLoader, specs: []const LoadSpec) !void {
         try self.checkOpen();
-        var items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty;
-        defer items.deinit(self.allocator);
-        errdefer for (items.items) |item| item.deinit(self.allocator);
-        try items.ensureTotalCapacityPrecise(self.allocator, specs.len);
-        for (specs) |spec| {
-            items.appendAssumeCapacity(try self.createItem(
-                spec.source,
-                spec.shape,
-                spec.sharding,
-                spec.output,
-            ));
+        const items = try self.allocator.alloc(*LoaderLoadItem, specs.len);
+        errdefer self.allocator.free(items);
+        var initialized: usize = 0;
+        errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
+        for (specs, items) |spec, *item| {
+            item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output);
+            initialized += 1;
         }
-        try self.appendItems(items.items);
-        items.clearRetainingCapacity();
+        try self.appendItems(items);
     }
 
     pub fn await(self: *DirectLoader) !void {
         if (self.cleaned) return error.LoaderShuttingDown;
-        if (!self.epoch_active) {
+        const batch = self.current orelse {
             if (self.pipeline.errorValue()) |err| return err;
             return;
+        };
+        batch.done.waitUncancelable(self.io);
+        // `done` means every job was claimed or retired by `fail`, and every
+        // claimed request released its lifecycle credit before its unit. The
+        // gate drain below only covers permits of workers that claimed
+        // nothing; it and the barrier stay until the epoch machinery goes.
+        if (builtin.mode == .Debug) {
+            std.debug.assert(self.scheduler.snapshot(self.io).remaining_jobs == 0);
         }
-        self.scheduler.waitExhausted(self.io);
         self.request_gate.waitEmpty(self.io);
         self.controller_runtime.epochBarrier(self.io);
         const load_error = self.pipeline.errorValue();
         if (load_error != null) {
             self.stopWorkers();
-            for (self.epoch_items.items) |item| {
+            for (batch.items) |item| {
                 const state = item.state.readyValue() orelse continue;
                 for (state.targets) |*target| {
                     if (!target.final_submitted) {
@@ -3270,21 +3384,17 @@ pub const DirectLoader = struct {
             }
         }
         self.scheduler.finishEpoch(self.io);
-        self.pipeline.reapCompleted();
-        for (self.epoch_items.items) |item| item.deinit(self.allocator);
-        self.epoch_items.clearRetainingCapacity();
-        self.logEpoch(load_error == null);
-        if (load_error) |err| {
-            self.diagnostics.resetEpoch();
-            self.epoch_active = false;
-            return err;
-        }
-        _ = self.bytes_loaded.fetchAdd(self.diagnostics.logical_bytes, .monotonic);
-        self.diagnostics.resetEpoch();
-        self.epoch_active = false;
+        self.pipeline.retireBatch(batch);
+        self.logEpoch(batch, load_error == null);
+        const logical_bytes = batch.diagnostics.logical_bytes;
+        batch.destroy();
+        self.current = null;
+        if (load_error) |err| return err;
+        _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
     }
 
-    fn logEpoch(self: *DirectLoader, successful: bool) void {
+    fn logEpoch(self: *DirectLoader, batch: *const Batch, successful: bool) void {
+        const diagnostics = &batch.diagnostics;
         const read_operations = self.metrics.read_operations.load(.acquire);
         const source_calls = self.metrics.source_calls.load(.acquire);
         const transfer_pieces = self.metrics.transfer_pieces.load(.acquire);
@@ -3302,43 +3412,41 @@ pub const DirectLoader = struct {
         var source_retries: u64 = 0;
         var source_throttles: u64 = 0;
         if (self.load_profile.stats) |provider| {
-            const current = provider.snapshot();
-            if (self.diagnostics.source_stats) |previous| {
-                const delta = current.sub(previous);
+            if (diagnostics.source_stats) |previous| {
+                const delta = provider.snapshot().sub(previous);
                 source_requests = delta.physical_requests;
                 source_bytes = delta.physical_bytes;
                 source_retries = delta.retries;
                 source_throttles = delta.throttles;
             }
-            self.diagnostics.source_stats = current;
         }
-        const elapsed_seconds: f64 = if (self.diagnostics.started_at) |started|
+        const elapsed_seconds: f64 = if (diagnostics.started_at) |started|
             @as(f64, @floatFromInt(started.untilNow(self.io, .awake).nanoseconds)) /
                 std.time.ns_per_s
         else
             0;
-        const average_read_size = if (self.diagnostics.source_jobs == 0)
+        const average_read_size = if (diagnostics.source_jobs == 0)
             0
         else
-            self.diagnostics.source_bytes / self.diagnostics.source_jobs;
-        const coalescing_ratio = if (self.diagnostics.source_jobs == 0)
+            diagnostics.source_bytes / diagnostics.source_jobs;
+        const coalescing_ratio = if (diagnostics.source_jobs == 0)
             0
         else
-            @as(f64, @floatFromInt(self.diagnostics.source_items)) /
-                @as(f64, @floatFromInt(self.diagnostics.source_jobs));
+            @as(f64, @floatFromInt(diagnostics.source_items)) /
+                @as(f64, @floatFromInt(diagnostics.source_jobs));
         load_log.debug("epoch completed: epoch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, elapsed={d:.3}s, planning_elapsed={d:.3}s, reads={d}, physical_source_calls={d}, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, tensor_transfer_pieces={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, dma_submissions={d}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.diagnostics.epoch_number,
             successful,
-            self.diagnostics.logical_bytes,
-            self.diagnostics.source_bytes,
+            diagnostics.logical_bytes,
+            diagnostics.source_bytes,
             elapsed_seconds,
-            @as(f64, @floatFromInt(self.diagnostics.planning_ns)) / std.time.ns_per_s,
+            @as(f64, @floatFromInt(diagnostics.planning_ns)) / std.time.ns_per_s,
             epoch_reads,
             epoch_source_calls,
-            self.diagnostics.source_jobs,
-            self.diagnostics.source_runs,
-            self.diagnostics.source_items,
-            self.diagnostics.planned_transfers,
+            diagnostics.source_jobs,
+            diagnostics.source_runs,
+            diagnostics.source_items,
+            diagnostics.planned_transfers,
             epoch_transfer_pieces,
             coalescing_ratio,
             average_read_size,
@@ -3363,7 +3471,7 @@ pub const DirectLoader = struct {
     ) !void {
         try self.checkOpen();
         const items = try self.allocator.alloc(*LoaderLoadItem, sources.len);
-        defer self.allocator.free(items);
+        errdefer self.allocator.free(items);
         var initialized: usize = 0;
         errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
         for (sources, exe.input_shapes, exe.input_shardings, inputs, items) |source, shape, sharding, *input, *item| {
@@ -3371,7 +3479,6 @@ pub const DirectLoader = struct {
             initialized += 1;
         }
         try self.appendItems(items);
-        initialized = 0;
         try self.await();
     }
 
@@ -3381,11 +3488,8 @@ pub const DirectLoader = struct {
 
     pub fn destroy(self: *DirectLoader) void {
         if (!self.cleaned) {
-            if (self.epoch_active) self.await() catch {};
+            if (self.current != null) self.await() catch {};
             self.stopWorkers();
-            self.pipeline.reapCompleted();
-            for (self.epoch_items.items) |item| item.deinit(self.allocator);
-            self.epoch_items.deinit(self.allocator);
             var slots = self.source_slots.valueIterator();
             while (slots.next()) |slot| {
                 slot.*.deinit(self.io);
@@ -3671,31 +3775,333 @@ test "vectored final transfers wait for every prior destination submission" {
     try std.testing.expect(pipeline.transferReady(non_final));
 }
 
+/// A single-device pipeline without PJRT: enough for request, block and
+/// batch lifecycle tests. Must not move after `init`.
+const TestPipeline = struct {
+    metrics: VectoredLoadMetrics = .{},
+    gate: AdaptiveRequestGate,
+    queues: [1]std.ArrayListUnmanaged(VectoredLoadPipeline.ReadyTransfer) = .{.empty},
+    active: [1]usize = .{0},
+    pipeline: VectoredLoadPipeline,
+
+    fn init(
+        self: *TestPipeline,
+        gate_limit: usize,
+        pool: ?*mem.DmaBlockPool,
+        scheduler: *FairVectoredReadScheduler,
+    ) void {
+        self.* = .{ .gate = .init(gate_limit), .pipeline = undefined };
+        self.pipeline = .{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .platform = undefined,
+            .pool = if (pool) |value| value else undefined,
+            .read_gate = undefined,
+            .request_gate = &self.gate,
+            .block_size = 64,
+            .device_pool_indices = &.{0},
+            .numa_explicit = false,
+            .metrics = &self.metrics,
+            .scheduler = scheduler,
+            .ready_queues = &self.queues,
+            .active_by_device = &self.active,
+            .dma_limit = 1,
+        };
+    }
+
+    fn deinit(self: *TestPipeline) void {
+        self.queues[0].deinit(std.testing.allocator);
+    }
+
+    /// The worker's claim-to-request sequence.
+    fn claimRequest(
+        self: *TestPipeline,
+        scheduler: *FairVectoredReadScheduler,
+    ) !*VectoredLoadPipeline.RequestContext {
+        const io = std.testing.io;
+        const claim = scheduler.claim(io) orelse return error.NoJob;
+        try std.testing.expect(self.gate.acquire(io));
+        self.pipeline.reserveSourceJob();
+        return self.pipeline.registerRequest(claim.batch);
+    }
+};
+
+/// One pre-mapped arena; growth is refused.
+const TestDmaArena = struct {
+    storage: []u8,
+
+    fn provider(self: *TestDmaArena) mem.DmaBlockPool.ArenaProvider {
+        return .{
+            .context = self,
+            .node_count = 1,
+            .arenaCountFn = arenaCount,
+            .arenaFn = arenaAt,
+            .allocateFn = allocate,
+            .mappedBytesFn = mappedBytes,
+        };
+    }
+
+    fn arenaCount(_: *anyopaque, _: usize) usize {
+        return 1;
+    }
+
+    fn arenaAt(context: *anyopaque, _: usize, _: usize) []u8 {
+        const self: *TestDmaArena = @ptrCast(@alignCast(context));
+        return self.storage;
+    }
+
+    fn allocate(_: *anyopaque, _: usize, _: usize) anyerror![]u8 {
+        return error.RequestExceedsCapacity;
+    }
+
+    fn mappedBytes(context: *anyopaque) usize {
+        const self: *TestDmaArena = @ptrCast(@alignCast(context));
+        return self.storage.len;
+    }
+};
+
+fn testBatch(allocator: std.mem.Allocator, job_count: usize) !*Batch {
+    const jobs = try allocator.alloc(FairVectoredReadScheduler.Job, job_count);
+    errdefer allocator.free(jobs);
+    for (jobs, 0..) |*job, index| job.* = .{
+        .source_slot = undefined,
+        .file_offset = index,
+        .len = 1,
+    };
+    var plan: FairVectoredReadScheduler.PreparedBatch = .{
+        .allocator = allocator,
+        .jobs = jobs,
+        .transfers = &.{},
+        .source_bytes = job_count,
+        .source_runs = job_count,
+    };
+    return Batch.create(allocator, std.testing.io, &plan, .{});
+}
+
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
-    var queues = [_]std.ArrayListUnmanaged(VectoredLoadPipeline.ReadyTransfer){.empty};
-    var active = [_]usize{1};
-    var pipeline: VectoredLoadPipeline = .{
-        .allocator = std.testing.allocator,
-        .io = io,
-        .platform = undefined,
-        .pool = undefined,
-        .read_gate = undefined,
-        .request_gate = undefined,
-        .block_size = 1,
-        .device_pool_indices = &.{0},
-        .numa_explicit = false,
-        .metrics = undefined,
-        .scheduler = undefined,
-        .ready_queues = &queues,
-        .active_by_device = &active,
-        .dma_limit = 1,
-        .active_events = 1,
-    };
+    const allocator = std.testing.allocator;
+    var arena: TestDmaArena = .{ .storage = try allocator.alloc(u8, 64) };
+    defer allocator.free(arena.storage);
+    var pool = try mem.DmaBlockPool.initFromProvider(allocator, arena.provider(), 64, 64, &.{0});
+    defer pool.deinit();
+    var scheduler = try FairVectoredReadScheduler.initForTest(allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 64, .physical_bytes = &.{64} },
+    });
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(1, &pool, &scheduler);
+    defer fixture.deinit();
+    const pipeline = &fixture.pipeline;
+
+    // One request whose only block is queued behind a DMA slot that a failed
+    // callback is about to free.
+    const batch = scheduler.plan.?;
+    const request = try fixture.claimRequest(&scheduler);
+    var leased: [1]mem.DmaBlockPool.Block = undefined;
+    var scratch = try pool.acquireScratch(allocator, 1);
+    defer scratch.deinit();
+    try pool.acquireMany(io, &leased, &.{.{}}, &scratch);
+    try pipeline.reserveBlockCapacity(batch, 1);
+    const block = try pipeline.registerBlock(request, leased[0], 1);
+    var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
+    try fixture.queues[0].append(allocator, .{
+        .target = &target,
+        .block = block,
+        .source_offset = 0,
+        .destination_offset = 0,
+        .len = 64,
+    });
+    pipeline.ready_entries = 1;
+    pipeline.active_events = 1;
+    fixture.active[0] = 1;
+    request.finishScheduling();
+    try std.testing.expect(!batch.done.isSet());
     pipeline.first_error.store(@intFromError(error.Unknown), .release);
 
     pipeline.eventCompleted(0);
     try std.testing.expectEqual(@as(usize, 0), pipeline.active_events);
+    try std.testing.expectEqual(@as(usize, 0), pipeline.ready_entries);
+    try std.testing.expect(block.lease.isComplete());
+    try std.testing.expect(request.completed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
+    try std.testing.expect(batch.done.isSet());
+
+    scheduler.finishEpoch(io);
+    pipeline.retireBatch(batch);
+    batch.destroy();
+}
+
+test "batch completes when every claimed request completes" {
+    const io = std.testing.io;
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 2, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(3, null, &scheduler);
+    defer fixture.deinit();
+
+    const batch = scheduler.plan.?;
+    try std.testing.expectEqual(@as(usize, 3), batch.remaining.load(.acquire));
+    var requests: [3]*VectoredLoadPipeline.RequestContext = undefined;
+    for (&requests) |*request| request.* = try fixture.claimRequest(&scheduler);
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 3), fixture.metrics.outstanding_requests.load(.acquire));
+
+    for (requests, 0..) |request, index| {
+        try std.testing.expect(!batch.done.isSet());
+        try std.testing.expectEqual(requests.len - index, batch.remaining.load(.acquire));
+        request.finishScheduling();
+    }
+    try std.testing.expect(batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 0), batch.remaining.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
+    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.outstanding_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), batch.requests.items.len);
+
+    scheduler.finishEpoch(io);
+    fixture.pipeline.retireBatch(batch);
+    batch.destroy();
+}
+
+test "batch completes when a claimed job is abandoned before its request" {
+    const io = std.testing.io;
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(2, null, &scheduler);
+    defer fixture.deinit();
+
+    const batch = scheduler.plan.?;
+    const request = try fixture.claimRequest(&scheduler);
+    // The worker's `registerRequest` failure path: the claim holds the unit,
+    // so the worker must release it itself.
+    const abandoned = scheduler.claim(io).?;
+    try std.testing.expect(fixture.gate.acquire(io));
+    fixture.pipeline.reserveSourceJob();
+    fixture.pipeline.abandonSourceJob();
+    fixture.gate.release(io);
+    try std.testing.expect(!batch.done.isSet());
+    abandoned.batch.finishJobs(1);
+    try std.testing.expect(!batch.done.isSet());
+
+    request.finishScheduling();
+    try std.testing.expect(batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.pending_source_jobs.load(.acquire));
+    scheduler.finishEpoch(io);
+    fixture.pipeline.retireBatch(batch);
+    batch.destroy();
+}
+
+test "scheduler failure retires unclaimed completion units" {
+    const io = std.testing.io;
+    // One claim in flight: only the two unclaimed units are retired.
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 2, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer scheduler.deinit();
+    const batch = scheduler.claim(io).?.batch;
+    scheduler.fail(io);
+    try std.testing.expect(!batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 1), batch.remaining.load(.acquire));
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    batch.finishJobs(1);
+    try std.testing.expect(batch.done.isSet());
+
+    // Nothing claimed: the failure alone completes the batch.
+    var idle = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer idle.deinit();
+    idle.fail(io);
+    try std.testing.expect(idle.plan.?.done.isSet());
+
+    // Everything claimed, cursor past the end: nothing to retire.
+    var exhausted = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer exhausted.deinit();
+    const claimed = exhausted.claim(io).?.batch;
+    try std.testing.expect(exhausted.claim(io) == null);
+    exhausted.fail(io);
+    try std.testing.expect(!claimed.done.isSet());
+    try std.testing.expectEqual(@as(usize, 1), claimed.remaining.load(.acquire));
+    claimed.finishJobs(1);
+    try std.testing.expect(claimed.done.isSet());
+}
+
+test "sequential batches complete under concurrent claims and retirement" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const worker_count = 4;
+    var scheduler: FairVectoredReadScheduler = .init(worker_count);
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(worker_count, null, &scheduler);
+    defer fixture.deinit();
+
+    const Worker = struct {
+        fn run(fixture_: *TestPipeline, scheduler_: *FairVectoredReadScheduler) void {
+            const io_ = std.testing.io;
+            while (scheduler_.waitForWork(io_)) {
+                if (!fixture_.gate.acquire(io_)) return;
+                const claim = scheduler_.claim(io_) orelse {
+                    fixture_.gate.release(io_);
+                    continue;
+                };
+                fixture_.pipeline.reserveSourceJob();
+                if (claim.job.file_offset % 3 == 2) {
+                    // The `registerRequest` failure path.
+                    fixture_.pipeline.abandonSourceJob();
+                    fixture_.gate.release(io_);
+                    claim.batch.finishJobs(1);
+                    continue;
+                }
+                const request = fixture_.pipeline.registerRequest(claim.batch) catch unreachable;
+                request.finishScheduling();
+            }
+        }
+    };
+    var group: std.Io.Group = .init;
+    defer {
+        scheduler.stop(io);
+        fixture.gate.close(io);
+        group.await(io) catch {};
+    }
+    for (0..worker_count) |_| try group.concurrent(io, Worker.run, .{ &fixture, &scheduler });
+
+    for (0..200) |index| {
+        const job_count = index % 7;
+        const batch = try testBatch(allocator, job_count);
+        scheduler.publish(io, batch) catch |err| {
+            batch.destroy();
+            return err;
+        };
+        batch.finishJobs(1);
+        batch.done.waitUncancelable(io);
+        try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+        fixture.gate.waitEmpty(io);
+        scheduler.finishEpoch(io);
+        var expected_requests: usize = 0;
+        for (0..job_count) |job| {
+            if (job % 3 != 2) expected_requests += 1;
+        }
+        try std.testing.expectEqual(expected_requests, batch.requests.items.len);
+        fixture.pipeline.retireBatch(batch);
+        batch.destroy();
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.outstanding_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.pending_source_jobs.load(.acquire));
 }
 
 fn buildMesh2x2x2(
