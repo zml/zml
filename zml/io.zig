@@ -1970,9 +1970,8 @@ const VectoredReadRequest = struct {
     }
 };
 
-/// Fixed-size source jobs scheduled by destination-device debt. A replicated
-/// job is present in every destination queue but is claimed exactly once and
-/// credits every device it serves.
+/// Immutable source-job epochs ordered once by destination-device debt.
+/// Replicated jobs credit every device they serve but occur once in the order.
 const FairVectoredReadScheduler = struct {
     const SourcePiece = struct {
         item: *LoaderLoadItem,
@@ -1996,7 +1995,6 @@ const FairVectoredReadScheduler = struct {
         len: usize,
         piece_start: usize,
         piece_len: usize,
-        piece_storage: ?[]const SourcePiece = null,
         predecessor: ?usize,
         adaptive_sample: bool = false,
     };
@@ -2019,72 +2017,94 @@ const FairVectoredReadScheduler = struct {
         allocator: std.mem.Allocator,
         jobs: []StoredJob,
         pieces: []SourcePiece,
-        physical_bytes: []usize,
-        queues: []std.ArrayListUnmanaged(usize),
-        remaining_bytes: u64,
-        remaining_full_jobs: usize,
+        order: []usize,
+        remaining_bytes: []u64,
+        remaining_full_jobs: []usize,
         maximum_blocks_per_job: usize,
         source_runs: usize,
 
         fn deinit(self: *PreparedBatch) void {
-            for (self.queues) |*queue| queue.deinit(self.allocator);
-            self.allocator.free(self.queues);
-            self.allocator.free(self.physical_bytes);
-            self.allocator.free(self.pieces);
-            self.allocator.free(self.jobs);
+            if (self.remaining_full_jobs.len != 0) self.allocator.free(self.remaining_full_jobs);
+            if (self.remaining_bytes.len != 0) self.allocator.free(self.remaining_bytes);
+            if (self.order.len != 0) self.allocator.free(self.order);
+            if (self.pieces.len != 0) self.allocator.free(self.pieces);
+            if (self.jobs.len != 0) self.allocator.free(self.jobs);
             self.* = undefined;
         }
     };
 
-    allocator: std.mem.Allocator,
-    device_count: usize,
-    request_size: usize,
-    jobs: std.ArrayListUnmanaged(StoredJob) = .empty,
-    piece_batches: std.ArrayListUnmanaged([]SourcePiece) = .empty,
-    physical_bytes: std.ArrayListUnmanaged(usize) = .empty,
-    queues: []std.ArrayListUnmanaged(usize),
-    cursors: []usize,
-    claimed: std.ArrayListUnmanaged(bool) = .empty,
-    scheduled_physical_bytes: []u64,
-    remaining_bytes: u64,
-    remaining_jobs: usize,
-    remaining_full_jobs: usize,
-    maximum_blocks_per_job: usize = 0,
-    next_device: usize = 0,
-    persistent: bool = false,
-    sealed: bool = true,
+    worker_count: usize,
+    plan: ?PreparedBatch = null,
+    cursor: std.atomic.Value(usize) = .init(0),
+    waiting_workers: usize = 0,
     stopping: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
 
-    fn initAppendable(
+    fn init(worker_count: usize) FairVectoredReadScheduler {
+        return .{ .worker_count = worker_count };
+    }
+
+    fn fairOrder(
         allocator: std.mem.Allocator,
-        device_count: usize,
-        request_size: usize,
-    ) !FairVectoredReadScheduler {
+        jobs: []const StoredJob,
+        physical_bytes: []const usize,
+        queues: []const std.ArrayListUnmanaged(usize),
+    ) ![]usize {
+        const device_count = queues.len;
         if (device_count == 0 or device_count > 64) return error.DmaDeviceMismatch;
-        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
-        errdefer allocator.free(queues);
-        @memset(queues, .empty);
+        if (physical_bytes.len != jobs.len * device_count) return error.InvalidLoaderJob;
+
+        const order = try allocator.alloc(usize, jobs.len);
+        errdefer allocator.free(order);
         const cursors = try allocator.alloc(usize, device_count);
-        errdefer allocator.free(cursors);
+        defer allocator.free(cursors);
         @memset(cursors, 0);
         const scheduled = try allocator.alloc(u64, device_count);
-        errdefer allocator.free(scheduled);
+        defer allocator.free(scheduled);
         @memset(scheduled, 0);
-        return .{
-            .allocator = allocator,
-            .device_count = device_count,
-            .request_size = request_size,
-            .queues = queues,
-            .cursors = cursors,
-            .scheduled_physical_bytes = scheduled,
-            .remaining_bytes = 0,
-            .remaining_jobs = 0,
-            .remaining_full_jobs = 0,
-            .persistent = true,
-            .sealed = false,
-        };
+        const claimed = try allocator.alloc(bool, jobs.len);
+        defer allocator.free(claimed);
+        @memset(claimed, false);
+
+        var next_device: usize = 0;
+        for (order) |*ordered_job| {
+            var selected_device: ?usize = null;
+            var selected_job: ?usize = null;
+            for (0..device_count) |offset| {
+                const device_index = (next_device + offset) % device_count;
+                const queue = queues[device_index];
+                while (cursors[device_index] < queue.items.len and
+                    claimed[queue.items[cursors[device_index]]])
+                {
+                    cursors[device_index] += 1;
+                }
+                var candidate: ?usize = null;
+                for (queue.items[cursors[device_index]..]) |job_index| {
+                    if (claimed[job_index]) continue;
+                    const predecessor = jobs[job_index].predecessor;
+                    if (predecessor == null or claimed[predecessor.?]) {
+                        candidate = job_index;
+                        break;
+                    }
+                }
+                if (candidate == null) continue;
+                if (selected_device == null or
+                    scheduled[device_index] < scheduled[selected_device.?])
+                {
+                    selected_device = device_index;
+                    selected_job = candidate;
+                }
+            }
+            const device_index = selected_device orelse return error.InvalidLoaderJob;
+            const job_index = selected_job.?;
+            claimed[job_index] = true;
+            ordered_job.* = job_index;
+            const row = physical_bytes[job_index * device_count ..][0..device_count];
+            for (row, scheduled) |bytes, *total| total.* +|= @intCast(bytes);
+            next_device = (device_index + 1) % device_count;
+        }
+        return order;
     }
 
     fn prepareBatch(
@@ -2165,8 +2185,6 @@ const FairVectoredReadScheduler = struct {
         errdefer allocator.free(queues);
         @memset(queues, .empty);
         errdefer for (queues) |*queue| queue.deinit(allocator);
-        var remaining_bytes: u64 = 0;
-        var remaining_full_jobs: usize = 0;
         var maximum_blocks_per_job: usize = 0;
         var source_runs: usize = 0;
         var file_start: usize = 0;
@@ -2323,9 +2341,6 @@ const FairVectoredReadScheduler = struct {
                     }
                     const block_count = std.math.divCeil(usize, job_len, block_size) catch unreachable;
                     maximum_blocks_per_job = @max(maximum_blocks_per_job, block_count);
-                    remaining_bytes +|= @intCast(job_len);
-                    // Coalesced jobs, including exact tails, are valid adaptive samples.
-                    remaining_full_jobs += 1;
                     job_start = job_end;
                     jobs_remaining -= 1;
                 }
@@ -2340,13 +2355,30 @@ const FairVectoredReadScheduler = struct {
         const pieces = try pieces_list.toOwnedSlice(allocator);
         errdefer allocator.free(pieces);
         const physical_bytes = try physical_list.toOwnedSlice(allocator);
-        errdefer allocator.free(physical_bytes);
+        defer allocator.free(physical_bytes);
+        const fair_order = try fairOrder(allocator, jobs, physical_bytes, queues);
+        errdefer allocator.free(fair_order);
+        const remaining_bytes = try allocator.alloc(u64, jobs.len + 1);
+        errdefer allocator.free(remaining_bytes);
+        const remaining_full_jobs = try allocator.alloc(usize, jobs.len + 1);
+        errdefer allocator.free(remaining_full_jobs);
+        remaining_bytes[jobs.len] = 0;
+        remaining_full_jobs[jobs.len] = 0;
+        var suffix = jobs.len;
+        while (suffix != 0) {
+            suffix -= 1;
+            const job = jobs[fair_order[suffix]];
+            remaining_bytes[suffix] = remaining_bytes[suffix + 1] +| @as(u64, @intCast(job.len));
+            remaining_full_jobs[suffix] = remaining_full_jobs[suffix + 1] +
+                @intFromBool(job.adaptive_sample);
+        }
+        for (queues) |*queue| queue.deinit(allocator);
+        allocator.free(queues);
         return .{
             .allocator = allocator,
             .jobs = jobs,
             .pieces = pieces,
-            .physical_bytes = physical_bytes,
-            .queues = queues,
+            .order = fair_order,
             .remaining_bytes = remaining_bytes,
             .remaining_full_jobs = remaining_full_jobs,
             .maximum_blocks_per_job = maximum_blocks_per_job,
@@ -2354,87 +2386,42 @@ const FairVectoredReadScheduler = struct {
         };
     }
 
-    fn appendPrepared(self: *FairVectoredReadScheduler, io: std.Io, batch: *PreparedBatch) !void {
-        std.debug.assert(self.persistent);
+    fn publish(self: *FairVectoredReadScheduler, io: std.Io, batch: *PreparedBatch) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.stopping) return error.LoaderShuttingDown;
-        if (self.sealed) return error.LoaderEpochSealed;
-
-        try self.jobs.ensureUnusedCapacity(self.allocator, batch.jobs.len);
-        if (batch.pieces.len != 0)
-            try self.piece_batches.ensureUnusedCapacity(self.allocator, 1);
-        try self.claimed.ensureUnusedCapacity(self.allocator, batch.jobs.len);
-        try self.physical_bytes.ensureUnusedCapacity(self.allocator, batch.physical_bytes.len);
-        for (self.queues, batch.queues) |*queue, prepared| {
-            try queue.ensureUnusedCapacity(self.allocator, prepared.items.len);
-        }
-
-        const base = self.jobs.items.len;
-        for (batch.jobs) |job| {
-            var stored = job;
-            if (stored.predecessor) |predecessor| stored.predecessor = base + predecessor;
-            if (batch.pieces.len != 0) stored.piece_storage = batch.pieces;
-            self.jobs.appendAssumeCapacity(stored);
-            self.claimed.appendAssumeCapacity(false);
-        }
-        if (batch.pieces.len != 0) {
-            self.piece_batches.appendAssumeCapacity(batch.pieces);
-            batch.pieces = &.{};
-        }
-        self.physical_bytes.appendSliceAssumeCapacity(batch.physical_bytes);
-        for (self.queues, batch.queues) |*queue, prepared| {
-            for (prepared.items) |job_index| queue.appendAssumeCapacity(base + job_index);
-        }
-        self.remaining_bytes +|= batch.remaining_bytes;
-        self.remaining_jobs += batch.jobs.len;
-        self.remaining_full_jobs += batch.remaining_full_jobs;
-        self.maximum_blocks_per_job = @max(self.maximum_blocks_per_job, batch.maximum_blocks_per_job);
+        if (self.plan != null) return error.LoaderEpochActive;
+        self.plan = batch.*;
+        batch.* = undefined;
+        self.cursor.store(0, .release);
         self.condition.broadcast(io);
     }
 
-    fn seal(self: *FairVectoredReadScheduler, io: std.Io) void {
+    fn finishEpoch(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        self.sealed = true;
-        self.condition.broadcast(io);
-    }
-
-    fn reopen(self: *FairVectoredReadScheduler, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        std.debug.assert(self.persistent and self.remaining_jobs == 0 and !self.stopping);
-        self.jobs.clearRetainingCapacity();
-        for (self.piece_batches.items) |pieces| self.allocator.free(pieces);
-        self.piece_batches.clearRetainingCapacity();
-        self.claimed.clearRetainingCapacity();
-        self.physical_bytes.clearRetainingCapacity();
-        for (self.queues) |*queue| queue.clearRetainingCapacity();
-        @memset(self.cursors, 0);
-        @memset(self.scheduled_physical_bytes, 0);
-        self.maximum_blocks_per_job = 0;
-        self.next_device = 0;
-        self.sealed = false;
-        self.condition.broadcast(io);
+        while (!self.stopping and self.waiting_workers != self.worker_count) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        if (self.plan) |*plan| plan.deinit();
+        self.plan = null;
+        self.cursor.store(0, .release);
     }
 
     fn stop(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.stopping = true;
-        self.sealed = true;
         self.condition.broadcast(io);
     }
 
     fn fail(self: *FairVectoredReadScheduler, io: std.Io) usize {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const abandoned = self.remaining_jobs;
-        self.remaining_jobs = 0;
-        self.remaining_bytes = 0;
-        self.remaining_full_jobs = 0;
+        const cursor = self.cursor.load(.acquire);
+        const abandoned = if (self.plan) |plan| plan.jobs.len -| cursor else 0;
+        if (self.plan) |plan| self.cursor.store(plan.jobs.len, .release);
         self.stopping = true;
-        self.sealed = true;
         self.condition.broadcast(io);
         return abandoned;
     }
@@ -2444,38 +2431,23 @@ const FairVectoredReadScheduler = struct {
         device_count: usize,
         test_jobs: []const TestJob,
     ) !FairVectoredReadScheduler {
+        if (device_count == 0 or device_count > 64) return error.DmaDeviceMismatch;
         const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
+        errdefer allocator.free(queues);
         @memset(queues, .empty);
-        const cursors = allocator.alloc(usize, device_count) catch |err| {
-            allocator.free(queues);
-            return err;
-        };
-        @memset(cursors, 0);
-        const scheduled = allocator.alloc(u64, device_count) catch |err| {
-            allocator.free(cursors);
-            allocator.free(queues);
-            return err;
-        };
-        @memset(scheduled, 0);
-        var self: FairVectoredReadScheduler = .{
-            .allocator = allocator,
-            .device_count = device_count,
-            .request_size = max_load_read_request_size,
-            .queues = queues,
-            .cursors = cursors,
-            .scheduled_physical_bytes = scheduled,
-            .remaining_bytes = 0,
-            .remaining_jobs = 0,
-            .remaining_full_jobs = 0,
-        };
-        errdefer self.deinit();
+        errdefer for (queues) |*queue| queue.deinit(allocator);
+        const stored_jobs = try allocator.alloc(StoredJob, test_jobs.len);
+        errdefer allocator.free(stored_jobs);
+        const physical_bytes = try allocator.alloc(usize, test_jobs.len * device_count);
+        defer allocator.free(physical_bytes);
         var previous_jobs = try allocator.alloc(?usize, test_jobs.len);
         defer allocator.free(previous_jobs);
         @memset(previous_jobs, null);
-        for (test_jobs, 0..) |job, job_index| {
+        var maximum_blocks_per_job: usize = 0;
+        for (test_jobs, stored_jobs, 0..) |job, *stored, job_index| {
             if (job.physical_bytes.len != device_count or job.block_count == 0)
                 return error.InvalidTestJob;
-            try self.jobs.append(allocator, .{
+            stored.* = .{
                 .tensor_index = job.tensor_index,
                 .file_offset = 0,
                 .len = job.len,
@@ -2485,169 +2457,85 @@ const FairVectoredReadScheduler = struct {
                     previous_jobs[job.tensor_index]
                 else
                     null,
-                .adaptive_sample = job.len == self.request_size,
-            });
+                .adaptive_sample = job.len == max_load_read_request_size,
+            };
             if (job.tensor_index < previous_jobs.len)
                 previous_jobs[job.tensor_index] = job_index;
-            try self.physical_bytes.appendSlice(allocator, job.physical_bytes);
+            @memcpy(
+                physical_bytes[job_index * device_count ..][0..device_count],
+                job.physical_bytes,
+            );
             var destinations: usize = 0;
-            for (job.physical_bytes, self.queues) |bytes, *queue| {
+            for (job.physical_bytes, queues) |bytes, *queue| {
                 if (bytes == 0) continue;
                 try queue.append(allocator, job_index);
                 destinations += 1;
             }
             if (destinations == 0) return error.InvalidTestJob;
-            self.maximum_blocks_per_job = @max(
-                self.maximum_blocks_per_job,
-                job.block_count,
-            );
-            self.remaining_bytes +|= @intCast(job.len);
-            self.remaining_jobs += 1;
-            if (job.len == self.request_size) self.remaining_full_jobs += 1;
+            maximum_blocks_per_job = @max(maximum_blocks_per_job, job.block_count);
         }
-        try self.claimed.appendNTimes(allocator, false, test_jobs.len);
-        return self;
-    }
-
-    fn appendTestJobs(
-        self: *FairVectoredReadScheduler,
-        io: std.Io,
-        test_jobs: []const TestJob,
-    ) !void {
-        std.debug.assert(self.persistent);
-        const jobs = try self.allocator.alloc(StoredJob, test_jobs.len);
-        defer self.allocator.free(jobs);
-        const bytes = try self.allocator.alloc(usize, test_jobs.len * self.device_count);
-        defer self.allocator.free(bytes);
-        const queues = try self.allocator.alloc(std.ArrayListUnmanaged(usize), self.device_count);
-        defer self.allocator.free(queues);
-        @memset(queues, .empty);
-        defer for (queues) |*queue| queue.deinit(self.allocator);
-        const previous = try self.allocator.alloc(?usize, test_jobs.len);
-        defer self.allocator.free(previous);
-        @memset(previous, null);
-        var remaining_bytes: u64 = 0;
-        var remaining_full_jobs: usize = 0;
-        var maximum_blocks: usize = 0;
-        for (test_jobs, jobs, 0..) |job, *stored, job_index| {
-            if (job.physical_bytes.len != self.device_count or job.block_count == 0)
-                return error.InvalidTestJob;
-            stored.* = .{
-                .tensor_index = job.tensor_index,
-                .file_offset = 0,
-                .len = job.len,
-                .piece_start = 0,
-                .piece_len = 0,
-                .predecessor = if (job.tensor_index < previous.len)
-                    previous[job.tensor_index]
-                else
-                    null,
-                .adaptive_sample = job.len == self.request_size,
-            };
-            if (job.tensor_index < previous.len) previous[job.tensor_index] = job_index;
-            @memcpy(bytes[job_index * self.device_count ..][0..self.device_count], job.physical_bytes);
-            var destinations: usize = 0;
-            for (job.physical_bytes, queues) |physical, *queue| {
-                if (physical == 0) continue;
-                try queue.append(self.allocator, job_index);
-                destinations += 1;
-            }
-            if (destinations == 0) return error.InvalidTestJob;
-            remaining_bytes +|= @intCast(job.len);
-            if (job.len == self.request_size) remaining_full_jobs += 1;
-            maximum_blocks = @max(maximum_blocks, job.block_count);
+        const order = try fairOrder(allocator, stored_jobs, physical_bytes, queues);
+        errdefer allocator.free(order);
+        const remaining_bytes = try allocator.alloc(u64, test_jobs.len + 1);
+        errdefer allocator.free(remaining_bytes);
+        const remaining_full_jobs = try allocator.alloc(usize, test_jobs.len + 1);
+        errdefer allocator.free(remaining_full_jobs);
+        remaining_bytes[test_jobs.len] = 0;
+        remaining_full_jobs[test_jobs.len] = 0;
+        var suffix = test_jobs.len;
+        while (suffix != 0) {
+            suffix -= 1;
+            const job = stored_jobs[order[suffix]];
+            remaining_bytes[suffix] = remaining_bytes[suffix + 1] +| @as(u64, @intCast(job.len));
+            remaining_full_jobs[suffix] = remaining_full_jobs[suffix + 1] +
+                @intFromBool(job.adaptive_sample);
         }
-        var batch: PreparedBatch = .{
-            .allocator = self.allocator,
-            .jobs = jobs,
-            .pieces = &.{},
-            .physical_bytes = bytes,
-            .queues = queues,
-            .remaining_bytes = remaining_bytes,
-            .remaining_full_jobs = remaining_full_jobs,
-            .maximum_blocks_per_job = maximum_blocks,
-            .source_runs = test_jobs.len,
+        for (queues) |*queue| queue.deinit(allocator);
+        allocator.free(queues);
+        return .{
+            .worker_count = 0,
+            .plan = .{
+                .allocator = allocator,
+                .jobs = stored_jobs,
+                .pieces = &.{},
+                .order = order,
+                .remaining_bytes = remaining_bytes,
+                .remaining_full_jobs = remaining_full_jobs,
+                .maximum_blocks_per_job = maximum_blocks_per_job,
+                .source_runs = test_jobs.len,
+            },
         };
-        try self.appendPrepared(io, &batch);
     }
 
     fn deinit(self: *FairVectoredReadScheduler) void {
-        for (self.queues) |*queue| queue.deinit(self.allocator);
-        self.allocator.free(self.queues);
-        self.allocator.free(self.cursors);
-        self.claimed.deinit(self.allocator);
-        for (self.piece_batches.items) |pieces| self.allocator.free(pieces);
-        self.piece_batches.deinit(self.allocator);
-        self.allocator.free(self.scheduled_physical_bytes);
-        self.jobs.deinit(self.allocator);
-        self.physical_bytes.deinit(self.allocator);
+        if (self.plan) |*plan| plan.deinit();
         self.* = undefined;
     }
 
-    fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Job {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (self.remaining_jobs == 0) return null;
-
-        var selected_device: ?usize = null;
-        var selected_job: ?usize = null;
-        for (0..self.device_count) |offset| {
-            const device_index = (self.next_device + offset) % self.device_count;
-            const queue = &self.queues[device_index];
-            while (self.cursors[device_index] < queue.items.len and
-                self.claimed.items[queue.items[self.cursors[device_index]]])
-            {
-                self.cursors[device_index] += 1;
-            }
-            var candidate: ?usize = null;
-            for (queue.items[self.cursors[device_index]..]) |job_index| {
-                if (self.claimed.items[job_index]) continue;
-                const predecessor = self.jobs.items[job_index].predecessor;
-                if (predecessor == null or self.claimed.items[predecessor.?]) {
-                    candidate = job_index;
-                    break;
-                }
-            }
-            if (candidate == null) continue;
-            if (selected_device == null or
-                self.scheduled_physical_bytes[device_index] <
-                    self.scheduled_physical_bytes[selected_device.?])
-            {
-                selected_device = device_index;
-                selected_job = candidate;
-            }
-        }
-        const device_index = selected_device orelse unreachable;
-        const job_index = selected_job.?;
-        std.debug.assert(!self.claimed.items[job_index]);
-        self.claimed.items[job_index] = true;
-        self.remaining_jobs -= 1;
-        const stored = self.jobs.items[job_index];
-        if (stored.adaptive_sample) self.remaining_full_jobs -= 1;
-        self.remaining_bytes -= stored.len;
-        const row = self.physical_bytes.items[job_index * self.device_count ..][0..self.device_count];
-        for (row, self.scheduled_physical_bytes) |bytes, *scheduled| {
-            scheduled.* +|= @intCast(bytes);
-        }
-        self.next_device = (device_index + 1) % self.device_count;
-        if (self.remaining_jobs == 0) self.condition.broadcast(io);
+    fn claim(self: *FairVectoredReadScheduler, _: std.Io) ?Job {
+        const plan = if (self.plan) |*value| value else return null;
+        const position = self.cursor.fetchAdd(1, .monotonic);
+        if (position >= plan.order.len) return null;
+        const stored = plan.jobs[plan.order[position]];
         return .{
             .tensor_index = stored.tensor_index,
             .source_slot = stored.source_slot,
             .file_offset = stored.file_offset,
             .len = stored.len,
-            .pieces = if (stored.piece_storage) |pieces|
-                pieces[stored.piece_start..][0..stored.piece_len]
-            else
-                &.{},
+            .pieces = plan.pieces[stored.piece_start..][0..stored.piece_len],
         };
     }
 
     fn waitForWork(self: *FairVectoredReadScheduler, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        while (self.remaining_jobs == 0 and !self.stopping) {
+        while (!self.stopping and (self.plan == null or
+            self.cursor.load(.acquire) >= self.plan.?.order.len))
+        {
+            self.waiting_workers += 1;
+            self.condition.broadcast(io);
             self.condition.waitUncancelable(io, &self.mutex);
+            self.waiting_workers -= 1;
         }
         return !self.stopping;
     }
@@ -2655,14 +2543,20 @@ const FairVectoredReadScheduler = struct {
     fn snapshot(self: *FairVectoredReadScheduler, io: std.Io) Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        const plan = self.plan orelse return .{
+            .remaining_bytes = 0,
+            .remaining_jobs = 0,
+            .remaining_full_jobs = 0,
+            .has_unscheduled = false,
+        };
+        const position = @min(self.cursor.load(.acquire), plan.order.len);
         return .{
-            .remaining_bytes = self.remaining_bytes,
-            .remaining_jobs = self.remaining_jobs,
-            .remaining_full_jobs = self.remaining_full_jobs,
-            .has_unscheduled = self.remaining_jobs != 0,
+            .remaining_bytes = plan.remaining_bytes[position],
+            .remaining_jobs = plan.order.len - position,
+            .remaining_full_jobs = plan.remaining_full_jobs[position],
+            .has_unscheduled = position != plan.order.len,
         };
     }
-
 };
 
 test "fair read scheduler rotates sharded devices by scheduled bytes" {
@@ -2730,7 +2624,7 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
     // and b:[3,15) is split at the request-size boundary.
     try std.testing.expectEqual(@as(usize, 3), batch.source_runs);
     try std.testing.expectEqual(@as(usize, 4), batch.jobs.len);
-    try std.testing.expectEqual(@as(u64, 24), batch.remaining_bytes);
+    try std.testing.expectEqual(@as(u64, 24), batch.remaining_bytes[0]);
     try std.testing.expectEqual(@as(usize, 6), batch.pieces.len);
     try std.testing.expectEqual(@as(u64, 10), batch.jobs[0].file_offset);
     try std.testing.expectEqual(@as(usize, 8), batch.jobs[0].len);
@@ -2739,13 +2633,7 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
     try std.testing.expectEqual(@as(u64, 3), batch.jobs[2].file_offset);
     try std.testing.expectEqual(@as(usize, 8), batch.jobs[2].len);
     try std.testing.expectEqual(@as(usize, 4), batch.jobs[3].len);
-    try std.testing.expectEqual(@as(usize, 4), batch.remaining_full_jobs);
-
-    var scheduler = try FairVectoredReadScheduler.initAppendable(allocator, device_count, 8);
-    defer scheduler.deinit();
-    try scheduler.appendPrepared(io, &batch);
-    while (scheduler.claim(io)) |_| {}
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_full_jobs);
+    try std.testing.expectEqual(@as(usize, 4), batch.remaining_full_jobs[0]);
 
     var iov_source: safetensors.Tensor = .{
         .file_uri = "iov",
@@ -2832,7 +2720,6 @@ test "fair read scheduler claims a replicated job once and credits every replica
     defer scheduler.deinit();
     const io = std.testing.io;
     try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
-    try std.testing.expectEqualSlices(u64, &.{ 20, 20 }, scheduler.scheduled_physical_bytes);
     // The replicated entry is skipped in device 1's queue; tie rotation gives
     // that device the next scheduling turn.
     try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
@@ -2939,49 +2826,41 @@ test "fair read scheduler validates jobs and cleans up allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
 }
 
-test "appendable fair scheduler admits late jobs by cumulative device debt" {
+test "fair scheduler rejects a second immutable epoch plan" {
     const io = std.testing.io;
-    var scheduler = try FairVectoredReadScheduler.initAppendable(
-        std.testing.allocator,
-        2,
-        max_load_read_request_size,
-    );
-    defer scheduler.deinit();
-    try scheduler.appendTestJobs(io, &.{
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &.{
         .{ .tensor_index = 0, .len = 10, .physical_bytes = &.{ 10, 0 } },
-        .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 10, 0 } },
     });
-    try std.testing.expectEqual(@as(usize, 0), scheduler.claim(io).?.tensor_index);
-    try scheduler.appendTestJobs(io, &.{
-        .{ .tensor_index = 2, .len = 10, .physical_bytes = &.{ 0, 10 } },
+    defer scheduler.deinit();
+    var pending = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &.{
+        .{ .tensor_index = 1, .len = 10, .physical_bytes = &.{ 0, 10 } },
     });
-    // The late device-1 job joins immediately because device 0 already owes
-    // ten scheduled bytes. The already-claimed request is never pre-empted.
-    try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
-    try std.testing.expectEqual(@as(usize, 1), scheduler.claim(io).?.tensor_index);
+    defer pending.deinit();
+    var plan = pending.plan.?;
+    pending.plan = null;
+    defer plan.deinit();
+    try std.testing.expectError(error.LoaderEpochActive, scheduler.publish(io, &plan));
 }
 
-test "appendable fair scheduler resets debt only at a reusable epoch barrier" {
+test "fair scheduler publishes a new plan only after the epoch barrier" {
     const io = std.testing.io;
-    var scheduler = try FairVectoredReadScheduler.initAppendable(
-        std.testing.allocator,
-        2,
-        max_load_read_request_size,
-    );
-    defer scheduler.deinit();
-    try scheduler.appendTestJobs(io, &.{
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &.{
         .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{ 8, 0 } },
         .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{ 0, 8 } },
     });
+    defer scheduler.deinit();
     _ = scheduler.claim(io).?;
     _ = scheduler.claim(io).?;
-    scheduler.seal(io);
-    try std.testing.expectEqualSlices(u64, &.{ 8, 8 }, scheduler.scheduled_physical_bytes);
-    scheduler.reopen(io);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, scheduler.scheduled_physical_bytes);
-    try scheduler.appendTestJobs(io, &.{
+    scheduler.finishEpoch(io);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+
+    var next = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 2, &.{
         .{ .tensor_index = 2, .len = 4, .physical_bytes = &.{ 0, 4 } },
     });
+    defer next.deinit();
+    var plan = next.plan.?;
+    next.plan = null;
+    try scheduler.publish(io, &plan);
     try std.testing.expectEqual(@as(usize, 2), scheduler.claim(io).?.tensor_index);
 }
 
@@ -4982,7 +4861,6 @@ const DmaBenchmarkSourcePools = struct {
             }.call,
         };
     }
-
 };
 
 const DmaBenchmarkRunMetrics = struct {
@@ -5552,10 +5430,11 @@ fn validateSamePlacement(shape: Shape, expected: Sharding, actual: Sharding) !vo
     for (expected_devices, actual_devices) |expected_device, actual_device| {
         const expected_slices = expected_placement.slices(expected_device.coords);
         const actual_slices = actual_placement.slices(actual_device.coords);
-        if (expected_device.id != actual_device.id or
-            !std.mem.eql(Placement.Slice1d, expected_slices.constSlice(), actual_slices.constSlice()))
-        {
+        if (expected_device.id != actual_device.id or expected_slices.len != actual_slices.len)
             return error.ExecutablePlacementMismatch;
+        for (expected_slices.constSlice(), actual_slices.constSlice()) |expected_slice, actual_slice| {
+            if (expected_slice.start != actual_slice.start or expected_slice.size != actual_slice.size)
+                return error.ExecutablePlacementMismatch;
         }
     }
 }
@@ -5569,6 +5448,7 @@ const BufferedLoader = struct {
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
+    epoch_active: bool = false,
 
     fn create(
         allocator: std.mem.Allocator,
@@ -5596,6 +5476,7 @@ const BufferedLoader = struct {
     fn checkOpen(self: *BufferedLoader) !void {
         const code = self.first_error.load(.acquire);
         if (code != 0) return @errorFromInt(code);
+        if (self.epoch_active) return error.LoaderEpochActive;
     }
 
     fn submitOne(
@@ -5705,10 +5586,16 @@ const BufferedLoader = struct {
         for (prepared[0..ctx.count]) |item| {
             self.submitOne(item.source, item.shape, item.sharding, item.output);
         }
+        self.epoch_active = true;
     }
 
     fn await(self: *BufferedLoader) !void {
+        if (!self.epoch_active) {
+            try self.checkOpen();
+            return;
+        }
         self.group.await(self.io) catch |err| self.recordError(err);
+        self.epoch_active = false;
         try self.checkOpen();
     }
 
@@ -5735,6 +5622,7 @@ const BufferedLoader = struct {
         for (sources, exe.input_shapes, exe.input_shardings, inputs) |source, shape, sharding, *input| {
             self.submitOne(source, shape, sharding.resolve(self.platform), input);
         }
+        self.epoch_active = true;
         try self.await();
         try executeLoadedBinding(self.allocator, self.io, inputs, output, exe);
     }
@@ -5759,6 +5647,70 @@ fn executeLoadedBinding(
     args.set(.{inputs});
     exe.callOpts(io, args, &results, .{ .wait = true });
     output.* = results.get(Buffer);
+}
+
+test "loader supports repeated synchronous and explicit epochs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const contents = [_]u8{ 1, 2, 3, 4 };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "weights.bin", .{ .read = true });
+    try file.writePositionalAll(io, &contents, 0);
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{
+        .file_uri = path_buffer[0..path_len],
+        .name = "value",
+        .shape = .init(.{contents.len}, .u8),
+        .offset = 0,
+    });
+    var store: TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+    const tensor = store.view().createTensor("value", null, .replicated);
+
+    const platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    const Identity = struct {
+        fn call(input: Tensor) Tensor {
+            return input;
+        }
+    };
+    var exe = try platform.compileFn(allocator, io, Identity.call, .{tensor}, .{});
+    defer exe.deinit();
+    var loader = try Loader.init(allocator, io, platform, &store, .{
+        .read_parallelism = .{ .fixed = 1 },
+    });
+    defer loader.deinit();
+
+    var first: Buffer = undefined;
+    try loader.loadExecute(tensor, &first, &exe);
+    defer first.deinit();
+    const first_loaded = try first.toSliceAlloc(allocator, io);
+    defer first_loaded.free(allocator);
+    try std.testing.expectEqualSlices(u8, &contents, first_loaded.constData());
+    var second: Buffer = undefined;
+    try loader.loadExecute(tensor, &second, &exe);
+    defer second.deinit();
+
+    const Model = struct { value: Tensor };
+    const model: Model = .{ .value = tensor };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+    try loader.load(Model, &model, &buffers);
+    try std.testing.expectError(error.LoaderEpochActive, loader.load(Model, &model, &buffers));
+    try loader.await();
+
+    try std.testing.expectEqual(contents.len * 3, loader.bytesLoaded());
+    const loaded = try buffers.value.toSliceAlloc(allocator, io);
+    defer loaded.free(allocator);
+    try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
 }
 
 const DirectLoader = struct {
@@ -5865,16 +5817,12 @@ const DirectLoader = struct {
             aggregate_width;
         if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
 
-        var scheduler = try FairVectoredReadScheduler.initAppendable(
-            allocator,
-            platform.devices.len,
-            request_size,
-        );
-        var scheduler_moved = false;
-        errdefer if (!scheduler_moved) scheduler.deinit();
         const source_parallelism = opts.read_parallelism;
         const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
         const limits: RequestGateLimits = .init(controller.width(), feasible_width);
+        var scheduler = FairVectoredReadScheduler.init(source_parallelism.maximum());
+        var scheduler_moved = false;
+        errdefer if (!scheduler_moved) scheduler.deinit();
 
         const self = try allocator.create(DirectLoader);
         errdefer allocator.destroy(self);
@@ -6034,7 +5982,7 @@ const DirectLoader = struct {
     fn checkOpen(self: *DirectLoader) !void {
         if (self.cleaned) return error.LoaderShuttingDown;
         if (self.pipeline.errorValue()) |err| return err;
-        if (self.scheduler.sealed) return error.LoaderEpochSealed;
+        if (self.epoch_active) return error.LoaderEpochActive;
     }
 
     fn sourceSlot(self: *DirectLoader, uri: []const u8) !*LoaderSourceSlot {
@@ -6078,10 +6026,14 @@ const DirectLoader = struct {
             self.source_request_size,
         );
         const planning_elapsed = planning_started.untilNow(self.io, .awake);
-        defer batch.deinit();
+        var batch_owned = true;
+        defer if (batch_owned) batch.deinit();
         if (batch.maximum_blocks_per_job > self.maximum_blocks_per_job)
             return error.InvalidDmaLoadConfig;
         const batch_piece_count = batch.pieces.len;
+        const batch_job_count = batch.jobs.len;
+        const batch_source_bytes = batch.remaining_bytes[0];
+        const batch_source_runs = batch.source_runs;
         try self.epoch_items.ensureUnusedCapacity(self.allocator, items.len);
 
         var logical_bytes: usize = 0;
@@ -6094,37 +6046,26 @@ const DirectLoader = struct {
             }
             logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
         }
-        const new_epoch_logical_bytes = try std.math.add(
-            usize,
-            self.epoch_logical_bytes,
-            logical_bytes,
-        );
-        const new_epoch_source_bytes = try std.math.add(
-            u64,
-            self.epoch_source_bytes,
-            batch.remaining_bytes,
-        );
-        if (!self.epoch_active) {
-            self.epoch_started_at = .now(self.io, .awake);
-            if (self.opts.load_profile.stats) |provider| {
-                // Exclude aggregate backend traffic that happened while this
-                // loader had no active epoch from the next diagnostic delta.
-                self.diagnostic_stats = provider.snapshot();
-            }
+        self.epoch_started_at = .now(self.io, .awake);
+        if (self.opts.load_profile.stats) |provider| {
+            // Exclude aggregate backend traffic that happened while this
+            // loader had no active epoch from the next diagnostic delta.
+            self.diagnostic_stats = provider.snapshot();
         }
-        self.pipeline.beginEpochJobs(batch.jobs.len);
-        self.scheduler.appendPrepared(self.io, &batch) catch |err| {
-            self.pipeline.cancelEpochJobs(batch.jobs.len);
+        self.pipeline.beginEpochJobs(batch_job_count);
+        self.scheduler.publish(self.io, &batch) catch |err| {
+            self.pipeline.cancelEpochJobs(batch_job_count);
             return err;
         };
+        batch_owned = false;
         for (items) |item| self.epoch_items.appendAssumeCapacity(item);
-        self.epoch_logical_bytes = new_epoch_logical_bytes;
-        self.epoch_source_bytes = new_epoch_source_bytes;
-        self.epoch_source_jobs += batch.jobs.len;
-        self.epoch_source_runs += batch.source_runs;
-        self.epoch_source_items += items.len;
-        self.epoch_source_pieces += batch_piece_count;
-        self.epoch_planning_ns +|= @intCast(@max(planning_elapsed.nanoseconds, 0));
+        self.epoch_logical_bytes = logical_bytes;
+        self.epoch_source_bytes = batch_source_bytes;
+        self.epoch_source_jobs = batch_job_count;
+        self.epoch_source_runs = batch_source_runs;
+        self.epoch_source_items = items.len;
+        self.epoch_source_pieces = batch_piece_count;
+        self.epoch_planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0));
         self.epoch_active = true;
     }
 
@@ -6196,10 +6137,11 @@ const DirectLoader = struct {
             if (self.pipeline.errorValue()) |err| return err;
             return;
         }
-        self.scheduler.seal(self.io);
         self.pipeline.waitEpochDrained();
         self.controller_runtime.epochBarrier(self.io);
-        if (self.pipeline.errorValue()) |_| {
+        const load_error = self.pipeline.errorValue();
+        if (load_error != null) {
+            self.stopWorkers();
             for (self.epoch_items.items) |item| {
                 if (item.state.status.load(.acquire) != LoaderLoadItem.StateSlot.ready) continue;
                 for (item.state.state.targets) |*target| {
@@ -6213,11 +6155,12 @@ const DirectLoader = struct {
                 }
             }
         }
+        self.scheduler.finishEpoch(self.io);
         self.pipeline.reapCompleted();
         for (self.epoch_items.items) |item| item.deinit(self.allocator);
         self.epoch_items.clearRetainingCapacity();
-        self.logEpoch(self.pipeline.errorValue() == null);
-        if (self.pipeline.errorValue()) |err| {
+        self.logEpoch(load_error == null);
+        if (load_error) |err| {
             self.epoch_logical_bytes = 0;
             self.epoch_source_bytes = 0;
             self.epoch_source_jobs = 0;
@@ -6239,7 +6182,6 @@ const DirectLoader = struct {
         self.epoch_planning_ns = 0;
         self.epoch_started_at = null;
         self.epoch_active = false;
-        self.scheduler.reopen(self.io);
     }
 
     fn logEpoch(self: *DirectLoader, successful: bool) void {

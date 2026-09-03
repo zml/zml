@@ -21,7 +21,7 @@ migrated yet.
 - [x] 1. Correct coalesced DMA block accounting and pinned-width feasibility.
 - [x] 2. Simplify admission gates and make settled backoff generation-safe.
 - [x] 3. Remove the tensor-local loader path and decision-dead calibration code.
-- [ ] 4. Make loader epochs immutable and precompute fair job order.
+- [x] 4. Make loader epochs immutable and precompute fair job order.
 - [ ] 5. Flatten final DMA transfer records once during planning.
 - [ ] 6. Simplify adaptive-controller and runtime bookkeeping.
 - [ ] 7. Run final validation and reconcile all documentation.
@@ -106,7 +106,7 @@ all-device retained working set. `zml/io.zig` fell from 8,495 lines at review
 start to 7,600. `//examples/io:playground` builds; `//vfs:test` and
 `//stdx:test` pass.
 
-### 4. Immutable epochs — pending
+### 4. Immutable epochs — completed
 
 - Reject a second `load` while an epoch is active. Keep persistent workers for
   inexpensive sequential `loadExecute` epochs.
@@ -120,6 +120,20 @@ start to 7,600. `//examples/io:playground` builds; `//vfs:test` and
 
 Validation: scheduler and loader integration tests plus the focused build/test
 set.
+
+Result: both loader backends now reject a second `load` while an epoch is
+active. The direct planner computes the physical-byte fair, predecessor-safe
+order once and publishes one owned immutable plan. Runtime queue scans,
+per-device cursors/debt, claimed flags, append/seal/reopen states, piece-batch
+ownership, and the claim mutex were replaced by one atomic position plus
+precomputed remaining-work suffixes. Persistent workers rendezvous at the epoch
+barrier before the plan is released, then wait for the next sequential epoch.
+Added the compatibility workflow test covering two synchronous `loadExecute`
+calls followed by `load`/`await`, ready output, active-epoch rejection, and
+cumulative `bytesLoaded`. It also exposed and fixed structural placement
+comparison that had relied on unsupported struct `!=`. The full 233-test ZML
+suite passes with CUDA dependencies and the CPU runtime enabled; the focused
+playground build and VFS/stdx tests pass.
 
 ### 5. Final transfer planning — pending
 

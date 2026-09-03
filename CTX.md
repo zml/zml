@@ -5,10 +5,11 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 on `brabier/adaptive-concurrency` at `507cabd4`.
-`PLAN.md` is the ordered implementation checklist; this file is the canonical
-description of the code after each completed task. `origin/master` was
-`e1e983c8` during the 2026-09-02 audit; never assume that ref is still current.
+Last consolidated: 2026-09-03 after plan Task 4, on a detached checkout based
+on `4900e17d`. `PLAN.md` is the ordered implementation checklist; this file is
+the canonical description of the code after each completed task.
+`origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
+ref is still current.
 
 ## Current design
 
@@ -16,7 +17,8 @@ description of the code after each completed task. `origin/master` was
 
 - `zml.io.Loader` selects the direct path for CUDA, ROCm, and oneAPI and the
   buffered path otherwise. A loader owns its store, sharding/profile options,
-  worker pool, and sequential epochs.
+  worker pool, and sequential epochs. Both backends allow one active epoch;
+  another `load` is rejected until `await` completes.
 - `VFS.loadProfile(path)` is prepared once for a model load and passed as a
   borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
   `high_latency`, and optional aggregate retry/throttle feedback. It assumes
@@ -72,15 +74,17 @@ so small adjacent tensors each caused a source operation. The current
    touching interval begins at the current union end, which preserves overlap
    and duplicate coverage.
 
-Coalescing is batch-local to one `load()`/`appendItems()` call; the current
-scheduler can append a later batch while an earlier one executes. The plan
-stores source jobs and logical source pieces. Jobs carry source slot, absolute
-offset, physical length, piece range, per-device physical-byte charges, and a
-same-file predecessor. Workers currently re-walk tensor dispatch spans and
-split logical pieces at DMA block boundaries to construct final transfer
-records. Physical source bytes are distinct from logical tensor bytes so
-duplication and replication do not distort diagnostics or fairness.
-Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash.
+Coalescing is batch-local to one immutable loader epoch. Planning uses
+per-device physical-byte charges and same-file predecessors to compute a
+deterministic fair, predecessor-safe job order, then discards the temporary
+queues and charges. The published plan owns source jobs, logical source pieces,
+the fair order, and remaining-byte/job suffixes. Workers currently re-walk
+tensor dispatch spans and split logical pieces at DMA block boundaries to
+construct final transfer records. Physical source bytes are distinct from
+logical tensor bytes so duplication and replication do not distort diagnostics
+or fairness. Planning is `O(tensors log tensors)` and took about 0.40 s for
+DeepSeek-V4-Flash before the fair-order precomputation change; remeasure after
+the remaining planning cleanup.
 
 ### Pinned blocks, scattering, and ownership
 
@@ -109,10 +113,15 @@ Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
 
 ### Scheduling and concurrency
 
-- The scheduler charges a coalesced job's physical bytes to every destination
-  device and retains cross-device fairness. Same-file predecessor claims and
-  per-target submitted-prefix accounting preserve ordering while unrelated
+- Planning charges a coalesced job's physical bytes to every destination
+  device and simulates the fairness policy once. Runtime claims are a single
+  atomic cursor into that immutable order; there are no live device queues,
+  debt counters, claimed bitmap, or claim mutex. Same-file predecessor order
+  and per-target submitted-prefix accounting preserve ordering while unrelated
   reads and DMA complete out of order.
+- Persistent direct-loader workers rendezvous in their idle wait before the
+  drained epoch plan is freed. They remain alive for the next sequential
+  `loadExecute` or `load` epoch; append/seal/reopen scheduler states are gone.
 - Source concurrency is adaptive for every direct-loader profile. The old
   conversion of local/default `.adaptive` to `.fixed = 12` was removed.
   `high_latency` only permits blind pre-response bootstrap to 24 then 32.
@@ -319,8 +328,8 @@ the userspace copy. The selected fixed artifact measured 26.83--26.90 GiB/s.
 - **Multi-device sharded deadlock (2026-09-01):** destination-debt scheduling
   could claim a tensor tail before its predecessor. Tails filled all lifecycle
   credits while `transferReady` correctly waited for missing prefixes, so no
-  DMA could start. Jobs now carry predecessors and become eligible only after
-  predecessor claim. Pre-growing memory and ignoring the DMA global cap did
+  DMA could start. Planning now emits a predecessor-safe order; atomic claims
+  preserve that order. Pre-growing memory and ignoring the DMA global cap did
   not help and were reverted.
 - **Coalescing boundary fan-out (2026-09-03):** rigid request-grid cuts reduced
   reads but increased DMA from 69,193 to 78,665. Tensor-aware feasible cuts
@@ -405,12 +414,15 @@ same-host medians.
 - DeepSeek CUDA loads completed repeatedly. Focused loader tests separately
   exercised tensor shape/content correctness.
 - VFS tests passed, including exact scatter, retries, and concurrency.
-- Source-planner, adaptive-controller, scheduler fairness/predecessor,
-  short-read, replication/sharding, NUMA-affinity, failure cleanup, and epoch
-  reuse tests passed.
-- The aggregate CUDA `zml:test` reached 239/240, then hit an unrelated existing
-  `attention.triton_attention` assertion: MLA `num_kv_splits (2)` exceeded
-  sparse tile count `(1)`. Loader tests completed before it.
+- Source-planner, adaptive-controller, immutable scheduler fairness/order,
+  concurrent atomic claims, short-read, replication/sharding, NUMA-affinity,
+  failure cleanup, and epoch reuse tests passed. A real public-loader test also
+  covers `loadExecute -> loadExecute -> load -> await`, output readiness,
+  active-epoch rejection, and cumulative byte accounting.
+- `bazel test //zml:test --@zml//platforms:cuda=true
+  --@zml//platforms:cpu=true` passed all 233 tests after Task 4. The default
+  configuration is still blocked at compilation by the existing missing
+  `platforms/cuda/flashinfer_cutlass_moe` module mapping.
 - Optimized playground builds had passed for CUDA, ROCm, and oneAPI during the
   preceding audits. Runtime coverage depends on hardware available per machine;
   oneAPI and remote-service behavior should be rechecked after relevant changes.
@@ -421,12 +433,9 @@ same-host medians.
 
 `PLAN.md` is the completion checklist. The current ordered design work is:
 
-1. Enforce one immutable batch per epoch, precompute the deterministic fair
-   predecessor-safe job order, and retain persistent workers across sequential
-   `loadExecute` epochs.
-2. Emit final block/DMA transfer records during planning instead of storing
+1. Emit final block/DMA transfer records during planning instead of storing
    logical pieces and re-walking dispatch spans in workers.
-3. Reduce the six-phase source controller, remove write-only metrics and
+2. Reduce the six-phase source controller, remove write-only metrics and
    singleton wrappers, and move block-pool matching arrays into reusable
    scratch.
 
