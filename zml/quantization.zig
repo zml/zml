@@ -106,7 +106,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input, global_scale, axis) else null,
-        .fp8_block128 => if (supportsNvfp4InputQuantization(platform)) quantizeFp8Block128(input, global_scale, axis) else null,
+        .fp8_block128 => quantizeFp8Block128(input, global_scale, axis),
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
 }
