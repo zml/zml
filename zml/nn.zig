@@ -73,10 +73,10 @@ pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
 
 /// Unpacks two f4e2m1 values per byte along `packed_tag` and names the expanded
 /// axis `k_tag`. Group-size agnostic: NVFP4 (16) and MXFP4 (32) share this packing.
-pub fn unpackFp4(w: Tensor, packed_tag: anytype, k_tag: anytype) Tensor {
+pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tensor {
     stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
     const source_tag = Shape.toTag(packed_tag);
-    const result_tag = Shape.toTag(k_tag);
+    const result_tag = Shape.toTag(contracting_tag);
     return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ source_tag, .bitcast } })
         .renameTag(.kb, result_tag);
