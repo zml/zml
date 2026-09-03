@@ -21,6 +21,7 @@ const Args = struct {
     backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
+    experimental_chunkwise_gdn: bool = false,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -35,6 +36,7 @@ const Args = struct {
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\   --experimental-chunkwise-gdn  Use chunkwise GDN for supported model prefills
         \\
     ;
 };
@@ -116,6 +118,7 @@ pub fn main(init: std.process.Init) !void {
         .sampling_strategy = .{
             .topk = args.topk,
         },
+        .experimental_chunkwise_gdn = args.experimental_chunkwise_gdn,
     };
 
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);

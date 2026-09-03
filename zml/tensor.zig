@@ -1396,8 +1396,13 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
+        return lhs.dotWithPrecision(rhs, args, .fast);
+    }
+
+    /// Matrix multiplication with an explicit StableHLO precision contract.
+    pub fn dotWithPrecision(lhs: Tensor, rhs: Tensor, args: anytype, precision: dialects.stablehlo.DotPrecision) Tensor {
         const dot_axes = lhs.dotAxes(rhs, args);
-        return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice());
+        return lhs.dotGeneralWithPrecision(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice(), precision);
     }
 
     pub const DotAxes = struct {
@@ -1504,6 +1509,16 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
+        return lhs.dotGeneralWithPrecision(rhs, contracting_axes, batching_axes, .fast);
+    }
+
+    pub fn dotGeneralWithPrecision(
+        lhs: Tensor,
+        rhs: Tensor,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+        precision: dialects.stablehlo.DotPrecision,
+    ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
@@ -1564,7 +1579,7 @@ pub const Tensor = struct {
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
                 .lhs_contracting_dimensions = lhs_contracting_axes.constSlice(),
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
-                .dot_precision = .fast,
+                .dot_precision = precision,
             },
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
