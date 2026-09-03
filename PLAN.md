@@ -19,7 +19,7 @@ migrated yet.
 
 - [x] 0. Record the second-pass plan and refresh the `CTX.md` baseline.
 - [x] 1. Flatten epoch plans and remove dead pipeline state.
-- [ ] 2. Make the lifecycle gate the epoch-completion mechanism.
+- [x] 2. Make the lifecycle gate the epoch-completion mechanism.
 - [ ] 3. Simplify adaptive-runtime and probe-state representation.
 - [ ] 4. Specialize DMA calibration for its single measured lane.
 - [ ] 5. Remove redundant platform/device identity state.
@@ -77,6 +77,17 @@ the IO playground builds and VFS/stdx tests pass.
 
 Validation: epoch reuse, active-epoch rejection, callback failure, and focused
 integration tests.
+
+Result: `await` now first waits until the immutable scheduler has handed out
+every job, then waits until the lifecycle gate has no active requests. Because
+a lifecycle credit spans claim through the final DMA callback, that pair is
+the epoch-completion condition. Removed the parallel epoch job atomic, drained
+event, tracking flag, abandoned-job accounting, and request-local completion
+flag. Scheduler failure directly exhausts the plan and wakes waiters; the
+controller generation barrier and worker rendezvous still run before metadata
+is reaped. Added focused waits-for-final-claim and waits-for-final-request
+tests. The loader-inclusive ZML suite, IO playground build, and VFS/stdx tests
+pass.
 
 ### 3. Adaptive runtime state
 

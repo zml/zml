@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 1, on detached commit
-`4fc79885` plus the current Task 1 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 2, on detached commit
+`bdfefabb` plus the current Task 2 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -130,6 +130,12 @@ simplification pass.
 - Persistent direct-loader workers rendezvous in their idle wait before the
   drained epoch plan is freed. They remain alive for the next sequential
   `loadExecute` or `load` epoch; append/seal/reopen scheduler states are gone.
+- Epoch completion has one ownership model: `await` waits for the immutable
+  scheduler to hand out every job, then for the lifecycle gate to become empty.
+  A lifecycle credit spans claim through the request's final DMA callback.
+  There is no parallel epoch-job counter, completion event, abandoned-job
+  adjustment, or request tracking flag. The controller generation barrier and
+  worker idle rendezvous still precede request/plan reclamation.
 - Source concurrency is adaptive for every direct-loader profile. The old
   conversion of local/default `.adaptive` to `.fixed = 12` was removed.
   `high_latency` only permits blind pre-response bootstrap to 24 then 32.
@@ -434,8 +440,8 @@ same-host medians.
 - `bazel build //examples/io:playground`, `bazel test //vfs:test`, and
   `bazel test //stdx:test` passed.
 - `bazel test //zml:test --@zml//platforms:cuda=true
-  --@zml//platforms:cpu=true` passed all 233 tests: 230 passed and three were
-  skipped. The default configuration is still blocked at compilation by the
+  --@zml//platforms:cpu=true` passes the loader-inclusive suite. The default
+  configuration is still blocked at compilation by the
   existing missing `platforms/cuda/flashinfer_cutlass_moe` module mapping in
   `zml/moe/cutlass_flashinfer.zig`; it does not reach loader tests.
 - Optimized playground builds had passed for CUDA, ROCm, and oneAPI during the

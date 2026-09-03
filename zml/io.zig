@@ -884,10 +884,20 @@ const AdaptiveRequestGate = struct {
         defer self.mutex.unlock(io);
         std.debug.assert(self.in_use > 0);
         self.in_use -= 1;
+        if (self.in_use == 0) {
+            self.condition.broadcast(io);
+            return;
+        }
         // One release creates one admission slot. Waking every worker here
         // turns a high adaptive cap into a thundering herd even when the
         // active limit is small.
         self.condition.signal(io);
+    }
+
+    fn waitEmpty(self: *AdaptiveRequestGate, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.in_use != 0) self.condition.waitUncancelable(io, &self.mutex);
     }
 
     fn setLimit(self: *AdaptiveRequestGate, io: std.Io, new_limit: usize) void {
@@ -953,7 +963,6 @@ const VectoredLoadPipeline = struct {
         source_finished: std.atomic.Value(bool) = .init(false),
         read_epoch: u64,
         admission_id: u64 = 0,
-        epoch_tracked: bool = false,
 
         fn addBlock(self: *RequestContext) void {
             _ = self.pending.fetchAdd(1, .acq_rel);
@@ -987,7 +996,6 @@ const VectoredLoadPipeline = struct {
             self.pipeline.metrics.endRequest();
             self.completed.store(true, .release);
             self.pipeline.request_gate.release(self.pipeline.io);
-            if (self.epoch_tracked) self.pipeline.completeEpochJob();
         }
     };
 
@@ -1036,6 +1044,7 @@ const VectoredLoadPipeline = struct {
     device_pool_indices: []const usize,
     numa_explicit: bool,
     metrics: *VectoredLoadMetrics,
+    scheduler: *FairVectoredReadScheduler,
     next_read_admission: std.atomic.Value(u64) = .init(1),
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
@@ -1049,10 +1058,6 @@ const VectoredLoadPipeline = struct {
     pumping: bool = false,
     active_events: usize = 0,
     ready_entries: usize = 0,
-    epoch_jobs: std.atomic.Value(usize) = .init(0),
-    epoch_drained: std.Io.Event = .is_set,
-    track_epoch_jobs: bool = false,
-    live_scheduler: ?*FairVectoredReadScheduler = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -1065,6 +1070,7 @@ const VectoredLoadPipeline = struct {
         device_pool_indices: []const usize,
         numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
+        scheduler: *FairVectoredReadScheduler,
         dma_limit: usize,
     ) !VectoredLoadPipeline {
         std.debug.assert(platform.devices.len <= 64);
@@ -1085,6 +1091,7 @@ const VectoredLoadPipeline = struct {
             .device_pool_indices = device_pool_indices,
             .numa_explicit = numa_explicit,
             .metrics = metrics,
+            .scheduler = scheduler,
             .ready_queues = ready_queues,
             .active_by_device = active_by_device,
             .dma_limit = dma_limit,
@@ -1126,10 +1133,7 @@ const VectoredLoadPipeline = struct {
 
     fn recordError(self: *VectoredLoadPipeline, err: anyerror) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
-            if (self.live_scheduler) |scheduler| {
-                const abandoned = scheduler.fail(self.io);
-                self.cancelEpochJobs(abandoned);
-            }
+            self.scheduler.fail(self.io);
             self.pool.close(self.io);
             self.read_gate.close(self.io);
             self.request_gate.close(self.io);
@@ -1143,7 +1147,6 @@ const VectoredLoadPipeline = struct {
         request.* = .{
             .pipeline = self,
             .read_epoch = 0,
-            .epoch_tracked = self.track_epoch_jobs,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
@@ -1152,34 +1155,7 @@ const VectoredLoadPipeline = struct {
         return request;
     }
 
-    fn beginEpochJobs(self: *VectoredLoadPipeline, count: usize) void {
-        if (count == 0) return;
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        std.debug.assert(self.track_epoch_jobs);
-        if (self.epoch_jobs.load(.acquire) == 0) self.epoch_drained.reset();
-        _ = self.epoch_jobs.fetchAdd(count, .acq_rel);
-    }
-
-    fn cancelEpochJobs(self: *VectoredLoadPipeline, count: usize) void {
-        if (count == 0) return;
-        const previous = self.epoch_jobs.fetchSub(count, .acq_rel);
-        std.debug.assert(previous >= count);
-        if (previous == count) self.epoch_drained.set(self.io);
-    }
-
-    fn completeEpochJob(self: *VectoredLoadPipeline) void {
-        const previous = self.epoch_jobs.fetchSub(1, .acq_rel);
-        std.debug.assert(previous > 0);
-        if (previous == 1) self.epoch_drained.set(self.io);
-    }
-
-    fn waitEpochDrained(self: *VectoredLoadPipeline) void {
-        self.epoch_drained.waitUncancelable(self.io);
-    }
-
     fn reapCompleted(self: *VectoredLoadPipeline) void {
-        std.debug.assert(self.epoch_jobs.load(.acquire) == 0);
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         std.debug.assert(self.active_events == 0 and self.ready_entries == 0);
@@ -2173,15 +2149,12 @@ const FairVectoredReadScheduler = struct {
         self.condition.broadcast(io);
     }
 
-    fn fail(self: *FairVectoredReadScheduler, io: std.Io) usize {
+    fn fail(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const cursor = self.cursor.load(.acquire);
-        const abandoned = if (self.plan) |plan| plan.jobs.len -| cursor else 0;
         if (self.plan) |plan| self.cursor.store(plan.jobs.len, .release);
         self.stopping = true;
         self.condition.broadcast(io);
-        return abandoned;
     }
 
     fn initForTest(
@@ -2262,11 +2235,25 @@ const FairVectoredReadScheduler = struct {
         self.* = undefined;
     }
 
-    fn claim(self: *FairVectoredReadScheduler, _: std.Io) ?Job {
+    fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Job {
         const plan = if (self.plan) |*value| value else return null;
         const position = self.cursor.fetchAdd(1, .monotonic);
         if (position >= plan.jobs.len) return null;
+        if (position + 1 == plan.jobs.len) {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.condition.broadcast(io);
+        }
         return plan.jobs[position];
+    }
+
+    fn waitExhausted(self: *FairVectoredReadScheduler, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.plan) |plan| {
+            if (self.cursor.load(.acquire) >= plan.jobs.len) return;
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
     }
 
     fn waitForWork(self: *FairVectoredReadScheduler, io: std.Io) bool {
@@ -2500,6 +2487,33 @@ test "fair read scheduler tracks fixed jobs and tails" {
     const after = scheduler.snapshot(std.testing.io);
     try std.testing.expectEqual(@as(usize, 2), after.remaining_jobs);
     try std.testing.expectEqual(@as(usize, 2), after.remaining_jobs);
+}
+
+test "fair read scheduler exhaustion waits for the final claim" {
+    const io = std.testing.io;
+    var scheduler = try FairVectoredReadScheduler.initForTest(std.testing.allocator, 1, &.{
+        .{ .tensor_index = 0, .len = 8, .physical_bytes = &.{8} },
+        .{ .tensor_index = 1, .len = 8, .physical_bytes = &.{8} },
+    });
+    defer scheduler.deinit();
+
+    var exhausted: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, exhausted_: *std.Io.Event) void {
+            scheduler_.waitExhausted(io_);
+            exhausted_.set(io_);
+        }
+    }.run, .{ &scheduler, io, &exhausted });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!exhausted.isSet());
+
+    _ = scheduler.claim(io).?;
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!exhausted.isSet());
+    _ = scheduler.claim(io).?;
+    try group.await(io);
+    try std.testing.expect(exhausted.isSet());
 }
 
 test "fair read scheduler concurrent claims return every logical job once" {
@@ -5488,11 +5502,10 @@ const DirectLoader = struct {
             resources.workspace.device_pool_indices,
             strict_affinity,
             &self.metrics,
+            &self.scheduler,
             config.max_in_flight_per_device,
         );
         errdefer self.pipeline.deinit();
-        self.pipeline.track_epoch_jobs = true;
-        self.pipeline.live_scheduler = &self.scheduler;
 
         self.controller_runtime = .{
             .controller = controller,
@@ -5559,7 +5572,6 @@ const DirectLoader = struct {
             const request = self.pipeline.registerRequest() catch |err| {
                 self.pipeline.abandonSourceJob();
                 self.request_gate.release(self.io);
-                self.pipeline.completeEpochJob();
                 self.pipeline.recordError(err);
                 return;
             };
@@ -5661,11 +5673,7 @@ const DirectLoader = struct {
             // loader had no active epoch from the next diagnostic delta.
             self.diagnostic_stats = provider.snapshot();
         }
-        self.pipeline.beginEpochJobs(batch_job_count);
-        self.scheduler.publish(self.io, &batch) catch |err| {
-            self.pipeline.cancelEpochJobs(batch_job_count);
-            return err;
-        };
+        try self.scheduler.publish(self.io, &batch);
         batch_owned = false;
         for (items) |item| self.epoch_items.appendAssumeCapacity(item);
         self.epoch_logical_bytes = logical_bytes;
@@ -5746,7 +5754,8 @@ const DirectLoader = struct {
             if (self.pipeline.errorValue()) |err| return err;
             return;
         }
-        self.pipeline.waitEpochDrained();
+        self.scheduler.waitExhausted(self.io);
+        self.request_gate.waitEmpty(self.io);
         self.controller_runtime.epochBarrier(self.io);
         const load_error = self.pipeline.errorValue();
         if (load_error != null) {
@@ -6801,6 +6810,31 @@ test "request lifecycle gate permits one shared spare request" {
     try std.testing.expectEqual(@as(usize, 32), clipped.lifecycle);
 }
 
+test "request lifecycle gate waits for every active request" {
+    const io = std.testing.io;
+    var gate: AdaptiveRequestGate = .init(2);
+    try std.testing.expect(gate.acquire(io));
+    try std.testing.expect(gate.acquire(io));
+
+    var drained: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(gate_: *AdaptiveRequestGate, io_: std.Io, drained_: *std.Io.Event) void {
+            gate_.waitEmpty(io_);
+            drained_.set(io_);
+        }
+    }.run, .{ &gate, io, &drained });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!drained.isSet());
+
+    gate.release(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!drained.isSet());
+    gate.release(io);
+    try group.await(io);
+    try std.testing.expect(drained.isSet());
+}
+
 fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
@@ -6912,6 +6946,7 @@ test "late vectored callback failure drains and signals completion" {
         .device_pool_indices = &.{0},
         .numa_explicit = false,
         .metrics = undefined,
+        .scheduler = undefined,
         .ready_queues = &queues,
         .active_by_device = &active,
         .dma_limit = 1,
