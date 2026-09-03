@@ -195,9 +195,9 @@ simplification pass.
   which no worker or callback touches the batch), marks unsubmitted targets
   when the pipeline failed, retires the contexts under `metadata_mutex` (so
   `abortReady` cannot race the free), logs the batch and frees items and
-  plan. Nothing drains the lifecycle gate or the controller per batch; the
-  controller's `epochBarrier` is unused until task 4 deletes it. A pipeline
-  failure is sticky: every open handle's await returns it and later
+  plan. Nothing drains the gates or the controller per batch and there is no
+  barrier: the controller sees submissions only as activity (below). A
+  pipeline failure is sticky: every open handle's await returns it and later
   submissions are rejected with it. There is no loader-wide context list or
   reap. The buffered backend mirrors this with `BufferedBatch{pending, done}`
   over the `LimitedGroup` read tasks.
@@ -235,6 +235,20 @@ simplification pass.
   width. Another settled backoff requires at least one new-generation source
   admission, so delayed old-width feedback cannot ratchet through several
   ladder rungs.
+- Activity transitions never close the read gate. Busy to idle (a control
+  tick with no unclaimed job, no pending source job and no read permit held)
+  scores a frozen or complete interval with an infinite remaining tail, drops
+  an incomplete one, then puts both gates at the controller's width and
+  reports it; a scoring freeze or a pending transition therefore never leaves
+  the gate closed or at a previous rung for the next submission. Idle to busy
+  prepares a probe at that width behind the admission fence, so reads
+  admitted before the tick are excluded but the gate is untouched. `create`
+  prepares the first generation before the workers start (born busy), so no
+  read is excluded and the gate is never closed at startup. A probe spans
+  consecutive submissions whenever the 25 ms tick misses the idle gap between
+  them. `gate_closed_ticks` in the loader summary counts control ticks that
+  found the read gate at 0 with jobs unclaimed; only scoring freezes and
+  width changes close it (5-6 per plain Llama load, 1-2 per pack run).
 - DMA width is fixed at eight per device by default after calibration work
   showed adaptive DMA width added substantial complexity and little load
   value. There is no global DMA parallelism cap.
@@ -670,6 +684,27 @@ decoupled, low pinned memory.
   pinned high-water 784 MiB; pack instrument width 16: pack phase
   0.805-0.859 s at 15.1-16.2 GiB/s, bulk remainder at 17-18 GiB/s, total
   0.957-1.024 s, content checks ok.
+- Remote regression after task 2 (commit b0584f43, quiet hosts): CUDA plain
+  0.611-0.620 s, packs width 16 pack phase 0.650-0.661 s; MI300 plain
+  0.902-0.954 s, pack phase 0.821-0.906 s. Neutral within spread.
+- Remote regression after task 3 (commit f55b8ea7, quiet hosts): CUDA plain
+  0.586-0.604 s (24.8-25.5 GiB/s); packs width 16 window 1 total
+  0.628-0.644 s (pack phase 0.546-0.561 s at 23.2-23.8 GiB/s), window 2
+  total 0.593-0.612 s (pack phase 0.514-0.530 s at 24.5-25.3 GiB/s), i.e.
+  packs plus bulk equal the plain load. MI300 plain 0.901-0.965 s (width 24,
+  pinned high-water 784 MiB); window 1 total 0.745-0.808 s (pack phase
+  0.615-0.681 s), window 2 total 0.677-0.689 s (pack phase 0.549-0.560 s at
+  23.2-23.7 GiB/s), i.e. the pack workload beats the plain load by 25%.
+  Four-GPU sharded packs at window 2 on MI300 complete in 1.04-1.09 s with
+  correct contents (the 2026-09-01 deadlock family passes). DeepSeek on MI300
+  7.255 / 7.603 s wall (19.6-20.5 GiB/s) versus 8.20-8.26 s on day one.
+- MI300 width evidence (task 3 tree, plain Llama, one GPU): fixed width 12
+  0.418 / 0.429 / 0.442 s (33.8-35.8 GiB/s, matching the CTX anchor for
+  16 MiB reads); fixed 24 0.616-0.671 s with the first 64 MiB pinned slab
+  growth costing 146 ms; adaptive 0.901-0.965 s selecting 24. The adaptive
+  ramp (gate drains, probing 16/24/32, slab growth) costs more than the whole
+  load on this host and settles on a worse width. This, not the host, is most
+  of the "ROCm problem". A CUDA fixed-width sweep was discarded (host busy).
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 

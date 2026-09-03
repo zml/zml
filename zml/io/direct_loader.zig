@@ -48,7 +48,6 @@ const VectoredLoadMetrics = struct {
     transfer_pieces: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
-    outstanding_requests: std.atomic.Value(usize) = .init(0),
     pending_source_jobs: std.atomic.Value(usize) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: u64 = std.math.maxInt(u64),
@@ -112,14 +111,6 @@ const VectoredLoadMetrics = struct {
         if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
         self.probe_read_operations +|= 1;
         self.probe_read_bytes +|= @intCast(bytes);
-    }
-
-    fn beginRequest(self: *VectoredLoadMetrics) void {
-        _ = self.outstanding_requests.fetchAdd(1, .acq_rel);
-    }
-
-    fn endRequest(self: *VectoredLoadMetrics) void {
-        _ = self.outstanding_requests.fetchSub(1, .acq_rel);
     }
 
     fn prepareProbe(
@@ -392,6 +383,12 @@ const AdaptiveRequestGate = struct {
         return self.in_use;
     }
 
+    fn currentLimit(self: *AdaptiveRequestGate, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.limit;
+    }
+
     fn close(self: *AdaptiveRequestGate, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -574,7 +571,6 @@ const VectoredLoadPipeline = struct {
             const pipeline = self.pipeline;
             const batch = self.batch;
             self.completed.store(true, .release);
-            pipeline.metrics.endRequest();
             pipeline.request_gate.release(pipeline.io);
             batch.finishJobs(1);
         }
@@ -681,7 +677,7 @@ const VectoredLoadPipeline = struct {
         // context may outlive its batch.
         std.debug.assert(self.active_events == 0);
         std.debug.assert(self.ready_entries == 0);
-        std.debug.assert(self.metrics.outstanding_requests.load(.acquire) == 0);
+        std.debug.assert(self.request_gate.inUse(self.io) == 0);
         for (self.ready_queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.ready_queues);
         self.allocator.free(self.active_by_device);
@@ -717,7 +713,6 @@ const VectoredLoadPipeline = struct {
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         try batch.requests.append(self.allocator, request);
-        self.metrics.beginRequest();
         return request;
     }
 
@@ -2766,8 +2761,10 @@ const SourceReadRuntime = struct {
     scheduler_idle: bool = false,
     backoff_admission_start: ?u64 = null,
     reported_width: usize = 1,
-    epoch_barrier_requested: std.atomic.Value(bool) = .init(false),
-    epoch_barrier_done: std.Io.Event = .unset,
+    /// Control ticks that found the read gate closed while jobs were still
+    /// unclaimed. Only a scoring freeze or a width change closes the gate;
+    /// activity transitions never do.
+    gate_closed_ticks: u64 = 0,
     control: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
 
@@ -2776,21 +2773,28 @@ const SourceReadRuntime = struct {
         return cursor.takeBackpressure();
     }
 
+    /// Applies a decision at a generation boundary. A changed width drains
+    /// the read gate and starts a clean generation; an unchanged one can only
+    /// be settled and just reopens the gate. Activity transitions do not come
+    /// through here: see `finishIdleMeasurement` and `resumeMeasurement`.
     fn applyDecision(
         self: *SourceReadRuntime,
         io: std.Io,
         decision: SourceReadWidthController.Decision,
-        force_probe: bool,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
         self.reported_width = decision.width;
         self.request_gate.setLimit(io, limits.lifecycle);
-        if (decision.changed or (!decision.settled and force_probe)) {
+        if (decision.changed) {
             self.read_gate.setLimit(io, 0);
             self.metrics.clearProbe(io);
             self.measurement = .{ .transitioning = limits.read };
             _ = self.activatePendingProbe(io);
-        } else if (decision.settled) {
+        } else {
+            // `observe` returns a changed or a settled decision, `backoff`
+            // always settles and the blind restart forces `changed`, so an
+            // unchanged unsettled decision cannot reach this point.
+            std.debug.assert(decision.settled);
             self.read_gate.setLimit(io, limits.read);
             self.metrics.clearProbe(io);
             self.metrics.config_epoch.store(decision.generation, .release);
@@ -2872,6 +2876,11 @@ const SourceReadRuntime = struct {
         self.metrics.clearProbe(io);
     }
 
+    /// Busy to idle. Scores a frozen or complete interval, then puts both
+    /// gates at the controller's width: nothing is in flight, so no drain is
+    /// needed, and neither a scoring freeze nor a pending transition may
+    /// leave the read gate closed or at a previous rung for the next
+    /// submission.
     fn finishIdleMeasurement(self: *SourceReadRuntime, io: std.Io) void {
         _ = self.takeRemoteBackpressure();
         if (self.controller.phase != .settled) {
@@ -2888,20 +2897,31 @@ const SourceReadRuntime = struct {
             }
         }
         self.metrics.clearProbe(io);
+        self.metrics.config_epoch.store(self.controller.generation, .release);
         self.measurement = .inactive;
-        self.reported_width = self.controller.selectedWidth();
+        const limits: RequestGateLimits = .init(self.controller.width(), self.pinned_feasible_width);
+        self.reported_width = self.controller.width();
+        self.read_gate.setLimit(io, limits.read);
+        self.request_gate.setLimit(io, limits.lifecycle);
     }
 
-    fn epochBarrier(self: *SourceReadRuntime, io: std.Io) void {
-        self.epoch_barrier_done.reset();
-        self.epoch_barrier_requested.store(true, .release);
-        self.control.set(io);
-        self.epoch_barrier_done.waitUncancelable(io);
+    /// Idle to busy. The gates already carry the controller's width, so an
+    /// unsettled controller starts a clean generation at that width without
+    /// touching them; the admission fence excludes reads admitted before
+    /// this tick. A settled controller has nothing to measure.
+    fn resumeMeasurement(self: *SourceReadRuntime, io: std.Io) void {
+        std.debug.assert(self.measurement == .inactive);
+        if (self.controller.phase == .settled) return;
+        self.metrics.prepareProbe(
+            io,
+            self.controller.generation,
+            self.next_read_admission.load(.acquire),
+        );
+        self.measurement = .measuring;
     }
 
     fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
         const started: std.Io.Timestamp = .now(io, .awake);
-        self.applyDecision(io, self.controller.currentDecision(), self.controller.isAdaptive());
         while (true) {
             self.control.waitTimeout(io, .{ .duration = .{
                 .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),
@@ -2924,12 +2944,14 @@ const SourceReadRuntime = struct {
                     else => {},
                 }
                 if (!self.backoffReady()) continue;
-                self.applyDecision(io, self.controller.backoff(), false);
+                self.applyDecision(io, self.controller.backoff());
                 continue;
             }
             if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
             const scheduler_snapshot = self.scheduler.snapshot(io);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+            if (scheduler_snapshot.remaining_jobs != 0 and self.read_gate.currentLimit(io) == 0)
+                self.gate_closed_ticks += 1;
 
             const idle = scheduler_snapshot.remaining_jobs == 0 and
                 self.metrics.pending_source_jobs.load(.acquire) == 0 and
@@ -2939,19 +2961,11 @@ const SourceReadRuntime = struct {
                     self.finishIdleMeasurement(io);
                     self.scheduler_idle = true;
                 }
-                if (self.epoch_barrier_requested.swap(false, .acq_rel)) {
-                    _ = self.takeRemoteBackpressure();
-                    self.epoch_barrier_done.set(io);
-                }
                 continue;
             }
             if (self.scheduler_idle) {
                 self.scheduler_idle = false;
-                self.applyDecision(
-                    io,
-                    self.controller.currentDecision(),
-                    self.controller.phase != .settled,
-                );
+                self.resumeMeasurement(io);
                 continue;
             }
 
@@ -2964,7 +2978,7 @@ const SourceReadRuntime = struct {
                     self.controller.generation +|= 1;
                     var decision = self.controller.currentDecision();
                     decision.changed = true;
-                    self.applyDecision(io, decision, true);
+                    self.applyDecision(io, decision);
                     continue;
                 },
                 else => {},
@@ -2976,7 +2990,7 @@ const SourceReadRuntime = struct {
                         self.source_bootstrap_enabled,
                         false,
                         self.metrics.read_bytes.load(.acquire),
-                        self.metrics.outstanding_requests.load(.acquire),
+                        self.request_gate.inUse(io),
                         self.controller.width(),
                         scheduler_snapshot.remaining_jobs,
                     ))
@@ -3001,7 +3015,7 @@ const SourceReadRuntime = struct {
                     evidence.remaining_full_jobs = scheduler_snapshot.remaining_jobs;
                     const decision = self.controller.observe(evidence);
                     self.measurement = .inactive;
-                    self.applyDecision(io, decision, !decision.settled);
+                    self.applyDecision(io, decision);
                     continue;
                 },
                 else => {},
@@ -3032,16 +3046,21 @@ const SourceReadRuntime = struct {
     }
 };
 
+/// Blind growth is warranted while a high-latency source has not answered
+/// and the read gate is the limiter: at least `read_limit` workers hold a
+/// lifecycle credit (taken before the claim, returned after the last DMA
+/// callback), no read has returned, so the admitted reads are all still
+/// pending and the other credit holders wait for a read permit.
 fn shouldBootstrapSource(
     enabled: bool,
     response_observed: bool,
     read_bytes: u64,
-    outstanding_requests: usize,
+    lifecycle_in_use: usize,
     read_limit: usize,
     remaining_jobs: usize,
 ) bool {
     return enabled and !response_observed and read_bytes == 0 and
-        outstanding_requests >= read_limit and remaining_jobs != 0;
+        lifecycle_in_use >= read_limit and remaining_jobs != 0;
 }
 
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
@@ -3200,7 +3219,13 @@ pub const DirectLoader = struct {
             .pinned_feasible_width = feasible_width,
             .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
+            .reported_width = controller.width(),
         };
+        // Born busy: both gates are open at the controller's width and the
+        // first generation is prepared before any worker can admit a read,
+        // so it measures from the first read and the gate is never closed at
+        // startup.
+        self.controller_runtime.resumeMeasurement(io);
         errdefer self.stopWorkers();
         try self.startWorkers(source_parallelism.maximum());
         load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, feasible_width={d}, mapped={Bi:.2}", .{
@@ -3452,7 +3477,7 @@ pub const DirectLoader = struct {
     }
 
     fn logSummary(self: *DirectLoader) void {
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.bytesLoaded(),
@@ -3462,6 +3487,7 @@ pub const DirectLoader = struct {
             self.metrics.transfer_pieces.load(.acquire),
             self.metrics.dma_submissions.load(.acquire),
             self.controller_runtime.reported_width,
+            self.controller_runtime.gate_closed_ticks,
             self.source_request_size,
             self.pool.highWaterBytes(),
             self.pool.mappedBytes(),
@@ -3584,20 +3610,21 @@ test "coalesced job block bound is independent of device count" {
     );
 }
 
-test "probe source capacity counts active reads rather than retained requests" {
+test "probe source capacity counts active reads and keeps their peak" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
     metrics.prepareProbe(io, 7, 10);
-    for (0..48) |_| metrics.beginRequest();
     for (0..8) |index| metrics.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
 
-    try std.testing.expectEqual(@as(usize, 48), metrics.outstanding_requests.load(.acquire));
     const active = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 8), active.probe_peak_reads);
     try std.testing.expectEqual(@as(usize, 8), active.probe_active_reads);
 
-    for (0..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    for (0..48) |_| metrics.endRequest();
+    for (0..4) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
+    const draining = metrics.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 8), draining.probe_peak_reads);
+    try std.testing.expectEqual(@as(usize, 4), draining.probe_active_reads);
+    for (4..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
     metrics.clearProbe(io);
 }
 
@@ -3730,6 +3757,73 @@ test "settled backoff waits for a new-generation admission" {
     next_admission.store(42, .release);
     try std.testing.expect(runtime.backoffReady());
     try std.testing.expect(runtime.backoffReady());
+}
+
+test "activity transitions keep both gates at the controller width" {
+    const io = std.testing.io;
+    var metrics: VectoredLoadMetrics = .{};
+    var read_gate: AdaptiveRequestGate = .init(12);
+    var request_gate: AdaptiveRequestGate = .init(13);
+    var next_admission: std.atomic.Value(u64) = .init(41);
+    var runtime: SourceReadRuntime = .{
+        .controller = SourceReadWidthController.init(
+            .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+            64,
+        ),
+        .read_gate = &read_gate,
+        .request_gate = &request_gate,
+        .metrics = &metrics,
+        .next_read_admission = &next_admission,
+        .scheduler = undefined,
+        .pinned_feasible_width = 64,
+        .read_stats = null,
+        .source_bootstrap_enabled = false,
+    };
+
+    // A scoring freeze had closed the read gate when the submission ran out
+    // of jobs. Going idle scores it, which moves the controller to the next
+    // rung, and reopens both gates at that rung.
+    read_gate.setLimit(io, 0);
+    runtime.measurement = .{ .scoring = sourceReadTestEvidence(&runtime.controller, 100, 0) };
+    runtime.finishIdleMeasurement(io);
+    try std.testing.expect(runtime.measurement == .inactive);
+    try std.testing.expect(runtime.controller.phase != .settled);
+    try std.testing.expectEqual(@as(usize, 16), runtime.controller.width());
+    try std.testing.expectEqual(@as(usize, 16), runtime.reported_width);
+    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 17), request_gate.currentLimit(io));
+
+    // Busy again: the probe restarts at the current width without touching
+    // the gates, and only reads admitted from now on are attributed to it.
+    runtime.resumeMeasurement(io);
+    try std.testing.expect(runtime.measurement == .measuring);
+    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 17), request_gate.currentLimit(io));
+    try std.testing.expectEqual(runtime.controller.generation, metrics.snapshot(io).probe_epoch);
+    metrics.beginRead(io, runtime.controller.generation, 40);
+    try std.testing.expectEqual(@as(usize, 0), metrics.snapshot(io).probe_active_reads);
+    metrics.beginRead(io, runtime.controller.generation, 41);
+    try std.testing.expectEqual(@as(usize, 1), metrics.snapshot(io).probe_active_reads);
+    metrics.endRead(io, runtime.controller.generation, 40);
+    metrics.endRead(io, runtime.controller.generation, 41);
+
+    // An interval too short to score is dropped at idle and the rung stays.
+    runtime.finishIdleMeasurement(io);
+    try std.testing.expect(runtime.measurement == .inactive);
+    try std.testing.expectEqual(@as(usize, 16), runtime.controller.width());
+    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
+
+    // A settled controller: idle applies its width, busy measures nothing.
+    _ = runtime.controller.backoff();
+    try std.testing.expect(runtime.controller.phase == .settled);
+    runtime.finishIdleMeasurement(io);
+    try std.testing.expectEqual(@as(usize, 12), runtime.reported_width);
+    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
+    runtime.resumeMeasurement(io);
+    try std.testing.expect(runtime.measurement == .inactive);
+    try std.testing.expectEqual(std.math.maxInt(u64), metrics.snapshot(io).probe_epoch);
+    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
 }
 
 test "vectored final transfers wait for every prior destination submission" {
@@ -3917,7 +4011,7 @@ test "batch completes when every claimed request completes" {
     var requests: [3]*VectoredLoadPipeline.RequestContext = undefined;
     for (&requests) |*request| request.* = try fixture.claimRequest(&scheduler);
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 3), fixture.metrics.outstanding_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), fixture.gate.inUse(io));
 
     for (requests, 0..) |request, index| {
         try std.testing.expect(!batch.done.isSet());
@@ -3927,7 +4021,6 @@ test "batch completes when every claimed request completes" {
     try std.testing.expect(batch.done.isSet());
     try std.testing.expectEqual(@as(usize, 0), batch.remaining.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
-    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.outstanding_requests.load(.acquire));
     try std.testing.expectEqual(@as(usize, 3), batch.requests.items.len);
 
     fixture.pipeline.retireBatch(batch);
@@ -4026,7 +4119,6 @@ test "overlapping batches complete under concurrent claims and retirement" {
         try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
     }
     fixture.gate.waitEmpty(io);
-    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.outstanding_requests.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.metrics.pending_source_jobs.load(.acquire));
 }
 

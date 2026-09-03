@@ -51,8 +51,9 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [x] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
 - [x] 2. Per-batch completion behind the existing single slot.
 - [x] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
-- [ ] 4. Controller continuity across submissions (minimal).
-- [ ] 5. Monorepo migration and Laguna window measurement.
+- [x] 4. Controller continuity across submissions (minimal).
+- [ ] 5. Monorepo migration and Laguna window measurement (after task 8:
+      the controller evidence from MI300 made task 8 the next priority).
 - [ ] 6. Per-file incremental publish; identity fair order for one device.
 - [ ] 7. VFS: throttle classification, two-class backpressure, dead timing.
 - [ ] 8. Climb-and-hold controller without gate drains (gated, revertible).
@@ -326,6 +327,49 @@ entry's input bytes next to its handle.
 - Validation: controller tests unchanged; packs=64 K=1 shows zero gate-closed
   intervals at boundaries; matrix packs=0 neutral, selected widths unchanged.
 
+Result (2026-09-04): `SourceReadRuntime` lost `epochBarrier` and its two
+fields, `metrics.outstanding_requests` with `beginRequest`/`endRequest` (the
+pipeline teardown assert and `shouldBootstrapSource` read
+`request_gate.inUse`, the lifecycle credit taken before the claim) and
+`applyDecision`'s `force_probe`: every remaining caller passes a changed or a
+settled decision, so the old fall-through is an assert. `finishIdleMeasurement`
+scores or drops the interval as before, then puts both gates at
+`controller.width()` and reports it; the new `resumeMeasurement` prepares a
+probe at the current width behind the admission fence without touching the
+gates. `create` seeds `reported_width` and calls `resumeMeasurement` before
+the workers start (born busy): the old startup `applyDecision` raced the
+workers' first admissions and closed the read gate for a full drain at the
+start of every load, and the resulting position of the first included read
+decided which 25 ms tick scored first. `gate_closed_ticks` (control ticks
+with the read gate at 0 and jobs unclaimed) is in the loader summary via
+`AdaptiveRequestGate.currentLimit`. Tests 235 -> 236 (`activity transitions
+keep both gates at the controller width`). Local B70, Llama, 3 runs each with
+the final binary: plain 0.777/0.828/0.819 s (width 12/8/8, 5-6 closed ticks,
+all rung-change drains); packs=64 width 16 window 1: pack phase
+0.742/0.751/0.740 s, total 0.836/0.846/0.831 s, widths 16/12/12,
+gate_closed_ticks 2/1/1; window 2: pack phase 0.659/0.741/0.664 s, total
+0.758/0.834/0.758 s, width 12, ticks 1/5/1 (three traced runs of the same
+code: 0.661-0.663 s, one tick each); window 4: pack phase 0.745/0.751/0.749 s
+(task 3: 0.78), total 0.841/0.862/0.841 s, widths 8/8/16, ticks 5/6/5. Not
+anticipated: (1) the counter does not read 0 at window 1 because the only
+closures left are scoring freezes, and a probe spans packs whenever the 25 ms
+tick misses the 7-15 ms idle gap between them (traced: freeze at t=110 ms
+with pack 1 already published); boundary closures themselves are gone. (2)
+Window 2 is bimodal on the first score: at t=135 ms the queue holds a short
+tail (6-35 jobs), `probeFitsTail` fails and the controller settles at 12
+(0.66 s); one tick later pack 3's 224 jobs are queued, the whole ladder runs
+with 4-5 drains and 16 is selected half the time (0.72-0.77 s). Born-busy
+startup made the first mode 5 of 6 runs. (3) Window 4 ramps
+12->16->24->32->12 like a plain load because four queued packs always leave
+about 480 jobs, and the pack workload measured 16 at 22.98 GiB/s against
+19.40/22.21 at 12, so 12 misses the 3% band by 0.35%; the controller scores
+read throughput only and never sees the per-batch DMA tail or its own drains,
+which is why it can select 16 while the pack phase is slower there. (4) At
+window 1, `finishIdleMeasurement` scores a complete `.measuring` interval with
+an infinite tail, so now that idle is seen between most packs the width moves
+one rung per pack unclipped (traced 12->8->4 and 12->16->12->24) and the bulk
+batch inherits it. (2)-(4) are task 8 territory (busy-time clock, no drains).
+
 ### 5. Monorepo migration and Laguna window
 
 - `llmd/main.zig`: `vfs.registerBackend(scheme, x.backend())` for the five
@@ -368,6 +412,16 @@ entry's input bytes next to its handle.
   AWS if credentials are available.
 
 ### 8. Climb-and-hold controller without gate drains (gated)
+
+Evidence that raised its priority (2026-09-04, MI300, plain Llama): fixed
+width 12 loads in 0.42 s, fixed 24 in 0.63 s, adaptive in 0.90 s selecting
+24. Task 4 traces: the scoring freeze still closes the gate; a probe that
+spans a submission boundary is scored at idle with an infinite tail and moves
+the width one rung per pack; the climb probes 16/24/32 above the knee because
+read throughput alone is within 3% across those rungs. The pinned pool grows
+by hipHostMalloc slabs mid-load when the width exceeds the retained arena
+(146 ms for the first slab); pre-growing to the widths the controller may
+probe belongs to this task.
 
 - Controller `{index, max_index, best_index, rates[12], samples[12],
   state: climbing|holding, borderline_used, probed_down, generation,
