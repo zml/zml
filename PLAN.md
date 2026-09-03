@@ -50,7 +50,7 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [x] 0. Baseline capture and pack instrument in the playground.
 - [x] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
 - [x] 2. Per-batch completion behind the existing single slot.
-- [ ] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
+- [x] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
 - [ ] 4. Controller continuity across submissions (minimal).
 - [ ] 5. Monorepo migration and Laguna window measurement.
 - [ ] 6. Per-file incremental publish; identity fair order for one device.
@@ -259,6 +259,60 @@ Unchanged from the task-1 numbers.
   planned jobs per submission; multi-device sharded and replicated loads with
   packs interleaved complete without hang (local 2xB70; 4/8 MI300X when the
   host is trusted).
+
+Result (2026-09-04): `FairVectoredReadScheduler` is a FIFO `{allocator,
+queue, head, unclaimed_total, stopping, mutex, condition}`: `publish` appends
+(a batch without jobs is never queued and completes when its sentinel drops),
+`claim` advances the batch's plain `cursor` under the mutex and pops the batch
+with its last job, so a queued batch can never be freed; `fail` retires the
+unclaimed units of every queued batch and clears the queue; `snapshot` returns
+`unclaimed_total`. `DirectLoader.submit(specs) !*Batch` and `awaitBatch`
+replace `appendItems`/`loadPrepared`/`loadBinding`/`await`; each batch logs
+one line with publish/first-claim/done offsets and `destroy` logs a loader
+summary. Deleted: `plan`, the atomic cursor, `waiting_workers`,
+`worker_count`, `finishEpoch`, `waitExhausted`, `initForTest`, `TestJob`,
+the `Job.transfers` default and `PreparedBatch` guards, `current`, the epoch
+branch of `checkOpen`, `logEpoch`/`DirectLoaderDiagnostics`,
+`error.LoaderEpochActive`, the buffered `epoch_active`/`epoch_logical_bytes`,
+`PreparedExecutableBinding`, `executeLoadedBinding`, `Loader.await`,
+`Loader.checkOpen`. `epochBarrier` stays unused and `metrics.outstanding_requests`
+stays, both for task 4. `io.zig`: `Loader.load -> Handle`, `Loader.Binding`,
+`loadExecute(bindings) -> Handle` over the union of the bindings' sources,
+`Handle{await, isDone, logicalBytes}` (executables run in binding order on
+the awaiting task with `.wait = true`, inputs freed, bytes committed per
+handle, idempotent), `awaitAll`, `executeInputBytesPerDevice`, `deinit`
+awaiting open handles reads-only, `Window{budget_bytes, max_handles}` with
+`submit`/`drain`/`deinit`, `BufferedBatch{pending, done}`, `error.EmptyTensor`.
+The in-repo callers were migrated mechanically to `const h = try
+loader.load(...); try h.await();`: `zml/testing.zig` (`testLayer`),
+`examples/mnist/mnist.zig`, and the llama/lfm2/qwen3_5/qwen3_5_moe models
+under `examples/llm/models`; `//examples/llm`, `//examples/llm:llama_tests`,
+`//examples/mnist` and the playground build. Tests 232 -> 235 passed, 3
+skipped: fair-order tests call
+`fairOrder`; FIFO tests cover publish order, completion while a later batch is
+still claimed, `fail` over every queued batch, wake/stop, concurrent claims
+across two batches and 210 overlapping batches awaited newest first; public
+tests cover out-of-order awaits with 3x bytes, a two-binding submission,
+`deinit` with open handles, the window, and a missing-file read failure that
+fails every pending await and later submissions with `error.FileNotFound`
+(a past-EOF entry reads zero bytes without error on the buffered path).
+Local B70, Llama, 3 runs each: plain 0.785/0.784/0.810 s (19.05/19.08/18.47
+GiB/s, width 12/12/8, pinned high-water 200-264 MiB); packs=64 width 16
+window 1: pack phase 0.712/0.695/0.804 s (task 2: 0.891-0.917 s), total
+0.809/0.791/0.919 s; window 2: pack phase 0.676/0.664/0.674 s at 19.2-19.6
+GiB/s, total 0.767/0.757/0.776 s, i.e. the plain load time; window 4:
+0.780/0.782/0.782 s (16.6 GiB/s, width 16, pinned 264 MiB); window 2 with
+pairs=1: 0.789/0.787/0.743 s, 8 batches, reads unchanged at 1977 because
+Llama's same-shape packs are not file-adjacent (widths 16/24/8). Pack runs
+pin 104 MiB at width 12. Two B70 (`level_zero:0,1`) with packs window 2:
+sharded 0.900 s and replicated 0.939 s, both complete, pack checks ok.
+Window-2 timeline: batch k+1's first claim precedes batch k's completion
+(+0.090 s vs +0.095 s, +0.235 vs +0.242), so executables are hidden. Window
+4 and pairs lose to the controller probing 16/24 once work is continuous
+(the B70 knee is 12): task 4/8 territory. Deviations: `DirectLoader.destroy`
+does not await batches itself (the front end's `deinit` does, reads only,
+and `scheduler.deinit` asserts the queue is empty); `Window` records each
+entry's input bytes next to its handle.
 
 ### 4. Controller continuity (minimal)
 

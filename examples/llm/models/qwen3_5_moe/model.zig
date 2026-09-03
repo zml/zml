@@ -123,8 +123,8 @@ pub const LoadedModel = struct {
             .load_profile = load_profile,
         });
         defer loader.deinit();
-        try loader.load(Model, &self.inner, &buffers);
-        try loader.await();
+        const weights_handle = try loader.load(Model, &self.inner, &buffers);
+        try weights_handle.await();
         const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);
@@ -209,8 +209,8 @@ pub const Model = struct {
             .load_profile = load_profile,
         });
         defer loader.deinit();
-        try loader.load(Model, self, &buffers);
-        try loader.await();
+        const weights_handle = try loader.load(Model, self, &buffers);
+        try weights_handle.await();
         const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);

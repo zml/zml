@@ -19,8 +19,22 @@ ref is still current.
 
 - `zml.io.Loader` selects the direct path for CUDA, ROCm, and oneAPI and the
   buffered path otherwise. A loader owns its store, sharding/profile options,
-  worker pool, and sequential epochs. Both backends allow one active epoch;
-  another `load` is rejected until `await` completes.
+  worker pool, and every handle it created. Every submission returns a
+  `Handle`: `load(Model, model, buffers)` submits all single-source tensors of
+  a model; `loadExecute(bindings)` submits the sources of one or more
+  `Binding{tensor, output, exe}` as ONE planned submission so adjacent
+  sources of different bindings coalesce. Any number of handles may be open;
+  `Handle.await` (idempotent, cached) waits for the submission's reads and
+  DMA, then for bindings runs each executable in binding order on the
+  awaiting task with `.wait = true`, writes `output.*`, frees the inputs and
+  commits the submission's logical bytes to `bytesLoaded()`. `awaitAll`
+  awaits in publish order; `deinit` awaits open handles without running
+  executables and frees every handle. A zero-byte tensor is `error.EmptyTensor`.
+- The loader has no memory policy: `zml.io.Window{budget_bytes, max_handles}`
+  is the caller-side policy, awaiting the oldest pending `loadExecute` handle
+  before submitting the next one whose inputs (sized by
+  `Loader.executeInputBytesPerDevice(exe)`) would exceed the budget or the
+  handle cap. A window of one reproduces the former synchronous behaviour.
 - `VFS.loadProfile(path)` is prepared once for a model load and passed as a
   borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
   `high_latency`, and optional aggregate retry/throttle feedback. It assumes
@@ -32,14 +46,16 @@ ref is still current.
   `Loader` API differs from the adjacent monorepo's older checkout: store,
   shardings, progress, and profile now belong to loader initialization.
 - `DirectMemoryWriter`, `DirectShardWriter`, and `DynamicBufferPool` are no
-  longer public loader mechanisms. `Loader.loadExecute` remains and is
-  synchronous: it loads every source for a multi-source/fused binding, drains
-  the epoch, executes the binding, and returns with the output ready.
+  longer public loader mechanisms. There is no executor inside the loader:
+  executables run on whichever task awaits the handle, so the caller's number
+  of un-awaited `loadExecute` handles bounds device memory and its await
+  order is the execution order.
 - Model traversal, tensor-store lookup, resolved sharding selection, and output
   flattening happen once in the shared `Loader.load` front end. Executable
-  source lookup, validation, input allocation, execution, and output ownership
-  similarly live once above the backend split; buffered and direct loaders
-  implement only their transfer epochs. The buffered memory writer is private.
+  source lookup, validation, input-shell allocation (`BoundExecutable`),
+  execution, and output ownership similarly live once above the backend
+  split; buffered and direct loaders implement only `submit(specs)` and
+  `awaitBatch`. The buffered memory writer is private.
 - `zml/io.zig` is the public/store front end and buffered backend. Direct
   planning, scheduling, adaptive control, transfer lifecycle, and their tests
   are in `zml/io/direct_loader.zig`; platform-owned DMA settings, retained
@@ -51,13 +67,16 @@ ref is still current.
   recovering duplicated state from its active backend. The buffered backend
   retains none of the unused store/options; the direct backend retains only
   the load profile and progress pointer needed after construction.
-- Both backends count logical loaded bytes only after the whole epoch succeeds.
-  Direct epoch diagnostics are one record with a single per-epoch reset; their
-  cumulative counter baselines and optional VFS cursor persist across epochs.
+- Both backends count a submission's logical bytes only when its await
+  succeeds. Direct diagnostics are batch-owned (publish, first-claim and
+  completion offsets from loader creation, planned jobs/runs/items/transfers,
+  planning time, VFS delta since publish) and logged once per batch at await;
+  loader-wide totals (reads, DMA submissions, pool high-water/mapped, width)
+  are logged once at `destroy`.
 - The compatibility target observed in `~/github/zml/monorepo` is behavioral:
-  repeated `loadExecute`, followed by at most one `load`/`await`, multi-source
-  `TensorStore` bindings, and cumulative loaded-byte accounting. That checkout
-  intentionally continues to use its older `../zml` dependency for now.
+  repeated `loadExecute`, whole-model `load`, multi-source `TensorStore`
+  bindings, and cumulative loaded-byte accounting. That checkout is migrated
+  to the handle API in task 5.
 
 ### Source and VFS data plane
 
@@ -142,17 +161,25 @@ simplification pass.
 ### Scheduling and concurrency
 
 - Planning charges a coalesced job's physical bytes to every destination device
-  and simulates the fairness policy once. It publishes jobs directly in that
-  immutable order, and runtime claims are a single atomic cursor. Remaining
-  sampleable work is the number of jobs after the cursor. There are no live
-  device queues, debt counters, claimed bitmap, claim mutex, runtime order
-  indirection, or suffix-metadata arrays. Same-file predecessor order and
-  per-target submitted-prefix accounting preserve ordering while unrelated
-  reads and DMA complete out of order.
-- Persistent direct-loader workers rendezvous in their idle wait before the
-  slot is emptied and the batch freed: `claim` reads the slot before it holds
-  a completion unit. They remain alive for the next sequential `loadExecute`
-  or `load` epoch; append/seal/reopen scheduler states are gone.
+  and simulates the fairness policy once per submission; the plan's jobs are
+  stored in that immutable order. Same-file predecessor order and per-target
+  submitted-prefix accounting preserve ordering while unrelated reads and DMA
+  complete out of order. There are no live device queues, debt counters,
+  claimed bitmap, runtime order indirection, or suffix-metadata arrays.
+- `FairVectoredReadScheduler` is a strict FIFO of published batches under one
+  mutex and condition: `publish` appends a batch behind every earlier one
+  (a batch without jobs is never queued), `claim` hands out the head batch's
+  next job by advancing that batch's plain cursor and pops the batch with
+  its last job, `waitForWork` sleeps while nothing is unclaimed, `fail`
+  retires the unclaimed units of every queued batch and clears the queue,
+  `snapshot` reports the unclaimed total. A later batch's first job is
+  claimed only after every job of the earlier ones; fairness is intra-batch
+  and the caller's submission order is the cross-batch policy. The queue
+  holds only batches with unclaimed jobs, and a batch can only be freed after
+  `done`, which needs every job claimed or retired; both pop the batch, so a
+  queued batch is never freed and no worker rendezvous is needed. Persistent
+  workers loop `waitForWork` -> lifecycle credit -> `claim` -> read ->
+  enqueue; the claim takes the mutex the idle wait already takes.
 - A `Batch` owns its plan (jobs, transfers), its items and every request,
   block and event context created for it. It completes when `remaining`
   (one publish sentinel plus one unit per job) reaches zero and sets `done`.
@@ -163,11 +190,17 @@ simplification pass.
   jobs. Callback order rule: the PJRT ready callback and the submission
   failure path copy `pipeline`, `device_index` and `block` into locals,
   call `eventCompleted`, then `block.complete()` last, because the block's
-  completion may free the batch. `await` waits `done`, drains the lifecycle
-  gate (only permits of workers that claimed nothing), runs the controller
-  barrier, empties the slot after the worker rendezvous, retires the batch's
-  contexts under `metadata_mutex` (so `abortReady` cannot race the free),
-  and frees items and plan. There is no loader-wide context list or reap.
+  completion may free the batch. `DirectLoader.submit` creates the items,
+  plans, publishes and drops the sentinel; `awaitBatch` waits `done` (after
+  which no worker or callback touches the batch), marks unsubmitted targets
+  when the pipeline failed, retires the contexts under `metadata_mutex` (so
+  `abortReady` cannot race the free), logs the batch and frees items and
+  plan. Nothing drains the lifecycle gate or the controller per batch; the
+  controller's `epochBarrier` is unused until task 4 deletes it. A pipeline
+  failure is sticky: every open handle's await returns it and later
+  submissions are rejected with it. There is no loader-wide context list or
+  reap. The buffered backend mirrors this with `BufferedBatch{pending, done}`
+  over the `LimitedGroup` read tasks.
 - Source concurrency is adaptive for every direct-loader profile. The old
   conversion of local/default `.adaptive` to `.fixed = 12` was removed.
   `high_latency` only permits blind pre-response bootstrap to 24 then 32.
@@ -484,9 +517,10 @@ same-host medians.
 - Source-planner/final-record, three-phase adaptive-controller, immutable
   scheduler fairness/order, concurrent atomic claims, short-read,
   replication/sharding, NUMA-affinity, pool-scratch allocation failure and
-  reuse, failure cleanup, and epoch reuse tests passed. A real public-loader
-  test also covers `loadExecute -> loadExecute -> load -> await`, output
-  readiness, active-epoch rejection, and cumulative byte accounting.
+  reuse, failure cleanup, and overlapping-batch tests passed. Public loader
+  tests cover out-of-order handle awaits, a two-binding submission, `deinit`
+  with open handles, the `Window`, a sticky read failure, and cumulative byte
+  accounting.
 - Zig formatting passes for `zml/io.zig`, every `zml/io/*.zig` module,
   `zml/mem.zig`, and `zml/safetensors.zig` with the repository's Bazel-managed
   toolchain. Buildifier check mode passes for `zml/BUILD.bazel`.

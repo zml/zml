@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
                 .check = try envUsize(init.environ_map, "ZML_LOAD_PACK_CHECK", 1) != 0,
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
-            if (pack_options.width == 0) return error.InvalidArgument;
+            if (pack_options.width == 0 or pack_options.window == 0) return error.InvalidArgument;
             const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, sharded_sharding, pack_options);
             defer for (pack_plan.exes) |*exe| exe.deinit();
             if (pack_options.packs > 0) {
@@ -247,9 +247,6 @@ pub fn main(init: std.process.Init) !void {
                     pack_plan.exes.len,
                     pack_plan.bytes,
                 });
-                if (pack_options.window != 1 or pack_options.pairs != 0) {
-                    log.warn("pack plan: window and pairs are logged only; packs run sequentially with window 1", .{});
-                }
             }
 
             const AllTensorsModel = struct {
@@ -320,26 +317,54 @@ pub fn main(init: std.process.Init) !void {
                 });
                 defer loader.deinit();
 
-                const pack_start: std.Io.Timestamp = .now(io, .awake);
-                for (pack_plan.packs, pack_outputs) |pack, *output| {
-                    try loader.loadExecute(pack.tensor, output, &pack_plan.exes[pack.exe_index]);
-                    packs_loaded += 1;
+                // `window` submissions of `packs_per_submission` packs in
+                // flight, budgeted by the largest pack's executable inputs.
+                const packs_per_submission: usize = if (pack_options.pairs != 0) 2 else 1;
+                var pack_input_bytes: usize = 0;
+                for (pack_plan.exes) |*exe| {
+                    pack_input_bytes = @max(pack_input_bytes, try loader.executeInputBytesPerDevice(exe));
                 }
+                const window_budget = pack_options.window * packs_per_submission * pack_input_bytes;
+                var window: zml.io.Window = .init(allocator, window_budget, pack_options.window);
+                defer window.deinit();
+
+                const pack_start: std.Io.Timestamp = .now(io, .awake);
+                var next_pack: usize = 0;
+                while (next_pack < pack_plan.packs.len) {
+                    const count = @min(packs_per_submission, pack_plan.packs.len - next_pack);
+                    var bindings: [2]zml.io.Loader.Binding = undefined;
+                    for (
+                        bindings[0..count],
+                        pack_plan.packs[next_pack..][0..count],
+                        pack_outputs[next_pack..][0..count],
+                    ) |*binding, pack, *output| {
+                        binding.* = .{
+                            .tensor = pack.tensor,
+                            .output = output,
+                            .exe = &pack_plan.exes[pack.exe_index],
+                        };
+                    }
+                    try window.submit(&loader, bindings[0..count]);
+                    next_pack += count;
+                }
+                try window.drain();
+                packs_loaded = pack_plan.packs.len;
                 const pack_took = pack_start.untilNow(io, .awake);
                 const pack_bytes = loader.bytesLoaded();
-                log.info("pack phase: packs={d} width={d} window={d} pairs={d} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
+                log.info("pack phase: packs={d} width={d} window={d} pairs={d} budget={Bi:.2} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
                     pack_plan.packs.len,
                     pack_options.width,
                     pack_options.window,
                     pack_options.pairs,
+                    window_budget,
                     pack_bytes,
                     pack_took,
                     gibPerSecond(pack_bytes, pack_took),
                 });
 
                 const bulk_start: std.Io.Timestamp = .now(io, .awake);
-                try loader.load(AllTensorsModel, &model, &loaded);
-                try loader.await();
+                const bulk = try loader.load(AllTensorsModel, &model, &loaded);
+                try bulk.await();
                 const bulk_took = bulk_start.untilNow(io, .awake);
                 total_bytes = loader.bytesLoaded();
                 const bulk_bytes = total_bytes - pack_bytes;
