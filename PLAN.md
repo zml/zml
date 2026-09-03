@@ -15,6 +15,125 @@ cumulative byte accounting. The old constructor options and exact method
 signatures are not constraints; that checkout is intentionally not being
 migrated yet.
 
+## Second-pass status
+
+- [x] 0. Record the second-pass plan and refresh the `CTX.md` baseline.
+- [ ] 1. Flatten epoch plans and remove dead pipeline state.
+- [ ] 2. Make the lifecycle gate the epoch-completion mechanism.
+- [ ] 3. Simplify adaptive-runtime and probe-state representation.
+- [ ] 4. Specialize DMA calibration for its single measured lane.
+- [ ] 5. Remove redundant platform/device identity state.
+- [ ] 6. Make `DmaBlockPool` provider-only and simplify block leases.
+- [ ] 7. Unify loader request preparation and exact positional scatter.
+- [ ] 8. Split the loader implementation into focused modules.
+- [ ] 9. Run final validation and reconcile all documentation.
+
+## Second-pass task details
+
+### 0. Baseline — completed
+
+Record the remaining simplifications found after the first pass. Preserve the
+two admission gates, generation-safe width changes, NUMA matching, final DMA
+ordering, persistent workers, per-tensor PJRT buffers, and physical-byte fair
+ordering. No loader policy changes are part of this pass.
+
+Validation: repository and adjacent-monorepo usage audit; clean worktree.
+
+Result: the only required behavioral compatibility remains repeated
+synchronous `loadExecute`, then at most one `load`/`await`, multi-source
+bindings, ready outputs, and cumulative loaded bytes. Current repository users
+also require public adaptive/fixed read parallelism and DMA benchmark options.
+
+### 1. Flat epoch plan and pipeline cleanup
+
+- Publish jobs directly in final fair order instead of retaining a separate
+  order array and planning-only predecessor/tensor identity.
+- Replace suffix metadata with the scalar source-byte total and remaining job
+  count actually consumed by production.
+- Remove test-only optionals and redundant maximum-job metadata.
+- Remove dead pipeline fields and assertion-only submission bookkeeping.
+- Make a DMA lease completion report whether it released the final reference.
+
+Validation: planner/fairness/failure tests and the focused build/test set.
+
+### 2. Lifecycle completion
+
+- Add an empty/drained wait to the lifecycle gate.
+- Use scheduler exhaustion plus an empty lifecycle gate as epoch completion.
+- Remove the parallel `epoch_jobs` counter/event and tracking flags.
+- Preserve controller synchronization and failure draining.
+
+Validation: epoch reuse, active-epoch rejection, callback failure, and focused
+integration tests.
+
+### 3. Adaptive runtime state
+
+- Replace mutually dependent probe booleans with an explicit tagged state.
+- Move generation/evidence validation into the measurement runtime so the
+  controller remains a width-selection policy.
+- Make mutex-protected probe counters non-atomic and remove redundant telemetry
+  structures and reporting atomics.
+- Remove nonpersistent controller branches unused by production.
+
+Validation: controller, generation, tail, blind bootstrap, settled backoff,
+and allocation-failure tests.
+
+### 4. Single-lane DMA calibration
+
+- Specialize benchmark windows and candidate measurement for the one
+  representative device that is now measured.
+- Remove lane slices, one-element result allocations, nullable fixed width,
+  cloned unmeasured recommendations, and dynamic three-sample storage.
+- Correct public documentation to say that one representative device is
+  measured while every device allocator is warmed.
+
+Validation: benchmark decision tests and focused builds.
+
+### 5. Platform settings identity
+
+- Remove device kind/ID ownership and canonicalization from settings already
+  owned by a stable `Platform`.
+- Retain topology, block size, per-device DMA width, mapped budget, platform
+  identity, and heterogeneous-device rejection.
+
+Validation: settings validation and platform-focused tests.
+
+### 6. Provider-only DMA pool
+
+- Convert allocator-backed pool tests to the existing arena provider fixture.
+- Remove the optional provider/slab allocator mode and owned-slab branches.
+- Remove the externally refreshed-arena path, which has no production or
+  monorepo caller after staged calibration.
+- Carry the NUMA node in leased block handles so release does not reverse-scan
+  arenas.
+
+Validation: pool growth, matching, close, reuse, and allocation-failure tests.
+
+### 7. Shared loader front end and scatter helper
+
+- Prepare model traversal, source lookup, sharding, and `loadExecute` inputs
+  once above the buffered/direct backend split.
+- Extract the duplicated exact positional scatter loop into one shared helper.
+- Bundle epoch diagnostics and remove unused public writer surface.
+- Define and test consistent successful-epoch byte accounting.
+
+Validation: public compatibility workflow, safetensor positional reads, VFS,
+and both loader implementations where supported.
+
+### 8. Module split
+
+After state cleanup, split calibration, dispatch/planning, and direct-loader
+implementation out of the monolithic `zml/io.zig`, keeping tests beside the
+code they exercise and preserving the public `zml.io` surface.
+
+Validation: formatting, focused builds, and all affected Zig tests.
+
+### 9. Final validation
+
+Run formatting, the IO playground build, VFS/stdx tests, and the loader-inclusive
+ZML suite with the platform flags needed to avoid the unrelated missing
+FlashInfer module. Record any independent default-configuration blocker.
+
 ## Status
 
 - [x] 0. Record the plan and reconcile `CTX.md` with the current implementation.

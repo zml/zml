@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after plan Task 7, on a detached checkout based
-on `f4b0dd76`. `PLAN.md` is the completed implementation checklist; this file is
+Last consolidated: 2026-09-03 at second-pass plan Task 0, on detached commit
+`5809e9ce`. `PLAN.md` is the sequential implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -85,7 +85,7 @@ another dispatch plan. Physical source bytes are distinct from logical tensor
 bytes so duplication and replication do not distort diagnostics or fairness.
 Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
 before the fair-order/final-record changes; remeasure after the remaining
-cleanup.
+  second simplification pass.
 
 ### Pinned blocks, scattering, and ownership
 
@@ -441,9 +441,10 @@ same-host medians.
 
 ## Open work
 
-The scheduled simplification and validation work in `PLAN.md` is complete.
-Reassess splitting `zml/io.zig` now that obsolete planner, scheduler,
-controller, and metrics state has been removed.
+The first simplification pass is complete. The active second pass in `PLAN.md`
+removes remaining planning/runtime genericity, consolidates epoch completion,
+specializes representative-device calibration, narrows the DMA pool, shares
+loader-front-end preparation, and then splits `zml/io.zig` by responsibility.
 Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below
