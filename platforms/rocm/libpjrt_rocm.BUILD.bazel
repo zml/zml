@@ -44,7 +44,6 @@ copy_to_directory(
         ":libpjrt_rocm_so",
         "@amdrocm-amdsmi//:libamd_smi",
         "@amdrocm-base//:rocm-core",
-        "@amdrocm-base//:rocm_smi",
         "@amdrocm-base//:rocprofiler-register",
         "@amdrocm-blas//:hipblaslt",
         "@amdrocm-blas//:hipblaslt_runfiles",
