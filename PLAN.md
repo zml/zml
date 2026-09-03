@@ -47,7 +47,7 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 
 ## Third-pass status
 
-- [ ] 0. Baseline capture and pack instrument in the playground.
+- [x] 0. Baseline capture and pack instrument in the playground.
 - [ ] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
 - [ ] 2. Per-batch completion behind the existing single slot.
 - [ ] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
@@ -111,6 +111,22 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
   quiet.
 - Validation: playground builds for oneapi/cuda/rocm; packs=0 medians match
   the 2026-09-03 baseline; content check passes on every host.
+
+Result (2026-09-04): `examples/io/main.zig` gained `planPacks`, `packShape`,
+`stackPack`, `checkPacks` and the knobs `ZML_LOAD_PACKS`, `ZML_LOAD_PACK_WIDTH`,
+`ZML_LOAD_PACK_WINDOW`, `ZML_LOAD_PACK_PAIRS`, `ZML_LOAD_PACK_CHECK`,
+`ZML_LOAD_PACK_MAX_ELEMENTS` (oneAPI rejects stack kernels above 2^31
+elements). Packs are formed per (shape, dtype) class in file order because
+Llama never has more than two adjacent same-shape tensors; bindings are
+replicated so `pickSharding` and the executable's output placement agree.
+Local B70, Llama, 3 runs each: packs=0 unchanged (0.772-0.792 s wall);
+width 64 gives 2 packs (2.5 GiB, pack phase 0.156-0.203 s at 12-16 GiB/s);
+width 16 gives 14 packs (13 GiB, pack phase 0.888-0.966 s at 13.5-14.6 GiB/s
+versus 17.4-18.3 GiB/s for the bulk, about 6.4 ms of drain plus execute per
+pack, every pack epoch stuck at the bootstrap width 12). Content checks pass.
+Width 16 is the sensitive pack instrument for the local host. The HF fixture
+needed a VFS fix (HEAD redirects), committed separately. CUDA host busy;
+DeepSeek and pack baselines there are deferred until it is quiet.
 
 ### 1. Zero-risk dead-code sweep
 

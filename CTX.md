@@ -604,6 +604,12 @@ decoupled, low pinned memory.
   failed on the Hub's 307; it now follows redirects itself (absolute or
   relative, credentials only to huggingface.co). The playground expects the
   `hf://owner/model` form.
+- Pack instrument (playground, local B70, Llama, `ZML_LOAD_PACKS=64
+  ZML_LOAD_PACK_WIDTH=16`, today's synchronous `loadExecute`): 14 packs of
+  16 sources (13.0 GiB) load at 13.5-14.6 GiB/s in 0.89-0.97 s while the
+  remaining 1.96 GiB bulk loads at 17.4-18.3 GiB/s; each pack epoch is under
+  110 ms, never scored, and runs at the bootstrap width 12. Total wall
+  1.005-1.086 s versus 0.77-0.79 s for the same bytes as one bulk load.
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 
