@@ -44,6 +44,153 @@ fn blockDotError(x: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zm
     return actual.sub(reference);
 }
 
+const PreparedQuantizerOutputs = struct {
+    routed_q: zml.Tensor,
+    routed_scale: zml.Tensor,
+    shared_q: zml.Tensor,
+    shared_scale: zml.Tensor,
+};
+
+fn comparePreparedAndOldSharedQuantizers(x: zml.Tensor) PreparedQuantizerOutputs {
+    const prepared = zml.moe.triton.prepareBlock128Fp8Activation(x, false);
+    const grouped = x.convert(.f32).splitAxis(.k, .{
+        .fp8_ks = -1,
+        .fp8_block = 128,
+    });
+    const reference_scale = grouped.abs().max(.fp8_block)
+        .maximum(.scalar(1e-10, .f32))
+        .scale(1.0 / 448.0);
+    const reference_q = grouped.div(reference_scale.broad(grouped.shape()))
+        .clamp(.scalar(-448.0, .f32), .scalar(448.0, .f32))
+        .convert(.f8e4m3fn)
+        .reshape(prepared.q.shape());
+    return .{
+        .routed_q = prepared.q,
+        .routed_scale = prepared.scale,
+        .shared_q = reference_q,
+        .shared_scale = reference_scale.squeeze(.fp8_block).reshape(prepared.scale.shape()),
+    };
+}
+
+test "routed block FP8 preparation bitwise matches the old CUDA shared quantizer" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const m = 7;
+    const k = 256;
+    const x: zml.Tensor = .init(.{ .m = m, .k = k }, .bf16);
+    var exe = try platform.compileFn(allocator, io, comparePreparedAndOldSharedQuantizers, .{x}, .{});
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const x_host = try allocator.alloc(BFloat16, x.shape().count());
+    defer allocator.free(x_host);
+    for (x_host, 0..) |*value, i| {
+        const centered: i32 = @intCast(i % 251);
+        value.* = BFloat16.fromF32(@as(f32, @floatFromInt(centered - 125)) / 37.0);
+    }
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(x_host));
+    defer x_buffer.deinit();
+    var output = try zml.testing.autoCall(allocator, io, &exe, comparePreparedAndOldSharedQuantizers, .{x_buffer});
+    defer zml.Buffer.deinitAll(PreparedQuantizerOutputs, &output);
+    var routed_q = try output.routed_q.toSliceAlloc(allocator, io);
+    defer routed_q.free(allocator);
+    var routed_scale = try output.routed_scale.toSliceAlloc(allocator, io);
+    defer routed_scale.free(allocator);
+    var shared_q = try output.shared_q.toSliceAlloc(allocator, io);
+    defer shared_q.free(allocator);
+    var shared_scale = try output.shared_scale.toSliceAlloc(allocator, io);
+    defer shared_scale.free(allocator);
+    try std.testing.expectEqualSlices(u8, routed_q.constData(), shared_q.constData());
+    try std.testing.expectEqualSlices(u8, routed_scale.constData(), shared_scale.constData());
+}
+
+fn preparedBlockDotMatchesOldSharedQuantizer(
+    x: zml.Tensor,
+    weight: zml.Tensor,
+    weight_scale: zml.Tensor,
+) zml.Tensor {
+    const comparison_shape = zml.Shape.init(.{ .m = x.dim(0), .n = weight.dim(0) }, .bool);
+    return zml.ops.manualComputation(
+        .{ x, weight, weight_scale },
+        comparison_shape,
+        {},
+        (struct {
+            fn body(_: void, _: std.mem.Allocator, inputs: []const zml.Tensor, local_output: zml.Shape) zml.Tensor {
+                const output_shape = local_output.withDtype(.bf16);
+                const old = zml.fp8.nativeBlockScaledDotLocal(inputs[0], inputs[1], inputs[2], output_shape);
+                const prepared = zml.moe.triton.prepareBlock128Fp8Activation(
+                    inputs[0],
+                    zml.Compiler.current().platform.target == .rocm,
+                );
+                const reused = zml.fp8.nativeBlockScaledDotPreparedLocal(prepared, inputs[1], inputs[2], output_shape);
+                return old.bitCast(.u16).cmp(.EQ, reused.bitCast(.u16));
+            }
+        }).body,
+    );
+}
+
+test "prepared routed activation matches the old shared FP8 quantizer for finite BF16 inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+
+    const m = 7;
+    const n = 256;
+    const k = 256;
+    const x: zml.Tensor = .init(.{ .m = m, .k = k }, .bf16);
+    const weight: zml.Tensor = .init(.{ .n = n, .k = k }, .f8e4m3fn);
+    const weight_scale: zml.Tensor = .init(.{ .nb = n / 128, .kb = k / 128 }, .f32);
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        preparedBlockDotMatchesOldSharedQuantizer,
+        .{ x, weight, weight_scale },
+        .{},
+    );
+    defer exe.deinit();
+
+    const BFloat16 = zml.floats.BFloat16;
+    const Float8 = zml.floats.Float8E4M3FN;
+    const x_host = try allocator.alloc(BFloat16, x.shape().count());
+    defer allocator.free(x_host);
+    for (x_host, 0..) |*value, i| {
+        const centered: i32 = @intCast(i % 251);
+        value.* = BFloat16.fromF32(@as(f32, @floatFromInt(centered - 125)) / 37.0);
+    }
+    const weight_host = try allocator.alloc(Float8, weight.shape().count());
+    defer allocator.free(weight_host);
+    for (weight_host, 0..) |*value, i| {
+        const centered: i32 = @intCast(i % 13);
+        value.* = Float8.fromF32(@as(f32, @floatFromInt(centered - 6)) / 4.0);
+    }
+    const scale_host = [_][2]f32{
+        .{ 0.25, 1.5 },
+        .{ 2.0, 0.75 },
+    };
+
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(x_host));
+    defer x_buffer.deinit();
+    var weight_buffer: zml.Buffer = try .fromBytes(io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(weight_host));
+    defer weight_buffer.deinit();
+    var scale_buffer: zml.Buffer = try .fromBytes(io, platform, weight_scale.shape(), .replicated, std.mem.asBytes(&scale_host));
+    defer scale_buffer.deinit();
+    var output = try zml.testing.autoCall(
+        allocator,
+        io,
+        &exe,
+        preparedBlockDotMatchesOldSharedQuantizer,
+        .{ x_buffer, weight_buffer, scale_buffer },
+    );
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+    for (output_host.constData()) |equal| try std.testing.expectEqual(@as(u8, 1), equal);
+}
+
 fn testCudaBlockDotCase(m: i64, n: i64, k: i64) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -689,6 +836,7 @@ test "CUDA and ROCm Triton fused MoE block-scaled FP8 GEMMs" {
 fn addLocalSharedExpert(
     _: void,
     local_input: zml.Tensor,
+    prepared_a1: zml.fp8.PreparedBlock128Activation,
     local_routed: zml.Tensor,
     local_operands: []const zml.Tensor,
 ) zml.Tensor {
@@ -702,8 +850,8 @@ fn addLocalSharedExpert(
         .setDim(.d, gate_up_weight.dim(.out))
         .setTag(.d, .out)
         .withDtype(.bf16);
-    const gate_up = zml.fp8.nativeBlockScaledDotLocal(
-        local_input,
+    const gate_up = zml.fp8.nativeBlockScaledDotPreparedLocal(
+        prepared_a1,
         gate_up_weight,
         gate_up_scale,
         gate_up_shape,

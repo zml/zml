@@ -38,6 +38,7 @@ pub const Options = struct {
     w2_zp: ?Tensor = null,
     a1_scale: ?Tensor = null,
     a2_scale: ?Tensor = null,
+    prepared_a1: ?zml.fp8.PreparedBlock128Activation = null,
     block_shape: ?[]const i64 = null,
     w1_bias: ?Tensor = null,
     w2_bias: ?Tensor = null,
@@ -246,7 +247,12 @@ pub fn fusedExpertsImpl(
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
 
-    if (gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz) {
+    if (opts.prepared_a1) |prepared| {
+        if (!block_fp8) return error.UnsupportedQuantization;
+        try validatePreparedBlock128Activation(prepared, hidden, gate_up);
+        hidden_quant = prepared.q;
+        a_scale = prepared.scale;
+    } else if (gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz) {
         hidden_quant, a_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden), gate_up.dtype() == .f8e4m3fnuz, block_fp8);
     }
 
@@ -709,6 +715,15 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, block_fp8: b
     return .{ outs.y_q, outs.y_s };
 }
 
+/// Quantize one BF16 activation matrix with the same block-128 producer used
+/// by routed FP8 MoE GEMM1. The explicit pair can be passed back through
+/// `Options.prepared_a1` and reused by another native block-scaled dot.
+pub fn prepareBlock128Fp8Activation(x: Tensor, fnuz: bool) zml.fp8.PreparedBlock128Activation {
+    stdx.debug.assert(x.dtype() == .bf16, "block FP8 activation preparation expects BF16, got {f}", .{x.shape()});
+    const q, const scale = quantizePerTokenGroupFp8(x, 128, fnuz, true);
+    return .{ .q = q, .scale = scale };
+}
+
 fn siluAndQuantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, activation_threshold: ?f32) struct { Tensor, Tensor } {
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 SwiGLU input, got {f}", .{x.shape()});
     const output_columns = @divExact(x.dim(1), 2);
@@ -986,7 +1001,23 @@ fn validateOptions(opts: Options) !void {
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
+    if (opts.prepared_a1 != null and opts.quant_scheme != .fp8_block128) return error.UnsupportedQuantization;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;
+}
+
+fn validatePreparedBlock128Activation(
+    prepared: zml.fp8.PreparedBlock128Activation,
+    hidden: Tensor,
+    gate_up: Tensor,
+) !void {
+    if (prepared.q.dtype() != gate_up.dtype() or prepared.scale.dtype() != .f32) return error.UnsupportedType;
+    if (prepared.q.rank() != 2 or prepared.scale.rank() != 2) return error.InvalidShape;
+    if (prepared.q.dim(0) != hidden.dim(0) or prepared.q.dim(1) != hidden.dim(1)) return error.InvalidShape;
+    if (prepared.scale.dim(0) != hidden.dim(0) or
+        prepared.scale.dim(1) != @divExact(hidden.dim(1), 128))
+    {
+        return error.InvalidShape;
+    }
 }
 
 fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {

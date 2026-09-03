@@ -223,6 +223,15 @@ fn TritonReduceEpilogueBody(comptime epilogue_fn: anytype) type {
                 global_expert_ids.sub(expert_start),
                 zml.Tensor.scalar(-1, .i32),
             );
+            const local_input_2d = sharded_inputs[0]
+                .reshape(.{
+                    .token = sharded_inputs[0].dim(.b) * sharded_inputs[0].dim(.s),
+                    .in = sharded_inputs[0].dim(.d),
+                });
+            const prepared_a1 = triton.prepareBlock128Fp8Activation(
+                local_input_2d,
+                zml.Compiler.current().platform.target == .rocm,
+            );
 
             const local_output = triton.fusedExpertsImpl(
                 sharded_inputs[0],
@@ -239,6 +248,7 @@ fn TritonReduceEpilogueBody(comptime epilogue_fn: anytype) type {
                     .w2_scale = sharded_inputs[6],
                     .quant_scheme = ctx.quant_scheme,
                     .activation_threshold = ctx.activation_threshold,
+                    .prepared_a1 = prepared_a1,
                 },
             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
             const local_routed = local_output
@@ -247,6 +257,7 @@ fn TritonReduceEpilogueBody(comptime epilogue_fn: anytype) type {
             const local_combined = @call(.auto, epilogue_fn, .{
                 ctx.epilogue_context,
                 sharded_inputs[0],
+                prepared_a1,
                 local_routed,
                 sharded_inputs[7..],
             });
@@ -340,7 +351,7 @@ fn tritonExpertParallelManual(
 /// in the same order. The callback runs inside that manual region and must have
 /// the following shape:
 ///
-///     fn (context, local_input, local_routed, local_epilogue_inputs) Tensor
+///     fn (context, local_input, prepared_a1, local_routed, local_epilogue_inputs) Tensor
 ///
 /// This deliberately narrow entry point currently supports only block-FP8
 /// Triton experts sharded on the `.experts` mesh.

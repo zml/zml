@@ -300,7 +300,12 @@ const PreparedDot = struct {
     k: i64,
 };
 
-const QuantizedBlock128 = struct {
+/// A block-128 activation matrix quantized for a native FP8 dot.
+///
+/// `q` is a rank-2 `[rows, K]` native-FP8 matrix and `scale` is its matching
+/// rank-2 F32 `[rows, K / 128]` scale grid. Keeping the pair explicit lets
+/// callers reuse one dynamic quantization across multiple projections.
+pub const PreparedBlock128Activation = struct {
     q: Tensor,
     scale: Tensor,
 };
@@ -308,7 +313,7 @@ const QuantizedBlock128 = struct {
 /// Emit CUDA's online activation quantization as StableHLO so XLA can fuse
 /// the value and scale outputs into one Triton kernel before consuming them in
 /// its block-128 W8A8 scaled-dot arm.
-fn quantizeBlock128Cuda(lhs_2d: Tensor) QuantizedBlock128 {
+fn quantizeBlock128Cuda(lhs_2d: Tensor) PreparedBlock128Activation {
     const fp8_max = 448.0;
     const grouped = lhs_2d.convert(.f32).splitAxis(.fp8_k, .{
         .fp8_ks = -1,
@@ -328,13 +333,33 @@ fn quantizeBlock128Cuda(lhs_2d: Tensor) QuantizedBlock128 {
     };
 }
 
-fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) PreparedDot {
-    stdx.debug.assert(lhs.rank() >= 1 and rhs_fn.rank() == 2, "block FP8 GEMM expects lhs rank >= 1 and rhs rank 2, got {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
+fn prepareQuantizedBlockScaledDot(
+    activation: PreparedBlock128Activation,
+    rhs_fn: Tensor,
+    rhs_scale_fn: Tensor,
+) PreparedDot {
+    stdx.debug.assert(
+        activation.q.rank() == 2 and activation.scale.rank() == 2 and rhs_fn.rank() == 2,
+        "prepared block FP8 GEMM expects rank-2 activation values/scales and weight, got {f}, {f}, and {f}",
+        .{ activation.q.shape(), activation.scale.shape(), rhs_fn.shape() },
+    );
     stdx.debug.assert(rhs_fn.dtype() == .f8e4m3fn, "block FP8 GEMM expects E4M3FN weights, got {f}", .{rhs_fn.shape()});
     const k = rhs_fn.dim(1);
     const n = rhs_fn.dim(0);
-    stdx.debug.assert(lhs.dim(-1) == k, "block FP8 GEMM contraction mismatch: {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
+    const m = activation.q.dim(0);
+    const native_fp8 = nativeBlockFp8();
+    stdx.debug.assert(
+        activation.q.dtype() == native_fp8.dtype and activation.scale.dtype() == .f32,
+        "prepared block FP8 GEMM expects native FP8 values and F32 scales, got {f} and {f}",
+        .{ activation.q.shape(), activation.scale.shape() },
+    );
+    stdx.debug.assert(activation.q.dim(1) == k, "block FP8 GEMM contraction mismatch: {f} and {f}", .{ activation.q.shape(), rhs_fn.shape() });
     stdx.debug.assert(@mod(k, 128) == 0, "block FP8 GEMM requires K divisible by 128, got {d}", .{k});
+    stdx.debug.assert(
+        activation.scale.dim(0) == m and activation.scale.dim(1) == @divExact(k, 128),
+        "prepared block FP8 activation scale grid mismatch for values {f}: got {f}",
+        .{ activation.q.shape(), activation.scale.shape() },
+    );
     stdx.debug.assert(
         (rhs_scale_fn.dtype() == .bf16 or rhs_scale_fn.dtype() == .f32) and rhs_scale_fn.rank() == 2,
         "block FP8 GEMM expects a rank-2 BF16 or F32 weight scale grid, got {f}",
@@ -346,17 +371,40 @@ fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) Prep
         .{ rhs_fn.shape(), rhs_scale_fn.shape() },
     );
 
-    const m: i64 = @intCast(@divExact(lhs.shape().count(), @as(usize, @intCast(k))));
-    const lhs_2d = lhs.reshape(.{ .fp8_m = m, .fp8_k = k });
-    const groups_per_row = @divExact(k, 128);
-    const native_fp8 = nativeBlockFp8();
     stdx.debug.assert(
         native_fp8.dtype != .f8e4m3fn or rhs_scale_fn.dtype() == .f32,
         "CUDA block FP8 GEMM requires F32 checkpoint scales, got {f}",
         .{rhs_scale_fn.shape()},
     );
 
-    const quantized: QuantizedBlock128 = switch (Compiler.current().platform.target) {
+    // Prepared ROCm checkpoints contain normalized FNUZ bytes and adjusted
+    // scales, so this bitcast has no inference-time cost. CUDA consumes the
+    // checkpoint's native E4M3FN values and F32 scales without conversion.
+    const rhs_native = if (native_fp8.dtype == .f8e4m3fnuz) rhs_fn.bitCast(.f8e4m3fnuz) else rhs_fn;
+    const rhs_scale_native = rhs_scale_fn.convert(.f32);
+
+    return .{
+        .a = activation.q,
+        .a_scale = activation.scale,
+        .b = rhs_native,
+        .b_scale = rhs_scale_native,
+        .m = m,
+        .n = n,
+        .k = k,
+    };
+}
+
+fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) PreparedDot {
+    stdx.debug.assert(lhs.rank() >= 1 and rhs_fn.rank() == 2, "block FP8 GEMM expects lhs rank >= 1 and rhs rank 2, got {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
+    const k = rhs_fn.dim(1);
+    stdx.debug.assert(lhs.dim(-1) == k, "block FP8 GEMM contraction mismatch: {f} and {f}", .{ lhs.shape(), rhs_fn.shape() });
+    stdx.debug.assert(@mod(k, 128) == 0, "block FP8 GEMM requires K divisible by 128, got {d}", .{k});
+
+    const m: i64 = @intCast(@divExact(lhs.shape().count(), @as(usize, @intCast(k))));
+    const lhs_2d = lhs.reshape(.{ .fp8_m = m, .fp8_k = k });
+    const groups_per_row = @divExact(k, 128);
+    const native_fp8 = nativeBlockFp8();
+    const quantized: PreparedBlock128Activation = switch (Compiler.current().platform.target) {
         .cuda => quantizeBlock128Cuda(lhs_2d),
         .rocm => blk: {
             const out = QuantizeBlock128.Kernel.call(
@@ -382,25 +430,10 @@ fn prepareBlockScaledDot(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor) Prep
         else => unreachable,
     };
 
-    // Prepared ROCm checkpoints contain normalized FNUZ bytes and adjusted
-    // scales, so this bitcast has no inference-time cost. CUDA consumes the
-    // checkpoint's native E4M3FN values and F32 scales without conversion.
-    const rhs_native = if (native_fp8.dtype == .f8e4m3fnuz) rhs_fn.bitCast(.f8e4m3fnuz) else rhs_fn;
-    const rhs_scale_native = rhs_scale_fn.convert(.f32);
-
-    return .{
-        .a = quantized.q,
-        .a_scale = quantized.scale,
-        .b = rhs_native,
-        .b_scale = rhs_scale_native,
-        .m = m,
-        .n = n,
-        .k = k,
-    };
+    return prepareQuantizedBlockScaledDot(quantized, rhs_fn, rhs_scale_fn);
 }
 
-fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
-    const prepared = prepareBlockScaledDot(lhs, rhs_fn, rhs_scale_fn);
+fn tritonPreparedBlockScaledDotLocal(prepared: PreparedDot, output_shape: Shape) Tensor {
     const m = prepared.m;
     const n = prepared.n;
     const k = prepared.k;
@@ -453,6 +486,10 @@ fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, 
     return out.reshape(output_shape);
 }
 
+fn tritonBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tensor, output_shape: Shape) Tensor {
+    return tritonPreparedBlockScaledDotLocal(prepareBlockScaledDot(lhs, rhs_fn, rhs_scale_fn), output_shape);
+}
+
 /// Perform one native block-128 FP8 dot using operands that have already been
 /// localized by an enclosing manual computation.
 ///
@@ -475,6 +512,28 @@ pub fn nativeBlockScaledDotLocal(lhs: Tensor, rhs_fn: Tensor, rhs_scale_fn: Tens
         .rocm => tritonBlockScaledDotLocal(lhs, rhs_fn, rhs_scale_fn, output_shape),
         else => unreachable,
     };
+}
+
+/// Perform one native block-128 FP8 dot from an activation that was already
+/// quantized inside the enclosing manual computation.
+///
+/// This is numerically identical to `nativeBlockScaledDotLocal` when
+/// `activation` was produced from the same BF16 input with the routed-MoE
+/// block-128 quantizer. It avoids quantizing that input again for a second
+/// projection.
+pub fn nativeBlockScaledDotPreparedLocal(
+    activation: PreparedBlock128Activation,
+    rhs_fn: Tensor,
+    rhs_scale_fn: Tensor,
+    output_shape: Shape,
+) Tensor {
+    stdx.debug.assert(
+        Compiler.current().manual_computation_depth > 0,
+        "nativeBlockScaledDotPreparedLocal must be called inside manualComputation",
+        .{},
+    );
+    const prepared = prepareQuantizedBlockScaledDot(activation, rhs_fn, rhs_scale_fn);
+    return tritonPreparedBlockScaledDotLocal(prepared, output_shape);
 }
 
 fn scaledDotReference(inputs: []const Tensor, output_shape: Shape) Tensor {
