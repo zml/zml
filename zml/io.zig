@@ -1286,6 +1286,15 @@ const VectoredLoadPipeline = struct {
         len: usize,
     };
 
+    const PlannedTransfer = struct {
+        tensor: *VectoredTensorTransfer,
+        block_index: usize,
+        block_offset: usize,
+        writer_mask: u64,
+        destination_offset: usize,
+        len: usize,
+    };
+
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
         block: *BlockContext,
@@ -1573,13 +1582,46 @@ const VectoredLoadPipeline = struct {
         self.requestPump();
     }
 
-    fn reserveReadyCapacity(self: *VectoredLoadPipeline, counts: []const usize) !void {
-        std.debug.assert(counts.len == self.ready_queues.len);
+    fn enqueueBlocks(
+        self: *VectoredLoadPipeline,
+        transfers: []const PlannedTransfer,
+        blocks: []const *BlockContext,
+        queue_counts: []const usize,
+    ) !void {
+        std.debug.assert(queue_counts.len == self.ready_queues.len);
         self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        for (self.ready_queues, counts) |*queue, count| {
+        errdefer self.metadata_mutex.unlock(self.io);
+        // Reserve every destination before mutating any queue so the batch is
+        // either fully visible or not visible at all.
+        for (self.ready_queues, queue_counts) |*queue, count| {
             try queue.ensureUnusedCapacity(self.allocator, count);
         }
+        for (transfers) |transfer| {
+            const block = blocks[transfer.block_index];
+            if (!block.ready_reported) {
+                _ = self.metrics.ready_bytes.fetchAdd(block.len, .monotonic);
+                _ = self.metrics.ready_blocks.fetchAdd(1, .monotonic);
+                block.ready_reported = true;
+            }
+            var mask = transfer.writer_mask;
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                const target = &transfer.tensor.targets[writer_index];
+                self.ready_queues[target.device_index].appendAssumeCapacity(.{
+                    .tensor = transfer.tensor,
+                    .target = target,
+                    .block = block,
+                    .source_offset = transfer.block_offset,
+                    .destination_offset = transfer.destination_offset,
+                    .len = transfer.len,
+                });
+                self.ready_entries += 1;
+            }
+            _ = self.metrics.transfer_pieces.fetchAdd(1, .monotonic);
+        }
+        self.metadata_mutex.unlock(self.io);
+        self.requestPump();
     }
 
     fn reserveBlockCapacity(self: *VectoredLoadPipeline, count: usize) !void {
@@ -1821,17 +1863,58 @@ const VectoredLoadPipeline = struct {
 };
 
 const VectoredReadRequest = struct {
-    const TransferSlice = struct {
-        tensor: *VectoredTensorTransfer,
-        block_index: usize,
-        block_offset: usize,
-        writer_mask: u64,
-        destination_offset: usize,
-        len: usize,
+    const TransferSlice = VectoredLoadPipeline.PlannedTransfer;
+
+    const Scratch = struct {
+        allocator: std.mem.Allocator,
+        leased: [][]u8,
+        affinities: []mem.DmaBlockPool.Affinity,
+        references: []usize,
+        iovecs: [][]u8,
+        blocks: []*VectoredLoadPipeline.BlockContext,
+        queue_counts: []usize,
+        transfers: std.ArrayList(TransferSlice) = .empty,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            maximum_blocks: usize,
+            device_count: usize,
+        ) !Scratch {
+            const leased = try allocator.alloc([]u8, maximum_blocks);
+            errdefer allocator.free(leased);
+            const affinities = try allocator.alloc(mem.DmaBlockPool.Affinity, maximum_blocks);
+            errdefer allocator.free(affinities);
+            const references = try allocator.alloc(usize, maximum_blocks);
+            errdefer allocator.free(references);
+            const iovecs = try allocator.alloc([]u8, maximum_blocks);
+            errdefer allocator.free(iovecs);
+            const blocks = try allocator.alloc(*VectoredLoadPipeline.BlockContext, maximum_blocks);
+            errdefer allocator.free(blocks);
+            const queue_counts = try allocator.alloc(usize, device_count);
+            return .{
+                .allocator = allocator,
+                .leased = leased,
+                .affinities = affinities,
+                .references = references,
+                .iovecs = iovecs,
+                .blocks = blocks,
+                .queue_counts = queue_counts,
+            };
+        }
+
+        fn deinit(self: *Scratch) void {
+            self.transfers.deinit(self.allocator);
+            self.allocator.free(self.queue_counts);
+            self.allocator.free(self.blocks);
+            self.allocator.free(self.iovecs);
+            self.allocator.free(self.references);
+            self.allocator.free(self.affinities);
+            self.allocator.free(self.leased);
+            self.* = undefined;
+        }
     };
 
     fn readAbsoluteAllV(
-        allocator: std.mem.Allocator,
         io: std.Io,
         file: std.Io.File,
         buffers: []const []u8,
@@ -1844,8 +1927,7 @@ const VectoredReadRequest = struct {
         var completed: usize = 0;
         var buffer_index: usize = 0;
         var buffer_offset: usize = 0;
-        const scratch = try allocator.alloc([]u8, buffers.len);
-        defer allocator.free(scratch);
+        var scratch: [max_load_positional_iovecs][]u8 = undefined;
         while (completed < total) {
             const current = buffers[buffer_index..];
             scratch[0] = current[0][buffer_offset..];
@@ -2092,6 +2174,7 @@ const VectoredReadRequest = struct {
         request_len: usize,
         pieces: []const FairVectoredReadScheduler.SourcePiece,
         direct: *DirectLoader,
+        scratch: *Scratch,
     ) void {
         defer request.finishScheduling();
         if (pipeline.failed()) return;
@@ -2107,36 +2190,21 @@ const VectoredReadRequest = struct {
             return;
         }
 
-        const leased = pipeline.allocator.alloc([]u8, block_count) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(leased);
+        std.debug.assert(block_count <= scratch.leased.len);
+        const leased = scratch.leased[0..block_count];
         @memset(leased, &.{});
         defer for (leased) |block| {
             if (block.len != 0) pipeline.pool.release(pipeline.io, block);
         };
 
-        const affinities = pipeline.allocator.alloc(mem.DmaBlockPool.Affinity, block_count) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(affinities);
+        const affinities = scratch.affinities[0..block_count];
         @memset(affinities, .{});
-        const references = pipeline.allocator.alloc(usize, block_count) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(references);
+        const references = scratch.references[0..block_count];
         @memset(references, 0);
 
-        var transfers: std.ArrayList(TransferSlice) = .empty;
-        defer transfers.deinit(pipeline.allocator);
-        const queue_counts = pipeline.allocator.alloc(usize, pipeline.platform.devices.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(queue_counts);
+        const transfers = &scratch.transfers;
+        transfers.clearRetainingCapacity();
+        const queue_counts = scratch.queue_counts;
         @memset(queue_counts, 0);
 
         for (pieces) |piece| {
@@ -2213,10 +2281,6 @@ const VectoredReadRequest = struct {
             }
         }
 
-        pipeline.reserveReadyCapacity(queue_counts) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
         pipeline.reserveBlockCapacity(block_count) catch |err| {
             pipeline.recordError(err);
             return;
@@ -2228,11 +2292,7 @@ const VectoredReadRequest = struct {
         recordPoolWait(pipeline, pool_wait_ns);
         if (pipeline.failed()) return;
 
-        const iovecs = pipeline.allocator.alloc([]u8, block_count) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(iovecs);
+        const iovecs = scratch.iovecs[0..block_count];
         for (iovecs, leased, 0..) |*iovec, block, block_index| {
             const consumed = block_index * pipeline.block_size;
             const len = @min(pipeline.block_size, request_len - consumed);
@@ -2242,7 +2302,6 @@ const VectoredReadRequest = struct {
         if (!beginRead(request, pipeline)) return;
         const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
         const read_result = readAbsoluteAllV(
-            pipeline.allocator,
             pipeline.io,
             file,
             iovecs,
@@ -2276,11 +2335,7 @@ const VectoredReadRequest = struct {
         endRead(request, pipeline);
         if (pipeline.failed()) return;
 
-        const blocks = pipeline.allocator.alloc(*VectoredLoadPipeline.BlockContext, block_count) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(blocks);
+        const blocks = scratch.blocks[0..block_count];
         var initialized_blocks: usize = 0;
         for (blocks, leased, references, iovecs) |*block, *lease, refs, iovec| {
             if (refs == 0) {
@@ -2300,25 +2355,16 @@ const VectoredReadRequest = struct {
             lease.* = &.{};
             initialized_blocks += 1;
         }
-        for (transfers.items, 0..) |transfer, transfer_index| {
-            pipeline.enqueueBlock(
-                transfer.tensor,
-                blocks[transfer.block_index],
-                transfer.writer_mask,
-                transfer.block_offset,
-                transfer.destination_offset,
-                transfer.len,
-            ) catch |err| {
-                for (transfers.items[transfer_index..]) |remaining| {
-                    pipeline.abandonSubmissions(
-                        blocks[remaining.block_index],
-                        @popCount(remaining.writer_mask),
-                    );
-                }
-                pipeline.recordError(err);
-                return;
-            };
-        }
+        pipeline.enqueueBlocks(transfers.items, blocks, queue_counts) catch |err| {
+            for (transfers.items) |transfer| {
+                pipeline.abandonSubmissions(
+                    blocks[transfer.block_index],
+                    @popCount(transfer.writer_mask),
+                );
+            }
+            pipeline.recordError(err);
+            return;
+        };
         request.markSuccessful();
     }
 };
@@ -2670,6 +2716,8 @@ const FairVectoredReadScheduler = struct {
         defer pieces_list.deinit(allocator);
         var physical_list: std.ArrayList(usize) = .empty;
         defer physical_list.deinit(allocator);
+        var safe_boundaries: std.ArrayList(u64) = .empty;
+        defer safe_boundaries.deinit(allocator);
         const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
         errdefer allocator.free(queues);
         @memset(queues, .empty);
@@ -2691,6 +2739,7 @@ const FairVectoredReadScheduler = struct {
             var previous_job: ?usize = null;
             var run_cursor = file_start;
             while (run_cursor < file_end) {
+                safe_boundaries.clearRetainingCapacity();
                 const first_index = order[run_cursor];
                 const first_offset = items[first_index].source.offset;
                 var run_end = std.math.add(
@@ -2708,17 +2757,62 @@ const FairVectoredReadScheduler = struct {
                     if (candidate.offset > run_end) break;
                     const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
                         return error.InvalidLoaderJob;
+                    // A touching range starts where every preceding range has
+                    // ended. Unlike an arbitrary tensor end, this is safe even
+                    // when the batch contains overlapping or duplicate ranges.
+                    if (candidate.byteSize() != 0 and candidate.offset == run_end and
+                        (safe_boundaries.items.len == 0 or
+                            safe_boundaries.items[safe_boundaries.items.len - 1] != candidate.offset))
+                    {
+                        try safe_boundaries.append(allocator, candidate.offset);
+                    }
                     run_end = @max(run_end, candidate_end);
                 }
                 source_runs += 1;
 
                 var job_start = first_offset;
                 var candidate_start = run_cursor;
-                while (job_start < run_end) {
-                    const job_end = @min(
+                var boundary_cursor: usize = 0;
+                const run_len = run_end - first_offset;
+                var jobs_remaining: usize = @intCast(std.math.divCeil(
+                    u64,
+                    run_len,
+                    @intCast(maximum_job_len),
+                ) catch unreachable);
+                while (jobs_remaining != 0) {
+                    const hard_end = @min(
                         run_end,
                         std.math.add(u64, job_start, maximum_job_len) catch run_end,
                     );
+                    const job_end = if (jobs_remaining == 1)
+                        run_end
+                    else boundary: {
+                        const remaining_capacity = std.math.mul(
+                            u64,
+                            @intCast(jobs_remaining - 1),
+                            @intCast(maximum_job_len),
+                        ) catch return error.InvalidLoaderJob;
+                        const minimum_end = @max(job_start + 1, run_end - remaining_capacity);
+                        const maximum_end = @min(
+                            hard_end,
+                            run_end - @as(u64, @intCast(jobs_remaining - 1)),
+                        );
+                        while (boundary_cursor < safe_boundaries.items.len and
+                            safe_boundaries.items[boundary_cursor] <= job_start)
+                        {
+                            boundary_cursor += 1;
+                        }
+                        var scan = boundary_cursor;
+                        var selected: ?u64 = null;
+                        while (scan < safe_boundaries.items.len and
+                            safe_boundaries.items[scan] <= maximum_end) : (scan += 1)
+                        {
+                            if (safe_boundaries.items[scan] >= minimum_end)
+                                selected = safe_boundaries.items[scan];
+                        }
+                        boundary_cursor = scan;
+                        break :boundary selected orelse maximum_end;
+                    };
                     const job_len: usize = @intCast(job_end - job_start);
                     const job_index = jobs_list.items.len;
                     const piece_start = pieces_list.items.len;
@@ -2790,7 +2884,9 @@ const FairVectoredReadScheduler = struct {
                     // Coalesced jobs, including exact tails, are valid adaptive samples.
                     remaining_full_jobs += 1;
                     job_start = job_end;
+                    jobs_remaining -= 1;
                 }
+                std.debug.assert(job_start == run_end);
                 run_cursor = run_item_end;
             }
             file_start = file_end;
@@ -3237,6 +3333,39 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
     try std.testing.expectEqual(@as(usize, 2), iov_batch.jobs.len);
     try std.testing.expectEqual(max_load_positional_iovecs, iov_batch.jobs[0].len);
     try std.testing.expectEqual(@as(usize, 1), iov_batch.jobs[1].len);
+
+    var aligned_sources = [_]safetensors.Tensor{
+        .{ .file_uri = "aligned", .name = "aligned0", .shape = .init(.{7}, .u8), .offset = 0 },
+        .{ .file_uri = "aligned", .name = "aligned1", .shape = .init(.{8}, .u8), .offset = 7 },
+        .{ .file_uri = "aligned", .name = "aligned2", .shape = .init(.{5}, .u8), .offset = 15 },
+    };
+    var aligned_slot: LoaderSourceSlot = .{ .uri = "aligned" };
+    var aligned_outputs: [aligned_sources.len]Buffer = undefined;
+    var aligned_items: [aligned_sources.len]LoaderLoadItem = undefined;
+    var aligned_item_ptrs: [aligned_sources.len]*LoaderLoadItem = undefined;
+    for (&aligned_items, &aligned_item_ptrs, 0..) |*item, *item_ptr, i| {
+        item.* = .{
+            .source = &aligned_sources[i],
+            .source_slot = &aligned_slot,
+            .shape = aligned_sources[i].shape,
+            .sharding = platform.replicated_sharding,
+            .output = &aligned_outputs[i],
+        };
+        item_ptr.* = item;
+    }
+    var aligned_batch = try FairVectoredReadScheduler.prepareBatch(
+        allocator,
+        device_count,
+        &aligned_item_ptrs,
+        4,
+        8,
+    );
+    defer aligned_batch.deinit();
+    try std.testing.expectEqual(@as(usize, 3), aligned_batch.jobs.len);
+    try std.testing.expectEqual(@as(usize, 3), aligned_batch.pieces.len);
+    try std.testing.expectEqual(@as(usize, 7), aligned_batch.jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 8), aligned_batch.jobs[1].len);
+    try std.testing.expectEqual(@as(usize, 5), aligned_batch.jobs[2].len);
 }
 
 test "fair read scheduler preserves per-tensor request order" {
@@ -6552,6 +6681,15 @@ const DirectLoader = struct {
     }
 
     fn workerMain(self: *DirectLoader, worker_index: usize) void {
+        var scratch = VectoredReadRequest.Scratch.init(
+            self.allocator,
+            self.maximum_blocks_per_job,
+            self.platform.devices.len,
+        ) catch |err| {
+            self.pipeline.recordError(err);
+            return;
+        };
+        defer scratch.deinit();
         while (true) {
             if (!self.scheduler.waitForWork(self.io)) return;
             if (!self.worker_gate.waitUntilEnabled(self.io, worker_index)) return;
@@ -6582,6 +6720,7 @@ const DirectLoader = struct {
                 job.len,
                 job.pieces,
                 self,
+                &scratch,
             );
         }
     }
