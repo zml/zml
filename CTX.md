@@ -5,10 +5,11 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after completed second-pass plan Task 9, on
-detached commit `e640efae` plus the current Task 9 documentation. `PLAN.md` is
-the sequential implementation checklist; this file is
-the canonical description of the code after each completed task.
+Last consolidated: 2026-09-03 at the start of the third pass (caller-controlled
+concurrency), on commit `2f9cac2b`. `PLAN.md` is the sequential implementation
+checklist; this file is the canonical description of the code after each
+completed task. The "Current design" section describes the second-pass code
+until third-pass tasks rewrite it; "Third-pass design" records the target.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
 
@@ -490,9 +491,112 @@ same-host medians.
 - ROCm-enabled aggregate tests were previously blocked before loader coverage
   by an existing CUDA flashinfer import in `zml/moe/cutlass_flashinfer.zig`.
 
+## Third-pass design (target, 2026-09-03)
+
+Decided after a seven-subsystem audit, four independent designs, three judges
+and a synthesis (all agree on the core). The user's goals: shortest load with
+the simplest code; the caller always controls how many `loadExecute`
+submissions are in flight and in which order; keep up-front DMA calibration,
+the per-VFS profile with its side channel, adaptive read width, reads and DMA
+decoupled, low pinned memory.
+
+### Why the epoch model must go
+
+- `FairVectoredReadScheduler` holds one plan and `publish` rejects a second,
+  so `loadExecute` must be `appendItems` + `await`. Laguna therefore pays 78
+  full loader drains (39 sparse layers x 2 packs), each waiting for scheduler
+  exhaustion, gate emptiness, a controller barrier that resolves on a 25 ms
+  tick, an O(W^2) worker rendezvous and manager teardown, then runs the pack
+  executable with the source pipeline idle, then restarts the width probe
+  with the read gate closed. Epochs shorter than 100 ms can never be scored,
+  so the controller never settles on that workload.
+- Nothing in the planner, fair order, `transferReady`, gates or pool depends
+  on one live plan; only `finishEpoch`'s free-the-plan rendezvous does.
+
+### Target
+
+- Public API (`zml/io.zig`): `Loader.load(Model, model, buffers) !Handle`;
+  `Loader.loadExecute(bindings: []const Binding{tensor, output, exe}) !Handle`
+  submitting all bindings' sources as ONE planned submission; `Handle.await()`
+  waits for the submission's final DMA callbacks, then runs each executable
+  on the awaiting task with `.wait = true` and frees its inputs;
+  `Loader.awaitAll()`, `bytesLoaded()` (per-handle commit on success),
+  `executeInputBytesPerDevice(exe)`; `zml.io.Window{budget_bytes,
+  max_handles}` awaits the oldest handle before submitting the next. A window
+  of one reproduces today's serialization; the loader has no memory policy
+  and no executor thread.
+- Direct backend: a strict FIFO of immutable batches; claim under the
+  scheduler mutex (already taken every worker iteration; ~9.5k claims per
+  DeepSeek load); `Batch.remaining` (sentinel + jobs) decremented at the
+  `RequestContext` 1->0 transition, by the `registerRequest` failure path,
+  and by `scheduler.fail` for unclaimed jobs; `done` event; per-batch
+  request/block/event lists retired by the awaiting task under
+  `metadata_mutex`. Callback order rule: locals first, `eventCompleted`
+  before `block.complete()`, `finishJobs` is the last access to batch memory.
+- Unchanged: planner and tensor-aware cuts, fair predecessor-safe order per
+  plan, two gates and lifecycle credit, pool with NUMA matching, calibration,
+  per-tensor PJRT managers, VFS data plane, blind bootstrap for
+  `high_latency`, fixed-width benchmark control.
+- Later, separately measured: per-file incremental publish (planner already
+  groups by file and resets predecessors per file), climb-and-hold width
+  controller without gate drains and with a busy-time window clock, per-plan
+  preallocated contexts, VFS consolidation, calibration reporting cleanup,
+  NUMA experiment (measurement only; deletion would be a follow-up).
+- Rejected: an in-loader executor (`Execute` orders behind definition events
+  so it would work, but caller-task execution keeps today's proven PJRT
+  lifetime order and needs no thread); evaluating the controller only at
+  read completion (loses backpressure sampling while workers sleep in
+  retries); dropping `high_latency`; deleting NUMA before measuring.
+
+### PJRT lifetime facts (header 0.113 and pjrt_client.h)
+
+- Buffers from an async host-to-device manager may be passed to `Execute`
+  immediately; execution orders behind the definition event.
+- `PJRT_Buffer_Destroy` while an execution references the buffer is safe;
+  device memory is freed when async operations complete. zml passes an empty
+  `non_donatable_input_indices`, so inputs may be donated: never reuse them.
+- Event destroy from another thread after the callback returned is current
+  practice (`reapCompleted`, `Buffer.await`); never inside the callback.
+  Manager destroy before its transfers complete is undocumented: destroy only
+  after completion, which per-batch retirement guarantees.
+- No blanket thread-safety statement; concurrent `Execute` on one executable
+  is undocumented, so executions stay on one awaiting task.
+
+### Baseline 2026-09-03 (commit 2f9cac2b, Llama-3.1-8B 14.96 GiB, one GPU, warm)
+
+| host | load | GiB/s | DMA block | request | width | pinned high-water | calibration |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 9985wx-5090x4 (CUDA, quiet host) | 0.606 / 0.609 s | 24.6 | 2 MiB | 8 MiB | 24 | 264 MiB | 751 ms |
+| local B70 (oneAPI) | 0.794 / 0.758 s | 18.8-19.7 | 8 MiB | 8 MiB | 12 | 200 MiB | 809-891 ms |
+| mi300 (ROCm) | 1.152 / 1.102 s | 13.0-13.6 | 16 MiB | 16 MiB | 24 | 784 MiB | 274-1109 ms |
+
+- DMA calibration peaks were healthy on all three (CUDA 50.7 GiB/s at 2 MiB,
+  oneAPI 48.8 at 8 MiB, ROCm 43.3 at 16 MiB), so ROCm's 13 GiB/s is
+  source-side; the user reports a likely host problem, to be investigated
+  later. ROCm allocator warm-up took 2.36 s.
+- Page-cache read ceiling (`dd`, 512 MiB chunks, P parallel readers):
+  CUDA host 14.1/24.7/31.6/55.7/62.1/60.7 GiB/s at P=1/2/4/8/16/32; local B70
+  19.5/27.2/27.4/26.6/30.8/29.8; mi300 4.3/9.5/16.8/26.0/44.0/54.6. The
+  loader reaches 41% of the CUDA ceiling and 66% of the B70 ceiling.
+- The CUDA host is shared: with another user's job running (load average 16,
+  GPU 0 busy) the same configuration measured 0.7 to 1.3 s. Check host state
+  before every measurement; a width/block sweep taken under that load was
+  discarded.
+- NUMA topology: only mi300 is multi-node (two nodes, GPUs split 4/4); the
+  CUDA and B70 hosts are single-node, so NUMA matching never engaged there.
+- Laguna-XS-2.1 (local, 63 GB, 14 shards): 39 sparse layers x 256 experts;
+  per expert down [2048,512], gate [512,2048], up [512,2048] at 2 MiB each,
+  adjacent in file order; a layer's 768 expert tensors form one contiguous
+  1.5 GiB run. A per-layer submission holding both packs coalesces into
+  ~16 MiB jobs; separate down and gate_up submissions would read every third
+  2 MiB tensor.
+- Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
+  locally; no AWS credentials on this machine.
+
 ## Open work
 
-Both simplification passes in `PLAN.md` are complete. They removed remaining
+The third pass is in progress; `PLAN.md` holds the checklist. Both earlier
+simplification passes are complete. They removed remaining
 planning/runtime genericity, consolidated epoch completion, specialized
 representative-device calibration, narrowed the DMA pool, shared loader-front-
 end preparation, and split the former monolithic IO module by responsibility.

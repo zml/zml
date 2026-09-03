@@ -1,4 +1,4 @@
-# Loader simplification plan
+# Loader redesign plan (third pass: caller-controlled concurrency)
 
 `CTX.md` is the authoritative description of the loader's current design and
 measured behavior. This file is the execution checklist. After every task:
@@ -8,425 +8,297 @@ measured behavior. This file is the execution checklist. After every task:
 3. update `CTX.md` so it describes the code that now exists;
 4. do not begin the next task until those updates are complete.
 
-The compatibility target is behavioral, based on the callers in
-`~/github/zml/monorepo`: repeated synchronous `loadExecute`, followed by at
-most one `load`/`await` epoch, multi-source `TensorStore` bindings, and
-cumulative byte accounting. The old constructor options and exact method
-signatures are not constraints; that checkout is intentionally not being
-migrated yet.
-
-## Second-pass status
-
-- [x] 0. Record the second-pass plan and refresh the `CTX.md` baseline.
-- [x] 1. Flatten epoch plans and remove dead pipeline state.
-- [x] 2. Make the lifecycle gate the epoch-completion mechanism.
-- [x] 3. Simplify adaptive-runtime and probe-state representation.
-- [x] 4. Specialize DMA calibration for its single measured lane.
-- [x] 5. Remove redundant platform/device identity state.
-- [x] 6. Make `DmaBlockPool` provider-only and simplify block leases.
-- [x] 7. Unify loader request preparation and exact positional scatter.
-- [x] 8. Split the loader implementation into focused modules.
-- [x] 9. Run final validation and reconcile all documentation.
-
-## Second-pass task details
-
-### 0. Baseline — completed
-
-Record the remaining simplifications found after the first pass. Preserve the
-two admission gates, generation-safe width changes, NUMA matching, final DMA
-ordering, persistent workers, per-tensor PJRT buffers, and physical-byte fair
-ordering. No loader policy changes are part of this pass.
-
-Validation: repository and adjacent-monorepo usage audit; clean worktree.
-
-Result: the only required behavioral compatibility remains repeated
-synchronous `loadExecute`, then at most one `load`/`await`, multi-source
-bindings, ready outputs, and cumulative loaded bytes. Current repository users
-also require public adaptive/fixed read parallelism and DMA benchmark options.
-
-### 1. Flat epoch plan and pipeline cleanup
-
-- Publish jobs directly in final fair order instead of retaining a separate
-  order array and planning-only predecessor/tensor identity.
-- Replace suffix metadata with the scalar source-byte total and remaining job
-  count actually consumed by production.
-- Remove test-only optionals and redundant maximum-job metadata.
-- Remove dead pipeline fields and assertion-only submission bookkeeping.
-- Make a DMA lease completion report whether it released the final reference.
-
-Validation: planner/fairness/failure tests and the focused build/test set.
-
-Result: the published epoch now owns jobs physically arranged in final fair
-order; planning-only predecessors and the separate order array are discarded.
-The source-byte total is scalar and remaining adaptive work is derived directly
-from the atomic cursor because every coalesced production job is sampleable.
-Removed production-dead tensor IDs, optional source slots, suffix arrays,
-per-batch maximum-block metadata, peak-DMA state, the unused DMA-done event,
-ready-transfer tensor pointers, and assertion-only pending-submission counts.
-`DmaBlockPool.Lease.complete` now reports the final reference, removing a
-second completion atomic. Per-device queues use unordered removal. The full
-loader-inclusive 233-test suite passes with CUDA dependencies and CPU runtime;
-the IO playground builds and VFS/stdx tests pass.
-
-### 2. Lifecycle completion
-
-- Add an empty/drained wait to the lifecycle gate.
-- Use scheduler exhaustion plus an empty lifecycle gate as epoch completion.
-- Remove the parallel `epoch_jobs` counter/event and tracking flags.
-- Preserve controller synchronization and failure draining.
-
-Validation: epoch reuse, active-epoch rejection, callback failure, and focused
-integration tests.
-
-Result: `await` now first waits until the immutable scheduler has handed out
-every job, then waits until the lifecycle gate has no active requests. Because
-a lifecycle credit spans claim through the final DMA callback, that pair is
-the epoch-completion condition. Removed the parallel epoch job atomic, drained
-event, tracking flag, abandoned-job accounting, and request-local completion
-flag. Scheduler failure directly exhausts the plan and wakes waiters; the
-controller generation barrier and worker rendezvous still run before metadata
-is reaped. Added focused waits-for-final-claim and waits-for-final-request
-tests. The loader-inclusive ZML suite, IO playground build, and VFS/stdx tests
-pass.
-
-### 3. Adaptive runtime state
-
-- Replace mutually dependent probe booleans with an explicit tagged state.
-- Move generation/evidence validation into the measurement runtime so the
-  controller remains a width-selection policy.
-- Make mutex-protected probe counters non-atomic and remove redundant telemetry
-  structures and reporting atomics.
-- Remove nonpersistent controller branches unused by production.
-
-Validation: controller, generation, tail, blind bootstrap, settled backoff,
-and allocation-failure tests.
-
-Result: the runtime's four mutually dependent probe booleans plus separate
-pending limit/evidence storage are now one tagged measurement state:
-inactive, transitioning, blind, measuring, or scoring. The measurement layer
-validates generation, duration, request count, and exercised concurrency before
-the controller sees evidence; the controller is only width-selection policy.
-Probe counters are plain fields under their existing mutex, aggregate feedback
-is reduced directly to a backpressure bit, and the selected width is published
-through the epoch barrier without an extra atomic. Removed the unused
-nonpersistent finalization/tail branches. The loader-inclusive ZML suite, IO
-playground build, and VFS/stdx tests pass.
-
-### 4. Single-lane DMA calibration
-
-- Specialize benchmark windows and candidate measurement for the one
-  representative device that is now measured.
-- Remove lane slices, one-element result allocations, nullable fixed width,
-  cloned unmeasured recommendations, and dynamic three-sample storage.
-- Correct public documentation to say that one representative device is
-  measured while every device allocator is warmed.
-
-Validation: benchmark decision tests and focused builds.
-
-Result: benchmark setup and windows now accept one cohort directly and return
-one metric; lane slices, per-window metric allocations, setup fan-out, and the
-nullable candidate-width mode are gone. Candidate screens store their fixed
-three runs inline, including fixed scratch for paired confirmation medians.
-The report owns one measured representative recommendation instead of cloned
-zero-valued records for other devices, and the always-all `used_devices` list
-was replaced by direct platform indices. Public documentation now explicitly
-says one representative device is measured while all allocators are warmed and
-all-device workspace is retained. Worker-start failure also drains already
-started benchmark tasks. The loader-inclusive ZML suite and focused builds
-pass.
-
-### 5. Platform settings identity
-
-- Remove device kind/ID ownership and canonicalization from settings already
-  owned by a stable `Platform`.
-- Retain topology, block size, per-device DMA width, mapped budget, platform
-  identity, and heterogeneous-device rejection.
-
-Validation: settings validation and platform-focused tests.
-
-Result: platform-owned DMA settings no longer duplicate device kind or ID
-arrays, sort them back into platform order, or validate each load against that
-copy. Configuration owns only platform-order NUMA nodes and transfer/workspace
-parameters; the stable `Platform` pointer is the identity. One shared platform
-validator retains nonempty, at-most-64, homogeneous-device checks. Default and
-calibrated setup now resolve topology directly for all platform devices, which
-also removes temporary index/ID arrays and a second NUMA copy. The
-loader-inclusive ZML suite and focused builds pass.
-
-### 6. Provider-only DMA pool
-
-- Convert allocator-backed pool tests to the existing arena provider fixture.
-- Remove the optional provider/slab allocator mode and owned-slab branches.
-- Remove the externally refreshed-arena path, which has no production or
-  monorepo caller after staged calibration.
-- Carry the NUMA node in leased block handles so release does not reverse-scan
-  arenas.
-
-Validation: pool growth, matching, close, reuse, and allocation-failure tests.
-
-Result: every pool, including tests, is now arena-provider backed. Removed the
-optional slab allocator, owned-slab list, allocator-only constructor, and the
-unused pre-first-lease provider refresh transaction. Existing pool tests use
-the arena fixture for growth, blocking, reuse, close, and metadata allocation
-failure; tail feasibility is tested directly on retained arenas. Acquisitions
-return typed blocks carrying their NUMA node, and leases preserve that handle,
-so callback release returns to the correct free list directly instead of
-reverse-scanning every retained arena. The loader-inclusive ZML suite and
-focused builds pass.
-
-### 7. Shared loader front end and scatter helper
-
-- Prepare model traversal, source lookup, sharding, and `loadExecute` inputs
-  once above the buffered/direct backend split.
-- Extract the duplicated exact positional scatter loop into one shared helper.
-- Bundle epoch diagnostics and remove unused public writer surface.
-- Define and test consistent successful-epoch byte accounting.
-
-Validation: public compatibility workflow, safetensor positional reads, VFS,
-and both loader implementations where supported.
-
-Result: `Loader.load` now performs model traversal, tensor-store lookup,
-sharding selection, and output flattening once before selecting a backend.
-`Loader.loadExecute` likewise prepares and validates one executable binding,
-including all input buffers, before delegating only the transfer epoch to the
-backend; execution and output ownership are shared again above that split.
-Safetensor readers and direct-loader pinned reads use one exact positional
-scatter implementation, including short-read continuation and `IOV_MAX`
-batching. The buffered writer is private, direct epoch diagnostics are one
-record with one reset operation, and both backends add logical bytes only after
-an entirely successful epoch. The loader-inclusive 235-test ZML suite passes,
-the IO playground builds, and VFS/stdx tests pass.
-
-### 8. Module split
-
-After state cleanup, split calibration, dispatch/planning, and direct-loader
-implementation out of the monolithic `zml/io.zig`, keeping tests beside the
-code they exercise and preserving the public `zml.io` surface.
-
-Validation: formatting, focused builds, and all affected Zig tests.
-
-Result: the former 6,999-line `zml/io.zig` is now an 853-line public/store
-front end plus the buffered backend. Platform-owned settings, arenas, and
-representative-device calibration live in `io/dma_calibration.zig`; pure
-sharding-to-byte-span expansion lives in `io/dispatch_spans.zig`; direct
-planning, scheduling, adaptive control, transfer lifecycle, and their tests
-live together in `io/direct_loader.zig`. Small `limits.zig` and
-`loader_types.zig` modules keep those dependencies acyclic while `zml.io`
-re-exports the existing public surface. `Loader` now owns its IO, platform,
-store, and front-end options once instead of recovering them from whichever
-backend is active; the buffered backend no longer retains unused store/options,
-and the direct backend retains only the load profile and progress pointer it
-uses after construction. Zig formatting and Buildifier pass, as do the
-loader-inclusive 235-test ZML suite, IO playground build, and VFS/stdx tests.
-
-### 9. Final validation
-
-Run formatting, the IO playground build, VFS/stdx tests, and the loader-inclusive
-ZML suite with the platform flags needed to avoid the unrelated missing
-FlashInfer module. Record any independent default-configuration blocker.
-
-Result: Zig formatting and Buildifier checks pass. `//examples/io:playground`
-builds, and `//zml:test`, `//vfs:test`, and `//stdx:test` all pass with CUDA
-dependencies enabled and CPU runtime selected; the ZML suite contains 235
-tests. The adjacent monorepo still has the previously audited older loader
-calls and remains intentionally unmigrated. A plain `bazel test //zml:test`
-was rechecked and still fails before loader coverage because
-`zml/moe/cutlass_flashinfer.zig` imports the unavailable
-`platforms/cuda/flashinfer_cutlass_moe` module. This is independent of the IO
-changes. The second simplification pass is complete.
-
-## Status
-
-- [x] 0. Record the plan and reconcile `CTX.md` with the current implementation.
-- [x] 1. Correct coalesced DMA block accounting and pinned-width feasibility.
-- [x] 2. Simplify admission gates and make settled backoff generation-safe.
-- [x] 3. Remove the tensor-local loader path and decision-dead calibration code.
-- [x] 4. Make loader epochs immutable and precompute fair job order.
-- [x] 5. Flatten final DMA transfer records once during planning.
-- [x] 6. Simplify adaptive-controller and runtime bookkeeping.
-- [x] 7. Run final validation and reconcile all documentation.
-
-## Task details and completion log
-
-### 0. Plan and documentation baseline — completed
-
-Write the current simplification sequence down and correct stale claims in
-`CTX.md`: the global DMA cap and old writer/pool APIs are gone, calibration
-arenas are staged, settled source backoff exists, and the current planner
-stores logical source pieces rather than final block transfer records.
-
-Validation: documentation inspection and repository-wide symbol search.
-
-### 1. Exact DMA block accounting — completed
-
-- Replace `ceil(request/block) + device_count - 1` and writer-group estimates
-  with the coalesced path's exact `ceil(max_job_len/block)` bound.
-- Use one calculation consistently for workspace validation, arena reserves,
-  worker scratch, aggregate feasibility, and strict-NUMA feasibility.
-- Add regression coverage demonstrating that device count does not inflate
-  the number of blocks needed by one coalesced source job.
-
-Validation: focused Zig tests, `//examples/io:playground`, and `//vfs:test`.
-
-Result: added `maximumCoalescedJobBlocks` as the shared bound and removed all
-device/writer-count inflation from platform workspace validation, retained
-arena growth, loader feasibility, and worker scratch sizing. Added a regression
-that an eight-device shared-NUMA configuration needs eight feed blocks rather
-than the obsolete nine-block request estimate. `//examples/io:playground`
-builds and `//vfs:test` passes. The inline Zig test is compiled by the broad
-`//zml:test` target, which remains independently blocked by the missing CUDA
-FlashInfer module recorded in Task 7.
-
-### 2. Admission and backpressure — completed
-
-- Remove `worker_gate`; retain `request_gate` for complete request lifecycles
-  and `read_gate` for source calls/generation drains.
-- Make mutex-protected gate fields non-atomic where possible.
-- Apply every changed source width, including settled backoff, through a clean
-  close/drain/telemetry-reset/reopen transition.
-- Prevent old-generation feedback from stepping down more than once before
-  the new width has handled work.
-
-Validation: gate/controller unit tests plus the focused build/test set.
-
-Result: removed `worker_gate` from the loader, pipeline, controller runtime,
-workers, failure shutdown, and tests. All persistent workers now compete for
-the lifecycle gate, whose one extra credit can stage work while the read gate
-limits source calls. Gate limit/closed fields are plain mutex-protected values.
-Changed settled widths now close and drain the read gate, reset telemetry at
-the boundary, and require a new-generation admission before another backoff;
-feedback consumed during the drain cannot cause another step. Added focused
-backoff-boundary coverage. `//examples/io:playground` builds and `//vfs:test`
-passes.
-
-### 3. Dead paths and calibration — completed
-
-- Remove the unused tensor-local `VectoredReadRequest.run` path,
-  `FairVectoredReadScheduler.init`, and their private support machinery.
-- Move valuable sharding/replication assertions from `VectoredRequestPlan`
-  tests to the production planning representation before deleting it.
-- Remove the aggregate DMA timing phase now that it cannot affect selection;
-  retain all-device workspace preparation and a cheap correctness warm-up if
-  required by the PJRT path.
-- Remove private identity wrappers and unreachable compatibility helpers found
-  during the same pass.
-
-Validation: planner/calibration tests plus the focused build/test set.
-
-Result: deleted `VectoredRequestPlan`, the tensor-local request runner and its
-allocation/enqueue helpers, the unused non-appendable scheduler constructor,
-and the no-longer-needed borrowed tensor reader state. Reworked the existing
-replicated, packed, 1D, 2D, and 3D tests to validate the production
-`DispatchSpans` traversal across request and block boundaries. Removed the
-aggregate calibration phase, per-device aggregate source carving, unused
-nonrepresentative cohorts, the synthetic distribution wrapper, and several
-private dead/identity helpers. Calibration now tunes one representative device,
-warms allocators on all devices, clones the selected tuple, and grows the
-all-device retained working set. `zml/io.zig` fell from 8,495 lines at review
-start to 7,600. `//examples/io:playground` builds; `//vfs:test` and
-`//stdx:test` pass.
-
-### 4. Immutable epochs — completed
-
-- Reject a second `load` while an epoch is active. Keep persistent workers for
-  inexpensive sequential `loadExecute` epochs.
-- Build and publish one immutable epoch plan.
-- Simulate the deterministic physical-byte fairness policy during planning and
-  store a predecessor-safe job order.
-- Replace runtime queues/cursors/claimed bookkeeping and claim mutex work with
-  an atomic epoch cursor and immutable remaining-work metadata.
-- Add the real compatibility workflow test:
-  `loadExecute -> loadExecute -> load -> await -> cumulative bytesLoaded`.
-
-Validation: scheduler and loader integration tests plus the focused build/test
-set.
-
-Result: both loader backends now reject a second `load` while an epoch is
-active. The direct planner computes the physical-byte fair, predecessor-safe
-order once and publishes one owned immutable plan. Runtime queue scans,
-per-device cursors/debt, claimed flags, append/seal/reopen states, piece-batch
-ownership, and the claim mutex were replaced by one atomic position plus
-precomputed remaining-work suffixes. Persistent workers rendezvous at the epoch
-barrier before the plan is released, then wait for the next sequential epoch.
-Added the compatibility workflow test covering two synchronous `loadExecute`
-calls followed by `load`/`await`, ready output, active-epoch rejection, and
-cumulative `bytesLoaded`. It also exposed and fixed structural placement
-comparison that had relied on unsupported struct `!=`. The full 233-test ZML
-suite passes with CUDA dependencies and the CPU runtime enabled; the focused
-playground build and VFS/stdx tests pass.
-
-### 5. Final transfer planning — completed
-
-- During the planner's existing dispatch-span walk, emit final records carrying
-  item, block index/offset, writer mask, destination offset, and length.
-- Make workers initialize destinations, lease/read blocks, and enqueue those
-  records without rebuilding transfers or re-walking dispatch spans.
-- Remove logical/source transfer state that becomes redundant.
-
-Validation: 1D/2D/3D, sharded, replicated, overlap, duplicate, packed-dtype,
-and failure-drain tests plus the focused build/test set.
-
-Result: the coalescing planner now emits the final item/block/writer-mask/
-destination records while it already has each tensor's `DispatchSpans`. Those
-same records drive physical-byte fairness and are retained in the immutable
-epoch plan. Workers only initialize referenced destinations, derive per-block
-reference/NUMA/queue counts, acquire and read blocks, then publish the records;
-their transfer `ArrayList`, dispatch traversal, block splitting, and associated
-allocation/error branches are gone. Runtime tensor state no longer owns a
-second `DispatchSpans`, and an unused single-block enqueue path was removed.
-The multidimensional, mirrored/folded, replicated, and packed-dtype tests now
-exercise the production final-record helper directly. All 233 ZML tests pass
-with CUDA dependencies plus the CPU runtime enabled.
-
-### 6. Controller and bookkeeping cleanup — completed
-
-- Reduce the adaptive source controller to ramp-up, refine-down, and settled,
-  retaining the smallest-within-3%-of-peak rule and finite-tail handling.
-- Use at most one adjacent confirmation rather than the six-phase alternating
-  pair protocol.
-- Remove write-only metrics and the request/block timestamps and branches that
-  exist solely to maintain them.
-- Replace singleton read-stat arrays with one optional cursor.
-- Move `DmaBlockPool.acquireMany` matching arrays into reusable scratch so a
-  source job performs no allocator calls in the steady state.
-- Remove productionless pool modes only where repository and monorepo searches
-  confirm they are not public compatibility requirements.
-
-Validation: controller, pool, allocation-failure, and focused integration
-tests; compare planning/load diagnostics against the recorded baseline.
-
-Result: replaced the baseline/upward/downward/pair-reference/pair-candidate
-controller with ramp-up, refine-down, and settled phases. It still chooses the
-smallest measured width within 3% of peak, handles finite tails, and now permits
-only one extra measurement of an adjacent borderline candidate. Removed
-write-only latency, byte-residency, high-water, and pool-wait metrics together
-with the request/block/event timestamps and success branches maintained solely
-for those metrics. Aggregate VFS feedback now uses one optional cursor rather
-than one-element arrays. Each worker owns reusable pool matching scratch, so
-`acquireMany` has no steady-state allocator calls and remains safe when several
-callers wait concurrently. Removed the unused direct-DMA construction mode;
-production pools are arena-provider backed and the allocator-backed path is
-test-only. Added reuse and exhaustive allocation-failure tests for pool
-scratch. The playground builds, VFS/stdx tests pass, and the full ZML suite
-passes with CUDA dependencies plus the CPU runtime enabled.
-
-### 7. Final validation — completed
-
-- Run `zig fmt` on changed Zig files.
-- Run `bazel build //examples/io:playground`, `bazel test //vfs:test`,
-  `bazel test //stdx:test`, and `bazel test //zml:test`.
-- If the broad ZML test remains blocked by the existing missing CUDA
-  FlashInfer module, record the exact failure without treating it as loader
-  validation.
-- Ensure `CTX.md` contains only the final current design, measurements,
-  compatibility contract, and genuinely open work.
-
-Result: `zig fmt --check` passes for both changed Zig files;
-`//examples/io:playground` builds; `//vfs:test` and `//stdx:test` pass. The
-loader-inclusive ZML suite passes all 233 tests (230 passed, three skipped)
-with `--@zml//platforms:cuda=true --@zml//platforms:cpu=true`. As before this
-work, the default `//zml:test` configuration does not compile because
-`zml/moe/cutlass_flashinfer.zig` imports the unavailable
-`platforms/cuda/flashinfer_cutlass_moe` module; this is unrelated to the loader.
-The final symbol and adjacent-monorepo audit found no removed loader state still
-referenced by current code or by the behavioral compatibility callers.
+Passes one and two (simplification) are complete and folded into `CTX.md`.
+This pass changes the loader's concurrency model. The compatibility target is
+behavioral, based on the callers in `~/github/zml/monorepo`: repeated expert
+pack loads, whole-model loads, multi-source bindings, cumulative byte
+accounting. Signatures are not a constraint; the monorepo is migrated here.
+
+## Goals (from the user)
+
+- Shortest load time with the simplest code: simple state machines, few
+  branches, clear control flow.
+- The caller always controls concurrency: how many `loadExecute` submissions
+  are in flight, and in which order, to avoid device OOM.
+- Keep: DMA block detection up front (8 in flight per device, no global cap),
+  one VFS profile per model with a feedback side channel, adaptive read
+  concurrency, reads and DMA decoupled in size and count, low pinned memory.
+
+## Target design (summary; details in CTX.md "Third-pass design")
+
+- Every submission returns a `Handle`. `load(Model, ...)` submits every
+  single-source tensor of a model; `loadExecute(bindings, outputs)` submits the
+  sources of one or more executable bindings as ONE planned submission (so a
+  layer's packs coalesce). `Handle.await()` waits for the submission's DMA,
+  then (for bindings) runs each executable on the awaiting task with
+  `.wait = true` and frees its inputs. `Loader.awaitAll()`, `bytesLoaded()`.
+- Direct backend: a strict FIFO of immutable planned batches replaces the one
+  epoch slot. Claims move under the scheduler mutex. A batch completes when
+  its last claimed job's final DMA callback lands (per-batch counter + event).
+  The epoch flag, worker rendezvous, controller epoch barrier and loader-wide
+  reclamation disappear. Workers, gates, pool, pump, planner, calibration and
+  VFS data plane are unchanged.
+- Caller-side policy: `zml.io.Window` (byte budget + ticket cap) awaits the
+  oldest handle before submitting the next; `executeInputBytesPerDevice(exe)`
+  sizes it. A window of one reproduces today's serialized behavior.
+- Later, separately measured: per-file incremental publish, climb-and-hold
+  width controller without gate drains, per-plan preallocated contexts, VFS
+  consolidation, NUMA experiment.
+
+## Third-pass status
+
+- [ ] 0. Baseline capture and pack instrument in the playground.
+- [ ] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
+- [ ] 2. Per-batch completion behind the existing single slot.
+- [ ] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
+- [ ] 4. Controller continuity across submissions (minimal).
+- [ ] 5. Monorepo migration and Laguna window measurement.
+- [ ] 6. Per-file incremental publish; identity fair order for one device.
+- [ ] 7. VFS: throttle classification, two-class backpressure, dead timing.
+- [ ] 8. Climb-and-hold controller without gate drains (gated, revertible).
+- [ ] 9. Per-plan preallocated contexts and event retirement (gated).
+- [ ] 10. VFS range/retry consolidation (gated on tests).
+- [ ] 11. Calibration reporting cleanup.
+- [ ] 12. NUMA placement experiment (measurement only).
+- [ ] 13. Final validation and documentation reconciliation.
+
+## Measurement protocol
+
+- Compare medians of at least 5 warm repeats on the same host, plugin, model
+  and cache state; report the spread; claim a change only outside the spread.
+- Check host state first (`uptime`, `nvidia-smi`/`rocm-smi`): the CUDA host is
+  shared and was measured bimodal (0.55 s vs 1.3 s) under another user's load.
+  The scratch script `bench_host.sh <cuda|rocm|oneapi> <runs> <label>` prints
+  host state, syncs `zml/`, `examples/io/`, `vfs/`, runs the playground and
+  greps the result lines. `./run_io_load_matrix.sh` remains the canonical
+  three-host run.
+- The ROCm host currently loads at 13 GiB/s (CTX anchor 24 GiB/s); the user
+  reports a host problem. Treat ROCm numbers as a smoke test only until it is
+  investigated.
+- Additional fixtures suggested by the user: `hf:///Qwen/Qwen3.5-9B` (remote
+  HF profile: 32 MiB requests, blind bootstrap, side channel) and
+  `/var/models/deepseek-ai/DeepSeek-V4-Flash` on mi300 (many tensors for its
+  size). Baselines are recorded in CTX.md.
+- Regression oracle at every task: three-host matrix at packs=0 (Llama
+  14.96 GiB, one GPU). Pack instrument (`ZML_LOAD_PACKS=64
+  ZML_LOAD_PACK_WIDTH=64 ZML_LOAD_PACK_WINDOW=K ZML_LOAD_PACK_PAIRS=1`) from
+  task 0 onward. DeepSeek-V4-Flash on the CUDA host for planner-touching tasks
+  (planned jobs must stay 9,524 and transfers 69,572).
+- Test commands (verified 2026-09-03, ~20 s warm):
+  `bazel test --@zml//platforms:cpu=true --@zml//platforms:cuda=true //zml:test --test_output=errors`,
+  `bazel test //vfs:test //stdx:test --test_output=errors`,
+  `bazel build --config=release --@zml//platforms:oneapi=true //examples/io:playground`,
+  `zig fmt --check` on touched files.
+
+## Task details
+
+### 0. Baseline capture and pack instrument
+
+- `examples/io/main.zig` `load`: add env knobs `ZML_LOAD_PACKS` (N pack
+  submissions, default 0), `ZML_LOAD_PACK_WIDTH` (sources per pack, default
+  64), `ZML_LOAD_PACK_WINDOW` (K, default 1), `ZML_LOAD_PACK_PAIRS` (0/1,
+  honoured from task 3). When N > 0: walk registry keys in file order, group
+  W consecutive rank-2 tensors of identical shape and dtype into a binding via
+  `store.view().maybeCreateBinding(keys, shape.insert(0, .{ .expert = W }))`,
+  compile one stack executable per distinct source shape with
+  `platform.compileFn` (replicated output), exclude packed keys from the bulk
+  model. Run packs with today's `loadExecute` sequentially, then `load` and
+  `await` for the remainder. Log per-phase wall time, pack count, bytes; keep
+  the `Loaded weights` line unchanged. Content check: read a sample of packs
+  back with `toSliceAlloc` and compare with `safetensors.Tensor.reader`.
+- Record baselines in CTX.md: packs=0 on all three hosts (done 2026-09-03,
+  see CTX.md), packs=64 on all three hosts, DeepSeek on CUDA when the host is
+  quiet.
+- Validation: playground builds for oneapi/cuda/rocm; packs=0 medians match
+  the 2026-09-03 baseline; content check passes on every host.
+
+### 1. Zero-risk dead-code sweep
+
+- Delete `rollbackTail`, `restartFitsTail` and the tests whose only subject
+  they are (port live `advanceAfterScore` assertions); `Snapshot.has_unscheduled`
+  (use `remaining_jobs != 0`); the `writer_mask == 0` branch and
+  `error.InconsistentReplicaLayout` (debug asserts); `VectoredTensorTransfer.total`;
+  the `appendItems` placement recompute (keep the logical-byte sum).
+- Move `effectiveSourceRequestSize` to `limits.zig`; both users import it.
+- `sourceSlot`: `StringHashMap` instead of the linear scan.
+- `LazyOnce(T, Ctx, initFn)` replaces `LoaderSourceSlot` and
+  `LoaderLoadItem.StateSlot` (four-state cmpxchg + Event + u16 error code).
+- Delete `selectDmaBenchmarkCandidate` and its two tests; fold their
+  assertions into one test of `confirmAndSelectDmaBenchmarkCandidate`; fold
+  the duplicated `DmaPlatformState` constants in `platform.zig` into
+  `dma_calibration.zig`.
+- CTX.md: remove the "unfinished finite-tail probes roll back" claim.
+- Validation: full test set, `zig fmt --check`; matrix packs=0 within spread.
+
+### 2. Per-batch completion behind the single slot
+
+- `Batch{allocator, jobs, transfers, items, remaining: atomic, done: Event,
+  requests, blocks, events, diagnostics, freeing(debug)}` and
+  `finishJobs(n)`: `if (remaining.fetchSub(n) == n) done.set()`.
+  `RequestContext.batch`; `registerRequest`/`registerBlock`/`submitOne`
+  append to the batch's lists.
+- `completeOne` at 1->0: copy `pipeline`/`batch` to locals, `endRequest`,
+  `request_gate.release`, `batch.finishJobs(1)` as the final statement.
+- Callback order rule (fixes a use-after-free): in `onReady` load `pipeline`,
+  `device_index`, `block` into locals, store `err`, record the error, call
+  `eventCompleted(device_index)`, then `block.complete()` LAST. Document at
+  the callback and at `finishJobs`; debug `freeing` assertion.
+- `workerMain`: when `registerRequest` fails after a claim, `batch.finishJobs(1)`
+  before `recordError`; `scheduler.fail` retires unclaimed units.
+- `appendItems` builds the Batch (remaining = 1 + jobs, then drop the
+  sentinel) into `current: ?*Batch`; `await` waits `batch.done` (keep
+  `waitExhausted`/`waitEmpty` as debug asserts), retires the batch's lists
+  and items under `metadata_mutex`.
+- Tests: N jobs complete after N request completions; abandonment completes;
+  `fail` retires unclaimed units; late-callback failure sets `done`; a
+  200-batch sequential stress test.
+- Validation: full test set; matrix packs=0 and packs=64 within spread.
+
+### 3. FIFO scheduler, Handle API, multi-binding submissions, Window
+
+- Scheduler: `queue: []*Batch`, `head`, `unclaimed_total`, `stopping`, one
+  mutex + condition. `publish(batch)` appends (never rejects); `claim()`
+  under the mutex pops sealed and exhausted heads; `waitForWork` waits while
+  `!stopping and nothing claimable`; `fail()` retires unclaimed units of every
+  queued batch; `snapshot()` returns `unclaimed_total`. Delete `plan`, the
+  atomic cursor, `waiting_workers`, `worker_count`, `finishEpoch`,
+  `waitExhausted`, `initForTest`, `TestJob`, `Job.transfers` default, the
+  empty-slice guards, `epoch_active`, `epoch_items`, the epoch branch of
+  `checkOpen`, `loadPrepared`/`loadBinding`/`await`, `reapCompleted`, the
+  duplicate `deinit` loops, `resetEpoch`/`logEpoch` (per-batch log line in
+  `awaitBatch`, loader summary in `destroy`), `metrics.outstanding_requests`
+  (`shouldBootstrapSource` reads `request_gate.inUse()`).
+- `DirectLoader.submit(specs) !*Batch`, `awaitBatch(*Batch)`; `destroy`
+  awaits open batches then drains the gate.
+- `io.zig`: `Handle{state}` with `await()`, `isDone()`, `logicalBytes()`;
+  `Loader.load(M, model, buffers) !Handle`; `Loader.Binding{tensor, output, exe}`;
+  `Loader.loadExecute(bindings: []const Binding) !Handle` validating every
+  binding, allocating input shells, one submission over all sources;
+  `Handle.await` runs the executables in binding order with `.wait = true`
+  and frees inputs; `Loader.awaitAll()`; `Loader.executeInputBytesPerDevice(exe)`;
+  `Loader.open` list; `Loader.deinit` awaits leftovers (reads only for
+  bindings). `Window{budget_bytes, max_handles}` with `submit`, `drain`,
+  `deinit`. Zero-byte tensors return `error.EmptyTensor`. Buffered backend:
+  `BufferedBatch{pending, done}`; delete its epoch state.
+- Tests: fair-order tests call `fairOrder` directly; concurrent claims and
+  exhaustion tests run against the FIFO; new: batches claimed in publish
+  order, a batch completes while a later batch has unclaimed jobs, `fail`
+  marks every queued batch done. Public test: `loadExecute` A and B and
+  `load` C back to back; await B, A, C; contents correct; bytes = 3x; an
+  injected read failure fails every pending await with the same error;
+  `deinit` with handles open; a two-binding submission yields two outputs
+  from one batch.
+- Playground: honour `ZML_LOAD_PACK_WINDOW` through `Window` and
+  `ZML_LOAD_PACK_PAIRS` (two packs per submission).
+- Validation: full test set; matrix packs=0 within spread; packs=64 K=1
+  faster than task 2 (no rendezvous/barrier); K=2/4 hide executables
+  (submission k+1 first read before submission k await returns); pairs reduce
+  planned jobs per submission; multi-device sharded and replicated loads with
+  packs interleaved complete without hang (local 2xB70; 4/8 MI300X when the
+  host is trusted).
+
+### 4. Controller continuity (minimal)
+
+- Delete `epochBarrier` and its two fields. `finishIdleMeasurement`: apply
+  `RequestGateLimits.init(controller.width(), feasible)` to both gates and set
+  `reported_width` (today the read gate is left at the last probed rung).
+  Busy transition: `metrics.prepareProbe(generation, next_read_admission)` and
+  `measurement = .measuring` when not settled; never touch the read gate on an
+  activity transition. `applyDecision` fall-through becomes an assert. Add a
+  debug counter of gate-closed-while-pending intervals to the loader summary.
+- Validation: controller tests unchanged; packs=64 K=1 shows zero gate-closed
+  intervals at boundaries; matrix packs=0 neutral, selected widths unchanged.
+
+### 5. Monorepo migration and Laguna window
+
+- `llmd/main.zig`: `vfs.registerBackend(scheme, x.backend())` for the five
+  schemes; `platform.benchTransfer` next to `warmupDeviceAllocators`;
+  `const load_profile = try vfs.loadProfile(model)` threaded to `loadBuffers`.
+- `llama.zig`, `gemma4_text.zig` and every other `Loader.init` user:
+  `Loader.init(allocator, io, platform, store, .{shardings, load_profile,
+  progress})`, `var h = try loader.load(...)`, `try h.await()`, `bytesLoaded()`.
+- `laguna.zig`: one whole-model `load`; per layer one `Window.submit` with
+  both packs; delete the per-struct `loadBuffers`/`LoadOpts` plumbing and the
+  per-call arena; keep `preloadExpertPackers`. Option `expert_pack_budget`
+  (0 = window of one; default two layers of inputs). Handle the new hard
+  errors (`NotFound`, placement equality with `.expert = .experts`).
+- Validation: llmd builds; Llama and Gemma4 serve; Laguna at budget 0 / 1 /
+  2 layers: byte total equal to the pre-migration total, temperature-0 tokens
+  identical, peak HBM steps by one layer's inputs, wall time decreasing; the
+  loader line shows the VFS profile for an `hf://` model.
+
+### 6. Per-file incremental publish; identity fair order for one device
+
+- `DirectLoader.submit`: sort once; per file group `prepareBatch` then
+  `publish` immediately; seal at the end (sentinel). Skip `fairOrder` for
+  `device_count == 1` (assert identity in a test). Per-batch diagnostics gain
+  `first_read_at` and per-file planning time.
+- Validation: DeepSeek on CUDA: jobs 9,524 and transfers 69,572 unchanged,
+  median at or below the anchor (target 3.6 to 3.8 s); multi-device sharded
+  medians within spread. Fallback: whole-model planning for `device_count > 1`.
+
+### 7. VFS throttle classification and two-class backpressure
+
+- S3/GCS `503` -> `.throttle`. Delete `ResponseTiming`,
+  `writeFirstAndReadScatter` and the one-byte probe; body path is discard
+  then scatter. `ReadStatsCursor.takeBackpressure` returns `{throttle,
+  transient}`; throttle -> `backoff()` (settle one rung down); transient ->
+  one rung down without settling, at most once per generation. Optional:
+  Retry-After parsing in the shared loop.
+- Validation: `//vfs:test`; S3Proxy with 2% injected 503 (ceiling drops, load
+  completes, floor > 1); a single early 500 no longer pins the width; real
+  AWS if credentials are available.
+
+### 8. Climb-and-hold controller without gate drains (gated)
+
+- Controller `{index, max_index, best_index, rates[12], samples[12],
+  state: climbing|holding, borderline_used, probed_down, generation,
+  last_backoff_generation}`; climb while a rung beats best by 3%; hold at the
+  lowest rung within 0.97 x best; one borderline re-measure; one optional
+  downward probe below the start rung. Delete `Confirmation`, `restartAt`,
+  `refine_down`, `beginRefineOrSettle`, `probeCost`/`probeFitsTail`,
+  `ramp_scores`/`unchanged_candidates`. Runtime `{inactive, measuring, blind}`;
+  `applyDecision` never sets the read gate to 0; busy-time window clock in
+  the existing 10/25 ms poll; two-class backoff from task 7.
+- Tests replay the recorded B70 curve (12/16/24/32 = 21.33/20.69/18.90/17.33
+  GiB/s -> hold 12) and a flat curve (hold at the first rung failing to beat
+  best by 3%).
+- Validation: per-rung rate table on B70 reproduces the ordering; matrix and
+  S3Proxy within spread; gate-closed counter zero. Revert the whole task if
+  any anchor moves outside spread.
+
+### 9. Per-plan preallocated contexts and event retirement (gated)
+
+- `prepareBatch` returns `dma_submissions`; plans own `requests`, `blocks`,
+  `events` arrays; the callback pushes retired events under the metadata lock
+  and the pump destroys them; `awaitBatch` drains the rest. Plugin check first.
+- Validation: tests; DeepSeek median and peak RSS; no PJRT error in debug.
+
+### 10. VFS range/retry consolidation (gated)
+
+- One `range_read.performRangeRead(io, client, stats, retry, spec, data,
+  offset, size)` with a per-attempt request hook (S3 SigV4 stays per attempt);
+  HTTP/S3/GCS/HF keep URL/auth/profile only. Delete `VFS.register` in favour
+  of `registerBackend`. Validation: `//vfs:test` and the acceptance tests.
+
+### 11. Calibration reporting cleanup
+
+- Remove the timing decomposition, per-sample logging and latency
+  accumulator (one summary line), the duplicate device-allocator warm-up, and
+  the overlapping arena growth entry points. Validation: dma-bench on the
+  three hosts selects the same block as today.
+
+### 12. NUMA placement experiment (measurement only)
+
+- Debug env override for a single unbound pool (and an interleaved variant).
+  Arms on eight MI300X (when the host is trusted): auto, all node 0, all node
+  1, single pool, single pool + interleave; replicated Gemma and sharded
+  Llama, 7 repeats; record `numastat` and a `_copy_to_iter` profile. Decision
+  rule in CTX.md: delete affinity only if the single-pool arm is within 3% of
+  auto on both workloads with overlapping spreads.
+
+### 13. Final validation and documentation reconciliation
+
+- Full test set, `zig fmt --check`, buildifier, playground builds, matrix,
+  DeepSeek, packs, monorepo serves. CTX.md "Current design" rewritten for the
+  code that exists; measurement tables refreshed; open work updated.
