@@ -169,7 +169,7 @@ test "Quantization.Scheme.classify" {
 
     // unsloth/Qwen3.6-27B-NVFP4: compressed-tensors, carrying both of its schemes under
     // `weight_scale` -- NVFP4 on the MLPs of layers 0-55, FP8 per-channel everywhere else.
-    const nvfp4_packed: Shape = .init(.{ .dout = 17408, .kw = 2560 }, .u8);
+    const nvfp4_packed: Shape = .init(.{ .dout = 17408, .d = 2560 }, .u8);
     try expect(@as(?Quantization.Scheme, .nvfp4), Quantization.Scheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn)));
     try expect(@as(?Quantization.Scheme, .fp8_per_channel), Quantization.Scheme.classify(
         .init(.{ .dout = 17408, .d = 5120 }, .f8e4m3fn),
@@ -178,7 +178,7 @@ test "Quantization.Scheme.classify" {
 
     // nvidia/Gemma-4-31B-IT-NVFP4: ModelOpt, packed values under the plain `weight` name.
     try expect(@as(?Quantization.Scheme, .nvfp4), Quantization.Scheme.classify(
-        .init(.{ .dout = 21504, .kw = 2688 }, .u8),
+        .init(.{ .dout = 21504, .d = 2688 }, .u8),
         .init(.{ .dout = 21504, .sc = 336 }, .f8e4m3fn),
     ));
 
@@ -234,7 +234,7 @@ test "Quantization.Scheme.classify" {
     try expect(@as(?Quantization.Scheme, .mxfp4), Quantization.Scheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 160 }, .f8e8m0)));
     // DeepSeek V4 stores the same packed FP4 bits in signed bytes.
     try expect(@as(?Quantization.Scheme, .mxfp4), Quantization.Scheme.classify(
-        .init(.{ .dout = 2048, .kw = 2048 }, .i8),
+        .init(.{ .dout = 2048, .d = 2048 }, .i8),
         .init(.{ .dout = 2048, .sc = 128 }, .f8e8m0),
     ));
     // Native (unpacked) f4e2m1, K no longer halved.
@@ -261,7 +261,7 @@ test "Quantization.Scheme.classify" {
     try expect(@as(?Quantization.Scheme, null), Quantization.Scheme.classify(fp8, .init(.{ .dout = 160, .sc = 80 }, .bf16)));
     // Stacked MoE weights are rank 3 and go through the MoE path, not this one.
     try expect(@as(?Quantization.Scheme, null), Quantization.Scheme.classify(
-        .init(.{ .expert = 128, .dout = 1408, .kw = 1408 }, .u8),
+        .init(.{ .expert = 128, .dout = 1408, .d = 1408 }, .u8),
         .init(.{ .expert = 128, .dout = 1408, .sc = 176 }, .f8e4m3fn),
     ));
 
