@@ -736,6 +736,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // NVIDIA recommends these settings
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_scaled_dot_with_tile_ir", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_subchannel_dequantisation_fusion", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
             },
             .rocm => {
                 // Use lld from libllvm instead of invoking the ld.lld binary.
