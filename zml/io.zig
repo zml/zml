@@ -3937,7 +3937,7 @@ fn releasePlatformDmaSettings(platform: *const Platform) void {
 const DmaBenchmarkReport = struct {
     allocator: std.mem.Allocator,
     resources: DmaPlatformSettings,
-    devices: []DeviceDmaRecommendation,
+    recommendation: DeviceDmaRecommendation,
     samples: []DmaBenchmarkSample,
     elapsed_ns: u64,
     setup_ns: u64 = 0,
@@ -3956,7 +3956,6 @@ const DmaBenchmarkReport = struct {
     }
 
     fn deinitReport(self: *DmaBenchmarkReport) void {
-        self.allocator.free(self.devices);
         self.allocator.free(self.samples);
         self.* = undefined;
     }
@@ -3967,7 +3966,7 @@ pub const BenchTransferOptions = struct {
     /// Fixed per-device width used by the block screen and the loader.
     block_parallelism: usize = 8,
     /// A screen window runs for at least this long and, unless the target is
-    /// zero, until every participating device completes the transfer target.
+    /// zero, until the representative device completes the transfer target.
     duration_ns: u64 = 2 * std.time.ns_per_ms,
     minimum_transfers_per_device: u64 = 32,
     /// Borderline local decisions receive longer alternating paired windows.
@@ -4574,34 +4573,6 @@ const ReusableDmaBenchmarkCohort = struct {
     }
 };
 
-const ReusableDmaBenchmarkLane = struct {
-    cohort: *ReusableDmaBenchmarkCohort,
-    source: []const u8,
-    parallelism: usize,
-};
-
-fn prepareReusableDmaBenchmarkLanes(io: std.Io, lanes: []const ReusableDmaBenchmarkLane) !void {
-    const SetupWorker = struct {
-        lane: ReusableDmaBenchmarkLane,
-        first_error: *std.atomic.Value(u16),
-
-        fn run(self: @This()) void {
-            self.lane.cohort.ensureReady(self.lane.source, self.lane.parallelism) catch |err| {
-                _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-            };
-        }
-    };
-    var setup_error: std.atomic.Value(u16) = .init(0);
-    var setup_group: std.Io.Group = .init;
-    for (lanes) |lane| try setup_group.concurrent(io, SetupWorker.run, .{SetupWorker{
-        .lane = lane,
-        .first_error = &setup_error,
-    }});
-    try setup_group.await(io);
-    const setup_error_code = setup_error.load(.acquire);
-    if (setup_error_code != 0) return @errorFromInt(setup_error_code);
-}
-
 fn dmaBenchmarkWindowComplete(
     elapsed_ns: u64,
     minimum_duration_ns: u64,
@@ -4612,23 +4583,22 @@ fn dmaBenchmarkWindowComplete(
 }
 
 fn runReusableDmaBenchmarkWindow(
-    allocator: std.mem.Allocator,
     io: std.Io,
-    lanes: []const ReusableDmaBenchmarkLane,
+    cohort: *ReusableDmaBenchmarkCohort,
+    source: []const u8,
+    parallelism: usize,
     duration_ns: u64,
-    minimum_transfers_per_device: u64,
+    minimum_transfers: u64,
     setup_ns: *u64,
-) ![]DmaBenchmarkRunMetrics {
-    std.debug.assert(lanes.len > 0);
-    const atomic_metrics = try allocator.alloc(DmaBenchmarkAtomicMetrics, lanes.len);
-    defer allocator.free(atomic_metrics);
-    for (atomic_metrics) |*metrics| metrics.* = .{};
+) !DmaBenchmarkRunMetrics {
+    var metrics: DmaBenchmarkAtomicMetrics = .{};
     const setup_started = std.Io.Timestamp.now(io, .awake);
-    try prepareReusableDmaBenchmarkLanes(io, lanes);
+    try cohort.ensureReady(source, parallelism);
     setup_ns.* +|= @intCast(@max(setup_started.untilNow(io, .awake).nanoseconds, 0));
 
     const Worker = struct {
-        lane: ReusableDmaBenchmarkLane,
+        cohort: *ReusableDmaBenchmarkCohort,
+        source: []const u8,
         slot: usize,
         metrics: *DmaBenchmarkAtomicMetrics,
         ready: *std.atomic.Value(usize),
@@ -4637,10 +4607,10 @@ fn runReusableDmaBenchmarkWindow(
 
         fn run(self: @This()) void {
             _ = self.ready.fetchAdd(1, .release);
-            self.start.waitUncancelable(self.lane.cohort.io);
+            self.start.waitUncancelable(self.cohort.io);
             while (!self.stop.load(.acquire)) {
-                self.lane.cohort.transfer(self.lane.source, self.slot, self.metrics);
-                if (self.lane.cohort.first_error.load(.acquire) != 0) return;
+                self.cohort.transfer(self.source, self.slot, self.metrics);
+                if (self.cohort.first_error.load(.acquire) != 0) return;
             }
         }
     };
@@ -4649,62 +4619,52 @@ fn runReusableDmaBenchmarkWindow(
     var start: std.Io.Event = .unset;
     var stop: std.atomic.Value(bool) = .init(false);
     var group: std.Io.Group = .init;
-    var worker_count: usize = 0;
-    for (lanes, atomic_metrics) |lane, *metrics| {
-        for (0..lane.parallelism) |slot| {
-            try group.concurrent(io, Worker.run, .{Worker{
-                .lane = lane,
-                .slot = slot,
-                .metrics = metrics,
-                .ready = &ready,
-                .start = &start,
-                .stop = &stop,
-            }});
-            worker_count += 1;
-        }
+    for (0..parallelism) |slot| {
+        group.concurrent(io, Worker.run, .{Worker{
+            .cohort = cohort,
+            .source = source,
+            .slot = slot,
+            .metrics = &metrics,
+            .ready = &ready,
+            .start = &start,
+            .stop = &stop,
+        }}) catch |err| {
+            stop.store(true, .release);
+            start.set(io);
+            group.await(io) catch {};
+            return err;
+        };
     }
-    while (ready.load(.acquire) != worker_count) try io.sleep(.fromMilliseconds(1), .awake);
+    while (ready.load(.acquire) != parallelism) try io.sleep(.fromMilliseconds(1), .awake);
     const measured_at = std.Io.Timestamp.now(io, .awake);
     start.set(io);
     while (true) {
         const elapsed_ns: u64 = @intCast(@max(measured_at.untilNow(io, .awake).nanoseconds, 0));
-        var completed_transfers: u64 = std.math.maxInt(u64);
-        for (lanes, atomic_metrics) |lane, *metrics| {
-            const error_code = lane.cohort.first_error.load(.acquire);
-            if (error_code != 0) {
-                stop.store(true, .release);
-                try group.await(io);
-                return @errorFromInt(error_code);
-            }
-            completed_transfers = @min(completed_transfers, metrics.transfers.load(.acquire));
+        const error_code = cohort.first_error.load(.acquire);
+        if (error_code != 0) {
+            stop.store(true, .release);
+            try group.await(io);
+            return @errorFromInt(error_code);
         }
         if (dmaBenchmarkWindowComplete(
             elapsed_ns,
             duration_ns,
-            completed_transfers,
-            minimum_transfers_per_device,
+            metrics.transfers.load(.acquire),
+            minimum_transfers,
         )) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     stop.store(true, .release);
     try group.await(io);
     const elapsed_ns: u64 = @intCast(@max(measured_at.untilNow(io, .awake).nanoseconds, 1));
-
-    const metrics = try allocator.alloc(DmaBenchmarkRunMetrics, lanes.len);
-    for (lanes, atomic_metrics, metrics) |lane, atomic, *result| {
-        const error_code = lane.cohort.first_error.load(.acquire);
-        if (error_code != 0) {
-            allocator.free(metrics);
-            return @errorFromInt(error_code);
-        }
-        result.* = .{
-            .bytes = atomic.bytes.load(.acquire),
-            .transfers = atomic.transfers.load(.acquire),
-            .total_latency_ns = atomic.total_latency_ns.load(.acquire),
-            .elapsed_ns = elapsed_ns,
-        };
-    }
-    return metrics;
+    const error_code = cohort.first_error.load(.acquire);
+    if (error_code != 0) return @errorFromInt(error_code);
+    return .{
+        .bytes = metrics.bytes.load(.acquire),
+        .transfers = metrics.transfers.load(.acquire),
+        .total_latency_ns = metrics.total_latency_ns.load(.acquire),
+        .elapsed_ns = elapsed_ns,
+    };
 }
 
 const ReusableDmaBenchmarkSession = struct {
@@ -4738,35 +4698,35 @@ const ReusableDmaBenchmarkSession = struct {
     fn measure(
         self: *ReusableDmaBenchmarkSession,
         phase: DmaBenchmarkPhase,
-        lanes: []const ReusableDmaBenchmarkLane,
+        cohort: *ReusableDmaBenchmarkCohort,
+        source: []const u8,
+        parallelism: usize,
         duration_ns: u64,
-        minimum_transfers_per_device: u64,
+        minimum_transfers: u64,
         repeat: usize,
-    ) ![]DmaBenchmarkRunMetrics {
+    ) !DmaBenchmarkRunMetrics {
         const metrics = try runReusableDmaBenchmarkWindow(
-            self.allocator,
             self.io,
-            lanes,
+            cohort,
+            source,
+            parallelism,
             duration_ns,
-            minimum_transfers_per_device,
+            minimum_transfers,
             &self.setup_ns,
         );
-        errdefer self.allocator.free(metrics);
-        self.sampling_ns +|= metrics[0].elapsed_ns;
+        self.sampling_ns +|= metrics.elapsed_ns;
         self.windows += 1;
-        for (lanes, metrics) |lane, metric| {
-            try self.samples.append(self.allocator, .{
-                .phase = phase,
-                .device_index = lane.cohort.device_index,
-                .block_size = lane.cohort.block_size,
-                .parallelism = lane.parallelism,
-                .repeat = repeat,
-                .bytes = metric.bytes,
-                .transfers = metric.transfers,
-                .elapsed_ns = metric.elapsed_ns,
-                .total_latency_ns = metric.total_latency_ns,
-            });
-        }
+        try self.samples.append(self.allocator, .{
+            .phase = phase,
+            .device_index = cohort.device_index,
+            .block_size = cohort.block_size,
+            .parallelism = parallelism,
+            .repeat = repeat,
+            .bytes = metrics.bytes,
+            .transfers = metrics.transfers,
+            .elapsed_ns = metrics.elapsed_ns,
+            .total_latency_ns = metrics.total_latency_ns,
+        });
         return metrics;
     }
 
@@ -5869,23 +5829,29 @@ const DirectLoader = struct {
 const DmaBenchmarkCandidate = struct {
     value: usize,
     cohort: *ReusableDmaBenchmarkCohort,
-    metrics: std.ArrayListUnmanaged(DmaBenchmarkRunMetrics) = .empty,
+    metrics: [dma_benchmark_repeats]DmaBenchmarkRunMetrics = undefined,
+    metrics_len: usize = 0,
 
-    fn median(self: DmaBenchmarkCandidate, allocator: std.mem.Allocator) !DmaBenchmarkRunMetrics {
-        std.debug.assert(self.metrics.items.len > 0);
-        const scratch = try allocator.dupe(DmaBenchmarkRunMetrics, self.metrics.items);
-        defer allocator.free(scratch);
-        std.mem.sort(DmaBenchmarkRunMetrics, scratch, {}, struct {
+    fn appendMetric(self: *DmaBenchmarkCandidate, metric: DmaBenchmarkRunMetrics) void {
+        std.debug.assert(self.metrics_len < self.metrics.len);
+        self.metrics[self.metrics_len] = metric;
+        self.metrics_len += 1;
+    }
+
+    fn metricSlice(self: *const DmaBenchmarkCandidate) []const DmaBenchmarkRunMetrics {
+        return self.metrics[0..self.metrics_len];
+    }
+
+    fn median(self: DmaBenchmarkCandidate) DmaBenchmarkRunMetrics {
+        std.debug.assert(self.metrics_len > 0);
+        var scratch = self.metrics;
+        const populated = scratch[0..self.metrics_len];
+        std.mem.sort(DmaBenchmarkRunMetrics, populated, {}, struct {
             fn lessThan(_: void, lhs: DmaBenchmarkRunMetrics, rhs: DmaBenchmarkRunMetrics) bool {
                 return lhs.bytesPerSecond() < rhs.bytesPerSecond();
             }
         }.lessThan);
-        return scratch[scratch.len / 2];
-    }
-
-    fn deinit(self: *DmaBenchmarkCandidate, allocator: std.mem.Allocator) void {
-        self.metrics.deinit(allocator);
-        self.* = undefined;
+        return populated[populated.len / 2];
     }
 };
 
@@ -5904,7 +5870,7 @@ fn selectDmaBenchmarkCandidate(
     defer allocator.free(medians);
     var fastest_index: usize = 0;
     for (candidates, medians, 0..) |candidate, *median, index| {
-        median.* = try candidate.median(allocator);
+        median.* = candidate.median();
         if (median.bytesPerSecond() > medians[fastest_index].bytesPerSecond())
             fastest_index = index;
     }
@@ -5920,24 +5886,23 @@ fn selectDmaBenchmarkCandidate(
 }
 
 fn dmaBenchmarkCandidateNeedsConfirmation(
-    allocator: std.mem.Allocator,
     candidates: []const DmaBenchmarkCandidate,
     candidate_index: usize,
     peak_index: usize,
     tolerance: f64,
     margin: f64,
-) !bool {
+) bool {
     if (candidate_index == peak_index) return false;
     const candidate = candidates[candidate_index];
     const peak = candidates[peak_index];
-    std.debug.assert(candidate.metrics.items.len == peak.metrics.items.len);
+    std.debug.assert(candidate.metrics_len == peak.metrics_len);
     var qualified_once = false;
     var rejected_once = false;
-    for (candidate.metrics.items, 0..) |metric, repeat| {
+    for (candidate.metricSlice(), 0..) |metric, repeat| {
         var peak_rate: f64 = 0;
         for (candidates) |round_candidate| {
-            std.debug.assert(round_candidate.metrics.items.len == candidate.metrics.items.len);
-            peak_rate = @max(peak_rate, round_candidate.metrics.items[repeat].bytesPerSecond());
+            std.debug.assert(round_candidate.metrics_len == candidate.metrics_len);
+            peak_rate = @max(peak_rate, round_candidate.metrics[repeat].bytesPerSecond());
         }
         const ratio = if (peak_rate == 0) 0 else metric.bytesPerSecond() / peak_rate;
         if (ratio >= 1.0 - tolerance)
@@ -5946,21 +5911,21 @@ fn dmaBenchmarkCandidateNeedsConfirmation(
             rejected_once = true;
     }
     if (qualified_once and rejected_once) return true;
-    const candidate_median = try candidate.median(allocator);
-    const peak_median = try peak.median(allocator);
+    const candidate_median = candidate.median();
+    const peak_median = peak.median();
     const peak_rate = peak_median.bytesPerSecond();
     const ratio = if (peak_rate == 0) 0 else candidate_median.bytesPerSecond() / peak_rate;
     return @abs(ratio - (1.0 - tolerance)) <= margin;
 }
 
 fn medianDmaMetricRatioIndex(
-    allocator: std.mem.Allocator,
     candidates: []const DmaBenchmarkRunMetrics,
     baselines: []const DmaBenchmarkRunMetrics,
-) !usize {
+) usize {
     std.debug.assert(candidates.len == baselines.len and candidates.len > 0);
-    const order = try allocator.alloc(usize, candidates.len);
-    defer allocator.free(order);
+    std.debug.assert(candidates.len <= dma_benchmark_repeats);
+    var order_storage: [dma_benchmark_repeats]usize = undefined;
+    const order = order_storage[0..candidates.len];
     for (order, 0..) |*index, i| index.* = i;
     const Context = struct {
         candidates: []const DmaBenchmarkRunMetrics,
@@ -5984,7 +5949,7 @@ fn confirmAndSelectDmaBenchmarkCandidate(
     phase: DmaBenchmarkPhase,
     candidates: []const DmaBenchmarkCandidate,
     source: []const u8,
-    fixed_parallelism: ?usize,
+    parallelism: usize,
     tolerance: f64,
 ) !DmaBenchmarkDecision {
     const medians = try session.allocator.alloc(DmaBenchmarkRunMetrics, candidates.len);
@@ -5997,7 +5962,7 @@ fn confirmAndSelectDmaBenchmarkCandidate(
 
     var peak_index: usize = 0;
     for (candidates, medians, 0..) |candidate, *median, index| {
-        median.* = try candidate.median(session.allocator);
+        median.* = candidate.median();
         if (median.bytesPerSecond() > medians[peak_index].bytesPerSecond()) peak_index = index;
     }
     const peak_rate = medians[peak_index].bytesPerSecond();
@@ -6006,8 +5971,7 @@ fn confirmAndSelectDmaBenchmarkCandidate(
     }
 
     for (candidates, 0..) |_, candidate_index| {
-        if (!try dmaBenchmarkCandidateNeedsConfirmation(
-            session.allocator,
+        if (!dmaBenchmarkCandidateNeedsConfirmation(
             candidates,
             candidate_index,
             peak_index,
@@ -6023,28 +5987,22 @@ fn confirmAndSelectDmaBenchmarkCandidate(
                 [_]usize{ peak_index, candidate_index };
             for (order) |measured_index| {
                 const measured = candidates[measured_index];
-                const parallelism = fixed_parallelism orelse measured.value;
-                const lanes = [_]ReusableDmaBenchmarkLane{.{
-                    .cohort = measured.cohort,
-                    .source = source[0 .. measured.cohort.block_size * parallelism],
-                    .parallelism = parallelism,
-                }};
                 const metrics = try session.measure(
                     phase,
-                    &lanes,
+                    measured.cohort,
+                    source[0 .. measured.cohort.block_size * parallelism],
+                    parallelism,
                     opts.confirmation_duration_ns,
                     opts.confirmation_minimum_transfers_per_device,
                     repeat,
                 );
-                defer session.allocator.free(metrics);
                 if (measured_index == candidate_index)
-                    candidate_runs[repeat] = metrics[0]
+                    candidate_runs[repeat] = metrics
                 else
-                    baseline_runs[repeat] = metrics[0];
+                    baseline_runs[repeat] = metrics;
             }
         }
-        const representative = try medianDmaMetricRatioIndex(
-            session.allocator,
+        const representative = medianDmaMetricRatioIndex(
             &candidate_runs,
             &baseline_runs,
         );
@@ -6067,14 +6025,6 @@ fn confirmAndSelectDmaBenchmarkCandidate(
     };
 }
 
-fn deinitDmaBenchmarkCandidates(
-    allocator: std.mem.Allocator,
-    candidates: []DmaBenchmarkCandidate,
-) void {
-    for (candidates) |*candidate| candidate.deinit(allocator);
-    allocator.free(candidates);
-}
-
 fn dmaBenchmarkTupleFeasible(source_len: usize, block_size: usize, parallelism: usize) bool {
     const bytes = std.math.mul(usize, block_size, parallelism) catch return false;
     return bytes <= source_len;
@@ -6085,7 +6035,7 @@ fn measureDmaBenchmarkCandidates(
     phase: DmaBenchmarkPhase,
     candidates: []DmaBenchmarkCandidate,
     source: []const u8,
-    fixed_parallelism: ?usize,
+    parallelism: usize,
     duration_ns: u64,
     minimum_transfers_per_device: u64,
     repeats: usize,
@@ -6094,21 +6044,16 @@ fn measureDmaBenchmarkCandidates(
         for (0..candidates.len) |offset| {
             const index = (offset + repeat) % candidates.len;
             const candidate = &candidates[index];
-            const parallelism = fixed_parallelism orelse candidate.value;
-            const lanes = [_]ReusableDmaBenchmarkLane{.{
-                .cohort = candidate.cohort,
-                .source = source[0 .. candidate.cohort.block_size * parallelism],
-                .parallelism = parallelism,
-            }};
             const metrics = try session.measure(
                 phase,
-                &lanes,
+                candidate.cohort,
+                source[0 .. candidate.cohort.block_size * parallelism],
+                parallelism,
                 duration_ns,
                 minimum_transfers_per_device,
                 repeat,
             );
-            defer session.allocator.free(metrics);
-            try candidate.metrics.append(session.allocator, metrics[0]);
+            candidate.appendMetric(metrics);
         }
     }
 }
@@ -6145,7 +6090,7 @@ fn tuneDmaBenchmarkDevice(
         };
         block_index += 1;
     }
-    defer deinitDmaBenchmarkCandidates(session.allocator, block_candidates);
+    defer session.allocator.free(block_candidates);
     try measureDmaBenchmarkCandidates(
         session,
         .block,
@@ -6249,8 +6194,9 @@ fn resolveDmaNumaNodes(
     return result;
 }
 
-/// Benchmarks synthetic DmaMapped PJRT transfers on every addressable device.
-/// Candidate search and scoring are independent of model data and shardings.
+/// Benchmarks synthetic DmaMapped PJRT transfers on one representative device.
+/// Every addressable device allocator is still warmed and retained workspace is
+/// prepared for the complete platform.
 fn benchmarkSyntheticDma(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -6287,30 +6233,30 @@ fn benchmarkSyntheticDma(
         }
     }
 
-    var used_devices: std.ArrayListUnmanaged(usize) = .empty;
-    defer used_devices.deinit(allocator);
+    const device_indices = try allocator.alloc(usize, platform.devices.len);
+    defer allocator.free(device_indices);
     const platform_device_ids = try allocator.alloc(u32, platform.devices.len);
     defer allocator.free(platform_device_ids);
-    for (platform_device_ids, 0..) |*device_id, device_index| {
-        try used_devices.append(allocator, device_index);
+    for (device_indices, platform_device_ids, 0..) |*stored_index, *device_id, device_index| {
+        stored_index.* = device_index;
         device_id.* = platform.devices[device_index].id();
     }
 
-    const representative_kind = platform.devices[used_devices.items[0]].kind();
-    for (used_devices.items[1..]) |device_index| {
+    const representative_kind = platform.devices[0].kind();
+    for (device_indices[1..]) |device_index| {
         if (!std.mem.eql(u8, representative_kind, platform.devices[device_index].kind()))
             return error.HeterogeneousDmaUnsupported;
     }
     const resolved_numa_nodes = try resolveDmaNumaNodes(
         allocator,
         platform,
-        used_devices.items,
+        device_indices,
         opts.device_numa_nodes,
     );
     defer allocator.free(resolved_numa_nodes);
 
     const device_warmup_started = std.Io.Timestamp.now(io, .awake);
-    try warmupDmaBenchmarkDeviceAllocators(io, platform, used_devices.items);
+    try warmupDmaBenchmarkDeviceAllocators(io, platform, device_indices);
     const device_allocator_warmup_ns: u64 = @intCast(@max(
         device_warmup_started.untilNow(io, .awake).nanoseconds,
         0,
@@ -6330,7 +6276,7 @@ fn benchmarkSyntheticDma(
         opts.block_parallelism,
     ) catch return error.DmaBenchmarkPinnedBudgetExceeded;
     try source_pools.growPool(
-        source_pools.device_pool_indices[used_devices.items[0]],
+        source_pools.device_pool_indices[0],
         calibration_source_bytes,
     );
 
@@ -6345,37 +6291,24 @@ fn benchmarkSyntheticDma(
     var session_active = true;
     defer if (session_active) session.deinit(&source_pools);
 
-    var recommendations: std.ArrayListUnmanaged(DeviceDmaRecommendation) = .empty;
-    errdefer recommendations.deinit(allocator);
     const representative = try tuneDmaBenchmarkDevice(
         &session,
         opts,
         &source_pools,
-        used_devices.items[0],
+        0,
     );
-    try recommendations.append(allocator, representative);
-    for (used_devices.items[1..]) |device_index| {
-        try recommendations.append(allocator, .{
-            .device_index = device_index,
-            .device_id = platform.devices[device_index].id(),
-            .dma_block_size = representative.dma_block_size,
-            .dma_parallelism = representative.dma_parallelism,
-            .measured_bytes_per_second = 0,
-            .average_latency_ns = 0,
-        });
-    }
 
-    const uniform_block_size = recommendations.items[0].dma_block_size;
-    const uniform_parallelism = recommendations.items[0].dma_parallelism;
-    const config_numa_nodes = try allocator.alloc(?usize, used_devices.items.len);
+    const uniform_block_size = representative.dma_block_size;
+    const uniform_parallelism = representative.dma_parallelism;
+    const config_numa_nodes = try allocator.alloc(?usize, device_indices.len);
     defer allocator.free(config_numa_nodes);
-    for (used_devices.items, config_numa_nodes) |device_index, *node| {
+    for (device_indices, config_numa_nodes) |device_index, *node| {
         node.* = resolved_numa_nodes[device_index];
     }
     const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
     defer allocator.free(calibrated_node_reserves);
     @memset(calibrated_node_reserves, 0);
-    for (used_devices.items) |device_index| {
+    for (device_indices) |device_index| {
         const pool_index = source_pools.device_pool_indices[device_index];
         calibrated_node_reserves[pool_index] = try std.math.add(
             usize,
@@ -6388,8 +6321,6 @@ fn benchmarkSyntheticDma(
         uniform_block_size,
         calibrated_node_reserves,
     );
-    const owned_devices = try recommendations.toOwnedSlice(allocator);
-    errdefer allocator.free(owned_devices);
     const owned_samples = try samples.toOwnedSlice(allocator);
     errdefer allocator.free(owned_samples);
     const resources = try DmaPlatformSettings.adopt(
@@ -6409,7 +6340,7 @@ fn benchmarkSyntheticDma(
     var result: DmaBenchmarkReport = .{
         .allocator = allocator,
         .resources = resources,
-        .devices = owned_devices,
+        .recommendation = representative,
         .samples = owned_samples,
         .elapsed_ns = 0,
     };
@@ -6431,7 +6362,7 @@ fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkR
         result.resources.numaPoolCount(),
         result.resources.retainedMappedBytes(),
         @tagName(platform.target),
-        result.devices.len,
+        platform.devices.len,
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
@@ -6441,24 +6372,25 @@ fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkR
         @as(f64, @floatFromInt(result.benchmark_overhead_ns)) / std.time.ns_per_ms,
         result.windows,
     });
-    for (result.devices) |recommendation| {
-        const device = platform.devices[recommendation.device_index];
+    for (platform.devices, 0..) |device, device_index| {
         log.info("dma_bench_numa device_index={d} device_id={d} numa_node={?d}", .{
-            recommendation.device_index,
-            recommendation.device_id,
-            result.resources.config.device_numa_nodes[recommendation.device_index],
-        });
-        log.info("dma_bench_device device_index={d} device_id={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} average_latency_ms={d:.3} windows={d}", .{
-            recommendation.device_index,
-            recommendation.device_id,
-            device.kind(),
-            recommendation.dma_block_size,
-            recommendation.dma_parallelism,
-            recommendation.measured_bytes_per_second / (1024 * 1024 * 1024),
-            recommendation.average_latency_ns / std.time.ns_per_ms,
-            recommendation.windows,
+            device_index,
+            device.id(),
+            result.resources.config.device_numa_nodes[device_index],
         });
     }
+    const recommendation = result.recommendation;
+    const representative_device = platform.devices[recommendation.device_index];
+    log.info("dma_bench_device device_index={d} device_id={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} average_latency_ms={d:.3} windows={d}", .{
+        recommendation.device_index,
+        recommendation.device_id,
+        representative_device.kind(),
+        recommendation.dma_block_size,
+        recommendation.dma_parallelism,
+        recommendation.measured_bytes_per_second / (1024 * 1024 * 1024),
+        recommendation.average_latency_ns / std.time.ns_per_ms,
+        recommendation.windows,
+    });
     for (result.samples) |sample| {
         const device = platform.devices[sample.device_index];
         log.info("dma_bench_sample phase={s} device_index={d} device_id={d} block_bytes={d} parallelism={d} repeat={d} bytes={d} transfers={d} elapsed_ns={d} gib_s={d:.3} average_latency_ms={d:.3}", .{
@@ -6477,8 +6409,9 @@ fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkR
     }
 }
 
-/// Calibrates every addressable device and atomically replaces the platform's
-/// private settings. The previous/default settings remain active on failure.
+/// Measures one representative device, prepares all-device workspace, and
+/// atomically replaces the platform's private settings. The previous/default
+/// settings remain active on failure.
 pub fn benchTransfer(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -6517,7 +6450,6 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .{ .value = 4, .cohort = undefined },
         .{ .value = 8, .cohort = undefined },
     };
-    defer for (&candidates) |*candidate| candidate.deinit(allocator);
     const rates = [_][3]u64{
         .{ 60, 10, 62 },
         .{ 98, 99, 97 },
@@ -6525,7 +6457,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
         for (candidate_rates) |rate| {
-            try candidate.metrics.append(allocator, .{
+            candidate.appendMetric(.{
                 .bytes = rate,
                 .transfers = 1,
                 .total_latency_ns = 1,
@@ -6547,10 +6479,9 @@ test "DMA benchmark selection does not assume a unimodal response" {
         .{ .value = 8, .cohort = undefined },
         .{ .value = 16, .cohort = undefined },
     };
-    defer for (&candidates) |*candidate| candidate.deinit(allocator);
     const rates = [_]u64{ 80, 100, 70, 99 };
     for (&candidates, rates) |*candidate, rate| {
-        try candidate.metrics.append(allocator, .{
+        candidate.appendMetric(.{
             .bytes = rate,
             .transfers = 1,
             .total_latency_ns = 1,
@@ -6568,26 +6499,23 @@ test "DMA benchmark tuple feasibility rejects pinned budget overflow" {
 }
 
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
-    const allocator = std.testing.allocator;
     var candidates = [_]DmaBenchmarkCandidate{
         .{ .value = 4, .cohort = undefined },
         .{ .value = 8, .cohort = undefined },
     };
-    defer for (&candidates) |*candidate| candidate.deinit(allocator);
     const rates = [_][3]u64{
         .{ 96, 80, 97 },
         .{ 100, 100, 100 },
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
-        for (candidate_rates) |rate| try candidate.metrics.append(allocator, .{
+        for (candidate_rates) |rate| candidate.appendMetric(.{
             .bytes = rate,
             .transfers = 1,
             .total_latency_ns = 1,
             .elapsed_ns = std.time.ns_per_s,
         });
     }
-    try std.testing.expect(try dmaBenchmarkCandidateNeedsConfirmation(
-        allocator,
+    try std.testing.expect(dmaBenchmarkCandidateNeedsConfirmation(
         &candidates,
         0,
         1,

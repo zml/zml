@@ -21,7 +21,7 @@ migrated yet.
 - [x] 1. Flatten epoch plans and remove dead pipeline state.
 - [x] 2. Make the lifecycle gate the epoch-completion mechanism.
 - [x] 3. Simplify adaptive-runtime and probe-state representation.
-- [ ] 4. Specialize DMA calibration for its single measured lane.
+- [x] 4. Specialize DMA calibration for its single measured lane.
 - [ ] 5. Remove redundant platform/device identity state.
 - [ ] 6. Make `DmaBlockPool` provider-only and simplify block leases.
 - [ ] 7. Unify loader request preparation and exact positional scatter.
@@ -122,6 +122,18 @@ playground build, and VFS/stdx tests pass.
   measured while every device allocator is warmed.
 
 Validation: benchmark decision tests and focused builds.
+
+Result: benchmark setup and windows now accept one cohort directly and return
+one metric; lane slices, per-window metric allocations, setup fan-out, and the
+nullable candidate-width mode are gone. Candidate screens store their fixed
+three runs inline, including fixed scratch for paired confirmation medians.
+The report owns one measured representative recommendation instead of cloned
+zero-valued records for other devices, and the always-all `used_devices` list
+was replaced by direct platform indices. Public documentation now explicitly
+says one representative device is measured while all allocators are warmed and
+all-device workspace is retained. Worker-start failure also drains already
+started benchmark tasks. The loader-inclusive ZML suite and focused builds
+pass.
 
 ### 5. Platform settings identity
 

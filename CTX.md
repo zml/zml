@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 3, on detached commit
-`4dd54ba5` plus the current Task 3 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 4, on detached commit
+`c3e8d1d2` plus the current Task 4 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -193,6 +193,11 @@ simplification pass.
   a smaller block. It tunes one representative device, warms device allocators
   on all devices, applies the uniform selected tuple, and grows the retained
   all-device working set. There is no decision-dead aggregate timing phase.
+- Calibration code is specialized for that representative lane: a window
+  returns one metric directly, screen candidates own three inline samples, and
+  the report contains one measured recommendation. There are no lane slices,
+  one-element result allocations, nullable candidate widths, or synthesized
+  recommendations for devices that were not measured.
 - Retained arenas are initial capacity, not the full permissible live set.
   Detection starts with one largest-candidate calibration ring, reuses it,
   grows after selection to the all-device working set, and permits bounded slab
