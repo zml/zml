@@ -566,13 +566,10 @@ test pagedAttention {
             zml.testing.expectClose(io, reference, output_h, tolerance) catch |err| switch (err) {
                 error.TestUnexpectedResult => {
                     num_failed += 1;
-                    std.log.err("test pagedAttention {s} failed on backend {t}\n--> reference ({t}): {d:32.3}\n--> pagedAttention({t}): {d:32.3}", .{
+                    std.log.err("test pagedAttention {s} failed on backend {t} against reference {t}", .{
                         test_case.name,
                         backend,
                         reference_backend,
-                        reference.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
-                        backend,
-                        output_h.subSlice(1, 0, 1).squeeze(1).subSlice(1, 0, 1).squeeze(1),
                     });
                 },
                 else => |e| return e,
