@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after plan Task 5, on a detached checkout based
-on `72e6d477`. `PLAN.md` is the ordered implementation checklist; this file is
+Last consolidated: 2026-09-03 after plan Task 6, on a detached checkout based
+on `aacda6ec`. `PLAN.md` is the ordered implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -105,10 +105,10 @@ cleanup.
   once. The prior per-piece enqueue caused roughly 69k--79k locks and pumps.
   Pre-reservation makes allocation failure atomic.
 - Workers retain scratch for leases, affinities, reference counts, iovecs,
-  block contexts, and queue counts. Positional-read rewrite scratch is stack
-  bounded. `DmaBlockPool.acquireMany` still allocates
-  matching arrays per source job, so steady-state allocation removal remains
-  open work; the earlier worker-scratch change was neutral within noise.
+  block contexts, queue counts, and the pool's affinity-matching search.
+  Positional-read rewrite scratch is stack bounded. A source job performs no
+  allocator calls for pool matching in steady state; each caller has separate
+  matching scratch, so blocked acquisitions cannot overwrite one another.
 - Source coalescing deliberately preserves per-tensor device buffers. Roughly
   one DMA submission per tensor is therefore the natural floor. Going much
   lower requires packed device allocations or a device-side scatter/copy stage
@@ -136,11 +136,12 @@ cleanup.
   a ladder rung and was useful as a fixed S3Proxy control; it is not a default
   or model-derived number.
 - Completed jobs contribute their actual byte count to adaptive evidence,
-  including partial tails. The controller uses clean 100 ms generations and
-  selects the smallest width within 3% of peak; unfinished finite-tail probes
-  roll back. Metadata can cheaply clip feasibility, but cannot predict a
-  source's latency/bandwidth saturation point, so no job-size-derived initial
-  width heuristic was added.
+  including partial tails. The controller has only ramp-up, refine-down, and
+  settled phases. It uses clean 100 ms generations, selects the smallest width
+  within 3% of peak, and may remeasure at most one adjacent borderline
+  candidate. Unfinished finite-tail probes roll back. Metadata can cheaply
+  clip feasibility, but cannot predict a source's latency/bandwidth saturation
+  point, so no job-size-derived initial-width heuristic was added.
 - Two gates separate clean read-measurement generations from complete request
   lifecycles. All persistent workers compete for lifecycle capacity, configured
   as active reads plus one shared spare and clipped by pinned feasibility; the
@@ -162,7 +163,8 @@ cleanup.
   mapped-byte ceiling, demand growth, NUMA reserves, and augmenting-path
   affinity assignment. Matching is correctness logic: greedily assigning a
   replicated block can consume the only block usable by a later strict-local
-  request.
+  request. Production construction is exclusively arena-provider backed; the
+  allocator-backed slab source exists only in tests.
 - Calibration resources/settings belong to `Platform`. Conservative defaults
   work without calibration; `benchTransfer` atomically replaces them and its
   arenas are retained as the loader's initial pool. Platform state prevents
@@ -417,11 +419,12 @@ same-host medians.
 - DeepSeek CUDA loads completed repeatedly. Focused loader tests separately
   exercised tensor shape/content correctness.
 - VFS tests passed, including exact scatter, retries, and concurrency.
-- Source-planner/final-record, adaptive-controller, immutable scheduler fairness/order,
-  concurrent atomic claims, short-read, replication/sharding, NUMA-affinity,
-  failure cleanup, and epoch reuse tests passed. A real public-loader test also
-  covers `loadExecute -> loadExecute -> load -> await`, output readiness,
-  active-epoch rejection, and cumulative byte accounting.
+- Source-planner/final-record, three-phase adaptive-controller, immutable
+  scheduler fairness/order, concurrent atomic claims, short-read,
+  replication/sharding, NUMA-affinity, pool-scratch allocation failure and
+  reuse, failure cleanup, and epoch reuse tests passed. A real public-loader
+  test also covers `loadExecute -> loadExecute -> load -> await`, output
+  readiness, active-epoch rejection, and cumulative byte accounting.
 - `bazel test //zml:test --@zml//platforms:cuda=true
   --@zml//platforms:cpu=true` passed all 233 tests after Task 4. The default
   configuration is still blocked at compilation by the existing missing
@@ -432,19 +435,15 @@ same-host medians.
 - ROCm-enabled aggregate tests were previously blocked before loader coverage
   by an existing CUDA flashinfer import in `zml/moe/cutlass_flashinfer.zig`.
 
-## Open work, in priority order
+## Open work
 
-`PLAN.md` is the completion checklist. The current ordered design work is:
-
-1. Reduce the six-phase source controller, remove write-only metrics and
-   singleton wrappers, and move block-pool matching arrays into reusable
-   scratch.
-
-After those deletions, reassess splitting `zml/io.zig`; splitting before them
-would distribute obsolete concepts across more modules. Longer-term work still
-includes calibration caching, cross-platform 24/32 MiB measurement,
-completion-aware local pacing, and any explicit packed-device-buffer redesign
-needed to reduce DMA submission count below roughly one per tensor.
+The scheduled simplification work is complete except for the final validation
+and documentation pass in `PLAN.md`. Reassess splitting `zml/io.zig` now that
+obsolete planner, scheduler, controller, and metrics state has been removed.
+Longer-term work still includes calibration caching, cross-platform 24/32 MiB
+measurement, completion-aware local pacing, and any explicit
+packed-device-buffer redesign needed to reduce DMA submission count below
+roughly one per tensor.
 
 ## Suggested upstream decomposition
 

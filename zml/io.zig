@@ -555,44 +555,25 @@ const VectoredLoadMetrics = struct {
     source_calls: std.atomic.Value(u64) = .init(0),
     transfer_pieces: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
-    read_ns: std.atomic.Value(u64) = .init(0),
-    weighted_read_latency_us: std.atomic.Value(u64) = .init(0),
-    pool_waits: std.atomic.Value(u64) = .init(0),
-    pool_wait_ns: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
-    submitted_bytes: std.atomic.Value(u64) = .init(0),
-    committed_bytes: std.atomic.Value(u64) = .init(0),
-    dma_ns: std.atomic.Value(u64) = .init(0),
-    weighted_dma_latency_us: std.atomic.Value(u64) = .init(0),
-    ready_bytes: std.atomic.Value(u64) = .init(0),
-    ready_blocks: std.atomic.Value(usize) = .init(0),
-    weighted_ready_age_us: std.atomic.Value(u64) = .init(0),
-    active_reads: std.atomic.Value(usize) = .init(0),
-    peak_reads: std.atomic.Value(usize) = .init(0),
     outstanding_requests: std.atomic.Value(usize) = .init(0),
     pending_source_jobs: std.atomic.Value(usize) = .init(0),
-    outstanding_request_bytes: std.atomic.Value(u64) = .init(0),
-    request_high_water: std.atomic.Value(usize) = .init(0),
-    post_read_bytes: std.atomic.Value(u64) = .init(0),
-    retired_bytes: std.atomic.Value(u64) = .init(0),
-    weighted_request_latency_us: std.atomic.Value(u64) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     probe_admission_start: u64 = std.math.maxInt(u64),
     probe_first_read_ns: std.atomic.Value(u64) = .init(0),
     probe_active_reads: std.atomic.Value(usize) = .init(0),
     probe_peak_reads: std.atomic.Value(usize) = .init(0),
-    probe_full_read_operations: std.atomic.Value(u64) = .init(0),
+    probe_read_operations: std.atomic.Value(u64) = .init(0),
     probe_read_bytes: std.atomic.Value(u64) = .init(0),
     probe_mutex: std.Io.Mutex = .init,
 
     const Snapshot = struct {
         probe_epoch: u64,
-        active_reads: usize,
         probe_first_read_ns: u64,
         probe_active_reads: usize,
         probe_peak_reads: usize,
-        probe_full_read_operations: u64,
+        probe_read_operations: u64,
         probe_read_bytes: u64,
     };
 
@@ -601,21 +582,15 @@ const VectoredLoadMetrics = struct {
         defer self.probe_mutex.unlock(io);
         return .{
             .probe_epoch = self.probe_epoch.load(.acquire),
-            .active_reads = self.active_reads.load(.acquire),
             .probe_first_read_ns = self.probe_first_read_ns.load(.acquire),
             .probe_active_reads = self.probe_active_reads.load(.acquire),
             .probe_peak_reads = self.probe_peak_reads.load(.acquire),
-            .probe_full_read_operations = self.probe_full_read_operations.load(.acquire),
+            .probe_read_operations = self.probe_read_operations.load(.acquire),
             .probe_read_bytes = self.probe_read_bytes.load(.acquire),
         };
     }
 
     fn beginRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
-        const active = self.active_reads.fetchAdd(1, .acq_rel) + 1;
-        var peak = self.peak_reads.load(.acquire);
-        while (active > peak) {
-            peak = self.peak_reads.cmpxchgWeak(peak, active, .release, .acquire) orelse break;
-        }
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch.load(.acquire) or
@@ -634,7 +609,6 @@ const VectoredLoadMetrics = struct {
     }
 
     fn endRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
-        _ = self.active_reads.fetchSub(1, .acq_rel);
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch.load(.acquire) or
@@ -648,29 +622,21 @@ const VectoredLoadMetrics = struct {
         epoch: u64,
         admission_id: u64,
         bytes: usize,
-        full_request_size: usize,
     ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch.load(.acquire) or
             admission_id < self.probe_admission_start) return;
-        _ = full_request_size;
-        _ = self.probe_full_read_operations.fetchAdd(1, .monotonic);
+        _ = self.probe_read_operations.fetchAdd(1, .monotonic);
         _ = self.probe_read_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
 
-    fn beginRequest(self: *VectoredLoadMetrics, bytes: usize) void {
-        const active = self.outstanding_requests.fetchAdd(1, .acq_rel) + 1;
-        _ = self.outstanding_request_bytes.fetchAdd(@intCast(bytes), .monotonic);
-        var high_water = self.request_high_water.load(.acquire);
-        while (active > high_water) {
-            high_water = self.request_high_water.cmpxchgWeak(high_water, active, .release, .acquire) orelse break;
-        }
+    fn beginRequest(self: *VectoredLoadMetrics) void {
+        _ = self.outstanding_requests.fetchAdd(1, .acq_rel);
     }
 
-    fn endRequest(self: *VectoredLoadMetrics, bytes: usize) void {
+    fn endRequest(self: *VectoredLoadMetrics) void {
         _ = self.outstanding_requests.fetchSub(1, .acq_rel);
-        _ = self.outstanding_request_bytes.fetchSub(@intCast(bytes), .monotonic);
     }
 
     fn prepareProbe(
@@ -685,7 +651,7 @@ const VectoredLoadMetrics = struct {
         self.probe_first_read_ns.store(0, .release);
         self.probe_active_reads.store(0, .release);
         self.probe_peak_reads.store(0, .release);
-        self.probe_full_read_operations.store(0, .release);
+        self.probe_read_operations.store(0, .release);
         self.probe_read_bytes.store(0, .release);
         self.probe_admission_start = admission_start;
         self.probe_epoch.store(epoch, .release);
@@ -701,7 +667,7 @@ const VectoredLoadMetrics = struct {
         self.probe_first_read_ns.store(0, .release);
         self.probe_active_reads.store(0, .release);
         self.probe_peak_reads.store(0, .release);
-        self.probe_full_read_operations.store(0, .release);
+        self.probe_read_operations.store(0, .release);
         self.probe_read_bytes.store(0, .release);
     }
 };
@@ -982,15 +948,11 @@ fn selectLoaderDmaDevice(
 const VectoredLoadPipeline = struct {
     const RequestContext = struct {
         pipeline: *VectoredLoadPipeline,
-        started_at: std.Io.Timestamp,
-        read_finished_at_ns: std.atomic.Value(u64) = .init(0),
         pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
         completed: std.atomic.Value(bool) = .init(false),
-        successful: std.atomic.Value(bool) = .init(false),
         source_finished: std.atomic.Value(bool) = .init(false),
         read_epoch: u64,
         admission_id: u64 = 0,
-        len: usize,
         epoch_tracked: bool = false,
 
         fn addBlock(self: *RequestContext) void {
@@ -998,14 +960,7 @@ const VectoredLoadPipeline = struct {
         }
 
         fn markReadFinished(self: *RequestContext) void {
-            const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.pipeline.io, .awake).nanoseconds, 1));
-            self.read_finished_at_ns.store(now_ns, .release);
-            _ = self.pipeline.metrics.post_read_bytes.fetchAdd(@intCast(self.len), .monotonic);
             self.finishSourceJob();
-        }
-
-        fn markSuccessful(self: *RequestContext) void {
-            self.successful.store(true, .release);
         }
 
         fn finishScheduling(self: *RequestContext) void {
@@ -1029,19 +984,7 @@ const VectoredLoadPipeline = struct {
             std.debug.assert(previous > 0);
             if (previous != 1) return;
 
-            if (self.read_finished_at_ns.load(.acquire) != 0) {
-                _ = self.pipeline.metrics.post_read_bytes.fetchSub(@intCast(self.len), .monotonic);
-            }
-            if (self.successful.load(.acquire)) {
-                const elapsed = self.started_at.untilNow(self.pipeline.io, .awake);
-                const elapsed_us: u64 = @intCast(@max(elapsed.nanoseconds, 0) / std.time.ns_per_us);
-                _ = self.pipeline.metrics.retired_bytes.fetchAdd(@intCast(self.len), .monotonic);
-                _ = self.pipeline.metrics.weighted_request_latency_us.fetchAdd(
-                    elapsed_us *| @as(u64, @intCast(self.len)),
-                    .monotonic,
-                );
-            }
-            self.pipeline.metrics.endRequest(self.len);
+            self.pipeline.metrics.endRequest();
             self.completed.store(true, .release);
             self.pipeline.request_gate.release(self.pipeline.io);
             if (self.epoch_tracked) self.pipeline.completeEpochJob();
@@ -1052,10 +995,7 @@ const VectoredLoadPipeline = struct {
         pipeline: *VectoredLoadPipeline,
         request: *RequestContext,
         lease: mem.DmaBlockPool.Lease,
-        ready_at: std.Io.Timestamp,
         pending_submissions: usize,
-        len: usize,
-        ready_reported: bool = false,
         completion_reported: std.atomic.Value(bool) = .init(false),
 
         fn complete(self: *BlockContext) void {
@@ -1091,9 +1031,7 @@ const VectoredLoadPipeline = struct {
         block: *BlockContext,
         pjrt_event: *pjrt.Event,
         err: ?*pjrt.Error = null,
-        submitted_at: std.Io.Timestamp,
         device_index: usize,
-        bytes: usize,
     };
 
     allocator: std.mem.Allocator,
@@ -1103,7 +1041,6 @@ const VectoredLoadPipeline = struct {
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     block_size: usize,
-    source_request_size: usize,
     device_pool_indices: []const usize,
     numa_explicit: bool,
     metrics: *VectoredLoadMetrics,
@@ -1136,7 +1073,6 @@ const VectoredLoadPipeline = struct {
         read_gate: *AdaptiveRequestGate,
         request_gate: *AdaptiveRequestGate,
         block_size: usize,
-        source_request_size: usize,
         device_pool_indices: []const usize,
         numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
@@ -1160,7 +1096,6 @@ const VectoredLoadPipeline = struct {
             .read_gate = read_gate,
             .request_gate = request_gate,
             .block_size = block_size,
-            .source_request_size = source_request_size,
             .device_pool_indices = device_pool_indices,
             .numa_explicit = numa_explicit,
             .metrics = metrics,
@@ -1219,20 +1154,18 @@ const VectoredLoadPipeline = struct {
         }
     }
 
-    fn registerRequest(self: *VectoredLoadPipeline, len: usize) !*RequestContext {
+    fn registerRequest(self: *VectoredLoadPipeline) !*RequestContext {
         const request = try self.allocator.create(RequestContext);
         errdefer self.allocator.destroy(request);
         request.* = .{
             .pipeline = self,
-            .started_at = .now(self.io, .awake),
             .read_epoch = 0,
-            .len = len,
             .epoch_tracked = self.track_epoch_jobs,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         try self.requests.append(self.allocator, request);
-        self.metrics.beginRequest(len);
+        self.metrics.beginRequest();
         return request;
     }
 
@@ -1296,16 +1229,14 @@ const VectoredLoadPipeline = struct {
         std.debug.assert(previous > 0);
     }
 
-    fn registerBlock(self: *VectoredLoadPipeline, request: *RequestContext, data: []u8, references: usize, len: usize) !*BlockContext {
+    fn registerBlock(self: *VectoredLoadPipeline, request: *RequestContext, data: []u8, references: usize) !*BlockContext {
         const block = try self.allocator.create(BlockContext);
         errdefer self.allocator.destroy(block);
         block.* = .{
             .pipeline = self,
             .request = request,
             .lease = .init(self.pool, self.io, data, references),
-            .ready_at = .now(self.io, .awake),
             .pending_submissions = references,
-            .len = len,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
@@ -1341,11 +1272,6 @@ const VectoredLoadPipeline = struct {
         for (transfers) |transfer| {
             const block = blocks[transfer.block_index];
             const tensor = &transfer.item.state.state;
-            if (!block.ready_reported) {
-                _ = self.metrics.ready_bytes.fetchAdd(block.len, .monotonic);
-                _ = self.metrics.ready_blocks.fetchAdd(1, .monotonic);
-                block.ready_reported = true;
-            }
             var mask = transfer.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
@@ -1382,10 +1308,6 @@ const VectoredLoadPipeline = struct {
         self.metadata_mutex.lockUncancelable(self.io);
         std.debug.assert(block.pending_submissions >= count);
         block.pending_submissions -= count;
-        if (block.pending_submissions == 0 and block.ready_reported) {
-            _ = self.metrics.ready_bytes.fetchSub(block.len, .monotonic);
-            _ = self.metrics.ready_blocks.fetchSub(1, .monotonic);
-        }
         self.metadata_mutex.unlock(self.io);
         for (0..count) |_| block.complete();
     }
@@ -1443,16 +1365,6 @@ const VectoredLoadPipeline = struct {
                     const transfer = selected.?;
                     std.debug.assert(transfer.block.pending_submissions > 0);
                     transfer.block.pending_submissions -= 1;
-                    if (transfer.block.pending_submissions == 0) {
-                        _ = self.metrics.ready_bytes.fetchSub(transfer.block.len, .monotonic);
-                        _ = self.metrics.ready_blocks.fetchSub(1, .monotonic);
-                        const ready_elapsed = transfer.block.ready_at.untilNow(self.io, .awake);
-                        const age_us: u64 = @intCast(@max(ready_elapsed.nanoseconds, 0) / std.time.ns_per_us);
-                        _ = self.metrics.weighted_ready_age_us.fetchAdd(
-                            age_us *| @as(u64, @intCast(transfer.block.len)),
-                            .monotonic,
-                        );
-                    }
                 }
             }
             if (selected == null) {
@@ -1469,7 +1381,6 @@ const VectoredLoadPipeline = struct {
 
     fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer) void {
         const is_last = transfer.destination_offset + transfer.len == transfer.target.total;
-        const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
         const event = transfer.target.manager.transferData(
             self.platform.pjrt_api,
             0,
@@ -1497,9 +1408,7 @@ const VectoredLoadPipeline = struct {
             .pipeline = self,
             .block = transfer.block,
             .pjrt_event = event,
-            .submitted_at = submitted_at,
             .device_index = transfer.target.device_index,
-            .bytes = transfer.len,
         };
 
         self.metadata_mutex.lockUncancelable(self.io);
@@ -1516,19 +1425,11 @@ const VectoredLoadPipeline = struct {
         self.metadata_mutex.unlock(self.io);
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
-        _ = self.metrics.submitted_bytes.fetchAdd(transfer.len, .monotonic);
         event.onReady(self.platform.pjrt_api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
                 ctx_.err = err;
                 if (err) |pjrt_error| {
                     ctx_.pipeline.recordError(pjrt_error.getCode(ctx_.pipeline.platform.pjrt_api).toApiError());
-                } else {
-                    const elapsed = ctx_.submitted_at.untilNow(ctx_.pipeline.io, .awake);
-                    const elapsed_ns: u64 = @intCast(@max(elapsed.nanoseconds, 0));
-                    const elapsed_us: u64 = elapsed_ns / std.time.ns_per_us;
-                    _ = ctx_.pipeline.metrics.committed_bytes.fetchAdd(ctx_.bytes, .monotonic);
-                    _ = ctx_.pipeline.metrics.dma_ns.fetchAdd(elapsed_ns, .monotonic);
-                    _ = ctx_.pipeline.metrics.weighted_dma_latency_us.fetchAdd(elapsed_us *| @as(u64, @intCast(ctx_.bytes)), .monotonic);
                 }
                 ctx_.block.complete();
                 ctx_.pipeline.eventCompleted(ctx_.device_index);
@@ -1566,10 +1467,6 @@ const VectoredLoadPipeline = struct {
                 transfer.block.pending_submissions -= 1;
                 transfer.block.complete();
                 self.ready_entries -= 1;
-                if (transfer.block.pending_submissions == 0) {
-                    _ = self.metrics.ready_bytes.fetchSub(transfer.block.len, .monotonic);
-                    _ = self.metrics.ready_blocks.fetchSub(1, .monotonic);
-                }
             }
             queue.clearRetainingCapacity();
         }
@@ -1592,9 +1489,11 @@ const VectoredReadRequest = struct {
         iovecs: [][]u8,
         blocks: []*VectoredLoadPipeline.BlockContext,
         queue_counts: []usize,
+        pool: mem.DmaBlockPool.AcquireScratch,
 
         fn init(
             allocator: std.mem.Allocator,
+            pool: *const mem.DmaBlockPool,
             maximum_blocks: usize,
             device_count: usize,
         ) !Scratch {
@@ -1609,6 +1508,8 @@ const VectoredReadRequest = struct {
             const blocks = try allocator.alloc(*VectoredLoadPipeline.BlockContext, maximum_blocks);
             errdefer allocator.free(blocks);
             const queue_counts = try allocator.alloc(usize, device_count);
+            errdefer allocator.free(queue_counts);
+            const pool_scratch = try pool.acquireScratch(allocator, maximum_blocks);
             return .{
                 .allocator = allocator,
                 .leased = leased,
@@ -1617,10 +1518,12 @@ const VectoredReadRequest = struct {
                 .iovecs = iovecs,
                 .blocks = blocks,
                 .queue_counts = queue_counts,
+                .pool = pool_scratch,
             };
         }
 
         fn deinit(self: *Scratch) void {
+            self.pool.deinit();
             self.allocator.free(self.queue_counts);
             self.allocator.free(self.blocks);
             self.allocator.free(self.iovecs);
@@ -1669,11 +1572,6 @@ const VectoredReadRequest = struct {
                 }
             }
         }
-    }
-
-    fn recordPoolWait(pipeline: *VectoredLoadPipeline, pool_wait_ns: u64) void {
-        if (pool_wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.pool_wait_ns.fetchAdd(pool_wait_ns, .monotonic);
     }
 
     fn beginRead(
@@ -1725,7 +1623,6 @@ const VectoredReadRequest = struct {
         const block_count = std.math.divCeil(usize, request_len, pipeline.block_size) catch unreachable;
         if (block_count == 0) {
             request.markReadFinished();
-            request.markSuccessful();
             return;
         }
 
@@ -1778,11 +1675,10 @@ const VectoredReadRequest = struct {
             pipeline.recordError(err);
             return;
         };
-        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased, affinities) catch |err| {
+        pipeline.pool.acquireMany(pipeline.io, leased, affinities, &scratch.pool) catch |err| {
             pipeline.recordError(err);
             return;
         };
-        recordPoolWait(pipeline, pool_wait_ns);
         if (pipeline.failed()) return;
 
         const iovecs = scratch.iovecs[0..block_count];
@@ -1793,7 +1689,6 @@ const VectoredReadRequest = struct {
         }
 
         if (!beginRead(request, pipeline)) return;
-        const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
         const read_result = readAbsoluteAllV(
             pipeline.io,
             file,
@@ -1801,7 +1696,6 @@ const VectoredReadRequest = struct {
             file_offset,
             pipeline.metrics,
         );
-        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
         read_result catch |err| {
             endRead(request, pipeline);
             pipeline.recordError(err);
@@ -1812,17 +1706,9 @@ const VectoredReadRequest = struct {
             request.read_epoch,
             request.admission_id,
             request_len,
-            pipeline.source_request_size,
         );
-        const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
-        const read_elapsed_us = read_elapsed_ns / std.time.ns_per_us;
         _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
         _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
-        _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
-        _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(
-            read_elapsed_us *| @as(u64, @intCast(request_len)),
-            .monotonic,
-        );
         for (transfers) |transfer| transfer.item.state.state.recordReadProgress(transfer.len);
         request.markReadFinished();
         endRead(request, pipeline);
@@ -1830,7 +1716,7 @@ const VectoredReadRequest = struct {
 
         const blocks = scratch.blocks[0..block_count];
         var initialized_blocks: usize = 0;
-        for (blocks, leased, references, iovecs) |*block, *lease, refs, iovec| {
+        for (blocks, leased, references) |*block, *lease, refs| {
             if (refs == 0) {
                 for (blocks[0..initialized_blocks], references[0..initialized_blocks]) |initialized, initialized_refs| {
                     pipeline.abandonSubmissions(initialized, initialized_refs);
@@ -1838,7 +1724,7 @@ const VectoredReadRequest = struct {
                 pipeline.recordError(error.InvalidLoaderJob);
                 return;
             }
-            block.* = pipeline.registerBlock(request, lease.*, refs, iovec.len) catch |err| {
+            block.* = pipeline.registerBlock(request, lease.*, refs) catch |err| {
                 for (blocks[0..initialized_blocks], references[0..initialized_blocks]) |initialized, initialized_refs| {
                     pipeline.abandonSubmissions(initialized, initialized_refs);
                 }
@@ -1858,7 +1744,6 @@ const VectoredReadRequest = struct {
             pipeline.recordError(err);
             return;
         };
-        request.markSuccessful();
     }
 };
 
@@ -2807,12 +2692,12 @@ const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 
 /// Source-only adaptive state. DMA width and request size never enter its
 /// evidence or decisions.
 const SourceReadWidthController = struct {
-    const Phase = enum { baseline, upward, downward, pair_reference, pair_candidate, settled };
+    const Phase = enum { ramp_up, refine_down, settled };
 
     const Evidence = struct {
         generation: u64,
         width: usize,
-        completed_full_requests: usize,
+        completed_requests: usize,
         elapsed_ns: u64,
         bytes: u64,
         exercised_width: usize,
@@ -2822,7 +2707,7 @@ const SourceReadWidthController = struct {
         fn scoreable(self: Evidence) bool {
             return self.clean and self.generation != std.math.maxInt(u64) and
                 self.exercised_width >= self.width and
-                self.completed_full_requests >= @max(@as(usize, 8), self.width) and
+                self.completed_requests >= @max(@as(usize, 8), self.width) and
                 self.elapsed_ns >= 100 * std.time.ns_per_ms and self.bytes != 0;
         }
 
@@ -2849,15 +2734,13 @@ const SourceReadWidthController = struct {
     generation: u64 = 0,
     phase: Phase,
     rates: [read_width_ladder.len]?f64 = @splat(null),
+    ramp_scores: usize = 0,
     unchanged_candidates: usize = 0,
-    pair_resume: Phase = .upward,
-    pair_resume_index: usize = 0,
-    pair_prior_selected_index: usize = 0,
-    pair_candidate_index: usize = 0,
-    pair_reference_index: usize = 0,
-    pair_candidate_total: f64 = 0,
-    pair_reference_total: f64 = 0,
-    pair_count: usize = 0,
+    confirmation_index: ?usize = null,
+    confirmation_resume_phase: Phase = .ramp_up,
+    confirmation_resume_index: usize = 0,
+    confirmation_prior_selected_index: usize = 0,
+    confirmation_used: bool = false,
 
     fn init(configured: Parallelism, pinned_feasible_width: usize) SourceReadWidthController {
         const configured_max = @min(configured.maximum(), pinned_feasible_width);
@@ -2886,7 +2769,7 @@ const SourceReadWidthController = struct {
             .current_index = initial_index,
             .selected_index = initial_index,
             .peak_index = initial_index,
-            .phase = .baseline,
+            .phase = .ramp_up,
         };
     }
 
@@ -2924,36 +2807,17 @@ const SourceReadWidthController = struct {
         return probeCost(index) *| 4 <= remaining_full_jobs;
     }
 
-    fn pairFitsTail(candidate: usize, reference: usize, remaining_full_jobs: usize) bool {
-        const three_pairs = (probeCost(candidate) +| probeCost(reference)) *| 3;
-        return three_pairs *| 4 <= remaining_full_jobs;
-    }
-
     fn restartFitsTail(self: *const SourceReadWidthController, remaining_full_jobs: usize) bool {
-        return switch (self.phase) {
-            .pair_reference => blk: {
-                const remaining_pairs = 3 -| self.pair_count;
-                const remaining_cost = remaining_pairs *|
-                    (probeCost(self.pair_reference_index) +| probeCost(self.pair_candidate_index));
-                break :blk remaining_cost *| 4 <= remaining_full_jobs;
-            },
-            .pair_candidate => blk: {
-                const remaining_pairs = 3 -| self.pair_count;
-                const remaining_cost = probeCost(self.pair_candidate_index) +|
-                    (remaining_pairs -| 1) *|
-                        (probeCost(self.pair_reference_index) +| probeCost(self.pair_candidate_index));
-                break :blk remaining_cost *| 4 <= remaining_full_jobs;
-            },
-            .settled => true,
-            else => probeFitsTail(self.current_index, remaining_full_jobs),
-        };
+        if (self.phase == .settled) return true;
+        return probeFitsTail(self.current_index, remaining_full_jobs);
     }
 
     fn blindGrow(
         self: *SourceReadWidthController,
         remaining_full_jobs: usize,
     ) ?Decision {
-        if (!self.adaptive or self.phase != .baseline or self.current_index >= self.maximum_index)
+        if (!self.adaptive or self.phase != .ramp_up or self.ramp_scores != 0 or
+            self.current_index >= self.maximum_index)
             return null;
         const ceiling: usize = if (self.width() < 24) 24 else if (self.width() < 32) 32 else return null;
         const target = @min(widthIndexAtMost(ceiling), self.maximum_index);
@@ -2967,44 +2831,7 @@ const SourceReadWidthController = struct {
             !evidence.scoreable())
             return self.currentDecision();
         const rate = evidence.bytesPerSecond();
-        return switch (self.phase) {
-            .baseline, .upward, .downward => self.finishScore(
-                self.current_index,
-                rate,
-                evidence.remaining_full_jobs,
-                true,
-            ),
-            .pair_reference => blk: {
-                self.pair_reference_total += rate;
-                self.phase = .pair_candidate;
-                break :blk self.changeTo(self.pair_candidate_index);
-            },
-            .pair_candidate => blk: {
-                self.pair_candidate_total += rate;
-                self.pair_count += 1;
-                if (self.pair_count < 3) {
-                    self.phase = .pair_reference;
-                    break :blk self.changeTo(self.pair_reference_index);
-                }
-                const reference_average = self.pair_reference_total / 3;
-                const candidate_average = self.pair_candidate_total / 3;
-                const reference_rate = self.rates[self.pair_reference_index] orelse reference_average;
-                const normalized_candidate = if (reference_average == 0)
-                    0
-                else
-                    reference_rate * candidate_average / reference_average;
-                self.rates[self.pair_candidate_index] = normalized_candidate;
-                self.recomputePeakAndSelection();
-                self.phase = self.pair_resume;
-                self.current_index = self.pair_resume_index;
-                break :blk self.advanceAfterScore(
-                    self.pair_resume_index,
-                    self.pair_prior_selected_index,
-                    evidence.remaining_full_jobs,
-                );
-            },
-            .settled => self.currentDecision(),
-        };
+        return self.finishScore(self.current_index, rate, evidence.remaining_full_jobs);
     }
 
     fn finishScore(
@@ -3012,36 +2839,44 @@ const SourceReadWidthController = struct {
         index: usize,
         rate: f64,
         remaining_full_jobs: usize,
-        allow_pair: bool,
     ) Decision {
+        if (self.confirmation_index) |confirmed_index| {
+            std.debug.assert(index == confirmed_index);
+            self.rates[index] = ((self.rates[index] orelse rate) + rate) / 2;
+            self.confirmation_index = null;
+            self.recomputePeakAndSelection();
+            self.phase = self.confirmation_resume_phase;
+            return self.advanceAfterScore(
+                self.confirmation_resume_index,
+                self.confirmation_prior_selected_index,
+                remaining_full_jobs,
+            );
+        }
+
         const prior_selected = self.selected_index;
         self.rates[index] = rate;
         self.recomputePeakAndSelection();
         const peak_rate = self.rates[self.peak_index] orelse rate;
-        const pair_candidate: ?usize = blk: {
-            // Confirm the decision made by this score first. A downward
-            // candidate just outside the band must not be hidden by an older
-            // in-band selection. If this score establishes a new peak,
-            // confirm the previously selected smaller width before discarding
-            // it. The final entry covers an older unresolved boundary.
+        const confirmation_candidate: ?usize = blk: {
             for ([_]usize{ index, prior_selected, self.selected_index }) |candidate| {
                 if (candidate == self.peak_index) continue;
                 const candidate_rate = self.rates[candidate] orelse continue;
                 const retention = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
-                if (@abs(retention - 0.97) <= 0.02) break :blk candidate;
+                const adjacent = candidate + 1 == self.peak_index or
+                    self.peak_index + 1 == candidate;
+                if (adjacent and @abs(retention - 0.97) <= 0.02) break :blk candidate;
             }
             break :blk null;
         };
-        if (allow_pair and pair_candidate != null and
-            pairFitsTail(pair_candidate.?, self.peak_index, remaining_full_jobs))
+        if (!self.confirmation_used and confirmation_candidate != null and
+            probeFitsTail(confirmation_candidate.?, remaining_full_jobs))
         {
-            return self.startPair(
-                pair_candidate.?,
-                self.peak_index,
-                self.phase,
-                index,
-                prior_selected,
-            );
+            self.confirmation_used = true;
+            self.confirmation_index = confirmation_candidate.?;
+            self.confirmation_resume_phase = self.phase;
+            self.confirmation_resume_index = index;
+            self.confirmation_prior_selected_index = prior_selected;
+            return self.restartAt(confirmation_candidate.?);
         }
 
         return self.advanceAfterScore(index, prior_selected, remaining_full_jobs);
@@ -3057,25 +2892,22 @@ const SourceReadWidthController = struct {
         const index_rate = self.rates[index] orelse 0;
         const retention = if (peak_rate == 0) 0 else index_rate / peak_rate;
         return switch (self.phase) {
-            .baseline => blk: {
-                self.phase = .upward;
-                if (index < self.maximum_index and probeFitsTail(index + 1, remaining_full_jobs))
-                    break :blk self.changeTo(index + 1);
-                break :blk self.beginDownwardOrSettle(remaining_full_jobs);
-            },
-            .upward => blk: {
-                if (self.selected_index == prior_selected)
-                    self.unchanged_candidates += 1
-                else
-                    self.unchanged_candidates = 0;
-                if (self.unchanged_candidates >= 2 or index == self.maximum_index)
-                    break :blk self.beginDownwardOrSettle(remaining_full_jobs);
+            .ramp_up => blk: {
+                self.ramp_scores += 1;
+                if (self.ramp_scores > 1) {
+                    if (self.selected_index == prior_selected)
+                        self.unchanged_candidates += 1
+                    else
+                        self.unchanged_candidates = 0;
+                }
+                if ((self.ramp_scores > 1 and self.unchanged_candidates >= 2) or
+                    index == self.maximum_index)
+                    break :blk self.beginRefineOrSettle(remaining_full_jobs);
                 if (probeFitsTail(index + 1, remaining_full_jobs))
                     break :blk self.changeTo(index + 1);
-                break :blk self.beginDownwardOrSettle(remaining_full_jobs);
+                break :blk self.beginRefineOrSettle(remaining_full_jobs);
             },
-            .downward => blk: {
-                if (retention >= 0.97) self.selected_index = index;
+            .refine_down => blk: {
                 if (retention < 0.97 or index == 0 or
                     !probeFitsTail(index - 1, remaining_full_jobs))
                     break :blk self.settle();
@@ -3107,31 +2939,11 @@ const SourceReadWidthController = struct {
         self.selected_index = selected;
     }
 
-    fn startPair(
-        self: *SourceReadWidthController,
-        candidate: usize,
-        reference: usize,
-        resume_phase: Phase,
-        resume_index: usize,
-        prior_selected: usize,
-    ) Decision {
-        self.pair_candidate_index = candidate;
-        self.pair_reference_index = reference;
-        self.pair_resume = resume_phase;
-        self.pair_resume_index = resume_index;
-        self.pair_prior_selected_index = prior_selected;
-        self.pair_candidate_total = 0;
-        self.pair_reference_total = 0;
-        self.pair_count = 0;
-        self.phase = .pair_reference;
-        return self.changeToForced(reference);
-    }
-
-    fn beginDownwardOrSettle(
+    fn beginRefineOrSettle(
         self: *SourceReadWidthController,
         remaining_full_jobs: usize,
     ) Decision {
-        self.phase = .downward;
+        self.phase = .refine_down;
         if (self.selected_index > 0 and probeFitsTail(self.selected_index - 1, remaining_full_jobs))
             return self.changeTo(self.selected_index - 1);
         return self.settle();
@@ -3149,7 +2961,7 @@ const SourceReadWidthController = struct {
         };
     }
 
-    fn changeToForced(self: *SourceReadWidthController, index: usize) Decision {
+    fn restartAt(self: *SourceReadWidthController, index: usize) Decision {
         self.current_index = index;
         self.generation +|= 1;
         return .{
@@ -3162,13 +2974,14 @@ const SourceReadWidthController = struct {
 
     fn settle(self: *SourceReadWidthController) Decision {
         self.phase = .settled;
+        self.confirmation_index = null;
         return self.changeTo(self.selected_index);
     }
 
     fn rollbackTail(self: *SourceReadWidthController) Decision {
         if (self.phase == .settled) return self.currentDecision();
-        if (self.phase == .pair_reference or self.phase == .pair_candidate)
-            self.selected_index = self.pair_prior_selected_index;
+        if (self.confirmation_index != null)
+            self.selected_index = self.confirmation_prior_selected_index;
         return self.settle();
     }
 
@@ -3197,7 +3010,7 @@ fn sourceReadTestEvidence(
     return .{
         .generation = controller.generation,
         .width = controller.width(),
-        .completed_full_requests = @max(@as(usize, 8), controller.width()),
+        .completed_requests = @max(@as(usize, 8), controller.width()),
         .elapsed_ns = std.time.ns_per_s,
         .bytes = rate,
         .exercised_width = controller.width(),
@@ -3275,103 +3088,56 @@ test "source read controller selects plateau then refines downward" {
     try std.testing.expectEqual(@as(usize, 12), controller.selectedWidth());
 }
 
-test "source read controller confirms boundary with three alternating pairs" {
+test "source read controller confirms an adjacent boundary once" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
         32,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
-    for (0..3) |_| {
-        _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-        _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    }
-    try std.testing.expectEqual(@as(usize, 3), controller.pair_count);
-    try std.testing.expect(controller.phase != .pair_reference and controller.phase != .pair_candidate);
+    try std.testing.expectEqual(@as(?usize, SourceReadWidthController.widthIndexAtMost(12)), controller.confirmation_index);
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
+    try std.testing.expect(controller.confirmation_index == null);
+    try std.testing.expect(controller.confirmation_used);
+    try std.testing.expectEqual(@as(usize, 24), controller.width());
 }
 
-test "source read controller confirms a borderline out-of-band candidate" {
+test "source read controller confirms a borderline candidate in place" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
         32,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
-    try std.testing.expectEqual(@as(usize, 16), read_width_ladder[controller.pair_candidate_index]);
-    try std.testing.expectEqual(@as(usize, 12), read_width_ladder[controller.pair_reference_index]);
-}
-
-test "source read controller prioritizes the newly measured boundary" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-    );
-    const width8 = SourceReadWidthController.widthIndexAtMost(8);
-    const width12 = SourceReadWidthController.widthIndexAtMost(12);
     const width16 = SourceReadWidthController.widthIndexAtMost(16);
-    controller.rates[width12] = 98;
-    controller.rates[width16] = 100;
-    controller.peak_index = width16;
-    controller.selected_index = width12;
-    controller.current_index = width8;
-    controller.phase = .downward;
-
-    _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
-    try std.testing.expectEqual(width8, controller.pair_candidate_index);
-    try std.testing.expectEqual(width16, controller.pair_reference_index);
+    try std.testing.expectEqual(@as(?usize, width16), controller.confirmation_index);
+    const generation = controller.generation;
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    try std.testing.expect(generation > 1);
 }
 
-test "source read controller confirms a prior selection displaced by a new peak" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-    );
-    const width12 = SourceReadWidthController.widthIndexAtMost(12);
-    const width16 = SourceReadWidthController.widthIndexAtMost(16);
-    const width24 = SourceReadWidthController.widthIndexAtMost(24);
-    controller.rates[width12] = 98;
-    controller.rates[width16] = 100;
-    controller.peak_index = width16;
-    controller.selected_index = width12;
-    controller.current_index = width24;
-    controller.phase = .upward;
-
-    _ = controller.observe(sourceReadTestEvidence(&controller, 102, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
-    try std.testing.expectEqual(width12, controller.pair_candidate_index);
-    try std.testing.expectEqual(width24, controller.pair_reference_index);
-}
-
-test "source read controller rolls back an unfinished boundary pair" {
+test "source read controller rolls back an unfinished confirmation" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
         32,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_reference, controller.phase);
+    try std.testing.expect(controller.confirmation_index != null);
     const rollback = controller.rollbackTail();
     try std.testing.expect(rollback.settled);
     try std.testing.expectEqual(@as(usize, 12), rollback.width);
 }
 
-test "source read controller charges only unfinished pair intervals on restart" {
+test "source read controller charges one unfinished confirmation on restart" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
         32,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    for (0..2) |_| {
-        _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-        _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    }
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.pair_candidate, controller.phase);
-    const remaining_cost = SourceReadWidthController.probeCost(controller.pair_candidate_index);
+    const remaining_cost = SourceReadWidthController.probeCost(controller.confirmation_index.?);
     try std.testing.expect(controller.restartFitsTail(remaining_cost * 4));
     try std.testing.expect(!controller.restartFitsTail(remaining_cost * 4 - 1));
 }
@@ -3384,7 +3150,7 @@ test "source read controller refines downward when an upward tail no longer fits
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 100_000));
     try std.testing.expectEqual(@as(usize, 16), controller.width());
     const downward = controller.observe(sourceReadTestEvidence(&controller, 120, 100));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.downward, controller.phase);
+    try std.testing.expectEqual(SourceReadWidthController.Phase.refine_down, controller.phase);
     try std.testing.expectEqual(@as(usize, 12), downward.width);
 }
 
@@ -3433,10 +3199,22 @@ test "source read controller backs off before and after convergence" {
     try std.testing.expectEqual(@as(usize, 7), fixed_backoff.width);
 }
 
-const VectoredReadStatsSource = struct {
+const ReadStatsCursor = struct {
     provider: VFS.ReadStatsProvider,
-    initial: VFS.ReadStats,
     previous: VFS.ReadStats,
+
+    fn take(self: *ReadStatsCursor) SourceTelemetry {
+        const current = self.provider.snapshot();
+        const delta = current.sub(self.previous);
+        self.previous = current;
+        return .{
+            .retries = delta.retries,
+            .transient_retries = delta.transient_retries,
+            .timeouts = delta.timeouts,
+            .server_failures = delta.server_failures,
+            .throttles = delta.throttles,
+        };
+    }
 };
 
 const SourceTelemetry = struct {
@@ -3453,21 +3231,6 @@ const SourceTelemetry = struct {
     }
 };
 
-fn takeSourceTelemetry(sources: []VectoredReadStatsSource) SourceTelemetry {
-    var result: SourceTelemetry = .{};
-    for (sources) |*source| {
-        const current = source.provider.snapshot();
-        const delta = current.sub(source.previous);
-        source.previous = current;
-        result.retries +|= delta.retries;
-        result.transient_retries +|= delta.transient_retries;
-        result.timeouts +|= delta.timeouts;
-        result.server_failures +|= delta.server_failures;
-        result.throttles +|= delta.throttles;
-    }
-    return result;
-}
-
 test "one load-profile feedback cursor reports only new backpressure" {
     const FakeProvider = struct {
         stats: VFS.ReadStats = .{},
@@ -3483,20 +3246,19 @@ test "one load-profile feedback cursor reports only new backpressure" {
         .userdata = &fake,
         .snapshotFn = FakeProvider.snapshot,
     };
-    var sources = [_]VectoredReadStatsSource{.{
+    var cursor: ReadStatsCursor = .{
         .provider = provider,
-        .initial = provider.snapshot(),
         .previous = provider.snapshot(),
-    }};
+    };
 
     fake.stats.retries = 2;
     fake.stats.throttles = 1;
-    const first = takeSourceTelemetry(&sources);
+    const first = cursor.take();
     try std.testing.expectEqual(@as(u64, 2), first.retries);
     try std.testing.expectEqual(@as(u64, 1), first.throttles);
     try std.testing.expect(first.hasBackpressure());
 
-    const second = takeSourceTelemetry(&sources);
+    const second = cursor.take();
     try std.testing.expectEqualDeep(SourceTelemetry{}, second);
     try std.testing.expect(!second.hasBackpressure());
 }
@@ -3509,7 +3271,7 @@ const SourceReadRuntime = struct {
     next_read_admission: *std.atomic.Value(u64),
     scheduler: *FairVectoredReadScheduler,
     pinned_feasible_width: usize,
-    read_stats_sources: []VectoredReadStatsSource,
+    read_stats: ?ReadStatsCursor,
     source_bootstrap_enabled: bool,
     source_response_observed: bool = false,
     probe_transition_pending: bool = false,
@@ -3529,7 +3291,8 @@ const SourceReadRuntime = struct {
     done: std.Io.Event = .unset,
 
     fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
-        return takeSourceTelemetry(self.read_stats_sources);
+        const cursor = if (self.read_stats) |*value| value else return .{};
+        return cursor.take();
     }
 
     fn applyDecision(
@@ -3616,7 +3379,7 @@ const SourceReadRuntime = struct {
         return .{
             .generation = probe.probe_epoch,
             .width = self.controller.width(),
-            .completed_full_requests = @intCast(probe.probe_full_read_operations),
+            .completed_requests = @intCast(probe.probe_read_operations),
             // Do not charge a candidate for prior-generation DMA drain before
             // its first source admission can begin.
             .elapsed_ns = if (probe.probe_first_read_ns == 0)
@@ -5688,8 +5451,6 @@ const DirectLoader = struct {
     source_request_size: usize,
     maximum_blocks_per_job: usize,
     effective_pinned_feasible_width: usize,
-    read_stats_storage: [1]VectoredReadStatsSource = undefined,
-    read_stats_len: usize = 0,
     workers_started: bool = false,
     controller_started: bool = false,
     cleaned: bool = false,
@@ -5758,6 +5519,10 @@ const DirectLoader = struct {
         const source_parallelism = opts.read_parallelism;
         const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
         const limits: RequestGateLimits = .init(controller.width(), feasible_width);
+        const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
+            const initial = provider.snapshot();
+            break :cursor .{ .provider = provider, .previous = initial };
+        } else null;
         var scheduler = FairVectoredReadScheduler.init(source_parallelism.maximum());
         var scheduler_moved = false;
         errdefer if (!scheduler_moved) scheduler.deinit();
@@ -5780,6 +5545,7 @@ const DirectLoader = struct {
             .source_request_size = request_size,
             .maximum_blocks_per_job = maximum_blocks_per_job,
             .effective_pinned_feasible_width = feasible_width,
+            .diagnostic_stats = if (read_stats) |cursor| cursor.previous else null,
         };
         // Ownership moved into the stable heap object.
         pool_moved = true;
@@ -5797,7 +5563,6 @@ const DirectLoader = struct {
             &self.read_gate,
             &self.request_gate,
             config.block_size,
-            request_size,
             resources.workspace.device_pool_indices,
             strict_affinity,
             &self.metrics,
@@ -5807,16 +5572,6 @@ const DirectLoader = struct {
         self.pipeline.track_epoch_jobs = true;
         self.pipeline.live_scheduler = &self.scheduler;
 
-        if (opts.load_profile.stats) |provider| {
-            const initial = provider.snapshot();
-            self.read_stats_storage[0] = .{
-                .provider = provider,
-                .initial = initial,
-                .previous = initial,
-            };
-            self.read_stats_len = 1;
-            self.diagnostic_stats = initial;
-        }
         self.controller_runtime = .{
             .controller = controller,
             .read_gate = &self.read_gate,
@@ -5825,7 +5580,7 @@ const DirectLoader = struct {
             .next_read_admission = &self.pipeline.next_read_admission,
             .scheduler = &self.scheduler,
             .pinned_feasible_width = feasible_width,
-            .read_stats_sources = self.read_stats_storage[0..self.read_stats_len],
+            .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
             .persistent = true,
         };
@@ -5862,6 +5617,7 @@ const DirectLoader = struct {
     fn workerMain(self: *DirectLoader) void {
         var scratch = VectoredReadRequest.Scratch.init(
             self.allocator,
+            &self.pool,
             self.maximum_blocks_per_job,
             self.platform.devices.len,
         ) catch |err| {
@@ -5878,7 +5634,7 @@ const DirectLoader = struct {
                 continue;
             };
             self.pipeline.reserveSourceJob();
-            const request = self.pipeline.registerRequest(job.len) catch |err| {
+            const request = self.pipeline.registerRequest() catch |err| {
                 self.pipeline.abandonSourceJob();
                 self.request_gate.release(self.io);
                 self.pipeline.completeEpochJob();
@@ -7071,7 +6827,7 @@ test "probe source capacity counts active reads rather than retained requests" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
     metrics.prepareProbe(io, 7, 10);
-    for (0..48) |_| metrics.beginRequest(1);
+    for (0..48) |_| metrics.beginRequest();
     for (0..8) |index| metrics.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
 
     try std.testing.expectEqual(@as(usize, 48), metrics.outstanding_requests.load(.acquire));
@@ -7080,7 +6836,7 @@ test "probe source capacity counts active reads rather than retained requests" {
     try std.testing.expectEqual(@as(usize, 8), active.probe_active_reads);
 
     for (0..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    for (0..48) |_| metrics.endRequest(1);
+    for (0..48) |_| metrics.endRequest();
     metrics.clearProbe(io, 7);
 }
 
@@ -7090,23 +6846,20 @@ test "source probe excludes pre-boundary admissions" {
     metrics.beginRead(io, 6, 40);
     metrics.prepareProbe(io, 7, 41);
     metrics.beginRead(io, 7, 40);
-    metrics.recordProbeRead(io, 7, 40, max_load_read_request_size, max_load_read_request_size);
+    metrics.recordProbeRead(io, 7, 40, max_load_read_request_size);
     metrics.beginRead(io, 7, 41);
-    metrics.recordProbeRead(io, 7, 41, max_load_read_request_size, max_load_read_request_size);
+    metrics.recordProbeRead(io, 7, 41, max_load_read_request_size);
     const admitted = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 3), admitted.active_reads);
     try std.testing.expect(admitted.probe_first_read_ns != 0);
     try std.testing.expectEqual(@as(usize, 1), admitted.probe_active_reads);
-    try std.testing.expectEqual(@as(u64, 1), admitted.probe_full_read_operations);
+    try std.testing.expectEqual(@as(u64, 1), admitted.probe_read_operations);
     try std.testing.expectEqual(@as(u64, max_load_read_request_size), admitted.probe_read_bytes);
     metrics.endRead(io, 6, 40);
     metrics.endRead(io, 7, 40);
     const draining = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 1), draining.active_reads);
     try std.testing.expectEqual(@as(usize, 1), draining.probe_active_reads);
     metrics.endRead(io, 7, 41);
     const drained = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 0), drained.active_reads);
     try std.testing.expectEqual(@as(usize, 0), drained.probe_active_reads);
     metrics.clearProbe(io, 7);
 }
@@ -7116,10 +6869,10 @@ test "partial source jobs contribute adaptive evidence" {
     var metrics: VectoredLoadMetrics = .{};
     metrics.prepareProbe(io, 3, 1);
     metrics.beginRead(io, 3, 1);
-    metrics.recordProbeRead(io, 3, 1, 256 * 1024, 16 * 1024 * 1024);
+    metrics.recordProbeRead(io, 3, 1, 256 * 1024);
     metrics.endRead(io, 3, 1);
     const snapshot = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.probe_full_read_operations);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.probe_read_operations);
     try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.probe_read_bytes);
 }
 
@@ -7246,7 +6999,6 @@ test "late vectored callback failure drains and signals completion" {
         .read_gate = undefined,
         .request_gate = undefined,
         .block_size = 1,
-        .source_request_size = 1,
         .device_pool_indices = &.{0},
         .numa_explicit = false,
         .metrics = undefined,

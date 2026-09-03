@@ -23,7 +23,7 @@ migrated yet.
 - [x] 3. Remove the tensor-local loader path and decision-dead calibration code.
 - [x] 4. Make loader epochs immutable and precompute fair job order.
 - [x] 5. Flatten final DMA transfer records once during planning.
-- [ ] 6. Simplify adaptive-controller and runtime bookkeeping.
+- [x] 6. Simplify adaptive-controller and runtime bookkeeping.
 - [ ] 7. Run final validation and reconcile all documentation.
 
 ## Task details and completion log
@@ -158,7 +158,7 @@ The multidimensional, mirrored/folded, replicated, and packed-dtype tests now
 exercise the production final-record helper directly. All 233 ZML tests pass
 with CUDA dependencies plus the CPU runtime enabled.
 
-### 6. Controller and bookkeeping cleanup — pending
+### 6. Controller and bookkeeping cleanup — completed
 
 - Reduce the adaptive source controller to ramp-up, refine-down, and settled,
   retaining the smallest-within-3%-of-peak rule and finite-tail handling.
@@ -174,6 +174,21 @@ with CUDA dependencies plus the CPU runtime enabled.
 
 Validation: controller, pool, allocation-failure, and focused integration
 tests; compare planning/load diagnostics against the recorded baseline.
+
+Result: replaced the baseline/upward/downward/pair-reference/pair-candidate
+controller with ramp-up, refine-down, and settled phases. It still chooses the
+smallest measured width within 3% of peak, handles finite tails, and now permits
+only one extra measurement of an adjacent borderline candidate. Removed
+write-only latency, byte-residency, high-water, and pool-wait metrics together
+with the request/block/event timestamps and success branches maintained solely
+for those metrics. Aggregate VFS feedback now uses one optional cursor rather
+than one-element arrays. Each worker owns reusable pool matching scratch, so
+`acquireMany` has no steady-state allocator calls and remains safe when several
+callers wait concurrently. Removed the unused direct-DMA construction mode;
+production pools are arena-provider backed and the allocator-backed path is
+test-only. Added reuse and exhaustive allocation-failure tests for pool
+scratch. The playground builds, VFS/stdx tests pass, and the full ZML suite
+passes with CUDA dependencies plus the CPU runtime enabled.
 
 ### 7. Final validation — pending
 
