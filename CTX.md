@@ -5,17 +5,18 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 on `brabier/adaptive-concurrency`, after
-`11d87cf3` (coalesced reads) and `95b1e730` (tensor-aware cuts, batched enqueue,
-worker scratch). `origin/master` was `e1e983c8` during the 2026-09-02 audit;
-never assume that ref is still current.
+Last consolidated: 2026-09-03 on `brabier/adaptive-concurrency` at `507cabd4`.
+`PLAN.md` is the ordered implementation checklist; this file is the canonical
+description of the code after each completed task. `origin/master` was
+`e1e983c8` during the 2026-09-02 audit; never assume that ref is still current.
 
 ## Current design
 
 ### Scope and API
 
-- The model-wide `zml.io.load`/`loadInto` direct path is used for CUDA, ROCm,
-  and oneAPI. The buffered CPU/TPU/Metal loader is unchanged.
+- `zml.io.Loader` selects the direct path for CUDA, ROCm, and oneAPI and the
+  buffered path otherwise. A loader owns its store, sharding/profile options,
+  worker pool, and sequential epochs.
 - `VFS.loadProfile(path)` is prepared once for a model load and passed as a
   borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
   `high_latency`, and optional aggregate retry/throttle feedback. It assumes
@@ -23,13 +24,17 @@ never assume that ref is still current.
 - Profile minima are local/file 8 MiB, HTTP/S3/GCS 16 MiB, and HF 32 MiB.
   Effective source request size is the greater of the profile minimum and
   calibrated DMA block size, capped at the supported 32 MiB maximum.
-- No public API changed for source-read coalescing. Existing fixed-width
-  overrides remain supported.
-- The older public `Loader`, `DirectMemoryWriter`, flip-flop
-  `DirectShardWriter`, `DynamicBufferPool`, and fused-tensor `loadExecute` path
-  remain for compatibility. No in-tree caller used the old public loader at
-  the 2026-09-02 audit. Multi-source/fused tensor capability must move before
-  removing it.
+- Adaptive and fixed source-width configurations remain supported. The current
+  `Loader` API differs from the adjacent monorepo's older checkout: store,
+  shardings, progress, and profile now belong to loader initialization.
+- `DirectMemoryWriter`, `DirectShardWriter`, and `DynamicBufferPool` are no
+  longer public loader mechanisms. `Loader.loadExecute` remains and is
+  synchronous: it loads every source for a multi-source/fused binding, drains
+  the epoch, executes the binding, and returns with the output ready.
+- The compatibility target observed in `~/github/zml/monorepo` is behavioral:
+  repeated `loadExecute`, followed by at most one `load`/`await`, multi-source
+  `TensorStore` bindings, and cumulative loaded-byte accounting. That checkout
+  intentionally continues to use its older `../zml` dependency for now.
 
 ### Source and VFS data plane
 
@@ -67,12 +72,14 @@ so small adjacent tensors each caused a source operation. The current
    touching interval begins at the current union end, which preserves overlap
    and duplicate coverage.
 
-Coalescing is intentionally batch-local to one `load()`/`appendItems()` call;
-an earlier batch may already be executing. The immutable plan stores source
-jobs and flattened transfer pieces once. Jobs carry source slot, absolute
+Coalescing is batch-local to one `load()`/`appendItems()` call; the current
+scheduler can append a later batch while an earlier one executes. The plan
+stores source jobs and logical source pieces. Jobs carry source slot, absolute
 offset, physical length, piece range, per-device physical-byte charges, and a
-same-file predecessor. Physical source bytes are distinct from logical tensor
-bytes so duplication and replication do not distort diagnostics or fairness.
+same-file predecessor. Workers currently re-walk tensor dispatch spans and
+split logical pieces at DMA block boundaries to construct final transfer
+records. Physical source bytes are distinct from logical tensor bytes so
+duplication and replication do not distort diagnostics or fairness.
 Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash.
 
 ### Pinned blocks, scattering, and ownership
@@ -92,8 +99,9 @@ Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
   Pre-reservation makes allocation failure atomic.
 - Workers retain scratch for leases, affinities, reference counts, iovecs,
   block contexts, queue counts, and transfer construction. Positional-read
-  rewrite scratch is stack bounded. This removed per-job allocation pressure;
-  its wall-time effect was within noise.
+  rewrite scratch is stack bounded. `DmaBlockPool.acquireMany` still allocates
+  matching arrays per source job, so steady-state allocation removal remains
+  open work; the earlier worker-scratch change was neutral within noise.
 - Source coalescing deliberately preserves per-tensor device buffers. Roughly
   one DMA submission per tensor is therefore the natural floor. Going much
   lower requires packed device allocations or a device-side scatter/copy stage
@@ -121,14 +129,19 @@ Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
   roll back. Metadata can cheaply clip feasibility, but cannot predict a
   source's latency/bandwidth saturation point, so no job-size-derived initial
   width heuristic was added.
-- Separate gates represent the stable worker set, clean read-measurement
-  generations, and complete request lifecycles. Lifecycle capacity is active
-  reads plus one shared spare, clipped by exact pinned feasibility. A request
-  returns lifecycle credit only after all its DMA children finish.
+- Two gates separate clean read-measurement generations from complete request
+  lifecycles. All persistent workers compete for lifecycle capacity, configured
+  as active reads plus one shared spare and clipped by pinned feasibility; the
+  read gate alone limits source calls. A request returns lifecycle credit only
+  after all its DMA children finish.
+- Every changed width, including settled backoff, closes and drains the read
+  gate, discards telemetry at the generation boundary, and reopens at the new
+  width. Another settled backoff requires at least one new-generation source
+  admission, so delayed old-width feedback cannot ratchet through several
+  ladder rungs.
 - DMA width is fixed at eight per device by default after calibration work
   showed adaptive DMA width added substantial complexity and little load
-  value. An optional calibrated global cap is applied only if the active device
-  count can exceed it.
+  value. There is no global DMA parallelism cap.
 
 ### DMA memory and calibration
 
@@ -146,13 +159,16 @@ Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
 - Current detector screens DMA blocks 2/4/8/16/32 MiB at width eight. Default
   screens require at least 2 ms and 32 completions. Borderline results use
   three alternating pairs at 25 ms/256 transfers. The 8% near-peak rule favors
-  a smaller block. Global-cap selection requires repeated evidence of at least
-  2% aggregate gain, at least 95% per-device retention, and adequate fairness;
-  ambiguous results stay uncapped.
+  a smaller block. It tunes one representative device, warms device allocators
+  on all devices, applies the uniform selected tuple, and grows the retained
+  all-device working set. There is no decision-dead aggregate timing phase.
 - Retained arenas are initial capacity, not the full permissible live set.
-  Demand growth remains bounded by the mapped-memory ceiling. Allocation still
-  occurs synchronously under the pool mutex; pre-growing the exactly known
-  initial deficit is open work.
+  Detection starts with one largest-candidate calibration ring, reuses it,
+  grows after selection to the all-device working set, and permits bounded slab
+  growth up to the mapped-memory ceiling. Workspace validation, arena reserves,
+  worker scratch, and adaptive pinned feasibility use the exact maximum
+  coalesced-job bound `ceil(max_job_len / block_size)`; device or writer count
+  does not inflate the blocks required by one source job.
 
 ## Latest DeepSeek result: why coalescing mattered
 
@@ -338,8 +354,9 @@ the userspace copy. The selected fixed artifact measured 26.83--26.90 GiB/s.
   positional reads lease all blocks up front. Implementing it needs the same
   dynamic buffer and resumable suffix contract; it is not present.
 - **Adaptive DMA width:** added policy/state complexity but usually changed
-  latency/memory more than throughput. Replaced by calibrated block size,
-  fixed per-device width eight, and conservative optional global cap.
+  latency/memory more than throughput. Replaced by calibrated block size and
+  fixed per-device width eight. The later global-cap experiment was also
+  removed from the implementation; its measurements above remain historical.
 - **Per-transfer SYCL `host_task`:** serialized host-task dispatch with DMA and
   cut B70 goodput about 58--60%. Reverted.
 - **Exact-event callback experiments:** single-worker and parallel exact-event
@@ -402,43 +419,22 @@ same-host medians.
 
 ## Open work, in priority order
 
-1. **Reduce DeepSeek planning overhead.** About 0.40 s remains before the
-   source epoch. Profile allocations and repeated dispatch-span walks in the
-   already-flat representation.
-2. **Measure 24/32 MiB after coalescing.** Metadata simulation predicts
-   6,356 jobs/69,406 pieces at 24 MiB and 4,774 jobs/69,353 pieces at 32 MiB,
-   versus 9,524/69,572 at 16 MiB. Do not change global defaults without CUDA,
-   ROCm, oneAPI, local, and remote evidence because larger requests increase
-   live pinned memory and have regressed B70.
-3. **Pre-grow the initial load working set.** The scheduler knows initial read
-   width, one-spare lifecycle capacity, maximum blocks/job, affinities, and DMA
-   reserve. Allocate that deficit outside the timed load/pool lock; keep demand
-   growth as the bounded fallback.
-4. **Stage calibration arenas.** Device tuning is sequential and initially
-   needs only `8 * 32 MiB` per participating NUMA node. Grow after block
-   selection to `devices_on_node * 8 * selected_block` for the aggregate phase.
-   This can avoid eager 2 GiB setup on 4+4 MI300X when 16 MiB wins.
-5. **Cache/reuse calibration.** Key by backend, device kind, topology,
-   PJRT/plugin, driver/runtime, host identity, and detector version. Resource
-   warmup/allocation can dominate short process wall time even after sampling
-   became fast.
-6. **Define settled-source congestion behavior.** Retry/throttle evidence rolls
-   back an unsettled probe, but settled width currently does not decrease. If
-   telemetry is only evidence hygiene, document that; otherwise add ongoing
-   backpressure. Aggregate provider attribution remains a limitation.
-7. **Decide old-loader compatibility.** Remove dead parallel/adaptive helpers
-   only after fused/multi-source tensor behavior has a model-wide equivalent.
-   Known dead candidates include adjustable `stdx.Io.LimitedGroup` additions,
-   unused `DynamicBufferPool` tuning methods, standalone productionless
-   `DmaBlockPool` mode, and `VectoredLoadMetrics.resetReadPeak`.
-8. **Split `zml/io.zig`.** Data plane, calibration, and block pool are large
-   enough to warrant separate modules before upstream review.
-9. **Lower DMA submissions only with explicit ownership redesign.** Packing
-   tensors into shared device buffers or device-side scatter is invasive and
-   independent of source coalescing; assess layout/API consequences first.
-10. **Consider completion-aware local pacing.** The lane-coupled diagnostic
-    showed a possible ~10% B70 gain, but any solution must preserve remote
-    refill and multi-device fairness.
+`PLAN.md` is the completion checklist. The current ordered design work is:
+
+1. Enforce one immutable batch per epoch, precompute the deterministic fair
+   predecessor-safe job order, and retain persistent workers across sequential
+   `loadExecute` epochs.
+2. Emit final block/DMA transfer records during planning instead of storing
+   logical pieces and re-walking dispatch spans in workers.
+3. Reduce the six-phase source controller, remove write-only metrics and
+   singleton wrappers, and move block-pool matching arrays into reusable
+   scratch.
+
+After those deletions, reassess splitting `zml/io.zig`; splitting before them
+would distribute obsolete concepts across more modules. Longer-term work still
+includes calibration caching, cross-platform 24/32 MiB measurement,
+completion-aware local pacing, and any explicit packed-device-buffer redesign
+needed to reduce DMA submission count below roughly one per tensor.
 
 ## Suggested upstream decomposition
 
@@ -450,7 +446,7 @@ same-host medians.
    of calibration policy.
 4. Model-wide coalescing planner/scheduler/pipeline and `load`/`loadInto`
    migration with conservative fixed DMA settings.
-5. DMA block calibration, width eight, and conservative global-cap detection.
+5. DMA block calibration and fixed per-device width eight.
 6. Adaptive source width and aggregate VFS feedback.
 7. `LoadProfile` and model-wrapper plumbing.
 

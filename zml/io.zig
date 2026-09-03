@@ -96,17 +96,6 @@ pub const TensorStore = struct {
         return entry_ptr.shape;
     }
 
-    fn getBorrowedPositionalReaderById(
-        self: *const TensorStore,
-        id: Tensor.Id,
-        io: std.Io,
-        file: std.Io.File,
-    ) !safetensors.TensorReader {
-        const sources = self.id_to_sources.get(id) orelse return error.NotFound;
-        if (sources.len != 1) return error.MultipleTensorSources;
-        return .initBorrowedPositional(io, sources[0].*, file);
-    }
-
     pub fn view(self: *TensorStore) View {
         return .{ .store = self };
     }
@@ -561,133 +550,6 @@ const DispatchSpans = struct {
     }
 };
 
-// Direct load writer state machine used by the compatibility `Loader` on
-// CUDA and oneAPI. The model-wide vectored loader below has separate state and
-// admission control; retaining this path preserves master's Loader behavior.
-const VectoredRequestPlan = struct {
-    const Block = struct {
-        writer_mask: u64,
-        destination_offset: usize,
-        len: usize = 0,
-    };
-
-    const Segment = struct {
-        block_index: usize,
-        block_offset: usize,
-        len: usize,
-    };
-
-    const Builder = struct {
-        writer_mask: u64,
-        current_block: ?usize = null,
-        used: usize = 0,
-        next_destination: usize,
-    };
-
-    blocks: []Block,
-    segments: []Segment,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        dispatch_spans: DispatchSpans,
-        source_offset: usize,
-        request_len: usize,
-        block_size: usize,
-    ) !VectoredRequestPlan {
-        if (block_size == 0) return error.InvalidBlockSize;
-        const total = if (dispatch_spans.spans.len == 0) 0 else dispatch_spans.spans[dispatch_spans.spans.len - 1].end;
-        const request_end = std.math.add(usize, source_offset, request_len) catch return error.OutOfBounds;
-        if (source_offset > total or request_end > total) return error.OutOfBounds;
-
-        var blocks: std.ArrayList(Block) = .empty;
-        errdefer blocks.deinit(allocator);
-        var segments: std.ArrayList(Segment) = .empty;
-        errdefer segments.deinit(allocator);
-        if (request_len == 0) {
-            const owned_blocks = try blocks.toOwnedSlice(allocator);
-            errdefer allocator.free(owned_blocks);
-            return .{
-                .blocks = owned_blocks,
-                .segments = try segments.toOwnedSlice(allocator),
-            };
-        }
-
-        var builders: [Platform.MAX_NUM_DEVICES]Builder = undefined;
-        var builder_count: usize = 0;
-        var cursor = source_offset;
-        var span_index = dispatch_spans.spanIndexAt(cursor) orelse return error.OutOfBounds;
-        while (cursor < request_end) {
-            const span = dispatch_spans.spans[span_index];
-            const span_offset = cursor - span.start;
-            var remaining = @min(request_end, span.end) - cursor;
-            const writer_mask = dispatch_spans.writerMask(span);
-            const destination = span.writer_offset + span_offset;
-
-            var builder_index: usize = 0;
-            while (builder_index < builder_count and builders[builder_index].writer_mask != writer_mask) : (builder_index += 1) {}
-            if (builder_index == builder_count) {
-                if (builder_count == builders.len) return error.TooManyDestinationSets;
-                builders[builder_count] = .{
-                    .writer_mask = writer_mask,
-                    .next_destination = destination,
-                };
-                builder_count += 1;
-            }
-            const builder = &builders[builder_index];
-            if (builder.next_destination != destination) return error.NonContiguousShardPlacement;
-
-            while (remaining > 0) {
-                if (builder.current_block == null or builder.used == block_size) {
-                    try blocks.append(allocator, .{
-                        .writer_mask = writer_mask,
-                        .destination_offset = builder.next_destination,
-                    });
-                    builder.current_block = blocks.items.len - 1;
-                    builder.used = 0;
-                }
-                const block_index = builder.current_block.?;
-                const take = @min(remaining, block_size - builder.used);
-                if (segments.items.len > 0) {
-                    const previous = &segments.items[segments.items.len - 1];
-                    if (previous.block_index == block_index and previous.block_offset + previous.len == builder.used) {
-                        previous.len += take;
-                    } else {
-                        try segments.append(allocator, .{
-                            .block_index = block_index,
-                            .block_offset = builder.used,
-                            .len = take,
-                        });
-                    }
-                } else {
-                    try segments.append(allocator, .{
-                        .block_index = block_index,
-                        .block_offset = builder.used,
-                        .len = take,
-                    });
-                }
-                builder.used += take;
-                builder.next_destination += take;
-                blocks.items[block_index].len += take;
-                remaining -= take;
-                cursor += take;
-            }
-            if (cursor == span.end) span_index += 1;
-        }
-
-        const owned_blocks = try blocks.toOwnedSlice(allocator);
-        errdefer allocator.free(owned_blocks);
-        return .{
-            .blocks = owned_blocks,
-            .segments = try segments.toOwnedSlice(allocator),
-        };
-    }
-
-    fn deinit(self: VectoredRequestPlan, allocator: std.mem.Allocator) void {
-        allocator.free(self.blocks);
-        allocator.free(self.segments);
-    }
-};
-
 const VectoredLoadMetrics = struct {
     read_operations: std.atomic.Value(u64) = .init(0),
     source_calls: std.atomic.Value(u64) = .init(0),
@@ -797,10 +659,6 @@ const VectoredLoadMetrics = struct {
         _ = self.probe_read_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
 
-    fn resetReadPeak(self: *VectoredLoadMetrics) void {
-        self.peak_reads.store(self.active_reads.load(.acquire), .release);
-    }
-
     fn beginRequest(self: *VectoredLoadMetrics, bytes: usize) void {
         const active = self.outstanding_requests.fetchAdd(1, .acq_rel) + 1;
         _ = self.outstanding_request_bytes.fetchAdd(@intCast(bytes), .monotonic);
@@ -861,57 +719,22 @@ const VectoredTensorTransfer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    reader: safetensors.TensorReader,
     dispatch_spans: DispatchSpans,
     targets: []Target,
     total: usize,
     completed_read_bytes: std.atomic.Value(usize) = .init(0),
     progress: ?std.Progress.Node = null,
 
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        store: *const TensorStore,
-        tensor: *const Tensor,
-        source_file: std.Io.File,
-        shardings: []const Sharding,
-        output: *Buffer,
-        progress_parent: ?*std.Progress.Node,
-    ) !VectoredTensorTransfer {
-        const source = store.getPtrFromId(tensor.id) orelse return error.NotFound;
-        const shape = tensor.shape();
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ source.name, shape });
-            break :blk platform.replicated_sharding;
-        };
-        return initResolved(
-            allocator,
-            io,
-            platform,
-            source,
-            source_file,
-            shape,
-            sharding,
-            output,
-            progress_parent,
-        );
-    }
-
     fn initResolved(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         source: *const safetensors.Tensor,
-        source_file: std.Io.File,
         shape: Shape,
         sharding: Sharding,
         output: *Buffer,
         progress_parent: ?*std.Progress.Node,
     ) !VectoredTensorTransfer {
-        var reader: safetensors.TensorReader = .initBorrowedPositional(io, source.*, source_file);
-        errdefer reader.deinit();
-
         const packed_shape = shape.packedShape();
         const dispatch_spans = try DispatchSpans.init(allocator, packed_shape, sharding);
         errdefer dispatch_spans.deinit(allocator);
@@ -954,7 +777,7 @@ const VectoredTensorTransfer = struct {
 
         output.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
         const progress = if (progress_parent) |parent|
-            parent.start(reader.tensor.name, std.math.divCeil(usize, shape.byteSize(), 1024) catch unreachable)
+            parent.start(source.name, std.math.divCeil(usize, shape.byteSize(), 1024) catch unreachable)
         else
             null;
 
@@ -962,7 +785,6 @@ const VectoredTensorTransfer = struct {
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .reader = reader,
             .dispatch_spans = dispatch_spans,
             .targets = targets,
             .total = packed_shape.byteSize(),
@@ -975,7 +797,6 @@ const VectoredTensorTransfer = struct {
         for (self.targets) |target| target.manager.deinit(self.platform.pjrt_api);
         self.allocator.free(self.targets);
         self.dispatch_spans.deinit(self.allocator);
-        self.reader.deinit();
     }
 
     fn recordReadProgress(self: *VectoredTensorTransfer, bytes: usize) void {
@@ -1040,18 +861,11 @@ const LoaderLoadItem = struct {
             while (true) switch (self.status.load(.acquire)) {
                 uninitialized => {
                     if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
-                    const source_file = item.source_slot.ensure(direct.io) catch |err| {
-                        self.error_code.store(@intFromError(err), .release);
-                        self.status.store(failed, .release);
-                        self.initialized.set(direct.io);
-                        return err;
-                    };
                     self.state = VectoredTensorTransfer.initResolved(
                         direct.allocator,
                         direct.io,
                         direct.platform,
                         item.source,
-                        source_file,
                         item.shape,
                         item.sharding,
                         item.output,
@@ -1092,34 +906,25 @@ const LoaderLoadItem = struct {
 };
 
 const AdaptiveRequestGate = struct {
-    limit: std.atomic.Value(usize),
+    limit: usize,
     in_use: usize = 0,
-    closed: std.atomic.Value(bool) = .init(false),
+    closed: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
 
     fn init(limit: usize) AdaptiveRequestGate {
-        return .{ .limit = .init(limit) };
+        return .{ .limit = limit };
     }
 
     fn acquire(self: *AdaptiveRequestGate, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        while (!self.closed.load(.acquire) and self.in_use >= self.limit.load(.acquire)) {
+        while (!self.closed and self.in_use >= self.limit) {
             self.condition.waitUncancelable(io, &self.mutex);
         }
-        if (self.closed.load(.acquire)) return false;
+        if (self.closed) return false;
         self.in_use += 1;
         return true;
-    }
-
-    fn waitUntilEnabled(self: *AdaptiveRequestGate, io: std.Io, index: usize) bool {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        while (!self.closed.load(.acquire) and index >= self.limit.load(.acquire)) {
-            self.condition.waitUncancelable(io, &self.mutex);
-        }
-        return !self.closed.load(.acquire);
     }
 
     fn release(self: *AdaptiveRequestGate, io: std.Io) void {
@@ -1136,7 +941,7 @@ const AdaptiveRequestGate = struct {
     fn setLimit(self: *AdaptiveRequestGate, io: std.Io, new_limit: usize) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        _ = self.limit.swap(new_limit, .acq_rel);
+        self.limit = new_limit;
         self.condition.broadcast(io);
     }
 
@@ -1149,7 +954,7 @@ const AdaptiveRequestGate = struct {
     fn close(self: *AdaptiveRequestGate, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        self.closed.store(true, .release);
+        self.closed = true;
         self.condition.broadcast(io);
     }
 };
@@ -1309,7 +1114,6 @@ const VectoredLoadPipeline = struct {
     io: std.Io,
     platform: *const Platform,
     pool: *mem.DmaBlockPool,
-    worker_gate: *AdaptiveRequestGate,
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     block_size: usize,
@@ -1343,7 +1147,6 @@ const VectoredLoadPipeline = struct {
         io: std.Io,
         platform: *const Platform,
         pool: *mem.DmaBlockPool,
-        worker_gate: *AdaptiveRequestGate,
         read_gate: *AdaptiveRequestGate,
         request_gate: *AdaptiveRequestGate,
         block_size: usize,
@@ -1368,7 +1171,6 @@ const VectoredLoadPipeline = struct {
             .io = io,
             .platform = platform,
             .pool = pool,
-            .worker_gate = worker_gate,
             .read_gate = read_gate,
             .request_gate = request_gate,
             .block_size = block_size,
@@ -1425,7 +1227,6 @@ const VectoredLoadPipeline = struct {
                 self.cancelEpochJobs(abandoned);
             }
             self.pool.close(self.io);
-            self.worker_gate.close(self.io);
             self.read_gate.close(self.io);
             self.request_gate.close(self.io);
             self.abortReady();
@@ -1835,28 +1636,6 @@ const VectoredLoadPipeline = struct {
         if (done) self.dma_done.set(self.io);
     }
 
-    fn finishReads(self: *VectoredLoadPipeline) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        self.reads_finished = true;
-        const done = self.doneLocked();
-        self.metadata_mutex.unlock(self.io);
-        if (done) {
-            self.dma_done.set(self.io);
-            return;
-        }
-        self.requestPump();
-    }
-
-    fn peakDeviceActive(self: *VectoredLoadPipeline) usize {
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        var peak_device_active: usize = 0;
-        for (self.peak_by_device) |peak| {
-            peak_device_active = @max(peak_device_active, peak);
-        }
-        return peak_device_active;
-    }
-
     fn doneLocked(self: *const VectoredLoadPipeline) bool {
         return self.reads_finished and self.ready_entries == 0 and self.active_events == 0;
     }
@@ -1954,67 +1733,9 @@ const VectoredReadRequest = struct {
         }
     }
 
-    fn fillAffinities(
-        tensor: *const VectoredTensorTransfer,
-        pipeline: *const VectoredLoadPipeline,
-        blocks: []const VectoredRequestPlan.Block,
-        affinities: []mem.DmaBlockPool.Affinity,
-    ) void {
-        std.debug.assert(blocks.len == affinities.len);
-        for (blocks, affinities) |block_plan, *affinity| {
-            if (!pipeline.numa_explicit) {
-                affinity.* = .{};
-                continue;
-            }
-            var eligible_nodes: u64 = 0;
-            var writer_mask = block_plan.writer_mask;
-            while (writer_mask != 0) {
-                const writer_index: usize = @intCast(@ctz(writer_mask));
-                writer_mask &= writer_mask - 1;
-                const device_index = tensor.targets[writer_index].device_index;
-                const node_index = pipeline.device_pool_indices[device_index];
-                eligible_nodes |= @as(u64, 1) << @intCast(node_index);
-            }
-            std.debug.assert(eligible_nodes != 0);
-            affinity.* = if (@popCount(eligible_nodes) == 1)
-                .node(@ctz(eligible_nodes))
-            else
-                .replicated(eligible_nodes);
-        }
-    }
-
     fn recordPoolWait(pipeline: *VectoredLoadPipeline, pool_wait_ns: u64) void {
         if (pool_wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
         _ = pipeline.metrics.pool_wait_ns.fetchAdd(pool_wait_ns, .monotonic);
-    }
-
-    fn enqueue(
-        request: *VectoredLoadPipeline.RequestContext,
-        tensor: *VectoredTensorTransfer,
-        pipeline: *VectoredLoadPipeline,
-        block_plan: VectoredRequestPlan.Block,
-        leased: *[]u8,
-    ) bool {
-        const references: usize = @popCount(block_plan.writer_mask);
-        const block = pipeline.registerBlock(request, leased.*, references, block_plan.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return false;
-        };
-        leased.* = &.{};
-        pipeline.enqueueBlock(
-            tensor,
-            block,
-            block_plan.writer_mask,
-            0,
-            block_plan.destination_offset,
-            block_plan.len,
-        ) catch |err| {
-            var remaining = references;
-            while (remaining > 0) : (remaining -= 1) block.complete();
-            pipeline.recordError(err);
-            return false;
-        };
-        return true;
     }
 
     fn beginRead(
@@ -2044,126 +1765,6 @@ const VectoredReadRequest = struct {
             request.admission_id,
         );
         pipeline.read_gate.release(pipeline.io);
-    }
-
-    fn recordReadSuccess(
-        request: *VectoredLoadPipeline.RequestContext,
-        tensor: *VectoredTensorTransfer,
-        pipeline: *VectoredLoadPipeline,
-        request_len: usize,
-        read_elapsed: std.Io.Duration,
-    ) void {
-        pipeline.metrics.recordProbeRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-            request_len,
-            pipeline.source_request_size,
-        );
-        const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
-        const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
-        _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
-        _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
-        _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(
-            read_elapsed_us *| @as(u64, @intCast(request_len)),
-            .monotonic,
-        );
-        tensor.recordReadProgress(request_len);
-        request.markReadFinished();
-    }
-
-    fn readWhole(
-        request: *VectoredLoadPipeline.RequestContext,
-        tensor: *VectoredTensorTransfer,
-        pipeline: *VectoredLoadPipeline,
-        plan: VectoredRequestPlan,
-        affinities: []const mem.DmaBlockPool.Affinity,
-        leased: [][]u8,
-        source_offset: usize,
-        request_len: usize,
-    ) bool {
-        const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased, affinities) catch |err| {
-            pipeline.recordError(err);
-            return false;
-        };
-        recordPoolWait(pipeline, pool_wait_ns);
-        if (pipeline.failed()) return false;
-
-        const iovecs = pipeline.allocator.alloc([]u8, plan.segments.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return false;
-        };
-        defer pipeline.allocator.free(iovecs);
-        for (plan.segments, iovecs) |segment, *iovec| {
-            iovec.* = leased[segment.block_index][segment.block_offset..][0..segment.len];
-        }
-
-        if (!beginRead(request, pipeline)) return false;
-        const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
-        const read_result = tensor.reader.readPositionalAllV(iovecs, source_offset);
-        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
-        read_result catch |err| {
-            endRead(request, pipeline);
-            pipeline.recordError(err);
-            return false;
-        };
-        recordReadSuccess(request, tensor, pipeline, request_len, read_elapsed);
-        endRead(request, pipeline);
-
-        if (pipeline.failed()) return false;
-        for (plan.blocks, 0..) |block_plan, i| {
-            if (!enqueue(request, tensor, pipeline, block_plan, &leased[i])) return false;
-        }
-        return true;
-    }
-
-    fn run(
-        request: *VectoredLoadPipeline.RequestContext,
-        tensor: *VectoredTensorTransfer,
-        pipeline: *VectoredLoadPipeline,
-        source_offset: usize,
-        request_len: usize,
-    ) void {
-        defer request.finishScheduling();
-        if (pipeline.failed()) return;
-
-        const plan = VectoredRequestPlan.init(
-            pipeline.allocator,
-            tensor.dispatch_spans,
-            source_offset,
-            request_len,
-            pipeline.block_size,
-        ) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
-        defer plan.deinit(pipeline.allocator);
-        if (plan.blocks.len == 0) {
-            request.markReadFinished();
-            request.markSuccessful();
-            return;
-        }
-
-        const leased = pipeline.allocator.alloc([]u8, plan.blocks.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(leased);
-        @memset(leased, &.{});
-
-        const affinities = pipeline.allocator.alloc(mem.DmaBlockPool.Affinity, plan.blocks.len) catch {
-            pipeline.recordError(error.OutOfMemory);
-            return;
-        };
-        defer pipeline.allocator.free(affinities);
-        fillAffinities(tensor, pipeline, plan.blocks, affinities);
-        defer for (leased) |block| {
-            if (block.len != 0) pipeline.pool.release(pipeline.io, block);
-        };
-
-        const successful = readWhole(request, tensor, pipeline, plan, affinities, leased, source_offset, request_len);
-        if (successful) request.markSuccessful();
     }
 
     fn runCoalesced(
@@ -2455,164 +2056,6 @@ const FairVectoredReadScheduler = struct {
     stopping: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        platform: *const Platform,
-        tensors: []const *const Tensor,
-        shardings: []const Sharding,
-        block_size: usize,
-        request_size: usize,
-    ) !FairVectoredReadScheduler {
-        const device_count = platform.devices.len;
-        if (device_count == 0) return error.DmaDeviceMismatch;
-        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
-        @memset(queues, .empty);
-        const cursors = allocator.alloc(usize, device_count) catch |err| {
-            allocator.free(queues);
-            return err;
-        };
-        @memset(cursors, 0);
-        const scheduled = allocator.alloc(u64, device_count) catch |err| {
-            allocator.free(cursors);
-            allocator.free(queues);
-            return err;
-        };
-        @memset(scheduled, 0);
-        var self: FairVectoredReadScheduler = .{
-            .allocator = allocator,
-            .device_count = device_count,
-            .request_size = request_size,
-            .queues = queues,
-            .cursors = cursors,
-            .scheduled_physical_bytes = scheduled,
-            .remaining_bytes = 0,
-            .remaining_jobs = 0,
-            .remaining_full_jobs = 0,
-        };
-        errdefer self.deinit();
-
-        const TensorPlan = struct {
-            dispatch_spans: DispatchSpans,
-            device_indices: []usize,
-            total: usize,
-        };
-        const tensor_plans = try allocator.alloc(TensorPlan, tensors.len);
-        var initialized_plans: usize = 0;
-        defer {
-            for (tensor_plans[0..initialized_plans]) |*plan| {
-                plan.dispatch_spans.deinit(allocator);
-                allocator.free(plan.device_indices);
-            }
-            allocator.free(tensor_plans);
-        }
-        for (tensors, tensor_plans) |tensor, *plan| {
-            const shape = tensor.shape();
-            const packed_shape = shape.packedShape();
-            const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse
-                platform.replicated_sharding;
-            plan.* = .{
-                .dispatch_spans = try .init(allocator, packed_shape, sharding),
-                .device_indices = &.{},
-                .total = packed_shape.byteSize(),
-            };
-            initialized_plans += 1;
-            const ordered_devices = sharding.devicesInCanonicalOrder();
-            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
-            for (ordered_devices, plan.device_indices) |device, *device_index| {
-                device_index.* = @intCast(device.id);
-                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
-            }
-        }
-
-        const offsets = try allocator.alloc(usize, tensors.len);
-        defer allocator.free(offsets);
-        @memset(offsets, 0);
-        const previous_jobs = try allocator.alloc(?usize, tensors.len);
-        defer allocator.free(previous_jobs);
-        @memset(previous_jobs, null);
-        const next_active = try allocator.alloc(usize, tensors.len);
-        defer allocator.free(next_active);
-        // Retain unfinished tensors in a ring so job construction preserves
-        // tensor round-robin order without rescanning completed tensors.
-        var tensors_remaining: usize = 0;
-        var first_active: ?usize = null;
-        var last_active: ?usize = null;
-        for (tensor_plans, 0..) |plan, tensor_index| {
-            if (plan.total == 0) continue;
-            if (first_active == null) first_active = tensor_index;
-            if (last_active) |previous| next_active[previous] = tensor_index;
-            last_active = tensor_index;
-            tensors_remaining += 1;
-        }
-        if (last_active) |last| next_active[last] = first_active.?;
-        var current_tensor = first_active orelse 0;
-        var previous_tensor = last_active orelse 0;
-        while (tensors_remaining != 0) {
-            const tensor_index = current_tensor;
-            const tensor_size = tensor_plans[tensor_index].total;
-            const source_offset = offsets[tensor_index];
-            const len = @min(request_size, tensor_size - source_offset);
-            offsets[tensor_index] += len;
-
-            const following_tensor = next_active[tensor_index];
-            if (offsets[tensor_index] == tensor_size) {
-                tensors_remaining -= 1;
-                if (tensors_remaining != 0) {
-                    next_active[previous_tensor] = following_tensor;
-                    current_tensor = following_tensor;
-                }
-            } else {
-                previous_tensor = tensor_index;
-                current_tensor = following_tensor;
-            }
-
-            const job_index = self.jobs.items.len;
-            try self.jobs.append(allocator, .{
-                .tensor_index = tensor_index,
-                .file_offset = source_offset,
-                .len = len,
-                .piece_start = 0,
-                .piece_len = 0,
-                .predecessor = previous_jobs[tensor_index],
-                .adaptive_sample = len == request_size,
-            });
-            previous_jobs[tensor_index] = job_index;
-            try self.physical_bytes.appendNTimes(allocator, 0, device_count);
-            const row = self.physical_bytes.items[job_index * device_count ..][0..device_count];
-            {
-                const request_plan = try VectoredRequestPlan.init(
-                    allocator,
-                    tensor_plans[tensor_index].dispatch_spans,
-                    source_offset,
-                    len,
-                    block_size,
-                );
-                defer request_plan.deinit(allocator);
-                self.maximum_blocks_per_job = @max(
-                    self.maximum_blocks_per_job,
-                    request_plan.blocks.len,
-                );
-                for (request_plan.blocks) |block| {
-                    var writer_mask = block.writer_mask;
-                    while (writer_mask != 0) {
-                        const writer_index: usize = @intCast(@ctz(writer_mask));
-                        writer_mask &= writer_mask - 1;
-                        const device_index = tensor_plans[tensor_index].device_indices[writer_index];
-                        row[device_index] = try std.math.add(usize, row[device_index], block.len);
-                    }
-                }
-            }
-            for (row, self.queues) |bytes, *queue| {
-                if (bytes != 0) try queue.append(allocator, job_index);
-            }
-            self.remaining_bytes +|= @intCast(len);
-            self.remaining_jobs += 1;
-            if (len == request_size) self.remaining_full_jobs += 1;
-        }
-        try self.claimed.appendNTimes(allocator, false, self.jobs.items.len);
-        return self;
-    }
 
     fn initAppendable(
         allocator: std.mem.Allocator,
@@ -3220,9 +2663,6 @@ const FairVectoredReadScheduler = struct {
         };
     }
 
-    fn maximumBlocksPerJob(self: *const FairVectoredReadScheduler) usize {
-        return self.maximum_blocks_per_job;
-    }
 };
 
 test "fair read scheduler rotates sharded devices by scheduled bytes" {
@@ -4246,7 +3686,6 @@ test "one load-profile feedback cursor reports only new backpressure" {
 
 const SourceReadRuntime = struct {
     controller: SourceReadWidthController,
-    worker_gate: *AdaptiveRequestGate,
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     metrics: *VectoredLoadMetrics,
@@ -4265,6 +3704,7 @@ const SourceReadRuntime = struct {
     last_blind_growth_ns: u64 = 0,
     persistent: bool = false,
     scheduler_idle: bool = false,
+    backoff_admission_start: ?u64 = null,
     reported_width: std.atomic.Value(usize) = .init(1),
     epoch_barrier_requested: std.atomic.Value(bool) = .init(false),
     epoch_barrier_done: std.Io.Event = .unset,
@@ -4283,9 +3723,8 @@ const SourceReadRuntime = struct {
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
         self.reported_width.store(decision.width, .release);
-        self.worker_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
-        if (!decision.settled and (decision.changed or force_probe)) {
+        if (decision.changed or (!decision.settled and force_probe)) {
             self.read_gate.setLimit(io, 0);
             self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
             self.pending_read_limit = limits.read;
@@ -4311,10 +3750,22 @@ const SourceReadRuntime = struct {
         // Advance the diagnostic baseline at a generation boundary.
         _ = self.takeRemoteTelemetry();
         const admission_start = self.next_read_admission.load(.acquire);
-        self.metrics.prepareProbe(io, self.controller.generation, admission_start);
+        if (self.controller.phase == .settled) {
+            self.metrics.config_epoch.store(self.controller.generation, .release);
+            self.backoff_admission_start = admission_start;
+        } else {
+            self.metrics.prepareProbe(io, self.controller.generation, admission_start);
+        }
         self.probe_transition_pending = false;
-        self.probe_measuring = true;
+        self.probe_measuring = self.controller.phase != .settled;
         self.read_gate.setLimit(io, self.pending_read_limit);
+        return true;
+    }
+
+    fn backoffReady(self: *SourceReadRuntime) bool {
+        const boundary = self.backoff_admission_start orelse return true;
+        if (self.next_read_admission.load(.acquire) <= boundary) return false;
+        self.backoff_admission_start = null;
         return true;
     }
 
@@ -4325,7 +3776,6 @@ const SourceReadRuntime = struct {
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
         self.reported_width.store(decision.width, .release);
-        self.worker_gate.setLimit(io, limits.read);
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
         self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
@@ -4429,6 +3879,10 @@ const SourceReadRuntime = struct {
 
             const telemetry = self.takeRemoteTelemetry();
             if (telemetry.hasBackpressure()) {
+                // Feedback collected while the old generation drains belongs
+                // to that transition and must not trigger another rung.
+                if (self.probe_transition_pending) continue;
+                if (!self.backoffReady()) continue;
                 self.applyDecision(io, self.controller.backoff(), false);
                 continue;
             }
@@ -4560,9 +4014,16 @@ fn shouldBootstrapSource(
         outstanding_requests >= read_limit and has_unscheduled;
 }
 
-fn effectiveSourceReadParallelism(configured: Parallelism, high_latency: bool) Parallelism {
-    _ = high_latency;
-    return configured;
+fn maximumCoalescedJobBlocks(request_size: usize, block_size: usize) !usize {
+    if (request_size == 0 or block_size == 0) return error.InvalidDmaLoadConfig;
+    const scatter_limit = std.math.mul(
+        usize,
+        block_size,
+        max_load_positional_iovecs,
+    ) catch std.math.maxInt(usize);
+    const maximum_job_len = @min(request_size, scatter_limit);
+    return std.math.divCeil(usize, maximum_job_len, block_size) catch
+        error.InvalidDmaLoadConfig;
 }
 
 fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) !usize {
@@ -4586,7 +4047,6 @@ const dma_benchmark_repeats = 3;
 const DmaBenchmarkPhase = enum {
     block,
     block_confirmation,
-    aggregate,
 };
 
 const DmaBenchmarkSample = struct {
@@ -4635,16 +4095,10 @@ const DmaLoadConfig = struct {
 };
 
 fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
-    const request_blocks = std.math.divCeil(
-        usize,
+    const maximum_request_blocks = try maximumCoalescedJobBlocks(
         max_load_read_request_size,
         config.block_size,
-    ) catch return error.InvalidDmaLoadConfig;
-    const maximum_request_blocks = std.math.add(
-        usize,
-        request_blocks,
-        config.device_ids.len - 1,
-    ) catch return error.InvalidDmaLoadConfig;
+    );
     var required_blocks: usize = 0;
     if (config.device_numa_nodes[0] == null) {
         const feed_blocks = std.math.mul(
@@ -5223,7 +4677,6 @@ const DmaBenchmarkSourcePools = struct {
     io: std.Io,
     pools: []DmaBenchmarkSourcePool,
     device_pool_indices: []usize,
-    device_sources: [][]const u8,
     registration_ns: u64 = 0,
     max_mapped_bytes: usize,
     allocated_bytes: std.atomic.Value(usize) = .init(0),
@@ -5245,9 +4698,6 @@ const DmaBenchmarkSourcePools = struct {
         errdefer allocator.free(pools);
         const device_pool_indices = try allocator.alloc(usize, platform.devices.len);
         errdefer allocator.free(device_pool_indices);
-        const device_sources = try allocator.alloc([]const u8, platform.devices.len);
-        errdefer allocator.free(device_sources);
-        @memset(device_sources, &.{});
         if (unique_nodes.count() == 0) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
@@ -5265,7 +4715,6 @@ const DmaBenchmarkSourcePools = struct {
                 .io = io,
                 .pools = pools,
                 .device_pool_indices = device_pool_indices,
-                .device_sources = device_sources,
                 .max_mapped_bytes = max_mapped_bytes,
             };
         }
@@ -5306,7 +4755,6 @@ const DmaBenchmarkSourcePools = struct {
             .io = io,
             .pools = pools,
             .device_pool_indices = device_pool_indices,
-            .device_sources = device_sources,
             .max_mapped_bytes = max_mapped_bytes,
         };
     }
@@ -5318,16 +4766,9 @@ const DmaBenchmarkSourcePools = struct {
             }
             pool.allocations.deinit(self.allocator);
         }
-        self.allocator.free(self.device_sources);
         self.allocator.free(self.device_pool_indices);
         self.allocator.free(self.pools);
         self.* = undefined;
-    }
-
-    fn sourceForDevice(self: *const DmaBenchmarkSourcePools, device_index: usize) []const u8 {
-        const assigned = self.device_sources[device_index];
-        if (assigned.len != 0) return assigned;
-        return self.pools[self.device_pool_indices[device_index]].source;
     }
 
     fn cleanupSourceForDevice(
@@ -5335,8 +4776,6 @@ const DmaBenchmarkSourcePools = struct {
         device_index: usize,
         minimum_len: usize,
     ) []const u8 {
-        const assigned = self.device_sources[device_index];
-        if (assigned.len >= minimum_len) return assigned;
         const pool = &self.pools[self.device_pool_indices[device_index]];
         var index = pool.allocations.items.len;
         while (index != 0) {
@@ -5413,38 +4852,15 @@ const DmaBenchmarkSourcePools = struct {
     fn ensureLoadBlockReserves(
         self: *DmaBenchmarkSourcePools,
         block_size: usize,
-        maximum_writer_groups: usize,
         calibrated_reserves: []const usize,
     ) !void {
-        if (block_size == 0 or maximum_writer_groups == 0 or
-            calibrated_reserves.len != self.pools.len)
+        if (block_size == 0 or calibrated_reserves.len != self.pools.len)
             return error.InvalidDmaLoadConfig;
-        const base_request_blocks = std.math.divCeil(
-            usize,
+        const request_blocks = try maximumCoalescedJobBlocks(
             max_load_read_request_size,
             block_size,
-        ) catch return error.InvalidDmaLoadConfig;
-        const request_blocks = std.math.add(
-            usize,
-            base_request_blocks,
-            maximum_writer_groups - 1,
-        ) catch return error.InvalidDmaLoadConfig;
+        );
         return self.ensureBlockReserves(block_size, request_blocks, calibrated_reserves);
-    }
-
-    /// Grows each retained NUMA arena for the exact largest request produced
-    /// by the completed scheduler. The caller has already accounted for every
-    /// dispatch/writer boundary, so this function must not add another
-    /// fixed-request or writer-group estimate.
-    fn ensureExactLoadBlockReserves(
-        self: *DmaBenchmarkSourcePools,
-        block_size: usize,
-        maximum_blocks_per_job: usize,
-        calibrated_reserves: []const usize,
-    ) !void {
-        if (block_size == 0 or maximum_blocks_per_job == 0 or calibrated_reserves.len != self.pools.len)
-            return error.InvalidDmaLoadConfig;
-        return self.ensureBlockReserves(block_size, maximum_blocks_per_job, calibrated_reserves);
     }
 
     fn ensureBlockReserves(
@@ -5567,114 +4983,6 @@ const DmaBenchmarkSourcePools = struct {
         };
     }
 
-    fn prepareAggregateSources(
-        self: *DmaBenchmarkSourcePools,
-        recommendations: []const DeviceDmaRecommendation,
-        max_mapped_bytes: usize,
-    ) !void {
-        const missing = try self.allocator.alloc(usize, self.pools.len);
-        defer self.allocator.free(missing);
-        @memset(missing, 0);
-        const offsets = try self.allocator.alloc(usize, self.pools.len);
-        defer self.allocator.free(offsets);
-        @memset(offsets, 0);
-
-        // First use the largest current arena in each pool. Earlier arenas are
-        // retained for manager teardown, while the aggregate path gets one
-        // contiguous, disjoint ring per device.
-        for (recommendations) |recommendation| {
-            const bytes = try std.math.mul(
-                usize,
-                recommendation.dma_block_size,
-                recommendation.dma_parallelism,
-            );
-            const pool_index = self.device_pool_indices[recommendation.device_index];
-            const pool = &self.pools[pool_index];
-            if (bytes <= pool.source.len -| offsets[pool_index]) {
-                const end = offsets[pool_index] + bytes;
-                self.device_sources[recommendation.device_index] =
-                    pool.source[offsets[pool_index]..end];
-                offsets[pool_index] = end;
-            } else {
-                missing[pool_index] = try std.math.add(usize, missing[pool_index], bytes);
-            }
-        }
-        var missing_total: usize = 0;
-        for (missing) |bytes| missing_total = try std.math.add(usize, missing_total, bytes);
-        if (try std.math.add(usize, self.allocatedBytes(), missing_total) > max_mapped_bytes)
-            return error.DmaBenchmarkPinnedBudgetExceeded;
-
-        const Worker = struct {
-            pools: *DmaBenchmarkSourcePools,
-            pool_index: usize,
-            bytes: usize,
-            first_error: *std.atomic.Value(u16),
-
-            fn run(worker: @This()) void {
-                worker.pools.allocatePool(worker.pool_index, worker.bytes) catch |err| {
-                    _ = worker.first_error.cmpxchgStrong(
-                        0,
-                        @intFromError(err),
-                        .release,
-                        .monotonic,
-                    );
-                };
-            }
-        };
-        var first_error: std.atomic.Value(u16) = .init(0);
-        var group: std.Io.Group = .init;
-        const registration_started = std.Io.Timestamp.now(self.io, .awake);
-        for (missing, 0..) |bytes, pool_index| {
-            if (bytes == 0) continue;
-            try group.concurrent(self.io, Worker.run, .{Worker{
-                .pools = self,
-                .pool_index = pool_index,
-                .bytes = bytes,
-                .first_error = &first_error,
-            }});
-            offsets[pool_index] = 0;
-        }
-        try group.await(self.io);
-        self.registration_ns +|= @intCast(@max(
-            registration_started.untilNow(self.io, .awake).nanoseconds,
-            0,
-        ));
-        const error_code = first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
-        for (recommendations) |recommendation| {
-            if (self.device_sources[recommendation.device_index].len != 0) continue;
-            const bytes = try std.math.mul(
-                usize,
-                recommendation.dma_block_size,
-                recommendation.dma_parallelism,
-            );
-            const pool_index = self.device_pool_indices[recommendation.device_index];
-            const pool = &self.pools[pool_index];
-            const end = offsets[pool_index] + bytes;
-            self.device_sources[recommendation.device_index] =
-                pool.source[offsets[pool_index]..end];
-            offsets[pool_index] = end;
-        }
-    }
-};
-
-const DmaBenchmarkDistribution = struct {
-    block_size: usize,
-
-    fn init(
-        _: std.mem.Allocator,
-        block_size: usize,
-    ) !DmaBenchmarkDistribution {
-        return .{ .block_size = block_size };
-    }
-
-    fn deinit(self: *DmaBenchmarkDistribution, _: std.mem.Allocator) void {
-        self.* = undefined;
-    }
-
-    fn at(self: DmaBenchmarkDistribution, _: u64) usize {
-        return self.block_size;
-    }
 };
 
 const DmaBenchmarkRunMetrics = struct {
@@ -5713,10 +5021,8 @@ const ReusableDmaBenchmarkCohort = struct {
     platform: *const Platform,
     device_index: usize,
     block_size: usize,
-    distribution: DmaBenchmarkDistribution,
     managers: std.ArrayListUnmanaged(DmaBenchmarkManager) = .empty,
     warmed_managers: usize = 0,
-    next_transfer: std.atomic.Value(u64) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
 
     fn init(
@@ -5725,14 +5031,13 @@ const ReusableDmaBenchmarkCohort = struct {
         platform: *const Platform,
         device_index: usize,
         block_size: usize,
-    ) !ReusableDmaBenchmarkCohort {
+    ) ReusableDmaBenchmarkCohort {
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .device_index = device_index,
             .block_size = block_size,
-            .distribution = try .init(allocator, block_size),
         };
     }
 
@@ -5746,8 +5051,7 @@ const ReusableDmaBenchmarkCohort = struct {
         slot: usize,
         metrics: ?*DmaBenchmarkAtomicMetrics,
     ) void {
-        const transfer_index = self.next_transfer.fetchAdd(1, .monotonic);
-        const len = self.distribution.at(transfer_index);
+        const len = self.block_size;
         const source_offset = slot * self.block_size;
         const started = std.Io.Timestamp.now(self.io, .awake);
         const event = self.managers.items[slot].manager.transferData(
@@ -5815,7 +5119,6 @@ const ReusableDmaBenchmarkCohort = struct {
             manager.buffer.deinit(self.platform.pjrt_api);
         }
         self.managers.deinit(self.allocator);
-        self.distribution.deinit(self.allocator);
         self.* = undefined;
     }
 };
@@ -5970,14 +5273,13 @@ const ReusableDmaBenchmarkSession = struct {
     ) !*ReusableDmaBenchmarkCohort {
         const cohort = try self.allocator.create(ReusableDmaBenchmarkCohort);
         errdefer self.allocator.destroy(cohort);
-        cohort.* = try .init(
+        cohort.* = .init(
             self.allocator,
             self.io,
             self.platform,
             device_index,
             block_size,
         );
-        errdefer cohort.distribution.deinit(self.allocator);
         try self.cohorts.append(self.allocator, cohort);
         return cohort;
     }
@@ -6469,7 +5771,6 @@ const DirectLoader = struct {
     pool: mem.DmaBlockPool,
     scheduler: FairVectoredReadScheduler,
     metrics: VectoredLoadMetrics = .{},
-    worker_gate: AdaptiveRequestGate,
     read_gate: AdaptiveRequestGate,
     request_gate: AdaptiveRequestGate,
     pipeline: VectoredLoadPipeline,
@@ -6526,11 +5827,9 @@ const DirectLoader = struct {
             opts.load_profile.read_chunk_size,
             config.block_size,
         );
-        const maximum_blocks_per_job = try std.math.add(
-            usize,
-            std.math.divCeil(usize, request_size, config.block_size) catch
-                return error.InvalidDmaLoadConfig,
-            platform.devices.len - 1,
+        const maximum_blocks_per_job = try maximumCoalescedJobBlocks(
+            request_size,
+            config.block_size,
         );
         const node_reserves = try allocator.alloc(usize, resources.workspace.pools.len);
         defer allocator.free(node_reserves);
@@ -6573,10 +5872,7 @@ const DirectLoader = struct {
         );
         var scheduler_moved = false;
         errdefer if (!scheduler_moved) scheduler.deinit();
-        const source_parallelism = effectiveSourceReadParallelism(
-            opts.read_parallelism,
-            opts.load_profile.high_latency,
-        );
+        const source_parallelism = opts.read_parallelism;
         const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
         const limits: RequestGateLimits = .init(controller.width(), feasible_width);
 
@@ -6591,7 +5887,6 @@ const DirectLoader = struct {
             .dma_resources = resources,
             .pool = pool,
             .scheduler = scheduler,
-            .worker_gate = .init(limits.read),
             .read_gate = .init(limits.read),
             .request_gate = .init(limits.lifecycle),
             .pipeline = undefined,
@@ -6613,7 +5908,6 @@ const DirectLoader = struct {
             io,
             platform,
             &self.pool,
-            &self.worker_gate,
             &self.read_gate,
             &self.request_gate,
             config.block_size,
@@ -6639,7 +5933,6 @@ const DirectLoader = struct {
         }
         self.controller_runtime = .{
             .controller = controller,
-            .worker_gate = &self.worker_gate,
             .read_gate = &self.read_gate,
             .request_gate = &self.request_gate,
             .metrics = &self.metrics,
@@ -6672,15 +5965,15 @@ const DirectLoader = struct {
         );
         self.controller_started = true;
         self.workers_started = true;
-        for (0..worker_count) |worker_index| {
-            self.worker_group.concurrent(self.io, workerMain, .{ self, worker_index }) catch |err| {
+        for (0..worker_count) |_| {
+            self.worker_group.concurrent(self.io, workerMain, .{self}) catch |err| {
                 self.stopWorkers();
                 return err;
             };
         }
     }
 
-    fn workerMain(self: *DirectLoader, worker_index: usize) void {
+    fn workerMain(self: *DirectLoader) void {
         var scratch = VectoredReadRequest.Scratch.init(
             self.allocator,
             self.maximum_blocks_per_job,
@@ -6692,7 +5985,6 @@ const DirectLoader = struct {
         defer scratch.deinit();
         while (true) {
             if (!self.scheduler.waitForWork(self.io)) return;
-            if (!self.worker_gate.waitUntilEnabled(self.io, worker_index)) return;
             if (self.pipeline.failed()) return;
             if (!self.request_gate.acquire(self.io)) return;
             const job = self.scheduler.claim(self.io) orelse {
@@ -6727,7 +6019,6 @@ const DirectLoader = struct {
 
     fn stopWorkers(self: *DirectLoader) void {
         self.scheduler.stop(self.io);
-        self.worker_gate.close(self.io);
         self.read_gate.close(self.io);
         self.request_gate.close(self.io);
         if (self.controller_started) {
@@ -7327,17 +6618,12 @@ fn measureDmaBenchmarkCandidates(
     }
 }
 
-const TunedDmaDevice = struct {
-    recommendation: DeviceDmaRecommendation,
-    cohort: *ReusableDmaBenchmarkCohort,
-};
-
 fn tuneDmaBenchmarkDevice(
     session: *ReusableDmaBenchmarkSession,
     opts: DmaBenchmarkOpts,
     source_pools: *DmaBenchmarkSourcePools,
     device_index: usize,
-) !TunedDmaDevice {
+) !DeviceDmaRecommendation {
     const started_windows = session.windows;
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
@@ -7387,35 +6673,13 @@ fn tuneDmaBenchmarkDevice(
     const selected_cohort = block_candidates[block_decision.index].cohort;
 
     return .{
-        .recommendation = .{
-            .device_index = device_index,
-            .device_id = session.platform.devices[device_index].id(),
-            .dma_block_size = selected_cohort.block_size,
-            .dma_parallelism = opts.block_parallelism,
-            .measured_bytes_per_second = block_decision.metrics.bytesPerSecond(),
-            .average_latency_ns = block_decision.metrics.averageLatencyNs(),
-            .windows = session.windows - started_windows,
-        },
-        .cohort = selected_cohort,
-    };
-}
-
-fn prepareDmaBenchmarkDevice(
-    session: *ReusableDmaBenchmarkSession,
-    device_index: usize,
-    base: DeviceDmaRecommendation,
-) !TunedDmaDevice {
-    const cohort = try session.createCohort(device_index, base.dma_block_size);
-    return .{
-        .recommendation = .{
-            .device_index = device_index,
-            .device_id = session.platform.devices[device_index].id(),
-            .dma_block_size = base.dma_block_size,
-            .dma_parallelism = base.dma_parallelism,
-            .measured_bytes_per_second = 0,
-            .average_latency_ns = 0,
-        },
-        .cohort = cohort,
+        .device_index = device_index,
+        .device_id = session.platform.devices[device_index].id(),
+        .dma_block_size = selected_cohort.block_size,
+        .dma_parallelism = opts.block_parallelism,
+        .measured_bytes_per_second = block_decision.metrics.bytesPerSecond(),
+        .average_latency_ns = block_decision.metrics.averageLatencyNs(),
+        .windows = session.windows - started_windows,
     };
 }
 
@@ -7454,63 +6718,6 @@ fn warmupDmaBenchmarkDeviceAllocators(
     try group.await(io);
     const error_code = first_error.load(.acquire);
     if (error_code != 0) return @errorFromInt(error_code);
-}
-
-const DmaUsedDevices = struct {
-    allocator: std.mem.Allocator,
-    device_indices: []usize,
-    device_ids: []u32,
-
-    fn deinit(self: *DmaUsedDevices) void {
-        self.allocator.free(self.device_indices);
-        self.allocator.free(self.device_ids);
-        self.* = undefined;
-    }
-};
-
-fn dmaUsedDevicesForTensors(
-    allocator: std.mem.Allocator,
-    platform: *const Platform,
-    tensors: []const *const Tensor,
-    shardings: []const Sharding,
-) !DmaUsedDevices {
-    const used = try allocator.alloc(bool, platform.devices.len);
-    defer allocator.free(used);
-    @memset(used, false);
-    for (tensors) |tensor| {
-        const shape = tensor.shape();
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse
-            platform.replicated_sharding;
-        const placement = try sharding.placement(shape);
-        const physical_bytes = placement.shape.byteSize();
-        if (physical_bytes == 0) continue;
-
-        const ordered_devices = sharding.devicesInCanonicalOrder();
-        for (ordered_devices) |device| {
-            const device_index: usize = @intCast(device.id);
-            if (device_index >= platform.devices.len) return error.DmaDeviceMismatch;
-            used[device_index] = true;
-        }
-    }
-    var count: usize = 0;
-    for (used) |is_used| if (is_used) {
-        count += 1;
-    };
-    const device_indices = try allocator.alloc(usize, count);
-    errdefer allocator.free(device_indices);
-    const device_ids = try allocator.alloc(u32, count);
-    var next: usize = 0;
-    for (used, 0..) |is_used, device_index| {
-        if (!is_used) continue;
-        device_indices[next] = device_index;
-        device_ids[next] = platform.devices[device_index].id();
-        next += 1;
-    }
-    return .{
-        .allocator = allocator,
-        .device_indices = device_indices,
-        .device_ids = device_ids,
-    };
 }
 
 fn resolveDmaNumaNodes(
@@ -7643,26 +6850,24 @@ fn benchmarkSyntheticDma(
     var session_active = true;
     defer if (session_active) session.deinit(&source_pools);
 
-    var tuned: std.ArrayListUnmanaged(TunedDmaDevice) = .empty;
-    defer tuned.deinit(allocator);
     var recommendations: std.ArrayListUnmanaged(DeviceDmaRecommendation) = .empty;
     errdefer recommendations.deinit(allocator);
-    for (used_devices.items, 0..) |device_index, used_index| {
-        const device = if (used_index == 0)
-            try tuneDmaBenchmarkDevice(
-                &session,
-                opts,
-                &source_pools,
-                device_index,
-            )
-        else
-            try prepareDmaBenchmarkDevice(
-                &session,
-                device_index,
-                tuned.items[0].recommendation,
-            );
-        try tuned.append(allocator, device);
-        try recommendations.append(allocator, device.recommendation);
+    const representative = try tuneDmaBenchmarkDevice(
+        &session,
+        opts,
+        &source_pools,
+        used_devices.items[0],
+    );
+    try recommendations.append(allocator, representative);
+    for (used_devices.items[1..]) |device_index| {
+        try recommendations.append(allocator, .{
+            .device_index = device_index,
+            .device_id = platform.devices[device_index].id(),
+            .dma_block_size = representative.dma_block_size,
+            .dma_parallelism = representative.dma_parallelism,
+            .measured_bytes_per_second = 0,
+            .average_latency_ns = 0,
+        });
     }
 
     const uniform_block_size = recommendations.items[0].dma_block_size;
@@ -7684,59 +6889,8 @@ fn benchmarkSyntheticDma(
         );
     }
 
-    if (tuned.items.len > 1) {
-        var aggregate_source_bytes: usize = 0;
-        for (recommendations.items) |recommendation| {
-            const lane_source_bytes = try std.math.mul(
-                usize,
-                recommendation.dma_block_size,
-                recommendation.dma_parallelism,
-            );
-            aggregate_source_bytes = try std.math.add(
-                usize,
-                aggregate_source_bytes,
-                lane_source_bytes,
-            );
-        }
-        if (aggregate_source_bytes > opts.max_mapped_bytes)
-            return error.DmaBenchmarkPinnedBudgetExceeded;
-        try source_pools.prepareAggregateSources(recommendations.items, opts.max_mapped_bytes);
-
-        const lanes = try allocator.alloc(ReusableDmaBenchmarkLane, tuned.items.len);
-        defer allocator.free(lanes);
-        for (tuned.items, lanes) |device, *lane| {
-            const lane_bytes = try std.math.mul(
-                usize,
-                device.recommendation.dma_block_size,
-                device.recommendation.dma_parallelism,
-            );
-            lane.* = .{
-                .cohort = device.cohort,
-                .source = source_pools.sourceForDevice(device.recommendation.device_index)[0..lane_bytes],
-                .parallelism = device.recommendation.dma_parallelism,
-            };
-        }
-
-        const aggregate_started_windows = session.windows;
-        const aggregate_metrics = try session.measure(
-            .aggregate,
-            lanes,
-            opts.duration_ns,
-            opts.minimum_transfers_per_device,
-            0,
-        );
-        defer allocator.free(aggregate_metrics);
-        const aggregate_windows = session.windows - aggregate_started_windows;
-        for (recommendations.items, aggregate_metrics) |*recommendation, metrics| {
-            recommendation.measured_bytes_per_second = metrics.bytesPerSecond();
-            recommendation.average_latency_ns = metrics.averageLatencyNs();
-            recommendation.windows += aggregate_windows;
-        }
-    }
-
     try source_pools.ensureLoadBlockReserves(
         uniform_block_size,
-        used_devices.items.len,
         calibrated_node_reserves,
     );
     const owned_devices = try recommendations.toOwnedSlice(allocator);
@@ -7861,17 +7015,6 @@ test "DMA benchmark completion target has no time cap" {
     try std.testing.expect(dmaBenchmarkWindowComplete(10, 10, 0, 0));
 }
 
-test "DMA benchmark synthetic distribution always transfers full blocks" {
-    const allocator = std.testing.allocator;
-    var distribution: DmaBenchmarkDistribution = try .init(allocator, 4);
-    defer distribution.deinit(allocator);
-    for (0..32) |index| try std.testing.expectEqual(
-        @as(usize, 4),
-        distribution.at(index),
-    );
-    try std.testing.expectEqual(@as(usize, 4), distribution.at(6));
-}
-
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
     const allocator = std.testing.allocator;
     var candidates = [_]DmaBenchmarkCandidate{
@@ -7992,33 +7135,6 @@ test "source bootstrap requires a high-latency source with no observed response"
     try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, true));
 }
 
-test "source profiles preserve adaptive read parallelism" {
-    const automatic = effectiveSourceReadParallelism(
-        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
-        false,
-    );
-    try std.testing.expect(automatic.isAdaptive());
-    try std.testing.expectEqual(@as(usize, 12), automatic.initial());
-    try std.testing.expectEqual(@as(usize, 128), automatic.maximum());
-
-    const capped = effectiveSourceReadParallelism(
-        .{ .adaptive = .{ .initial = 4, .maximum = 8 } },
-        false,
-    );
-    try std.testing.expect(capped.isAdaptive());
-    try std.testing.expectEqual(@as(usize, 4), capped.initial());
-    try std.testing.expectEqual(@as(usize, 8), capped.maximum());
-
-    const remote = effectiveSourceReadParallelism(
-        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
-        true,
-    );
-    try std.testing.expect(remote.isAdaptive());
-
-    const explicit = effectiveSourceReadParallelism(.{ .fixed = 7 }, false);
-    try std.testing.expectEqual(@as(usize, 7), explicit.initial());
-}
-
 test "source request size combines the VFS floor with DMA granularity" {
     try std.testing.expectEqual(
         @as(usize, 8 * 1024 * 1024),
@@ -8040,6 +7156,34 @@ test "source request size combines the VFS floor with DMA granularity" {
     try std.testing.expectError(
         error.InvalidLoadProfile,
         effectiveSourceRequestSize(max_load_read_request_size + 1, 8 * 1024 * 1024),
+    );
+}
+
+test "coalesced job block bound is independent of device count" {
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try maximumCoalescedJobBlocks(32 * 1024 * 1024, 16 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        try maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
+    );
+
+    const device_ids = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    const shared_numa = [_]?usize{null} ** device_ids.len;
+    const config: DmaLoadConfig = .{
+        .device_kind = "test",
+        .device_ids = &device_ids,
+        .device_numa_nodes = &shared_numa,
+        .block_size = 16 * 1024 * 1024,
+        .max_in_flight_per_device = 1,
+        .max_mapped_bytes = 1024 * 1024 * 1024,
+    };
+    // Eight device feed blocks dominate the two blocks required by a request.
+    // The obsolete writer-boundary formula incorrectly required nine blocks.
+    try std.testing.expectEqual(
+        @as(usize, 8 * 16 * 1024 * 1024),
+        try requiredDmaWorkspaceBytes(config),
     );
 }
 
@@ -8157,25 +7301,16 @@ test "adaptive request gate reductions drain without cancelling active requests"
     try std.testing.expectEqual(@as(usize, 0), gate.inUse(io));
 }
 
-test "adaptive worker gate enables stable workers only as the limit grows" {
-    const io = std.testing.io;
-    var gate: AdaptiveRequestGate = .init(1);
-    try std.testing.expect(gate.waitUntilEnabled(io, 0));
+test "settled backoff waits for a new-generation admission" {
+    var next_admission: std.atomic.Value(u64) = .init(41);
+    var runtime: SourceReadRuntime = undefined;
+    runtime.next_read_admission = &next_admission;
+    runtime.backoff_admission_start = 41;
 
-    var enabled: std.Io.Event = .unset;
-    var group: std.Io.Group = .init;
-    try group.concurrent(io, struct {
-        fn run(gate_: *AdaptiveRequestGate, io_: std.Io, enabled_: *std.Io.Event) void {
-            if (!gate_.waitUntilEnabled(io_, 1)) return;
-            enabled_.set(io_);
-        }
-    }.run, .{ &gate, io, &enabled });
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!enabled.isSet());
-
-    gate.setLimit(io, 2);
-    try group.await(io);
-    try std.testing.expect(enabled.isSet());
+    try std.testing.expect(!runtime.backoffReady());
+    next_admission.store(42, .release);
+    try std.testing.expect(runtime.backoffReady());
+    try std.testing.expect(runtime.backoffReady());
 }
 
 test "vectored final transfers wait for every prior destination submission" {
@@ -8228,7 +7363,6 @@ test "late vectored callback failure drains and signals completion" {
         .io = io,
         .platform = undefined,
         .pool = undefined,
-        .worker_gate = undefined,
         .read_gate = undefined,
         .request_gate = undefined,
         .block_size = 1,
@@ -8282,7 +7416,7 @@ fn buildMesh2x2x2(
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
-const VectoredRequestPlanTest = struct {
+const DispatchSpansTest = struct {
     const Scenario = struct {
         name: []const u8,
         device_count: u32,
@@ -8352,64 +7486,35 @@ const VectoredRequestPlanTest = struct {
             reverse_index -= 1;
             const source_offset = reverse_index * request_size;
             const request_len = @min(request_size, source.len - source_offset);
-            const plan: VectoredRequestPlan = try .init(allocator, dispatch_spans, source_offset, request_len, block_size);
-            defer plan.deinit(allocator);
-
-            const block_storage = try allocator.alloc(u8, plan.blocks.len * block_size);
-            defer allocator.free(block_storage);
-            @memset(block_storage, 0);
-
-            var source_cursor = source_offset;
-            for (plan.segments) |segment| {
-                try std.testing.expect(segment.block_index < plan.blocks.len);
-                try std.testing.expect(segment.block_offset + segment.len <= block_size);
-                const destination = block_storage[segment.block_index * block_size + segment.block_offset ..][0..segment.len];
-                @memcpy(destination, source[source_cursor..][0..segment.len]);
-                source_cursor += segment.len;
-            }
-            try std.testing.expectEqual(source_offset + request_len, source_cursor);
-
-            for (plan.blocks, 0..) |block, block_index| {
-                try std.testing.expect(block.len > 0 and block.len <= block_size);
-                var mask = block.writer_mask;
+            const request_end = source_offset + request_len;
+            var cursor = source_offset;
+            var span_index = dispatch_spans.spanIndexAt(cursor).?;
+            while (cursor < request_end) {
+                const span = dispatch_spans.spans[span_index];
+                const request_relative = cursor - source_offset;
+                const block_remaining = block_size - request_relative % block_size;
+                const take = @min(@min(request_end - cursor, span.end - cursor), block_remaining);
+                const destination_offset = span.writer_offset + cursor - span.start;
+                var mask = dispatch_spans.writerMask(span);
                 while (mask != 0) {
                     const writer_index: usize = @intCast(@ctz(mask));
                     mask &= mask - 1;
-                    try std.testing.expect(block.destination_offset + block.len <= writer_size);
+                    try std.testing.expect(destination_offset + take <= writer_size);
                     @memcpy(
-                        actual[writer_index * writer_size + block.destination_offset ..][0..block.len],
-                        block_storage[block_index * block_size ..][0..block.len],
+                        actual[writer_index * writer_size + destination_offset ..][0..take],
+                        source[cursor..][0..take],
                     );
                 }
+                cursor += take;
+                if (cursor == span.end) span_index += 1;
             }
         }
         try std.testing.expectEqualSlices(u8, expected, actual);
     }
 };
 
-test "vectored request planner validates empty and invalid ranges" {
-    const spans = [_]DispatchSpans.DispatchSpan{.{
-        .start = 0,
-        .end = 16,
-        .writer_offset = 0,
-        .primary_writer = 0,
-        .mirror_writer_start = 0,
-        .mirror_writer_len = 0,
-    }};
-    const dispatch: DispatchSpans = .{ .spans = @constCast(&spans), .mirror_writers = &.{} };
-
-    const empty: VectoredRequestPlan = try .init(std.testing.allocator, dispatch, 16, 0, 4);
-    defer empty.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), empty.blocks.len);
-    try std.testing.expectEqual(@as(usize, 0), empty.segments.len);
-    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, 17, 0, 4));
-    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, 15, 2, 4));
-    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, std.math.maxInt(usize), 2, 4));
-    try std.testing.expectError(error.InvalidBlockSize, VectoredRequestPlan.init(std.testing.allocator, dispatch, 0, 1, 0));
-}
-
-test "vectored request planner handles replication and block/request boundaries" {
-    try VectoredRequestPlanTest.run(.{
+test "dispatch spans handle replication and block/request boundaries" {
+    try DispatchSpansTest.run(.{
         .name = "replicated_boundaries",
         .device_count = 4,
         .shape = Shape.init(.{ .rows = 9, .cols = 257 }, .f32)
@@ -8421,12 +7526,12 @@ test "vectored request planner handles replication and block/request boundaries"
     });
 }
 
-test "vectored request planner dispatches packed sub-byte storage" {
+test "dispatch spans handle packed sub-byte storage" {
     const logical = Shape.init(.{ .rows = 9, .cols = 256 }, .u2)
         .withPartitioning(.{ .rows = .replicated, .cols = .replicated });
     const packed_shape = logical.packedShape();
     try std.testing.expectEqual(@as(usize, logical.byteSize()), packed_shape.byteSize());
-    try VectoredRequestPlanTest.run(.{
+    try DispatchSpansTest.run(.{
         .name = "packed_u2",
         .device_count = 4,
         .shape = packed_shape,
@@ -8437,8 +7542,8 @@ test "vectored request planner dispatches packed sub-byte storage" {
     });
 }
 
-test "vectored request planner handles 1D mirrored and folded sharding" {
-    try VectoredRequestPlanTest.run(.{
+test "dispatch spans handle 1D mirrored and folded sharding" {
+    try DispatchSpansTest.run(.{
         .name = "mirrored_1d",
         .device_count = 4,
         .physical_mesh = .{ .custom = buildMesh2x2 },
@@ -8449,7 +7554,7 @@ test "vectored request planner handles 1D mirrored and folded sharding" {
         .request_size = 2053,
         .block_size = 509,
     });
-    try VectoredRequestPlanTest.run(.{
+    try DispatchSpansTest.run(.{
         .name = "folded_1d",
         .device_count = 4,
         .physical_mesh = .{ .custom = buildMesh2x2 },
@@ -8465,8 +7570,8 @@ test "vectored request planner handles 1D mirrored and folded sharding" {
     });
 }
 
-test "vectored request planner handles 2D and 3D sharding" {
-    try VectoredRequestPlanTest.run(.{
+test "dispatch spans handle 2D and 3D sharding" {
+    try DispatchSpansTest.run(.{
         .name = "batch_model_2d",
         .device_count = 4,
         .physical_mesh = .{ .custom = buildMesh2x2 },
@@ -8477,7 +7582,7 @@ test "vectored request planner handles 2D and 3D sharding" {
         .request_size = 4093,
         .block_size = 1021,
     });
-    try VectoredRequestPlanTest.run(.{
+    try DispatchSpansTest.run(.{
         .name = "folded_model_3d",
         .device_count = 8,
         .physical_mesh = .{ .custom = buildMesh2x2x2 },
