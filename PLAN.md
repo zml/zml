@@ -22,7 +22,7 @@ migrated yet.
 - [x] 2. Make the lifecycle gate the epoch-completion mechanism.
 - [x] 3. Simplify adaptive-runtime and probe-state representation.
 - [x] 4. Specialize DMA calibration for its single measured lane.
-- [ ] 5. Remove redundant platform/device identity state.
+- [x] 5. Remove redundant platform/device identity state.
 - [ ] 6. Make `DmaBlockPool` provider-only and simplify block leases.
 - [ ] 7. Unify loader request preparation and exact positional scatter.
 - [ ] 8. Split the loader implementation into focused modules.
@@ -143,6 +143,15 @@ pass.
   identity, and heterogeneous-device rejection.
 
 Validation: settings validation and platform-focused tests.
+
+Result: platform-owned DMA settings no longer duplicate device kind or ID
+arrays, sort them back into platform order, or validate each load against that
+copy. Configuration owns only platform-order NUMA nodes and transfer/workspace
+parameters; the stable `Platform` pointer is the identity. One shared platform
+validator retains nonempty, at-most-64, homogeneous-device checks. Default and
+calibrated setup now resolve topology directly for all platform devices, which
+also removes temporary index/ID arrays and a second NUMA copy. The
+loader-inclusive ZML suite and focused builds pass.
 
 ### 6. Provider-only DMA pool
 

@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 4, on detached commit
-`c3e8d1d2` plus the current Task 4 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 5, on detached commit
+`da34becc` plus the current Task 5 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -187,6 +187,11 @@ simplification pass.
   arenas are retained as the loader's initial pool. Platform state prevents
   calibration, loading, inspection, and teardown from borrowing the workspace
   concurrently.
+- DMA configuration does not copy platform identity. It owns NUMA nodes in
+  platform order plus block size, per-device width, and mapped budget; the
+  stable `Platform` pointer is authoritative for device IDs and kind. Both
+  default and calibrated settings reject empty, oversized, or heterogeneous
+  platforms before allocating workspace.
 - Current detector screens DMA blocks 2/4/8/16/32 MiB at width eight. Default
   screens require at least 2 ms and 32 completions. Borderline results use
   three alternating pairs at 25 ms/256 transfers. The 8% near-peak rule favors

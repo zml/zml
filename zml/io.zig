@@ -3538,8 +3538,6 @@ const DeviceDmaRecommendation = struct {
 /// Immutable DMA settings shared by every device participating in one load.
 /// The slices are owned by the enclosing platform settings.
 const DmaLoadConfig = struct {
-    device_kind: []const u8,
-    device_ids: []const u32,
     device_numa_nodes: []const ?usize,
     block_size: usize,
     max_in_flight_per_device: usize,
@@ -3555,7 +3553,7 @@ fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
     if (config.device_numa_nodes[0] == null) {
         const feed_blocks = std.math.mul(
             usize,
-            config.device_ids.len,
+            config.device_numa_nodes.len,
             config.max_in_flight_per_device,
         ) catch return error.InvalidDmaLoadConfig;
         required_blocks = @max(feed_blocks, maximum_request_blocks);
@@ -3591,9 +3589,7 @@ fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
 }
 
 fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
-    if (config.device_kind.len == 0 or config.device_ids.len == 0 or
-        config.device_ids.len > 64 or
-        config.device_ids.len != config.device_numa_nodes.len or
+    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > 64 or
         config.block_size == 0 or config.max_in_flight_per_device == 0 or
         config.max_in_flight_per_device > max_load_dma_parallelism or
         config.block_size > max_load_read_request_size or
@@ -3613,23 +3609,12 @@ fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
         return error.DmaBenchmarkNumaUnsupported;
     if (try requiredDmaWorkspaceBytes(config) > config.max_mapped_bytes)
         return error.InvalidDmaLoadConfig;
-    for (config.device_ids, 0..) |id, index| {
-        for (config.device_ids[0..index]) |previous| {
-            if (id == previous) return error.InvalidDmaLoadConfig;
-        }
-    }
 }
 
 fn dupeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) !DmaLoadConfig {
     try validateDmaLoadConfig(config);
-    const kind = try allocator.dupe(u8, config.device_kind);
-    errdefer allocator.free(kind);
-    const ids = try allocator.dupe(u32, config.device_ids);
-    errdefer allocator.free(ids);
     const nodes = try allocator.dupe(?usize, config.device_numa_nodes);
     return .{
-        .device_kind = kind,
-        .device_ids = ids,
         .device_numa_nodes = nodes,
         .block_size = config.block_size,
         .max_in_flight_per_device = config.max_in_flight_per_device,
@@ -3638,15 +3623,11 @@ fn dupeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) !DmaLo
 }
 
 fn freeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) void {
-    allocator.free(config.device_kind);
-    allocator.free(config.device_ids);
     allocator.free(config.device_numa_nodes);
 }
 
 test "DMA load config validates uniform caps, topology, and workspace budget" {
     const valid: DmaLoadConfig = .{
-        .device_kind = "test",
-        .device_ids = &.{ 11, 12 },
         .device_numa_nodes = &.{ null, null },
         .block_size = 4 * 1024 * 1024,
         .max_in_flight_per_device = 8,
@@ -3655,9 +3636,6 @@ test "DMA load config validates uniform caps, topology, and workspace budget" {
     try validateDmaLoadConfig(valid);
 
     var invalid = valid;
-    invalid.device_ids = &.{ 11, 11 };
-    try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
-    invalid = valid;
     invalid.device_numa_nodes = &.{ 0, null };
     try std.testing.expectError(error.InvalidDmaLoadConfig, validateDmaLoadConfig(invalid));
     invalid = valid;
@@ -3683,48 +3661,16 @@ const DmaPlatformSettings = struct {
         calibrated: bool,
     ) !DmaPlatformSettings {
         try validateDmaLoadConfig(config);
-        const canonical_ids = try allocator.alloc(u32, config.device_ids.len);
-        defer allocator.free(canonical_ids);
-        const canonical_nodes = try allocator.alloc(?usize, config.device_numa_nodes.len);
-        defer allocator.free(canonical_nodes);
-        var canonical_len: usize = 0;
-        for (platform.devices) |device| {
-            const input_index = for (config.device_ids, 0..) |device_id, index| {
-                if (device.id() == device_id) break index;
-            } else continue;
-            if (!std.mem.eql(u8, device.kind(), config.device_kind))
-                return error.DmaDeviceKindMismatch;
-            canonical_ids[canonical_len] = config.device_ids[input_index];
-            canonical_nodes[canonical_len] = config.device_numa_nodes[input_index];
-            canonical_len += 1;
-        }
-        if (canonical_len != config.device_ids.len) return error.DmaDeviceMismatch;
-        const canonical_config: DmaLoadConfig = .{
-            .device_kind = config.device_kind,
-            .device_ids = canonical_ids,
-            .device_numa_nodes = canonical_nodes,
-            .block_size = config.block_size,
-            .max_in_flight_per_device = config.max_in_flight_per_device,
-            .max_mapped_bytes = config.max_mapped_bytes,
-        };
-        const owned_config = try dupeDmaLoadConfig(allocator, canonical_config);
+        try validateDmaPlatform(platform);
+        if (config.device_numa_nodes.len != platform.devices.len)
+            return error.DmaDeviceMismatch;
+        const owned_config = try dupeDmaLoadConfig(allocator, config);
         errdefer freeDmaLoadConfig(allocator, owned_config);
-        const full_nodes = try allocator.alloc(?usize, platform.devices.len);
-        defer allocator.free(full_nodes);
-        @memset(full_nodes, null);
-        for (owned_config.device_ids, owned_config.device_numa_nodes) |device_id, node| {
-            const device_index = for (platform.devices, 0..) |device, index| {
-                if (device.id() == device_id) break index;
-            } else return error.DmaDeviceMismatch;
-            if (!std.mem.eql(u8, platform.devices[device_index].kind(), owned_config.device_kind))
-                return error.DmaDeviceKindMismatch;
-            full_nodes[device_index] = node;
-        }
         var workspace = try DmaBenchmarkSourcePools.init(
             allocator,
             io,
             platform,
-            full_nodes,
+            owned_config.device_numa_nodes,
             owned_config.max_mapped_bytes,
         );
         errdefer workspace.deinit();
@@ -3743,6 +3689,10 @@ const DmaPlatformSettings = struct {
         config: DmaLoadConfig,
         workspace: DmaBenchmarkSourcePools,
     ) !DmaPlatformSettings {
+        try validateDmaLoadConfig(config);
+        try validateDmaPlatform(platform);
+        if (config.device_numa_nodes.len != platform.devices.len)
+            return error.DmaDeviceMismatch;
         const owned_config = try dupeDmaLoadConfig(allocator, config);
         return .{
             .config = owned_config,
@@ -3753,23 +3703,11 @@ const DmaPlatformSettings = struct {
         };
     }
 
-    fn validateLoad(
-        self: *DmaPlatformSettings,
-        platform: *const Platform,
-        device_ids: []const u32,
-    ) !void {
+    fn validateLoad(self: *DmaPlatformSettings, platform: *const Platform) !void {
         try validateDmaLoadConfig(self.config);
         if (platform != self.platform) return error.DmaPlatformMismatch;
-        for (device_ids) |device_id| {
-            const device = for (platform.devices) |device| {
-                if (device.id() == device_id) break device;
-            } else return error.DmaDeviceMismatch;
-            for (self.config.device_ids) |configured_id| {
-                if (configured_id == device_id) break;
-            } else return error.DmaDeviceMismatch;
-            if (!std.mem.eql(u8, device.kind(), self.config.device_kind))
-                return error.DmaDeviceKindMismatch;
-        }
+        if (self.config.device_numa_nodes.len != platform.devices.len)
+            return error.DmaDeviceMismatch;
         if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
     }
@@ -3811,6 +3749,16 @@ fn isDirectTransferPlatform(platform: *const Platform) bool {
         platform.target == .oneapi;
 }
 
+fn validateDmaPlatform(platform: *const Platform) !void {
+    if (platform.devices.len == 0 or platform.devices.len > 64)
+        return error.DmaDeviceMismatch;
+    const device_kind = platform.devices[0].kind();
+    for (platform.devices[1..]) |device| {
+        if (!std.mem.eql(u8, device_kind, device.kind()))
+            return error.HeterogeneousDmaUnsupported;
+    }
+}
+
 fn dmaSettingsFromOpaque(ptr: *anyopaque) *DmaPlatformSettings {
     return @ptrCast(@alignCast(ptr));
 }
@@ -3844,26 +3792,11 @@ pub fn initPlatformDma(
     defaults: platform_mod.TransferConfig,
 ) !void {
     if (!isDirectTransferPlatform(platform)) return;
-    if (platform.devices.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
+    try validateDmaPlatform(platform);
 
-    const device_kind = platform.devices[0].kind();
-    for (platform.devices[1..]) |device| {
-        if (!std.mem.eql(u8, device_kind, device.kind()))
-            return error.HeterogeneousDmaUnsupported;
-    }
-
-    const device_indices = try allocator.alloc(usize, platform.devices.len);
-    defer allocator.free(device_indices);
-    const device_ids = try allocator.alloc(u32, platform.devices.len);
-    defer allocator.free(device_ids);
-    for (device_indices, device_ids, 0..) |*device_index, *device_id, index| {
-        device_index.* = index;
-        device_id.* = platform.devices[index].id();
-    }
     const numa_nodes = try resolveDmaNumaNodes(
         allocator,
         platform,
-        device_indices,
         defaults.device_numa_nodes,
     );
     defer allocator.free(numa_nodes);
@@ -3873,8 +3806,6 @@ pub fn initPlatformDma(
         io,
         platform,
         .{
-            .device_kind = device_kind,
-            .device_ids = device_ids,
             .device_numa_nodes = numa_nodes,
             .block_size = defaults.block_size,
             .max_in_flight_per_device = defaults.max_in_flight_per_device,
@@ -3918,7 +3849,6 @@ pub fn deinitPlatformDma(platform: *Platform) void {
 
 fn acquirePlatformDmaSettings(
     platform: *const Platform,
-    device_ids: []const u32,
 ) !*DmaPlatformSettings {
     try beginPlatformDmaOperation(platform, dma_platform_loading);
     errdefer endPlatformDmaOperation(platform, dma_platform_loading);
@@ -3926,7 +3856,7 @@ fn acquirePlatformDmaSettings(
     const raw = mutable._dma.settings.load(.acquire) orelse
         return error.DmaResourcesRequired;
     const settings = dmaSettingsFromOpaque(raw);
-    try settings.validateLoad(platform, device_ids);
+    try settings.validateLoad(platform);
     return settings;
 }
 
@@ -5296,10 +5226,7 @@ const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        const device_ids = try allocator.alloc(u32, platform.devices.len);
-        defer allocator.free(device_ids);
-        for (platform.devices, device_ids) |device, *device_id| device_id.* = device.id();
-        const resources = try acquirePlatformDmaSettings(platform, device_ids);
+        const resources = try acquirePlatformDmaSettings(platform);
         errdefer releasePlatformDmaSettings(platform);
         const config = resources.config;
         if (config.block_size > max_load_read_request_size or
@@ -6126,7 +6053,6 @@ fn tuneDmaBenchmarkDevice(
 fn warmupDmaBenchmarkDeviceAllocators(
     io: std.Io,
     platform: *const Platform,
-    used_device_indices: []const usize,
 ) !void {
     const Worker = struct {
         platform: *const Platform,
@@ -6150,7 +6076,7 @@ fn warmupDmaBenchmarkDeviceAllocators(
     };
     var first_error: std.atomic.Value(u16) = .init(0);
     var group: std.Io.Group = .init;
-    for (used_device_indices) |device_index| try group.concurrent(io, Worker.run, .{Worker{
+    for (platform.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
         .platform = platform,
         .device_index = device_index,
         .first_error = &first_error,
@@ -6163,7 +6089,6 @@ fn warmupDmaBenchmarkDeviceAllocators(
 fn resolveDmaNumaNodes(
     allocator: std.mem.Allocator,
     platform: *const Platform,
-    used_device_indices: []const usize,
     override: []const usize,
 ) ![]?usize {
     const result = try allocator.alloc(?usize, platform.devices.len);
@@ -6175,11 +6100,11 @@ fn resolveDmaNumaNodes(
             if (node >= DmaBenchmarkNumaAllocator.max_nodes)
                 return error.InvalidDmaBenchmarkOptions;
         }
-        for (used_device_indices) |device_index| result[device_index] = override[device_index];
+        for (override, result) |node, *stored| stored.* = node;
         return result;
     }
 
-    for (used_device_indices) |device_index| {
+    for (platform.devices, 0..) |_, device_index| {
         const node = platform.devices[device_index].numaNode() orelse {
             @memset(result, null);
             return result;
@@ -6233,30 +6158,20 @@ fn benchmarkSyntheticDma(
         }
     }
 
-    const device_indices = try allocator.alloc(usize, platform.devices.len);
-    defer allocator.free(device_indices);
-    const platform_device_ids = try allocator.alloc(u32, platform.devices.len);
-    defer allocator.free(platform_device_ids);
-    for (device_indices, platform_device_ids, 0..) |*stored_index, *device_id, device_index| {
-        stored_index.* = device_index;
-        device_id.* = platform.devices[device_index].id();
-    }
-
     const representative_kind = platform.devices[0].kind();
-    for (device_indices[1..]) |device_index| {
-        if (!std.mem.eql(u8, representative_kind, platform.devices[device_index].kind()))
+    for (platform.devices[1..]) |device| {
+        if (!std.mem.eql(u8, representative_kind, device.kind()))
             return error.HeterogeneousDmaUnsupported;
     }
     const resolved_numa_nodes = try resolveDmaNumaNodes(
         allocator,
         platform,
-        device_indices,
         opts.device_numa_nodes,
     );
     defer allocator.free(resolved_numa_nodes);
 
     const device_warmup_started = std.Io.Timestamp.now(io, .awake);
-    try warmupDmaBenchmarkDeviceAllocators(io, platform, device_indices);
+    try warmupDmaBenchmarkDeviceAllocators(io, platform);
     const device_allocator_warmup_ns: u64 = @intCast(@max(
         device_warmup_started.untilNow(io, .awake).nanoseconds,
         0,
@@ -6300,15 +6215,10 @@ fn benchmarkSyntheticDma(
 
     const uniform_block_size = representative.dma_block_size;
     const uniform_parallelism = representative.dma_parallelism;
-    const config_numa_nodes = try allocator.alloc(?usize, device_indices.len);
-    defer allocator.free(config_numa_nodes);
-    for (device_indices, config_numa_nodes) |device_index, *node| {
-        node.* = resolved_numa_nodes[device_index];
-    }
     const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
     defer allocator.free(calibrated_node_reserves);
     @memset(calibrated_node_reserves, 0);
-    for (device_indices) |device_index| {
+    for (platform.devices, 0..) |_, device_index| {
         const pool_index = source_pools.device_pool_indices[device_index];
         calibrated_node_reserves[pool_index] = try std.math.add(
             usize,
@@ -6327,9 +6237,7 @@ fn benchmarkSyntheticDma(
         allocator,
         platform,
         .{
-            .device_kind = representative_kind,
-            .device_ids = platform_device_ids,
-            .device_numa_nodes = config_numa_nodes,
+            .device_numa_nodes = resolved_numa_nodes,
             .block_size = uniform_block_size,
             .max_in_flight_per_device = uniform_parallelism,
             .max_mapped_bytes = opts.max_mapped_bytes,
@@ -6592,11 +6500,8 @@ test "coalesced job block bound is independent of device count" {
         try maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
     );
 
-    const device_ids = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    const shared_numa = [_]?usize{null} ** device_ids.len;
+    const shared_numa = [_]?usize{null} ** 8;
     const config: DmaLoadConfig = .{
-        .device_kind = "test",
-        .device_ids = &device_ids,
         .device_numa_nodes = &shared_numa,
         .block_size = 16 * 1024 * 1024,
         .max_in_flight_per_device = 1,
