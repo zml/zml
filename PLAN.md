@@ -18,7 +18,7 @@ migrated yet.
 ## Second-pass status
 
 - [x] 0. Record the second-pass plan and refresh the `CTX.md` baseline.
-- [ ] 1. Flatten epoch plans and remove dead pipeline state.
+- [x] 1. Flatten epoch plans and remove dead pipeline state.
 - [ ] 2. Make the lifecycle gate the epoch-completion mechanism.
 - [ ] 3. Simplify adaptive-runtime and probe-state representation.
 - [ ] 4. Specialize DMA calibration for its single measured lane.
@@ -55,6 +55,18 @@ also require public adaptive/fixed read parallelism and DMA benchmark options.
 - Make a DMA lease completion report whether it released the final reference.
 
 Validation: planner/fairness/failure tests and the focused build/test set.
+
+Result: the published epoch now owns jobs physically arranged in final fair
+order; planning-only predecessors and the separate order array are discarded.
+The source-byte total is scalar and remaining adaptive work is derived directly
+from the atomic cursor because every coalesced production job is sampleable.
+Removed production-dead tensor IDs, optional source slots, suffix arrays,
+per-batch maximum-block metadata, peak-DMA state, the unused DMA-done event,
+ready-transfer tensor pointers, and assertion-only pending-submission counts.
+`DmaBlockPool.Lease.complete` now reports the final reference, removing a
+second completion atomic. Per-device queues use unordered removal. The full
+loader-inclusive 233-test suite passes with CUDA dependencies and CPU runtime;
+the IO playground builds and VFS/stdx tests pass.
 
 ### 2. Lifecycle completion
 

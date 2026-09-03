@@ -5,8 +5,9 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 at second-pass plan Task 0, on detached commit
-`5809e9ce`. `PLAN.md` is the sequential implementation checklist; this file is
+Last consolidated: 2026-09-03 after second-pass plan Task 1, on detached commit
+`4fc79885` plus the current Task 1 work. `PLAN.md` is the sequential
+implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -79,13 +80,14 @@ per-device physical-byte charges and same-file predecessors to compute a
 deterministic fair, predecessor-safe job order, then discards the temporary
 queues and charges. While those spans are available, the planner also emits
 the final item, block index/offset, writer mask, destination offset, and length
-records. The published plan owns source jobs, their final transfer records, the
-fair order, and remaining-byte/job suffixes; runtime tensor state does not own
-another dispatch plan. Physical source bytes are distinct from logical tensor
+records. The published plan owns source jobs physically arranged in final fair
+order and their final transfer records; runtime tensor state does not own
+another dispatch plan. Planning-only predecessors, order indirection, and
+remaining-work suffix arrays are discarded. Physical source bytes are distinct from logical tensor
 bytes so duplication and replication do not distort diagnostics or fairness.
 Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
-before the fair-order/final-record changes; remeasure after the remaining
-  second simplification pass.
+before the fair-order/final-record changes; remeasure after the second
+simplification pass.
 
 ### Pinned blocks, scattering, and ownership
 
@@ -95,8 +97,9 @@ before the fair-order/final-record changes; remeasure after the remaining
   publishes the records to existing per-tensor PJRT transfer managers.
   Compatible adjacent records were already merged during planning; workers do
   not traverse sharding spans or rebuild/split a transfer list.
-- The same pinned block may feed several tensor transfers. It is reference
-  counted across every consuming PJRT event and released only after all child
+- The same pinned block may feed several tensor transfers. One atomic lease is
+  counted across every consuming PJRT event; its final completion both releases
+  the block and completes the parent request. It is released only after all child
   transfers finish or are abandoned. Source/allocation/enqueue/PJRT failures
   close scheduling, fail unfinished buffers, drain the epoch, and release each
   reference exactly once.
@@ -116,11 +119,13 @@ before the fair-order/final-record changes; remeasure after the remaining
 
 ### Scheduling and concurrency
 
-- Planning charges a coalesced job's physical bytes to every destination
-  device and simulates the fairness policy once. Runtime claims are a single
-  atomic cursor into that immutable order; there are no live device queues,
-  debt counters, claimed bitmap, or claim mutex. Same-file predecessor order
-  and per-target submitted-prefix accounting preserve ordering while unrelated
+- Planning charges a coalesced job's physical bytes to every destination device
+  and simulates the fairness policy once. It publishes jobs directly in that
+  immutable order, and runtime claims are a single atomic cursor. Remaining
+  sampleable work is the number of jobs after the cursor. There are no live
+  device queues, debt counters, claimed bitmap, claim mutex, runtime order
+  indirection, or suffix-metadata arrays. Same-file predecessor order and
+  per-target submitted-prefix accounting preserve ordering while unrelated
   reads and DMA complete out of order.
 - Persistent direct-loader workers rendezvous in their idle wait before the
   drained epoch plan is freed. They remain alive for the next sequential

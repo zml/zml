@@ -277,10 +277,12 @@ pub const DmaBlockPool = struct {
             return .{ .pool = pool, .io = io, .data = data, .remaining = .init(references) };
         }
 
-        pub fn complete(self: *Lease) void {
+        /// Completes one reference and returns whether this was the final one.
+        pub fn complete(self: *Lease) bool {
             const previous = self.remaining.fetchSub(1, .acq_rel);
             std.debug.assert(previous > 0);
             if (previous == 1) self.pool.release(self.io, self.data);
+            return previous == 1;
         }
 
         pub fn isComplete(self: *const Lease) bool {
@@ -1225,7 +1227,7 @@ test "DmaBlockPool lease returns a replicated block after out-of-order callbacks
         try group.concurrent(io, struct {
             fn run(lease_: *DmaBlockPool.Lease, io_: std.Io, delay_ms_: i64) void {
                 io_.sleep(.fromMilliseconds(delay_ms_), .awake) catch unreachable;
-                lease_.complete();
+                _ = lease_.complete();
             }
         }.run, .{ &lease, io, delay_ms });
     }
