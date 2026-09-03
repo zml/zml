@@ -5,9 +5,9 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 8, on detached commit
-`e2b8ad77` plus the current Task 8 work. `PLAN.md` is the sequential
-implementation checklist; this file is
+Last consolidated: 2026-09-03 after completed second-pass plan Task 9, on
+detached commit `e640efae` plus the current Task 9 documentation. `PLAN.md` is
+the sequential implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -474,8 +474,9 @@ same-host medians.
   reuse, failure cleanup, and epoch reuse tests passed. A real public-loader
   test also covers `loadExecute -> loadExecute -> load -> await`, output
   readiness, active-epoch rejection, and cumulative byte accounting.
-- `zig fmt --check zml/io.zig zml/safetensors.zig` passed with the repository's
-  Bazel-managed Zig toolchain.
+- Zig formatting passes for `zml/io.zig`, every `zml/io/*.zig` module,
+  `zml/mem.zig`, and `zml/safetensors.zig` with the repository's Bazel-managed
+  toolchain. Buildifier check mode passes for `zml/BUILD.bazel`.
 - `bazel build //examples/io:playground`, `bazel test //vfs:test`, and
   `bazel test //stdx:test` passed.
 - `bazel test //zml:test --@zml//platforms:cuda=true
@@ -491,12 +492,10 @@ same-host medians.
 
 ## Open work
 
-The first simplification pass is complete. The active second pass in `PLAN.md`
-has removed remaining planning/runtime genericity, consolidated epoch
-completion, specialized representative-device calibration, narrowed the DMA
-pool, shared loader-front-end preparation, and split the former monolithic IO
-module by responsibility. Only final validation and documentation
-reconciliation remain.
+Both simplification passes in `PLAN.md` are complete. They removed remaining
+planning/runtime genericity, consolidated epoch completion, specialized
+representative-device calibration, narrowed the DMA pool, shared loader-front-
+end preparation, and split the former monolithic IO module by responsibility.
 Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below

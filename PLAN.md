@@ -26,7 +26,7 @@ migrated yet.
 - [x] 6. Make `DmaBlockPool` provider-only and simplify block leases.
 - [x] 7. Unify loader request preparation and exact positional scatter.
 - [x] 8. Split the loader implementation into focused modules.
-- [ ] 9. Run final validation and reconcile all documentation.
+- [x] 9. Run final validation and reconcile all documentation.
 
 ## Second-pass task details
 
@@ -224,6 +224,16 @@ loader-inclusive 235-test ZML suite, IO playground build, and VFS/stdx tests.
 Run formatting, the IO playground build, VFS/stdx tests, and the loader-inclusive
 ZML suite with the platform flags needed to avoid the unrelated missing
 FlashInfer module. Record any independent default-configuration blocker.
+
+Result: Zig formatting and Buildifier checks pass. `//examples/io:playground`
+builds, and `//zml:test`, `//vfs:test`, and `//stdx:test` all pass with CUDA
+dependencies enabled and CPU runtime selected; the ZML suite contains 235
+tests. The adjacent monorepo still has the previously audited older loader
+calls and remains intentionally unmigrated. A plain `bazel test //zml:test`
+was rechecked and still fails before loader coverage because
+`zml/moe/cutlass_flashinfer.zig` imports the unavailable
+`platforms/cuda/flashinfer_cutlass_moe` module. This is independent of the IO
+changes. The second simplification pass is complete.
 
 ## Status
 
