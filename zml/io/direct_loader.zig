@@ -28,6 +28,7 @@ const max_load_read_parallelism = load_limits.max_read_parallelism;
 const max_load_read_request_size = load_limits.max_read_request_size;
 const max_load_positional_iovecs = load_limits.max_positional_iovecs;
 const maximumCoalescedJobBlocks = load_limits.maximumCoalescedJobBlocks;
+const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 const DmaLoadConfig = dma.DmaLoadConfig;
 const DmaPlatformSettings = dma.DmaPlatformSettings;
 const requiredDmaWorkspaceBytes = dma.requiredDmaWorkspaceBytes;
@@ -40,14 +41,6 @@ pub const LoadSpec = struct {
     sharding: Sharding,
     output: *Buffer,
 };
-
-fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) !usize {
-    if (read_chunk_size == 0 or read_chunk_size > max_load_read_request_size)
-        return error.InvalidLoadProfile;
-    const selected = @max(read_chunk_size, dma_block_size);
-    if (selected > max_load_read_request_size) return error.InvalidLoadProfile;
-    return selected;
-}
 
 const VectoredLoadMetrics = struct {
     read_operations: std.atomic.Value(u64) = .init(0),
@@ -173,7 +166,6 @@ const VectoredTensorTransfer = struct {
     allocator: std.mem.Allocator,
     platform: *const Platform,
     targets: []Target,
-    total: usize,
     completed_read_bytes: std.atomic.Value(usize) = .init(0),
     progress: ?std.Progress.Node = null,
 
@@ -230,7 +222,6 @@ const VectoredTensorTransfer = struct {
             .allocator = allocator,
             .platform = platform,
             .targets = targets,
-            .total = packed_shape.byteSize(),
             .progress = progress,
         };
     }
@@ -249,99 +240,98 @@ const VectoredTensorTransfer = struct {
     }
 };
 
-const LoaderSourceSlot = struct {
-    const uninitialized = 0;
-    const initializing = 1;
-    const ready = 2;
-    const failed = 3;
-
-    uri: []const u8,
-    file: std.Io.File = undefined,
-    status: std.atomic.Value(u8) = .init(uninitialized),
-    error_code: std.atomic.Value(u16) = .init(0),
-    initialized: std.Io.Event = .unset,
-
-    fn ensure(self: *LoaderSourceSlot, io: std.Io) !std.Io.File {
-        while (true) switch (self.status.load(.acquire)) {
-            uninitialized => {
-                if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
-                self.file = std.Io.Dir.openFile(.cwd(), io, self.uri, .{ .mode = .read_only }) catch |err| {
-                    self.error_code.store(@intFromError(err), .release);
-                    self.status.store(failed, .release);
-                    self.initialized.set(io);
-                    return err;
-                };
-                self.status.store(ready, .release);
-                self.initialized.set(io);
-                return self.file;
-            },
-            initializing => self.initialized.waitUncancelable(io),
-            ready => return self.file,
-            failed => return @errorFromInt(self.error_code.load(.acquire)),
-            else => unreachable,
-        };
-    }
-
-    fn deinit(self: *LoaderSourceSlot, io: std.Io) void {
-        if (self.status.load(.acquire) == ready) self.file.close(io);
-    }
-};
-
-const LoaderLoadItem = struct {
-    const StateSlot = struct {
+/// A value initialized at most once by whichever task touches it first.
+/// Concurrent callers wait on the event; a failed initialization keeps its
+/// error code and re-materializes the same error for every later caller.
+fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anyerror!T) type {
+    return struct {
+        const Self = @This();
         const uninitialized = 0;
         const initializing = 1;
         const ready = 2;
         const failed = 3;
 
-        state: VectoredTensorTransfer = undefined,
+        value: T = undefined,
         status: std.atomic.Value(u8) = .init(uninitialized),
         error_code: std.atomic.Value(u16) = .init(0),
         initialized: std.Io.Event = .unset,
 
-        fn ensure(self: *StateSlot, item: *LoaderLoadItem, direct: *DirectLoader) !*VectoredTensorTransfer {
+        fn ensure(self: *Self, io: std.Io, ctx: Ctx) !*T {
             while (true) switch (self.status.load(.acquire)) {
                 uninitialized => {
                     if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
-                    self.state = VectoredTensorTransfer.initResolved(
-                        direct.allocator,
-                        direct.platform,
-                        item.source,
-                        item.shape,
-                        item.sharding,
-                        item.output,
-                        direct.progress,
-                    ) catch |err| {
+                    self.value = initFn(ctx) catch |err| {
                         self.error_code.store(@intFromError(err), .release);
                         self.status.store(failed, .release);
-                        self.initialized.set(direct.io);
+                        self.initialized.set(io);
                         return err;
                     };
                     self.status.store(ready, .release);
-                    self.initialized.set(direct.io);
-                    return &self.state;
+                    self.initialized.set(io);
+                    return &self.value;
                 },
-                initializing => self.initialized.waitUncancelable(direct.io),
-                ready => return &self.state,
+                initializing => self.initialized.waitUncancelable(io),
+                ready => return &self.value,
                 failed => return @errorFromInt(self.error_code.load(.acquire)),
                 else => unreachable,
             };
         }
 
-        fn deinit(self: *StateSlot) void {
-            if (self.status.load(.acquire) == ready) self.state.deinit();
+        /// The value when initialization has completed successfully.
+        fn readyValue(self: *Self) ?*T {
+            return if (self.status.load(.acquire) == ready) &self.value else null;
         }
     };
+}
+
+const LoaderSourceSlot = struct {
+    const OpenContext = struct { io: std.Io, uri: []const u8 };
+
+    fn openFile(ctx: OpenContext) !std.Io.File {
+        return std.Io.Dir.openFile(.cwd(), ctx.io, ctx.uri, .{ .mode = .read_only });
+    }
+
+    uri: []const u8,
+    file: LazyOnce(std.Io.File, OpenContext, openFile) = .{},
+
+    fn ensure(self: *LoaderSourceSlot, io: std.Io) !std.Io.File {
+        const file = try self.file.ensure(io, .{ .io = io, .uri = self.uri });
+        return file.*;
+    }
+
+    fn deinit(self: *LoaderSourceSlot, io: std.Io) void {
+        if (self.file.readyValue()) |file| file.close(io);
+    }
+};
+
+const LoaderLoadItem = struct {
+    const InitContext = struct { item: *LoaderLoadItem, direct: *DirectLoader };
+
+    fn initTransfer(ctx: InitContext) !VectoredTensorTransfer {
+        return VectoredTensorTransfer.initResolved(
+            ctx.direct.allocator,
+            ctx.direct.platform,
+            ctx.item.source,
+            ctx.item.shape,
+            ctx.item.sharding,
+            ctx.item.output,
+            ctx.direct.progress,
+        );
+    }
 
     source: *const safetensors.Tensor,
     source_slot: *LoaderSourceSlot,
     shape: Shape,
     sharding: Sharding,
     output: *Buffer,
-    state: StateSlot = .{},
+    state: LazyOnce(VectoredTensorTransfer, InitContext, initTransfer) = .{},
+
+    fn ensureState(self: *LoaderLoadItem, direct: *DirectLoader) !*VectoredTensorTransfer {
+        return self.state.ensure(direct.io, .{ .item = self, .direct = direct });
+    }
 
     fn deinit(self: *LoaderLoadItem, allocator: std.mem.Allocator) void {
-        self.state.deinit();
+        if (self.state.readyValue()) |state| state.deinit();
         allocator.destroy(self);
     }
 };
@@ -721,7 +711,7 @@ const VectoredLoadPipeline = struct {
         }
         for (transfers) |transfer| {
             const block = blocks[transfer.block_index];
-            const tensor = &transfer.item.state.state;
+            const tensor = &transfer.item.state.value;
             var mask = transfer.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
@@ -1045,7 +1035,7 @@ const VectoredReadRequest = struct {
         @memset(queue_counts, 0);
 
         for (transfers) |transfer| {
-            const tensor = transfer.item.state.ensure(transfer.item, direct) catch |err| {
+            const tensor = transfer.item.ensureState(direct) catch |err| {
                 pipeline.recordError(err);
                 return;
             };
@@ -1112,7 +1102,7 @@ const VectoredReadRequest = struct {
         );
         _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
         _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
-        for (transfers) |transfer| transfer.item.state.state.recordReadProgress(transfer.len);
+        for (transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
         request.markReadFinished();
         endRead(request, pipeline);
         if (pipeline.failed()) return;
@@ -1178,7 +1168,6 @@ const FairVectoredReadScheduler = struct {
 
     const Snapshot = struct {
         remaining_jobs: usize,
-        has_unscheduled: bool,
     };
 
     const PreparedBatch = struct {
@@ -1298,7 +1287,7 @@ const FairVectoredReadScheduler = struct {
                 block_size - block_offset,
             );
             const writer_mask = dispatch.writerMask(span);
-            if (writer_mask == 0) return error.InvalidLoaderJob;
+            std.debug.assert(writer_mask != 0);
             const destination_offset = span.writer_offset + cursor - span.start;
             var merged = false;
             if (output.items.len > transfer_start) merge: {
@@ -1743,15 +1732,9 @@ const FairVectoredReadScheduler = struct {
     fn snapshot(self: *FairVectoredReadScheduler, io: std.Io) Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const plan = self.plan orelse return .{
-            .remaining_jobs = 0,
-            .has_unscheduled = false,
-        };
+        const plan = self.plan orelse return .{ .remaining_jobs = 0 };
         const position = @min(self.cursor.load(.acquire), plan.jobs.len);
-        return .{
-            .remaining_jobs = plan.jobs.len - position,
-            .has_unscheduled = position != plan.jobs.len,
-        };
+        return .{ .remaining_jobs = plan.jobs.len - position };
     }
 };
 
@@ -2207,11 +2190,6 @@ const SourceReadWidthController = struct {
         return probeCost(index) *| 4 <= remaining_full_jobs;
     }
 
-    fn restartFitsTail(self: *const SourceReadWidthController, remaining_full_jobs: usize) bool {
-        if (self.phase == .settled) return true;
-        return probeFitsTail(self.current_index, remaining_full_jobs);
-    }
-
     fn blindGrow(
         self: *SourceReadWidthController,
         remaining_full_jobs: usize,
@@ -2379,13 +2357,6 @@ const SourceReadWidthController = struct {
         return self.changeTo(self.selected_index);
     }
 
-    fn rollbackTail(self: *SourceReadWidthController) Decision {
-        if (self.phase == .settled) return self.currentDecision();
-        if (self.confirmation) |confirmation|
-            self.selected_index = confirmation.prior_selected_index;
-        return self.settle();
-    }
-
     fn backoff(self: *SourceReadWidthController) Decision {
         if (!self.isAdaptive()) return self.currentDecision();
         if (self.current_index == 0) {
@@ -2509,31 +2480,6 @@ test "source read controller confirms a borderline candidate in place" {
     try std.testing.expect(generation > 1);
 }
 
-test "source read controller rolls back an unfinished confirmation" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        32,
-    );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expect(controller.confirmation != null);
-    const rollback = controller.rollbackTail();
-    try std.testing.expect(rollback.settled);
-    try std.testing.expectEqual(@as(usize, 12), rollback.width);
-}
-
-test "source read controller charges one unfinished confirmation on restart" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        32,
-    );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    const remaining_cost = SourceReadWidthController.probeCost(controller.confirmation.?.index);
-    try std.testing.expect(controller.restartFitsTail(remaining_cost * 4));
-    try std.testing.expect(!controller.restartFitsTail(remaining_cost * 4 - 1));
-}
-
 test "source read controller refines downward when an upward tail no longer fits" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
@@ -2546,16 +2492,7 @@ test "source read controller refines downward when an upward tail no longer fits
     try std.testing.expectEqual(@as(usize, 12), downward.width);
 }
 
-test "source read controller rejects dirty probe restarts at a short tail" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-    );
-    try std.testing.expect(controller.restartFitsTail(96));
-    try std.testing.expect(!controller.restartFitsTail(95));
-}
-
-test "source read controller keeps fixed width and rolls back a short tail" {
+test "source read controller keeps fixed width and settles at a short tail" {
     var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
     try std.testing.expect(fixed.currentDecision().settled);
@@ -2574,7 +2511,10 @@ test "source read controller backs off before and after convergence" {
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
     );
-    try std.testing.expectEqual(@as(usize, 24), probing.blindGrow(10_000).?.width);
+    // A probe needs four times its cost (width plus completions) of
+    // remaining full jobs; a shorter tail leaves the width in place.
+    try std.testing.expect(probing.blindGrow(191) == null);
+    try std.testing.expectEqual(@as(usize, 24), probing.blindGrow(192).?.width);
     const probe_backoff = probing.backoff();
     try std.testing.expect(probe_backoff.changed);
     try std.testing.expect(probe_backoff.settled);
@@ -2833,7 +2773,7 @@ const SourceReadRuntime = struct {
             const scheduler_snapshot = self.scheduler.snapshot(io);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
 
-            const idle = !scheduler_snapshot.has_unscheduled and
+            const idle = scheduler_snapshot.remaining_jobs == 0 and
                 self.metrics.pending_source_jobs.load(.acquire) == 0 and
                 self.read_gate.inUse(io) == 0;
             if (idle) {
@@ -2880,7 +2820,7 @@ const SourceReadRuntime = struct {
                         self.metrics.read_bytes.load(.acquire),
                         self.metrics.outstanding_requests.load(.acquire),
                         self.controller.width(),
-                        scheduler_snapshot.has_unscheduled,
+                        scheduler_snapshot.remaining_jobs,
                     ))
                 {
                     self.last_blind_growth_ns = now_ns;
@@ -2940,10 +2880,10 @@ fn shouldBootstrapSource(
     read_bytes: u64,
     outstanding_requests: usize,
     read_limit: usize,
-    has_unscheduled: bool,
+    remaining_jobs: usize,
 ) bool {
     return enabled and !response_observed and read_bytes == 0 and
-        outstanding_requests >= read_limit and has_unscheduled;
+        outstanding_requests >= read_limit and remaining_jobs != 0;
 }
 
 const DirectLoaderDiagnostics = struct {
@@ -2990,7 +2930,7 @@ pub const DirectLoader = struct {
     controller_runtime: SourceReadRuntime,
     worker_group: std.Io.Group = .init,
     controller_group: std.Io.Group = .init,
-    source_slots: std.ArrayListUnmanaged(*LoaderSourceSlot) = .empty,
+    source_slots: std.StringHashMapUnmanaged(*LoaderSourceSlot) = .empty,
     epoch_items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     diagnostics: DirectLoaderDiagnostics = .{},
@@ -3217,13 +3157,11 @@ pub const DirectLoader = struct {
     }
 
     fn sourceSlot(self: *DirectLoader, uri: []const u8) !*LoaderSourceSlot {
-        for (self.source_slots.items) |slot| {
-            if (std.mem.eql(u8, slot.uri, uri)) return slot;
-        }
+        if (self.source_slots.get(uri)) |slot| return slot;
         const slot = try self.allocator.create(LoaderSourceSlot);
         errdefer self.allocator.destroy(slot);
         slot.* = .{ .uri = uri };
-        try self.source_slots.append(self.allocator, slot);
+        try self.source_slots.putNoClobber(self.allocator, uri, slot);
         return slot;
     }
 
@@ -3267,12 +3205,6 @@ pub const DirectLoader = struct {
 
         var logical_bytes: usize = 0;
         for (items) |item| {
-            const placement = try item.sharding.placement(item.shape.packedShape());
-            if (placement.shape.byteSize() != 0) {
-                for (item.sharding.devicesInCanonicalOrder()) |device| {
-                    if (device.id >= self.platform.devices.len) return error.DmaDeviceMismatch;
-                }
-            }
             logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
         }
         self.diagnostics.started_at = .now(self.io, .awake);
@@ -3325,8 +3257,8 @@ pub const DirectLoader = struct {
         if (load_error != null) {
             self.stopWorkers();
             for (self.epoch_items.items) |item| {
-                if (item.state.status.load(.acquire) != LoaderLoadItem.StateSlot.ready) continue;
-                for (item.state.state.targets) |*target| {
+                const state = item.state.readyValue() orelse continue;
+                for (state.targets) |*target| {
                     if (!target.final_submitted) {
                         target.manager.setBufferErrorUnknown(
                             self.platform.pjrt_api,
@@ -3454,9 +3386,10 @@ pub const DirectLoader = struct {
             self.pipeline.reapCompleted();
             for (self.epoch_items.items) |item| item.deinit(self.allocator);
             self.epoch_items.deinit(self.allocator);
-            for (self.source_slots.items) |slot| {
-                slot.deinit(self.io);
-                self.allocator.destroy(slot);
+            var slots = self.source_slots.valueIterator();
+            while (slots.next()) |slot| {
+                slot.*.deinit(self.io);
+                self.allocator.destroy(slot.*);
             }
             self.source_slots.deinit(self.allocator);
             self.pipeline.deinit();
@@ -3498,10 +3431,11 @@ test "loader DMA admission rotates and respects per-device limits" {
 }
 
 test "source bootstrap requires a high-latency source with no observed response" {
-    try std.testing.expect(shouldBootstrapSource(true, false, 0, 12, 12, true));
-    try std.testing.expect(!shouldBootstrapSource(false, false, 0, 12, 12, true));
-    try std.testing.expect(!shouldBootstrapSource(true, true, 0, 12, 12, true));
-    try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, true));
+    try std.testing.expect(shouldBootstrapSource(true, false, 0, 12, 12, 1));
+    try std.testing.expect(!shouldBootstrapSource(false, false, 0, 12, 12, 1));
+    try std.testing.expect(!shouldBootstrapSource(true, true, 0, 12, 12, 1));
+    try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, 1));
+    try std.testing.expect(!shouldBootstrapSource(true, false, 0, 12, 12, 0));
 }
 
 test "source request size combines the VFS floor with DMA granularity" {

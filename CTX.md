@@ -171,7 +171,8 @@ simplification pass.
   including partial tails. The controller has only ramp-up, refine-down, and
   settled phases. It uses clean 100 ms generations, selects the smallest width
   within 3% of peak, and may remeasure at most one adjacent borderline
-  candidate. Unfinished finite-tail probes roll back. Metadata can cheaply
+  candidate. There is no rollback: a probe that cannot complete before the
+  tail simply leaves the current width in place. Metadata can cheaply
   clip feasibility, but cannot predict a source's latency/bandwidth saturation
   point, so no job-size-derived initial-width heuristic was added.
 - Measurement mechanics are separate from width policy. Runtime state is one

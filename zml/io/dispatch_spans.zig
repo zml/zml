@@ -62,7 +62,10 @@ pub const DispatchSpans = struct {
             writer_offsets[span.primary_writer] += span.end - span.start;
             const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
             for (mirror_writers.items[span.mirror_writer_start..mirror_end]) |writer_index| {
-                if (writer_offsets[writer_index] != span.writer_offset) return error.InconsistentReplicaLayout;
+                // `deduplicateByRange` groups only spans with identical
+                // start/len, so every writer of a group has consumed the
+                // same bytes so far.
+                std.debug.assert(writer_offsets[writer_index] == span.writer_offset);
                 writer_offsets[writer_index] += span.end - span.start;
             }
         }

@@ -321,13 +321,7 @@ const BufferedMemoryWriter = struct {
     }
 };
 
-fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) !usize {
-    if (read_chunk_size == 0 or read_chunk_size > max_load_read_request_size)
-        return error.InvalidLoadProfile;
-    const selected = @max(read_chunk_size, dma_block_size);
-    if (selected > max_load_read_request_size) return error.InvalidLoadProfile;
-    return selected;
-}
+const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 
 pub const default_dma_benchmark_block_sizes = dma.default_dma_benchmark_block_sizes;
 pub const BenchTransferOptions = dma.BenchTransferOptions;

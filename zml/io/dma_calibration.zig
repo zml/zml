@@ -268,11 +268,11 @@ pub const DmaPlatformSettings = struct {
     }
 };
 
-const dma_platform_idle = 0;
-const dma_platform_inspecting = 1;
-const dma_platform_calibrating = 2;
-const dma_platform_loading = 3;
-const dma_platform_destroying = 4;
+pub const dma_platform_idle = 0;
+pub const dma_platform_inspecting = 1;
+pub const dma_platform_calibrating = 2;
+pub const dma_platform_loading = 3;
+pub const dma_platform_destroying = 4;
 
 pub fn isDirectTransferPlatform(platform: *const Platform) bool {
     return platform.target == .cuda or platform.target == .rocm or
@@ -1269,31 +1269,6 @@ const DmaBenchmarkDecision = struct {
     metrics: DmaBenchmarkRunMetrics,
 };
 
-fn selectDmaBenchmarkCandidate(
-    allocator: std.mem.Allocator,
-    candidates: []const DmaBenchmarkCandidate,
-    tolerance: f64,
-) !DmaBenchmarkDecision {
-    std.debug.assert(candidates.len > 0);
-    const medians = try allocator.alloc(DmaBenchmarkRunMetrics, candidates.len);
-    defer allocator.free(medians);
-    var fastest_index: usize = 0;
-    for (candidates, medians, 0..) |candidate, *median, index| {
-        median.* = candidate.median();
-        if (median.bytesPerSecond() > medians[fastest_index].bytesPerSecond())
-            fastest_index = index;
-    }
-
-    const floor = medians[fastest_index].bytesPerSecond() * (1.0 - tolerance);
-    var selected_index = fastest_index;
-    for (candidates, medians, 0..) |candidate, median, index| {
-        if (median.bytesPerSecond() >= floor and
-            candidate.value < candidates[selected_index].value)
-            selected_index = index;
-    }
-    return .{ .index = selected_index, .metrics = medians[selected_index] };
-}
-
 fn dmaBenchmarkCandidateNeedsConfirmation(
     candidates: []const DmaBenchmarkCandidate,
     candidate_index: usize,
@@ -1834,7 +1809,17 @@ test "DMA benchmark completion target has no time cap" {
 }
 
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
-    const allocator = std.testing.allocator;
+    // No candidate below is borderline, so the production selector never
+    // schedules a confirmation window and the session supplies only its
+    // allocator.
+    var session: ReusableDmaBenchmarkSession = .{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+        .platform = undefined,
+        .samples = undefined,
+    };
+    const opts: DmaBenchmarkOpts = .{};
+
     var candidates = [_]DmaBenchmarkCandidate{
         .{ .value = 2, .cohort = undefined },
         .{ .value = 4, .cohort = undefined },
@@ -1855,22 +1840,27 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
             });
         }
     }
-
-    const decision = try selectDmaBenchmarkCandidate(allocator, &candidates, 0.05);
+    const decision = try confirmAndSelectDmaBenchmarkCandidate(
+        &session,
+        opts,
+        .block_confirmation,
+        &candidates,
+        &.{},
+        opts.block_parallelism,
+        0.05,
+    );
     try std.testing.expectEqual(@as(usize, 1), decision.index);
     try std.testing.expectEqual(@as(f64, 98), decision.metrics.bytesPerSecond());
-}
 
-test "DMA benchmark selection does not assume a unimodal response" {
-    const allocator = std.testing.allocator;
-    var candidates = [_]DmaBenchmarkCandidate{
+    // A dip between two near-peak values must not end the scan early.
+    var bimodal = [_]DmaBenchmarkCandidate{
         .{ .value = 2, .cohort = undefined },
         .{ .value = 4, .cohort = undefined },
         .{ .value = 8, .cohort = undefined },
         .{ .value = 16, .cohort = undefined },
     };
-    const rates = [_]u64{ 80, 100, 70, 99 };
-    for (&candidates, rates) |*candidate, rate| {
+    const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
+    for (&bimodal, bimodal_rates) |*candidate, rate| {
         candidate.appendMetric(.{
             .bytes = rate,
             .transfers = 1,
@@ -1878,8 +1868,17 @@ test "DMA benchmark selection does not assume a unimodal response" {
             .elapsed_ns = std.time.ns_per_s,
         });
     }
-    const decision = try selectDmaBenchmarkCandidate(allocator, &candidates, 0.02);
-    try std.testing.expectEqual(@as(usize, 1), decision.index);
+    const bimodal_decision = try confirmAndSelectDmaBenchmarkCandidate(
+        &session,
+        opts,
+        .block_confirmation,
+        &bimodal,
+        &.{},
+        opts.block_parallelism,
+        0.05,
+    );
+    try std.testing.expectEqual(@as(usize, 1), bimodal_decision.index);
+    try std.testing.expectEqual(@as(f64, 100), bimodal_decision.metrics.bytesPerSecond());
 }
 
 test "DMA benchmark tuple feasibility rejects pinned budget overflow" {

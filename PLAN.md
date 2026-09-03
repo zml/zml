@@ -48,7 +48,7 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 ## Third-pass status
 
 - [x] 0. Baseline capture and pack instrument in the playground.
-- [ ] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
+- [x] 1. Zero-risk dead-code sweep, `LazyOnce`, shared helpers.
 - [ ] 2. Per-batch completion behind the existing single slot.
 - [ ] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
 - [ ] 4. Controller continuity across submissions (minimal).
@@ -145,6 +145,23 @@ DeepSeek and pack baselines there are deferred until it is quiet.
   `dma_calibration.zig`.
 - CTX.md: remove the "unfinished finite-tail probes roll back" claim.
 - Validation: full test set, `zig fmt --check`; matrix packs=0 within spread.
+
+Result (2026-09-04): deleted `rollbackTail`, `restartFitsTail` and their three
+tests (the tail-fit boundary is now asserted through `blindGrow` in the
+backoff test; the short-tail `observe` test was kept and renamed),
+`Snapshot.has_unscheduled`, the `writer_mask == 0` branch and
+`error.InconsistentReplicaLayout` (debug asserts), `VectoredTensorTransfer.total`,
+the `appendItems` placement recompute, `selectDmaBenchmarkCandidate` and its
+two tests (one test now drives `confirmAndSelectDmaBenchmarkCandidate` with
+non-borderline data so no confirmation window is scheduled), and the
+`DmaPlatformState` constants in `platform.zig` (the `dma_platform_*`
+constants of `dma_calibration.zig` are public). `effectiveSourceRequestSize`
+lives in `limits.zig`. `sourceSlot` uses a `StringHashMapUnmanaged`.
+`LazyOnce(T, Ctx, initFn)` backs `LoaderSourceSlot.file` and
+`LoaderLoadItem.state`. Tests 232 -> 228 passed, 3 skipped. Local B70, Llama,
+3 runs: packs=0 0.774/0.810/0.778 s (19.32/18.46/19.24 GiB/s, width 12);
+packs=64 width 16: pack phase 0.901/0.896/0.909 s (14.43/14.51/14.30 GiB/s),
+pack check ok, total 1.017/1.012/1.024 s. Unchanged from the task-0 baseline.
 
 ### 2. Per-batch completion behind the single slot
 

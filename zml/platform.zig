@@ -14,6 +14,7 @@ const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
+const dma_calibration = @import("io/dma_calibration.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -276,14 +277,10 @@ pub const TransferSettings = struct {
 
 pub const BenchTransferOptions = zml.io.BenchTransferOptions;
 
+/// Operation codes are the `dma_platform_*` constants of
+/// `io/dma_calibration.zig`, which owns every transition.
 const DmaPlatformState = struct {
-    const idle = 0;
-    const inspecting = 1;
-    const calibrating = 2;
-    const loading = 3;
-    const destroying = 4;
-
-    operation: std.atomic.Value(u8) = .init(idle),
+    operation: std.atomic.Value(u8) = .init(dma_calibration.dma_platform_idle),
     settings: std.atomic.Value(?*anyopaque) = .init(null),
 };
 
@@ -1012,17 +1009,17 @@ test "platform transfer defaults are usable without calibration" {
     try std.testing.expectEqual(
         @as(?u8, null),
         state.operation.cmpxchgStrong(
-            DmaPlatformState.idle,
-            DmaPlatformState.loading,
+            dma_calibration.dma_platform_idle,
+            dma_calibration.dma_platform_loading,
             .acq_rel,
             .acquire,
         ),
     );
     try std.testing.expectEqual(
-        @as(?u8, DmaPlatformState.loading),
+        @as(?u8, dma_calibration.dma_platform_loading),
         state.operation.cmpxchgStrong(
-            DmaPlatformState.idle,
-            DmaPlatformState.calibrating,
+            dma_calibration.dma_platform_idle,
+            dma_calibration.dma_platform_calibrating,
             .acq_rel,
             .acquire,
         ),
