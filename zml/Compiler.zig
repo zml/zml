@@ -71,6 +71,8 @@ pub const Options = struct {
     shardings: []const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
+    /// Capture standard NCCL all-reduce thunks in CUDA command buffers.
+    cuda_capture_nccl_all_reduce: bool = false,
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
@@ -704,6 +706,15 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // NVIDIA recommends these settings
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+
+                if (opts.cuda_capture_nccl_all_reduce) {
+                    // Disable XLA's custom all-reduce kernel so command buffers
+                    // capture the standard NCCL thunk instead.
+                    try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CONDITIONAL,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION,COLLECTIVES", upb_arena);
+                    try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_collectives_command_buffer_filter", "ALLREDUCE", upb_arena);
+                    try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
+                    try setXlaOverrideFlag(overrides_map, "xla_gpu_graph_min_graph_size", 1, upb_arena);
+                }
             },
             .rocm => {
                 // Use lld from libllvm instead of invoking the ld.lld binary.
