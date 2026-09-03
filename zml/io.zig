@@ -559,13 +559,13 @@ const VectoredLoadMetrics = struct {
     outstanding_requests: std.atomic.Value(usize) = .init(0),
     pending_source_jobs: std.atomic.Value(usize) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
-    probe_epoch: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
+    probe_epoch: u64 = std.math.maxInt(u64),
     probe_admission_start: u64 = std.math.maxInt(u64),
-    probe_first_read_ns: std.atomic.Value(u64) = .init(0),
-    probe_active_reads: std.atomic.Value(usize) = .init(0),
-    probe_peak_reads: std.atomic.Value(usize) = .init(0),
-    probe_read_operations: std.atomic.Value(u64) = .init(0),
-    probe_read_bytes: std.atomic.Value(u64) = .init(0),
+    probe_first_read_ns: u64 = 0,
+    probe_active_reads: usize = 0,
+    probe_peak_reads: usize = 0,
+    probe_read_operations: u64 = 0,
+    probe_read_bytes: u64 = 0,
     probe_mutex: std.Io.Mutex = .init,
 
     const Snapshot = struct {
@@ -581,39 +581,31 @@ const VectoredLoadMetrics = struct {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         return .{
-            .probe_epoch = self.probe_epoch.load(.acquire),
-            .probe_first_read_ns = self.probe_first_read_ns.load(.acquire),
-            .probe_active_reads = self.probe_active_reads.load(.acquire),
-            .probe_peak_reads = self.probe_peak_reads.load(.acquire),
-            .probe_read_operations = self.probe_read_operations.load(.acquire),
-            .probe_read_bytes = self.probe_read_bytes.load(.acquire),
+            .probe_epoch = self.probe_epoch,
+            .probe_first_read_ns = self.probe_first_read_ns,
+            .probe_active_reads = self.probe_active_reads,
+            .probe_peak_reads = self.probe_peak_reads,
+            .probe_read_operations = self.probe_read_operations,
+            .probe_read_bytes = self.probe_read_bytes,
         };
     }
 
     fn beginRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire) or
-            admission_id < self.probe_admission_start) return;
-        _ = self.probe_first_read_ns.cmpxchgStrong(
-            0,
-            @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1)),
-            .release,
-            .monotonic,
-        );
-        const probe_active = self.probe_active_reads.fetchAdd(1, .acq_rel) + 1;
-        var probe_peak = self.probe_peak_reads.load(.acquire);
-        while (probe_active > probe_peak) {
-            probe_peak = self.probe_peak_reads.cmpxchgWeak(probe_peak, probe_active, .release, .acquire) orelse break;
-        }
+        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
+        if (self.probe_first_read_ns == 0)
+            self.probe_first_read_ns = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
+        self.probe_active_reads += 1;
+        self.probe_peak_reads = @max(self.probe_peak_reads, self.probe_active_reads);
     }
 
     fn endRead(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, admission_id: u64) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire) or
-            admission_id < self.probe_admission_start) return;
-        _ = self.probe_active_reads.fetchSub(1, .acq_rel);
+        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
+        std.debug.assert(self.probe_active_reads > 0);
+        self.probe_active_reads -= 1;
     }
 
     fn recordProbeRead(
@@ -625,10 +617,9 @@ const VectoredLoadMetrics = struct {
     ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire) or
-            admission_id < self.probe_admission_start) return;
-        _ = self.probe_read_operations.fetchAdd(1, .monotonic);
-        _ = self.probe_read_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
+        self.probe_read_operations +|= 1;
+        self.probe_read_bytes +|= @intCast(bytes);
     }
 
     fn beginRequest(self: *VectoredLoadMetrics) void {
@@ -647,28 +638,27 @@ const VectoredLoadMetrics = struct {
     ) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        self.probe_epoch.store(std.math.maxInt(u64), .release);
-        self.probe_first_read_ns.store(0, .release);
-        self.probe_active_reads.store(0, .release);
-        self.probe_peak_reads.store(0, .release);
-        self.probe_read_operations.store(0, .release);
-        self.probe_read_bytes.store(0, .release);
+        self.probe_epoch = std.math.maxInt(u64);
+        self.probe_first_read_ns = 0;
+        self.probe_active_reads = 0;
+        self.probe_peak_reads = 0;
+        self.probe_read_operations = 0;
+        self.probe_read_bytes = 0;
         self.probe_admission_start = admission_start;
-        self.probe_epoch.store(epoch, .release);
+        self.probe_epoch = epoch;
         self.config_epoch.store(epoch, .release);
     }
 
-    fn clearProbe(self: *VectoredLoadMetrics, io: std.Io, epoch: u64) void {
+    fn clearProbe(self: *VectoredLoadMetrics, io: std.Io) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
-        if (self.probe_epoch.load(.acquire) != epoch) return;
-        self.probe_epoch.store(std.math.maxInt(u64), .release);
+        self.probe_epoch = std.math.maxInt(u64);
         self.probe_admission_start = std.math.maxInt(u64);
-        self.probe_first_read_ns.store(0, .release);
-        self.probe_active_reads.store(0, .release);
-        self.probe_peak_reads.store(0, .release);
-        self.probe_read_operations.store(0, .release);
-        self.probe_read_bytes.store(0, .release);
+        self.probe_first_read_ns = 0;
+        self.probe_active_reads = 0;
+        self.probe_peak_reads = 0;
+        self.probe_read_operations = 0;
+        self.probe_read_bytes = 0;
     }
 };
 
@@ -2624,19 +2614,15 @@ const SourceReadWidthController = struct {
     const Phase = enum { ramp_up, refine_down, settled };
 
     const Evidence = struct {
-        generation: u64,
-        width: usize,
         completed_requests: usize,
         elapsed_ns: u64,
         bytes: u64,
         exercised_width: usize,
-        clean: bool,
         remaining_full_jobs: usize,
 
-        fn scoreable(self: Evidence) bool {
-            return self.clean and self.generation != std.math.maxInt(u64) and
-                self.exercised_width >= self.width and
-                self.completed_requests >= @max(@as(usize, 8), self.width) and
+        fn scoreable(self: Evidence, expected_width: usize) bool {
+            return self.exercised_width >= expected_width and
+                self.completed_requests >= @max(@as(usize, 8), expected_width) and
                 self.elapsed_ns >= 100 * std.time.ns_per_ms and self.bytes != 0;
         }
 
@@ -2760,10 +2746,9 @@ const SourceReadWidthController = struct {
     }
 
     fn observe(self: *SourceReadWidthController, evidence: Evidence) Decision {
-        if (!self.isAdaptive() or self.phase == .settled or
-            evidence.generation != self.generation or evidence.width != self.width() or
-            !evidence.scoreable())
+        if (!self.isAdaptive() or self.phase == .settled)
             return self.currentDecision();
+        std.debug.assert(evidence.scoreable(self.width()));
         const rate = evidence.bytesPerSecond();
         return self.finishScore(self.current_index, rate, evidence.remaining_full_jobs);
     }
@@ -2944,13 +2929,10 @@ fn sourceReadTestEvidence(
     remaining_full_jobs: usize,
 ) SourceReadWidthController.Evidence {
     return .{
-        .generation = controller.generation,
-        .width = controller.width(),
         .completed_requests = @max(@as(usize, 8), controller.width()),
         .elapsed_ns = std.time.ns_per_s,
         .bytes = rate,
         .exercised_width = controller.width(),
-        .clean = true,
         .remaining_full_jobs = remaining_full_jobs,
     };
 }
@@ -2985,23 +2967,17 @@ test "source read controller clips infeasible adaptive and fixed widths" {
     try std.testing.expectEqual(@as(usize, 48), configured_initial.width());
 }
 
-test "source read controller isolates generation and requires exercised clean evidence" {
+test "source read evidence requires enough concurrency and duration" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
     );
-    var stale = sourceReadTestEvidence(&controller, 100, 10_000);
-    stale.generation +|= 1;
-    try std.testing.expect(!controller.observe(stale).changed);
     var short = sourceReadTestEvidence(&controller, 100, 10_000);
     short.elapsed_ns = 99 * std.time.ns_per_ms;
-    try std.testing.expect(!controller.observe(short).changed);
+    try std.testing.expect(!short.scoreable(controller.width()));
     var unexercised = sourceReadTestEvidence(&controller, 100, 10_000);
     unexercised.exercised_width -= 1;
-    try std.testing.expect(!controller.observe(unexercised).changed);
-    var dirty = sourceReadTestEvidence(&controller, 100, 10_000);
-    dirty.clean = false;
-    try std.testing.expect(!controller.observe(dirty).changed);
+    try std.testing.expect(!unexercised.scoreable(controller.width()));
     try std.testing.expectEqual(
         @as(usize, 16),
         controller.observe(sourceReadTestEvidence(&controller, 100, 10_000)).width,
@@ -3139,31 +3115,13 @@ const ReadStatsCursor = struct {
     provider: VFS.ReadStatsProvider,
     previous: VFS.ReadStats,
 
-    fn take(self: *ReadStatsCursor) SourceTelemetry {
+    fn takeBackpressure(self: *ReadStatsCursor) bool {
         const current = self.provider.snapshot();
         const delta = current.sub(self.previous);
         self.previous = current;
-        return .{
-            .retries = delta.retries,
-            .transient_retries = delta.transient_retries,
-            .timeouts = delta.timeouts,
-            .server_failures = delta.server_failures,
-            .throttles = delta.throttles,
-        };
-    }
-};
-
-const SourceTelemetry = struct {
-    retries: u64 = 0,
-    transient_retries: u64 = 0,
-    timeouts: u64 = 0,
-    server_failures: u64 = 0,
-    throttles: u64 = 0,
-
-    fn hasBackpressure(self: SourceTelemetry) bool {
-        return self.retries != 0 or self.transient_retries != 0 or
-            self.timeouts != 0 or self.server_failures != 0 or
-            self.throttles != 0;
+        return delta.retries != 0 or delta.transient_retries != 0 or
+            delta.timeouts != 0 or delta.server_failures != 0 or
+            delta.throttles != 0;
     }
 };
 
@@ -3189,17 +3147,32 @@ test "one load-profile feedback cursor reports only new backpressure" {
 
     fake.stats.retries = 2;
     fake.stats.throttles = 1;
-    const first = cursor.take();
-    try std.testing.expectEqual(@as(u64, 2), first.retries);
-    try std.testing.expectEqual(@as(u64, 1), first.throttles);
-    try std.testing.expect(first.hasBackpressure());
+    try std.testing.expect(cursor.takeBackpressure());
+    try std.testing.expect(!cursor.takeBackpressure());
+}
 
-    const second = cursor.take();
-    try std.testing.expectEqualDeep(SourceTelemetry{}, second);
-    try std.testing.expect(!second.hasBackpressure());
+test "source measurement rejects another controller generation" {
+    const io = std.testing.io;
+    var metrics: VectoredLoadMetrics = .{};
+    var runtime: SourceReadRuntime = undefined;
+    runtime.controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    runtime.metrics = &metrics;
+    metrics.prepareProbe(io, runtime.controller.generation + 1, 1);
+    try std.testing.expect(runtime.currentEvidence(io, 1_000) == null);
 }
 
 const SourceReadRuntime = struct {
+    const Measurement = union(enum) {
+        inactive,
+        transitioning: usize,
+        measuring,
+        scoring: SourceReadWidthController.Evidence,
+        blind,
+    };
+
     controller: SourceReadWidthController,
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
@@ -3210,25 +3183,19 @@ const SourceReadRuntime = struct {
     read_stats: ?ReadStatsCursor,
     source_bootstrap_enabled: bool,
     source_response_observed: bool = false,
-    probe_transition_pending: bool = false,
-    probe_measuring: bool = false,
-    scoring_pending: bool = false,
-    blind_admissions: bool = false,
-    pending_read_limit: usize = 1,
-    pending_evidence: SourceReadWidthController.Evidence = undefined,
+    measurement: Measurement = .inactive,
     last_blind_growth_ns: u64 = 0,
-    persistent: bool = false,
     scheduler_idle: bool = false,
     backoff_admission_start: ?u64 = null,
-    reported_width: std.atomic.Value(usize) = .init(1),
+    reported_width: usize = 1,
     epoch_barrier_requested: std.atomic.Value(bool) = .init(false),
     epoch_barrier_done: std.Io.Event = .unset,
     control: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
 
-    fn takeRemoteTelemetry(self: *SourceReadRuntime) SourceTelemetry {
-        const cursor = if (self.read_stats) |*value| value else return .{};
-        return cursor.take();
+    fn takeRemoteBackpressure(self: *SourceReadRuntime) bool {
+        const cursor = if (self.read_stats) |*value| value else return false;
+        return cursor.takeBackpressure();
     }
 
     fn applyDecision(
@@ -3238,43 +3205,39 @@ const SourceReadRuntime = struct {
         force_probe: bool,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
-        self.reported_width.store(decision.width, .release);
+        self.reported_width = decision.width;
         self.request_gate.setLimit(io, limits.lifecycle);
         if (decision.changed or (!decision.settled and force_probe)) {
             self.read_gate.setLimit(io, 0);
-            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
-            self.pending_read_limit = limits.read;
-            self.probe_transition_pending = true;
-            self.probe_measuring = false;
-            self.scoring_pending = false;
-            self.blind_admissions = false;
+            self.metrics.clearProbe(io);
+            self.measurement = .{ .transitioning = limits.read };
             _ = self.activatePendingProbe(io);
         } else if (decision.settled) {
             self.read_gate.setLimit(io, limits.read);
-            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+            self.metrics.clearProbe(io);
             self.metrics.config_epoch.store(decision.generation, .release);
-            self.probe_transition_pending = false;
-            self.probe_measuring = false;
-            self.scoring_pending = false;
-            self.blind_admissions = false;
+            self.measurement = .inactive;
         }
     }
 
     fn activatePendingProbe(self: *SourceReadRuntime, io: std.Io) bool {
-        if (!self.probe_transition_pending or
-            self.read_gate.inUse(io) != 0) return false;
+        const read_limit = switch (self.measurement) {
+            .transitioning => |limit| limit,
+            else => return false,
+        };
+        if (self.read_gate.inUse(io) != 0) return false;
         // Advance the diagnostic baseline at a generation boundary.
-        _ = self.takeRemoteTelemetry();
+        _ = self.takeRemoteBackpressure();
         const admission_start = self.next_read_admission.load(.acquire);
         if (self.controller.phase == .settled) {
             self.metrics.config_epoch.store(self.controller.generation, .release);
             self.backoff_admission_start = admission_start;
+            self.measurement = .inactive;
         } else {
             self.metrics.prepareProbe(io, self.controller.generation, admission_start);
+            self.measurement = .measuring;
         }
-        self.probe_transition_pending = false;
-        self.probe_measuring = self.controller.phase != .settled;
-        self.read_gate.setLimit(io, self.pending_read_limit);
+        self.read_gate.setLimit(io, read_limit);
         return true;
     }
 
@@ -3291,30 +3254,26 @@ const SourceReadRuntime = struct {
         decision: SourceReadWidthController.Decision,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
-        self.reported_width.store(decision.width, .release);
+        self.reported_width = decision.width;
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
-        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+        self.metrics.clearProbe(io);
         self.metrics.config_epoch.store(decision.generation, .release);
-        self.probe_transition_pending = false;
-        self.probe_measuring = false;
-        self.scoring_pending = false;
-        self.blind_admissions = true;
+        self.measurement = .blind;
     }
 
     fn currentEvidence(
         self: *SourceReadRuntime,
         io: std.Io,
         remaining_full_jobs: usize,
-    ) SourceReadWidthController.Evidence {
+    ) ?SourceReadWidthController.Evidence {
         const probe = self.metrics.snapshot(io);
+        if (probe.probe_epoch != self.controller.generation) return null;
         const now_ns: u64 = @intCast(@max(
             std.Io.Timestamp.now(io, .awake).nanoseconds,
             1,
         ));
-        return .{
-            .generation = probe.probe_epoch,
-            .width = self.controller.width(),
+        const evidence: SourceReadWidthController.Evidence = .{
             .completed_requests = @intCast(probe.probe_read_operations),
             // Do not charge a candidate for prior-generation DMA drain before
             // its first source admission can begin.
@@ -3324,49 +3283,35 @@ const SourceReadRuntime = struct {
                 now_ns -| probe.probe_first_read_ns,
             .bytes = probe.probe_read_bytes,
             .exercised_width = probe.probe_peak_reads,
-            .clean = true,
             .remaining_full_jobs = remaining_full_jobs,
         };
+        return if (evidence.scoreable(self.controller.width())) evidence else null;
     }
 
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
         std.debug.assert(self.read_gate.inUse(io) == 0);
-        _ = self.takeRemoteTelemetry();
-        if (self.persistent) {
-            self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
-            return;
-        }
-        if (self.controller.phase != .settled) {
-            const remaining_full_jobs = self.scheduler.snapshot(io).remaining_jobs;
-            if (self.scoring_pending) {
-                self.pending_evidence.remaining_full_jobs = remaining_full_jobs;
-                _ = self.controller.observe(self.pending_evidence);
-            } else if (self.probe_measuring) {
-                const evidence = self.currentEvidence(io, remaining_full_jobs);
-                if (evidence.scoreable()) _ = self.controller.observe(evidence);
-            }
-        }
-        if (self.controller.phase != .settled) _ = self.controller.rollbackTail();
-        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
+        _ = self.takeRemoteBackpressure();
+        self.metrics.clearProbe(io);
     }
 
     fn finishIdleMeasurement(self: *SourceReadRuntime, io: std.Io) void {
-        _ = self.takeRemoteTelemetry();
+        _ = self.takeRemoteBackpressure();
         if (self.controller.phase != .settled) {
-            if (self.scoring_pending) {
-                self.pending_evidence.remaining_full_jobs = std.math.maxInt(usize);
-                _ = self.controller.observe(self.pending_evidence);
-            } else if (self.probe_measuring) {
-                const evidence = self.currentEvidence(io, std.math.maxInt(usize));
-                if (evidence.scoreable()) _ = self.controller.observe(evidence);
+            switch (self.measurement) {
+                .scoring => |pending| {
+                    var evidence = pending;
+                    evidence.remaining_full_jobs = std.math.maxInt(usize);
+                    _ = self.controller.observe(evidence);
+                },
+                .measuring => if (self.currentEvidence(io, std.math.maxInt(usize))) |evidence| {
+                    _ = self.controller.observe(evidence);
+                },
+                else => {},
             }
         }
-        self.metrics.clearProbe(io, self.metrics.probe_epoch.load(.acquire));
-        self.probe_transition_pending = false;
-        self.probe_measuring = false;
-        self.scoring_pending = false;
-        self.blind_admissions = false;
-        self.reported_width.store(self.controller.selectedWidth(), .release);
+        self.metrics.clearProbe(io);
+        self.measurement = .inactive;
+        self.reported_width = self.controller.selectedWidth();
     }
 
     fn epochBarrier(self: *SourceReadRuntime, io: std.Io) void {
@@ -3393,11 +3338,13 @@ const SourceReadRuntime = struct {
                 break;
             }
 
-            const telemetry = self.takeRemoteTelemetry();
-            if (telemetry.hasBackpressure()) {
+            if (self.takeRemoteBackpressure()) {
                 // Feedback collected while the old generation drains belongs
                 // to that transition and must not trigger another rung.
-                if (self.probe_transition_pending) continue;
+                switch (self.measurement) {
+                    .transitioning => continue,
+                    else => {},
+                }
                 if (!self.backoffReady()) continue;
                 self.applyDecision(io, self.controller.backoff(), false);
                 continue;
@@ -3406,42 +3353,43 @@ const SourceReadRuntime = struct {
             const scheduler_snapshot = self.scheduler.snapshot(io);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
 
-            if (self.persistent) {
-                const idle = !scheduler_snapshot.has_unscheduled and
-                    self.metrics.pending_source_jobs.load(.acquire) == 0 and
-                    self.read_gate.inUse(io) == 0;
-                if (idle) {
-                    if (!self.scheduler_idle) {
-                        self.finishIdleMeasurement(io);
-                        self.scheduler_idle = true;
-                    }
-                    if (self.epoch_barrier_requested.swap(false, .acq_rel)) {
-                        _ = self.takeRemoteTelemetry();
-                        self.epoch_barrier_done.set(io);
-                    }
-                    continue;
+            const idle = !scheduler_snapshot.has_unscheduled and
+                self.metrics.pending_source_jobs.load(.acquire) == 0 and
+                self.read_gate.inUse(io) == 0;
+            if (idle) {
+                if (!self.scheduler_idle) {
+                    self.finishIdleMeasurement(io);
+                    self.scheduler_idle = true;
                 }
-                if (self.scheduler_idle) {
-                    self.scheduler_idle = false;
-                    self.applyDecision(
-                        io,
-                        self.controller.currentDecision(),
-                        self.controller.phase != .settled,
-                    );
-                    continue;
+                if (self.epoch_barrier_requested.swap(false, .acq_rel)) {
+                    _ = self.takeRemoteBackpressure();
+                    self.epoch_barrier_done.set(io);
                 }
+                continue;
+            }
+            if (self.scheduler_idle) {
+                self.scheduler_idle = false;
+                self.applyDecision(
+                    io,
+                    self.controller.currentDecision(),
+                    self.controller.phase != .settled,
+                );
+                continue;
             }
 
             // Blind admissions deliberately overlap generations so a remote
             // source can ramp before its first response. Once any response is
             // visible, close the read gate and start a clean generation only
             // after every blind admission has returned.
-            if (self.blind_admissions and self.source_response_observed) {
-                self.controller.generation +|= 1;
-                var decision = self.controller.currentDecision();
-                decision.changed = true;
-                self.applyDecision(io, decision, true);
-                continue;
+            switch (self.measurement) {
+                .blind => if (self.source_response_observed) {
+                    self.controller.generation +|= 1;
+                    var decision = self.controller.currentDecision();
+                    decision.changed = true;
+                    self.applyDecision(io, decision, true);
+                    continue;
+                },
+                else => {},
             }
 
             if (!self.source_response_observed) {
@@ -3467,52 +3415,40 @@ const SourceReadRuntime = struct {
 
             // Hold a completed score until all calls admitted at that width
             // have drained, keeping generation attribution unambiguous.
-            if (self.scoring_pending) {
-                if (self.read_gate.inUse(io) != 0) continue;
-                _ = self.takeRemoteTelemetry();
-                self.pending_evidence.remaining_full_jobs = scheduler_snapshot.remaining_jobs;
-                const decision = self.controller.observe(self.pending_evidence);
-                self.scoring_pending = false;
-                self.applyDecision(io, decision, !decision.settled);
-                continue;
-            }
-
-            if (self.probe_transition_pending) {
-                if (!scheduler_snapshot.has_unscheduled and
-                    self.metrics.pending_source_jobs.load(.acquire) == 0 and
-                    self.read_gate.inUse(io) == 0)
-                {
-                    if (self.persistent) continue;
-                    self.applyDecision(io, self.controller.rollbackTail(), false);
+            switch (self.measurement) {
+                .scoring => |pending| {
+                    if (self.read_gate.inUse(io) != 0) continue;
+                    _ = self.takeRemoteBackpressure();
+                    var evidence = pending;
+                    evidence.remaining_full_jobs = scheduler_snapshot.remaining_jobs;
+                    const decision = self.controller.observe(evidence);
+                    self.measurement = .inactive;
+                    self.applyDecision(io, decision, !decision.settled);
                     continue;
-                }
-                _ = self.activatePendingProbe(io);
-                continue;
+                },
+                else => {},
             }
 
-            if (self.probe_measuring) {
-                const evidence = self.currentEvidence(
+            switch (self.measurement) {
+                .transitioning => {
+                    _ = self.activatePendingProbe(io);
+                    continue;
+                },
+                else => {},
+            }
+
+            switch (self.measurement) {
+                .measuring => if (self.currentEvidence(
                     io,
                     scheduler_snapshot.remaining_jobs,
-                );
-                if (evidence.scoreable()) {
+                )) |evidence| {
                     // Freeze a complete interval, then drain admissions that
                     // raced with the snapshot. Their bytes are excluded.
                     self.read_gate.setLimit(io, 0);
-                    self.pending_evidence = evidence;
-                    self.probe_measuring = false;
-                    self.scoring_pending = true;
+                    self.measurement = .{ .scoring = evidence };
                     continue;
-                }
-            }
-
-            if (!scheduler_snapshot.has_unscheduled and
-                self.metrics.pending_source_jobs.load(.acquire) == 0 and
-                self.read_gate.inUse(io) == 0 and
-                self.controller.phase != .settled and !self.persistent)
-            {
-                const rollback = self.controller.rollbackTail();
-                self.applyDecision(io, rollback, false);
+                },
+                else => {},
             }
         }
     }
@@ -5517,7 +5453,6 @@ const DirectLoader = struct {
             .pinned_feasible_width = feasible_width,
             .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
-            .persistent = true,
         };
         errdefer self.stopWorkers();
         try self.startWorkers(source_parallelism.maximum());
@@ -5860,7 +5795,7 @@ const DirectLoader = struct {
             epoch_transfer_pieces,
             coalescing_ratio,
             average_read_size,
-            self.controller_runtime.reported_width.load(.acquire),
+            self.controller_runtime.reported_width,
             self.source_request_size,
             source_requests,
             source_bytes,
@@ -6761,7 +6696,7 @@ test "probe source capacity counts active reads rather than retained requests" {
 
     for (0..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
     for (0..48) |_| metrics.endRequest();
-    metrics.clearProbe(io, 7);
+    metrics.clearProbe(io);
 }
 
 test "source probe excludes pre-boundary admissions" {
@@ -6785,7 +6720,7 @@ test "source probe excludes pre-boundary admissions" {
     metrics.endRead(io, 7, 41);
     const drained = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 0), drained.probe_active_reads);
-    metrics.clearProbe(io, 7);
+    metrics.clearProbe(io);
 }
 
 test "partial source jobs contribute adaptive evidence" {

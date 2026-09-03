@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 2, on detached commit
-`bdfefabb` plus the current Task 2 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 3, on detached commit
+`4dd54ba5` plus the current Task 3 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -153,6 +153,12 @@ simplification pass.
   candidate. Unfinished finite-tail probes roll back. Metadata can cheaply
   clip feasibility, but cannot predict a source's latency/bandwidth saturation
   point, so no job-size-derived initial-width heuristic was added.
+- Measurement mechanics are separate from width policy. Runtime state is one
+  tagged value—inactive, transitioning, blind, measuring, or scoring—rather
+  than several coupled booleans. The measurement layer rejects stale or
+  insufficient evidence before invoking the controller. Probe counters are
+  ordinary fields protected by one mutex; only the source-call configuration
+  generation remains atomic for lock-free worker admission.
 - Two gates separate clean read-measurement generations from complete request
   lifecycles. All persistent workers compete for lifecycle capacity, configured
   as active reads plus one shared spare and clipped by pinned feasibility; the

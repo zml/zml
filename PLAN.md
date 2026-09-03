@@ -20,7 +20,7 @@ migrated yet.
 - [x] 0. Record the second-pass plan and refresh the `CTX.md` baseline.
 - [x] 1. Flatten epoch plans and remove dead pipeline state.
 - [x] 2. Make the lifecycle gate the epoch-completion mechanism.
-- [ ] 3. Simplify adaptive-runtime and probe-state representation.
+- [x] 3. Simplify adaptive-runtime and probe-state representation.
 - [ ] 4. Specialize DMA calibration for its single measured lane.
 - [ ] 5. Remove redundant platform/device identity state.
 - [ ] 6. Make `DmaBlockPool` provider-only and simplify block leases.
@@ -100,6 +100,17 @@ pass.
 
 Validation: controller, generation, tail, blind bootstrap, settled backoff,
 and allocation-failure tests.
+
+Result: the runtime's four mutually dependent probe booleans plus separate
+pending limit/evidence storage are now one tagged measurement state:
+inactive, transitioning, blind, measuring, or scoring. The measurement layer
+validates generation, duration, request count, and exercised concurrency before
+the controller sees evidence; the controller is only width-selection policy.
+Probe counters are plain fields under their existing mutex, aggregate feedback
+is reduced directly to a backpressure bit, and the selected width is published
+through the epoch barrier without an extra atomic. Removed the unused
+nonpersistent finalization/tail branches. The loader-inclusive ZML suite, IO
+playground build, and VFS/stdx tests pass.
 
 ### 4. Single-lane DMA calibration
 
