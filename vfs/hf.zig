@@ -381,27 +381,50 @@ pub const HF = struct {
     }
 
     fn resolveDownloadUrl(self: *HF, repo: Repo, out_buffer: []u8) ![]const u8 {
-        var url_buffer: [8 * 1024]u8 = undefined;
+        // `std.http.Client.Request.receiveHead` returns every HEAD response
+        // before its redirect handling, so the Hub's 307 to its CDN must be
+        // followed here. Credentials only travel to the Hub itself.
+        // Three rotating buffers: the current URL string, the redirect
+        // location being resolved against it, and the formatted result.
+        var url_buffers: [3][8 * 1024]u8 = undefined;
         var redirect_buffer: [16 * 1024]u8 = undefined;
-        const url = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
-        const uri: std.Uri = try .parse(url);
+        var url: []const u8 = try std.fmt.bufPrint(&url_buffers[0], API.LFS_FILE_URL_TEMPLATE, repo);
+        var current: usize = 0;
+        var remaining_redirects: usize = 8;
+        while (true) {
+            const uri: std.Uri = try .parse(url);
+            var req = try self.client.request(.HEAD, uri, .{
+                .redirect_behavior = .unhandled,
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit,
+                },
+            });
+            defer req.deinit();
 
-        var req = try self.client.request(.HEAD, uri, .{
-            .redirect_behavior = .init(8),
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = self.authorization,
-            },
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-        const res = try req.receiveHead(&redirect_buffer);
-        if (res.head.status.class() != .success) {
-            log.err("Failed to resolve download URL for {s}: status={}", .{ url, res.head.status });
-            return error.RequestFailed;
+            try req.sendBodiless();
+            const res = try req.receiveHead(&redirect_buffer);
+            switch (res.head.status.class()) {
+                .success => return std.fmt.bufPrint(out_buffer, "{s}", .{url}),
+                .redirect => {
+                    const location = res.head.location orelse return error.HttpRedirectLocationMissing;
+                    if (remaining_redirects == 0) return error.TooManyHttpRedirects;
+                    remaining_redirects -= 1;
+                    const scratch = (current + 1) % url_buffers.len;
+                    const output = (current + 2) % url_buffers.len;
+                    if (location.len > url_buffers[scratch].len) return error.HttpRedirectLocationOversize;
+                    @memcpy(url_buffers[scratch][0..location.len], location);
+                    var aux: []u8 = url_buffers[scratch][0..];
+                    const resolved = try uri.resolveInPlace(location.len, &aux);
+                    url = try std.fmt.bufPrint(&url_buffers[output], "{f}", .{resolved});
+                    current = output;
+                },
+                else => {
+                    log.err("Failed to resolve download URL for {s}: status={}", .{ url, res.head.status });
+                    return error.RequestFailed;
+                },
+            }
         }
-        return std.fmt.bufPrint(out_buffer, "{f}", .{req.uri});
     }
 
     fn findDirChildren(tree_items: []const TreeNode, dir_path: []const u8) ?[]const TreeNode {

@@ -590,6 +590,20 @@ decoupled, low pinned memory.
   1.5 GiB run. A per-layer submission holding both packs coalesces into
   ~16 MiB jobs; separate down and gate_up submissions would read every third
   2 MiB tensor.
+- DeepSeek-V4-Flash on mi300 (one MI300X, warm, 148.65 GiB, 69,187 tensors,
+  46 shards): 8.264 / 8.204 s wall, epoch 7.438 / 7.631 s, 18.0 GiB/s,
+  9,524 jobs, 69,572 transfers, planning 0.32 s, width 24, pinned high-water
+  784 MiB. Same host loads Llama at only 13 GiB/s, so the per-byte cost is
+  lower on the many-tensor model.
+- HF remote (`hf://Qwen/Qwen3.5-9B`, 17.98 GiB, local B70 host, no token):
+  22.35 / 21.02 s, 824 / 876 MiB/s, profile `hf`, 32 MiB requests, 577
+  requests, zero retries or throttles, selected width 24 / 32, pinned
+  high-water 1.53 GiB (width x 32 MiB requests; a remote load pins far more
+  than a local one). Found and fixed on the way: `std.http.Client` returns
+  HEAD responses before its redirect handling, so `HF.resolveDownloadUrl`
+  failed on the Hub's 307; it now follows redirects itself (absolute or
+  relative, credentials only to huggingface.co). The playground expects the
+  `hf://owner/model` form.
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 
