@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 7, on detached commit
-`2f411e7a` plus the current Task 7 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 8, on detached commit
+`e2b8ad77` plus the current Task 8 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -39,6 +39,17 @@ ref is still current.
   source lookup, validation, input allocation, execution, and output ownership
   similarly live once above the backend split; buffered and direct loaders
   implement only their transfer epochs. The buffered memory writer is private.
+- `zml/io.zig` is the public/store front end and buffered backend. Direct
+  planning, scheduling, adaptive control, transfer lifecycle, and their tests
+  are in `zml/io/direct_loader.zig`; platform-owned DMA settings, retained
+  arenas, and calibration are in `zml/io/dma_calibration.zig`; pure
+  sharding-to-byte-span expansion is in `zml/io/dispatch_spans.zig`. Shared
+  loader limits and option types are small leaf modules, and `zml.io` continues
+  to re-export the existing public names.
+- `Loader` owns IO, platform, store, and front-end options directly rather than
+  recovering duplicated state from its active backend. The buffered backend
+  retains none of the unused store/options; the direct backend retains only
+  the load profile and progress pointer needed after construction.
 - Both backends count logical loaded bytes only after the whole epoch succeeds.
   Direct epoch diagnostics are one record with a single per-epoch reset; their
   cumulative counter baselines and optional VFS cursor persist across epochs.
@@ -483,8 +494,9 @@ same-host medians.
 The first simplification pass is complete. The active second pass in `PLAN.md`
 has removed remaining planning/runtime genericity, consolidated epoch
 completion, specialized representative-device calibration, narrowed the DMA
-pool, and shared loader-front-end preparation. It next splits `zml/io.zig` by
-responsibility.
+pool, shared loader-front-end preparation, and split the former monolithic IO
+module by responsibility. Only final validation and documentation
+reconciliation remain.
 Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below

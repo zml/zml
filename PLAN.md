@@ -25,7 +25,7 @@ migrated yet.
 - [x] 5. Remove redundant platform/device identity state.
 - [x] 6. Make `DmaBlockPool` provider-only and simplify block leases.
 - [x] 7. Unify loader request preparation and exact positional scatter.
-- [ ] 8. Split the loader implementation into focused modules.
+- [x] 8. Split the loader implementation into focused modules.
 - [ ] 9. Run final validation and reconcile all documentation.
 
 ## Second-pass task details
@@ -204,6 +204,20 @@ implementation out of the monolithic `zml/io.zig`, keeping tests beside the
 code they exercise and preserving the public `zml.io` surface.
 
 Validation: formatting, focused builds, and all affected Zig tests.
+
+Result: the former 6,999-line `zml/io.zig` is now an 853-line public/store
+front end plus the buffered backend. Platform-owned settings, arenas, and
+representative-device calibration live in `io/dma_calibration.zig`; pure
+sharding-to-byte-span expansion lives in `io/dispatch_spans.zig`; direct
+planning, scheduling, adaptive control, transfer lifecycle, and their tests
+live together in `io/direct_loader.zig`. Small `limits.zig` and
+`loader_types.zig` modules keep those dependencies acyclic while `zml.io`
+re-exports the existing public surface. `Loader` now owns its IO, platform,
+store, and front-end options once instead of recovering them from whichever
+backend is active; the buffered backend no longer retains unused store/options,
+and the direct backend retains only the load profile and progress pointer it
+uses after construction. Zig formatting and Buildifier pass, as do the
+loader-inclusive 235-test ZML suite, IO playground build, and VFS/stdx tests.
 
 ### 9. Final validation
 
