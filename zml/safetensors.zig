@@ -12,6 +12,84 @@ pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 const log = std.log.scoped(.@"zml/safetensors");
 
 const BYTES_HEADER = 8;
+pub const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
+
+pub const ExactPositionalError = std.Io.File.ReadPositionalError || error{
+    OutOfBounds,
+    UnexpectedEndOfFile,
+};
+
+/// Completes an exact absolute positional scatter read, resuming short reads
+/// and respecting the platform iovec limit. `call_count` is optional
+/// diagnostic accounting for physical file calls.
+pub fn readFilePositionalAllV(
+    io: std.Io,
+    file: std.Io.File,
+    buffers: []const []u8,
+    file_offset: u64,
+    call_count: ?*std.atomic.Value(u64),
+) ExactPositionalError!void {
+    var read_size: u64 = 0;
+    for (buffers) |buffer| {
+        const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+        read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
+    }
+    _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
+    if (read_size == 0) return;
+
+    var batch: [max_positional_iovecs][]u8 = undefined;
+    var buffer_index: usize = 0;
+    var buffer_offset: usize = 0;
+    var completed: u64 = 0;
+    while (completed < read_size) {
+        var batch_len: usize = 0;
+        var scan_index = buffer_index;
+        var scan_offset = buffer_offset;
+        while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
+            const buffer = buffers[scan_index];
+            if (scan_offset >= buffer.len) {
+                scan_offset = 0;
+                continue;
+            }
+            batch[batch_len] = buffer[scan_offset..];
+            batch_len += 1;
+            scan_offset = 0;
+        }
+        if (batch_len == 0) return error.UnexpectedEndOfFile;
+
+        if (call_count) |count| _ = count.fetchAdd(1, .monotonic);
+        const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
+        const bytes_read = try file.readPositional(io, batch[0..batch_len], absolute_offset);
+        if (bytes_read == 0) return error.UnexpectedEndOfFile;
+        completed += @intCast(bytes_read);
+
+        try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
+    }
+}
+
+fn advanceScatter(
+    buffers: []const []u8,
+    buffer_index: *usize,
+    buffer_offset: *usize,
+    bytes: usize,
+) error{UnexpectedEndOfFile}!void {
+    var remaining = bytes;
+    while (remaining > 0) {
+        while (buffer_index.* < buffers.len and buffer_offset.* == buffers[buffer_index.*].len) {
+            buffer_index.* += 1;
+            buffer_offset.* = 0;
+        }
+        if (buffer_index.* >= buffers.len) return error.UnexpectedEndOfFile;
+        const available = buffers[buffer_index.*].len - buffer_offset.*;
+        if (remaining < available) {
+            buffer_offset.* += remaining;
+            return;
+        }
+        remaining -= available;
+        buffer_index.* += 1;
+        buffer_offset.* = 0;
+    }
+}
 
 pub const FileType = enum {
     index,
@@ -64,8 +142,6 @@ pub fn fetchRegistry(
 }
 
 pub const TensorReader = struct {
-    const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
-
     tensor: Tensor,
     file: std.Io.File,
     file_reader: std.Io.File.Reader,
@@ -81,10 +157,7 @@ pub const TensorReader = struct {
         alignment: ?std.mem.Alignment = null,
     };
 
-    pub const ReadPositionalError = std.Io.File.ReadPositionalError || error{
-        OutOfBounds,
-        UnexpectedEndOfFile,
-    };
+    pub const ReadPositionalError = ExactPositionalError;
 
     pub fn init(
         io: std.Io,
@@ -197,55 +270,13 @@ pub const TensorReader = struct {
         };
         _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
 
-        // Linux preadv(2) accepts at most IOV_MAX entries. Keep the public API
-        // backend-neutral and issue another exact positional read when a
-        // scatter list is larger or a backend completes only a prefix.
-        var batch: [max_positional_iovecs][]u8 = undefined;
-        var buffer_index: usize = 0;
-        var buffer_offset: usize = 0;
-        var completed: u64 = 0;
-        while (completed < read_size) {
-            var batch_len: usize = 0;
-            var scan_index = buffer_index;
-            var scan_offset = buffer_offset;
-            while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
-                const buffer = buffers[scan_index];
-                if (scan_offset >= buffer.len) {
-                    scan_offset = 0;
-                    continue;
-                }
-                batch[batch_len] = buffer[scan_offset..];
-                batch_len += 1;
-                scan_offset = 0;
-            }
-            if (batch_len == 0) return error.UnexpectedEndOfFile;
-
-            const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
-            const bytes_read = try self.file.readPositional(self.io, batch[0..batch_len], absolute_offset);
-            if (bytes_read == 0) return error.UnexpectedEndOfFile;
-            completed += @intCast(bytes_read);
-
-            try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
-        }
-    }
-
-    fn advanceScatter(buffers: []const []u8, buffer_index: *usize, buffer_offset: *usize, bytes: usize) error{UnexpectedEndOfFile}!void {
-        var remaining = bytes;
-        while (remaining > 0) {
-            while (buffer_index.* < buffers.len and buffer_offset.* == buffers[buffer_index.*].len) {
-                buffer_index.* += 1;
-                buffer_offset.* = 0;
-            }
-            if (buffer_index.* >= buffers.len) return error.UnexpectedEndOfFile;
-            const available = buffers[buffer_index.*].len - buffer_offset.*;
-            if (remaining < available) {
-                buffer_offset.* += remaining;
-                return;
-            }
-            remaining -= available;
-            buffer_index.* += 1;
-            buffer_offset.* = 0;
-        }
+        return readFilePositionalAllV(
+            self.io,
+            self.file,
+            buffers,
+            file_offset,
+            null,
+        );
     }
 
     // Limit single reads to 1GB to avoid issues on macOS where pread returns
@@ -478,7 +509,7 @@ test "TensorReader borrowed positional readers share and do not close their file
 
 test "TensorReader positional scatter reads batch more than IOV_MAX buffers" {
     const io = std.testing.io;
-    const len = TensorReader.max_positional_iovecs + 1;
+    const len = max_positional_iovecs + 1;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -529,16 +560,16 @@ test "TensorReader positional scatter resumes partial reads across boundaries" {
     const buffers = [_][]u8{ storage[0..2], storage[2..2], storage[2..5], storage[5..6] };
     var index: usize = 0;
     var offset: usize = 0;
-    try TensorReader.advanceScatter(&buffers, &index, &offset, 1);
+    try advanceScatter(&buffers, &index, &offset, 1);
     try std.testing.expectEqual(@as(usize, 0), index);
     try std.testing.expectEqual(@as(usize, 1), offset);
-    try TensorReader.advanceScatter(&buffers, &index, &offset, 2);
+    try advanceScatter(&buffers, &index, &offset, 2);
     try std.testing.expectEqual(@as(usize, 2), index);
     try std.testing.expectEqual(@as(usize, 1), offset);
-    try TensorReader.advanceScatter(&buffers, &index, &offset, 3);
+    try advanceScatter(&buffers, &index, &offset, 3);
     try std.testing.expectEqual(@as(usize, 4), index);
     try std.testing.expectEqual(@as(usize, 0), offset);
-    try std.testing.expectError(error.UnexpectedEndOfFile, TensorReader.advanceScatter(&buffers, &index, &offset, 1));
+    try std.testing.expectError(error.UnexpectedEndOfFile, advanceScatter(&buffers, &index, &offset, 1));
 }
 
 test "TensorReader positional reads report a truncated backing file" {

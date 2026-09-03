@@ -24,7 +24,7 @@ migrated yet.
 - [x] 4. Specialize DMA calibration for its single measured lane.
 - [x] 5. Remove redundant platform/device identity state.
 - [x] 6. Make `DmaBlockPool` provider-only and simplify block leases.
-- [ ] 7. Unify loader request preparation and exact positional scatter.
+- [x] 7. Unify loader request preparation and exact positional scatter.
 - [ ] 8. Split the loader implementation into focused modules.
 - [ ] 9. Run final validation and reconcile all documentation.
 
@@ -184,6 +184,18 @@ focused builds pass.
 
 Validation: public compatibility workflow, safetensor positional reads, VFS,
 and both loader implementations where supported.
+
+Result: `Loader.load` now performs model traversal, tensor-store lookup,
+sharding selection, and output flattening once before selecting a backend.
+`Loader.loadExecute` likewise prepares and validates one executable binding,
+including all input buffers, before delegating only the transfer epoch to the
+backend; execution and output ownership are shared again above that split.
+Safetensor readers and direct-loader pinned reads use one exact positional
+scatter implementation, including short-read continuation and `IOV_MAX`
+batching. The buffered writer is private, direct epoch diagnostics are one
+record with one reset operation, and both backends add logical bytes only after
+an entirely successful epoch. The loader-inclusive 235-test ZML suite passes,
+the IO playground builds, and VFS/stdx tests pass.
 
 ### 8. Module split
 

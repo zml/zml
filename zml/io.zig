@@ -279,7 +279,7 @@ pub const TensorStore = struct {
     };
 };
 
-pub const BufferedMemoryWriter = struct {
+const BufferedMemoryWriter = struct {
     io: std.Io,
     platform: *const Platform,
     shape: Shape,
@@ -287,7 +287,7 @@ pub const BufferedMemoryWriter = struct {
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
+    fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
@@ -305,13 +305,13 @@ pub const BufferedMemoryWriter = struct {
         };
     }
 
-    pub fn deinit(self: *BufferedMemoryWriter, allocator: std.mem.Allocator) void {
+    fn deinit(self: *BufferedMemoryWriter, allocator: std.mem.Allocator) void {
         if (self.interface.buffer.len > 0) {
             allocator.free(self.interface.buffer);
         }
     }
 
-    pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *BufferedMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
         self.buffer.* = Buffer.from(
@@ -1469,37 +1469,13 @@ const VectoredReadRequest = struct {
         file_offset: u64,
         metrics: *VectoredLoadMetrics,
     ) !void {
-        std.debug.assert(buffers.len <= max_load_positional_iovecs);
-        var total: usize = 0;
-        for (buffers) |buffer| total = try std.math.add(usize, total, buffer.len);
-        var completed: usize = 0;
-        var buffer_index: usize = 0;
-        var buffer_offset: usize = 0;
-        var scratch: [max_load_positional_iovecs][]u8 = undefined;
-        while (completed < total) {
-            const current = buffers[buffer_index..];
-            scratch[0] = current[0][buffer_offset..];
-            @memcpy(scratch[1..current.len], current[1..]);
-            _ = metrics.source_calls.fetchAdd(1, .monotonic);
-            const bytes_read = try file.readPositional(
-                io,
-                scratch[0..current.len],
-                file_offset + completed,
-            );
-            if (bytes_read == 0) return error.UnexpectedEndOfFile;
-            completed += bytes_read;
-            var advance = bytes_read;
-            while (advance > 0) {
-                const available = buffers[buffer_index].len - buffer_offset;
-                const take = @min(advance, available);
-                buffer_offset += take;
-                advance -= take;
-                if (buffer_offset == buffers[buffer_index].len) {
-                    buffer_index += 1;
-                    buffer_offset = 0;
-                }
-            }
-        }
+        return safetensors.readFilePositionalAllV(
+            io,
+            file,
+            buffers,
+            file_offset,
+            &metrics.source_calls,
+        );
     }
 
     fn beginRead(
@@ -4714,10 +4690,7 @@ fn finishDmaBenchmarkReport(
 pub const max_load_read_parallelism: usize = 128;
 pub const max_load_dma_parallelism: usize = 32;
 pub const max_load_read_request_size: usize = 32 * 1024 * 1024;
-const max_load_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void)
-    64
-else
-    std.posix.IOV_MAX;
+const max_load_positional_iovecs = safetensors.max_positional_iovecs;
 
 pub const Parallelism = union(enum) {
     adaptive: Adaptive,
@@ -4749,6 +4722,77 @@ pub const Parallelism = union(enum) {
         };
     }
 };
+
+const LoaderLoadSpec = struct {
+    source: *safetensors.Tensor,
+    shape: Shape,
+    sharding: Sharding,
+    output: *Buffer,
+};
+
+fn prepareModelLoad(
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: Loader.Opts,
+    comptime ModelType: type,
+    model: *const ModelType,
+    buffers: *Bufferized(ModelType),
+) ![]LoaderLoadSpec {
+    const tensor_count = meta.count(Tensor, model);
+    const flattened = try allocator.alloc(*Buffer, tensor_count);
+    defer allocator.free(flattened);
+    meta.forEachVisit(buffers, *Buffer, struct {
+        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+            output[i] = buffer;
+        }
+    }.call, .{flattened});
+
+    var specs: std.ArrayListUnmanaged(LoaderLoadSpec) = .empty;
+    errdefer specs.deinit(allocator);
+    try specs.ensureTotalCapacityPrecise(allocator, tensor_count);
+    const Ctx = struct {
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Loader.Opts,
+        buffers: []*Buffer,
+        specs: *std.ArrayListUnmanaged(LoaderLoadSpec),
+        err: ?anyerror = null,
+    };
+    var ctx: Ctx = .{
+        .platform = platform,
+        .store = store,
+        .opts = opts,
+        .buffers = flattened,
+        .specs = &specs,
+    };
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
+            if (context.err != null) return;
+            const sources = context.store.getSourcesById(tensor.id) orelse {
+                context.err = error.NotFound;
+                return;
+            };
+            if (sources.len != 1) {
+                load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
+                return;
+            }
+            const shape = tensor.shape();
+            context.specs.appendAssumeCapacity(.{
+                .source = sources[0],
+                .shape = shape,
+                .sharding = Sharding.pickSharding(
+                    context.opts.shardings,
+                    shape,
+                    .explicit_axis_binding,
+                ) orelse context.platform.replicated_sharding,
+                .output = context.buffers[i],
+            });
+        }
+    }.call, .{&ctx});
+    if (ctx.err) |err| return err;
+    return specs.toOwnedSlice(allocator);
+}
 
 pub const Loader = struct {
     allocator: std.mem.Allocator,
@@ -4797,9 +4841,21 @@ pub const Loader = struct {
         model: *const ModelType,
         buffers: *Bufferized(ModelType),
     ) !void {
+        try self.checkOpen();
+        const context = self.frontend();
+        const specs = try prepareModelLoad(
+            self.allocator,
+            context.platform,
+            context.store,
+            context.opts,
+            ModelType,
+            model,
+            buffers,
+        );
+        defer self.allocator.free(specs);
         return switch (self.backend) {
-            .direct => |direct| direct.load(ModelType, model, buffers),
-            .buffered => |buffered| buffered.load(ModelType, model, buffers),
+            .direct => |direct| direct.loadPrepared(specs),
+            .buffered => |buffered| buffered.loadPrepared(specs),
         };
     }
 
@@ -4811,10 +4867,22 @@ pub const Loader = struct {
         output: *Buffer,
         exe: *const Exe,
     ) !void {
-        return switch (self.backend) {
-            .direct => |direct| direct.loadExecute(tensor, output, exe),
-            .buffered => |buffered| buffered.loadExecute(tensor, output, exe),
-        };
+        try self.checkOpen();
+        const context = self.frontend();
+        var binding = try PreparedExecutableBinding.init(
+            self.allocator,
+            context.platform,
+            context.store,
+            context.opts,
+            tensor,
+            exe,
+        );
+        defer binding.deinit();
+        switch (self.backend) {
+            .direct => |direct| try direct.loadBinding(binding.sources, binding.inputs, exe),
+            .buffered => |buffered| try buffered.loadBinding(binding.sources, binding.inputs, exe),
+        }
+        try executeLoadedBinding(self.allocator, context.io, binding.inputs, output, exe);
     }
 
     /// Drains the current epoch and reopens the loader for later submissions.
@@ -4839,6 +4907,31 @@ pub const Loader = struct {
         }
         self.* = undefined;
     }
+
+    const Frontend = struct {
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Opts,
+        io: std.Io,
+    };
+
+    fn frontend(self: *const Loader) Frontend {
+        return switch (self.backend) {
+            inline else => |backend| .{
+                .platform = backend.platform,
+                .store = backend.store,
+                .opts = backend.opts,
+                .io = backend.io,
+            },
+        };
+    }
+
+    fn checkOpen(self: *Loader) !void {
+        return switch (self.backend) {
+            .direct => |direct| direct.checkOpen(),
+            .buffered => |buffered| buffered.checkOpen(),
+        };
+    }
 };
 
 fn validateLoaderOpts(opts: Loader.Opts) !void {
@@ -4848,6 +4941,45 @@ fn validateLoaderOpts(opts: Loader.Opts) !void {
     if (initial == 0 or maximum < initial or maximum > max_load_read_parallelism)
         return error.InvalidLoadParallelism;
 }
+
+const PreparedExecutableBinding = struct {
+    allocator: std.mem.Allocator,
+    sources: []const *safetensors.Tensor,
+    inputs: []Buffer,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Loader.Opts,
+        tensor: Tensor,
+        exe: *const Exe,
+    ) !PreparedExecutableBinding {
+        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
+        const output_sharding = Sharding.pickSharding(
+            opts.shardings,
+            tensor.shape(),
+            .explicit_axis_binding,
+        ) orelse platform.replicated_sharding;
+        try validateExecutableBinding(platform, tensor, sources, exe, output_sharding);
+        const inputs = try allocator.alloc(Buffer, sources.len);
+        for (inputs, exe.input_shapes, exe.input_shardings) |*input, shape, sharding| {
+            input.* = .{
+                ._platform = platform,
+                ._shape = shape,
+                ._sharding = sharding.resolve(platform),
+                ._shards = .empty,
+            };
+        }
+        return .{ .allocator = allocator, .sources = sources, .inputs = inputs };
+    }
+
+    fn deinit(self: *PreparedExecutableBinding) void {
+        for (self.inputs) |*input| input.deinit();
+        self.allocator.free(self.inputs);
+        self.* = undefined;
+    }
+};
 
 fn validateExecutableBinding(
     platform: *const Platform,
@@ -4915,6 +5047,7 @@ const BufferedLoader = struct {
     opts: Loader.Opts,
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
+    epoch_logical_bytes: usize = 0,
     first_error: std.atomic.Value(u16) = .init(0),
     epoch_active: bool = false,
 
@@ -4980,7 +5113,7 @@ const BufferedLoader = struct {
                     return;
                 };
                 defer writer.deinit(loader.allocator);
-                const total = reader.interface.streamRemaining(&writer.interface) catch |err| {
+                _ = reader.interface.streamRemaining(&writer.interface) catch |err| {
                     loader.recordError(err);
                     return;
                 };
@@ -4988,72 +5121,20 @@ const BufferedLoader = struct {
                     loader.recordError(err);
                     return;
                 };
-                _ = loader.bytes_loaded.fetchAdd(total, .monotonic);
             }
         }.run, .{ self, source, shape, sharding, output });
     }
 
-    fn load(
-        self: *BufferedLoader,
-        comptime ModelType: type,
-        model: *const ModelType,
-        buffers: *Bufferized(ModelType),
-    ) !void {
+    fn loadPrepared(self: *BufferedLoader, specs: []const LoaderLoadSpec) !void {
         try self.checkOpen();
-        const tensor_count = meta.count(Tensor, model);
-        var arena: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena.deinit();
-        const flattened = try arena.allocator().alloc(*Buffer, tensor_count);
-        meta.forEachVisit(buffers, *Buffer, struct {
-            fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-                output[i] = buffer;
-            }
-        }.call, .{flattened});
-        const Prepared = struct {
-            source: *safetensors.Tensor,
-            shape: Shape,
-            sharding: Sharding,
-            output: *Buffer,
-        };
-        const prepared = try arena.allocator().alloc(Prepared, tensor_count);
-        const Ctx = struct {
-            loader: *BufferedLoader,
-            buffers: []*Buffer,
-            prepared: []Prepared,
-            count: usize = 0,
-            err: ?anyerror = null,
-        };
-        var ctx: Ctx = .{ .loader = self, .buffers = flattened, .prepared = prepared };
-        meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
-                if (context.err != null) return;
-                const sources = context.loader.store.getSourcesById(tensor.id) orelse {
-                    context.err = error.NotFound;
-                    return;
-                };
-                if (sources.len != 1) {
-                    load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
-                    return;
-                }
-                const shape = tensor.shape();
-                const sharding = Sharding.pickSharding(
-                    context.loader.opts.shardings,
-                    shape,
-                    .explicit_axis_binding,
-                ) orelse context.loader.platform.replicated_sharding;
-                context.prepared[context.count] = .{
-                    .source = sources[0],
-                    .shape = shape,
-                    .sharding = sharding,
-                    .output = context.buffers[i],
-                };
-                context.count += 1;
-            }
-        }.call, .{&ctx});
-        if (ctx.err) |err| return err;
-        for (prepared[0..ctx.count]) |item| {
+        var logical_bytes: usize = 0;
+        for (specs) |item| {
+            logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
+        }
+        for (specs) |item| {
             self.submitOne(item.source, item.shape, item.sharding, item.output);
         }
+        self.epoch_logical_bytes = logical_bytes;
         self.epoch_active = true;
     }
 
@@ -5064,35 +5145,29 @@ const BufferedLoader = struct {
         }
         self.group.await(self.io) catch |err| self.recordError(err);
         self.epoch_active = false;
-        try self.checkOpen();
+        const code = self.first_error.load(.acquire);
+        if (code == 0) _ = self.bytes_loaded.fetchAdd(self.epoch_logical_bytes, .monotonic);
+        self.epoch_logical_bytes = 0;
+        if (code != 0) return @errorFromInt(code);
     }
 
-    fn loadExecute(self: *BufferedLoader, tensor: Tensor, output: *Buffer, exe: *const Exe) !void {
+    fn loadBinding(
+        self: *BufferedLoader,
+        sources: []const *safetensors.Tensor,
+        inputs: []Buffer,
+        exe: *const Exe,
+    ) !void {
         try self.checkOpen();
-        const sources = self.store.getSourcesById(tensor.id) orelse return error.NotFound;
-        const output_sharding = Sharding.pickSharding(
-            self.opts.shardings,
-            tensor.shape(),
-            .explicit_axis_binding,
-        ) orelse self.platform.replicated_sharding;
-        try validateExecutableBinding(self.platform, tensor, sources, exe, output_sharding);
-        const inputs = try self.allocator.alloc(Buffer, sources.len);
-        defer self.allocator.free(inputs);
-        for (inputs, exe.input_shapes, exe.input_shardings) |*input, shape, sharding| {
-            input.* = .{
-                ._platform = self.platform,
-                ._shape = shape,
-                ._sharding = sharding.resolve(self.platform),
-                ._shards = .empty,
-            };
+        var logical_bytes: usize = 0;
+        for (sources) |source| {
+            logical_bytes = try std.math.add(usize, logical_bytes, source.shape.byteSize());
         }
-        defer for (inputs) |*input| input.deinit();
         for (sources, exe.input_shapes, exe.input_shardings, inputs) |source, shape, sharding, *input| {
             self.submitOne(source, shape, sharding.resolve(self.platform), input);
         }
+        self.epoch_logical_bytes = logical_bytes;
         self.epoch_active = true;
         try self.await();
-        try executeLoadedBinding(self.allocator, self.io, inputs, output, exe);
     }
 
     fn destroy(self: *BufferedLoader) void {
@@ -5181,6 +5256,34 @@ test "loader supports repeated synchronous and explicit epochs" {
     try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
 }
 
+const DirectLoaderDiagnostics = struct {
+    logical_bytes: usize = 0,
+    source_bytes: u64 = 0,
+    source_jobs: usize = 0,
+    source_runs: usize = 0,
+    source_items: usize = 0,
+    planned_transfers: usize = 0,
+    planning_ns: u64 = 0,
+    started_at: ?std.Io.Timestamp = null,
+    epoch_number: usize = 0,
+    logged_read_operations: u64 = 0,
+    logged_source_calls: u64 = 0,
+    logged_transfer_pieces: u64 = 0,
+    logged_dma_submissions: u64 = 0,
+    source_stats: ?VFS.ReadStats = null,
+
+    fn resetEpoch(self: *DirectLoaderDiagnostics) void {
+        self.logical_bytes = 0;
+        self.source_bytes = 0;
+        self.source_jobs = 0;
+        self.source_runs = 0;
+        self.source_items = 0;
+        self.planned_transfers = 0;
+        self.planning_ns = 0;
+        self.started_at = null;
+    }
+};
+
 const DirectLoader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -5200,20 +5303,7 @@ const DirectLoader = struct {
     source_slots: std.ArrayListUnmanaged(*LoaderSourceSlot) = .empty,
     epoch_items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
-    epoch_logical_bytes: usize = 0,
-    epoch_source_bytes: u64 = 0,
-    epoch_source_jobs: usize = 0,
-    epoch_source_runs: usize = 0,
-    epoch_source_items: usize = 0,
-    epoch_planned_transfers: usize = 0,
-    epoch_planning_ns: u64 = 0,
-    epoch_started_at: ?std.Io.Timestamp = null,
-    epoch_number: usize = 0,
-    logged_read_operations: u64 = 0,
-    logged_source_calls: u64 = 0,
-    logged_transfer_pieces: u64 = 0,
-    logged_dma_submissions: u64 = 0,
-    diagnostic_stats: ?VFS.ReadStats = null,
+    diagnostics: DirectLoaderDiagnostics = .{},
     epoch_active: bool = false,
     source_request_size: usize,
     maximum_blocks_per_job: usize,
@@ -5309,7 +5399,9 @@ const DirectLoader = struct {
             .source_request_size = request_size,
             .maximum_blocks_per_job = maximum_blocks_per_job,
             .effective_pinned_feasible_width = feasible_width,
-            .diagnostic_stats = if (read_stats) |cursor| cursor.previous else null,
+            .diagnostics = .{
+                .source_stats = if (read_stats) |cursor| cursor.previous else null,
+            },
         };
         // Ownership moved into the stable heap object.
         pool_moved = true;
@@ -5494,83 +5586,39 @@ const DirectLoader = struct {
             }
             logical_bytes = try std.math.add(usize, logical_bytes, item.source.shape.byteSize());
         }
-        self.epoch_started_at = .now(self.io, .awake);
+        self.diagnostics.started_at = .now(self.io, .awake);
         if (self.opts.load_profile.stats) |provider| {
             // Exclude aggregate backend traffic that happened while this
             // loader had no active epoch from the next diagnostic delta.
-            self.diagnostic_stats = provider.snapshot();
+            self.diagnostics.source_stats = provider.snapshot();
         }
         try self.scheduler.publish(self.io, &batch);
         batch_owned = false;
         for (items) |item| self.epoch_items.appendAssumeCapacity(item);
-        self.epoch_logical_bytes = logical_bytes;
-        self.epoch_source_bytes = batch_source_bytes;
-        self.epoch_source_jobs = batch_job_count;
-        self.epoch_source_runs = batch_source_runs;
-        self.epoch_source_items = items.len;
-        self.epoch_planned_transfers = batch_transfer_count;
-        self.epoch_planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0));
+        self.diagnostics.logical_bytes = logical_bytes;
+        self.diagnostics.source_bytes = batch_source_bytes;
+        self.diagnostics.source_jobs = batch_job_count;
+        self.diagnostics.source_runs = batch_source_runs;
+        self.diagnostics.source_items = items.len;
+        self.diagnostics.planned_transfers = batch_transfer_count;
+        self.diagnostics.planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0));
         self.epoch_active = true;
     }
 
-    fn load(
-        self: *DirectLoader,
-        comptime ModelType: type,
-        model: *const ModelType,
-        buffers: *Bufferized(ModelType),
-    ) !void {
+    fn loadPrepared(self: *DirectLoader, specs: []const LoaderLoadSpec) !void {
         try self.checkOpen();
-        const count = meta.count(Tensor, model);
-        const flattened = try self.allocator.alloc(*Buffer, count);
-        defer self.allocator.free(flattened);
-        meta.forEachVisit(buffers, *Buffer, struct {
-            fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-                output[i] = buffer;
-            }
-        }.call, .{flattened});
         var items: std.ArrayListUnmanaged(*LoaderLoadItem) = .empty;
         defer items.deinit(self.allocator);
         errdefer for (items.items) |item| item.deinit(self.allocator);
-        const Ctx = struct {
-            loader: *DirectLoader,
-            buffers: []*Buffer,
-            items: *std.ArrayListUnmanaged(*LoaderLoadItem),
-            err: ?anyerror = null,
-        };
-        var ctx: Ctx = .{ .loader = self, .buffers = flattened, .items = &items };
-        meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
-                if (context.err != null) return;
-                const sources = context.loader.store.getSourcesById(tensor.id) orelse {
-                    context.err = error.NotFound;
-                    return;
-                };
-                if (sources.len != 1) {
-                    load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
-                    return;
-                }
-                const shape = tensor.shape();
-                const sharding = Sharding.pickSharding(
-                    context.loader.opts.shardings,
-                    shape,
-                    .explicit_axis_binding,
-                ) orelse context.loader.platform.replicated_sharding;
-                const item = context.loader.createItem(
-                    sources[0],
-                    shape,
-                    sharding,
-                    context.buffers[i],
-                ) catch |err| {
-                    context.err = err;
-                    return;
-                };
-                context.items.append(context.loader.allocator, item) catch |err| {
-                    item.deinit(context.loader.allocator);
-                    context.err = err;
-                };
-            }
-        }.call, .{&ctx});
-        if (ctx.err) |err| return err;
+        try items.ensureTotalCapacityPrecise(self.allocator, specs.len);
+        for (specs) |spec| {
+            items.appendAssumeCapacity(try self.createItem(
+                spec.source,
+                spec.shape,
+                spec.sharding,
+                spec.output,
+            ));
+        }
         try self.appendItems(items.items);
         items.clearRetainingCapacity();
     }
@@ -5606,26 +5654,12 @@ const DirectLoader = struct {
         self.epoch_items.clearRetainingCapacity();
         self.logEpoch(load_error == null);
         if (load_error) |err| {
-            self.epoch_logical_bytes = 0;
-            self.epoch_source_bytes = 0;
-            self.epoch_source_jobs = 0;
-            self.epoch_source_runs = 0;
-            self.epoch_source_items = 0;
-            self.epoch_planned_transfers = 0;
-            self.epoch_planning_ns = 0;
-            self.epoch_started_at = null;
+            self.diagnostics.resetEpoch();
             self.epoch_active = false;
             return err;
         }
-        _ = self.bytes_loaded.fetchAdd(self.epoch_logical_bytes, .monotonic);
-        self.epoch_logical_bytes = 0;
-        self.epoch_source_bytes = 0;
-        self.epoch_source_jobs = 0;
-        self.epoch_source_runs = 0;
-        self.epoch_source_items = 0;
-        self.epoch_planned_transfers = 0;
-        self.epoch_planning_ns = 0;
-        self.epoch_started_at = null;
+        _ = self.bytes_loaded.fetchAdd(self.diagnostics.logical_bytes, .monotonic);
+        self.diagnostics.resetEpoch();
         self.epoch_active = false;
     }
 
@@ -5634,56 +5668,56 @@ const DirectLoader = struct {
         const source_calls = self.metrics.source_calls.load(.acquire);
         const transfer_pieces = self.metrics.transfer_pieces.load(.acquire);
         const dma_submissions = self.metrics.dma_submissions.load(.acquire);
-        const epoch_reads = read_operations -| self.logged_read_operations;
-        const epoch_source_calls = source_calls -| self.logged_source_calls;
-        const epoch_transfer_pieces = transfer_pieces -| self.logged_transfer_pieces;
-        const epoch_dma = dma_submissions -| self.logged_dma_submissions;
-        self.logged_read_operations = read_operations;
-        self.logged_source_calls = source_calls;
-        self.logged_transfer_pieces = transfer_pieces;
-        self.logged_dma_submissions = dma_submissions;
+        const epoch_reads = read_operations -| self.diagnostics.logged_read_operations;
+        const epoch_source_calls = source_calls -| self.diagnostics.logged_source_calls;
+        const epoch_transfer_pieces = transfer_pieces -| self.diagnostics.logged_transfer_pieces;
+        const epoch_dma = dma_submissions -| self.diagnostics.logged_dma_submissions;
+        self.diagnostics.logged_read_operations = read_operations;
+        self.diagnostics.logged_source_calls = source_calls;
+        self.diagnostics.logged_transfer_pieces = transfer_pieces;
+        self.diagnostics.logged_dma_submissions = dma_submissions;
         var source_requests: u64 = 0;
         var source_bytes: u64 = 0;
         var source_retries: u64 = 0;
         var source_throttles: u64 = 0;
         if (self.opts.load_profile.stats) |provider| {
             const current = provider.snapshot();
-            if (self.diagnostic_stats) |previous| {
+            if (self.diagnostics.source_stats) |previous| {
                 const delta = current.sub(previous);
                 source_requests = delta.physical_requests;
                 source_bytes = delta.physical_bytes;
                 source_retries = delta.retries;
                 source_throttles = delta.throttles;
             }
-            self.diagnostic_stats = current;
+            self.diagnostics.source_stats = current;
         }
-        const elapsed_seconds: f64 = if (self.epoch_started_at) |started|
+        const elapsed_seconds: f64 = if (self.diagnostics.started_at) |started|
             @as(f64, @floatFromInt(started.untilNow(self.io, .awake).nanoseconds)) /
                 std.time.ns_per_s
         else
             0;
-        const average_read_size = if (self.epoch_source_jobs == 0)
+        const average_read_size = if (self.diagnostics.source_jobs == 0)
             0
         else
-            self.epoch_source_bytes / self.epoch_source_jobs;
-        const coalescing_ratio = if (self.epoch_source_jobs == 0)
+            self.diagnostics.source_bytes / self.diagnostics.source_jobs;
+        const coalescing_ratio = if (self.diagnostics.source_jobs == 0)
             0
         else
-            @as(f64, @floatFromInt(self.epoch_source_items)) /
-                @as(f64, @floatFromInt(self.epoch_source_jobs));
+            @as(f64, @floatFromInt(self.diagnostics.source_items)) /
+                @as(f64, @floatFromInt(self.diagnostics.source_jobs));
         load_log.debug("epoch completed: epoch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, elapsed={d:.3}s, planning_elapsed={d:.3}s, reads={d}, physical_source_calls={d}, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, tensor_transfer_pieces={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, dma_submissions={d}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
-            self.epoch_number,
+            self.diagnostics.epoch_number,
             successful,
-            self.epoch_logical_bytes,
-            self.epoch_source_bytes,
+            self.diagnostics.logical_bytes,
+            self.diagnostics.source_bytes,
             elapsed_seconds,
-            @as(f64, @floatFromInt(self.epoch_planning_ns)) / std.time.ns_per_s,
+            @as(f64, @floatFromInt(self.diagnostics.planning_ns)) / std.time.ns_per_s,
             epoch_reads,
             epoch_source_calls,
-            self.epoch_source_jobs,
-            self.epoch_source_runs,
-            self.epoch_source_items,
-            self.epoch_planned_transfers,
+            self.diagnostics.source_jobs,
+            self.diagnostics.source_runs,
+            self.diagnostics.source_items,
+            self.diagnostics.planned_transfers,
             epoch_transfer_pieces,
             coalescing_ratio,
             average_read_size,
@@ -5697,30 +5731,16 @@ const DirectLoader = struct {
             self.pool.highWaterBytes(),
             self.pool.mappedBytes(),
         });
-        self.epoch_number += 1;
+        self.diagnostics.epoch_number += 1;
     }
 
-    fn loadExecute(self: *DirectLoader, tensor: Tensor, output: *Buffer, exe: *const Exe) !void {
+    fn loadBinding(
+        self: *DirectLoader,
+        sources: []const *safetensors.Tensor,
+        inputs: []Buffer,
+        exe: *const Exe,
+    ) !void {
         try self.checkOpen();
-        const sources = self.store.getSourcesById(tensor.id) orelse return error.NotFound;
-        const output_sharding = Sharding.pickSharding(
-            self.opts.shardings,
-            tensor.shape(),
-            .explicit_axis_binding,
-        ) orelse self.platform.replicated_sharding;
-        try validateExecutableBinding(self.platform, tensor, sources, exe, output_sharding);
-        const inputs = try self.allocator.alloc(Buffer, sources.len);
-        defer self.allocator.free(inputs);
-        for (inputs, exe.input_shapes, exe.input_shardings) |*input, shape, sharding| {
-            input.* = .{
-                ._platform = self.platform,
-                ._shape = shape,
-                ._sharding = sharding.resolve(self.platform),
-                ._shards = .empty,
-            };
-        }
-        defer for (inputs) |*input| input.deinit();
-
         const items = try self.allocator.alloc(*LoaderLoadItem, sources.len);
         defer self.allocator.free(items);
         var initialized: usize = 0;
@@ -5732,7 +5752,6 @@ const DirectLoader = struct {
         try self.appendItems(items);
         initialized = 0;
         try self.await();
-        try executeLoadedBinding(self.allocator, self.io, inputs, output, exe);
     }
 
     fn destroy(self: *DirectLoader) void {

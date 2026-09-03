@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 6, on detached commit
-`4bb9ff65` plus the current Task 6 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 7, on detached commit
+`2f411e7a` plus the current Task 7 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -34,6 +34,14 @@ ref is still current.
   longer public loader mechanisms. `Loader.loadExecute` remains and is
   synchronous: it loads every source for a multi-source/fused binding, drains
   the epoch, executes the binding, and returns with the output ready.
+- Model traversal, tensor-store lookup, resolved sharding selection, and output
+  flattening happen once in the shared `Loader.load` front end. Executable
+  source lookup, validation, input allocation, execution, and output ownership
+  similarly live once above the backend split; buffered and direct loaders
+  implement only their transfer epochs. The buffered memory writer is private.
+- Both backends count logical loaded bytes only after the whole epoch succeeds.
+  Direct epoch diagnostics are one record with a single per-epoch reset; their
+  cumulative counter baselines and optional VFS cursor persist across epochs.
 - The compatibility target observed in `~/github/zml/monorepo` is behavioral:
   repeated `loadExecute`, followed by at most one `load`/`await`, multi-source
   `TensorStore` bindings, and cumulative loaded-byte accounting. That checkout
@@ -41,10 +49,11 @@ ref is still current.
 
 ### Source and VFS data plane
 
-- `TensorReader.readPositionalAllV` provides checked, exact positional scatter
-  reads, short-read resumption, local `IOV_MAX` batching, and borrowed readers
-  over a shared open file. Each distinct safetensor object is opened once per
-  model-wide load.
+- `safetensors.readFilePositionalAllV` is the one exact positional scatter
+  implementation for tensor readers and direct-loader pinned reads. It handles
+  short-read resumption and local `IOV_MAX` batching; `TensorReader` adds tensor
+  range validation and borrowed readers over a shared open file. Each distinct
+  safetensor object is opened once per model-wide load.
 - HTTP, S3, GCS, and HF issue one whole Range request per admitted positional
   call. Retries are serial inside that caller's source credit; the retired
   backend-local `parallel_read` pools must not return.
@@ -454,7 +463,8 @@ same-host medians.
   reuse, failure cleanup, and epoch reuse tests passed. A real public-loader
   test also covers `loadExecute -> loadExecute -> load -> await`, output
   readiness, active-epoch rejection, and cumulative byte accounting.
-- `zig fmt --check zml/io.zig zml/mem.zig` passed.
+- `zig fmt --check zml/io.zig zml/safetensors.zig` passed with the repository's
+  Bazel-managed Zig toolchain.
 - `bazel build //examples/io:playground`, `bazel test //vfs:test`, and
   `bazel test //stdx:test` passed.
 - `bazel test //zml:test --@zml//platforms:cuda=true
@@ -471,9 +481,10 @@ same-host medians.
 ## Open work
 
 The first simplification pass is complete. The active second pass in `PLAN.md`
-removes remaining planning/runtime genericity, consolidates epoch completion,
-specializes representative-device calibration, narrows the DMA pool, shares
-loader-front-end preparation, and then splits `zml/io.zig` by responsibility.
+has removed remaining planning/runtime genericity, consolidated epoch
+completion, specialized representative-device calibration, narrowed the DMA
+pool, and shared loader-front-end preparation. It next splits `zml/io.zig` by
+responsibility.
 Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below
