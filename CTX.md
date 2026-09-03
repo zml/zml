@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after second-pass plan Task 5, on detached commit
-`da34becc` plus the current Task 5 work. `PLAN.md` is the sequential
+Last consolidated: 2026-09-03 after second-pass plan Task 6, on detached commit
+`4bb9ff65` plus the current Task 6 work. `PLAN.md` is the sequential
 implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
@@ -180,8 +180,10 @@ simplification pass.
   mapped-byte ceiling, demand growth, NUMA reserves, and augmenting-path
   affinity assignment. Matching is correctness logic: greedily assigning a
   replicated block can consume the only block usable by a later strict-local
-  request. Production construction is exclusively arena-provider backed; the
-  allocator-backed slab source exists only in tests.
+  request. Construction is exclusively arena-provider backed, including tests;
+  there is no alternate owned-slab mode or externally refreshed-arena path.
+  Acquired block handles carry their NUMA node, so final callback release goes
+  directly to the correct free list without scanning retained arenas.
 - Calibration resources/settings belong to `Platform`. Conservative defaults
   work without calibration; `benchTransfer` atomically replaces them and its
   arenas are retained as the loader's initial pool. Platform state prevents

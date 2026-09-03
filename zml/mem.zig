@@ -240,6 +240,11 @@ pub const DmaBlockPool = struct {
         unused_tail_bytes: usize,
     };
 
+    pub const Block = struct {
+        data: []u8,
+        node_index: usize,
+    };
+
     /// Type-erased bridge to the resource-owned arena workspace.
     pub const ArenaProvider = struct {
         context: *anyopaque,
@@ -270,18 +275,28 @@ pub const DmaBlockPool = struct {
         pool: *DmaBlockPool,
         io: std.Io,
         data: []u8,
+        node_index: usize,
         remaining: std.atomic.Value(usize),
 
-        pub fn init(pool: *DmaBlockPool, io: std.Io, data: []u8, references: usize) Lease {
+        pub fn init(pool: *DmaBlockPool, io: std.Io, block: Block, references: usize) Lease {
             std.debug.assert(references > 0);
-            return .{ .pool = pool, .io = io, .data = data, .remaining = .init(references) };
+            return .{
+                .pool = pool,
+                .io = io,
+                .data = block.data,
+                .node_index = block.node_index,
+                .remaining = .init(references),
+            };
         }
 
         /// Completes one reference and returns whether this was the final one.
         pub fn complete(self: *Lease) bool {
             const previous = self.remaining.fetchSub(1, .acq_rel);
             std.debug.assert(previous > 0);
-            if (previous == 1) self.pool.release(self.io, self.data);
+            if (previous == 1) self.pool.release(self.io, .{
+                .data = self.data,
+                .node_index = self.node_index,
+            });
             return previous == 1;
         }
 
@@ -329,7 +344,7 @@ pub const DmaBlockPool = struct {
     };
 
     const Node = struct {
-        free_blocks: std.ArrayListUnmanaged([]u8) = .empty,
+        free_blocks: std.ArrayListUnmanaged(Block) = .empty,
         arenas: std.ArrayListUnmanaged([]u8) = .empty,
         capacity: usize = 0,
         in_use: usize = 0,
@@ -346,8 +361,7 @@ pub const DmaBlockPool = struct {
     };
 
     allocator: std.mem.Allocator,
-    slab_allocator: ?std.mem.Allocator,
-    provider: ?ArenaProvider,
+    provider: ArenaProvider,
     nodes: []Node,
     block_size: usize,
     max_mapped_bytes: usize,
@@ -355,42 +369,12 @@ pub const DmaBlockPool = struct {
     unused_tail_bytes: usize = 0,
     newly_mapped_bytes: usize = 0,
     slab_blocks: usize,
-    owned_slabs: std.ArrayListUnmanaged([]u8) = .empty,
     in_use: usize = 0,
     high_water: usize = 0,
     next_node: usize = 0,
     closed: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-
-    fn initForTest(
-        allocator: std.mem.Allocator,
-        slab_allocator: std.mem.Allocator,
-        block_size: usize,
-        max_bytes: usize,
-    ) !DmaBlockPool {
-        if (block_size == 0 or max_bytes < block_size) return error.RequestExceedsCapacity;
-        const nodes = try allocator.alloc(Node, 1);
-        nodes[0] = .{};
-        const max_blocks = max_bytes / block_size;
-        var self: DmaBlockPool = .{
-            .allocator = allocator,
-            .slab_allocator = slab_allocator,
-            .provider = null,
-            .nodes = nodes,
-            .block_size = block_size,
-            .max_mapped_bytes = max_bytes,
-            .mapped_bytes = 0,
-            .slab_blocks = @max(@as(usize, 1), default_slab_size / block_size),
-        };
-        errdefer self.deinit();
-        try self.nodes[0].free_blocks.ensureTotalCapacityPrecise(allocator, max_blocks);
-        try self.nodes[0].arenas.ensureTotalCapacityPrecise(
-            allocator,
-            std.math.divCeil(usize, max_blocks, @max(@as(usize, 1), default_slab_size / block_size)) catch unreachable,
-        );
-        return self;
-    }
 
     /// Builds a fresh free-list view from every retained arena. Arena tails
     /// smaller than one selected block remain mapped and are reported unused.
@@ -409,7 +393,6 @@ pub const DmaBlockPool = struct {
         for (nodes, reserves) |*node, reserve| node.* = .{ .reserve = reserve };
         var self: DmaBlockPool = .{
             .allocator = allocator,
-            .slab_allocator = null,
             .provider = provider,
             .nodes = nodes,
             .block_size = block_size,
@@ -435,10 +418,6 @@ pub const DmaBlockPool = struct {
 
     pub fn deinit(self: *DmaBlockPool) void {
         std.debug.assert(self.in_use == 0);
-        if (self.slab_allocator) |slab_allocator| {
-            for (self.owned_slabs.items) |slab| slab_allocator.rawFree(slab, .of(u8), @returnAddress());
-        }
-        self.owned_slabs.deinit(self.allocator);
         for (self.nodes) |*node| {
             std.debug.assert(node.in_use == 0 and node.free_blocks.items.len == node.capacity);
             node.free_blocks.deinit(self.allocator);
@@ -463,7 +442,7 @@ pub const DmaBlockPool = struct {
     pub fn acquireMany(
         self: *DmaBlockPool,
         io: std.Io,
-        output: [][]u8,
+        output: []Block,
         affinities: []const Affinity,
         scratch: *AcquireScratch,
     ) Error!void {
@@ -500,6 +479,7 @@ pub const DmaBlockPool = struct {
         for (output, assignments) |*block, node_index| {
             const node = &self.nodes[node_index];
             block.* = node.free_blocks.pop().?;
+            std.debug.assert(block.node_index == node_index);
             node.in_use += 1;
             node.high_water = @max(node.high_water, node.in_use);
         }
@@ -645,8 +625,7 @@ pub const DmaBlockPool = struct {
 
     /// Returns the largest request width that the pool could support if each
     /// request consumes `blocks_per_request` blocks and admissions may draw
-    /// from aggregate capacity. Call this after refreshing provider arenas and
-    /// before the first lease. Arena tails count against the mapped-byte cap
+    /// from aggregate capacity. Arena tails count against the mapped-byte cap
     /// but do not contribute usable blocks.
     pub fn aggregatePotentialRequestWidth(
         self: *const DmaBlockPool,
@@ -661,8 +640,7 @@ pub const DmaBlockPool = struct {
     /// Returns the smallest request width that any one strict-affinity node
     /// could eventually support. Growth needed to satisfy every node's reserve
     /// is protected first; the remaining growth budget may then be used by the
-    /// node being evaluated. Call this after refreshing provider arenas and
-    /// before the first lease.
+    /// node being evaluated.
     pub fn minimumStrictAffinityRequestWidth(
         self: *const DmaBlockPool,
         blocks_per_request: usize,
@@ -716,14 +694,14 @@ pub const DmaBlockPool = struct {
         return true;
     }
 
-    pub fn releaseMany(self: *DmaBlockPool, io: std.Io, blocks: []const []u8) void {
+    pub fn releaseMany(self: *DmaBlockPool, io: std.Io, blocks: []const Block) void {
         if (blocks.len == 0) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         std.debug.assert(blocks.len <= self.in_use);
         for (blocks) |block| {
-            const node_index = self.nodeForBlock(block) orelse unreachable;
-            const node = &self.nodes[node_index];
+            std.debug.assert(block.data.len == self.block_size and block.node_index < self.nodes.len);
+            const node = &self.nodes[block.node_index];
             node.free_blocks.appendAssumeCapacity(block);
             std.debug.assert(node.in_use > 0);
             node.in_use -= 1;
@@ -732,25 +710,8 @@ pub const DmaBlockPool = struct {
         self.condition.broadcast(io);
     }
 
-    pub fn release(self: *DmaBlockPool, io: std.Io, block: []u8) void {
+    pub fn release(self: *DmaBlockPool, io: std.Io, block: Block) void {
         self.releaseMany(io, &.{block});
-    }
-
-    fn nodeForBlock(self: *const DmaBlockPool, block: []const u8) ?usize {
-        if (block.len != self.block_size) return null;
-        const address = @intFromPtr(block.ptr);
-        for (self.nodes, 0..) |node, node_index| {
-            for (node.arenas.items) |arena| {
-                const start = @intFromPtr(arena.ptr);
-                if (address < start) continue;
-                const offset = address - start;
-                const usable_len = arena.len - arena.len % self.block_size;
-                if (usable_len < self.block_size) continue;
-                if (offset % self.block_size == 0 and offset <= usable_len -| self.block_size)
-                    return node_index;
-            }
-        }
-        return null;
     }
 
     pub fn close(self: *DmaBlockPool, io: std.Io) void {
@@ -792,143 +753,17 @@ pub const DmaBlockPool = struct {
         };
     }
 
-    /// Discovers arenas appended to a provider after pool initialization and
-    /// before the first lease. The provider must remain quiescent for the
-    /// duration of this call. Existing arenas must remain an unchanged prefix
-    /// of each provider node's append-only arena list.
-    pub fn refreshProviderArenas(self: *DmaBlockPool, io: std.Io) !void {
-        const provider = self.provider orelse return error.NotProviderBacked;
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (self.closed) return error.Closed;
-        if (self.in_use != 0 or self.high_water != 0) return error.DmaBlockPoolAlreadyUsed;
-
-        const SnapshotArena = struct {
-            node_index: usize,
-            arena_index: usize,
-            data: []u8,
-            appended: bool,
-        };
-
-        const attached_counts = try self.allocator.alloc(usize, self.nodes.len);
-        defer self.allocator.free(attached_counts);
-        const future_capacities = try self.allocator.alloc(usize, self.nodes.len);
-        defer self.allocator.free(future_capacities);
-        var arena_count: usize = 0;
-        for (self.nodes, attached_counts, future_capacities, 0..) |node, *attached, *capacity, node_index| {
-            attached.* = node.arenas.items.len;
-            capacity.* = node.capacity;
-            const provider_count = provider.arenaCount(node_index);
-            if (provider_count < attached.*) return error.InvalidArenaProvider;
-            arena_count = std.math.add(usize, arena_count, provider_count) catch
-                return error.InvalidArenaProvider;
-        }
-
-        const snapshot = try self.allocator.alloc(SnapshotArena, arena_count);
-        defer self.allocator.free(snapshot);
-        var snapshot_index: usize = 0;
-        var enumerated_bytes: usize = 0;
-        var attached_bytes: usize = 0;
-        for (self.nodes, attached_counts, future_capacities, 0..) |node, attached_count, *capacity, node_index| {
-            for (0..provider.arenaCount(node_index)) |arena_index| {
-                const data = provider.arena(node_index, arena_index);
-                if (data.len == 0) return error.InvalidArenaProvider;
-                _ = std.math.add(usize, @intFromPtr(data.ptr), data.len) catch
-                    return error.InvalidArenaProvider;
-                enumerated_bytes = std.math.add(usize, enumerated_bytes, data.len) catch
-                    return error.InvalidArenaProvider;
-                const appended = arena_index >= attached_count;
-                if (!appended) {
-                    const existing = node.arenas.items[arena_index];
-                    if (existing.ptr != data.ptr or existing.len != data.len)
-                        return error.InvalidArenaProvider;
-                    attached_bytes = std.math.add(usize, attached_bytes, data.len) catch
-                        return error.InvalidArenaProvider;
-                } else {
-                    capacity.* = std.math.add(usize, capacity.*, data.len / self.block_size) catch
-                        return error.InvalidArenaProvider;
-                }
-                snapshot[snapshot_index] = .{
-                    .node_index = node_index,
-                    .arena_index = arena_index,
-                    .data = data,
-                    .appended = appended,
-                };
-                snapshot_index += 1;
-            }
-        }
-
-        // Validate the whole snapshot before changing any pool metadata, so a
-        // reordered or overlapping append cannot be partially adopted.
-        for (snapshot, 0..) |candidate, index| {
-            const candidate_start = @intFromPtr(candidate.data.ptr);
-            const candidate_end = candidate_start + candidate.data.len;
-            for (snapshot[0..index]) |existing| {
-                const existing_start = @intFromPtr(existing.data.ptr);
-                const existing_end = existing_start + existing.data.len;
-                if (candidate_start < existing_end and existing_start < candidate_end)
-                    return error.InvalidArenaProvider;
-            }
-        }
-
-        const provider_mapped_bytes = provider.mappedBytes();
-        if (attached_bytes != self.mapped_bytes or
-            enumerated_bytes != provider_mapped_bytes or
-            provider_mapped_bytes < self.mapped_bytes)
-            return error.InvalidArenaProvider;
-        if (provider_mapped_bytes > self.max_mapped_bytes)
-            return error.RequestExceedsCapacity;
-        const future_remaining_blocks =
-            (self.max_mapped_bytes - provider_mapped_bytes) / self.block_size;
-        var future_reserved_growth: usize = 0;
-        for (self.nodes, future_capacities) |node, capacity| {
-            future_reserved_growth +|= node.reserve -| capacity;
-        }
-        if (future_reserved_growth > future_remaining_blocks)
-            return error.RequestExceedsCapacity;
-
-        for (snapshot) |candidate| {
-            if (!candidate.appended) continue;
-            const node = &self.nodes[candidate.node_index];
-            if (node.arenas.items.len != candidate.arena_index)
-                return error.InvalidArenaProvider;
-            try self.attachArena(candidate.node_index, candidate.data, .newly_mapped);
-            self.mapped_bytes = try std.math.add(usize, self.mapped_bytes, candidate.data.len);
-            self.newly_mapped_bytes = try std.math.add(
-                usize,
-                self.newly_mapped_bytes,
-                candidate.data.len,
-            );
-        }
-        std.debug.assert(self.mapped_bytes == provider_mapped_bytes);
-    }
-
     fn allocateSlab(self: *DmaBlockPool, node_index: usize, block_count: usize) !void {
         const slab_len = try std.math.mul(usize, block_count, self.block_size);
-        const slab = if (self.provider) |provider| blk: {
-            const mapped_before = provider.mappedBytes();
-            if (mapped_before != self.mapped_bytes) return error.InvalidArenaProvider;
-            const allocated = try provider.allocate(node_index, slab_len);
-            const mapped_after = provider.mappedBytes();
-            if (allocated.len != slab_len or mapped_after < mapped_before or
-                mapped_after - mapped_before != allocated.len or mapped_after > self.max_mapped_bytes)
-                return error.InvalidArenaProvider;
-            self.mapped_bytes = mapped_after;
-            self.newly_mapped_bytes +|= mapped_after - mapped_before;
-            break :blk allocated;
-        } else blk: {
-            const slab_allocator = self.slab_allocator.?;
-            const slab_ptr = slab_allocator.rawAlloc(slab_len, .of(u8), @returnAddress()) orelse
-                return error.OutOfMemory;
-            const owned = slab_ptr[0..slab_len];
-            errdefer slab_allocator.rawFree(owned, .of(u8), @returnAddress());
-            try self.owned_slabs.append(self.allocator, owned);
-            break :blk owned;
-        };
-        if (self.provider == null) {
-            self.mapped_bytes = try std.math.add(usize, self.mapped_bytes, slab.len);
-            self.newly_mapped_bytes = try std.math.add(usize, self.newly_mapped_bytes, slab.len);
-        }
+        const mapped_before = self.provider.mappedBytes();
+        if (mapped_before != self.mapped_bytes) return error.InvalidArenaProvider;
+        const slab = try self.provider.allocate(node_index, slab_len);
+        const mapped_after = self.provider.mappedBytes();
+        if (slab.len != slab_len or mapped_after < mapped_before or
+            mapped_after - mapped_before != slab.len or mapped_after > self.max_mapped_bytes)
+            return error.InvalidArenaProvider;
+        self.mapped_bytes = mapped_after;
+        self.newly_mapped_bytes +|= mapped_after - mapped_before;
         try self.attachArena(node_index, slab, .newly_mapped);
     }
 
@@ -960,9 +795,10 @@ pub const DmaBlockPool = struct {
         try node.arenas.ensureUnusedCapacity(self.allocator, 1);
         node.arenas.appendAssumeCapacity(arena);
         for (0..block_count) |index| {
-            node.free_blocks.appendAssumeCapacity(
-                arena[index * self.block_size ..][0..self.block_size],
-            );
+            node.free_blocks.appendAssumeCapacity(.{
+                .data = arena[index * self.block_size ..][0..self.block_size],
+                .node_index = node_index,
+            });
         }
         node.capacity += block_count;
         const unused_tail_bytes = arena.len % self.block_size;
@@ -1086,7 +922,7 @@ const TestDmaArenaProvider = struct {
 fn acquireDmaBlocksForTest(
     pool: *DmaBlockPool,
     io: std.Io,
-    output: [][]u8,
+    output: []DmaBlockPool.Block,
     affinities: []const DmaBlockPool.Affinity,
 ) !void {
     var scratch = try pool.acquireScratch(std.testing.allocator, output.len);
@@ -1097,10 +933,12 @@ fn acquireDmaBlocksForTest(
 test "DmaBlockPool acquires request blocks atomically" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 4 * 64);
+    var provider: TestDmaArenaProvider = .init(allocator, 1);
+    defer provider.deinit();
+    var pool = try DmaBlockPool.initFromProvider(allocator, provider.provider(), 64, 4 * 64, &.{0});
     defer pool.deinit();
 
-    var first: [3][]u8 = undefined;
+    var first: [3]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(&pool, io, &first, &.{ .{}, .{}, .{} });
     try std.testing.expectEqual(@as(usize, 3 * 64), pool.highWaterBytes());
     try std.testing.expectEqual(@as(usize, 4 * 64), pool.mappedBytes());
@@ -1113,7 +951,7 @@ test "DmaBlockPool acquires request blocks atomically" {
         },
         pool.nodeStats(0),
     );
-    var oversized: [5][]u8 = undefined;
+    var oversized: [5]DmaBlockPool.Block = undefined;
     try std.testing.expectError(
         error.RequestExceedsCapacity,
         acquireDmaBlocksForTest(&pool, io, &oversized, &.{ .{}, .{}, .{}, .{}, .{} }),
@@ -1124,7 +962,7 @@ test "DmaBlockPool acquires request blocks atomically" {
     var group: std.Io.Group = .init;
     try group.concurrent(io, struct {
         fn run(pool_: *DmaBlockPool, io_: std.Io, started_: *std.Io.Event, acquired_: *std.Io.Event) void {
-            var blocks: [2][]u8 = undefined;
+            var blocks: [2]DmaBlockPool.Block = undefined;
             started_.set(io_);
             acquireDmaBlocksForTest(pool_, io_, &blocks, &.{ .{}, .{} }) catch unreachable;
             acquired_.set(io_);
@@ -1143,11 +981,13 @@ test "DmaBlockPool acquires request blocks atomically" {
 test "DmaBlockPool retains free-list capacity when growing with blocks leased" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 9 * 64);
+    var provider: TestDmaArenaProvider = .init(allocator, 1);
+    defer provider.deinit();
+    var pool = try DmaBlockPool.initFromProvider(allocator, provider.provider(), 64, 9 * 64, &.{0});
     defer pool.deinit();
     pool.slab_blocks = 1;
 
-    var held: [9][]u8 = undefined;
+    var held: [9]DmaBlockPool.Block = undefined;
     const affinities: [held.len]DmaBlockPool.Affinity = @splat(.{});
     try acquireDmaBlocksForTest(&pool, io, &held, &affinities);
 
@@ -1158,12 +998,20 @@ test "DmaBlockPool retains free-list capacity when growing with blocks leased" {
 test "DmaBlockPool acquisition reuses matching scratch" {
     const io = std.testing.io;
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
-    var pool = try DmaBlockPool.initForTest(failing.allocator(), std.testing.allocator, 64, 4 * 64);
+    var provider: TestDmaArenaProvider = .init(std.testing.allocator, 1);
+    defer provider.deinit();
+    var pool = try DmaBlockPool.initFromProvider(
+        failing.allocator(),
+        provider.provider(),
+        64,
+        4 * 64,
+        &.{0},
+    );
     defer pool.deinit();
     var scratch = try pool.acquireScratch(std.testing.allocator, 3);
     defer scratch.deinit();
 
-    var blocks: [3][]u8 = undefined;
+    var blocks: [3]DmaBlockPool.Block = undefined;
     try pool.acquireMany(io, &blocks, &.{ .{}, .{}, .{} }, &scratch);
     pool.releaseMany(io, &blocks);
 
@@ -1186,17 +1034,19 @@ test "DmaBlockPool matching scratch cleans up allocation failures" {
 test "DmaBlockPool close wakes blocked bulk acquisitions" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 2 * 64);
+    var provider: TestDmaArenaProvider = .init(allocator, 1);
+    defer provider.deinit();
+    var pool = try DmaBlockPool.initFromProvider(allocator, provider.provider(), 64, 2 * 64, &.{0});
     defer pool.deinit();
 
-    var held: [2][]u8 = undefined;
+    var held: [2]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(&pool, io, &held, &.{ .{}, .{} });
     var started: std.Io.Event = .unset;
     var result: std.atomic.Value(u16) = .init(0);
     var group: std.Io.Group = .init;
     try group.concurrent(io, struct {
         fn run(pool_: *DmaBlockPool, io_: std.Io, started_: *std.Io.Event, result_: *std.atomic.Value(u16)) void {
-            var block: [1][]u8 = undefined;
+            var block: [1]DmaBlockPool.Block = undefined;
             started_.set(io_);
             acquireDmaBlocksForTest(pool_, io_, &block, &.{.{}}) catch |err| {
                 result_.store(@intFromError(err), .release);
@@ -1216,10 +1066,12 @@ test "DmaBlockPool close wakes blocked bulk acquisitions" {
 test "DmaBlockPool lease returns a replicated block after out-of-order callbacks" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 64);
+    var provider: TestDmaArenaProvider = .init(allocator, 1);
+    defer provider.deinit();
+    var pool = try DmaBlockPool.initFromProvider(allocator, provider.provider(), 64, 64, &.{0});
     defer pool.deinit();
 
-    var blocks: [1][]u8 = undefined;
+    var blocks: [1]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(&pool, io, &blocks, &.{.{}});
     var lease: DmaBlockPool.Lease = .init(&pool, io, blocks[0], 4);
     var group: std.Io.Group = .init;
@@ -1234,9 +1086,9 @@ test "DmaBlockPool lease returns a replicated block after out-of-order callbacks
     try group.await(io);
     try std.testing.expect(lease.isComplete());
 
-    var reacquired: [1][]u8 = undefined;
+    var reacquired: [1]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(&pool, io, &reacquired, &.{.{}});
-    try std.testing.expectEqual(@intFromPtr(blocks[0].ptr), @intFromPtr(reacquired[0].ptr));
+    try std.testing.expectEqual(@intFromPtr(blocks[0].data.ptr), @intFromPtr(reacquired[0].data.ptr));
     pool.releaseMany(io, &reacquired);
 }
 
@@ -1257,15 +1109,15 @@ test "DmaBlockPool preserves strict affinity when a replica is planned first" {
     );
     defer pool.deinit();
 
-    var blocks: [2][]u8 = undefined;
+    var blocks: [2]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(
         &pool,
         io,
         &blocks,
         &.{ .replicated(0b11), .node(0) },
     );
-    try std.testing.expectEqual(@as(?usize, 1), pool.nodeForBlock(blocks[0]));
-    try std.testing.expectEqual(@as(?usize, 0), pool.nodeForBlock(blocks[1]));
+    try std.testing.expectEqual(@as(usize, 1), blocks[0].node_index);
+    try std.testing.expectEqual(@as(usize, 0), blocks[1].node_index);
     try std.testing.expectEqual(@as(usize, 0), provider.growth_allocations);
     pool.releaseMany(io, &blocks);
 }
@@ -1287,7 +1139,7 @@ test "DmaBlockPool balances cross-node replicas by leased capacity" {
     );
     defer pool.deinit();
 
-    var blocks: [4][]u8 = undefined;
+    var blocks: [4]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(
         &pool,
         io,
@@ -1295,7 +1147,7 @@ test "DmaBlockPool balances cross-node replicas by leased capacity" {
         &.{ .replicated(0b11), .replicated(0b11), .replicated(0b11), .replicated(0b11) },
     );
     var per_node = [_]usize{ 0, 0 };
-    for (blocks) |block| per_node[pool.nodeForBlock(block).?] += 1;
+    for (blocks) |block| per_node[block.node_index] += 1;
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, &per_node);
     pool.releaseMany(io, &blocks);
 }
@@ -1320,7 +1172,7 @@ test "DmaBlockPool reblocks retained arenas and grows only the required node" {
     try std.testing.expectEqual(@as(usize, 285), pool.mappedBytes());
     try std.testing.expectEqual(@as(usize, 29), pool.unusedTailBytes());
 
-    var blocks: [5][]u8 = undefined;
+    var blocks: [5]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(
         &pool,
         io,
@@ -1328,10 +1180,10 @@ test "DmaBlockPool reblocks retained arenas and grows only the required node" {
         &.{ .node(0), .node(0), .node(0), .node(1), .node(1) },
     );
     for (blocks[0..3]) |block| {
-        try std.testing.expectEqual(@as(?usize, 0), pool.nodeForBlock(block));
+        try std.testing.expectEqual(@as(usize, 0), block.node_index);
     }
     for (blocks[3..]) |block| {
-        try std.testing.expectEqual(@as(?usize, 1), pool.nodeForBlock(block));
+        try std.testing.expectEqual(@as(usize, 1), block.node_index);
     }
     try std.testing.expectEqual(@as(usize, 1), provider.growth_allocations);
     try std.testing.expectEqual(@as(usize, 349), pool.mappedBytes());
@@ -1359,72 +1211,12 @@ test "DmaBlockPool reblocks retained arenas and grows only the required node" {
     pool.releaseMany(io, &blocks);
 }
 
-test "DmaBlockPool refreshes append-only provider arenas before use" {
+test "DmaBlockPool potential request widths account for retained arena tails" {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
     var provider: TestDmaArenaProvider = .init(allocator, 2);
     defer provider.deinit();
-    _ = try provider.addArena(0, 64);
-    _ = try provider.addArena(0, 64);
-    _ = try provider.addArena(1, 64);
-
-    var pool = try DmaBlockPool.initFromProvider(
-        allocator,
-        provider.provider(),
-        64,
-        390,
-        &.{ 3, 3 },
-    );
-    defer pool.deinit();
-
-    std.mem.swap([]u8, &provider.nodes[0].items[0], &provider.nodes[0].items[1]);
-    try std.testing.expectError(error.InvalidArenaProvider, pool.refreshProviderArenas(io));
-    std.mem.swap([]u8, &provider.nodes[0].items[0], &provider.nodes[0].items[1]);
-
-    _ = try provider.addArena(0, 70);
-    _ = try provider.addArena(1, 128);
-    try pool.refreshProviderArenas(io);
-    try std.testing.expectEqual(@as(usize, 390), pool.mappedBytes());
-    try std.testing.expectEqual(@as(usize, 198), pool.newlyMappedBytes());
-    try std.testing.expectEqual(@as(usize, 6), pool.unusedTailBytes());
-    try std.testing.expectEqualDeep(
-        DmaBlockPool.NodeStats{
-            .retained_mapped_bytes = 128,
-            .newly_mapped_bytes = 70,
-            .leased_high_water_bytes = 0,
-            .unused_tail_bytes = 6,
-        },
-        pool.nodeStats(0),
-    );
-    try std.testing.expectEqualDeep(
-        DmaBlockPool.NodeStats{
-            .retained_mapped_bytes = 64,
-            .newly_mapped_bytes = 128,
-            .leased_high_water_bytes = 0,
-            .unused_tail_bytes = 0,
-        },
-        pool.nodeStats(1),
-    );
-
-    var blocks: [6][]u8 = undefined;
-    try acquireDmaBlocksForTest(
-        &pool,
-        io,
-        &blocks,
-        &.{ .node(0), .node(0), .node(0), .node(1), .node(1), .node(1) },
-    );
-    try std.testing.expectEqual(@as(usize, 0), provider.growth_allocations);
-    pool.releaseMany(io, &blocks);
-    try std.testing.expectError(error.DmaBlockPoolAlreadyUsed, pool.refreshProviderArenas(io));
-}
-
-test "DmaBlockPool potential request widths account for refreshed arena tails" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var provider: TestDmaArenaProvider = .init(allocator, 2);
-    defer provider.deinit();
-    _ = try provider.addArena(0, 64);
-    _ = try provider.addArena(1, 64);
+    _ = try provider.addArena(0, 127);
+    _ = try provider.addArena(1, 127);
 
     var pool = try DmaBlockPool.initFromProvider(
         allocator,
@@ -1435,14 +1227,6 @@ test "DmaBlockPool potential request widths account for refreshed arena tails" {
     );
     defer pool.deinit();
 
-    try std.testing.expectEqual(@as(usize, 4), try pool.aggregatePotentialRequestWidth(2));
-    try std.testing.expectEqual(@as(usize, 3), try pool.minimumStrictAffinityRequestWidth(2));
-
-    // These arenas consume almost two more blocks of mapped budget without
-    // producing a usable block on either node.
-    _ = try provider.addArena(0, 63);
-    _ = try provider.addArena(1, 63);
-    try pool.refreshProviderArenas(io);
     try std.testing.expectEqual(@as(usize, 126), pool.unusedTailBytes());
     try std.testing.expectEqual(@as(usize, 3), try pool.aggregatePotentialRequestWidth(2));
     try std.testing.expectEqual(@as(usize, 2), try pool.minimumStrictAffinityRequestWidth(2));
@@ -1475,19 +1259,19 @@ test "DmaBlockPool rejects impossible and invalid affinities without leasing" {
     );
     defer pool.deinit();
 
-    var impossible: [2][]u8 = undefined;
+    var impossible: [2]DmaBlockPool.Block = undefined;
     try std.testing.expectError(
         error.RequestExceedsCapacity,
         acquireDmaBlocksForTest(&pool, io, &impossible, &.{ .node(0), .node(0) }),
     );
-    var invalid: [1][]u8 = undefined;
+    var invalid: [1]DmaBlockPool.Block = undefined;
     try std.testing.expectError(
         error.InvalidAffinity,
         acquireDmaBlocksForTest(&pool, io, &invalid, &.{.{ .eligible_nodes = 0b100 }}),
     );
-    var local: [1][]u8 = undefined;
+    var local: [1]DmaBlockPool.Block = undefined;
     try acquireDmaBlocksForTest(&pool, io, &local, &.{.node(0)});
-    try std.testing.expectEqual(@as(?usize, 0), pool.nodeForBlock(local[0]));
+    try std.testing.expectEqual(@as(usize, 0), local[0].node_index);
     pool.releaseMany(io, &local);
 }
 

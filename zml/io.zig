@@ -1176,13 +1176,18 @@ const VectoredLoadPipeline = struct {
         std.debug.assert(previous > 0);
     }
 
-    fn registerBlock(self: *VectoredLoadPipeline, request: *RequestContext, data: []u8, references: usize) !*BlockContext {
+    fn registerBlock(
+        self: *VectoredLoadPipeline,
+        request: *RequestContext,
+        dma_block: mem.DmaBlockPool.Block,
+        references: usize,
+    ) !*BlockContext {
         const block = try self.allocator.create(BlockContext);
         errdefer self.allocator.destroy(block);
         block.* = .{
             .pipeline = self,
             .request = request,
-            .lease = .init(self.pool, self.io, data, references),
+            .lease = .init(self.pool, self.io, dma_block, references),
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
@@ -1406,7 +1411,7 @@ const VectoredLoadPipeline = struct {
 const VectoredReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
-        leased: [][]u8,
+        leased: []mem.DmaBlockPool.Block,
         affinities: []mem.DmaBlockPool.Affinity,
         references: []usize,
         iovecs: [][]u8,
@@ -1420,7 +1425,7 @@ const VectoredReadRequest = struct {
             maximum_blocks: usize,
             device_count: usize,
         ) !Scratch {
-            const leased = try allocator.alloc([]u8, maximum_blocks);
+            const leased = try allocator.alloc(mem.DmaBlockPool.Block, maximum_blocks);
             errdefer allocator.free(leased);
             const affinities = try allocator.alloc(mem.DmaBlockPool.Affinity, maximum_blocks);
             errdefer allocator.free(affinities);
@@ -1551,9 +1556,9 @@ const VectoredReadRequest = struct {
 
         std.debug.assert(block_count <= scratch.leased.len);
         const leased = scratch.leased[0..block_count];
-        @memset(leased, &.{});
+        @memset(leased, .{ .data = &.{}, .node_index = 0 });
         defer for (leased) |block| {
-            if (block.len != 0) pipeline.pool.release(pipeline.io, block);
+            if (block.data.len != 0) pipeline.pool.release(pipeline.io, block);
         };
 
         const affinities = scratch.affinities[0..block_count];
@@ -1608,7 +1613,7 @@ const VectoredReadRequest = struct {
         for (iovecs, leased, 0..) |*iovec, block, block_index| {
             const consumed = block_index * pipeline.block_size;
             const len = @min(pipeline.block_size, request_len - consumed);
-            iovec.* = block[0..len];
+            iovec.* = block.data[0..len];
         }
 
         if (!beginRead(request, pipeline)) return;
@@ -1654,7 +1659,7 @@ const VectoredReadRequest = struct {
                 pipeline.recordError(err);
                 return;
             };
-            lease.* = &.{};
+            lease.data = &.{};
             initialized_blocks += 1;
         }
         pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {

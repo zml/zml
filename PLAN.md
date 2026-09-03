@@ -23,7 +23,7 @@ migrated yet.
 - [x] 3. Simplify adaptive-runtime and probe-state representation.
 - [x] 4. Specialize DMA calibration for its single measured lane.
 - [x] 5. Remove redundant platform/device identity state.
-- [ ] 6. Make `DmaBlockPool` provider-only and simplify block leases.
+- [x] 6. Make `DmaBlockPool` provider-only and simplify block leases.
 - [ ] 7. Unify loader request preparation and exact positional scatter.
 - [ ] 8. Split the loader implementation into focused modules.
 - [ ] 9. Run final validation and reconcile all documentation.
@@ -163,6 +163,16 @@ loader-inclusive ZML suite and focused builds pass.
   arenas.
 
 Validation: pool growth, matching, close, reuse, and allocation-failure tests.
+
+Result: every pool, including tests, is now arena-provider backed. Removed the
+optional slab allocator, owned-slab list, allocator-only constructor, and the
+unused pre-first-lease provider refresh transaction. Existing pool tests use
+the arena fixture for growth, blocking, reuse, close, and metadata allocation
+failure; tail feasibility is tested directly on retained arenas. Acquisitions
+return typed blocks carrying their NUMA node, and leases preserve that handle,
+so callback release returns to the correct free list directly instead of
+reverse-scanning every retained arena. The loader-inclusive ZML suite and
+focused builds pass.
 
 ### 7. Shared loader front end and scatter helper
 
