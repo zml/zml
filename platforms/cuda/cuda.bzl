@@ -221,8 +221,8 @@ _PJRT_CUDA_ASSETS = {
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "72fa203ec5356c722ad02947d10df720133591ca5e3dcaf5d92e016e01aa373f",
-        "url": "file:///home/benjamin/github/openxla/cuda-collective-kernel-command-buffer-2622ef7168.tar.gz",
+        "sha256": "aaaa1fd00b1318b99ee501cf8cc311779c4f4ca2a52df964ca274bbed68adf40",
+        "url": "file:///home/benjamin/github/openxla/cuda-native-collectives.tar.gz",
     },
 }
 
