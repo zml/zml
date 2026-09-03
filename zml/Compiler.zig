@@ -686,6 +686,23 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, true);
             c.xla_ExecutableBuildOptionsProto_set_use_shardy_partitioner(exec_build_options, use_shardy_partitioner);
 
+            // Tell XLA how much device memory PJRT actually made available.
+            // Without this, the GPU scheduler falls back to 80% of physical
+            // memory. Programs whose donated inputs and outputs exceed that
+            // artificial limit get a zero-byte temporary-memory budget and
+            // can trigger excessive rematerialization.
+            var device_memory_size: ?u64 = null;
+            for (platform.devices) |device| {
+                const bytes_limit = device.memoryStats().bytes_limit orelse {
+                    device_memory_size = null;
+                    break;
+                };
+                device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
+            }
+            if (device_memory_size) |bytes_limit| {
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+            }
+
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
