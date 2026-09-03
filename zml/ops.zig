@@ -1943,7 +1943,7 @@ pub fn manualComputation(
     return manualComputationSliceToReturn(ReturnT, sharded_outputs);
 }
 
-fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype, local_tensors: []const Tensor) @TypeOf(inputs) {
+fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype, local_tensors: []const Tensor) !@TypeOf(inputs) {
     const Context = struct {
         local_tensors: []const Tensor,
         input_idx: usize = 0,
@@ -1957,7 +1957,7 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
 
     var context: Context = .{ .local_tensors = local_tensors };
     var local_inputs: @TypeOf(inputs) = undefined;
-    meta.mapAlloc(Context.localize, allocator, &context, inputs, &local_inputs) catch unreachable;
+    try meta.mapAlloc(Context.localize, allocator, &context, inputs, &local_inputs);
     stdx.debug.assert(context.input_idx == local_tensors.len, "manualComputation localized {} inputs, expected {}", .{ context.input_idx, local_tensors.len });
     return local_inputs;
 }
@@ -1977,10 +1977,8 @@ fn manualComputationInternal(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const allocator = ctx.arena.allocator();
-
-    const input_shapes = meta.collectAlloc(Tensor.shape, {}, allocator, &inputs) catch unreachable;
-    const input_values = meta.collectAlloc(Tensor.value, {}, allocator, &inputs) catch unreachable;
+    const input_shapes = try meta.collectAlloc(Tensor.shape, {}, arena, &inputs);
+    const input_values = try meta.collectAlloc(Tensor.value, {}, arena, &inputs);
 
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
@@ -2035,7 +2033,7 @@ fn manualComputationInternal(
             ctx.manual_computation_depth += 1;
             defer ctx.manual_computation_depth -= 1;
 
-            const local_inputs = manualComputationLocalizeInputs(allocator, inputs, local_input_tensors);
+            const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
             const body_result = @call(.auto, body_fn, .{ local_inputs, body_output_shapes });
             const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
@@ -2106,7 +2104,7 @@ fn manualComputationInternal(
 
             ctx.manual_computation_depth += 1;
             defer ctx.manual_computation_depth -= 1;
-            const local_inputs = manualComputationLocalizeInputs(allocator, inputs, local_input_tensors);
+            const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
             const body_result = @call(.auto, body_fn, .{ local_inputs, body_output_shapes });
             const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
