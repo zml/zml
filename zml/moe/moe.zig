@@ -647,7 +647,7 @@ pub fn forwardMoe(
 fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {
     const quantization = linear.quantization orelse return linear.weight;
     return if (zml.nn.isPackedFp4(quantization.scheme, linear.weight.dtype()))
-        zml.nn.unpackFp4(linear.weight, linear.tag)
+        zml.nn.unpackFp4(linear.weight, linear.tag, linear.tag)
     else
         linear.weight;
 }
