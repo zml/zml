@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after plan Task 6, on a detached checkout based
-on `aacda6ec`. `PLAN.md` is the ordered implementation checklist; this file is
+Last consolidated: 2026-09-03 after plan Task 7, on a detached checkout based
+on `f4b0dd76`. `PLAN.md` is the completed implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -263,7 +263,7 @@ do not restore a universal 32 MiB policy.
 - Shortening calibration screens from 10 ms/128 completions to 2 ms/32 cut an
   eight-MI300X calibration from 4.834 s to 0.956 s while retaining 16 MiB,
   width eight, and no cap. Borderline confirmation remains necessary because
-  noisy short screens sometimes selected the wrong block or provisional cap.
+  noisy short screens sometimes selected the wrong block size.
 
 ### Local copy bottleneck and NUMA
 
@@ -414,7 +414,7 @@ epoch throughput but included in process wall time. Host contention invalidated
 several historical runs; isolated screening values should not replace repeated
 same-host medians.
 
-## Validation state at consolidation
+## Final validation state
 
 - DeepSeek CUDA loads completed repeatedly. Focused loader tests separately
   exercised tensor shape/content correctness.
@@ -425,10 +425,14 @@ same-host medians.
   reuse, failure cleanup, and epoch reuse tests passed. A real public-loader
   test also covers `loadExecute -> loadExecute -> load -> await`, output
   readiness, active-epoch rejection, and cumulative byte accounting.
+- `zig fmt --check zml/io.zig zml/mem.zig` passed.
+- `bazel build //examples/io:playground`, `bazel test //vfs:test`, and
+  `bazel test //stdx:test` passed.
 - `bazel test //zml:test --@zml//platforms:cuda=true
-  --@zml//platforms:cpu=true` passed all 233 tests after Task 4. The default
-  configuration is still blocked at compilation by the existing missing
-  `platforms/cuda/flashinfer_cutlass_moe` module mapping.
+  --@zml//platforms:cpu=true` passed all 233 tests: 230 passed and three were
+  skipped. The default configuration is still blocked at compilation by the
+  existing missing `platforms/cuda/flashinfer_cutlass_moe` module mapping in
+  `zml/moe/cutlass_flashinfer.zig`; it does not reach loader tests.
 - Optimized playground builds had passed for CUDA, ROCm, and oneAPI during the
   preceding audits. Runtime coverage depends on hardware available per machine;
   oneAPI and remote-service behavior should be rechecked after relevant changes.
@@ -437,9 +441,9 @@ same-host medians.
 
 ## Open work
 
-The scheduled simplification work is complete except for the final validation
-and documentation pass in `PLAN.md`. Reassess splitting `zml/io.zig` now that
-obsolete planner, scheduler, controller, and metrics state has been removed.
+The scheduled simplification and validation work in `PLAN.md` is complete.
+Reassess splitting `zml/io.zig` now that obsolete planner, scheduler,
+controller, and metrics state has been removed.
 Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below

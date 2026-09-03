@@ -24,7 +24,7 @@ migrated yet.
 - [x] 4. Make loader epochs immutable and precompute fair job order.
 - [x] 5. Flatten final DMA transfer records once during planning.
 - [x] 6. Simplify adaptive-controller and runtime bookkeeping.
-- [ ] 7. Run final validation and reconcile all documentation.
+- [x] 7. Run final validation and reconcile all documentation.
 
 ## Task details and completion log
 
@@ -190,7 +190,7 @@ test-only. Added reuse and exhaustive allocation-failure tests for pool
 scratch. The playground builds, VFS/stdx tests pass, and the full ZML suite
 passes with CUDA dependencies plus the CPU runtime enabled.
 
-### 7. Final validation — pending
+### 7. Final validation — completed
 
 - Run `zig fmt` on changed Zig files.
 - Run `bazel build //examples/io:playground`, `bazel test //vfs:test`,
@@ -200,3 +200,13 @@ passes with CUDA dependencies plus the CPU runtime enabled.
   validation.
 - Ensure `CTX.md` contains only the final current design, measurements,
   compatibility contract, and genuinely open work.
+
+Result: `zig fmt --check` passes for both changed Zig files;
+`//examples/io:playground` builds; `//vfs:test` and `//stdx:test` pass. The
+loader-inclusive ZML suite passes all 233 tests (230 passed, three skipped)
+with `--@zml//platforms:cuda=true --@zml//platforms:cpu=true`. As before this
+work, the default `//zml:test` configuration does not compile because
+`zml/moe/cutlass_flashinfer.zig` imports the unavailable
+`platforms/cuda/flashinfer_cutlass_moe` module; this is unrelated to the loader.
+The final symbol and adjacent-monorepo audit found no removed loader state still
+referenced by current code or by the behavioral compatibility callers.

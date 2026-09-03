@@ -2725,7 +2725,13 @@ const SourceReadWidthController = struct {
         settled: bool = false,
     };
 
-    adaptive: bool,
+    const Confirmation = struct {
+        index: usize,
+        resume_phase: Phase,
+        resume_index: usize,
+        prior_selected_index: usize,
+    };
+
     fixed_width: ?usize = null,
     maximum_index: usize,
     current_index: usize,
@@ -2736,10 +2742,7 @@ const SourceReadWidthController = struct {
     rates: [read_width_ladder.len]?f64 = @splat(null),
     ramp_scores: usize = 0,
     unchanged_candidates: usize = 0,
-    confirmation_index: ?usize = null,
-    confirmation_resume_phase: Phase = .ramp_up,
-    confirmation_resume_index: usize = 0,
-    confirmation_prior_selected_index: usize = 0,
+    confirmation: ?Confirmation = null,
     confirmation_used: bool = false,
 
     fn init(configured: Parallelism, pinned_feasible_width: usize) SourceReadWidthController {
@@ -2753,7 +2756,6 @@ const SourceReadWidthController = struct {
             const fixed = @min(configured.initial(), pinned_feasible_width);
             const fixed_index = widthIndexAtMost(fixed);
             return .{
-                .adaptive = false,
                 .fixed_width = @max(@as(usize, 1), fixed),
                 .maximum_index = fixed_index,
                 .current_index = fixed_index,
@@ -2764,7 +2766,6 @@ const SourceReadWidthController = struct {
         }
         const initial_index = @min(widthIndexAtMost(configured.initial()), maximum_index);
         return .{
-            .adaptive = true,
             .maximum_index = maximum_index,
             .current_index = initial_index,
             .selected_index = initial_index,
@@ -2784,6 +2785,10 @@ const SourceReadWidthController = struct {
 
     fn width(self: *const SourceReadWidthController) usize {
         return self.fixed_width orelse read_width_ladder[self.current_index];
+    }
+
+    fn isAdaptive(self: *const SourceReadWidthController) bool {
+        return self.fixed_width == null;
     }
 
     fn selectedWidth(self: *const SourceReadWidthController) usize {
@@ -2816,7 +2821,7 @@ const SourceReadWidthController = struct {
         self: *SourceReadWidthController,
         remaining_full_jobs: usize,
     ) ?Decision {
-        if (!self.adaptive or self.phase != .ramp_up or self.ramp_scores != 0 or
+        if (!self.isAdaptive() or self.phase != .ramp_up or self.ramp_scores != 0 or
             self.current_index >= self.maximum_index)
             return null;
         const ceiling: usize = if (self.width() < 24) 24 else if (self.width() < 32) 32 else return null;
@@ -2826,7 +2831,7 @@ const SourceReadWidthController = struct {
     }
 
     fn observe(self: *SourceReadWidthController, evidence: Evidence) Decision {
-        if (!self.adaptive or self.phase == .settled or
+        if (!self.isAdaptive() or self.phase == .settled or
             evidence.generation != self.generation or evidence.width != self.width() or
             !evidence.scoreable())
             return self.currentDecision();
@@ -2840,15 +2845,15 @@ const SourceReadWidthController = struct {
         rate: f64,
         remaining_full_jobs: usize,
     ) Decision {
-        if (self.confirmation_index) |confirmed_index| {
-            std.debug.assert(index == confirmed_index);
+        if (self.confirmation) |confirmation| {
+            std.debug.assert(index == confirmation.index);
             self.rates[index] = ((self.rates[index] orelse rate) + rate) / 2;
-            self.confirmation_index = null;
+            self.confirmation = null;
             self.recomputePeakAndSelection();
-            self.phase = self.confirmation_resume_phase;
+            self.phase = confirmation.resume_phase;
             return self.advanceAfterScore(
-                self.confirmation_resume_index,
-                self.confirmation_prior_selected_index,
+                confirmation.resume_index,
+                confirmation.prior_selected_index,
                 remaining_full_jobs,
             );
         }
@@ -2872,10 +2877,12 @@ const SourceReadWidthController = struct {
             probeFitsTail(confirmation_candidate.?, remaining_full_jobs))
         {
             self.confirmation_used = true;
-            self.confirmation_index = confirmation_candidate.?;
-            self.confirmation_resume_phase = self.phase;
-            self.confirmation_resume_index = index;
-            self.confirmation_prior_selected_index = prior_selected;
+            self.confirmation = .{
+                .index = confirmation_candidate.?,
+                .resume_phase = self.phase,
+                .resume_index = index,
+                .prior_selected_index = prior_selected,
+            };
             return self.restartAt(confirmation_candidate.?);
         }
 
@@ -2974,19 +2981,19 @@ const SourceReadWidthController = struct {
 
     fn settle(self: *SourceReadWidthController) Decision {
         self.phase = .settled;
-        self.confirmation_index = null;
+        self.confirmation = null;
         return self.changeTo(self.selected_index);
     }
 
     fn rollbackTail(self: *SourceReadWidthController) Decision {
         if (self.phase == .settled) return self.currentDecision();
-        if (self.confirmation_index != null)
-            self.selected_index = self.confirmation_prior_selected_index;
+        if (self.confirmation) |confirmation|
+            self.selected_index = confirmation.prior_selected_index;
         return self.settle();
     }
 
     fn backoff(self: *SourceReadWidthController) Decision {
-        if (!self.adaptive) return self.currentDecision();
+        if (!self.isAdaptive()) return self.currentDecision();
         if (self.current_index == 0) {
             self.selected_index = 0;
             return self.settle();
@@ -3095,10 +3102,10 @@ test "source read controller confirms an adjacent boundary once" {
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expectEqual(@as(?usize, SourceReadWidthController.widthIndexAtMost(12)), controller.confirmation_index);
+    try std.testing.expectEqual(SourceReadWidthController.widthIndexAtMost(12), controller.confirmation.?.index);
     try std.testing.expectEqual(@as(usize, 12), controller.width());
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    try std.testing.expect(controller.confirmation_index == null);
+    try std.testing.expect(controller.confirmation == null);
     try std.testing.expect(controller.confirmation_used);
     try std.testing.expectEqual(@as(usize, 24), controller.width());
 }
@@ -3111,7 +3118,7 @@ test "source read controller confirms a borderline candidate in place" {
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
     const width16 = SourceReadWidthController.widthIndexAtMost(16);
-    try std.testing.expectEqual(@as(?usize, width16), controller.confirmation_index);
+    try std.testing.expectEqual(width16, controller.confirmation.?.index);
     const generation = controller.generation;
     try std.testing.expectEqual(@as(usize, 16), controller.width());
     try std.testing.expect(generation > 1);
@@ -3124,7 +3131,7 @@ test "source read controller rolls back an unfinished confirmation" {
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expect(controller.confirmation_index != null);
+    try std.testing.expect(controller.confirmation != null);
     const rollback = controller.rollbackTail();
     try std.testing.expect(rollback.settled);
     try std.testing.expectEqual(@as(usize, 12), rollback.width);
@@ -3137,7 +3144,7 @@ test "source read controller charges one unfinished confirmation on restart" {
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
     _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    const remaining_cost = SourceReadWidthController.probeCost(controller.confirmation_index.?);
+    const remaining_cost = SourceReadWidthController.probeCost(controller.confirmation.?.index);
     try std.testing.expect(controller.restartFitsTail(remaining_cost * 4));
     try std.testing.expect(!controller.restartFitsTail(remaining_cost * 4 - 1));
 }
@@ -3442,7 +3449,7 @@ const SourceReadRuntime = struct {
 
     fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
         const started: std.Io.Timestamp = .now(io, .awake);
-        self.applyDecision(io, self.controller.currentDecision(), self.controller.adaptive);
+        self.applyDecision(io, self.controller.currentDecision(), self.controller.isAdaptive());
         while (true) {
             self.control.waitTimeout(io, .{ .duration = .{
                 .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),

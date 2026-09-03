@@ -446,6 +446,8 @@ pub const DmaBlockPool = struct {
         self.* = undefined;
     }
 
+    /// Allocates matching state for one concurrent caller. Reuse it across
+    /// acquisitions, but do not share it between calls that may overlap.
     pub fn acquireScratch(
         self: *const DmaBlockPool,
         allocator: std.mem.Allocator,
