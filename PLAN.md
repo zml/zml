@@ -22,7 +22,7 @@ migrated yet.
 - [x] 2. Simplify admission gates and make settled backoff generation-safe.
 - [x] 3. Remove the tensor-local loader path and decision-dead calibration code.
 - [x] 4. Make loader epochs immutable and precompute fair job order.
-- [ ] 5. Flatten final DMA transfer records once during planning.
+- [x] 5. Flatten final DMA transfer records once during planning.
 - [ ] 6. Simplify adaptive-controller and runtime bookkeeping.
 - [ ] 7. Run final validation and reconcile all documentation.
 
@@ -135,7 +135,7 @@ comparison that had relied on unsupported struct `!=`. The full 233-test ZML
 suite passes with CUDA dependencies and the CPU runtime enabled; the focused
 playground build and VFS/stdx tests pass.
 
-### 5. Final transfer planning — pending
+### 5. Final transfer planning — completed
 
 - During the planner's existing dispatch-span walk, emit final records carrying
   item, block index/offset, writer mask, destination offset, and length.
@@ -145,6 +145,18 @@ playground build and VFS/stdx tests pass.
 
 Validation: 1D/2D/3D, sharded, replicated, overlap, duplicate, packed-dtype,
 and failure-drain tests plus the focused build/test set.
+
+Result: the coalescing planner now emits the final item/block/writer-mask/
+destination records while it already has each tensor's `DispatchSpans`. Those
+same records drive physical-byte fairness and are retained in the immutable
+epoch plan. Workers only initialize referenced destinations, derive per-block
+reference/NUMA/queue counts, acquire and read blocks, then publish the records;
+their transfer `ArrayList`, dispatch traversal, block splitting, and associated
+allocation/error branches are gone. Runtime tensor state no longer owns a
+second `DispatchSpans`, and an unused single-block enqueue path was removed.
+The multidimensional, mirrored/folded, replicated, and packed-dtype tests now
+exercise the production final-record helper directly. All 233 ZML tests pass
+with CUDA dependencies plus the CPU runtime enabled.
 
 ### 6. Controller and bookkeeping cleanup — pending
 

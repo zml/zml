@@ -5,8 +5,8 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 after plan Task 4, on a detached checkout based
-on `4900e17d`. `PLAN.md` is the ordered implementation checklist; this file is
+Last consolidated: 2026-09-03 after plan Task 5, on a detached checkout based
+on `72e6d477`. `PLAN.md` is the ordered implementation checklist; this file is
 the canonical description of the code after each completed task.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
@@ -77,21 +77,24 @@ so small adjacent tensors each caused a source operation. The current
 Coalescing is batch-local to one immutable loader epoch. Planning uses
 per-device physical-byte charges and same-file predecessors to compute a
 deterministic fair, predecessor-safe job order, then discards the temporary
-queues and charges. The published plan owns source jobs, logical source pieces,
-the fair order, and remaining-byte/job suffixes. Workers currently re-walk
-tensor dispatch spans and split logical pieces at DMA block boundaries to
-construct final transfer records. Physical source bytes are distinct from
-logical tensor bytes so duplication and replication do not distort diagnostics
-or fairness. Planning is `O(tensors log tensors)` and took about 0.40 s for
-DeepSeek-V4-Flash before the fair-order precomputation change; remeasure after
-the remaining planning cleanup.
+queues and charges. While those spans are available, the planner also emits
+the final item, block index/offset, writer mask, destination offset, and length
+records. The published plan owns source jobs, their final transfer records, the
+fair order, and remaining-byte/job suffixes; runtime tensor state does not own
+another dispatch plan. Physical source bytes are distinct from logical tensor
+bytes so duplication and replication do not distort diagnostics or fairness.
+Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
+before the fair-order/final-record changes; remeasure after the remaining
+cleanup.
 
 ### Pinned blocks, scattering, and ownership
 
-- A worker atomically leases all pinned blocks for one source job, reads into
-  them, then maps block-relative slices to existing per-tensor PJRT transfer
-  managers. Pieces include tensor, block index/offset, writer/replica mask,
-  destination offset, and length. Compatible adjacent pieces are merged.
+- A worker initializes the destinations referenced by its planned records,
+  derives block references, NUMA affinities, and destination queue counts,
+  atomically leases all pinned blocks for the source job, reads into them, and
+  publishes the records to existing per-tensor PJRT transfer managers.
+  Compatible adjacent records were already merged during planning; workers do
+  not traverse sharding spans or rebuild/split a transfer list.
 - The same pinned block may feed several tensor transfers. It is reference
   counted across every consuming PJRT event and released only after all child
   transfers finish or are abandoned. Source/allocation/enqueue/PJRT failures
@@ -102,8 +105,8 @@ the remaining planning cleanup.
   once. The prior per-piece enqueue caused roughly 69k--79k locks and pumps.
   Pre-reservation makes allocation failure atomic.
 - Workers retain scratch for leases, affinities, reference counts, iovecs,
-  block contexts, queue counts, and transfer construction. Positional-read
-  rewrite scratch is stack bounded. `DmaBlockPool.acquireMany` still allocates
+  block contexts, and queue counts. Positional-read rewrite scratch is stack
+  bounded. `DmaBlockPool.acquireMany` still allocates
   matching arrays per source job, so steady-state allocation removal remains
   open work; the earlier worker-scratch change was neutral within noise.
 - Source coalescing deliberately preserves per-tensor device buffers. Roughly
@@ -414,7 +417,7 @@ same-host medians.
 - DeepSeek CUDA loads completed repeatedly. Focused loader tests separately
   exercised tensor shape/content correctness.
 - VFS tests passed, including exact scatter, retries, and concurrency.
-- Source-planner, adaptive-controller, immutable scheduler fairness/order,
+- Source-planner/final-record, adaptive-controller, immutable scheduler fairness/order,
   concurrent atomic claims, short-read, replication/sharding, NUMA-affinity,
   failure cleanup, and epoch reuse tests passed. A real public-loader test also
   covers `loadExecute -> loadExecute -> load -> await`, output readiness,
@@ -433,9 +436,7 @@ same-host medians.
 
 `PLAN.md` is the completion checklist. The current ordered design work is:
 
-1. Emit final block/DMA transfer records during planning instead of storing
-   logical pieces and re-walking dispatch spans in workers.
-2. Reduce the six-phase source controller, remove write-only metrics and
+1. Reduce the six-phase source controller, remove write-only metrics and
    singleton wrappers, and move block-pool matching arrays into reusable
    scratch.
 

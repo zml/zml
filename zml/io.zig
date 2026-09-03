@@ -709,7 +709,6 @@ const VectoredLoadMetrics = struct {
 const VectoredTensorTransfer = struct {
     const Target = struct {
         manager: *pjrt.AsyncHostToDeviceTransferManager,
-        pjrt_buffer: *pjrt.Buffer,
         device_index: usize,
         total: usize,
         submitted_bytes: std.atomic.Value(usize) = .init(0),
@@ -717,9 +716,7 @@ const VectoredTensorTransfer = struct {
     };
 
     allocator: std.mem.Allocator,
-    io: std.Io,
     platform: *const Platform,
-    dispatch_spans: DispatchSpans,
     targets: []Target,
     total: usize,
     completed_read_bytes: std.atomic.Value(usize) = .init(0),
@@ -727,7 +724,6 @@ const VectoredTensorTransfer = struct {
 
     fn initResolved(
         allocator: std.mem.Allocator,
-        io: std.Io,
         platform: *const Platform,
         source: *const safetensors.Tensor,
         shape: Shape,
@@ -736,9 +732,6 @@ const VectoredTensorTransfer = struct {
         progress_parent: ?*std.Progress.Node,
     ) !VectoredTensorTransfer {
         const packed_shape = shape.packedShape();
-        const dispatch_spans = try DispatchSpans.init(allocator, packed_shape, sharding);
-        errdefer dispatch_spans.deinit(allocator);
-
         const packed_placement = try sharding.placement(packed_shape);
         const ordered_devices = sharding.devicesInCanonicalOrder();
         const targets = try allocator.alloc(Target, ordered_devices.len);
@@ -747,10 +740,8 @@ const VectoredTensorTransfer = struct {
         var pjrt_buffers: Buffer.Shards = .empty;
         var initialized: usize = 0;
         errdefer {
-            for (targets[0..initialized]) |target| {
-                target.manager.deinit(platform.pjrt_api);
-                target.pjrt_buffer.deinit(platform.pjrt_api);
-            }
+            for (targets[0..initialized]) |target| target.manager.deinit(platform.pjrt_api);
+            for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(platform.pjrt_api);
         }
 
         const shape_spec: pjrt.ShapeSpec = .init(
@@ -767,7 +758,6 @@ const VectoredTensorTransfer = struct {
             const pjrt_buffer = try manager.retrieveBuffer(platform.pjrt_api, 0);
             targets[i] = .{
                 .manager = manager,
-                .pjrt_buffer = pjrt_buffer,
                 .device_index = device.id,
                 .total = packed_placement.shape.byteSize(),
             };
@@ -783,9 +773,7 @@ const VectoredTensorTransfer = struct {
 
         return .{
             .allocator = allocator,
-            .io = io,
             .platform = platform,
-            .dispatch_spans = dispatch_spans,
             .targets = targets,
             .total = packed_shape.byteSize(),
             .progress = progress,
@@ -796,7 +784,6 @@ const VectoredTensorTransfer = struct {
         if (self.progress) |*progress| progress.end();
         for (self.targets) |target| target.manager.deinit(self.platform.pjrt_api);
         self.allocator.free(self.targets);
-        self.dispatch_spans.deinit(self.allocator);
     }
 
     fn recordReadProgress(self: *VectoredTensorTransfer, bytes: usize) void {
@@ -863,7 +850,6 @@ const LoaderLoadItem = struct {
                     if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
                     self.state = VectoredTensorTransfer.initResolved(
                         direct.allocator,
-                        direct.io,
                         direct.platform,
                         item.source,
                         item.shape,
@@ -1092,7 +1078,7 @@ const VectoredLoadPipeline = struct {
     };
 
     const PlannedTransfer = struct {
-        tensor: *VectoredTensorTransfer,
+        item: *LoaderLoadItem,
         block_index: usize,
         block_offset: usize,
         writer_mask: u64,
@@ -1338,51 +1324,6 @@ const VectoredLoadPipeline = struct {
         return true;
     }
 
-    fn enqueueBlock(
-        self: *VectoredLoadPipeline,
-        tensor: *VectoredTensorTransfer,
-        block: *BlockContext,
-        writer_mask: u64,
-        source_offset: usize,
-        destination_offset: usize,
-        len: usize,
-    ) !void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        errdefer self.metadata_mutex.unlock(self.io);
-        var reserve_mask = writer_mask;
-        while (reserve_mask != 0) {
-            const writer_index: usize = @intCast(@ctz(reserve_mask));
-            reserve_mask &= reserve_mask - 1;
-            const target = &tensor.targets[writer_index];
-            try self.ready_queues[target.device_index].ensureUnusedCapacity(self.allocator, 1);
-        }
-        if (!block.ready_reported) {
-            _ = self.metrics.ready_bytes.fetchAdd(block.len, .monotonic);
-            _ = self.metrics.ready_blocks.fetchAdd(1, .monotonic);
-            block.ready_reported = true;
-        }
-        var mask = writer_mask;
-        while (mask != 0) {
-            const writer_index: usize = @intCast(@ctz(mask));
-            mask &= mask - 1;
-            const target = &tensor.targets[writer_index];
-            const transfer: ReadyTransfer = .{
-                .tensor = tensor,
-                .target = target,
-                .block = block,
-                .source_offset = source_offset,
-                .destination_offset = destination_offset,
-                .len = len,
-            };
-            const queue = &self.ready_queues[target.device_index];
-            queue.appendAssumeCapacity(transfer);
-            self.ready_entries += 1;
-        }
-        _ = self.metrics.transfer_pieces.fetchAdd(1, .monotonic);
-        self.metadata_mutex.unlock(self.io);
-        self.requestPump();
-    }
-
     fn enqueueBlocks(
         self: *VectoredLoadPipeline,
         transfers: []const PlannedTransfer,
@@ -1399,6 +1340,7 @@ const VectoredLoadPipeline = struct {
         }
         for (transfers) |transfer| {
             const block = blocks[transfer.block_index];
+            const tensor = &transfer.item.state.state;
             if (!block.ready_reported) {
                 _ = self.metrics.ready_bytes.fetchAdd(block.len, .monotonic);
                 _ = self.metrics.ready_blocks.fetchAdd(1, .monotonic);
@@ -1408,9 +1350,9 @@ const VectoredLoadPipeline = struct {
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
-                const target = &transfer.tensor.targets[writer_index];
+                const target = &tensor.targets[writer_index];
                 self.ready_queues[target.device_index].appendAssumeCapacity(.{
-                    .tensor = transfer.tensor,
+                    .tensor = tensor,
                     .target = target,
                     .block = block,
                     .source_offset = transfer.block_offset,
@@ -1642,8 +1584,6 @@ const VectoredLoadPipeline = struct {
 };
 
 const VectoredReadRequest = struct {
-    const TransferSlice = VectoredLoadPipeline.PlannedTransfer;
-
     const Scratch = struct {
         allocator: std.mem.Allocator,
         leased: [][]u8,
@@ -1652,7 +1592,6 @@ const VectoredReadRequest = struct {
         iovecs: [][]u8,
         blocks: []*VectoredLoadPipeline.BlockContext,
         queue_counts: []usize,
-        transfers: std.ArrayList(TransferSlice) = .empty,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -1682,7 +1621,6 @@ const VectoredReadRequest = struct {
         }
 
         fn deinit(self: *Scratch) void {
-            self.transfers.deinit(self.allocator);
             self.allocator.free(self.queue_counts);
             self.allocator.free(self.blocks);
             self.allocator.free(self.iovecs);
@@ -1773,7 +1711,7 @@ const VectoredReadRequest = struct {
         pipeline: *VectoredLoadPipeline,
         file_offset: u64,
         request_len: usize,
-        pieces: []const FairVectoredReadScheduler.SourcePiece,
+        transfers: []const VectoredLoadPipeline.PlannedTransfer,
         direct: *DirectLoader,
         scratch: *Scratch,
     ) void {
@@ -1803,82 +1741,36 @@ const VectoredReadRequest = struct {
         const references = scratch.references[0..block_count];
         @memset(references, 0);
 
-        const transfers = &scratch.transfers;
-        transfers.clearRetainingCapacity();
         const queue_counts = scratch.queue_counts;
         @memset(queue_counts, 0);
 
-        for (pieces) |piece| {
-            const tensor = piece.item.state.ensure(piece.item, direct) catch |err| {
+        for (transfers) |transfer| {
+            const tensor = transfer.item.state.ensure(transfer.item, direct) catch |err| {
                 pipeline.recordError(err);
                 return;
             };
-            const piece_end = std.math.add(usize, piece.tensor_offset, piece.len) catch {
+            if (transfer.block_index >= block_count or
+                transfer.block_offset >= pipeline.block_size or
+                transfer.len > pipeline.block_size - transfer.block_offset)
+            {
                 pipeline.recordError(error.InvalidLoaderJob);
                 return;
-            };
-            var tensor_cursor = piece.tensor_offset;
-            var span_index = tensor.dispatch_spans.spanIndexAt(tensor_cursor) orelse {
-                pipeline.recordError(error.InvalidLoaderJob);
-                return;
-            };
-            while (tensor_cursor < piece_end) {
-                const span = tensor.dispatch_spans.spans[span_index];
-                const absolute = std.math.add(u64, piece.item.source.offset, tensor_cursor) catch {
-                    pipeline.recordError(error.InvalidLoaderJob);
-                    return;
-                };
-                if (absolute < file_offset) {
+            }
+            references[transfer.block_index] += @popCount(transfer.writer_mask);
+            var mask = transfer.writer_mask;
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                if (writer_index >= tensor.targets.len) {
                     pipeline.recordError(error.InvalidLoaderJob);
                     return;
                 }
-                const source_relative: usize = @intCast(absolute - file_offset);
-                const block_index = source_relative / pipeline.block_size;
-                const block_offset = source_relative % pipeline.block_size;
-                const take = @min(
-                    @min(piece_end - tensor_cursor, span.end - tensor_cursor),
-                    pipeline.block_size - block_offset,
-                );
-                const writer_mask = tensor.dispatch_spans.writerMask(span);
-                const destination_offset = span.writer_offset + tensor_cursor - span.start;
-                var merged = false;
-                if (transfers.items.len > 0) merge: {
-                    const previous = &transfers.items[transfers.items.len - 1];
-                    if (previous.tensor != tensor or previous.block_index != block_index or
-                        previous.writer_mask != writer_mask or
-                        previous.block_offset + previous.len != block_offset or
-                        previous.destination_offset + previous.len != destination_offset)
-                        break :merge;
-                    previous.len += take;
-                    merged = true;
+                const target = &tensor.targets[writer_index];
+                queue_counts[target.device_index] += 1;
+                if (pipeline.numa_explicit) {
+                    const node_index = pipeline.device_pool_indices[target.device_index];
+                    affinities[transfer.block_index].eligible_nodes |= @as(u64, 1) << @intCast(node_index);
                 }
-                if (!merged) {
-                    transfers.append(pipeline.allocator, .{
-                        .tensor = tensor,
-                        .block_index = block_index,
-                        .block_offset = block_offset,
-                        .writer_mask = writer_mask,
-                        .destination_offset = destination_offset,
-                        .len = take,
-                    }) catch {
-                        pipeline.recordError(error.OutOfMemory);
-                        return;
-                    };
-                    references[block_index] += @popCount(writer_mask);
-                    var mask = writer_mask;
-                    while (mask != 0) {
-                        const writer_index: usize = @intCast(@ctz(mask));
-                        mask &= mask - 1;
-                        const target = &tensor.targets[writer_index];
-                        queue_counts[target.device_index] += 1;
-                        if (pipeline.numa_explicit) {
-                            const node_index = pipeline.device_pool_indices[target.device_index];
-                            affinities[block_index].eligible_nodes |= @as(u64, 1) << @intCast(node_index);
-                        }
-                    }
-                }
-                tensor_cursor += take;
-                if (tensor_cursor == span.end) span_index += 1;
             }
         }
 
@@ -1931,7 +1823,7 @@ const VectoredReadRequest = struct {
             read_elapsed_us *| @as(u64, @intCast(request_len)),
             .monotonic,
         );
-        for (pieces) |piece| piece.item.state.state.recordReadProgress(piece.len);
+        for (transfers) |transfer| transfer.item.state.state.recordReadProgress(transfer.len);
         request.markReadFinished();
         endRead(request, pipeline);
         if (pipeline.failed()) return;
@@ -1956,8 +1848,8 @@ const VectoredReadRequest = struct {
             lease.* = &.{};
             initialized_blocks += 1;
         }
-        pipeline.enqueueBlocks(transfers.items, blocks, queue_counts) catch |err| {
-            for (transfers.items) |transfer| {
+        pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
+            for (transfers) |transfer| {
                 pipeline.abandonSubmissions(
                     blocks[transfer.block_index],
                     @popCount(transfer.writer_mask),
@@ -1973,19 +1865,12 @@ const VectoredReadRequest = struct {
 /// Immutable source-job epochs ordered once by destination-device debt.
 /// Replicated jobs credit every device they serve but occur once in the order.
 const FairVectoredReadScheduler = struct {
-    const SourcePiece = struct {
-        item: *LoaderLoadItem,
-        item_index: usize,
-        tensor_offset: usize,
-        len: usize,
-    };
-
     const Job = struct {
         tensor_index: usize,
         source_slot: ?*LoaderSourceSlot = null,
         file_offset: u64,
         len: usize,
-        pieces: []const SourcePiece = &.{},
+        transfers: []const VectoredLoadPipeline.PlannedTransfer = &.{},
     };
 
     const StoredJob = struct {
@@ -1993,8 +1878,8 @@ const FairVectoredReadScheduler = struct {
         source_slot: ?*LoaderSourceSlot = null,
         file_offset: u64,
         len: usize,
-        piece_start: usize,
-        piece_len: usize,
+        transfer_start: usize,
+        transfer_len: usize,
         predecessor: ?usize,
         adaptive_sample: bool = false,
     };
@@ -2016,7 +1901,7 @@ const FairVectoredReadScheduler = struct {
     const PreparedBatch = struct {
         allocator: std.mem.Allocator,
         jobs: []StoredJob,
-        pieces: []SourcePiece,
+        transfers: []VectoredLoadPipeline.PlannedTransfer,
         order: []usize,
         remaining_bytes: []u64,
         remaining_full_jobs: []usize,
@@ -2027,7 +1912,7 @@ const FairVectoredReadScheduler = struct {
             if (self.remaining_full_jobs.len != 0) self.allocator.free(self.remaining_full_jobs);
             if (self.remaining_bytes.len != 0) self.allocator.free(self.remaining_bytes);
             if (self.order.len != 0) self.allocator.free(self.order);
-            if (self.pieces.len != 0) self.allocator.free(self.pieces);
+            if (self.transfers.len != 0) self.allocator.free(self.transfers);
             if (self.jobs.len != 0) self.allocator.free(self.jobs);
             self.* = undefined;
         }
@@ -2107,6 +1992,73 @@ const FairVectoredReadScheduler = struct {
         return order;
     }
 
+    fn appendTransfers(
+        allocator: std.mem.Allocator,
+        output: *std.ArrayList(VectoredLoadPipeline.PlannedTransfer),
+        transfer_start: usize,
+        item: *LoaderLoadItem,
+        tensor_offset: usize,
+        len: usize,
+        job_file_offset: u64,
+        block_size: usize,
+        dispatch: DispatchSpans,
+        device_indices: []const usize,
+        physical_bytes: []usize,
+    ) !void {
+        const piece_end = try std.math.add(usize, tensor_offset, len);
+        var cursor = tensor_offset;
+        var span_index = dispatch.spanIndexAt(cursor) orelse return error.InvalidLoaderJob;
+        while (cursor < piece_end) {
+            const span = dispatch.spans[span_index];
+            const absolute = try std.math.add(u64, item.source.offset, @as(u64, @intCast(cursor)));
+            if (absolute < job_file_offset) return error.InvalidLoaderJob;
+            const source_relative = std.math.cast(usize, absolute - job_file_offset) orelse
+                return error.InvalidLoaderJob;
+            const block_index = source_relative / block_size;
+            const block_offset = source_relative % block_size;
+            const take = @min(
+                @min(piece_end - cursor, span.end - cursor),
+                block_size - block_offset,
+            );
+            const writer_mask = dispatch.writerMask(span);
+            if (writer_mask == 0) return error.InvalidLoaderJob;
+            const destination_offset = span.writer_offset + cursor - span.start;
+            var merged = false;
+            if (output.items.len > transfer_start) merge: {
+                const previous = &output.items[output.items.len - 1];
+                if (previous.item != item or previous.block_index != block_index or
+                    previous.writer_mask != writer_mask or
+                    previous.block_offset + previous.len != block_offset or
+                    previous.destination_offset + previous.len != destination_offset)
+                    break :merge;
+                previous.len += take;
+                merged = true;
+            }
+            if (!merged) try output.append(allocator, .{
+                .item = item,
+                .block_index = block_index,
+                .block_offset = block_offset,
+                .writer_mask = writer_mask,
+                .destination_offset = destination_offset,
+                .len = take,
+            });
+            var mask = writer_mask;
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                if (writer_index >= device_indices.len) return error.InvalidLoaderJob;
+                const device_index = device_indices[writer_index];
+                physical_bytes[device_index] = try std.math.add(
+                    usize,
+                    physical_bytes[device_index],
+                    take,
+                );
+            }
+            cursor += take;
+            if (cursor == span.end) span_index += 1;
+        }
+    }
+
     fn prepareBatch(
         allocator: std.mem.Allocator,
         device_count: usize,
@@ -2175,8 +2127,8 @@ const FairVectoredReadScheduler = struct {
 
         var jobs_list: std.ArrayList(StoredJob) = .empty;
         defer jobs_list.deinit(allocator);
-        var pieces_list: std.ArrayList(SourcePiece) = .empty;
-        defer pieces_list.deinit(allocator);
+        var transfers_list: std.ArrayList(VectoredLoadPipeline.PlannedTransfer) = .empty;
+        defer transfers_list.deinit(allocator);
         var physical_list: std.ArrayList(usize) = .empty;
         defer physical_list.deinit(allocator);
         var safe_boundaries: std.ArrayList(u64) = .empty;
@@ -2276,8 +2228,10 @@ const FairVectoredReadScheduler = struct {
                     };
                     const job_len: usize = @intCast(job_end - job_start);
                     const job_index = jobs_list.items.len;
-                    const piece_start = pieces_list.items.len;
+                    const transfer_start = transfers_list.items.len;
                     var representative = first_index;
+                    try physical_list.appendNTimes(allocator, 0, device_count);
+                    const row = physical_list.items[job_index * device_count ..][0..device_count];
                     while (candidate_start < run_item_end) {
                         const candidate = items[order[candidate_start]].source;
                         const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
@@ -2293,49 +2247,33 @@ const FairVectoredReadScheduler = struct {
                         const intersection_start = @max(job_start, item.source.offset);
                         const intersection_end = @min(job_end, item_end);
                         if (intersection_start >= intersection_end) continue;
-                        if (pieces_list.items.len == piece_start) representative = item_index;
-                        try pieces_list.append(allocator, .{
-                            .item = item,
-                            .item_index = item_index,
-                            .tensor_offset = @intCast(intersection_start - item.source.offset),
-                            .len = @intCast(intersection_end - intersection_start),
-                        });
+                        if (transfers_list.items.len == transfer_start) representative = item_index;
+                        try appendTransfers(
+                            allocator,
+                            &transfers_list,
+                            transfer_start,
+                            item,
+                            @intCast(intersection_start - item.source.offset),
+                            @intCast(intersection_end - intersection_start),
+                            job_start,
+                            block_size,
+                            plans[item_index].dispatch_spans,
+                            plans[item_index].device_indices,
+                            row,
+                        );
                     }
-                    std.debug.assert(pieces_list.items.len > piece_start);
+                    std.debug.assert(transfers_list.items.len > transfer_start);
                     try jobs_list.append(allocator, .{
                         .tensor_index = representative,
                         .source_slot = first_item.source_slot,
                         .file_offset = job_start,
                         .len = job_len,
-                        .piece_start = piece_start,
-                        .piece_len = pieces_list.items.len - piece_start,
+                        .transfer_start = transfer_start,
+                        .transfer_len = transfers_list.items.len - transfer_start,
                         .predecessor = previous_job,
                         .adaptive_sample = true,
                     });
                     previous_job = job_index;
-
-                    try physical_list.appendNTimes(allocator, 0, device_count);
-                    const row = physical_list.items[job_index * device_count ..][0..device_count];
-                    for (pieces_list.items[piece_start..]) |piece| {
-                        const dispatch = plans[piece.item_index].dispatch_spans;
-                        const piece_end = piece.tensor_offset + piece.len;
-                        var cursor = piece.tensor_offset;
-                        var span_index = dispatch.spanIndexAt(cursor) orelse
-                            return error.InvalidLoaderJob;
-                        while (cursor < piece_end) {
-                            const span = dispatch.spans[span_index];
-                            const take = @min(piece_end, span.end) - cursor;
-                            var writer_mask = dispatch.writerMask(span);
-                            while (writer_mask != 0) {
-                                const writer_index: usize = @intCast(@ctz(writer_mask));
-                                writer_mask &= writer_mask - 1;
-                                const device_index = plans[piece.item_index].device_indices[writer_index];
-                                row[device_index] = try std.math.add(usize, row[device_index], take);
-                            }
-                            cursor += take;
-                            if (cursor == span.end) span_index += 1;
-                        }
-                    }
                     for (row, queues) |bytes, *queue| {
                         if (bytes != 0) try queue.append(allocator, job_index);
                     }
@@ -2352,8 +2290,8 @@ const FairVectoredReadScheduler = struct {
 
         const jobs = try jobs_list.toOwnedSlice(allocator);
         errdefer allocator.free(jobs);
-        const pieces = try pieces_list.toOwnedSlice(allocator);
-        errdefer allocator.free(pieces);
+        const transfers = try transfers_list.toOwnedSlice(allocator);
+        errdefer allocator.free(transfers);
         const physical_bytes = try physical_list.toOwnedSlice(allocator);
         defer allocator.free(physical_bytes);
         const fair_order = try fairOrder(allocator, jobs, physical_bytes, queues);
@@ -2377,7 +2315,7 @@ const FairVectoredReadScheduler = struct {
         return .{
             .allocator = allocator,
             .jobs = jobs,
-            .pieces = pieces,
+            .transfers = transfers,
             .order = fair_order,
             .remaining_bytes = remaining_bytes,
             .remaining_full_jobs = remaining_full_jobs,
@@ -2451,8 +2389,8 @@ const FairVectoredReadScheduler = struct {
                 .tensor_index = job.tensor_index,
                 .file_offset = 0,
                 .len = job.len,
-                .piece_start = 0,
-                .piece_len = 0,
+                .transfer_start = 0,
+                .transfer_len = 0,
                 .predecessor = if (job.tensor_index < previous_jobs.len)
                     previous_jobs[job.tensor_index]
                 else
@@ -2497,7 +2435,7 @@ const FairVectoredReadScheduler = struct {
             .plan = .{
                 .allocator = allocator,
                 .jobs = stored_jobs,
-                .pieces = &.{},
+                .transfers = &.{},
                 .order = order,
                 .remaining_bytes = remaining_bytes,
                 .remaining_full_jobs = remaining_full_jobs,
@@ -2522,7 +2460,7 @@ const FairVectoredReadScheduler = struct {
             .source_slot = stored.source_slot,
             .file_offset = stored.file_offset,
             .len = stored.len,
-            .pieces = plan.pieces[stored.piece_start..][0..stored.piece_len],
+            .transfers = plan.transfers[stored.transfer_start..][0..stored.transfer_len],
         };
     }
 
@@ -2625,10 +2563,10 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
     try std.testing.expectEqual(@as(usize, 3), batch.source_runs);
     try std.testing.expectEqual(@as(usize, 4), batch.jobs.len);
     try std.testing.expectEqual(@as(u64, 24), batch.remaining_bytes[0]);
-    try std.testing.expectEqual(@as(usize, 6), batch.pieces.len);
+    try std.testing.expectEqual(@as(usize, 7), batch.transfers.len);
     try std.testing.expectEqual(@as(u64, 10), batch.jobs[0].file_offset);
     try std.testing.expectEqual(@as(usize, 8), batch.jobs[0].len);
-    try std.testing.expectEqual(@as(usize, 3), batch.jobs[0].piece_len);
+    try std.testing.expectEqual(@as(usize, 3), batch.jobs[0].transfer_len);
     try std.testing.expectEqual(@as(u64, 20), batch.jobs[1].file_offset);
     try std.testing.expectEqual(@as(u64, 3), batch.jobs[2].file_offset);
     try std.testing.expectEqual(@as(usize, 8), batch.jobs[2].len);
@@ -2690,7 +2628,7 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
     );
     defer aligned_batch.deinit();
     try std.testing.expectEqual(@as(usize, 3), aligned_batch.jobs.len);
-    try std.testing.expectEqual(@as(usize, 3), aligned_batch.pieces.len);
+    try std.testing.expectEqual(@as(usize, 6), aligned_batch.transfers.len);
     try std.testing.expectEqual(@as(usize, 7), aligned_batch.jobs[0].len);
     try std.testing.expectEqual(@as(usize, 8), aligned_batch.jobs[1].len);
     try std.testing.expectEqual(@as(usize, 5), aligned_batch.jobs[2].len);
@@ -5737,7 +5675,7 @@ const DirectLoader = struct {
     epoch_source_jobs: usize = 0,
     epoch_source_runs: usize = 0,
     epoch_source_items: usize = 0,
-    epoch_source_pieces: usize = 0,
+    epoch_planned_transfers: usize = 0,
     epoch_planning_ns: u64 = 0,
     epoch_started_at: ?std.Io.Timestamp = null,
     epoch_number: usize = 0,
@@ -5958,7 +5896,7 @@ const DirectLoader = struct {
                 &self.pipeline,
                 job.file_offset,
                 job.len,
-                job.pieces,
+                job.transfers,
                 self,
                 &scratch,
             );
@@ -6030,7 +5968,7 @@ const DirectLoader = struct {
         defer if (batch_owned) batch.deinit();
         if (batch.maximum_blocks_per_job > self.maximum_blocks_per_job)
             return error.InvalidDmaLoadConfig;
-        const batch_piece_count = batch.pieces.len;
+        const batch_transfer_count = batch.transfers.len;
         const batch_job_count = batch.jobs.len;
         const batch_source_bytes = batch.remaining_bytes[0];
         const batch_source_runs = batch.source_runs;
@@ -6064,7 +6002,7 @@ const DirectLoader = struct {
         self.epoch_source_jobs = batch_job_count;
         self.epoch_source_runs = batch_source_runs;
         self.epoch_source_items = items.len;
-        self.epoch_source_pieces = batch_piece_count;
+        self.epoch_planned_transfers = batch_transfer_count;
         self.epoch_planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0));
         self.epoch_active = true;
     }
@@ -6166,7 +6104,7 @@ const DirectLoader = struct {
             self.epoch_source_jobs = 0;
             self.epoch_source_runs = 0;
             self.epoch_source_items = 0;
-            self.epoch_source_pieces = 0;
+            self.epoch_planned_transfers = 0;
             self.epoch_planning_ns = 0;
             self.epoch_started_at = null;
             self.epoch_active = false;
@@ -6178,7 +6116,7 @@ const DirectLoader = struct {
         self.epoch_source_jobs = 0;
         self.epoch_source_runs = 0;
         self.epoch_source_items = 0;
-        self.epoch_source_pieces = 0;
+        self.epoch_planned_transfers = 0;
         self.epoch_planning_ns = 0;
         self.epoch_started_at = null;
         self.epoch_active = false;
@@ -6226,7 +6164,7 @@ const DirectLoader = struct {
         else
             @as(f64, @floatFromInt(self.epoch_source_items)) /
                 @as(f64, @floatFromInt(self.epoch_source_jobs));
-        load_log.debug("epoch completed: epoch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, elapsed={d:.3}s, planning_elapsed={d:.3}s, reads={d}, physical_source_calls={d}, planned_source_jobs={d}, source_runs={d}, source_items={d}, source_slices={d}, tensor_transfer_pieces={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, dma_submissions={d}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        load_log.debug("epoch completed: epoch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, elapsed={d:.3}s, planning_elapsed={d:.3}s, reads={d}, physical_source_calls={d}, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, tensor_transfer_pieces={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, dma_submissions={d}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.epoch_number,
             successful,
             self.epoch_logical_bytes,
@@ -6238,7 +6176,7 @@ const DirectLoader = struct {
             self.epoch_source_jobs,
             self.epoch_source_runs,
             self.epoch_source_items,
-            self.epoch_source_pieces,
+            self.epoch_planned_transfers,
             epoch_transfer_pieces,
             coalescing_ratio,
             average_read_size,
@@ -7257,8 +7195,8 @@ test "settled backoff waits for a new-generation admission" {
 
 test "vectored final transfers wait for every prior destination submission" {
     var targets = [_]VectoredTensorTransfer.Target{
-        .{ .manager = undefined, .pjrt_buffer = undefined, .device_index = 0, .total = 100 },
-        .{ .manager = undefined, .pjrt_buffer = undefined, .device_index = 1, .total = 100 },
+        .{ .manager = undefined, .device_index = 0, .total = 100 },
+        .{ .manager = undefined, .device_index = 1, .total = 100 },
     };
     var tensor: VectoredTensorTransfer = undefined;
     tensor.targets = &targets;
@@ -7398,7 +7336,15 @@ const DispatchSpansTest = struct {
         const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
         defer dispatch_spans.deinit(allocator);
 
-        const writer_count = sharding.devicesInCanonicalOrder().len;
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+        const writer_count = ordered_devices.len;
+        const device_indices = try allocator.alloc(usize, writer_count);
+        defer allocator.free(device_indices);
+        var device_count: usize = 0;
+        for (ordered_devices, device_indices) |device, *device_index| {
+            device_index.* = @intCast(device.id);
+            device_count = @max(device_count, device_index.* + 1);
+        }
         const placement = try sharding.placement(shape);
         const writer_size = placement.shape.byteSize();
         const source = try allocator.alloc(u8, shape.byteSize());
@@ -7421,6 +7367,23 @@ const DispatchSpansTest = struct {
         const actual = try allocator.alloc(u8, expected.len);
         defer allocator.free(actual);
         @memset(actual, 0);
+        var source_tensor: safetensors.Tensor = .{
+            .file_uri = "unused",
+            .name = "value",
+            .shape = shape,
+            .offset = 0,
+        };
+        var item: LoaderLoadItem = .{
+            .source = &source_tensor,
+            .source_slot = undefined,
+            .shape = shape,
+            .sharding = sharding,
+            .output = undefined,
+        };
+        var transfers: std.ArrayList(VectoredLoadPipeline.PlannedTransfer) = .empty;
+        defer transfers.deinit(allocator);
+        const physical_bytes = try allocator.alloc(usize, device_count);
+        defer allocator.free(physical_bytes);
 
         const request_count = std.math.divCeil(usize, source.len, request_size) catch unreachable;
         var reverse_index = request_count;
@@ -7428,27 +7391,35 @@ const DispatchSpansTest = struct {
             reverse_index -= 1;
             const source_offset = reverse_index * request_size;
             const request_len = @min(request_size, source.len - source_offset);
-            const request_end = source_offset + request_len;
-            var cursor = source_offset;
-            var span_index = dispatch_spans.spanIndexAt(cursor).?;
-            while (cursor < request_end) {
-                const span = dispatch_spans.spans[span_index];
-                const request_relative = cursor - source_offset;
-                const block_remaining = block_size - request_relative % block_size;
-                const take = @min(@min(request_end - cursor, span.end - cursor), block_remaining);
-                const destination_offset = span.writer_offset + cursor - span.start;
-                var mask = dispatch_spans.writerMask(span);
+            transfers.clearRetainingCapacity();
+            @memset(physical_bytes, 0);
+            try FairVectoredReadScheduler.appendTransfers(
+                allocator,
+                &transfers,
+                0,
+                &item,
+                source_offset,
+                request_len,
+                source_offset,
+                block_size,
+                dispatch_spans,
+                device_indices,
+                physical_bytes,
+            );
+            for (transfers.items) |transfer| {
+                try std.testing.expectEqual(&item, transfer.item);
+                const block_source_offset = source_offset +
+                    transfer.block_index * block_size + transfer.block_offset;
+                var mask = transfer.writer_mask;
                 while (mask != 0) {
                     const writer_index: usize = @intCast(@ctz(mask));
                     mask &= mask - 1;
-                    try std.testing.expect(destination_offset + take <= writer_size);
+                    try std.testing.expect(transfer.destination_offset + transfer.len <= writer_size);
                     @memcpy(
-                        actual[writer_index * writer_size + destination_offset ..][0..take],
-                        source[cursor..][0..take],
+                        actual[writer_index * writer_size + transfer.destination_offset ..][0..transfer.len],
+                        source[block_source_offset..][0..transfer.len],
                     );
                 }
-                cursor += take;
-                if (cursor == span.end) span_index += 1;
             }
         }
         try std.testing.expectEqualSlices(u8, expected, actual);
