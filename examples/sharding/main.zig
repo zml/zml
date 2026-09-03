@@ -39,15 +39,17 @@ const DemoModel = struct {
 
         const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
-            .{ y, gate },
-            y.shape(),
-            {},
             (struct {
-                fn body(_: void, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_sharded: zml.Shape) zml.Tensor {
-                    const local_result = sharded_inputs[0].relu().mul(sharded_inputs[1]);
+                y: zml.Tensor,
+                gate: zml.Tensor,
+
+                fn body(ctx: @This(), output_sharded: zml.Shape) zml.Tensor {
+                    const local_result = ctx.y.relu().mul(ctx.gate);
                     return local_result.reshape(output_sharded);
                 }
             }).body,
+            .{ .y = y, .gate = gate },
+            y.shape(),
         );
     }
 };

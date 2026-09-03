@@ -341,38 +341,36 @@ pub const paged = struct {
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const output = zml.ops.manualComputation(
-            .{
-                q,
-                k_cache,
-                v_cache,
-                parameters.block_table,
-                parameters.seq_lens,
-                parameters.query_start_len,
-            },
-            q.shape(),
-            .{
-                .opts = opts,
-                .options = parameters.options_,
-            },
             (struct {
-                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                    const q_ = sharded_inputs[0];
-                    const k_cache_ = sharded_inputs[1];
-                    const v_cache_ = sharded_inputs[2];
-                    const parameters_: Parameters = .{ .block_table = sharded_inputs[3], .seq_lens = sharded_inputs[4], .query_start_len = sharded_inputs[5], .options_ = ctx_.options };
+                q: zml.Tensor,
+                k_cache: zml.Tensor,
+                v_cache: zml.Tensor,
+                block_table: zml.Tensor,
+                seq_lens: zml.Tensor,
+                query_start_len: zml.Tensor,
+                opts: AttentionOptions,
+                options: Options,
+
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const parameters_: Parameters = .{
+                        .block_table = self.block_table,
+                        .seq_lens = self.seq_lens,
+                        .query_start_len = self.query_start_len,
+                        .options_ = self.options,
+                    };
 
                     const cu_count = getCuCount();
-                    const num_heads: usize = @intCast(q_.dim(.hkv) * q_.dim(.hg));
-                    const num_kv_heads: usize = @intCast(k_cache_.dim(.hkv));
+                    const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
+                    const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
                     // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (!ctx_.options.is_prefill and isOneapiTarget())
+                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
                         std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
                     else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
                     const block_q: usize = block_m / num_queries_per_kv;
-                    const num_tokens: usize = @intCast(q_.dim(.b));
+                    const num_tokens: usize = @intCast(self.q.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
                     const total_q_blocks: usize = num_tokens / block_q + num_seqs;
                     const target_num_prgms: usize = cu_count * 4;
@@ -380,23 +378,23 @@ pub const paged = struct {
 
                     const paged_attention_opts: PagedAttentionOptions = .{
                         .cu_count = getCuCount(),
-                        .all_decode = !ctx_.options.is_prefill,
+                        .all_decode = !self.options.is_prefill,
                         .num_tokens = num_tokens,
                         .num_heads = num_heads,
                         .num_kv_heads = num_kv_heads,
-                        .head_dim = @intCast(q_.dim(.hd)),
+                        .head_dim = @intCast(self.q.dim(.hd)),
                         .batch_size = @intCast(parameters_.block_table.dim(.b)),
-                        .block_size = @intCast(k_cache_.dim(.k_chunk)),
-                        .num_blocks = @intCast(k_cache_.dim(.page)),
+                        .block_size = @intCast(self.k_cache.dim(.k_chunk)),
+                        .num_blocks = @intCast(self.k_cache.dim(.page)),
                         .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
-                        .sliding_window = if (ctx_.opts.sliding_window < 0) 0 else @intCast(ctx_.opts.sliding_window),
+                        .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
                         .block_m = block_m,
                         .block_q = block_q,
                         .total_q_blocks = total_q_blocks,
                         .target_num_prgms = target_num_prgms,
                         .num_2d_prgms = num_2d_prgms,
-                        .max_seqlen_q = ctx_.options.max_seqlen_q,
-                        .scale = ctx_.opts.scale,
+                        .max_seqlen_q = self.options.max_seqlen_q,
+                        .scale = self.opts.scale,
                     };
 
                     const use_2d_kernel = use2dKernel(
@@ -405,15 +403,26 @@ pub const paged = struct {
                         paged_attention_opts.num_kv_heads,
                     );
                     const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                        pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else if (isOneapiTarget())
-                        pagedAttention3dOneapi(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                        pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else
-                        pagedAttention3d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
+                        pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
 
                     return output;
                 }
             }).body,
+            .{
+                .q = q,
+                .k_cache = k_cache,
+                .v_cache = v_cache,
+                .block_table = parameters.block_table,
+                .seq_lens = parameters.seq_lens,
+                .query_start_len = parameters.query_start_len,
+                .opts = opts,
+                .options = parameters.options_,
+            },
+            q.shape(),
         );
 
         return output;
@@ -975,64 +984,70 @@ pub const paged = struct {
     pub fn pagedSparseMla(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
         const output_shape = q.shape().set(.hd, opts.value_rank);
         return zml.ops.manualComputation(
-            .{
-                q,
-                kv_cache,
-                sink,
-                topk,
-                tokens_pos,
-                parameters.block_table,
-                parameters.seq_lens,
-                parameters.query_start_len,
-            },
-            output_shape,
-            .{
-                .opts = opts,
-                .options = parameters.options_,
-            },
             (struct {
-                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                    const q_ = sharded_inputs[0];
-                    const kv_cache_ = sharded_inputs[1];
+                q: zml.Tensor,
+                kv_cache: zml.Tensor,
+                sink: ?zml.Tensor,
+                topk: zml.Tensor,
+                tokens_pos: zml.Tensor,
+                block_table: zml.Tensor,
+                seq_lens: zml.Tensor,
+                query_start_len: zml.Tensor,
+                opts: MlaOptions,
+                options: Options,
 
-                    const block_size = kv_cache_.dim(.k_chunk);
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const block_size = self.kv_cache.dim(.k_chunk);
 
                     const parameters_: Parameters = .{
-                        .block_table = sharded_inputs[5],
-                        .seq_lens = sharded_inputs[6],
-                        .query_start_len = sharded_inputs[7],
-                        .options_ = ctx_.options,
+                        .block_table = self.block_table,
+                        .seq_lens = self.seq_lens,
+                        .query_start_len = self.query_start_len,
+                        .options_ = self.options,
                     };
 
-                    const topk_final = topkToPhysical(parameters_, sharded_inputs[3], sharded_inputs[4], block_size);
-                    const active_query_count = sharded_inputs[7]
-                        .slice(.b, .{ .start = sharded_inputs[7].dim(.b) - 1 })
+                    const topk_final = topkToPhysical(parameters_, self.topk, self.tokens_pos, block_size);
+                    const active_query_count = self.query_start_len
+                        .slice(.b, .{ .start = self.query_start_len.dim(.b) - 1 })
                         .squeeze(.b);
-                    stdx.debug.assert(topk_final.dim(.q) == q_.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), q_.dim(.q) });
+                    stdx.debug.assert(topk_final.dim(.q) == self.q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), self.q.dim(.q) });
 
-                    const num_heads: usize = @intCast(q_.dim(.h));
+                    const num_heads: usize = @intCast(self.q.dim(.h));
                     const paged_opts: PagedSparseMlaOptions = .{
-                        .qk_rank = @intCast(q_.dim(.hd)),
-                        .value_rank = @intCast(ctx_.opts.value_rank),
+                        .qk_rank = @intCast(self.q.dim(.hd)),
+                        .value_rank = @intCast(self.opts.value_rank),
                         .num_heads = num_heads,
-                        .block_size = @intCast(kv_cache_.dim(.k_chunk)),
-                        .rope_rank = @intCast(ctx_.opts.rope_rank),
-                        .scale = ctx_.opts.scale,
-                        .total_q_blocks = @intCast(q_.dim(.q)),
-                        .num_kv_splits = ctx_.opts.num_kv_splits,
-                        .all_decode = !ctx_.options.is_prefill,
+                        .block_size = @intCast(self.kv_cache.dim(.k_chunk)),
+                        .rope_rank = @intCast(self.opts.rope_rank),
+                        .scale = self.opts.scale,
+                        .total_q_blocks = @intCast(self.q.dim(.q)),
+                        .num_kv_splits = self.opts.num_kv_splits,
+                        .all_decode = !self.options.is_prefill,
                     };
 
                     return pagedSparseMlaKernel(
-                        q_,
-                        kv_cache_,
-                        sharded_inputs[2],
+                        self.q,
+                        self.kv_cache,
+                        self.sink,
                         topk_final,
                         active_query_count,
                         paged_opts,
                     );
                 }
             }).body,
+            .{
+                .q = q,
+                .kv_cache = kv_cache,
+                .sink = sink,
+                .topk = topk,
+                .tokens_pos = tokens_pos,
+                .block_table = parameters.block_table,
+                .seq_lens = parameters.seq_lens,
+                .query_start_len = parameters.query_start_len,
+                .opts = opts,
+                .options = parameters.options_,
+            },
+            output_shape,
         );
     }
 };
