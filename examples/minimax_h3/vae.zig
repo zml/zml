@@ -1,4 +1,4 @@
-//! Tiled ViT decoder. Python: `AutoencoderKLMiniMaxH3`.
+//! Tiled ViT decoder.
 //!
 //!   1. denormalize latents with `vae/config.json` moments
 //!   2. split the canvas into 256 px tiles (64 px overlap)
@@ -18,6 +18,7 @@ const rms = ops.rms;
 const ln = ops.ln;
 const load = ops.load;
 const ropeCat3 = ops.ropeCat3;
+const applyLatentNorm = ops.applyLatentNorm;
 const Run = ops.Run;
 
 fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
@@ -25,7 +26,7 @@ fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
 }
 
 // =============================================================================
-// Tile / stitch  (256 px tiles, 64 px overlap — official VAE tiling)
+// Tile / stitch  (256 px tiles, 64 px overlap)
 // =============================================================================
 
 const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
@@ -220,11 +221,6 @@ const NchwStitcher = struct {
     }
 };
 
-/// `v ← v * std + mean` per latent channel (official VAE denorm).
-fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []const f32) void {
-    for (values, 0..) |*v, i| v.* = v.* * stddev[i % channels] + mean[i % channels];
-}
-
 fn vitCoords(dim: u32, out: []f32) void {
     const d: f32 = @floatFromInt(dim);
     for (0..dim) |i| out[i] = 2.0 * ((@as(f32, @floatFromInt(i)) + 0.5) / d) - 1.0;
@@ -309,7 +305,7 @@ fn blendRgbFrames(
 }
 
 // =============================================================================
-// Decoder  (`MiniMaxH3VideoViTDecoder3d`: embed → 36 blocks → finish)
+// Decoder  (embed → 36 blocks → finish)
 // =============================================================================
 
 const VitFf = struct {
@@ -329,7 +325,6 @@ const VitFf = struct {
     }
 };
 
-/// Python: `MiniMaxH3VideoAttention`
 const VitAttn = struct {
     q: zml.nn.Linear,
     k: zml.nn.Linear,
@@ -367,7 +362,6 @@ const VitAttn = struct {
     }
 };
 
-/// Python: `MiniMaxH3VideoTransformerBlock`
 const VitBlock = struct {
     norm1: zml.nn.RmsNorm,
     attn: VitAttn,
@@ -445,7 +439,7 @@ const FinishModel = struct {
     }
 };
 
-/// Python: `AutoencoderKLMiniMaxH3` (tiled ViT decoder)
+/// Tiled ViT decoder.
 pub const Vae = struct {
     embed: EmbedModel,
     blocks: []VitBlock,
@@ -457,8 +451,8 @@ pub const Vae = struct {
         embed: zml.FnExe(EmbedModel.forward),
         block: zml.FnExe(VitBlock.forward),
         finish: zml.FnExe(FinishModel.forward),
-        tile_batch: u32 = 1,
-        partition_b: bool = false,
+        tile_batch: u32,
+        partition_b: bool,
 
         fn deinit(self: *Compiled) void {
             self.embed.deinit();
@@ -558,9 +552,8 @@ fn vaeBatchShape(tags: anytype, dt: zml.DataType, partition_b: bool) zml.Tensor 
 
 fn compileVae(self: *Vae, run: *const Run) !void {
     const model = self.*;
-    const tile_batch: u32 = 28;
+    const batch: u32 = 28;
     const seq = vaeSeq(@intCast(model.cfg.decoder_num_register_tokens));
-    const batch = @max(1, tile_batch);
     const tp: u32 = @intCast(run.shardings.model.numPartitionsForLogicalAxis(.model));
     const partition_b = batch > 1 and tp > 1 and batch % tp == 0;
     var node = run.progress.start("Compiling MiniMax-H3 VAE", 3);
@@ -654,9 +647,8 @@ fn runVaeBatch(
     run: *const Run,
     loaded: *const Vae,
     embed: *EmbedRunner,
-    block: *VitRunner,
+    blocks: []VitRunner,
     finish: *FinishRunner,
-    layers: []const zml.Bufferized(VitBlock),
     pos: zml.Buffer,
     packed_latents: []const f32,
 ) ![]f32 {
@@ -682,8 +674,7 @@ fn runVaeBatch(
         held.deinit(run.allocator);
     }
     try held.append(run.allocator, hidden);
-    for (layers) |layer| {
-        block.rebake(.{ .layer = layer });
+    for (blocks) |*block| {
         var next: zml.Buffer = undefined;
         block.run(run.io, .{ .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin }, .outputs = .{ .hidden = &next } });
         hidden = next;
@@ -728,8 +719,16 @@ fn decodeVae(
     defer run.allocator.free(positions);
     var embed = try EmbedRunner.init(&compiled.embed, run.allocator, .{ .model = cache.embed });
     defer embed.deinit(run.allocator);
-    var block = try VitRunner.init(&compiled.block, run.allocator, .{ .layer = cache.blocks[0] });
-    defer block.deinit(run.allocator);
+    const block_runners = try run.allocator.alloc(VitRunner, cache.blocks.len);
+    var blocks_ready: usize = 0;
+    defer {
+        for (block_runners[0..blocks_ready]) |*r| r.deinit(run.allocator);
+        run.allocator.free(block_runners);
+    }
+    for (block_runners, cache.blocks) |*r, layer| {
+        r.* = try VitRunner.init(&compiled.block, run.allocator, .{ .layer = layer });
+        blocks_ready += 1;
+    }
     var finish = try FinishRunner.init(&compiled.finish, run.allocator, .{ .model = cache.finish });
     defer finish.deinit(run.allocator);
     var pos = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .s = vaeSeq(registers), .ax = 3 }, .f32), .replicated, std.mem.sliceAsBytes(positions));
@@ -786,7 +785,7 @@ fn decodeVae(
         );
         defer stitcher.deinit(run.allocator);
 
-        const batch = @max(1, compiled.tile_batch);
+        const batch = compiled.tile_batch;
         const packed_lat = try run.allocator.alloc(f32, batch * tile_n);
         defer run.allocator.free(packed_lat);
         const tile_patch = vaeTokens() * @as(usize, @intCast(self.cfg.out_channels * config.visual_temporal * config.visual_spatial * config.visual_spatial));
@@ -798,7 +797,7 @@ fn decodeVae(
             while (b < take) : (b += 1) {
                 @memcpy(packed_lat[b * tile_n ..][0..tile_n], tile_lats[(off + b) * tile_n ..][0..tile_n]);
             }
-            const patches = try runVaeBatch(run, self, &embed, &block, &finish, cache.blocks, pos, packed_lat);
+            const patches = try runVaeBatch(run, self, &embed, block_runners, &finish, pos, packed_lat);
             defer run.allocator.free(patches);
             b = 0;
             while (b < take) : (b += 1) {
@@ -825,7 +824,7 @@ fn decodeVae(
         }
         written += take;
         const overlap_src = chunk_frames + frame_pre;
-        if (frame_ov > 0 and overlap_src < clip_t) {
+        if (overlap_src < clip_t) {
             copyRgbFrames(pending, frame_ov, 0, clip, clip_t, overlap_src, @min(frame_ov, clip_t - overlap_src), plane);
             has_overlap = true;
         }

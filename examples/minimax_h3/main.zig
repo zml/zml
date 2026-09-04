@@ -1,15 +1,16 @@
-//! MiniMax-H3 text-to-video (768P, video only).
+//! MiniMax-H3 text-to-video.
 //!
-//! tokenize → encode → pack → denoise → unpatchify → VAE → rgb
+//! tokenize → encode → pack → denoise → unpatchify → visual VAE + audio VAE → rgb + wav
 //!
-//! Weights (`--model`): HuggingFace `MiniMaxAI/MiniMax-H3`
-//!   text_encoder/   transformer/   vae/
+//! Weights (`--model`):
+//!   text_encoder/   transformer/   vae/   audio_vae/
 
 const std = @import("std");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
 
+const audio = @import("audio.zig");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
 const encoder = @import("encoder.zig");
@@ -36,12 +37,12 @@ const Args = struct {
     pub const help =
         \\minimax_h3 --model=<path> [options]
         \\
-        \\Prompt in, silent video.rgb out. Default 1344x768, 5s, 30 Euler steps.
+        \\Prompt in, video.rgb + audio.wav out. Default 1344x768, 5s, 30 Euler steps.
         \\
         \\Options:
         \\  --model=<path>       Path to the MiniMax-H3 repository (required)
         \\  --prompt=<string>    Text prompt (default: a dusk waves shot)
-        \\  --out=<dir>          Output directory for video.rgb (default: out)
+        \\  --out=<dir>          Output directory (default: out)
         \\  --seed=<number>      Noise seed (default: 0)
         \\  --steps=<number>     Sigma points including terminal 0 (default: 30)
         \\  --width=<pixels>     Canvas width, multiple of 32 (default: 1344)
@@ -89,11 +90,13 @@ pub fn main(init: std.process.Init) !void {
             .{ config.min_duration_s, config.max_duration_s },
         ),
     };
-    log.info("t2v  {d}x{d}  {d} frames ({d:.1}s)  {d} steps  seed {d}  devices={d}", .{
+    if (args.steps < 2) stdx.flags.fatal("--steps must be at least 2", .{});
+    log.info("t2v  {d}x{d}  {d} frames ({d:.1}s)  audio_t={d}  {d} steps  seed {d}  devices={d}", .{
         geo.pixel_w,
         geo.pixel_h,
         geo.frames,
         @as(f32, @floatFromInt(geo.frames)) / config.video_fps,
+        geo.audio_t,
         args.steps,
         args.seed,
         platform.devices.len,
@@ -104,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     const run = ops.Run.init(allocator, io, platform, shardings, &progress);
 
     // =============================================================================
-    // Weights  (HuggingFace MiniMax-H3: three safetensors indexes)
+    // Weights
     // =============================================================================
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -124,12 +127,19 @@ pub fn main(init: std.process.Init) !void {
     var vae_store: zml.io.TensorStore = .fromRegistry(allocator, &vae_reg);
     defer vae_store.deinit();
 
+    var audio_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/audio_vae/diffusion_pytorch_model.safetensors", .{args.model}));
+    defer audio_reg.deinit();
+    var audio_store: zml.io.TensorStore = .fromRegistry(allocator, &audio_reg);
+    defer audio_store.deinit();
+
     var enc_model = try encoder.Encoder.init(allocator, enc_store.view());
     defer enc_model.deinit(allocator);
     var dit_model = try dit.Dit.init(allocator, dit_store.view());
     defer dit_model.deinit(allocator);
     var vae_model = try vae.Vae.init(allocator, vae_store.view());
     defer vae_model.deinit(allocator);
+    var audio_model = try audio.AudioVae.init(allocator, audio_store.view());
+    defer audio_model.deinit(allocator);
 
     // =============================================================================
     // 1. Tokenize
@@ -159,6 +169,7 @@ pub fn main(init: std.process.Init) !void {
     try enc_model.compile(&run, @intCast(tokens.len));
     try dit_model.compile(&run, geo, @intCast(tokens.len), packed_run, enc_model.embed_tokens.weight.dtype());
     try vae_model.compile(&run);
+    try audio_model.compile(&run, geo);
     log.info("compile all: ok [{f}]", .{compile_start.untilNow(io, .awake)});
 
     // =============================================================================
@@ -167,11 +178,11 @@ pub fn main(init: std.process.Init) !void {
 
     var text = try enc_model.encodeText(&run, &enc_store, tokens);
     defer text.deinit();
-    const video_tokens = try dit_model.denoise(&run, &dit_store, geo, text, @intCast(tokens.len), packed_run, args.seed);
-    defer allocator.free(video_tokens);
+    const latents = try dit_model.denoise(&run, &dit_store, geo, text, @intCast(tokens.len), packed_run, args.seed);
+    defer latents.deinit(allocator);
     const thwc = try pack.unpatchify(
         allocator,
-        video_tokens,
+        latents.video,
         geo.latent_t,
         geo.latent_h,
         geo.latent_w,
@@ -181,12 +192,21 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(thwc);
     const rgb = try vae_model.decodeVideo(&run, &vae_store, geo, thwc);
     defer allocator.free(rgb);
+    const pcm_f32 = try audio_model.decodeAudio(&run, &audio_store, geo, latents.audio);
+    defer allocator.free(pcm_f32);
 
-    try writeRgb(allocator, io, out, geo, rgb);
+    try writeOutputs(allocator, io, out, geo, rgb, pcm_f32);
 }
 
-/// VAE output is NCHW planar RGB in `[0, 1]`. Write packed RGB24 frames.
-fn writeRgb(allocator: std.mem.Allocator, io: std.Io, out: []const u8, geo: config.Geometry, rgb: []const f32) !void {
+/// Visual VAE output is NCHW planar RGB in `[0, 1]`. Audio is interleaved stereo f32 in `[-1, 1]`.
+fn writeOutputs(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    out: []const u8,
+    geo: config.Geometry,
+    rgb: []const f32,
+    pcm_f32: []const f32,
+) !void {
     var out_dir: std.Io.Dir = if (std.fs.path.isAbsolute(out)) blk: {
         var root = try std.Io.Dir.openDirAbsolute(io, std.fs.path.dirname(out).?, .{});
         defer root.close(io);
@@ -213,10 +233,36 @@ fn writeRgb(allocator: std.mem.Allocator, io: std.Io, out: []const u8, geo: conf
         var writer = file.writer(io, &.{});
         try writer.interface.writeAll(rgb8);
     }
-
     log.info("wrote {s}/video.rgb", .{out});
+
+    const pcm = try allocator.alloc(i16, pcm_f32.len);
+    defer allocator.free(pcm);
+    for (pcm, pcm_f32) |*d, s| {
+        d.* = @intFromFloat(@round(std.math.clamp(s, -1.0, 1.0) * 32767.0));
+    }
+    {
+        const file = try out_dir.createFile(io, "audio.wav", .{});
+        defer file.close(io);
+        var writer = file.writer(io, &.{});
+        const data_bytes: u32 = @intCast(pcm.len * 2);
+        const channels: u16 = 2;
+        try writer.interface.writeAll("RIFF");
+        try writer.interface.writeInt(u32, 36 + data_bytes, .little);
+        try writer.interface.writeAll("WAVEfmt ");
+        try writer.interface.writeInt(u32, 16, .little);
+        try writer.interface.writeInt(u16, 1, .little);
+        try writer.interface.writeInt(u16, channels, .little);
+        try writer.interface.writeInt(u32, config.audio_sample_rate, .little);
+        try writer.interface.writeInt(u32, config.audio_sample_rate * channels * 2, .little);
+        try writer.interface.writeInt(u16, channels * 2, .little);
+        try writer.interface.writeInt(u16, 16, .little);
+        try writer.interface.writeAll("data");
+        try writer.interface.writeInt(u32, data_bytes, .little);
+        try writer.interface.writeAll(std.mem.sliceAsBytes(pcm));
+    }
+    log.info("wrote {s}/audio.wav", .{out});
     log.info(
-        "ffmpeg -y -f rawvideo -pix_fmt rgb24 -s {d}x{d} -r {d} -i {s}/video.rgb -an -pix_fmt yuv420p -c:v libx264 {s}/out.mp4",
-        .{ geo.pixel_w, geo.pixel_h, @as(u32, @intFromFloat(config.video_fps)), out, out },
+        "ffmpeg -y -f rawvideo -pix_fmt rgb24 -s {d}x{d} -r {d} -i {s}/video.rgb -i {s}/audio.wav -pix_fmt yuv420p -c:v libx264 -c:a aac {s}/out.mp4",
+        .{ geo.pixel_w, geo.pixel_h, @as(u32, @intFromFloat(config.video_fps)), out, out, out },
     );
 }

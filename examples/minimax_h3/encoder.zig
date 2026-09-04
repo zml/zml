@@ -13,6 +13,17 @@ const rms = ops.rms;
 const load = ops.load;
 const Run = ops.Run;
 
+/// Qwen3 eager: `(q @ k.T) * scale` then fp32 softmax. Scale-on-K (`zml.nn.sdpa`) drifts in bf16.
+fn qwenSdpa(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
+    var q = q_.splitAxis(.h, .{ .h = k_.dim(.h), .hq = .auto });
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
+    const mask = zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k_.dim(.k) }, .f32, null);
+    var scores = q.dot(k_, .hd).convert(.f32).scale(scale);
+    scores = scores.add(mask.broad(scores.shape()));
+    const attn = scores.softmax(.k).convert(q.dtype()).dot(v_, .k);
+    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
+}
+
 // =============================================================================
 // SwiGLU MLP
 // =============================================================================
@@ -71,15 +82,14 @@ const SelfAttn = struct {
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
         const v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
-        q = zml.nn.applyRotary(self.q_norm.forward(q), cos, sin);
-        k = zml.nn.applyRotary(self.k_norm.forward(k), cos, sin);
-        return self.o_proj.forward(zml.attention.dense(
-            q.rename(.{ .s = .q }),
-            k.rename(.{ .s = .k }),
-            v.rename(.{ .s = .k }),
-            .vanilla,
-            .{ .is_causal = true },
-        ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        q = self.q_norm.forward(q);
+        k = self.k_norm.forward(k);
+        q = zml.nn.applyRotary(q, cos, sin);
+        k = zml.nn.applyRotary(k, cos, sin);
+        const attn = qwenSdpa(q.rename(.{ .s = .q }), k.rename(.{ .s = .k }), v.rename(.{ .s = .k }))
+            .rename(.{ .q = .s })
+            .merge(.{ .d = .{ .h, .hd } });
+        return self.o_proj.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
     }
 };
 
@@ -265,14 +275,13 @@ pub const Encoder = struct {
         var loader: zml.io.Loader = try .init(run.allocator, run.platform, ops.loader_opts);
         defer loader.deinit();
         const LayerRunner = zml.FnExe(TransformerLayer.forward).Runner(.{.layer});
-        var layer_runner: ?LayerRunner = null;
-        defer if (layer_runner) |*r| r.deinit(run.allocator);
         for (0..self.layers.len) |layer_i| {
             var layer_bufs = try load(run, store, TransformerLayer, &self.layers[layer_i], &loader);
             defer zml.Buffer.deinitAll(TransformerLayer, &layer_bufs);
-            if (layer_runner) |*r| r.rebake(.{ .layer = layer_bufs }) else layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
+            var layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
+            defer layer_runner.deinit(run.allocator);
             var next: zml.Buffer = undefined;
-            layer_runner.?.run(run.io, .{
+            layer_runner.run(run.io, .{
                 .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf },
                 .outputs = .{ .hidden = &next },
                 .opts = .{ .wait = true },

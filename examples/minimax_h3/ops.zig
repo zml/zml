@@ -1,5 +1,5 @@
 //! Shared load helpers and weight constructors.
-//! Model math is in `encoder.zig`, `pack.zig`, `dit.zig`, and `vae.zig`.
+//! Model math is in `encoder.zig`, `pack.zig`, `dit.zig`, `vae.zig`, and `audio.zig`.
 
 const std = @import("std");
 const zml = @import("zml");
@@ -90,7 +90,12 @@ pub fn load(
     return buffers;
 }
 
-/// 3-axis MM-RoPE (`MiniMaxH3RotaryPosEmbed`): concat t/h/w freqs, then duplicate.
+/// `v ← v * std + mean` per latent channel.
+pub fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []const f32) void {
+    for (values, 0..) |*v, i| v.* = v.* * stddev[i % channels] + mean[i % channels];
+}
+
+/// 3-axis MM-RoPE: concat t/h/w freqs, then duplicate.
 pub fn ropeCat3(pos: zml.Tensor, inv: zml.Tensor) zml.Tensor {
     const parts = pos.convert(.f32).withPartialTags(.{ .s, .ax }).outer(inv).chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
