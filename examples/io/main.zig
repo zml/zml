@@ -187,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
                 .{
                     benchmark_result.calibration.block_size,
                     benchmark_result.calibration.max_in_flight_per_device,
-                    benchmark_result.calibration.max_mapped_bytes,
+                    benchmark_result.maxMappedBytes(),
                     benchmark_result.retainedMappedBytes(),
                     benchmark_result.numaPoolCount(),
                 },

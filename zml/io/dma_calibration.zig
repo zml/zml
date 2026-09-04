@@ -21,12 +21,9 @@ const benchmark_repeats = 3;
 const max_devices = 64;
 
 /// Immutable DMA calibration shared by every device participating in one load.
-/// The slices are owned by the enclosing benchmark result.
 pub const Calibration = struct {
-    device_numa_nodes: []const ?usize,
     block_size: usize,
     max_in_flight_per_device: usize,
-    max_mapped_bytes: usize,
 };
 
 pub const Options = struct {
@@ -84,6 +81,9 @@ pub fn benchmark(
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !BenchmarkResult {
+    if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
+    try validatePlatform(platform);
+    try validateOptions(opts, platform.devices.len);
     var result = try benchmarkSyntheticTransfer(allocator, io, platform, opts);
     errdefer result.resources.deinit();
     logBenchmarkReport(platform, &result);
@@ -100,25 +100,6 @@ fn benchmarkSyntheticTransfer(
     opts: Options,
 ) !BenchmarkReport {
     const benchmark_started = std.Io.Timestamp.now(io, .awake);
-    if (!isSupported(platform))
-        return error.DmaBenchmarkUnsupported;
-    if (platform.devices.len == 0 or opts.block_sizes.len == 0)
-        return error.NoFeasibleDmaBenchmarkTuple;
-    if (opts.duration_ns == 0 or opts.confirmation_duration_ns == 0)
-        return error.InvalidDmaBenchmarkOptions;
-    if (opts.block_parallelism == 0 or opts.block_parallelism > limits.max_dma_parallelism)
-        return error.InvalidDmaBenchmarkOptions;
-    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
-        !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
-        return error.InvalidDmaBenchmarkOptions;
-    var has_feasible_block = false;
-    for (opts.block_sizes) |block_size| {
-        if (block_size == 0) return error.InvalidDmaBenchmarkOptions;
-        if (benchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
-            has_feasible_block = true;
-    }
-    if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
-    try validatePlatform(platform);
     const resolved_numa_nodes = try resolveNumaNodes(
         allocator,
         platform,
@@ -198,14 +179,10 @@ fn benchmarkSyntheticTransfer(
         BenchmarkResult.preallocated_source_width,
         calibrated_node_reserves,
     );
-    const resources = try BenchmarkResult.adopt(
-        allocator,
-        platform,
+    const resources = BenchmarkResult.adopt(
         .{
-            .device_numa_nodes = resolved_numa_nodes,
             .block_size = uniform_block_size,
             .max_in_flight_per_device = uniform_parallelism,
-            .max_mapped_bytes = opts.max_mapped_bytes,
         },
         source_pools,
     );
@@ -227,15 +204,6 @@ fn resolveNumaNodes(
     platform: *const platform_mod.Platform,
     override: []const usize,
 ) ![]?usize {
-    if (override.len != 0) {
-        if (override.len != platform.devices.len) return error.InvalidDmaBenchmarkOptions;
-        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
-        for (override) |node| {
-            if (node >= NumaAllocator.max_nodes)
-                return error.InvalidDmaBenchmarkOptions;
-        }
-    }
-
     const result = try allocator.alloc(?usize, platform.devices.len);
     @memset(result, null);
     if (override.len != 0) {
@@ -272,7 +240,6 @@ fn tuneDevice(
         block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
     }
-    if (block_count == 0) return error.NoFeasibleDmaBenchmarkTuple;
     // One calibration ring, sized for the largest candidate tuple, is mapped
     // once and reused by every candidate cohort.
     const pool_index = source_pools.device_pool_indices[device_index];
@@ -421,7 +388,6 @@ fn confirmAndSelectBenchmarkCandidate(
             selected_index = index;
     }
     return .{
-        .index = selected_index,
         .value = candidates[selected_index].value,
         .metrics = confirmed_metrics[selected_index] orelse medians[selected_index],
     };
@@ -623,7 +589,6 @@ const BenchmarkCandidate = struct {
 };
 
 const BenchmarkDecision = struct {
-    index: usize,
     value: usize,
     metrics: BenchmarkRunMetrics,
 };
@@ -809,24 +774,15 @@ pub const BenchmarkResult = struct {
 
     calibration: Calibration,
 
-    allocator: std.mem.Allocator,
     workspace: BenchmarkSourcePools,
     status: std.atomic.Value(Status) = .init(.idle),
 
     fn adopt(
-        allocator: std.mem.Allocator,
-        platform: *const platform_mod.Platform,
         calibration: Calibration,
         workspace: BenchmarkSourcePools,
-    ) !BenchmarkResult {
-        try validateCalibration(calibration);
-        try validatePlatform(platform);
-        if (calibration.device_numa_nodes.len != platform.devices.len)
-            return error.DmaDeviceMismatch;
-        const owned_calibration = try dupeCalibration(allocator, calibration);
+    ) BenchmarkResult {
         return .{
-            .calibration = owned_calibration,
-            .allocator = allocator,
+            .calibration = calibration,
             .workspace = workspace,
         };
     }
@@ -838,11 +794,6 @@ pub const BenchmarkResult = struct {
             .acq_rel,
             .acquire,
         ) != null) return error.DmaWorkspaceBusy;
-        errdefer self.release();
-
-        try validateCalibration(self.calibration);
-        if (self.workspace.allocatedBytes() > self.calibration.max_mapped_bytes)
-            return error.DmaMappedBudgetExceeded;
     }
 
     pub fn release(self: *BenchmarkResult) void {
@@ -852,6 +803,10 @@ pub const BenchmarkResult = struct {
 
     pub fn retainedMappedBytes(self: *const BenchmarkResult) usize {
         return self.workspace.allocatedBytes();
+    }
+
+    pub fn maxMappedBytes(self: *const BenchmarkResult) usize {
+        return self.workspace.max_mapped_bytes;
     }
 
     /// The widest source rung whose working set is mapped before a load
@@ -894,6 +849,10 @@ pub const BenchmarkResult = struct {
         return self.workspace.pools.len;
     }
 
+    pub fn hasStrictAffinity(self: *const BenchmarkResult) bool {
+        return self.workspace.pools[0].numa_allocator.node != null;
+    }
+
     pub fn deinit(self: *BenchmarkResult) void {
         if (self.status.cmpxchgStrong(
             .idle,
@@ -910,7 +869,6 @@ pub const BenchmarkResult = struct {
             mapped_bytes,
             @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
         });
-        freeCalibration(self.allocator, self.calibration);
         self.* = undefined;
     }
 };
@@ -925,91 +883,39 @@ fn validatePlatform(platform: *const platform_mod.Platform) !void {
     }
 }
 
-/// Blocks a load cannot start without: every pool feeds its own devices and
-/// must still hold one maximal coalesced job. Validation only; the pool grows
-/// on demand up to the mapped ceiling.
-pub fn requiredWorkspaceBytes(config: Calibration) !usize {
-    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_devices)
-        return error.InvalidDmaLoadConfig;
-    const maximum_request_blocks = try limits.maximumCoalescedJobBlocks(
-        limits.max_read_request_size,
-        config.block_size,
-    );
-
-    // One shared pool feeds every device when the topology is unknown.
-    if (config.device_numa_nodes[0] == null) {
-        const feed_blocks = std.math.mul(
-            usize,
-            config.device_numa_nodes.len,
-            config.max_in_flight_per_device,
-        ) catch return error.InvalidDmaLoadConfig;
-        return std.math.mul(
-            usize,
-            @max(feed_blocks, maximum_request_blocks),
-            config.block_size,
-        ) catch error.InvalidDmaLoadConfig;
-    }
-
-    const topology = try KnownPoolTopology.init(config.device_numa_nodes);
-    var required_blocks: usize = 0;
-    for (topology.device_counts[0..topology.pool_count]) |device_count| {
-        const feed_blocks = std.math.mul(
-            usize,
-            device_count,
-            config.max_in_flight_per_device,
-        ) catch return error.InvalidDmaLoadConfig;
-        required_blocks = std.math.add(
-            usize,
-            required_blocks,
-            @max(feed_blocks, maximum_request_blocks),
-        ) catch return error.InvalidDmaLoadConfig;
-    }
-    return std.math.mul(usize, required_blocks, config.block_size) catch
-        error.InvalidDmaLoadConfig;
-}
-
-fn validateCalibration(config: Calibration) !void {
-    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_devices or
-        config.block_size == 0 or config.max_in_flight_per_device == 0 or
-        config.max_in_flight_per_device > limits.max_dma_parallelism or
-        config.block_size > limits.max_read_request_size or
-        config.max_mapped_bytes < config.block_size)
-        return error.InvalidDmaLoadConfig;
-    var known_numa_nodes: usize = 0;
-    for (config.device_numa_nodes) |maybe_node| {
-        if (maybe_node) |node| {
-            known_numa_nodes += 1;
+fn validateOptions(opts: Options, device_count: usize) !void {
+    if (opts.block_sizes.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
+    if (opts.duration_ns == 0 or opts.confirmation_duration_ns == 0)
+        return error.InvalidDmaBenchmarkOptions;
+    if (opts.block_parallelism == 0 or opts.block_parallelism > limits.max_dma_parallelism)
+        return error.InvalidDmaBenchmarkOptions;
+    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
+        !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
+        return error.InvalidDmaBenchmarkOptions;
+    if (opts.device_numa_nodes.len != 0) {
+        if (opts.device_numa_nodes.len != device_count)
+            return error.InvalidDmaBenchmarkOptions;
+        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
+        for (opts.device_numa_nodes) |node| {
             if (node >= NumaAllocator.max_nodes)
-                return error.InvalidDmaLoadConfig;
+                return error.InvalidDmaBenchmarkOptions;
         }
     }
-    if (known_numa_nodes != 0 and known_numa_nodes != config.device_numa_nodes.len)
-        return error.InvalidDmaLoadConfig;
-    if (known_numa_nodes != 0 and builtin.os.tag != .linux)
-        return error.DmaBenchmarkNumaUnsupported;
-    if (try requiredWorkspaceBytes(config) > config.max_mapped_bytes)
-        return error.InvalidDmaLoadConfig;
-}
 
-fn dupeCalibration(allocator: std.mem.Allocator, config: Calibration) !Calibration {
-    const nodes = try allocator.dupe(?usize, config.device_numa_nodes);
-    return .{
-        .device_numa_nodes = nodes,
-        .block_size = config.block_size,
-        .max_in_flight_per_device = config.max_in_flight_per_device,
-        .max_mapped_bytes = config.max_mapped_bytes,
-    };
-}
-
-fn freeCalibration(allocator: std.mem.Allocator, config: Calibration) void {
-    allocator.free(config.device_numa_nodes);
+    var has_feasible_block = false;
+    for (opts.block_sizes) |block_size| {
+        if (block_size == 0 or block_size > limits.max_read_request_size)
+            return error.InvalidDmaBenchmarkOptions;
+        if (benchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
+            has_feasible_block = true;
+    }
+    if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
 }
 
 const KnownPoolTopology = struct {
     pool_count: usize = 0,
     pool_nodes: [max_devices]usize = undefined,
     first_device_indices: [max_devices]usize = undefined,
-    device_counts: [max_devices]usize = @splat(0),
     device_pool_indices: [max_devices]usize = undefined,
 
     fn init(device_numa_nodes: []const ?usize) !KnownPoolTopology {
@@ -1018,7 +924,6 @@ const KnownPoolTopology = struct {
             const node = maybe_node orelse return error.InvalidDmaLoadConfig;
             for (result.pool_nodes[0..result.pool_count], 0..) |known, pool_index| {
                 if (known == node) {
-                    result.device_counts[pool_index] += 1;
                     result.device_pool_indices[device_index] = pool_index;
                     continue :devices;
                 }
@@ -1026,7 +931,6 @@ const KnownPoolTopology = struct {
             const pool_index = result.pool_count;
             result.pool_nodes[pool_index] = node;
             result.first_device_indices[pool_index] = device_index;
-            result.device_counts[pool_index] = 1;
             result.device_pool_indices[device_index] = pool_index;
             result.pool_count += 1;
         }
@@ -1530,21 +1434,12 @@ test "DMA benchmark is optional on buffered platforms" {
     );
 }
 
-test "DMA calibration validates uniform caps, topology, and workspace budget" {
-    const valid: Calibration = .{
-        .device_numa_nodes = &.{ null, null },
-        .block_size = 4 * 1024 * 1024,
-        .max_in_flight_per_device = 8,
-        .max_mapped_bytes = 64 * 1024 * 1024,
-    };
-    try validateCalibration(valid);
-
-    var invalid = valid;
-    invalid.device_numa_nodes = &.{ 0, null };
-    try std.testing.expectError(error.InvalidDmaLoadConfig, validateCalibration(invalid));
-    invalid = valid;
-    invalid.max_mapped_bytes -= 1;
-    try std.testing.expectError(error.InvalidDmaLoadConfig, validateCalibration(invalid));
+test "DMA benchmark validates options" {
+    try validateOptions(.{}, 8);
+    try std.testing.expectError(
+        error.InvalidDmaBenchmarkOptions,
+        validateOptions(.{ .block_parallelism = 0 }, 8),
+    );
 }
 
 test "DMA benchmark completion target has no time cap" {
@@ -1593,7 +1488,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         opts.block_parallelism,
         0.05,
     );
-    try std.testing.expectEqual(@as(usize, 1), decision.index);
+    try std.testing.expectEqual(@as(usize, 4), decision.value);
     try std.testing.expectEqual(@as(f64, 98), decision.metrics.bytesPerSecond());
 
     // A dip between two near-peak values must not end the scan early.
@@ -1619,7 +1514,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         opts.block_parallelism,
         0.05,
     );
-    try std.testing.expectEqual(@as(usize, 1), bimodal_decision.index);
+    try std.testing.expectEqual(@as(usize, 4), bimodal_decision.value);
     try std.testing.expectEqual(@as(f64, 100), bimodal_decision.metrics.bytesPerSecond());
 }
 

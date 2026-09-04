@@ -3983,20 +3983,20 @@ pub const DirectLoader = struct {
         };
         try resources.acquire();
         errdefer resources.release();
-        const config = resources.calibration;
-        if (config.device_numa_nodes.len != platform.devices.len)
+        const calibration = resources.calibration;
+        if (resources.workspace.device_pool_indices.len != platform.devices.len)
             return error.DmaDeviceMismatch;
-        if (config.block_size > max_load_read_request_size or
-            config.max_mapped_bytes < max_load_read_request_size)
+        if (calibration.block_size > max_load_read_request_size or
+            resources.maxMappedBytes() < max_load_read_request_size)
             return error.InvalidDmaLoadConfig;
 
         const request_size = try effectiveSourceRequestSize(
             opts.load_profile.read_chunk_size,
-            config.block_size,
+            calibration.block_size,
         );
         const maximum_blocks_per_job = try maximumCoalescedJobBlocks(
             request_size,
-            config.block_size,
+            calibration.block_size,
         );
         const node_reserves = try allocator.alloc(usize, resources.workspace.pools.len);
         defer allocator.free(node_reserves);
@@ -4006,7 +4006,7 @@ pub const DirectLoader = struct {
             node_reserves[node_index] = try std.math.add(
                 usize,
                 node_reserves[node_index],
-                config.max_in_flight_per_device,
+                calibration.max_in_flight_per_device,
             );
         }
         // Calibration already mapped the working set for a 16 MiB request;
@@ -4028,17 +4028,15 @@ pub const DirectLoader = struct {
         var pool = try mem.DmaBlockPool.initFromProvider(
             allocator,
             resources.workspace.blockPoolArenaProvider(),
-            config.block_size,
-            config.max_mapped_bytes,
+            calibration.block_size,
+            resources.maxMappedBytes(),
             node_reserves,
         );
         var pool_moved = false;
         errdefer if (!pool_moved) pool.deinit();
         const aggregate_width = try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
         const strict_width = try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
-        const strict_affinity = for (config.device_numa_nodes) |node| {
-            if (node != null) break true;
-        } else false;
+        const strict_affinity = resources.hasStrictAffinity();
         const feasible_width = if (strict_affinity)
             @min(aggregate_width, strict_width)
         else
@@ -4048,9 +4046,9 @@ pub const DirectLoader = struct {
         const source_parallelism = opts.read_parallelism;
         const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job, strict_affinity);
         const dma_stage_requests = dmaStageRequests(
-            config.max_in_flight_per_device,
+            calibration.max_in_flight_per_device,
             platform.devices.len,
-            config.block_size,
+            calibration.block_size,
             request_size,
         );
         const controller = SourceReadWidthController.init(
@@ -4104,12 +4102,12 @@ pub const DirectLoader = struct {
             &self.pool,
             &self.read_gate,
             &self.request_gate,
-            config.block_size,
+            calibration.block_size,
             resources.workspace.device_pool_indices,
             strict_affinity,
             &self.metrics,
             &self.scheduler,
-            config.max_in_flight_per_device * config.block_size,
+            calibration.max_in_flight_per_device * calibration.block_size,
         );
         errdefer self.pipeline.deinit();
 
@@ -4143,7 +4141,7 @@ pub const DirectLoader = struct {
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
-            config.block_size,
+            calibration.block_size,
             self.pipeline.dma_budget_bytes,
             limits.lifecycle,
             self.worker_pool.spawned,
@@ -4563,20 +4561,6 @@ test "coalesced job block bound is independent of device count" {
     try std.testing.expectEqual(
         @as(usize, 3),
         try maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-
-    const shared_numa = [_]?usize{null} ** 8;
-    const config: dma.Calibration = .{
-        .device_numa_nodes = &shared_numa,
-        .block_size = 16 * 1024 * 1024,
-        .max_in_flight_per_device = 1,
-        .max_mapped_bytes = 1024 * 1024 * 1024,
-    };
-    // Eight device feed blocks dominate the two blocks required by a request.
-    // The obsolete writer-boundary formula incorrectly required nine blocks.
-    try std.testing.expectEqual(
-        @as(usize, 8 * 16 * 1024 * 1024),
-        try dma.requiredWorkspaceBytes(config),
     );
 }
 
