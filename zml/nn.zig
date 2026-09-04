@@ -1558,6 +1558,8 @@ pub const GatedDeltaNet = struct {
     alphas: Tensor,
     /// Delta gate .{ .s, .h }.
     betas: Tensor,
+    /// Number of sequence positions to process, clamped to the input length.
+    active_length: Tensor,
 
     pub const State = struct {
         /// Per-head recurrent state with shape .{ .h, .v, .k }.
@@ -1581,7 +1583,11 @@ pub const GatedDeltaNet = struct {
     };
 
     pub fn cond(gdn: GatedDeltaNet, state: State) Tensor {
-        return state.step.cmp(.LT, .scalar(gdn.queries.dim(.s), .i32));
+        const active_length = gdn.active_length
+            .convert(.i32)
+            .maximum(.scalar(0, .i32))
+            .minimum(.scalar(gdn.queries.dim(.s), .i32));
+        return state.step.cmp(.LT, active_length);
     }
 
     /// Single-step recurrent update for Gated Delta Net.
@@ -1625,6 +1631,7 @@ pub const GatedDeltaNet = struct {
         stdx.debug.assert(gdn.values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
         stdx.debug.assert(gdn.alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tag {{.h}}", err_args);
         stdx.debug.assert(gdn.betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.active_length.rank() == 0 and gdn.active_length.dtype().isInteger(), err_template ++ "active_length must be an integer scalar", err_args);
 
         _ = collectDims(.{.h}, &.{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas }, .strict) catch {
             stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
@@ -1644,6 +1651,7 @@ pub const GatedDeltaNet = struct {
     /// - `values`, `outputs`: .{ .s, .h, .v }
     /// - `alphas`, `betas`: .{ .s, .h }
     /// - `initial_state.s`: .{ .h, .v, .k }
+    /// - `active_length`: integer scalar
     pub fn forward(
         queries: Tensor,
         keys: Tensor,
@@ -1651,6 +1659,7 @@ pub const GatedDeltaNet = struct {
         alphas: Tensor,
         betas: Tensor,
         initial_state: Input,
+        active_length: Tensor,
     ) Output {
         const gdn: GatedDeltaNet = .{
             .queries = queries,
@@ -1658,6 +1667,7 @@ pub const GatedDeltaNet = struct {
             .values = values,
             .alphas = alphas,
             .betas = betas,
+            .active_length = active_length,
         };
         const state: GatedDeltaNet.State = .{
             .step = .scalar(0, .i32),
@@ -1683,12 +1693,13 @@ test "gated delta net" {
     const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+    const active_length: zml.Tensor = .init(.{}, .u32);
 
     var exe = try platform.compileFn(
         std.testing.allocator,
         std.testing.io,
         GatedDeltaNet.forward,
-        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s }, active_length },
         .{},
     );
     defer exe.deinit();
@@ -1759,13 +1770,15 @@ test "gated delta net" {
         }),
     );
     defer initial_s_buffer.deinit();
+    var oversized_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 3), .u32);
+    defer oversized_length_buffer.deinit();
 
     var result = try zml.testing.autoCall(
         std.testing.allocator,
         std.testing.io,
         &exe,
         GatedDeltaNet.forward,
-        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, oversized_length_buffer },
     );
     defer result.outputs.deinit();
     defer result.state.s.deinit();
@@ -1790,6 +1803,41 @@ test "gated delta net" {
         .relative_tolerance = 1e-4,
     });
     try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+
+    var prefix_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 1), .u32);
+    defer prefix_length_buffer.deinit();
+    var prefix_result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        GatedDeltaNet.forward,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, prefix_length_buffer },
+    );
+    defer prefix_result.outputs.deinit();
+    defer prefix_result.state.s.deinit();
+
+    const expected_prefix_outputs: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
+            .{ .{ 0.0, 0.0 }, .{ 0.0, 0.0 } },
+        }),
+    );
+    const expected_prefix_final_s: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 5.0 }, .{ 0.0, 0.5 } },
+            .{ .{ 0.5, 1.125 }, .{ 0.25, 2.0 } },
+        }),
+    );
+    try zml.testing.expectClose(std.testing.io, expected_prefix_outputs, prefix_result.outputs, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, expected_prefix_final_s, prefix_result.state.s, .{
         .absolute_tolerance = 1e-4,
         .relative_tolerance = 1e-4,
     });
