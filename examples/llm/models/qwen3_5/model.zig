@@ -83,6 +83,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
         shardings: common.Shardings,
         load_profile: zml.io.VFS.LoadProfile,
+        dma_settings: ?*zml.io.dma.DmaPlatformSettings,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -92,6 +93,7 @@ pub const LoadedModel = struct {
 
         const all_shardings = shardings.all();
         var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
+            .dma = dma_settings,
             .progress = progress,
             .shardings = &all_shardings,
             .load_profile = load_profile,

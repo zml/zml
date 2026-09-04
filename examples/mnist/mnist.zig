@@ -42,11 +42,13 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
+        dma_settings: ?*zml.io.dma.DmaPlatformSettings,
     ) !zml.Bufferized(Mnist) {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
         errdefer unloadBuffers(&buffers);
 
         var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
+            .dma = dma_settings,
             .read_parallelism = .{ .fixed = 1 },
         });
         defer loader.deinit();
@@ -96,6 +98,8 @@ pub fn main(init: std.process.Init) !void {
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
+    var dma_settings = try zml.io.dma.calibrateIfSupported(allocator, io, platform, .{});
+    defer if (dma_settings) |*settings| settings.deinit();
 
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
@@ -114,7 +118,13 @@ pub fn main(init: std.process.Init) !void {
         defer log.info("✅ Transferred weights [{f}]", .{
             start.untilNow(io, .awake),
         });
-        break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store);
+        break :blk try mnist_model.load(
+            init.arena.allocator(),
+            io,
+            platform,
+            &store,
+            if (dma_settings) |*settings| settings else null,
+        );
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 

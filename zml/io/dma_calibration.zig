@@ -26,16 +26,8 @@ pub const default_dma_benchmark_block_sizes = [_]usize{
 const dma_benchmark_repeats = 3;
 const max_dma_devices = 64;
 
-pub const DmaPlatformOperation = enum(u8) {
-    idle,
-    inspecting,
-    calibrating,
-    loading,
-    destroying,
-};
-
 /// Immutable DMA settings shared by every device participating in one load.
-/// The slices are owned by the enclosing platform settings.
+/// The slices are owned by the enclosing DMA settings.
 pub const DmaLoadConfig = struct {
     device_numa_nodes: []const ?usize,
     block_size: usize,
@@ -86,29 +78,30 @@ const DmaBenchmarkReport = struct {
     device_allocator_warmup_ns: u64,
 };
 
-/// Measures one representative device, prepares all-device workspace, and
-/// atomically replaces the platform's private settings. The previous/default
-/// settings remain active on failure.
-pub fn benchTransfer(
+/// Returns calibrated settings for direct-transfer platforms and `null` for
+/// platforms that use the buffered loader.
+pub fn calibrateIfSupported(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *Platform,
+    platform: *const Platform,
     opts: BenchTransferOptions,
-) !void {
-    if (platform.target == .cpu) return;
+) !?DmaPlatformSettings {
+    if (!isDirectTransferPlatform(platform)) return null;
+    return try calibrate(allocator, io, platform, opts);
+}
 
-    try beginPlatformDmaOperation(platform, .calibrating);
-    defer endPlatformDmaOperation(platform, .calibrating);
-
+/// Measures one representative device and returns an owned, reusable DMA
+/// workspace configured for every addressable device.
+pub fn calibrate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    opts: BenchTransferOptions,
+) !DmaPlatformSettings {
     var result = try benchmarkSyntheticDma(allocator, io, platform, opts);
     errdefer result.resources.deinit();
     logDmaBenchmarkReport(platform, &result);
-
-    const replacement = try allocator.create(DmaPlatformSettings);
-    replacement.* = result.resources;
-
-    const old = platform._dma.settings.swap(replacement, .acq_rel);
-    if (old) |ptr| destroyDmaPlatformSettings(dmaSettingsFromOpaque(ptr));
+    return result.resources;
 }
 
 /// Benchmarks synthetic DmaMapped PJRT transfers on one representative device.
@@ -823,124 +816,22 @@ pub fn isDirectTransferPlatform(platform: *const Platform) bool {
         platform.target == .oneapi;
 }
 
-pub fn initPlatformDma(
-    platform: *Platform,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    defaults: platform_mod.TransferConfig,
-) !void {
-    if (!isDirectTransferPlatform(platform)) return;
-    try validateDmaPlatform(platform);
-
-    const numa_nodes = try resolveDmaNumaNodes(
-        allocator,
-        platform,
-        defaults.device_numa_nodes,
-    );
-    defer allocator.free(numa_nodes);
-
-    var settings = try DmaPlatformSettings.init(
-        allocator,
-        io,
-        platform,
-        .{
-            .device_numa_nodes = numa_nodes,
-            .block_size = defaults.block_size,
-            .max_in_flight_per_device = defaults.max_in_flight_per_device,
-            .max_mapped_bytes = defaults.max_mapped_bytes,
-        },
-        false,
-    );
-    errdefer settings.deinit();
-    const owned = try allocator.create(DmaPlatformSettings);
-    owned.* = settings;
-    std.debug.assert(platform._dma.settings.swap(owned, .release) == null);
-}
-
-pub fn platformTransferSettings(platform: *Platform) !?platform_mod.TransferSettings {
-    if (!isDirectTransferPlatform(platform)) return null;
-    try beginPlatformDmaOperation(platform, .inspecting);
-    defer endPlatformDmaOperation(platform, .inspecting);
-    const raw = platform._dma.settings.load(.acquire) orelse return null;
-    const settings = dmaSettingsFromOpaque(raw);
-    return .{
-        .calibrated = settings.calibrated,
-        .block_size = settings.config.block_size,
-        .max_in_flight_per_device = settings.config.max_in_flight_per_device,
-        .max_mapped_bytes = settings.config.max_mapped_bytes,
-        .retained_mapped_bytes = settings.retainedMappedBytes(),
-        .numa_pool_count = settings.numaPoolCount(),
-    };
-}
-
-pub fn acquirePlatformDmaSettings(
-    platform: *const Platform,
-) !*DmaPlatformSettings {
-    try beginPlatformDmaOperation(platform, .loading);
-    errdefer endPlatformDmaOperation(platform, .loading);
-    const mutable: *Platform = @constCast(platform);
-    const raw = mutable._dma.settings.load(.acquire) orelse
-        return error.DmaResourcesRequired;
-    const settings = dmaSettingsFromOpaque(raw);
-    try settings.validateLoad(platform);
-    return settings;
-}
-
-pub fn releasePlatformDmaSettings(platform: *const Platform) void {
-    endPlatformDmaOperation(platform, .loading);
-}
-
-pub fn deinitPlatformDma(platform: *Platform) void {
-    if (!isDirectTransferPlatform(platform)) return;
-    if (platform._dma.operation.cmpxchgStrong(
-        .idle,
-        .destroying,
-        .acq_rel,
-        .acquire,
-    ) != null) @panic("Platform.deinit called while DMA state is borrowed");
-    const raw = platform._dma.settings.swap(null, .acq_rel);
-    if (raw) |ptr| destroyDmaPlatformSettings(dmaSettingsFromOpaque(ptr));
-}
-
 /// Owned, reusable host-DMA workspace. A workspace may be borrowed by only one
-/// load at a time; all registered arenas remain mapped until `deinit`.
+/// load at a time, must be deinitialized before its platform, and keeps all
+/// registered arenas mapped until `deinit`.
 pub const DmaPlatformSettings = struct {
+    const Status = enum(u8) {
+        idle,
+        loading,
+        destroying,
+    };
+
     config: DmaLoadConfig,
 
     allocator: std.mem.Allocator,
     platform: *const Platform,
     workspace: DmaBenchmarkSourcePools,
-    calibrated: bool,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        config: DmaLoadConfig,
-        calibrated: bool,
-    ) !DmaPlatformSettings {
-        try validateDmaLoadConfig(config);
-        try validateDmaPlatform(platform);
-        if (config.device_numa_nodes.len != platform.devices.len)
-            return error.DmaDeviceMismatch;
-        const owned_config = try dupeDmaLoadConfig(allocator, config);
-        errdefer freeDmaLoadConfig(allocator, owned_config);
-        var workspace = try DmaBenchmarkSourcePools.init(
-            allocator,
-            io,
-            platform,
-            owned_config.device_numa_nodes,
-            owned_config.max_mapped_bytes,
-        );
-        errdefer workspace.deinit();
-        return .{
-            .config = owned_config,
-            .allocator = allocator,
-            .platform = platform,
-            .workspace = workspace,
-            .calibrated = calibrated,
-        };
-    }
+    status: std.atomic.Value(Status) = .init(.idle),
 
     fn adopt(
         allocator: std.mem.Allocator,
@@ -958,17 +849,29 @@ pub const DmaPlatformSettings = struct {
             .allocator = allocator,
             .platform = platform,
             .workspace = workspace,
-            .calibrated = true,
         };
     }
 
-    fn validateLoad(self: *DmaPlatformSettings, platform: *const Platform) !void {
+    pub fn acquire(self: *DmaPlatformSettings, platform: *const Platform) !void {
+        if (self.status.cmpxchgStrong(
+            .idle,
+            .loading,
+            .acq_rel,
+            .acquire,
+        ) != null) return error.DmaWorkspaceBusy;
+        errdefer self.release();
+
         try validateDmaLoadConfig(self.config);
         if (platform != self.platform) return error.DmaPlatformMismatch;
         if (self.config.device_numa_nodes.len != platform.devices.len)
             return error.DmaDeviceMismatch;
         if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
+    }
+
+    pub fn release(self: *DmaPlatformSettings) void {
+        const previous = self.status.swap(.idle, .release);
+        std.debug.assert(previous == .loading);
     }
 
     pub fn retainedMappedBytes(self: *const DmaPlatformSettings) usize {
@@ -996,7 +899,7 @@ pub const DmaPlatformSettings = struct {
     /// stage's blocks: the calibrated depth per device) can be leased from
     /// each pool without mapping a slab during the load, clipped to the
     /// largest width that fits the mapped ceiling. The arenas stay owned by
-    /// the platform settings and are reused by every later loader.
+    /// these settings and are reused by every later loader.
     pub fn ensureSourceWorkingSet(
         self: *DmaPlatformSettings,
         request_blocks: usize,
@@ -1011,11 +914,17 @@ pub const DmaPlatformSettings = struct {
         );
     }
 
-    fn numaPoolCount(self: *const DmaPlatformSettings) usize {
+    pub fn numaPoolCount(self: *const DmaPlatformSettings) usize {
         return self.workspace.pools.len;
     }
 
-    fn deinit(self: *DmaPlatformSettings) void {
+    pub fn deinit(self: *DmaPlatformSettings) void {
+        if (self.status.cmpxchgStrong(
+            .idle,
+            .destroying,
+            .acq_rel,
+            .acquire,
+        ) != null) @panic("DmaPlatformSettings.deinit called while borrowed");
         const io = self.workspace.io;
         const mapped_bytes = self.workspace.allocatedBytes();
         const started = std.Io.Timestamp.now(io, .awake);
@@ -1029,32 +938,6 @@ pub const DmaPlatformSettings = struct {
         self.* = undefined;
     }
 };
-
-fn beginPlatformDmaOperation(platform: *const Platform, operation: DmaPlatformOperation) !void {
-    const mutable: *Platform = @constCast(platform);
-    if (mutable._dma.operation.cmpxchgStrong(
-        .idle,
-        operation,
-        .acq_rel,
-        .acquire,
-    ) != null) return error.DmaWorkspaceBusy;
-}
-
-fn endPlatformDmaOperation(platform: *const Platform, operation: DmaPlatformOperation) void {
-    const mutable: *Platform = @constCast(platform);
-    const previous = mutable._dma.operation.swap(.idle, .release);
-    std.debug.assert(previous == operation);
-}
-
-fn dmaSettingsFromOpaque(ptr: *anyopaque) *DmaPlatformSettings {
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn destroyDmaPlatformSettings(settings: *DmaPlatformSettings) void {
-    const allocator = settings.allocator;
-    settings.deinit();
-    allocator.destroy(settings);
-}
 
 fn validateDmaPlatform(platform: *const Platform) !void {
     if (platform.devices.len == 0 or platform.devices.len > 64)
@@ -1650,6 +1533,25 @@ const DmaBenchmarkNumaAllocator = struct {
 
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
+}
+
+test "DMA calibration is optional on buffered platforms" {
+    var platform: Platform = .{
+        .arena = undefined,
+        .target = .cpu,
+        .pjrt_api = undefined,
+        .pjrt_client = undefined,
+        .state = .init(.cpu),
+        .devices = &.{},
+        .memories = &.{},
+        .physical_mesh = undefined,
+        .replicated_sharding = undefined,
+        .shardings = .empty,
+    };
+
+    try std.testing.expect(
+        try calibrateIfSupported(std.testing.allocator, std.testing.io, &platform, .{}) == null,
+    );
 }
 
 test "DMA load config validates uniform caps, topology, and workspace budget" {

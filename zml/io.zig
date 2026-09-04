@@ -5,7 +5,7 @@ pub const VFS = @import("vfs");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
-const dma = @import("io/dma_calibration.zig");
+pub const dma = @import("io/dma_calibration.zig");
 const direct_loader = @import("io/direct_loader.zig");
 const load_limits = @import("io/limits.zig");
 const loader_types = @import("io/loader_types.zig");
@@ -277,16 +277,10 @@ pub const TensorStore = struct {
 
 const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 
-pub const default_dma_benchmark_block_sizes = dma.default_dma_benchmark_block_sizes;
-pub const BenchTransferOptions = dma.BenchTransferOptions;
 pub const max_load_read_parallelism = load_limits.max_read_parallelism;
 pub const max_load_dma_parallelism = load_limits.max_dma_parallelism;
 pub const max_load_read_request_size = load_limits.max_read_request_size;
 const isDirectTransferPlatform = dma.isDirectTransferPlatform;
-pub const initPlatformDma = dma.initPlatformDma;
-pub const platformTransferSettings = dma.platformTransferSettings;
-pub const deinitPlatformDma = dma.deinitPlatformDma;
-pub const benchTransfer = dma.benchTransfer;
 
 pub const Parallelism = loader_types.Parallelism;
 const DirectLoader = direct_loader.DirectLoader;

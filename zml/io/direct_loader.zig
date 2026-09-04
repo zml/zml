@@ -41,8 +41,6 @@ const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 const DmaLoadConfig = dma.DmaLoadConfig;
 const DmaPlatformSettings = dma.DmaPlatformSettings;
 const requiredDmaWorkspaceBytes = dma.requiredDmaWorkspaceBytes;
-const acquirePlatformDmaSettings = dma.acquirePlatformDmaSettings;
-const releasePlatformDmaSettings = dma.releasePlatformDmaSettings;
 
 pub const LoadSpec = struct {
     source: *safetensors.Tensor,
@@ -3968,8 +3966,9 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        const resources = try acquirePlatformDmaSettings(platform);
-        errdefer releasePlatformDmaSettings(platform);
+        const resources = opts.dma orelse return error.DmaResourcesRequired;
+        try resources.acquire(platform);
+        errdefer resources.release();
         const config = resources.config;
         if (config.block_size > max_load_read_request_size or
             config.max_mapped_bytes < max_load_read_request_size)
@@ -3997,7 +3996,7 @@ pub const DirectLoader = struct {
         // Calibration already mapped the working set for a 16 MiB request;
         // this grows the remainder for larger request sizes (HF profiles)
         // so no pinned slab grows inside a scored window. The arenas stay
-        // with the platform for later loaders.
+        // with the settings for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = resources.retainedMappedBytes();
         try resources.ensureSourceWorkingSet(
@@ -4460,7 +4459,7 @@ pub const DirectLoader = struct {
             self.pipeline.deinit();
             self.scheduler.deinit();
             self.pool.deinit();
-            releasePlatformDmaSettings(self.platform);
+            self.dma_resources.release();
             self.cleaned = true;
         }
         const allocator = self.allocator;
