@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
                 option_allocator,
                 init.environ_map,
                 "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma.default_dma_benchmark_block_sizes,
+                &zml.io.dma.default_benchmark_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
             var settings = try zml.io.dma.calibrate(allocator, io, platform, .{
@@ -210,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
                 init.arena.allocator(),
                 init.environ_map,
                 "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma.default_dma_benchmark_block_sizes,
+                &zml.io.dma.default_benchmark_block_sizes,
             );
             var dma_settings = try zml.io.dma.calibrateIfSupported(allocator, io, platform, .{
                 .block_sizes = load_dma_block_sizes,

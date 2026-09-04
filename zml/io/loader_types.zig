@@ -49,7 +49,7 @@ pub const LoaderOptions = struct {
     /// Reuses an existing calibration on direct-transfer platforms. When
     /// absent, the loader calibrates and owns its DMA settings. Supplied
     /// settings must outlive the loader and may be used by only one loader.
-    dma: ?*?dma.DmaPlatformSettings = null,
+    dma: ?*?dma.Settings = null,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
 };

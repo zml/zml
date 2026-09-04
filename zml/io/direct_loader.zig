@@ -38,9 +38,6 @@ const max_load_read_request_size = load_limits.max_read_request_size;
 const max_load_positional_iovecs = load_limits.max_positional_iovecs;
 const maximumCoalescedJobBlocks = load_limits.maximumCoalescedJobBlocks;
 const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
-const DmaLoadConfig = dma.DmaLoadConfig;
-const DmaPlatformSettings = dma.DmaPlatformSettings;
-const requiredDmaWorkspaceBytes = dma.requiredDmaWorkspaceBytes;
 
 pub const LoadSpec = struct {
     source: *safetensors.Tensor,
@@ -3935,7 +3932,7 @@ pub const DirectLoader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
-    dma_resources: *DmaPlatformSettings,
+    dma_resources: *dma.Settings,
     owns_dma_resources: bool,
     pool: mem.DmaBlockPool,
     scheduler: FairVectoredReadScheduler,
@@ -3959,7 +3956,7 @@ pub const DirectLoader = struct {
     controller_started: bool = false,
     cleaned: bool = false,
 
-    fn providedDmaSettings(opts: LoaderOptions) ?*DmaPlatformSettings {
+    fn providedDmaSettings(opts: LoaderOptions) ?*dma.Settings {
         const optional = opts.dma orelse return null;
         return if (optional.*) |*settings| settings else null;
     }
@@ -3972,9 +3969,9 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        var owned_resources: ?*DmaPlatformSettings = null;
+        var owned_resources: ?*dma.Settings = null;
         const resources = providedDmaSettings(opts) orelse resources: {
-            const owned = try allocator.create(DmaPlatformSettings);
+            const owned = try allocator.create(dma.Settings);
             errdefer allocator.destroy(owned);
             owned.* = try dma.calibrate(allocator, io, platform, .{});
             owned_resources = owned;
@@ -4020,7 +4017,7 @@ pub const DirectLoader = struct {
         const retained_before = resources.retainedMappedBytes();
         try resources.ensureSourceWorkingSet(
             maximum_blocks_per_job,
-            DmaPlatformSettings.preallocated_source_width,
+            dma.Settings.preallocated_source_width,
             node_reserves,
         );
         const pregrown_bytes = resources.retainedMappedBytes() - retained_before;
@@ -4569,7 +4566,7 @@ test "coalesced job block bound is independent of device count" {
     );
 
     const shared_numa = [_]?usize{null} ** 8;
-    const config: DmaLoadConfig = .{
+    const config: dma.LoadConfig = .{
         .device_numa_nodes = &shared_numa,
         .block_size = 16 * 1024 * 1024,
         .max_in_flight_per_device = 1,
@@ -4579,7 +4576,7 @@ test "coalesced job block bound is independent of device count" {
     // The obsolete writer-boundary formula incorrectly required nine blocks.
     try std.testing.expectEqual(
         @as(usize, 8 * 16 * 1024 * 1024),
-        try requiredDmaWorkspaceBytes(config),
+        try dma.requiredWorkspaceBytes(config),
     );
 }
 

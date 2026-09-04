@@ -280,7 +280,6 @@ const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 pub const max_load_read_parallelism = load_limits.max_read_parallelism;
 pub const max_load_dma_parallelism = load_limits.max_dma_parallelism;
 pub const max_load_read_request_size = load_limits.max_read_request_size;
-const isDirectTransferPlatform = dma.isDirectTransferPlatform;
 
 pub const Parallelism = loader_types.Parallelism;
 const DirectLoader = direct_loader.DirectLoader;
@@ -395,7 +394,7 @@ pub const Loader = struct {
             .platform = platform,
             .store = store,
             .opts = opts,
-            .backend = if (isDirectTransferPlatform(platform))
+            .backend = if (dma.isSupported(platform))
                 .{ .direct = try DirectLoader.create(allocator, io, platform, opts) }
             else
                 .{ .buffered = try BufferedLoader.create(
