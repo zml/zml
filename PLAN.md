@@ -84,6 +84,22 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
   read to 4.5 with no warm-up misfire. Open: the climb rule on DMA-bound
   hosts (a climb to 32 is 2.6 to 3.0 s there).
   Details in CTX.md "Fifth pass".
+- [x] 16. Sixth pass (2026-09-04): width detection on a flat plateau. A
+  fixed-width sweep on gb300-2 shows the DeepSeek rungs from 12 to 48 inside
+  an 8% plateau (44.8 to 48.8 GiB/s) with only 8 a real cliff (36.9), and a
+  per-window trace shows the within-load window spread is 13 to 15% and
+  drifts with the file, so single windows cannot rank the plateau. The
+  controller therefore bounds the downside: it tolerates one rung that fails
+  the 3% test and stops on two, adopts a downward probe only when it beats
+  the best rate (never on retention), drops the borderline re-measure the
+  probe rule made unreachable, and clips the climb at the width the pre-grown
+  pinned capacity covers. Result: seven interleaved pairs on gb300-2 give
+  3.62 s -> 3.22 s (-11%, paired t = -3.2), worst load 4.15 -> 3.41 s, and no
+  run settles at 8 (the baseline did in three of seven); B70 Llama 0.67 s and
+  read-back 291/291, HF 22.1 and 20.6 s. Rejected with measurements: a wider
+  start rung, a credit-wait climb rule, longer windows. Open: the remaining
+  5% against the fixed-32 oracle needs whole-load sampling.
+  Details in CTX.md "Sixth pass".
 
 ## Measurement protocol
 

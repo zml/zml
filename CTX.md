@@ -290,19 +290,29 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   climb-and-hold with two states. Climbing: each window (at least 100 ms of
   busy time, max(8, width) completions, the width exercised) scores the
   current rung into that rung's mean; a rung that beats the best rate seen
-  by 3% moves the width one rung up (or holds at the pinned clip); the first
-  rung that does not ends the climb, and the controller holds at the lowest
-  measured rung at or below the best within 3% of it. Before holding it
-  re-measures that hold rung once when its retention is within 0.02 of 0.97,
-  and when the hold rung is the start rung it probes the rung below once and
-  holds at the better answer. Holding: evidence changes nothing. A plain
-  load therefore spends three or four windows away from its final width. No
+  by 3% moves the width one rung up (or holds at the pinned clip). One rung
+  that does not is tolerated and the climb carries on to the next
+  (`stall_tolerance`, sixth pass); two in a row end it, and the controller
+  holds at the lowest measured rung at or below the best within 3% of it.
+  When that hold rung is the start rung it probes the rung below once and
+  adopts it only if it beats the best rate by the same 3% -- never on
+  retention, because a rung stepped down to inherits the wider rung's queued
+  transfers and reads high. Holding: evidence changes nothing. A plain load
+  therefore spends four or five windows away from its final width. No
   tail rule: a window that cannot complete before the load ends leaves the
   width in place. Metadata can cheaply clip feasibility, but cannot predict
   a source's latency/bandwidth saturation point, so no job-size-derived
-  initial-width heuristic was added. Confirmed on B70 (holds 12 or 16 at
-  equal load time, 0.66 s against 0.63 s fixed 12); MI300 and CUDA
-  confirmation pending.
+  initial-width heuristic was added, and a wider start rung was measured and
+  rejected (sixth pass). Confirmed on B70 (holds 12 or 16 at equal load
+  time, 0.67 s against 0.65 s fixed 12); MI300 and CUDA confirmation
+  pending.
+- The adaptive climb stops at the widest rung whose lifecycle credits the
+  pool already holds mapped (`retained - dma_stage`, reported as
+  `width_ceiling`): 32 on gb300-2, 64 on the B70, 32 on the HF profile.
+  Above it a scored window maps a new pinned slab, which the pre-growth
+  above is meant to avoid; one such window on a GB300 read 20.8 GiB/s at
+  width 48 with 136 completions against 400 in a normal window. A width the
+  caller fixed is clipped only by feasibility.
 - Measurement mechanics are separate from width policy. Runtime state is one
   value—inactive (holding), measuring (climbing) or blind (pre-response
   bootstrap)—rather than several coupled booleans. Every decision opens a
@@ -1215,6 +1225,117 @@ Known limits recorded by the review of this pass:
 - Credit waiting is undercounted by the waits of workers that lose the
   claim race after `waitForWork` (pre-existing).
 
+## Sixth pass: width detection on a flat plateau (2026-09-04)
+
+Trigger: the fifth pass left "the climb on gb300-2 is the biggest lever
+left" open, on the reading that loads reaching 24 or 32 finish in 2.6 to
+3.0 s while loads holding 8 to 16 take 3.2 to 3.5. A fixed-width sweep
+measured the curve instead of inferring it, and it is flatter than that.
+
+DeepSeek-V4-Flash 148.65 GiB, gb300-2 GPU 0, `ZML_LOAD_FIXED_READ_PARALLELISM`,
+three interleaved rounds per rung:
+
+| fixed width | GiB/s per run | mean | load |
+|---|---|---:|---:|
+| 8 | 35.3, 39.1, 36.4 | 36.9 | 4.03 s |
+| 12 | 45.2, 43.8, 45.3 | 44.8 | 3.32 s |
+| 16 | 50.3, 42.1, 47.9 | 46.7 | 3.20 s |
+| 24 | 44.8, 49.2, 50.5 | 48.2 | 3.09 s |
+| 32 | 49.1, 50.5, 46.8 | 48.8 | 3.05 s |
+| 48 | 40.8, 50.1, 51.0 | 47.3 | 3.18 s |
+
+Everything from 12 to 48 is one plateau 8% wide; only 8 is a real cliff, 20%
+below it. The whole prize a width controller can win on this host is 0.27 s
+of a 3.3 s load, and the cost of the one bad rung is 0.7 s.
+
+Why the controller cannot win the 8%: a throwaway patch kept the runtime
+measuring while holding, so a fixed-width load logs every window. Inside one
+load at width 12 the windows read 42.6 39.7 42.2 34.0 32.3 27.6 40.1 45.6
+48.2 ... 53.1 54.7 54.7 GiB/s; at width 24 either 47 47 44 44 then 55 to 66,
+or 58 57 57 59 60 59 55 then 43 to 50. The within-load spread is 13 to 15%
+and drifts with the file: DeepSeek interleaves 256 KiB scales with 4 MiB
+weights, so consecutive 5 GiB stretches carry different DMA piece counts and
+sustain different rates. One 120 ms window at rung A and the next at rung B
+measure different parts of the file, and that, not the width, decides which
+looks faster. Six baseline loads agree: the first scored window at 12 read
+37.8, 53.1, 39.3, 52.8, 40.7 and 40.5 GiB/s against a sustained 44.8, and
+half of those are above the best rate any rung sustains. The load is 26
+windows long and the controller decides in the first four.
+
+So this pass stops chasing the peak and bounds the downside.
+
+Change (commit COMMIT_PLACEHOLDER):
+
+- The climb tolerates one rung that fails the 3% test and stops on two in a
+  row (`stall_tolerance`). The rung above a stall is compared with the same
+  best rate, so a genuinely declining curve still stops, one window later;
+  the B70 replay reaches the same rung in four windows instead of three.
+- The downward probe below the start rung is adopted only when it beats the
+  best rate. In the baseline set a probe at 8 read 41.07 GiB/s right after a
+  window at 16, against 36.9 sustained, and the 0.97 retention rule held the
+  whole load at 8 (3.70 s).
+- `isBorderline`/`borderline_used` are deleted. With the probe gated on
+  improvement, a hold rung can only be borderline if the climb's 3%
+  improvement and the 0.95-to-0.99 retention band overlap, which they do
+  over a 0.1%-wide slice of retention. The mechanism could no longer fire
+  outside its own unit test.
+- The adaptive climb stops at the growth-free width (`width_ceiling`, see
+  "Scheduling and concurrency"). The stall tolerance would otherwise push
+  the climb into rungs that map pinned slabs mid-load: runs before this clip
+  ended at 48, 64 and 96.
+
+Results, gb300-2 GPU 0, DeepSeek 148.65 GiB, seven interleaved pairs of the
+baseline (`fb8ccf55`) and this tree on one host state (bulk phase):
+
+| pair | baseline | this pass | selected width |
+|---|---:|---:|---|
+| 1 | 4.150 s | 3.184 s | 8 -> 12 |
+| 2 | 3.347 | 3.250 | 12 -> 24 |
+| 3 | 3.703 | 3.408 | 12 -> 12 |
+| 4 | 3.198 | 3.204 | 12 -> 24 |
+| 5 | 3.773 | 3.393 | 8 -> 24 |
+| 6 | 3.452 | 2.861 | 24 -> 24 |
+| 7 | 3.728 | 3.249 | 8 -> 32 |
+| mean | 3.622 | 3.221 | |
+
+Six of seven pairs improve, mean -0.40 s (-11%), paired t = -3.2 over seven
+differences. The worst load falls from 4.15 s to 3.41 s and no run settles
+at 8; the baseline settled there in three of seven. Other hosts:
+
+| host, workload | baseline | this pass |
+|---|---:|---:|
+| local B70, Llama sharded, `ZML_LOAD_CHECK=1` | 668 to 676 ms | 666, 680, 681 ms; holds 12 or 16; read-back ok 291/291 |
+| local B70, HF Qwen3.5-9B (network) | 22.5, 23.9 s | 22.1, 20.6 s; `width_ceiling=32`, holds 32 |
+| gb300-2, DeepSeek `ZML_LOAD_CHECK=64` | ok | ok, 1082 tensors, 3.243 s at width 24 |
+
+Rejected in this pass, each measured:
+
+- A wider start rung. Four interleaved rounds of adaptive loads at
+  `ZML_LOAD_READ_INITIAL_PARALLELISM` 12, 24 and 32 averaged 3.37, 3.43 and
+  3.23 s. The first window at any rung improves on nothing, so a higher
+  start only climbs higher: those runs ended at 48, 64 and 96.
+- Climbing while credits are not the limiter (`credit_wait_ms_per_read`
+  below `read_ms_per_read`). It selects 32 on gb300-2, the optimum, but the
+  B70 shows zero credit wait through width 24 and 2.0 to 2.3 ms at 32, so
+  the rule climbs past the B70's peak (23.0 GiB/s at 12 to 16) into 21.9 at
+  32 and above.
+- Longer windows. The within-load drift is not noise that averages out in a
+  few hundred milliseconds; reaching a 5% standard error needs about a
+  second of busy time, a third of a DeepSeek load.
+
+Known limits:
+
+- The controller still settles at 12 in some gb300-2 loads and at 24 or 32
+  in the rest, so the mean stays about 5% above the fixed-32 oracle
+  (3.22 s against 3.05). Closing that needs several samples per rung, which
+  on this workload means measuring for the whole load and revising the width
+  instead of holding after four windows. That is a different controller, not
+  a tuning of this one.
+- The B70 sweep at 8 MiB requests (19.5, 18.4, 23.0, 23.0, 22.5, 21.9,
+  21.9 GiB/s at widths 4 to 48) is reproducible to 0.1% between runs, while
+  gb300-2 spreads 10 to 15% at every rung. The confidence a rate comparison
+  deserves is a property of the host, and the controller does not measure it.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
@@ -1235,9 +1356,13 @@ Third-pass items left open; `PLAN.md` holds the checklist.
   healthy. The gb300-2 hold at 8 is explained by the fifth pass: on a
   DMA-bound host the rungs measure within noise of each other and the
   single-sample 3% climb rule stops at random; see "Fifth pass".
-- Fifth-pass follow-ups: a controller rule for DMA-bound windows (see the
-  fifth-pass limits); the `toSliceAlloc` sub-byte shard placement; the
-  pump-side race with an errored manager.
+- Fifth-pass follow-ups: the controller rule for DMA-bound windows is the
+  sixth pass; the `toSliceAlloc` sub-byte shard placement and the pump-side
+  race with an errored manager are still open.
+- Sixth-pass follow-up: the remaining 5% on gb300-2 needs a controller that
+  keeps sampling for the whole load (see the sixth-pass limits). The B70,
+  CUDA and MI300 trees have not been re-measured against the width ceiling;
+  the B70 was (`width_ceiling=64`, no behaviour change).
 - The 8% smallest-near-peak block rule is fragile on a busy host (it chose
   2 MiB on MI300 while degraded). Calibration caching per host/plugin, or
   re-screening when the measured rate is implausibly low, remains open.
