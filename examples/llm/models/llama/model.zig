@@ -10,10 +10,7 @@ const log = std.log.scoped(.llama);
 
 pub const Config = struct {
     bos_token_id: u32,
-    eos_token_id: stdx.json.Union(union(enum) {
-        int: u32,
-        ints: []u32,
-    }),
+    eos_token_id: EosTokens,
     head_dim: ?u32 = null,
     hidden_size: u32,
     num_hidden_layers: u32,
@@ -25,6 +22,16 @@ pub const Config = struct {
     hf_rope_impl: bool = true,
     tie_word_embeddings: bool = false,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
+
+    pub const EosTokens = union(enum) {
+        int: u32,
+        ints: []u32,
+
+        const Helpers = stdx.json.UnionHelpers(@This());
+        pub const jsonParse = Helpers.jsonParse;
+        pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+        pub const jsonStringify = Helpers.jsonStringify;
+    };
 };
 
 const Options = struct {
