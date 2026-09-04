@@ -79,13 +79,13 @@ pub fn load(
 ) !zml.Bufferized(T) {
     var buffers = try zml.mem.bufferize(run.allocator, T, m);
     if (loader) |shared| {
-        shared.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
+        try shared.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
         try shared.await(run.io);
         return buffers;
     }
     var owned: zml.io.Loader = try .init(run.allocator, run.platform, loader_opts);
     defer owned.deinit();
-    owned.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
+    try owned.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
     try owned.await(run.io);
     return buffers;
 }
