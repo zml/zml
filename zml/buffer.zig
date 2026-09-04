@@ -44,6 +44,13 @@ pub const Buffer = struct {
         pub fn devicePtr(self: *const Shard) *anyopaque {
             return self._pjrt_buffer.opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
         }
+
+        /// Copies this shard's bytes to `destination`, which must hold the
+        /// shard's byte size, and waits for the copy.
+        pub fn toHost(self: *const Shard, io: std.Io, destination: []u8) !void {
+            const maybe_event = try self._pjrt_buffer.toHostBuffer(self._platform.pjrt_api, destination);
+            if (maybe_event) |event| try event.await(self._platform.pjrt_api, io);
+        }
     };
 
     pub const ShardIterator = struct {

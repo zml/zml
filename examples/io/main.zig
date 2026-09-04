@@ -294,11 +294,13 @@ pub fn main(init: std.process.Init) !void {
             defer for (pack_outputs[0..packs_loaded]) |*output| output.deinit();
 
             var check_error: ?anyerror = null;
+            // Stamped before the read-back check so the summary excludes it.
+            var load_took: ?std.Io.Duration = null;
             {
                 const now: std.Io.Timestamp = .now(io, .awake);
                 var total_bytes: usize = 0;
                 defer {
-                    const took = now.untilNow(io, .awake);
+                    const took = load_took orelse now.untilNow(io, .awake);
                     const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
                     log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
                 }
@@ -385,10 +387,11 @@ pub fn main(init: std.process.Init) !void {
                     init.arena.allocator().free(loaded.tensors);
                 }
 
+                load_took = now.untilNow(io, .awake);
                 // Not `try`: the `errdefer` above and the `defer` just
                 // registered both release the buffers.
                 if (check_stride != 0) {
-                    checkLoaded(allocator, io, &store, tensors, loaded.tensors, platform.devices.len, check_stride) catch |err| {
+                    checkLoaded(allocator, io, &store, tensors, loaded.tensors, check_stride) catch |err| {
                         check_error = err;
                     };
                 }
@@ -610,27 +613,36 @@ fn checkPacks(
     log.info("pack check: ok packs_checked={d} of {d}", .{ checked, packs.len });
 }
 
-/// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest one
-/// back to host and compares the bytes with the source, so a buffer that
-/// reported ready before every piece landed is caught. Each source file is
-/// opened once (an `hf://` open is a HEAD plus a redirect). Limits: a
-/// replicated buffer is compared on its last replica only, since
-/// `toSliceAlloc` assembles every replica into the same slice, and sub-byte
-/// tensors on several devices are skipped, since it places their shards by
-/// element stride. Tensors with several sources are skipped.
+/// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest
+/// eligible one back to host and compares the bytes with the source, so a
+/// buffer that reported ready before every piece landed is caught. A
+/// replicated buffer is compared on every replica; a partitioned one is
+/// assembled with `toSliceAlloc`. Each source file is opened once (an
+/// `hf://` open is a HEAD plus a redirect). Skipped: tensors with several
+/// sources, and sub-byte tensors partitioned over several devices
+/// (`toSliceAlloc` places their shards by element stride).
 fn checkLoaded(
     allocator: std.mem.Allocator,
     io: std.Io,
     store: *const zml.io.TensorStore,
     tensors: []const zml.Tensor,
     buffers: []const zml.Buffer,
-    device_count: usize,
     stride: usize,
 ) !void {
     std.debug.assert(tensors.len == buffers.len);
-    var largest: usize = 0;
-    for (tensors, 0..) |tensor, i| {
-        if (tensor.byteSize() > tensors[largest].byteSize()) largest = i;
+    const Eligibility = struct {
+        fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*zml.safetensors.Tensor {
+            const sources = store_.getSourcesById(tensor.id) orelse return null;
+            if (sources.len != 1) return null;
+            const partitioned = buffer.byteSize() / buffer.numShards() != tensor.byteSize();
+            if (partitioned and tensor.dtype().bitSizeOf() < 8) return null;
+            return sources[0];
+        }
+    };
+    var largest: ?usize = null;
+    for (tensors, buffers, 0..) |tensor, buffer, i| {
+        if (Eligibility.source(store, tensor, buffer) == null) continue;
+        if (largest == null or tensor.byteSize() > tensors[largest.?].byteSize()) largest = i;
     }
     var files: std.StringHashMapUnmanaged(std.Io.File) = .empty;
     defer {
@@ -640,27 +652,24 @@ fn checkLoaded(
     }
     var expected: []u8 = &.{};
     defer allocator.free(expected);
+    var replica: []u8 = &.{};
+    defer allocator.free(replica);
     const started: std.Io.Timestamp = .now(io, .awake);
     var checked: usize = 0;
     var skipped: usize = 0;
     var checked_bytes: usize = 0;
     for (tensors, buffers, 0..) |tensor, buffer, i| {
         if (i % stride != 0 and i != largest) continue;
-        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
-        if (sources.len != 1 or (device_count > 1 and tensor.dtype().bitSizeOf() < 8)) {
+        const source = Eligibility.source(store, tensor, buffer) orelse {
             skipped += 1;
             continue;
-        }
-        const source = sources[0];
+        };
         const file = files.get(source.file_uri) orelse blk: {
             const opened = try std.Io.Dir.openFile(.cwd(), io, source.file_uri, .{ .mode = .read_only });
             errdefer opened.close(io);
             try files.put(allocator, source.file_uri, opened);
             break :blk opened;
         };
-        const slice = try buffer.toSliceAlloc(allocator, io);
-        defer slice.free(allocator);
-        const actual = slice.constData();
         const source_bytes: usize = @intCast(source.byteSize());
         if (expected.len < source_bytes) {
             allocator.free(expected);
@@ -670,13 +679,28 @@ fn checkLoaded(
         var reader = zml.safetensors.TensorReader.initBorrowedPositional(io, source.*, file);
         defer reader.deinit();
         try reader.readPositionalAll(expected[0..source_bytes], 0);
-        if (actual.len != source_bytes or !std.mem.eql(u8, expected[0..source_bytes], actual)) {
-            const first_bad = std.mem.indexOfDiff(u8, expected[0..source_bytes], actual) orelse actual.len;
-            log.err("load check: mismatch tensor={s} bytes={d} first_difference={d}", .{ source.name, source_bytes, first_bad });
-            return error.LoadContentMismatch;
+
+        if (buffer.byteSize() / buffer.numShards() == source_bytes) {
+            // Every shard holds the whole tensor: compare each replica.
+            if (replica.len < source_bytes) {
+                allocator.free(replica);
+                replica = &.{};
+                replica = try allocator.alloc(u8, source_bytes);
+            }
+            var shards = buffer.shards();
+            var shard_index: usize = 0;
+            while (shards.next()) |shard| : (shard_index += 1) {
+                try shard.toHost(io, replica[0..source_bytes]);
+                try expectSameBytes(source.name, shard_index, expected[0..source_bytes], replica[0..source_bytes]);
+                checked_bytes += source_bytes;
+            }
+        } else {
+            const slice = try buffer.toSliceAlloc(allocator, io);
+            defer slice.free(allocator);
+            try expectSameBytes(source.name, null, expected[0..source_bytes], slice.constData());
+            checked_bytes += source_bytes;
         }
         checked += 1;
-        checked_bytes += actual.len;
     }
     log.info("load check: ok tensors_checked={d} of {d} skipped={d} bytes={Bi:.2} elapsed={f}", .{
         checked,
@@ -685,6 +709,19 @@ fn checkLoaded(
         checked_bytes,
         started.untilNow(io, .awake),
     });
+}
+
+fn expectSameBytes(name: []const u8, replica: ?usize, expected: []const u8, actual: []const u8) !void {
+    if (actual.len == expected.len and std.mem.eql(u8, expected, actual)) return;
+    const first_bad = std.mem.indexOfDiff(u8, expected, actual) orelse @min(expected.len, actual.len);
+    log.err("load check: mismatch tensor={s} replica={?d} expected_bytes={d} actual_bytes={d} first_difference={d}", .{
+        name,
+        replica,
+        expected.len,
+        actual.len,
+        first_bad,
+    });
+    return error.LoadContentMismatch;
 }
 
 /// `ZML_LOAD_EVENT_RETIRE_CHECK=1`: the loader's event retirement against
