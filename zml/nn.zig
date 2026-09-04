@@ -35,6 +35,10 @@ pub const Linear = struct {
         zml.Buffer.deinitAll(Linear, self);
     }
 
+    pub fn quantizationScheme(self: Linear) ?Quantization.Scheme {
+        return if (self.quantization) |q| q.scheme else null;
+    }
+
     pub fn forward(self: Linear, x: Tensor) Tensor {
         const y = self.forwardWeight(x);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
