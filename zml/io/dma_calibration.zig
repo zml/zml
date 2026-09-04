@@ -256,6 +256,12 @@ pub const DmaPlatformSettings = struct {
     /// window. A high-latency bootstrap above 32 still grows on demand.
     pub const preallocated_source_width = 32;
 
+    /// Request size assumed when calibration maps the source working set:
+    /// the default profile chunk and the HTTP/S3/GCS minimum. Local 8 MiB
+    /// profiles need less; a 32 MiB HF profile grows the rest at loader
+    /// creation.
+    pub const preallocated_request_size: usize = 16 * 1024 * 1024;
+
     /// Grows the retained arenas so that `width + 1` requests of
     /// `request_blocks` blocks can be leased from each pool without mapping
     /// a slab during the load, clipped to the largest width whose growth
@@ -1762,6 +1768,20 @@ fn benchmarkSyntheticDma(
 
     try source_pools.ensureLoadBlockReserves(
         uniform_block_size,
+        calibrated_node_reserves,
+    );
+    // Map the source working set here, before any load starts: pinned
+    // allocation is slow (about 200 ms for 272 MiB of hipHostMalloc on
+    // MI300X) and must not sit inside a measured load. A loader whose
+    // request size exceeds `preallocated_request_size` grows the remainder
+    // when it is created.
+    try source_pools.ensureSourceWorkingSet(
+        uniform_block_size,
+        try maximumCoalescedJobBlocks(
+            @max(uniform_block_size, DmaPlatformSettings.preallocated_request_size),
+            uniform_block_size,
+        ),
+        DmaPlatformSettings.preallocated_source_width,
         calibrated_node_reserves,
     );
     const owned_samples = try samples.toOwnedSlice(allocator);

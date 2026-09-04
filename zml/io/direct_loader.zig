@@ -2766,6 +2766,29 @@ test "busy window clock subtracts idle intervals from a window" {
     try std.testing.expectEqual(25 * std.time.ns_per_ms, clock.busyNs(now_ns, now_ns + 25 * std.time.ns_per_ms));
 }
 
+/// Worker tasks are spawned on demand: enough to fill the lifecycle gate at
+/// the current width, never more than the configured maximum. Idle tasks
+/// above the gate limit only add scheduling noise (128 persistent workers
+/// cost about 7% on one MI300X while the controller held width 12).
+const WorkerPool = struct {
+    loader: *DirectLoader,
+    maximum: usize,
+    mutex: std.Io.Mutex = .init,
+    spawned: usize = 0,
+
+    fn ensure(self: *WorkerPool, io: std.Io, wanted: usize) void {
+        const target = @min(wanted, self.maximum);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.spawned < target) : (self.spawned += 1) {
+            self.loader.worker_group.concurrent(io, DirectLoader.workerMain, .{self.loader}) catch |err| {
+                load_log.err("cannot spawn source worker {d}: {}", .{ self.spawned + 1, err });
+                return;
+            };
+        }
+    }
+};
+
 const SourceReadRuntime = struct {
     /// `measuring` while the controller climbs: the current generation's
     /// window is open. `blind` during the pre-response bootstrap of a
@@ -2781,6 +2804,8 @@ const SourceReadRuntime = struct {
     pinned_feasible_width: usize,
     read_stats: ?ReadStatsCursor,
     source_bootstrap_enabled: bool,
+    /// Grown with the lifecycle limit; null in unit tests without workers.
+    workers: ?*WorkerPool = null,
     source_response_observed: bool = false,
     measurement: Measurement = .inactive,
     last_blind_growth_ns: u64 = 0,
@@ -2812,6 +2837,7 @@ const SourceReadRuntime = struct {
         self.reported_width = decision.width;
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
+        if (self.workers) |pool| pool.ensure(io, limits.lifecycle);
         // Advance the diagnostic baseline at the generation boundary.
         _ = self.takeRemoteBackpressure();
         self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
@@ -2837,6 +2863,7 @@ const SourceReadRuntime = struct {
         self.reported_width = decision.width;
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
+        if (self.workers) |pool| pool.ensure(io, limits.lifecycle);
         self.metrics.clearProbe(io);
         self.metrics.config_epoch.store(decision.generation, .release);
         self.measurement = .blind;
@@ -3013,6 +3040,7 @@ pub const DirectLoader = struct {
     request_gate: AdaptiveRequestGate,
     pipeline: VectoredLoadPipeline,
     controller_runtime: SourceReadRuntime,
+    worker_pool: WorkerPool,
     worker_group: std.Io.Group = .init,
     controller_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*LoaderSourceSlot) = .empty,
@@ -3061,9 +3089,10 @@ pub const DirectLoader = struct {
                 config.max_in_flight_per_device,
             );
         }
-        // Map the working set of every rung the controller may climb through
-        // now, so no pinned slab grows inside a scored window; the arenas
-        // stay with the platform for later loaders.
+        // Calibration already mapped the working set for a 16 MiB request;
+        // this grows the remainder for larger request sizes (HF profiles)
+        // so no pinned slab grows inside a scored window. The arenas stay
+        // with the platform for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = resources.retainedMappedBytes();
         try resources.ensureSourceWorkingSet(
@@ -3122,6 +3151,7 @@ pub const DirectLoader = struct {
             .request_gate = .init(limits.lifecycle),
             .pipeline = undefined,
             .controller_runtime = undefined,
+            .worker_pool = undefined,
             .created_at = .now(io, .awake),
             .source_request_size = request_size,
             .maximum_blocks_per_job = maximum_blocks_per_job,
@@ -3151,30 +3181,34 @@ pub const DirectLoader = struct {
         );
         errdefer self.pipeline.deinit();
 
+        self.worker_pool = .{ .loader = self, .maximum = source_parallelism.maximum() };
         self.controller_runtime = .{
             .controller = controller,
             .read_gate = &self.read_gate,
             .request_gate = &self.request_gate,
             .metrics = &self.metrics,
             .next_read_admission = &self.pipeline.next_read_admission,
+            .workers = &self.worker_pool,
             .scheduler = &self.scheduler,
             .pinned_feasible_width = feasible_width,
             .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
             .reported_width = controller.width(),
         };
-        // Born busy: both gates are open at the controller's width and the
-        // first window is fenced before any worker can admit a read, so it
-        // measures from the first read and the gate is never closed.
-        self.controller_runtime.start(io);
+        // Born busy: both gates are open at the controller's width, the
+        // first window is fenced before any worker can admit a read, and the
+        // initial workers are spawned by the decision that opened the gates.
         errdefer self.stopWorkers();
-        try self.startWorkers(source_parallelism.maximum());
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+        self.workers_started = true;
+        self.controller_runtime.start(io);
+        try self.startController();
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, max_workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
             config.block_size,
-            source_parallelism.maximum(),
+            self.worker_pool.spawned,
+            self.worker_pool.maximum,
             feasible_width,
             self.pool.mappedBytes(),
             pregrown_bytes,
@@ -3183,20 +3217,13 @@ pub const DirectLoader = struct {
         return self;
     }
 
-    fn startWorkers(self: *DirectLoader, worker_count: usize) !void {
+    fn startController(self: *DirectLoader) !void {
         try self.controller_group.concurrent(
             self.io,
             SourceReadRuntime.run,
             .{ &self.controller_runtime, self.io },
         );
         self.controller_started = true;
-        self.workers_started = true;
-        for (0..worker_count) |_| {
-            self.worker_group.concurrent(self.io, workerMain, .{self}) catch |err| {
-                self.stopWorkers();
-                return err;
-            };
-        }
     }
 
     fn workerMain(self: *DirectLoader) void {
