@@ -81,16 +81,16 @@ pub const Instance = struct {
 
 pub fn instance() !Instance {
     var info = std.mem.zeroes(c.struct_nrt_instance_info);
-    info.family = @intFromEnum(Family.unknown);
-    info.size = @intFromEnum(Size.unknown);
+    info.family = @backingInt(Family.unknown);
+    info.size = @backingInt(Size.unknown);
 
     if (c.nrt_get_instance_info(&info, @sizeOf(c.struct_nrt_instance_info)) != c.NRT_SUCCESS) {
         return error.Unavailable;
     }
 
     return .{
-        .family = @enumFromInt(info.family),
-        .size = @enumFromInt(info.size),
+        .family = @fromBackingInt(@intCast(info.family)),
+        .size = @fromBackingInt(@intCast(info.size)),
     };
 }
 

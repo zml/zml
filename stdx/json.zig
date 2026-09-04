@@ -41,26 +41,26 @@ pub fn Union(comptime T: type) type {
         }
 
         pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!Self {
-            inline for (std.meta.fields(T)) |field| {
-                switch (field.type) {
-                    bool => if (source == .bool) return .{ .value = @unionInit(T, field.name, source.bool) },
+            inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |field_name, Field| {
+                switch (Field) {
+                    bool => if (source == .bool) return .{ .value = @unionInit(T, field_name, source.bool) },
                     []const u8 => switch (source) {
                         .string => |v| {
                             const dupe = try allocator.dupe(u8, v);
-                            return .{ .value = @unionInit(T, field.name, dupe) };
+                            return .{ .value = @unionInit(T, field_name, dupe) };
                         },
                         .number_string => |v| {
                             const dupe = try allocator.dupe(u8, v);
-                            return .{ .value = @unionInit(T, field.name, dupe) };
+                            return .{ .value = @unionInit(T, field_name, dupe) };
                         },
                         else => {},
                     },
-                    else => switch (@typeInfo(field.type)) {
-                        .int => if (source == .integer) return .{ .value = @unionInit(T, field.name, @intCast(source.integer)) },
-                        .float => if (source == .float) return .{ .value = @unionInit(T, field.name, @floatCast(source.float)) },
-                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source.object, options)) },
+                    else => switch (@typeInfo(Field)) {
+                        .int => if (source == .integer) return .{ .value = @unionInit(T, field_name, @intCast(source.integer)) },
+                        .float => if (source == .float) return .{ .value = @unionInit(T, field_name, @floatCast(source.float)) },
+                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field_name, try std.json.innerParseFromValue(Field, allocator, source.object, options)) },
                         inline else => switch (source) {
-                            .number_string, .array => return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
+                            .number_string, .array => return .{ .value = @unionInit(T, field_name, try std.json.innerParseFromValue(Field, allocator, source, options)) },
                             else => {},
                         },
                     },
@@ -104,9 +104,9 @@ pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
         if (@typeInfo(T) != .@"union") {
             @compileError("TaggedUnion expects a union type, found " ++ @typeName(T));
         }
-        for (std.meta.fields(T)) |field| {
-            if (@typeInfo(field.type) != .@"struct") {
-                @compileError("TaggedUnion member '" ++ field.name ++ "' must be a struct, found " ++ @typeName(field.type));
+        for (std.meta.fieldNames(T), std.meta.fieldTypes(T)) |field_name, Field| {
+            if (@typeInfo(Field) != .@"struct") {
+                @compileError("TaggedUnion member '" ++ field_name ++ "' must be a struct, found " ++ @typeName(Field));
             }
         }
     }
@@ -130,13 +130,13 @@ pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
             var o = source.object;
             const tag = (o.fetchSwapRemove(tag_name) orelse return error.MissingField).value;
             if (tag != .string) return error.LengthMismatch;
-            inline for (std.meta.fields(T)) |field| {
-                if (std.mem.eql(u8, field.name, tag.string)) {
-                    const inner: field.type = std.json.parseFromValueLeaky(field.type, allocator, .{ .object = o }, options) catch |err| {
-                        std.log.warn("failed to interpret {s} as a {s}: {}", .{ tag.string, @typeName(field.type), err });
+            inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |field_name, Field| {
+                if (std.mem.eql(u8, field_name, tag.string)) {
+                    const inner: Field = std.json.parseFromValueLeaky(Field, allocator, .{ .object = o }, options) catch |err| {
+                        std.log.warn("failed to interpret {s} as a {s}: {}", .{ tag.string, @typeName(Field), err });
                         return err;
                     };
-                    return .{ .value = @unionInit(T, field.name, inner) };
+                    return .{ .value = @unionInit(T, field_name, inner) };
                 }
             }
             return error.InvalidEnumTag;
@@ -150,9 +150,9 @@ pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
                     try jw.objectField(tag_name);
                     try jw.write(field_name);
                     switch (@typeInfo(@TypeOf(v))) {
-                        .@"struct" => inline for (std.meta.fields(@TypeOf(v))) |field| {
-                            try jw.objectField(field.name);
-                            try jw.write(@field(v, field.name));
+                        .@"struct" => inline for (comptime std.meta.fieldNames(@TypeOf(v))) |name| {
+                            try jw.objectField(name);
+                            try jw.write(@field(v, name));
                         },
                         else => unreachable, // Would have failed with comptime check.
                     }
@@ -184,11 +184,11 @@ pub fn NeverNull(comptime T: type, comptime default_value: T) type {
 }
 
 pub fn fillDefaultStructValues(comptime T: type, r: *T) !void {
-    inline for (@typeInfo(T).Struct.fields) |field| {
-        if (field.default_value) |default_ptr| {
-            if (@field(r, field.name) == null) {
-                const default = @as(*align(1) const field.type, @ptrCast(default_ptr)).*;
-                @field(r, field.name) = default;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |field_name, Field, attrs| {
+        if (attrs.defaultValue(Field)) |default| {
+            if (@field(r, field_name) == null) {
+                @field(r, field_name) = default;
             }
         }
     }
