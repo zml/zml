@@ -278,9 +278,23 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
 
     zig_action, link, archive = selected
     zig_arguments = zig_action["arguments"]
+    module_action = zig_action
+    if not any(argument.startswith("-M") for argument in zig_arguments):
+        module_actions = [
+            action
+            for action in actions
+            if action.get("mnemonic") == "ZigBuildTest"
+            and emitted_path(action.get("arguments", [])) in zig_arguments
+        ]
+        if len(module_actions) != 1:
+            raise RuntimeError(
+                f"could not match {label}'s Zig archive to one module compilation action"
+            )
+        module_action = module_actions[0]
+    module_arguments = module_action["arguments"]
     link_arguments = link["arguments"]
-    target = zig_arguments[zig_arguments.index("-target") + 1]
-    optimize = zig_arguments[zig_arguments.index("-O") + 1]
+    target = module_arguments[module_arguments.index("-target") + 1]
+    optimize = module_arguments[module_arguments.index("-O") + 1]
     output_index = link_arguments.index("-o") + 1
     output_path = link_arguments[output_index]
     rewritten_link_args = [
@@ -290,9 +304,10 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
     return {
         "execroot": execroot,
         "name": Path(output_path).name,
+        "kind": "test" if module_action.get("mnemonic") == "ZigBuildTest" else "binary",
         "target": target,
         "optimize": optimize,
-        "modules": parse_modules(zig_arguments),
+        "modules": parse_modules(module_arguments),
         "linker": link_arguments[0],
         "link_args": rewritten_link_args,
         "link_env": link.get("environmentVariables", []),

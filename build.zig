@@ -3,6 +3,7 @@ const std = @import("std");
 const Config = struct {
     execroot: []const u8,
     name: []const u8,
+    kind: enum { binary, @"test" },
     target: []const u8,
     optimize: []const u8,
     modules: []const Module,
@@ -106,10 +107,13 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const binary = if (use_zig_linker)
-        zigLinkedBinary(b, config, modules[0])
-    else
-        bazelLinkedBinary(b, config, modules[0], use_lld orelse !target.result.os.tag.isDarwin());
+    const binary = switch (config.kind) {
+        .binary => if (use_zig_linker)
+            zigLinkedBinary(b, config, modules[0])
+        else
+            bazelLinkedBinary(b, config, modules[0], use_lld orelse !target.result.os.tag.isDarwin()),
+        .@"test" => zigLinkedTest(b, config, modules[0]),
+    };
     b.getInstallStep().dependOn(&b.addInstallBinFile(binary, config.name).step);
 
     const run = std.Build.Step.Run.create(b, "run bazel target");
@@ -231,6 +235,80 @@ fn zigLinkedBinary(
     // Zig 0.17 currently corrupts PT_INTERP/PT_DYNAMIC on the second incremental
     // dynamic-ELF update. Rebuild this thin self-hosted link, but keep the costly
     // Zig archive compilation above incremental.
+    exe.incremental = if (config.native_prelink != null) false else null;
+    exe.pie = config.native_prelink == null;
+    exe.bundle_compiler_rt = true;
+    exe.headerpad_max_install_names = config.zig_link.headerpad_max_install_names;
+    if (config.zig_link.dead_strip) {
+        exe.link_gc_sections = true;
+    }
+
+    return exe.getEmittedBin();
+}
+
+fn zigLinkedTest(
+    b: *std.Build,
+    config: Config,
+    root_module: *std.Build.Module,
+) std.Build.LazyPath {
+    root_module.link_libc = true;
+    const test_object = b.addTest(.{
+        .name = b.fmt("{s}-zig", .{config.name}),
+        .root_module = root_module,
+        .use_llvm = true,
+        .use_lld = false,
+        .emit_object = true,
+    });
+    test_object.bundle_compiler_rt = true;
+
+    const final_module = b.createModule(.{
+        .target = root_module.resolved_target,
+        .optimize = root_module.optimize,
+    });
+    final_module.link_libc = true;
+    final_module.addObjectFile(test_object.getEmittedBin());
+
+    if (config.native_prelink) |native_prelink| {
+        final_module.addObjectFile(.{ .cwd_relative = native_prelink });
+        final_module.addRPath(.{ .cwd_relative = std.fs.path.dirname(native_prelink) orelse "." });
+    } else {
+        if (config.zig_link.archive_objects.len != 0) {
+            const archive = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "rcs" });
+            const archive_path = archive.addOutputFileArg("bazel_start_lib.a");
+            for (config.zig_link.archive_objects) |object| {
+                archive.addFileArg(.{ .cwd_relative = absolute(config.execroot, object, b) });
+            }
+            final_module.addObjectFile(archive_path);
+        }
+        for (config.zig_link.objects) |object| {
+            final_module.addObjectFile(.{ .cwd_relative = absolute(config.execroot, object, b) });
+        }
+    }
+    for (config.zig_link.library_paths) |library_path| {
+        final_module.addLibraryPath(.{ .cwd_relative = absolute(config.execroot, library_path, b) });
+    }
+    for (config.zig_link.framework_paths) |framework_path| {
+        final_module.addSystemFrameworkPath(.{ .cwd_relative = absolute(config.execroot, framework_path, b) });
+    }
+    for (config.zig_link.system_libraries) |library| {
+        final_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+    }
+    for (config.zig_link.frameworks) |framework| {
+        final_module.linkFramework(framework, .{});
+    }
+    for (config.zig_link.needed_frameworks) |framework| {
+        final_module.linkFramework(framework, .{ .needed = true });
+    }
+    for (config.zig_link.weak_frameworks) |framework| {
+        final_module.linkFramework(framework, .{ .weak = true });
+    }
+
+    const exe = b.addExecutable(.{
+        .name = config.name,
+        .root_module = final_module,
+        .use_llvm = config.native_prelink == null,
+        .use_lld = config.native_prelink == null,
+    });
     exe.incremental = if (config.native_prelink != null) false else null;
     exe.pie = config.native_prelink == null;
     exe.bundle_compiler_rt = true;
