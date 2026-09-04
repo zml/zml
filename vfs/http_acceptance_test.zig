@@ -1,6 +1,8 @@
 const std = @import("std");
 
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
 const HTTP = @import("http.zig").HTTP;
+const range_read = @import("range_read.zig");
 
 const MockServer = struct {
     const Options = struct {
@@ -17,6 +19,8 @@ const MockServer = struct {
     get_requests: std.atomic.Value(usize) = .init(0),
     active_gets: std.atomic.Value(usize) = .init(0),
     peak_gets: std.atomic.Value(usize) = .init(0),
+    attempt_header_gets: std.atomic.Value(usize) = .init(0),
+    peak_attempt: std.atomic.Value(usize) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
 
     fn init(
@@ -105,6 +109,10 @@ const MockServer = struct {
                 const active = self.active_gets.fetchAdd(1, .acq_rel) + 1;
                 _ = self.peak_gets.fetchMax(active, .acq_rel);
                 defer _ = self.active_gets.fetchSub(1, .release);
+                if (requestHeader(&request, "x-attempt")) |value| {
+                    _ = self.attempt_header_gets.fetchAdd(1, .monotonic);
+                    _ = self.peak_attempt.fetchMax(try std.fmt.parseInt(usize, value, 10), .monotonic);
+                }
 
                 if (self.barrier_gets != 0 and get_ordinal <= self.barrier_gets) {
                     if (get_ordinal == self.barrier_gets) self.get_barrier.set(io);
@@ -147,6 +155,14 @@ const MockServer = struct {
         start: usize,
         end: usize,
     };
+
+    fn requestHeader(request: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
+        var headers = request.iterateHeaders();
+        while (headers.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+        }
+        return null;
+    }
 
     fn parseRequestRange(request: *const std.http.Server.Request, object_len: usize) !Range {
         var value: ?[]const u8 = null;
@@ -414,4 +430,85 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
     );
     const delta = stats.snapshot().sub(before);
     try std.testing.expectEqual(@as(u64, admission), delta.physical_requests);
+}
+
+test "the shared range loop prepares the request once per attempt" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const request_size = 3 * 1024;
+
+    var object: [request_size]u8 = undefined;
+    for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 7);
+    var output: [request_size]u8 = undefined;
+
+    var server = try MockServer.init(io, &object, .{ .fail_first_gets = 2 });
+    var server_group: std.Io.Group = .init;
+    try startMockServer(&server, &server_group, io);
+    var server_joined = false;
+    defer cleanupMockServer(&server, &server_group, io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    // An S3-style request: like `x-amz-date` under a SigV4 signature, the
+    // header is recomputed by the hook for every attempt.
+    const Signed = struct {
+        uri: std.Uri,
+        prepared: usize = 0,
+        attempt_value: [8]u8 = undefined,
+        headers: [1]std.http.Header = undefined,
+
+        fn prepare(context: *anyopaque, attempt: range_read.Attempt) anyerror!range_read.PreparedRequest {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(self.prepared, attempt.ordinal);
+            try std.testing.expectEqualStrings("Range", attempt.range.name);
+            self.prepared += 1;
+            self.headers = .{.{
+                .name = "x-attempt",
+                .value = try std.fmt.bufPrint(&self.attempt_value, "{d}", .{attempt.ordinal}),
+            }};
+            return .{ .uri = self.uri, .extra_headers = &self.headers };
+        }
+    };
+    var url_buffer: [160]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
+    var signed: Signed = .{ .uri = try .parse(url) };
+    const spec: range_read.RequestSpec = .{
+        .backend = "test",
+        .target = url,
+        .unavailable = .throttle,
+        .context = &signed,
+        .prepare = Signed.prepare,
+    };
+    var stats: AtomicReadStats = .{};
+    const buffers = [_][]u8{ output[0..1024], output[1024..] };
+    const size = range_read.readSize(object.len, 0, &buffers);
+
+    // No retry budget: one attempt, one hook call, the failure is counted.
+    const no_retry: range_read.RetryConfig = .{ .max_retries = 0, .initial_delay = .fromNanoseconds(0), .max_delay = .fromNanoseconds(0) };
+    try std.testing.expectError(
+        error.RetriesExhausted,
+        range_read.performRangeRead(io, &client, &stats, no_retry, spec, &buffers, 0, size),
+    );
+    try std.testing.expectEqual(@as(usize, 1), signed.prepared);
+
+    signed.prepared = 0;
+    const one_retry: range_read.RetryConfig = .{ .max_retries = 1, .initial_delay = .fromNanoseconds(0), .max_delay = .fromNanoseconds(0) };
+    try std.testing.expectEqual(size, try range_read.performRangeRead(io, &client, &stats, one_retry, spec, &buffers, 0, size));
+    try std.testing.expectEqual(@as(usize, 2), signed.prepared);
+    try std.testing.expectEqualSlices(u8, &object, &output);
+
+    server_group.cancel(io);
+    server_joined = true;
+    try server.check();
+
+    const snapshot = stats.snapshot();
+    try std.testing.expectEqual(@as(usize, 3), server.get_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), server.attempt_header_gets.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), server.peak_attempt.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), server.peak_gets.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.physical_requests);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.retries);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.server_failures);
+    try std.testing.expectEqual(@as(u64, request_size), snapshot.physical_bytes);
 }

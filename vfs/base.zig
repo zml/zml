@@ -91,6 +91,15 @@ pub const AtomicReadStats = struct {
             .retry_delay_ns = self.retry_delay_ns.load(.acquire),
         };
     }
+
+    pub fn provider(self: *AtomicReadStats) ReadStatsProvider {
+        return .{ .userdata = self, .snapshotFn = snapshotOpaque };
+    }
+
+    fn snapshotOpaque(userdata: *anyopaque) ReadStats {
+        const self: *AtomicReadStats = @ptrCast(@alignCast(userdata));
+        return self.snapshot();
+    }
 };
 
 test "atomic read stats retain aggregate retry feedback" {

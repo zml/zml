@@ -35,7 +35,7 @@ pub const LoadProfile = struct {
         .stats = null,
     };
 
-    /// Local-file profile returned for paths without a registered URI scheme.
+    /// Fallback for bare paths when no `file` backend is registered.
     pub const local: LoadProfile = .{
         .name = "local",
         .read_chunk_size = 8 * 1024 * 1024,
@@ -80,10 +80,6 @@ pub fn deinit(self: *VFS) void {
     self.handles.deinit(self.allocator);
     self.closed_handles.deinit(self.allocator);
     self.backends.deinit(self.allocator);
-}
-
-pub fn register(self: *VFS, scheme: []const u8, backend: std.Io) std.mem.Allocator.Error!void {
-    return self.registerBackend(scheme, .{ .io = backend });
 }
 
 pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem.Allocator.Error!void {
@@ -133,25 +129,24 @@ fn ioVTable() *const std.Io.VTable {
     });
 }
 
-/// Prepares the source tuning and feedback provider for one model load.
+/// Prepares the source tuning and feedback provider for one model load. A
+/// bare path resolves through the `file` backend when one is registered and
+/// falls back to `LoadProfile.local` otherwise.
 /// Returned strings and providers borrow backend state, so this VFS and its
 /// registered backend must outlive the load.
 pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
-    if (std.mem.indexOf(u8, path, "://") == null) return .local;
-    const uri = std.Uri.parse(path) catch return error.VFSNotRegistered;
+    const bare = std.mem.indexOf(u8, path, "://") == null;
+    const scheme = if (bare) "file" else (std.Uri.parse(path) catch return error.VFSNotRegistered).scheme;
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
-    for (self.backends.entries.items(.key), 0..) |scheme, index| {
-        if (!std.mem.eql(u8, uri.scheme, scheme)) continue;
-        const backend = self.backends.entries.items(.value)[index];
-        return .{
-            .name = scheme,
-            .read_chunk_size = backend.read_hints.read_chunk_size,
-            .high_latency = backend.read_hints.high_latency,
-            .stats = backend.read_stats,
-        };
-    }
-    return error.VFSNotRegistered;
+    const index = self.backends.getIndex(scheme) orelse return if (bare) .local else error.VFSNotRegistered;
+    const backend = self.backends.entries.items(.value)[index];
+    return .{
+        .name = self.backends.entries.items(.key)[index],
+        .read_chunk_size = backend.read_hints.read_chunk_size,
+        .high_latency = backend.read_hints.high_latency,
+        .stats = backend.read_stats,
+    };
 }
 
 fn openHandle(self: *VFS) !struct { u32, *Handle } {
@@ -535,6 +530,7 @@ test "VFS reports the configured load profile for every bundled backend" {
     };
     const cases = [_]Case{
         .{ .path = "file:///tmp/model", .name = "file", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
+        .{ .path = "/var/models/model", .name = "file", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
         .{ .path = "https://example.com/model", .name = "https", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
         .{ .path = "s3://bucket/model", .name = "s3", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
         .{ .path = "gs://bucket/model", .name = "gs", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },

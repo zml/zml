@@ -5,7 +5,6 @@ const stdx = @import("stdx");
 const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
-const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = std.log.scoped(.@"zml/vfs/hf");
@@ -123,9 +122,7 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
-    max_retries: usize,
-    retry_initial_delay: std.Io.Duration,
-    retry_max_delay: std.Io.Duration,
+    retry: range_read.RetryConfig,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -134,8 +131,6 @@ pub const HF = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
-        range_read.assertValidOptions(opts.retry_initial_delay, opts.retry_max_delay);
-
         var self: HF = .{
             .allocator = allocator,
             .base = .init(inner),
@@ -147,9 +142,7 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .max_retries = opts.max_retries,
-            .retry_initial_delay = opts.retry_initial_delay,
-            .retry_max_delay = opts.retry_max_delay,
+            .retry = .fromOptions(opts),
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -247,13 +240,8 @@ pub const HF = struct {
                 .read_chunk_size = 32 * 1024 * 1024,
                 .high_latency = true,
             },
-            .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
+            .read_stats = self.read_stats.provider(),
         };
-    }
-
-    fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
-        const self: *HF = @ptrCast(@alignCast(userdata));
-        return self.read_stats.snapshot();
     }
 
     fn openHandle(self: *HF) !struct { u32, *Handle } {
@@ -797,155 +785,19 @@ pub const HF = struct {
     }
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        const read_size = range_read.readSize(handle.size, offset, data);
-        if (read_size == 0) return 0;
+        if (range_read.readSize(handle.size, offset, data) == 0) return 0;
 
         const url = handle.download_url orelse return error.InvalidHandle;
-        const uri: std.Uri = try .parse(url);
-        const authorization: std.http.Client.Request.Headers.Value = if (std.mem.startsWith(u8, url, "https://huggingface.co/"))
-            self.authorization
-        else
-            .omit;
-
-        var attempt: usize = 0;
-        while (true) {
-            switch (try self.performReadAttempt(uri, url, authorization, data, offset, read_size)) {
-                .success => return read_size,
-                .retry => |retry| {
-                    self.read_stats.recordFailure(retry.failure);
-                    if (attempt >= self.max_retries) return error.RetriesExhausted;
-
-                    self.read_stats.recordRetry();
-                    const delay = retry.delay orelse range_read.fullJitterDelay(
-                        self.base.inner,
-                        self.retry_initial_delay,
-                        self.retry_max_delay,
-                        attempt,
-                    );
-                    self.read_stats.recordRetryDelay(delay);
-                    self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
-                    attempt += 1;
-                },
-            }
-        }
-    }
-
-    fn performReadAttempt(
-        self: *HF,
-        uri: std.Uri,
-        url: []const u8,
-        authorization: std.http.Client.Request.Headers.Value,
-        data: []const []u8,
-        offset: u64,
-        read_size: usize,
-    ) !range_read.AttemptResult {
-        var range_buf: [64]u8 = undefined;
-        const range_header = std.fmt.bufPrint(
-            &range_buf,
-            "bytes={d}-{d}",
-            .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
-        ) catch unreachable;
-
-        self.read_stats.recordAttempt();
-        var req = self.client.request(.GET, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = authorization,
-            },
-            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-        }) catch |err| switch (err) {
-            error.Timeout => {
-                log.warn("Failed to connect: {}", .{err});
-                return .{ .retry = .{ .failure = .timeout } };
-            },
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            error.NetworkDown,
-            error.NameServerFailure,
-            => {
-                log.warn("Failed to connect: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to connect: {}", .{err});
-                return err;
-            },
+        var request: range_read.PreparedRequest = .{
+            .uri = try .parse(url),
+            .authorization = if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit,
         };
-        defer req.deinit();
-
-        req.sendBodiless() catch |err| switch (err) {
-            error.WriteFailed => {
-                log.warn("Failed to send headers: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-        };
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = req.receiveHead(&redirect_buffer) catch |err| switch (err) {
-            error.Timeout => {
-                log.warn("Failed to receive headers: {}", .{err});
-                return .{ .retry = .{ .failure = .timeout } };
-            },
-            error.HttpConnectionClosing,
-            error.HttpRequestTruncated,
-            error.ReadFailed,
-            error.WriteFailed,
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            error.NetworkDown,
-            error.NameServerFailure,
-            => {
-                log.warn("Failed to receive headers: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to receive headers: {}", .{err});
-                return err;
-            },
-        };
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            const failure = range_read.classifyStatus(res.head.status, .server_failure) orelse {
-                log.err("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
-                return error.RequestFailed;
-            };
-            log.warn("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
-            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
-        }
-
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk range_read.parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
-
-        range_read.readResponse(
-            res.reader(&.{}),
-            res.head.status,
-            content_range,
-            offset,
-            data,
-            read_size,
-        ) catch |err| switch (err) {
-            error.EndOfStream, error.ReadFailed => {
-                log.warn("Failed to read from response: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to read from response: {}", .{err});
-                return err;
-            },
-        };
-        self.read_stats.recordSuccess(read_size);
-        return .success;
+        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
+            .backend = "hf",
+            .target = url,
+            .unavailable = .server_failure,
+            .context = &request,
+            .prepare = range_read.prepareStatic,
+        }, data, offset, range_read.readSize(handle.size, offset, data));
     }
 };

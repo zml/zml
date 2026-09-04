@@ -6,7 +6,6 @@ const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const ReadFailure = @import("base.zig").ReadFailure;
-const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = std.log.scoped(.@"zml/vfs/s3");
@@ -185,9 +184,7 @@ pub const S3 = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     config: Config,
-    max_retries: usize,
-    retry_initial_delay: std.Io.Duration,
-    retry_max_delay: std.Io.Duration,
+    retry: range_read.RetryConfig,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -201,15 +198,11 @@ pub const S3 = struct {
         config: Config,
         opts: InitOpts,
     ) !S3 {
-        range_read.assertValidOptions(opts.retry_initial_delay, opts.retry_max_delay);
-
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .max_retries = opts.max_retries,
-            .retry_initial_delay = opts.retry_initial_delay,
-            .retry_max_delay = opts.retry_max_delay,
+            .retry = .fromOptions(opts),
             .config = .{
                 .access_key = if (config.access_key) |k| try allocator.dupe(u8, k) else null,
                 .secret_key = if (config.secret_key) |k| try allocator.dupe(u8, k) else null,
@@ -324,13 +317,8 @@ pub const S3 = struct {
         return .{
             .io = self.io(),
             .read_hints = .{ .high_latency = true },
-            .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
+            .read_stats = self.read_stats.provider(),
         };
-    }
-
-    fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
-        const self: *S3 = @ptrCast(@alignCast(userdata));
-        return self.read_stats.snapshot();
     }
 
     fn openHandle(self: *S3) !struct { u32, *Handle } {
@@ -808,188 +796,57 @@ pub const S3 = struct {
     }
 
     fn performRead(self: *S3, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        const read_size = range_read.readSize(handle.size, offset, data);
-        if (read_size == 0) return 0;
-
         var url_buf: [8 * 1024]u8 = undefined;
         const url = try self.s3Url(handle.uri, &url_buf);
-        const uri = std.Uri.parse(url) catch return error.BadPathName;
-
-        var attempt: usize = 0;
-        while (true) {
-            switch (try self.performReadAttempt(uri, url, data, offset, read_size)) {
-                .success => return read_size,
-                .retry => |retry| {
-                    self.read_stats.recordFailure(retry.failure);
-                    if (attempt >= self.max_retries) return error.RetriesExhausted;
-
-                    self.read_stats.recordRetry();
-                    const delay = retry.delay orelse range_read.fullJitterDelay(
-                        self.base.inner,
-                        self.retry_initial_delay,
-                        self.retry_max_delay,
-                        attempt,
-                    );
-                    self.read_stats.recordRetryDelay(delay);
-                    self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
-                    attempt += 1;
-                },
-            }
-        }
-    }
-
-    fn performReadAttempt(
-        self: *S3,
-        uri: std.Uri,
-        url: []const u8,
-        data: []const []u8,
-        offset: u64,
-        read_size: usize,
-    ) !range_read.AttemptResult {
-        var range_buf: [64]u8 = undefined;
-        const range_header = std.fmt.bufPrint(
-            &range_buf,
-            "bytes={d}-{d}",
-            .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
-        ) catch unreachable;
-
-        var timestamp_buf: [16]u8 = undefined;
-        const timestamp = self.getTimestamp(&timestamp_buf) catch unreachable;
-
-        const signer: AwsSigV4 = .{
-            .access_key = self.config.access_key,
-            .secret_key = self.config.secret_key,
-            .region = self.config.region,
-            .service = self.config.auth_service,
-        };
-        var authorization_buffer: [512]u8 = undefined;
-        const authorization = signer.generateAuthHeader(
-            &authorization_buffer,
-            .GET,
-            uri,
-            timestamp,
-            &.{.{ .name = "Range", .value = range_header }},
-        ) catch |err| {
-            log.err("Failed to generate auth header: {}", .{err});
-            return err;
-        };
-
-        self.read_stats.recordAttempt();
-        var req = self.client.request(.GET, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
-            },
-            .extra_headers = &.{
-                .{ .name = "x-amz-date", .value = timestamp },
-                .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-                .{ .name = "Range", .value = range_header },
-            },
-        }) catch |err| switch (err) {
-            error.Timeout => {
-                log.warn("Failed to connect: {}", .{err});
-                return .{ .retry = .{ .failure = .timeout } };
-            },
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            error.NetworkDown,
-            error.NameServerFailure,
-            => {
-                log.warn("Failed to connect: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to connect: {}", .{err});
-                return err;
-            },
-        };
-        defer req.deinit();
-
-        req.sendBodiless() catch |err| switch (err) {
-            error.WriteFailed => {
-                log.warn("Failed to send headers: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-        };
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = req.receiveHead(&redirect_buffer) catch |err| switch (err) {
-            error.Timeout => {
-                log.warn("Failed to receive headers: {}", .{err});
-                return .{ .retry = .{ .failure = .timeout } };
-            },
-            error.HttpConnectionClosing,
-            error.HttpRequestTruncated,
-            error.ReadFailed,
-            error.WriteFailed,
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            error.NetworkDown,
-            error.NameServerFailure,
-            => {
-                log.warn("Failed to receive headers: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to receive headers: {}", .{err});
-                return err;
-            },
-        };
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            const failure = classifyStatus(res.head.status) orelse {
-                log.err("Failed to read {s}: {s}", .{ url, res.head.bytes });
-                return error.RequestFailed;
-            };
-            log.warn("Failed to read {s}: {s}", .{ url, res.head.bytes });
-            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
-        }
-
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk range_read.parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
-        range_read.readResponse(
-            res.reader(&.{}),
-            res.head.status,
-            content_range,
-            offset,
-            data,
-            read_size,
-        ) catch |err| switch (err) {
-            error.EndOfStream, error.ReadFailed => {
-                log.warn("Failed to read from response: {}", .{err});
-                return .{ .retry = .{ .failure = .transient } };
-            },
-            else => {
-                log.err("Failed to read from response: {}", .{err});
-                return err;
-            },
-        };
-        self.read_stats.recordSuccess(read_size);
-        return .success;
+        var request: SignedRequest = .{ .s3 = self, .uri = std.Uri.parse(url) catch return error.BadPathName };
+        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
+            .backend = "s3",
+            .target = url,
+            .unavailable = unavailable,
+            .context = &request,
+            .prepare = SignedRequest.prepare,
+        }, data, offset, range_read.readSize(handle.size, offset, data));
     }
 
     /// S3 rate limiting is `503 SlowDown` as well as `429`.
-    fn classifyStatus(status: std.http.Status) ?ReadFailure {
-        return range_read.classifyStatus(status, .throttle);
-    }
+    const unavailable: ReadFailure = .throttle;
+
+    /// One SigV4-signed GET. The signature covers `x-amz-date` and `Range`,
+    /// so it is recomputed for every attempt.
+    const SignedRequest = struct {
+        s3: *S3,
+        uri: std.Uri,
+        timestamp: [16]u8 = undefined,
+        authorization: [512]u8 = undefined,
+        headers: [2]std.http.Header = undefined,
+
+        fn prepare(context: *anyopaque, attempt: range_read.Attempt) anyerror!range_read.PreparedRequest {
+            const self: *SignedRequest = @ptrCast(@alignCast(context));
+            const timestamp = try self.s3.getTimestamp(&self.timestamp);
+            const signer: AwsSigV4 = .{
+                .access_key = self.s3.config.access_key,
+                .secret_key = self.s3.config.secret_key,
+                .region = self.s3.config.region,
+                .service = self.s3.config.auth_service,
+            };
+            const authorization = try signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{attempt.range});
+            self.headers = .{
+                .{ .name = "x-amz-date", .value = timestamp },
+                .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
+            };
+            return .{
+                .uri = self.uri,
+                .authorization = if (authorization) |value| .{ .override = value } else .omit,
+                .extra_headers = &self.headers,
+            };
+        }
+    };
 };
 
 test "S3 classifies 503 SlowDown as throttling" {
-    try std.testing.expectEqual(ReadFailure.throttle, S3.classifyStatus(.service_unavailable).?);
-    try std.testing.expectEqual(ReadFailure.throttle, S3.classifyStatus(.too_many_requests).?);
-    try std.testing.expectEqual(ReadFailure.server_failure, S3.classifyStatus(.internal_server_error).?);
-    try std.testing.expectEqual(ReadFailure.timeout, S3.classifyStatus(.request_timeout).?);
-    try std.testing.expect(S3.classifyStatus(.not_found) == null);
+    try std.testing.expectEqual(ReadFailure.throttle, range_read.classifyStatus(.service_unavailable, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.throttle, range_read.classifyStatus(.too_many_requests, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, range_read.classifyStatus(.internal_server_error, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.timeout, range_read.classifyStatus(.request_timeout, S3.unavailable).?);
+    try std.testing.expect(range_read.classifyStatus(.not_found, S3.unavailable) == null);
 }
