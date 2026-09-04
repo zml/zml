@@ -1123,9 +1123,10 @@ pub const RmsNormGated = struct {
     pub fn forward(self: RmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {
         const x_f32 = x.convert(.f32);
         const gate_f32 = gate.convert(.f32);
+        const weight_f32 = self.weight.convert(.f32);
 
         const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
-        const output = normalized.mul(self.weight.broad(x.shape()));
+        const output = normalized.mul(weight_f32.broad(x.shape()));
 
         const gated_output = output.mul(gate_f32.silu());
         return gated_output.convert(x.dtype());
