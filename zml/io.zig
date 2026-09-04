@@ -303,7 +303,7 @@ pub const Loader = struct {
         dma_chunk_size: usize,
     };
 
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) !Loader {
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) error{OutOfMemory}!Loader {
         const pool_count = platform.devices.len;
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
         errdefer allocator.free(dma_allocators);
@@ -406,6 +406,10 @@ pub const Loader = struct {
         log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
     }
 
+    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: Tensor, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+        loader.group.async(io, defaultCallback, .{ loader, io, &tensor, buffer, store, shardings, opts });
+    }
+
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
@@ -428,7 +432,15 @@ pub const Loader = struct {
         loaded.* = true;
     }
 
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
+    fn loadSingleInner(
+        self: *Loader,
+        io: std.Io,
+        source: *safetensors.Tensor,
+        shape: Shape,
+        buffer: *Buffer,
+        shardings: []const Sharding,
+        opts: LoadOpts,
+    ) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
@@ -478,28 +490,31 @@ pub const Loader = struct {
         shardings: []const Sharding,
         exe: *const Exe,
         opts: LoadOpts,
-    ) !void {
+    ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
         const sources = (store.getSourcesById(tensor.id) orelse return error.NotFound).tensors;
         const buffers = try arena.alloc(Buffer, sources.len);
         const loaded = try arena.alloc(bool, sources.len);
         @memset(loaded, false);
         defer for (buffers, loaded) |*b, l| if (l) b.deinit();
 
-        var node = if (opts.progress) |progress| b: {
+        var node = if (opts.progress) |progress| p: {
             var writer = std.Io.Writer.Allocating.init(arena);
-            try writer.writer.writeAll("Running executable on ");
-            for (sources, 0..) |source, i| {
-                try writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name });
+            print: {
+                writer.writer.writeAll("Running executable on ") catch break :print;
+                for (sources, 0..) |source, i| {
+                    writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name }) catch break :print;
+                }
             }
-
-            break :b progress.start(writer.written(), 1);
+            break :p progress.start(writer.written(), 1);
         } else null;
         defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
             self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
         }
-        try self.group.await(io);
+        self.group.await(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
 
         if (std.mem.findScalar(bool, loaded, false)) |_| {
             return error.LoadFailed;
@@ -608,8 +623,12 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .cuda, .oneapi => .{
+                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer),
+            },
+            .rocm, .tpu, .neuron, .cpu, .metal => .{
+                .buffered = try .init(allocator, io, platform, shape, sharding, buffer),
+            },
         };
     }
 
