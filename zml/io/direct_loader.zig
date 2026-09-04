@@ -64,6 +64,13 @@ const VectoredLoadMetrics = struct {
     lifecycle_wait_ns: std.atomic.Value(u64) = .init(0),
     block_wait_ns: std.atomic.Value(u64) = .init(0),
     read_ns: std.atomic.Value(u64) = .init(0),
+    /// From a request's enqueue to its last DMA callback: how long the DMA
+    /// stage holds a lifecycle credit and pinned blocks per request.
+    dma_stage_ns: std.atomic.Value(u64) = .init(0),
+    /// Inside `ensureState` for a claimed job's items: the first worker to
+    /// touch a tensor creates its PJRT buffers and transfer managers there,
+    /// and the other workers of the same tensor wait for it.
+    tensor_init_ns: std.atomic.Value(u64) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: u64 = std.math.maxInt(u64),
     probe_admission_start: u64 = std.math.maxInt(u64),
@@ -172,32 +179,31 @@ const VectoredTensorTransfer = struct {
     /// every transfer submitted to it has completed and one of them carried
     /// the last-transfer flag, whatever their completion order: the flag
     /// only closes the buffer to further calls. The pump, the only
-    /// submitter, therefore flags the submission that reaches the plan's
-    /// piece count, and no piece ever waits for another one.
+    /// submitter, therefore flags the submission that completes the
+    /// placement's bytes, and no piece ever waits for another one.
     const Target = struct {
         manager: *pjrt.AsyncHostToDeviceTransferManager,
         device_index: usize,
+        /// Bytes of the placement on this device; the pieces partition them.
         total: usize,
-        /// Pieces the plan routes here; at least one.
-        planned_pieces: u32,
         /// Owned by the pump; read by the awaiting task once the batch is
         /// done and nothing submits any more.
-        submitted_pieces: u32 = 0,
+        submitted_bytes: usize = 0,
 
-        /// Whether the next submission closes the buffer.
-        fn nextIsLast(self: *const Target) bool {
-            std.debug.assert(self.submitted_pieces < self.planned_pieces);
-            return self.submitted_pieces + 1 == self.planned_pieces;
+        /// Whether a submission of `len` bytes closes the buffer.
+        fn nextIsLast(self: *const Target, len: usize) bool {
+            std.debug.assert(len != 0 and self.submitted_bytes + len <= self.total);
+            return self.submitted_bytes + len == self.total;
         }
 
-        fn noteSubmitted(self: *Target) void {
-            std.debug.assert(self.submitted_pieces < self.planned_pieces);
-            self.submitted_pieces += 1;
+        fn noteSubmitted(self: *Target, len: usize) void {
+            std.debug.assert(self.submitted_bytes + len <= self.total);
+            self.submitted_bytes += len;
         }
 
-        /// Every planned piece went out, so the last-transfer flag did too.
+        /// Every byte went out, so the last-transfer flag did too.
         fn fullySubmitted(self: *const Target) bool {
-            return self.submitted_pieces == self.planned_pieces;
+            return self.submitted_bytes == self.total;
         }
     };
 
@@ -215,17 +221,10 @@ const VectoredTensorTransfer = struct {
         sharding: Sharding,
         output: *Buffer,
         progress_parent: ?*std.Progress.Node,
-        planned_pieces: []const u32,
     ) !VectoredTensorTransfer {
         const packed_shape = shape.packedShape();
         const packed_placement = try sharding.placement(packed_shape);
         const ordered_devices = sharding.devicesInCanonicalOrder();
-        // A target without a planned piece would never receive the
-        // last-transfer flag and never become ready.
-        if (planned_pieces.len != ordered_devices.len) return error.InvalidLoaderJob;
-        for (planned_pieces) |count| {
-            if (count == 0) return error.InvalidLoaderJob;
-        }
         const targets = try allocator.alloc(Target, ordered_devices.len);
         errdefer allocator.free(targets);
 
@@ -252,7 +251,6 @@ const VectoredTensorTransfer = struct {
                 .manager = manager,
                 .device_index = device.id,
                 .total = packed_placement.shape.byteSize(),
-                .planned_pieces = planned_pieces[i],
             };
             initialized += 1;
             pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
@@ -362,7 +360,6 @@ const LoaderLoadItem = struct {
             ctx.item.sharding,
             ctx.item.output,
             ctx.direct.progress,
-            ctx.item.planned_pieces,
         );
     }
 
@@ -371,10 +368,6 @@ const LoaderLoadItem = struct {
     shape: Shape,
     sharding: Sharding,
     output: *Buffer,
-    /// DMA pieces per writer, counted by the planner into its plan's
-    /// `piece_counts`; complete before the plan is published, so before any
-    /// worker can touch the item.
-    planned_pieces: []u32 = &.{},
     state: LazyOnce(VectoredTensorTransfer, InitContext, initTransfer) = .{},
 
     fn ensureState(self: *LoaderLoadItem, direct: *DirectLoader) !*VectoredTensorTransfer {
@@ -570,9 +563,6 @@ pub const Batch = struct {
         events: []VectoredLoadPipeline.EventContext,
         /// Event slots handed out so far; owned by `metadata_mutex`.
         events_used: usize = 0,
-        /// Planned DMA pieces per (item, writer), sliced by
-        /// `LoaderLoadItem.planned_pieces`.
-        piece_counts: []u32 = &.{},
         source_bytes: u64,
         source_runs: usize,
         planning_ns: u64 = 0,
@@ -582,7 +572,6 @@ pub const Batch = struct {
         /// Frees the plan; the pipeline retired its contexts first.
         fn destroy(self: *Plan) void {
             const allocator = self.allocator;
-            allocator.free(self.piece_counts);
             allocator.free(self.events);
             allocator.free(self.blocks);
             allocator.free(self.requests);
@@ -720,6 +709,18 @@ pub const Batch = struct {
         self.plans.deinit(self.allocator);
         self.allocator.destroy(self);
     }
+
+    /// After `done`: every item was touched and every target received its
+    /// last transfer.
+    fn fullySubmitted(self: *const Batch) bool {
+        for (self.items) |item| {
+            const state = item.state.readyValue() orelse return false;
+            for (state.targets) |target| {
+                if (!target.fullySubmitted()) return false;
+            }
+        }
+        return true;
+    }
 };
 
 const VectoredLoadPipeline = struct {
@@ -735,6 +736,8 @@ const VectoredLoadPipeline = struct {
         source_finished: std.atomic.Value(bool) = .init(false),
         read_epoch: u64,
         admission_id: u64 = 0,
+        /// Awake-clock nanoseconds of the enqueue; 0 until then.
+        enqueued_ns: u64 = 0,
 
         /// The slot of a job that was never claimed: nothing pending, so the
         /// retirement checks hold.
@@ -782,6 +785,9 @@ const VectoredLoadPipeline = struct {
             // that owns this request, so nothing is touched after it.
             const pipeline = self.pipeline;
             const batch = self.batch;
+            if (self.enqueued_ns != 0) {
+                _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
+            }
             self.completed.store(true, .release);
             pipeline.request_gate.release(pipeline.io);
             batch.finishJobs(1);
@@ -816,53 +822,9 @@ const VectoredLoadPipeline = struct {
     };
 
     /// Transfers ready for one device, submitted in arrival order so the
-    /// oldest requests and submissions complete first. A dead prefix is
-    /// dropped when it reaches half the list, so pushes and pops stay
-    /// amortized constant. Owned by `metadata_mutex`.
-    const ReadyQueue = struct {
-        items: std.ArrayListUnmanaged(ReadyTransfer) = .empty,
-        head: usize = 0,
-
-        fn len(self: *const ReadyQueue) usize {
-            return self.items.items.len - self.head;
-        }
-
-        fn pending(self: *const ReadyQueue) []const ReadyTransfer {
-            return self.items.items[self.head..];
-        }
-
-        fn ensureUnusedCapacity(self: *ReadyQueue, allocator: std.mem.Allocator, count: usize) !void {
-            if (self.head != 0 and self.head >= self.items.items.len / 2) {
-                const live = self.len();
-                std.mem.copyForwards(ReadyTransfer, self.items.items[0..live], self.items.items[self.head..]);
-                self.items.items.len = live;
-                self.head = 0;
-            }
-            try self.items.ensureUnusedCapacity(allocator, count);
-        }
-
-        fn appendAssumeCapacity(self: *ReadyQueue, transfer: ReadyTransfer) void {
-            self.items.appendAssumeCapacity(transfer);
-        }
-
-        fn pop(self: *ReadyQueue) ?ReadyTransfer {
-            if (self.head == self.items.items.len) return null;
-            const transfer = self.items.items[self.head];
-            self.head += 1;
-            if (self.head == self.items.items.len) self.clear();
-            return transfer;
-        }
-
-        fn clear(self: *ReadyQueue) void {
-            self.items.clearRetainingCapacity();
-            self.head = 0;
-        }
-
-        fn deinit(self: *ReadyQueue, allocator: std.mem.Allocator) void {
-            self.items.deinit(allocator);
-            self.* = undefined;
-        }
-    };
+    /// oldest requests and submissions complete first. Owned by
+    /// `metadata_mutex`.
+    const ReadyQueue = std.Deque(ReadyTransfer);
 
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
@@ -933,7 +895,7 @@ const VectoredLoadPipeline = struct {
         std.debug.assert(dma_budget_bytes > 0);
         const ready_queues = try allocator.alloc(ReadyQueue, platform.devices.len);
         errdefer allocator.free(ready_queues);
-        @memset(ready_queues, .{});
+        @memset(ready_queues, .empty);
         const active_bytes_by_device = try allocator.alloc(usize, platform.devices.len);
         errdefer allocator.free(active_bytes_by_device);
         @memset(active_bytes_by_device, 0);
@@ -1103,7 +1065,7 @@ const VectoredLoadPipeline = struct {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
                 const target = &tensor.targets[writer_index];
-                self.ready_queues[target.device_index].appendAssumeCapacity(.{
+                self.ready_queues[target.device_index].pushBackAssumeCapacity(.{
                     .target = target,
                     .block = block,
                     .source_offset = transfer.block_offset,
@@ -1150,8 +1112,8 @@ const VectoredLoadPipeline = struct {
                 // Any queued transfer can go: nothing waits for another
                 // piece, so each queue is served in arrival order.
                 var ready_mask: u64 = 0;
-                for (self.ready_queues, 0..) |*queue, device_index| {
-                    if (queue.len() != 0) ready_mask |= @as(u64, 1) << @intCast(device_index);
+                for (self.ready_queues, 0..) |queue, device_index| {
+                    if (queue.len != 0) ready_mask |= @as(u64, 1) << @intCast(device_index);
                 }
                 const device_index = selectLoaderDmaDevice(
                     self.active_bytes_by_device,
@@ -1161,7 +1123,7 @@ const VectoredLoadPipeline = struct {
                     self.next_device,
                 );
                 if (device_index) |index| {
-                    selected = self.ready_queues[index].pop().?;
+                    selected = self.ready_queues[index].popFront().?;
                     self.next_device = (index + 1) % self.ready_queues.len;
                     // The piece that crosses the budget is admitted: a
                     // device with room always has a transfer in flight.
@@ -1205,9 +1167,9 @@ const VectoredLoadPipeline = struct {
             0,
             transfer.block.lease.data[transfer.source_offset..][0..transfer.len],
             @intCast(transfer.destination_offset),
-            target.nextIsLast(),
+            target.nextIsLast(transfer.len),
         );
-        target.noteSubmitted();
+        target.noteSubmitted(transfer.len);
 
         // The plan holds one event slot per planned submission; the batch
         // owns it. A pump destroys the event once its callback has run, or
@@ -1282,11 +1244,10 @@ const VectoredLoadPipeline = struct {
     fn abortReady(self: *VectoredLoadPipeline) void {
         self.metadata_mutex.lockUncancelable(self.io);
         for (self.ready_queues) |*queue| {
-            for (queue.pending()) |transfer| {
+            while (queue.popFront()) |transfer| {
                 transfer.block.complete();
                 self.ready_entries -= 1;
             }
-            queue.clear();
         }
         self.metadata_mutex.unlock(self.io);
     }
@@ -1426,10 +1387,12 @@ const VectoredReadRequest = struct {
         @memset(queue_counts, 0);
 
         for (transfers) |transfer| {
+            const init_started = awakeNs(pipeline.io);
             const tensor = transfer.item.ensureState(direct) catch |err| {
                 pipeline.recordError(err);
                 return;
             };
+            _ = pipeline.metrics.tensor_init_ns.fetchAdd(awakeNs(pipeline.io) -| init_started, .monotonic);
             if (transfer.block_index >= block_count or
                 transfer.block_offset >= pipeline.block_size or
                 transfer.len > pipeline.block_size - transfer.block_offset)
@@ -1512,6 +1475,7 @@ const VectoredReadRequest = struct {
             _ = pipeline.registerBlock(request, lease.*, refs);
             lease.data = &.{};
         }
+        request.enqueued_ns = awakeNs(pipeline.io);
         pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
             for (transfers) |transfer| {
                 VectoredLoadPipeline.abandonSubmissions(
@@ -1528,8 +1492,8 @@ const VectoredReadRequest = struct {
 /// A strict FIFO of published batches. A batch holds one plan per source
 /// file, published as soon as that file is planned. Within a plan, jobs are
 /// handed out in the planned order (fair by destination-device bytes); plans
-/// in file order; a later batch's first job only
-/// after every job of the earlier ones. The queue holds only batches that
+/// in file order; a later batch's first job only after every job of the
+/// earlier ones. The queue holds only batches that
 /// are open (their submission is still planning) or have unclaimed jobs: a
 /// sealed batch is popped with its last claim, at its seal when already
 /// exhausted, or by `fail`, and a batch can only be freed after `done`,
@@ -1699,10 +1663,7 @@ const FairVectoredReadScheduler = struct {
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
-                if (writer_index >= device_indices.len or writer_index >= item.planned_pieces.len)
-                    return error.InvalidLoaderJob;
-                // One DMA submission per writer of every emitted record.
-                if (!merged) item.planned_pieces[writer_index] += 1;
+                if (writer_index >= device_indices.len) return error.InvalidLoaderJob;
                 const device_index = device_indices[writer_index];
                 physical_bytes[device_index] = try std.math.add(
                     usize,
@@ -1753,9 +1714,9 @@ const FairVectoredReadScheduler = struct {
     /// minimum number of jobs at tensor-safe boundaries, in a fair order
     /// across the destination devices (the planning order when there is one
     /// device); no job depends on another, since every DMA piece is
-    /// submitted as soon as its block is read. The plan also carries the contexts its jobs
-    /// need: one request per job, one block per job block, one event per
-    /// DMA submission (a transfer's writer count).
+    /// submitted as soon as its block is read. The plan also carries the
+    /// contexts its jobs need: one request per job, one block per job block,
+    /// one event per DMA submission (a transfer's writer count).
     fn preparePlan(
         allocator: std.mem.Allocator,
         device_count: usize,
@@ -1803,24 +1764,6 @@ const FairVectoredReadScheduler = struct {
                 if (device_index.* >= device_count) return error.DmaDeviceMismatch;
             }
         }
-        // One piece counter per (item, writer), owned by the plan; the items
-        // slice it and `appendTransfers` counts into it.
-        var writer_total: usize = 0;
-        for (tensor_plans) |plan| writer_total += plan.device_indices.len;
-        const piece_counts = try allocator.alloc(u32, writer_total);
-        errdefer allocator.free(piece_counts);
-        @memset(piece_counts, 0);
-        errdefer for (order) |item_index| {
-            items[item_index].planned_pieces = &.{};
-        };
-        {
-            var next: usize = 0;
-            for (order, tensor_plans) |item_index, plan| {
-                items[item_index].planned_pieces = piece_counts[next..][0..plan.device_indices.len];
-                next += plan.device_indices.len;
-            }
-        }
-
         var jobs_list: std.ArrayList(PlanningJob) = .empty;
         defer jobs_list.deinit(allocator);
         var transfers_list: std.ArrayList(VectoredLoadPipeline.PlannedTransfer) = .empty;
@@ -1996,7 +1939,6 @@ const FairVectoredReadScheduler = struct {
             .requests = requests,
             .blocks = blocks,
             .events = events,
-            .piece_counts = piece_counts,
             .source_bytes = source_bytes,
             .source_runs = source_runs,
         };
@@ -2188,8 +2130,8 @@ const FairVectoredReadScheduler = struct {
     }
 };
 
-/// Planning input for the fair-order tests: one job per entry, chained to the
-/// previous job of the same tensor; `file_offset` is the entry index.
+/// Planning input for the fair-order tests: one job per entry; `file_offset`
+/// is the entry index.
 const FairOrderJob = struct {
     physical_bytes: []const usize,
 };
@@ -4175,13 +4117,21 @@ pub const DirectLoader = struct {
     }
     /// Waits for the batch's last completion unit, retires it and returns
     /// the loader's sticky error if the pipeline failed. Targets the failure
-    /// left unsubmitted are marked so their buffers never report ready.
+    /// left unsubmitted are marked so their buffers never report ready. A
+    /// batch that completed without an error must have closed every target
+    /// (the pump flagged the submission that completed its bytes); one that
+    /// did not would leave a buffer that never becomes ready, so it fails
+    /// the loader instead.
     pub fn awaitBatch(self: *DirectLoader, batch: *Batch) !void {
         batch.done.waitUncancelable(self.io);
         const done_at: std.Io.Timestamp = .now(self.io, .awake);
         // Every request of this batch has completed: no worker or callback
         // touches its managers or contexts any more.
-        const load_error = self.pipeline.errorValue();
+        var load_error = self.pipeline.errorValue();
+        if (load_error == null and !batch.fullySubmitted()) {
+            self.pipeline.recordError(error.IncompleteTransfer);
+            load_error = self.pipeline.errorValue();
+        }
         if (load_error != null) {
             for (batch.items) |item| {
                 const state = item.state.readyValue() orelse continue;
@@ -4267,7 +4217,7 @@ pub const DirectLoader = struct {
     }
     fn logSummary(self: *DirectLoader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.bytesLoaded(),
@@ -4284,6 +4234,8 @@ pub const DirectLoader = struct {
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
         });
     }
 
@@ -4718,60 +4670,19 @@ test "source read runtime scores a window from its first admission on busy time"
     try std.testing.expectEqual(@as(u64, 12 * max_load_read_request_size), evidence.bytes);
 }
 
-test "the submission that reaches a target's planned piece count carries the last flag" {
-    var target: VectoredTensorTransfer.Target = .{
-        .manager = undefined,
-        .device_index = 0,
-        .total = 100,
-        .planned_pieces = 3,
-    };
+test "the submission that completes a target's bytes carries the last flag" {
+    var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 100 };
     try std.testing.expect(!target.fullySubmitted());
-    try std.testing.expect(!target.nextIsLast());
-    target.noteSubmitted();
-    try std.testing.expect(!target.nextIsLast());
-    target.noteSubmitted();
-    try std.testing.expect(target.nextIsLast());
+    // Pieces arrive in any order; only the byte total matters.
+    try std.testing.expect(!target.nextIsLast(20));
+    target.noteSubmitted(20);
+    try std.testing.expect(!target.nextIsLast(30));
+    target.noteSubmitted(30);
+    try std.testing.expect(!target.nextIsLast(10));
+    try std.testing.expect(target.nextIsLast(50));
     try std.testing.expect(!target.fullySubmitted());
-    target.noteSubmitted();
+    target.noteSubmitted(50);
     try std.testing.expect(target.fullySubmitted());
-}
-
-test "ready queue serves transfers in arrival order and drops its dead prefix" {
-    const allocator = std.testing.allocator;
-    var queue: VectoredLoadPipeline.ReadyQueue = .{};
-    defer queue.deinit(allocator);
-    var target: VectoredTensorTransfer.Target = .{
-        .manager = undefined,
-        .device_index = 0,
-        .total = 100,
-        .planned_pieces = 1,
-    };
-    var block: VectoredLoadPipeline.BlockContext = undefined;
-    const entry = struct {
-        fn make(target_: *VectoredTensorTransfer.Target, block_: *VectoredLoadPipeline.BlockContext, offset: usize) VectoredLoadPipeline.ReadyTransfer {
-            return .{ .target = target_, .block = block_, .source_offset = 0, .destination_offset = offset, .len = 1 };
-        }
-    }.make;
-
-    try std.testing.expect(queue.pop() == null);
-    try queue.ensureUnusedCapacity(allocator, 4);
-    for (0..4) |offset| queue.appendAssumeCapacity(entry(&target, &block, offset));
-    try std.testing.expectEqual(@as(usize, 4), queue.len());
-    try std.testing.expectEqual(@as(usize, 0), queue.pop().?.destination_offset);
-    try std.testing.expectEqual(@as(usize, 1), queue.pop().?.destination_offset);
-    try std.testing.expectEqual(@as(usize, 2), queue.pending().len);
-    // Half the list is dead: the reservation compacts it.
-    try queue.ensureUnusedCapacity(allocator, 1);
-    try std.testing.expectEqual(@as(usize, 0), queue.head);
-    try std.testing.expectEqual(@as(usize, 2), queue.items.items.len);
-    queue.appendAssumeCapacity(entry(&target, &block, 4));
-    try std.testing.expectEqual(@as(usize, 2), queue.pop().?.destination_offset);
-    try std.testing.expectEqual(@as(usize, 3), queue.pop().?.destination_offset);
-    try std.testing.expectEqual(@as(usize, 4), queue.pop().?.destination_offset);
-    // Draining resets the list so the next push starts at the front.
-    try std.testing.expect(queue.pop() == null);
-    try std.testing.expectEqual(@as(usize, 0), queue.items.items.len);
-    try std.testing.expectEqual(@as(usize, 0), queue.head);
 }
 
 /// A single-device pipeline without PJRT: enough for request, block and
@@ -4779,7 +4690,7 @@ test "ready queue serves transfers in arrival order and drops its dead prefix" {
 const TestPipeline = struct {
     metrics: VectoredLoadMetrics = .{},
     gate: AdaptiveRequestGate,
-    queues: [1]VectoredLoadPipeline.ReadyQueue = .{.{}},
+    queues: [1]VectoredLoadPipeline.ReadyQueue = .{.empty},
     active: [1]usize = .{0},
     active_pieces: [1]usize = .{0},
     pipeline: VectoredLoadPipeline,
@@ -4885,9 +4796,8 @@ test "late vectored callback failure drains and signals completion" {
     try pool.acquireMany(io, &leased, &.{.{}}, &scratch);
     const block = pipeline.registerBlock(request, leased[0], 1);
     try std.testing.expectEqual(&batch.plans.items[0].blocks[0], block);
-    var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64, .planned_pieces = 1 };
-    try fixture.queues[0].ensureUnusedCapacity(allocator, 1);
-    fixture.queues[0].appendAssumeCapacity(.{
+    var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
+    try fixture.queues[0].pushBack(allocator, .{
         .target = &target,
         .block = block,
         .source_offset = 0,
@@ -5183,24 +5093,22 @@ const DispatchSpansTest = struct {
             .shape = shape,
             .offset = 0,
         };
-        const planned_pieces = try allocator.alloc(u32, writer_count);
-        defer allocator.free(planned_pieces);
-        @memset(planned_pieces, 0);
         var item: LoaderLoadItem = .{
             .source = &source_tensor,
             .source_slot = undefined,
             .shape = shape,
             .sharding = sharding,
             .output = undefined,
-            .planned_pieces = planned_pieces,
         };
         var transfers: std.ArrayList(VectoredLoadPipeline.PlannedTransfer) = .empty;
         defer transfers.deinit(allocator);
         const physical_bytes = try allocator.alloc(usize, device_count);
         defer allocator.free(physical_bytes);
-        const emitted_pieces = try allocator.alloc(u32, writer_count);
-        defer allocator.free(emitted_pieces);
-        @memset(emitted_pieces, 0);
+        // The pump flags a target's last transfer when its pieces reach the
+        // placement's bytes, so every writer's pieces must sum to it.
+        const written_bytes = try allocator.alloc(usize, writer_count);
+        defer allocator.free(written_bytes);
+        @memset(written_bytes, 0);
 
         const request_count = std.math.divCeil(usize, source.len, request_size) catch unreachable;
         var reverse_index = request_count;
@@ -5236,14 +5144,12 @@ const DispatchSpansTest = struct {
                         actual[writer_index * writer_size + transfer.destination_offset ..][0..transfer.len],
                         source[block_source_offset..][0..transfer.len],
                     );
-                    emitted_pieces[writer_index] += 1;
+                    written_bytes[writer_index] += transfer.len;
                 }
             }
         }
         try std.testing.expectEqualSlices(u8, expected, actual);
-        // The planner's per-writer piece count is what the pump flags by.
-        try std.testing.expectEqualSlices(u32, emitted_pieces, planned_pieces);
-        for (planned_pieces) |count| try std.testing.expect(count != 0);
+        for (written_bytes) |bytes| try std.testing.expectEqual(writer_size, bytes);
     }
 };
 
