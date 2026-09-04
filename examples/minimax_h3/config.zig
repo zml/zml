@@ -1,4 +1,8 @@
-// hardcoded 768p numbers from the json. not parsed at runtime.
+//! Hardcoded 768P MiniMax-H3 geometry and layer sizes from `config.json`.
+//!
+//!   pixels  1344×768×124
+//!   latents 84×48×37     (spatial /16, temporal /4, plus VAE padding)
+//!   DiT tokens  37 × 24 × 42   (1×2×2 patchify of the latent grid)
 
 const std = @import("std");
 const zml = @import("zml");
@@ -9,8 +13,10 @@ pub const video_fps: f32 = 24.0;
 pub const visual_spatial: u32 = 16;
 pub const visual_temporal: u32 = 4;
 pub const default_steps: u32 = 30;
+/// Rectified-flow time-shift used by the official video scheduler.
 pub const video_shift: f32 = 12.0;
-pub const modality_count: i64 = 3; // vid / text / unused audio in the ckpt
+/// Packed-sequence modalities in the checkpoint: video, text, unused audio.
+pub const modality_count: i64 = 3;
 
 pub const pixel_w: u32 = 1344;
 pub const pixel_h: u32 = 768;
@@ -20,6 +26,7 @@ pub const latent_t: u32 = 37;
 pub const latent_h: u32 = 48;
 pub const latent_w: u32 = 84;
 
+/// DiT (`transformer/config.json`). Python: `MiniMaxH3Transformer3DModel`.
 pub const Config = struct {
     hidden_size: i64 = 5376,
     num_layers: i64 = 50,
@@ -36,12 +43,13 @@ pub const Config = struct {
     qk_norm_eps: f32 = 1e-5,
     final_norm_eps: f32 = 1e-5,
 
+    /// MM-RoPE width: 3 axes × `rope_freq_dim`, then duplicated (`ops.ropeCat3`).
     pub fn rotaryDim(self: Config) i64 {
         return 2 * 3 * self.rope_freq_dim;
     }
 };
 
-// qwen is 64 layers, h3 only uses 50
+/// Qwen text tower is 64 layers; MiniMax-H3 uses the first 50 as `text_encoder`.
 pub const EncoderConfig = struct {
     hidden_size: i64 = 5120,
     used_hidden_layers: i64 = 50,
@@ -71,13 +79,14 @@ pub const geo: Geometry = .{
     .latent_h = latent_h,
     .latent_w = latent_w,
     .video_tokens = latent_t * (latent_h / 2) * (latent_w / 2),
-    .video_patch_dim = 96,
+    .video_patch_dim = 96, // in_channels (24) × 1 × 2 × 2
 };
 
+/// Head-wise tensor-parallel mesh on `.model`. GPU count must divide every
+/// sharded head dimension (DiT 56, encoder 64/8, VAE 32).
 pub const Shardings = struct {
     model: zml.Sharding,
 
-    // tp along .model. use as many gpus as the sharded head dims can split evenly.
     fn tpCount(available: usize) usize {
         const dit: Config = .{};
         const enc: EncoderConfig = .{};
@@ -121,7 +130,7 @@ pub const Shardings = struct {
     }
 };
 
-// vae/config.json decoder + latent moments
+/// Channel-wise latent moments from `vae/config.json`. Applied before decode.
 pub const visual_latents_mean = [24]f32{
     0.858090341091156,    -0.9606591463088989,  1.0661640167236328,   -0.5090325474739075,
     -0.2727581858634949,  -1.3675414323806763,  -0.2553254961967468,  -0.26907554268836975,
@@ -139,6 +148,7 @@ pub const visual_latents_std = [24]f32{
     3.276226282119751,   3.1627357006073,     2.28168129920959475, 2.6127843856811525,
 };
 
+/// VAE decoder (`vae/config.json`). Python: `AutoencoderKLMiniMaxH3`.
 pub const VisualConfig = struct {
     latent_channels: i64 = 24,
     out_channels: i64 = 3,
