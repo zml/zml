@@ -205,50 +205,75 @@ simplification pass.
   conversion of local/default `.adaptive` to `.fixed = 12` was removed.
   `high_latency` only permits blind pre-response bootstrap to 24 then 32.
 - Default source configuration remains adaptive initial 12, maximum 128,
-  clipped by remaining jobs and pinned-memory feasibility. Twelve is an
-  empirical bootstrap, not a value derived from tensor count, request size,
-  storage queue depth, or bandwidth-delay product.
+  clipped by pinned-memory feasibility. Twelve is an empirical bootstrap, not
+  a value derived from tensor count, request size, storage queue depth, or
+  bandwidth-delay product.
 - The source ladder is `1,2,4,8,12,16,24,32,48,64,96,128`. Ninety-six is only
   a ladder rung and was useful as a fixed S3Proxy control; it is not a default
   or model-derived number.
 - Completed jobs contribute their actual byte count to adaptive evidence,
-  including partial tails. The controller has only ramp-up, refine-down, and
-  settled phases. It uses clean 100 ms generations, selects the smallest width
-  within 3% of peak, and may remeasure at most one adjacent borderline
-  candidate. There is no rollback: a probe that cannot complete before the
-  tail simply leaves the current width in place. Metadata can cheaply
-  clip feasibility, but cannot predict a source's latency/bandwidth saturation
-  point, so no job-size-derived initial-width heuristic was added.
+  including partial tails. The controller (`SourceReadWidthController`) is
+  climb-and-hold with two states. Climbing: each window (at least 100 ms of
+  busy time, max(8, width) completions, the width exercised) scores the
+  current rung into that rung's mean; a rung that beats the best rate seen
+  by 3% moves the width one rung up (or holds at the pinned clip); the first
+  rung that does not ends the climb, and the controller holds at the lowest
+  measured rung at or below the best within 3% of it. Before holding it
+  re-measures that hold rung once when its retention is within 0.02 of 0.97,
+  and when the hold rung is the start rung it probes the rung below once and
+  holds at the better answer. Holding: evidence changes nothing. A plain
+  load therefore spends three or four windows away from its final width. No
+  tail rule: a window that cannot complete before the load ends leaves the
+  width in place. Metadata can cheaply clip feasibility, but cannot predict
+  a source's latency/bandwidth saturation point, so no job-size-derived
+  initial-width heuristic was added. Confirmed on B70 (holds 12 or 16 at
+  equal load time, 0.66 s against 0.63 s fixed 12); MI300 and CUDA
+  confirmation pending.
 - Measurement mechanics are separate from width policy. Runtime state is one
-  tagged value—inactive, transitioning, blind, measuring, or scoring—rather
-  than several coupled booleans. The measurement layer rejects stale or
-  insufficient evidence before invoking the controller. Probe counters are
-  ordinary fields protected by one mutex; only the source-call configuration
-  generation remains atomic for lock-free worker admission.
+  value—inactive (holding), measuring (climbing) or blind (pre-response
+  bootstrap)—rather than several coupled booleans. Every decision opens a
+  generation: `applyDecision` puts both gates at the width and fences the
+  generation's window at the next admission (`prepareProbe`), so every read
+  is attributed to the width in effect when it was admitted and nothing is
+  ever drained. The measurement layer rejects stale or insufficient evidence
+  before invoking the controller. Probe counters are ordinary fields
+  protected by one mutex; only the source-call configuration generation
+  remains atomic for lock-free worker admission.
 - Two gates separate clean read-measurement generations from complete request
   lifecycles. All persistent workers compete for lifecycle capacity, configured
   as active reads plus one shared spare and clipped by pinned feasibility; the
   read gate alone limits source calls. A request returns lifecycle credit only
   after all its DMA children finish.
-- Every changed width, including settled backoff, closes and drains the read
-  gate, discards telemetry at the generation boundary, and reopens at the new
-  width. Another settled backoff requires at least one new-generation source
-  admission, so delayed old-width feedback cannot ratchet through several
-  ladder rungs.
-- Activity transitions never close the read gate. Busy to idle (a control
-  tick with no unclaimed job, no pending source job and no read permit held)
-  scores a frozen or complete interval with an infinite remaining tail, drops
-  an incomplete one, then puts both gates at the controller's width and
-  reports it; a scoring freeze or a pending transition therefore never leaves
-  the gate closed or at a previous rung for the next submission. Idle to busy
-  prepares a probe at that width behind the admission fence, so reads
-  admitted before the tick are excluded but the gate is untouched. `create`
-  prepares the first generation before the workers start (born busy), so no
-  read is excluded and the gate is never closed at startup. A probe spans
-  consecutive submissions whenever the 25 ms tick misses the idle gap between
-  them. `gate_closed_ticks` in the loader summary counts control ticks that
-  found the read gate at 0 with jobs unclaimed; only scoring freezes and
-  width changes close it (5-6 per plain Llama load, 1-2 per pack run).
+- Nothing closes the read gate. A changed width sets the new limit and the
+  reads admitted under the previous generation return at their own pace,
+  excluded from the new window by the fence. Source backpressure (boolean
+  until task 7) lowers the width one rung, clips the ladder there and holds;
+  a further sample in the generation a backoff opened is ignored unless a
+  read admitted under that generation has begun, so delayed old-width
+  feedback cannot ratchet through several rungs. `gate_closed_ticks` in the
+  loader summary counts control ticks that found the read gate at 0 with
+  jobs unclaimed and is 0 by construction.
+- The window clock counts busy time. The 10/25 ms control tick still runs
+  while workers sleep in retries (it samples backpressure); a tick that finds
+  nothing unclaimed, no pending source job and no read permit held, after
+  the window's first admission, charges the interval since the previous tick
+  to idle, and the window's elapsed time excludes it. Windows therefore span
+  submissions: many short submissions jointly complete one window, an idle
+  gap neither scores nor resets it, and the controller never learns that
+  batches exist. `create` fences the first window before the workers start
+  (born busy). Every scored window logs `source width window` (generation,
+  width, rate, busy time, completions, exercised width, samples, next width,
+  state).
+- Pinned pre-growth: `DirectLoader.create` grows the platform's retained
+  arenas (`DmaPlatformSettings.ensureSourceWorkingSet`) so every NUMA pool
+  can lease `(32 + 1) * blocks_per_request` blocks, clipped to the mapped
+  ceiling with room for the feed reserves, before the first read: the rungs
+  the controller climbs through never map a slab inside a scored window
+  (146 ms per first hipHostMalloc slab on MI300X). With 16 MiB blocks and
+  requests that is 528 MiB, with 8 MiB blocks and requests 264 MiB (B70:
+  8 MiB beyond calibration's 256 MiB, 1.5 ms). The arenas stay with the
+  platform for later loaders; the ready line logs `retained`, `pregrown`
+  and `pregrowth_ms`.
 - DMA width is fixed at eight per device by default after calibration work
   showed adaptive DMA width added substantial complexity and little load
   value. There is no global DMA parallelism cap.

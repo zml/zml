@@ -2226,15 +2226,29 @@ const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 
 
 /// Source-only adaptive state. DMA width and request size never enter its
 /// evidence or decisions.
+/// Climb-and-hold source width policy. Every scored window is attributed by
+/// the admission fence to the rung in effect when its reads were admitted,
+/// so a rung change never drains the read gate. The controller climbs the
+/// ladder one rung per window while each rung beats the best rate seen by
+/// 3%, then holds at the lowest rung within 3% of the best. One borderline
+/// re-measure of the hold rung and one downward probe below the start rung
+/// bound the number of windows a load spends away from its final width.
 const SourceReadWidthController = struct {
-    const Phase = enum { ramp_up, refine_down, settled };
+    const State = enum { climbing, holding };
+
+    /// A rung must beat the best rate by this factor to keep the climb going.
+    const improvement_ratio = 1.03;
+    /// The hold rung is the lowest rung retaining this fraction of the best.
+    const hold_ratio = 0.97;
+    /// A hold rung whose retention is this close to `hold_ratio` is measured
+    /// a second time before the decision stands.
+    const borderline_band = 0.02;
 
     const Evidence = struct {
         completed_requests: usize,
         elapsed_ns: u64,
         bytes: u64,
         exercised_width: usize,
-        remaining_full_jobs: usize,
 
         fn scoreable(self: Evidence, expected_width: usize) bool {
             return self.exercised_width >= expected_width and
@@ -2249,59 +2263,52 @@ const SourceReadWidthController = struct {
         }
     };
 
+    /// A width and the generation that measures it. Every decision opens a
+    /// new generation, so the runtime re-fences its window on each one.
     const Decision = struct {
         width: usize,
         generation: u64,
-        changed: bool = false,
-        settled: bool = false,
-    };
-
-    const Confirmation = struct {
-        index: usize,
-        resume_phase: Phase,
-        resume_index: usize,
-        prior_selected_index: usize,
     };
 
     fixed_width: ?usize = null,
-    maximum_index: usize,
-    current_index: usize,
-    selected_index: usize,
-    peak_index: usize,
-    generation: u64 = 0,
-    phase: Phase,
+    index: usize,
+    /// Where measurement began: the configured initial rung, or the blind
+    /// bootstrap's last rung for a high-latency source.
+    start_index: usize,
+    /// Pinned-feasibility clip, lowered by backpressure.
+    max_index: usize,
+    best_index: usize,
+    /// Per rung: the mean of its scored windows.
     rates: [read_width_ladder.len]?f64 = @splat(null),
-    ramp_scores: usize = 0,
-    unchanged_candidates: usize = 0,
-    confirmation: ?Confirmation = null,
-    confirmation_used: bool = false,
+    samples: [read_width_ladder.len]u8 = @splat(0),
+    state: State,
+    borderline_used: bool = false,
+    probed_down: bool = false,
+    generation: u64 = 0,
+    last_backoff_generation: u64 = std.math.maxInt(u64),
 
     fn init(configured: Parallelism, pinned_feasible_width: usize) SourceReadWidthController {
         const configured_max = @min(configured.maximum(), pinned_feasible_width);
-        var maximum_index: usize = 0;
-        for (read_width_ladder, 0..) |candidate_width, index| {
-            if (candidate_width > configured_max) break;
-            maximum_index = index;
-        }
+        const max_index = widthIndexAtMost(configured_max);
         if (!configured.isAdaptive()) {
             const fixed = @min(configured.initial(), pinned_feasible_width);
             const fixed_index = widthIndexAtMost(fixed);
             return .{
                 .fixed_width = @max(@as(usize, 1), fixed),
-                .maximum_index = fixed_index,
-                .current_index = fixed_index,
-                .selected_index = fixed_index,
-                .peak_index = fixed_index,
-                .phase = .settled,
+                .index = fixed_index,
+                .start_index = fixed_index,
+                .max_index = fixed_index,
+                .best_index = fixed_index,
+                .state = .holding,
             };
         }
-        const initial_index = @min(widthIndexAtMost(configured.initial()), maximum_index);
+        const initial_index = @min(widthIndexAtMost(configured.initial()), max_index);
         return .{
-            .maximum_index = maximum_index,
-            .current_index = initial_index,
-            .selected_index = initial_index,
-            .peak_index = initial_index,
-            .phase = .ramp_up,
+            .index = initial_index,
+            .start_index = initial_index,
+            .max_index = max_index,
+            .best_index = initial_index,
+            .state = .climbing,
         };
     }
 
@@ -2315,230 +2322,151 @@ const SourceReadWidthController = struct {
     }
 
     fn width(self: *const SourceReadWidthController) usize {
-        return self.fixed_width orelse read_width_ladder[self.current_index];
+        return self.fixed_width orelse read_width_ladder[self.index];
     }
 
     fn isAdaptive(self: *const SourceReadWidthController) bool {
         return self.fixed_width == null;
     }
 
-    fn selectedWidth(self: *const SourceReadWidthController) usize {
-        return self.fixed_width orelse read_width_ladder[self.selected_index];
-    }
-
     fn currentDecision(self: *const SourceReadWidthController) Decision {
-        return .{
-            .width = self.width(),
-            .generation = self.generation,
-            .settled = self.phase == .settled,
-        };
+        return .{ .width = self.width(), .generation = self.generation };
     }
 
-    fn probeCost(index: usize) usize {
-        const candidate_width = read_width_ladder[index];
-        return candidate_width +| @max(@as(usize, 8), candidate_width);
+    /// Opens a new generation at the current width: the first measured
+    /// window after a blind bootstrap, whose admissions overlap generations.
+    fn newGeneration(self: *SourceReadWidthController) Decision {
+        self.generation +|= 1;
+        return self.currentDecision();
     }
 
-    fn probeFitsTail(index: usize, remaining_full_jobs: usize) bool {
-        return probeCost(index) *| 4 <= remaining_full_jobs;
-    }
-
-    fn blindGrow(
-        self: *SourceReadWidthController,
-        remaining_full_jobs: usize,
-    ) ?Decision {
-        if (!self.isAdaptive() or self.phase != .ramp_up or self.ramp_scores != 0 or
-            self.current_index >= self.maximum_index)
+    /// Pre-response growth for a high-latency source: 24 then 32, before any
+    /// window is scored. Measurement then starts from the reached rung.
+    fn blindGrow(self: *SourceReadWidthController) ?Decision {
+        if (!self.isAdaptive() or self.state != .climbing or
+            self.rates[self.best_index] != null or self.index >= self.max_index)
             return null;
         const ceiling: usize = if (self.width() < 24) 24 else if (self.width() < 32) 32 else return null;
-        const target = @min(widthIndexAtMost(ceiling), self.maximum_index);
-        if (target <= self.current_index or !probeFitsTail(target, remaining_full_jobs)) return null;
-        return self.changeTo(target);
+        const target = @min(widthIndexAtMost(ceiling), self.max_index);
+        if (target <= self.index) return null;
+        self.start_index = target;
+        self.best_index = target;
+        return self.moveTo(target);
     }
 
     fn observe(self: *SourceReadWidthController, evidence: Evidence) Decision {
-        if (!self.isAdaptive() or self.phase == .settled)
-            return self.currentDecision();
+        if (!self.isAdaptive() or self.state == .holding) return self.currentDecision();
         std.debug.assert(evidence.scoreable(self.width()));
-        const rate = evidence.bytesPerSecond();
-        return self.finishScore(self.current_index, rate, evidence.remaining_full_jobs);
-    }
-
-    fn finishScore(
-        self: *SourceReadWidthController,
-        index: usize,
-        rate: f64,
-        remaining_full_jobs: usize,
-    ) Decision {
-        if (self.confirmation) |confirmation| {
-            std.debug.assert(index == confirmation.index);
-            self.rates[index] = ((self.rates[index] orelse rate) + rate) / 2;
-            self.confirmation = null;
-            self.recomputePeakAndSelection();
-            self.phase = confirmation.resume_phase;
-            return self.advanceAfterScore(
-                confirmation.resume_index,
-                confirmation.prior_selected_index,
-                remaining_full_jobs,
-            );
+        // While climbing the scored rung is the best rung or the one above
+        // it; a re-measure or the downward probe scores a rung below it.
+        const climb_sample = self.index >= self.best_index;
+        const best_rate = self.rates[self.best_index];
+        const rate = self.addSample(self.index, evidence.bytesPerSecond());
+        const improved = if (best_rate) |best| rate > improvement_ratio * best else true;
+        if (improved) self.best_index = self.index;
+        if (climb_sample and improved) {
+            if (self.index < self.max_index) return self.moveTo(self.index + 1);
+            return self.hold(self.index);
         }
 
-        const prior_selected = self.selected_index;
-        self.rates[index] = rate;
-        self.recomputePeakAndSelection();
-        const peak_rate = self.rates[self.peak_index] orelse rate;
-        const confirmation_candidate: ?usize = blk: {
-            for ([_]usize{ index, prior_selected, self.selected_index }) |candidate| {
-                if (candidate == self.peak_index) continue;
-                const candidate_rate = self.rates[candidate] orelse continue;
-                const retention = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
-                const adjacent = candidate + 1 == self.peak_index or
-                    self.peak_index + 1 == candidate;
-                if (adjacent and @abs(retention - 0.97) <= 0.02) break :blk candidate;
-            }
-            break :blk null;
-        };
-        if (!self.confirmation_used and confirmation_candidate != null and
-            probeFitsTail(confirmation_candidate.?, remaining_full_jobs))
-        {
-            self.confirmation_used = true;
-            self.confirmation = .{
-                .index = confirmation_candidate.?,
-                .resume_phase = self.phase,
-                .resume_index = index,
-                .prior_selected_index = prior_selected,
-            };
-            return self.restartAt(confirmation_candidate.?);
+        const hold_index = self.holdIndex();
+        if (!self.borderline_used and self.isBorderline(hold_index)) {
+            self.borderline_used = true;
+            return self.moveTo(hold_index);
         }
-
-        return self.advanceAfterScore(index, prior_selected, remaining_full_jobs);
+        if (hold_index == self.start_index and self.start_index > 0 and !self.probed_down) {
+            self.probed_down = true;
+            return self.moveTo(self.start_index - 1);
+        }
+        return self.hold(hold_index);
     }
 
-    fn advanceAfterScore(
-        self: *SourceReadWidthController,
-        index: usize,
-        prior_selected: usize,
-        remaining_full_jobs: usize,
-    ) Decision {
-        const peak_rate = self.rates[self.peak_index] orelse 0;
-        const index_rate = self.rates[index] orelse 0;
-        const retention = if (peak_rate == 0) 0 else index_rate / peak_rate;
-        return switch (self.phase) {
-            .ramp_up => blk: {
-                self.ramp_scores += 1;
-                if (self.ramp_scores > 1) {
-                    if (self.selected_index == prior_selected)
-                        self.unchanged_candidates += 1
-                    else
-                        self.unchanged_candidates = 0;
-                }
-                if ((self.ramp_scores > 1 and self.unchanged_candidates >= 2) or
-                    index == self.maximum_index)
-                    break :blk self.beginRefineOrSettle(remaining_full_jobs);
-                if (probeFitsTail(index + 1, remaining_full_jobs))
-                    break :blk self.changeTo(index + 1);
-                break :blk self.beginRefineOrSettle(remaining_full_jobs);
-            },
-            .refine_down => blk: {
-                if (retention < 0.97 or index == 0 or
-                    !probeFitsTail(index - 1, remaining_full_jobs))
-                    break :blk self.settle();
-                break :blk self.changeTo(index - 1);
-            },
-            else => self.currentDecision(),
-        };
+    fn addSample(self: *SourceReadWidthController, index: usize, rate: f64) f64 {
+        const count: f64 = @floatFromInt(self.samples[index]);
+        const mean = if (self.rates[index]) |previous|
+            (previous * count + rate) / (count + 1)
+        else
+            rate;
+        self.rates[index] = mean;
+        self.samples[index] +|= 1;
+        return mean;
     }
 
-    fn recomputePeakAndSelection(self: *SourceReadWidthController) void {
-        var peak_index = self.peak_index;
-        var peak_rate: f64 = self.rates[peak_index] orelse 0;
-        for (self.rates, 0..) |maybe_rate, index| {
+    /// The lowest measured rung at or below the best one that retains
+    /// `hold_ratio` of the best rate.
+    fn holdIndex(self: *const SourceReadWidthController) usize {
+        const best_rate = self.rates[self.best_index].?;
+        for (self.rates[0 .. self.best_index + 1], 0..) |maybe_rate, index| {
             const rate = maybe_rate orelse continue;
-            if (rate > peak_rate) {
-                peak_rate = rate;
-                peak_index = index;
-            }
+            if (rate >= hold_ratio * best_rate) return index;
         }
-        self.peak_index = peak_index;
-        var selected = peak_index;
-        for (self.rates, 0..) |maybe_rate, index| {
-            const rate = maybe_rate orelse continue;
-            if (rate >= peak_rate * 0.97) {
-                selected = index;
-                break;
-            }
-        }
-        self.selected_index = selected;
+        return self.best_index;
     }
 
-    fn beginRefineOrSettle(
-        self: *SourceReadWidthController,
-        remaining_full_jobs: usize,
-    ) Decision {
-        self.phase = .refine_down;
-        if (self.selected_index > 0 and probeFitsTail(self.selected_index - 1, remaining_full_jobs))
-            return self.changeTo(self.selected_index - 1);
-        return self.settle();
+    fn isBorderline(self: *const SourceReadWidthController, index: usize) bool {
+        if (index == self.best_index) return false;
+        const retention = self.rates[index].? / self.rates[self.best_index].?;
+        return @abs(retention - hold_ratio) <= borderline_band;
     }
 
-    fn changeTo(self: *SourceReadWidthController, index: usize) Decision {
-        const changed = index != self.current_index;
-        self.current_index = index;
-        if (changed) self.generation +|= 1;
-        return .{
-            .width = self.width(),
-            .generation = self.generation,
-            .changed = changed,
-            .settled = self.phase == .settled,
-        };
+    fn moveTo(self: *SourceReadWidthController, index: usize) Decision {
+        self.index = index;
+        return self.newGeneration();
     }
 
-    fn restartAt(self: *SourceReadWidthController, index: usize) Decision {
-        self.current_index = index;
-        self.generation +|= 1;
-        return .{
-            .width = self.width(),
-            .generation = self.generation,
-            .changed = true,
-            .settled = self.phase == .settled,
-        };
+    fn hold(self: *SourceReadWidthController, index: usize) Decision {
+        self.index = index;
+        self.state = .holding;
+        return self.newGeneration();
     }
 
-    fn settle(self: *SourceReadWidthController) Decision {
-        self.phase = .settled;
-        self.confirmation = null;
-        return self.changeTo(self.selected_index);
-    }
-
-    fn backoff(self: *SourceReadWidthController) Decision {
-        if (!self.isAdaptive()) return self.currentDecision();
-        if (self.current_index == 0) {
-            self.selected_index = 0;
-            return self.settle();
-        }
-
-        // Never retain a width above the last clean selection after the source
-        // reports pressure. Further feedback can keep walking a settled
-        // controller down one rung at a time.
-        self.selected_index = @min(self.current_index - 1, self.selected_index);
-        self.peak_index = self.selected_index;
-        self.phase = .settled;
-        return self.changeTo(self.selected_index);
+    /// Source backpressure: one rung down, clipped there, and holding. At
+    /// most once per generation of fresh admissions: a further sample in the
+    /// generation a backoff opened is delayed feedback from the old width
+    /// unless a read admitted under the new generation has begun
+    /// (`fresh_admissions`), so it cannot ratchet through several rungs.
+    fn backoff(self: *SourceReadWidthController, fresh_admissions: bool) ?Decision {
+        if (!self.isAdaptive()) return null;
+        if (self.last_backoff_generation == self.generation and !fresh_admissions) return null;
+        self.index -|= 1;
+        self.max_index = self.index;
+        self.state = .holding;
+        const decision = self.newGeneration();
+        self.last_backoff_generation = self.generation;
+        return decision;
     }
 };
 
 fn sourceReadTestEvidence(
     controller: *const SourceReadWidthController,
-    rate: u64,
-    remaining_full_jobs: usize,
+    rate: f64,
 ) SourceReadWidthController.Evidence {
     return .{
         .completed_requests = @max(@as(usize, 8), controller.width()),
         .elapsed_ns = std.time.ns_per_s,
-        .bytes = rate,
+        .bytes = @intFromFloat(rate * 1024 * 1024),
         .exercised_width = controller.width(),
-        .remaining_full_jobs = remaining_full_jobs,
     };
+}
+
+const SourceReadCurvePoint = struct { width: usize, rate: f64 };
+
+/// Replays a curve of per-width rates: each window scores the controller's
+/// current width and returns the number of windows until it holds.
+fn replaySourceReadCurve(
+    controller: *SourceReadWidthController,
+    curve: []const SourceReadCurvePoint,
+) !usize {
+    var windows: usize = 0;
+    while (controller.state == .climbing) : (windows += 1) {
+        const rate = for (curve) |point| {
+            if (point.width == controller.width()) break point.rate;
+        } else return error.UnmeasuredWidth;
+        const generation = controller.generation;
+        _ = controller.observe(sourceReadTestEvidence(controller, rate));
+        try std.testing.expect(controller.generation == generation + 1);
+    }
+    return windows;
 }
 
 test "source read controller bounds blind growth at 32" {
@@ -2547,9 +2475,14 @@ test "source read controller bounds blind growth at 32" {
         128,
     );
     try std.testing.expectEqual(@as(usize, 12), controller.width());
-    try std.testing.expectEqual(@as(usize, 24), controller.blindGrow(10_000).?.width);
-    try std.testing.expectEqual(@as(usize, 32), controller.blindGrow(10_000).?.width);
-    try std.testing.expect(controller.blindGrow(10_000) == null);
+    try std.testing.expectEqual(@as(usize, 24), controller.blindGrow().?.width);
+    try std.testing.expectEqual(@as(usize, 32), controller.blindGrow().?.width);
+    try std.testing.expect(controller.blindGrow() == null);
+    try std.testing.expectEqual(@as(usize, 32), read_width_ladder[controller.start_index]);
+    // Measurement starts at the reached rung; a scored window ends growth.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
+    try std.testing.expectEqual(@as(usize, 48), controller.width());
+    try std.testing.expect(controller.blindGrow() == null);
 }
 
 test "source read controller clips infeasible adaptive and fixed widths" {
@@ -2558,11 +2491,15 @@ test "source read controller clips infeasible adaptive and fixed widths" {
         10,
     );
     try std.testing.expectEqual(@as(usize, 8), adaptive.width());
-    try std.testing.expect(adaptive.blindGrow(10_000) == null);
+    try std.testing.expect(adaptive.blindGrow() == null);
+    // At the clip the first window holds the only rung it can use.
+    _ = adaptive.observe(sourceReadTestEvidence(&adaptive, 100));
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, adaptive.state);
+    try std.testing.expectEqual(@as(usize, 8), adaptive.width());
 
     const fixed = SourceReadWidthController.init(.{ .fixed = 20 }, 7);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
-    try std.testing.expect(fixed.currentDecision().settled);
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, fixed.state);
 
     const configured_initial = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 48, .maximum = 128 } },
@@ -2576,112 +2513,160 @@ test "source read evidence requires enough concurrency and duration" {
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
     );
-    var short = sourceReadTestEvidence(&controller, 100, 10_000);
+    var short = sourceReadTestEvidence(&controller, 100);
     short.elapsed_ns = 99 * std.time.ns_per_ms;
     try std.testing.expect(!short.scoreable(controller.width()));
-    var unexercised = sourceReadTestEvidence(&controller, 100, 10_000);
+    var unexercised = sourceReadTestEvidence(&controller, 100);
     unexercised.exercised_width -= 1;
     try std.testing.expect(!unexercised.scoreable(controller.width()));
+    var few = sourceReadTestEvidence(&controller, 100);
+    few.completed_requests = 11;
+    try std.testing.expect(!few.scoreable(controller.width()));
+    var empty = sourceReadTestEvidence(&controller, 100);
+    empty.bytes = 0;
+    try std.testing.expect(!empty.scoreable(controller.width()));
     try std.testing.expectEqual(
         @as(usize, 16),
-        controller.observe(sourceReadTestEvidence(&controller, 100, 10_000)).width,
+        controller.observe(sourceReadTestEvidence(&controller, 100)).width,
     );
 }
 
-test "source read controller selects plateau then refines downward" {
+test "source read controller replays the B70 32 MiB curve and holds 12" {
+    // Recorded on one B70 at 32 MiB requests (CTX "Source request size is
+    // backend-dependent"), GiB/s. Eight was not screened there; the probe
+    // below the start rung gets a value below the 3% band.
     var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
     );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 100_000));
-    try std.testing.expectEqual(@as(usize, 16), controller.width());
-    _ = controller.observe(sourceReadTestEvidence(&controller, 94, 100_000));
-    try std.testing.expectEqual(@as(usize, 24), controller.width());
-    _ = controller.observe(sourceReadTestEvidence(&controller, 94, 100_000));
-    try std.testing.expectEqual(@as(usize, 8), controller.width());
-    const settled = controller.observe(sourceReadTestEvidence(&controller, 80, 100_000));
-    try std.testing.expect(settled.settled);
-    try std.testing.expectEqual(@as(usize, 12), controller.selectedWidth());
-}
-
-test "source read controller confirms an adjacent boundary once" {
-    var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        32,
-    );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    try std.testing.expectEqual(SourceReadWidthController.widthIndexAtMost(12), controller.confirmation.?.index);
+    const windows = try replaySourceReadCurve(&controller, &.{
+        .{ .width = 8, .rate = 19.90 },
+        .{ .width = 12, .rate = 21.33 },
+        .{ .width = 16, .rate = 20.69 },
+        .{ .width = 24, .rate = 18.90 },
+        .{ .width = 32, .rate = 17.33 },
+    });
+    // 12, 16 (0.970 of 12: the climb stops), the downward probe of 8.
+    try std.testing.expectEqual(@as(usize, 3), windows);
     try std.testing.expectEqual(@as(usize, 12), controller.width());
-    _ = controller.observe(sourceReadTestEvidence(&controller, 97, 1_000_000));
-    try std.testing.expect(controller.confirmation == null);
-    try std.testing.expect(controller.confirmation_used);
-    try std.testing.expectEqual(@as(usize, 24), controller.width());
+    try std.testing.expect(controller.probed_down);
+    try std.testing.expect(!controller.borderline_used);
+    try std.testing.expectEqual(@as(u8, 0), controller.samples[SourceReadWidthController.widthIndexAtMost(24)]);
+    // Holding: further evidence and blind growth change nothing.
+    const held = controller.observe(sourceReadTestEvidence(&controller, 30));
+    try std.testing.expectEqual(@as(usize, 12), held.width);
+    try std.testing.expectEqual(controller.generation, held.generation);
+    try std.testing.expect(controller.blindGrow() == null);
 }
 
-test "source read controller confirms a borderline candidate in place" {
+test "source read controller re-measures a borderline hold rung once" {
+    // 8 retains 0.975 of 12 on the first window and 0.960 on the mean of two,
+    // so the second window moves the hold to 12.
     var controller = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 32 } },
-        32,
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
     );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 1_000_000));
-    _ = controller.observe(sourceReadTestEvidence(&controller, 96, 1_000_000));
-    const width16 = SourceReadWidthController.widthIndexAtMost(16);
-    try std.testing.expectEqual(width16, controller.confirmation.?.index);
-    const generation = controller.generation;
-    try std.testing.expectEqual(@as(usize, 16), controller.width());
-    try std.testing.expect(generation > 1);
+    const width8 = SourceReadWidthController.widthIndexAtMost(8);
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 101));
+    try std.testing.expectEqual(@as(usize, 8), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 97.5));
+    try std.testing.expect(controller.borderline_used);
+    try std.testing.expectEqual(SourceReadWidthController.State.climbing, controller.state);
+    try std.testing.expectEqual(@as(usize, 8), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 94.5));
+    try std.testing.expectEqual(@as(u8, 2), controller.samples[width8]);
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, controller.state);
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
 }
 
-test "source read controller refines downward when an upward tail no longer fits" {
+test "source read controller holds at the lowest rung within 3% on a flat curve" {
+    // Real AWS shape: 16 MiB requests plateau near 950 MiB/s from 16 up.
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+    );
+    const windows = try replaySourceReadCurve(&controller, &.{
+        .{ .width = 12, .rate = 900 },
+        .{ .width = 16, .rate = 940 },
+        .{ .width = 24, .rate = 948 },
+        .{ .width = 32, .rate = 950 },
+        .{ .width = 48, .rate = 950 },
+    });
+    // 12, 16 (better by 4.4%), 24 (not better by 3%): hold at 16, the lowest
+    // rung within 3% of it; 12 at 0.957 is below the band.
+    try std.testing.expectEqual(@as(usize, 3), windows);
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    try std.testing.expectEqual(@as(usize, 16), read_width_ladder[controller.best_index]);
+    try std.testing.expect(!controller.probed_down);
+}
+
+test "source read controller probes below the start rung once" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+    );
+    const windows = try replaySourceReadCurve(&controller, &.{
+        .{ .width = 8, .rate = 105 },
+        .{ .width = 12, .rate = 100 },
+        .{ .width = 16, .rate = 100 },
+    });
+    // 12, 16 (flat), 8 (better by 5%): hold 8 without climbing further down.
+    try std.testing.expectEqual(@as(usize, 3), windows);
+    try std.testing.expectEqual(@as(usize, 8), controller.width());
+    try std.testing.expectEqual(@as(usize, 8), read_width_ladder[controller.best_index]);
+
+    var from_one = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 1, .maximum = 128 } },
+        128,
+    );
+    // Nothing below the lowest rung to probe.
+    _ = try replaySourceReadCurve(&from_one, &.{
+        .{ .width = 1, .rate = 100 },
+        .{ .width = 2, .rate = 100 },
+    });
+    try std.testing.expectEqual(@as(usize, 1), from_one.width());
+    try std.testing.expect(!from_one.probed_down);
+}
+
+test "source read controller backs off once per generation of fresh admissions" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
     );
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100, 100_000));
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
     try std.testing.expectEqual(@as(usize, 16), controller.width());
-    const downward = controller.observe(sourceReadTestEvidence(&controller, 120, 100));
-    try std.testing.expectEqual(SourceReadWidthController.Phase.refine_down, controller.phase);
-    try std.testing.expectEqual(@as(usize, 12), downward.width);
+    const first = controller.backoff(false).?;
+    try std.testing.expectEqual(@as(usize, 12), first.width);
+    try std.testing.expectEqual(controller.generation, first.generation);
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, controller.state);
+    try std.testing.expectEqual(@as(usize, 12), read_width_ladder[controller.max_index]);
+    // Delayed feedback from the old width in the same generation is ignored.
+    try std.testing.expect(controller.backoff(false) == null);
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
+    // Feedback after a fresh admission under the new generation counts.
+    try std.testing.expectEqual(@as(usize, 8), controller.backoff(true).?.width);
+    try std.testing.expectEqual(@as(usize, 8), read_width_ladder[controller.max_index]);
+    // Holding: evidence no longer moves the width.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 1000));
+    try std.testing.expectEqual(@as(usize, 8), controller.width());
+
+    var floor = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 1, .maximum = 64 } },
+        64,
+    );
+    try std.testing.expectEqual(@as(usize, 1), floor.backoff(false).?.width);
 }
 
-test "source read controller keeps fixed width and settles at a short tail" {
+test "source read controller keeps a fixed width" {
     var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
-    try std.testing.expect(fixed.currentDecision().settled);
-
-    var adaptive = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-    );
-    const tail = adaptive.observe(sourceReadTestEvidence(&adaptive, 100, 10));
-    try std.testing.expect(tail.settled);
-    try std.testing.expectEqual(@as(usize, 12), tail.width);
-}
-
-test "source read controller backs off before and after convergence" {
-    var probing = SourceReadWidthController.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-    );
-    // A probe needs four times its cost (width plus completions) of
-    // remaining full jobs; a shorter tail leaves the width in place.
-    try std.testing.expect(probing.blindGrow(191) == null);
-    try std.testing.expectEqual(@as(usize, 24), probing.blindGrow(192).?.width);
-    const probe_backoff = probing.backoff();
-    try std.testing.expect(probe_backoff.changed);
-    try std.testing.expect(probe_backoff.settled);
-    try std.testing.expectEqual(@as(usize, 12), probe_backoff.width);
-
-    const settled_backoff = probing.backoff();
-    try std.testing.expect(settled_backoff.changed);
-    try std.testing.expect(settled_backoff.settled);
-    try std.testing.expectEqual(@as(usize, 8), settled_backoff.width);
-
-    var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
-    const fixed_backoff = fixed.backoff();
-    try std.testing.expect(!fixed_backoff.changed);
-    try std.testing.expectEqual(@as(usize, 7), fixed_backoff.width);
+    try std.testing.expect(fixed.backoff(true) == null);
+    try std.testing.expect(fixed.blindGrow() == null);
+    const observed = fixed.observe(sourceReadTestEvidence(&fixed, 100));
+    try std.testing.expectEqual(@as(usize, 7), observed.width);
+    try std.testing.expectEqual(@as(u64, 0), fixed.generation);
+    try std.testing.expectEqual(@as(usize, 7), fixed.width());
 }
 
 const ReadStatsCursor = struct {
@@ -2733,18 +2718,59 @@ test "source measurement rejects another controller generation" {
         64,
     );
     runtime.metrics = &metrics;
+    runtime.clock = .{};
     metrics.prepareProbe(io, runtime.controller.generation + 1, 1);
     try std.testing.expect(runtime.currentEvidence(io, 1_000) == null);
 }
 
+/// The window clock of the width controller counts busy time only. A
+/// control tick that found nothing unclaimed, nothing pending and no read
+/// permit held charges the interval since the previous tick to idle, so
+/// many short submissions jointly complete one window and the controller
+/// never learns that batches exist.
+const BusyWindowClock = struct {
+    idle_ns: u64 = 0,
+    last_tick_ns: u64 = 0,
+
+    fn tick(self: *BusyWindowClock, now_ns: u64, idle: bool) void {
+        if (idle) self.idle_ns +|= now_ns -| self.last_tick_ns;
+        self.last_tick_ns = now_ns;
+    }
+
+    /// A new window starts: idle time accrued before it does not count.
+    fn reset(self: *BusyWindowClock) void {
+        self.idle_ns = 0;
+    }
+
+    fn busyNs(self: *const BusyWindowClock, from_ns: u64, now_ns: u64) u64 {
+        return (now_ns -| from_ns) -| self.idle_ns;
+    }
+};
+
+test "busy window clock subtracts idle intervals from a window" {
+    var clock: BusyWindowClock = .{};
+    clock.tick(0, false);
+    clock.reset();
+    // Busy 0-40 ms, idle 40-240 ms, busy 240-280 ms, sampled every 20 ms.
+    var now_ns: u64 = 0;
+    while (now_ns < 280 * std.time.ns_per_ms) {
+        now_ns += 20 * std.time.ns_per_ms;
+        const idle = now_ns > 40 * std.time.ns_per_ms and now_ns <= 240 * std.time.ns_per_ms;
+        clock.tick(now_ns, idle);
+    }
+    try std.testing.expectEqual(200 * std.time.ns_per_ms, clock.idle_ns);
+    try std.testing.expectEqual(80 * std.time.ns_per_ms, clock.busyNs(0, now_ns));
+    // The next window starts clean.
+    clock.reset();
+    clock.tick(now_ns + 25 * std.time.ns_per_ms, false);
+    try std.testing.expectEqual(25 * std.time.ns_per_ms, clock.busyNs(now_ns, now_ns + 25 * std.time.ns_per_ms));
+}
+
 const SourceReadRuntime = struct {
-    const Measurement = union(enum) {
-        inactive,
-        transitioning: usize,
-        measuring,
-        scoring: SourceReadWidthController.Evidence,
-        blind,
-    };
+    /// `measuring` while the controller climbs: the current generation's
+    /// window is open. `blind` during the pre-response bootstrap of a
+    /// high-latency source. `inactive` while holding.
+    const Measurement = enum { inactive, measuring, blind };
 
     controller: SourceReadWidthController,
     read_gate: *AdaptiveRequestGate,
@@ -2758,12 +2784,11 @@ const SourceReadRuntime = struct {
     source_response_observed: bool = false,
     measurement: Measurement = .inactive,
     last_blind_growth_ns: u64 = 0,
-    scheduler_idle: bool = false,
-    backoff_admission_start: ?u64 = null,
+    clock: BusyWindowClock = .{},
     reported_width: usize = 1,
     /// Control ticks that found the read gate closed while jobs were still
-    /// unclaimed. Only a scoring freeze or a width change closes the gate;
-    /// activity transitions never do.
+    /// unclaimed. Nothing closes the gate any more; the counter stays as
+    /// the invariant's witness in the loader summary.
     gate_closed_ticks: u64 = 0,
     control: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
@@ -2773,61 +2798,34 @@ const SourceReadRuntime = struct {
         return cursor.takeBackpressure();
     }
 
-    /// Applies a decision at a generation boundary. A changed width drains
-    /// the read gate and starts a clean generation; an unchanged one can only
-    /// be settled and just reopens the gate. Activity transitions do not come
-    /// through here: see `finishIdleMeasurement` and `resumeMeasurement`.
+    /// Applies a decision: both gates at its width and a window for its
+    /// generation fenced at the next admission. The read gate is never
+    /// closed: reads admitted under the previous generation are excluded by
+    /// the fence and return at their own pace.
     fn applyDecision(
         self: *SourceReadRuntime,
         io: std.Io,
         decision: SourceReadWidthController.Decision,
     ) void {
         const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        std.debug.assert(limits.read > 0);
         self.reported_width = decision.width;
+        self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
-        if (decision.changed) {
-            self.read_gate.setLimit(io, 0);
-            self.metrics.clearProbe(io);
-            self.measurement = .{ .transitioning = limits.read };
-            _ = self.activatePendingProbe(io);
-        } else {
-            // `observe` returns a changed or a settled decision, `backoff`
-            // always settles and the blind restart forces `changed`, so an
-            // unchanged unsettled decision cannot reach this point.
-            std.debug.assert(decision.settled);
-            self.read_gate.setLimit(io, limits.read);
-            self.metrics.clearProbe(io);
-            self.metrics.config_epoch.store(decision.generation, .release);
-            self.measurement = .inactive;
-        }
-    }
-
-    fn activatePendingProbe(self: *SourceReadRuntime, io: std.Io) bool {
-        const read_limit = switch (self.measurement) {
-            .transitioning => |limit| limit,
-            else => return false,
-        };
-        if (self.read_gate.inUse(io) != 0) return false;
-        // Advance the diagnostic baseline at a generation boundary.
+        // Advance the diagnostic baseline at the generation boundary.
         _ = self.takeRemoteBackpressure();
-        const admission_start = self.next_read_admission.load(.acquire);
-        if (self.controller.phase == .settled) {
-            self.metrics.config_epoch.store(self.controller.generation, .release);
-            self.backoff_admission_start = admission_start;
-            self.measurement = .inactive;
-        } else {
-            self.metrics.prepareProbe(io, self.controller.generation, admission_start);
-            self.measurement = .measuring;
-        }
-        self.read_gate.setLimit(io, read_limit);
-        return true;
+        self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
+        self.clock.reset();
+        self.measurement = switch (self.controller.state) {
+            .climbing => .measuring,
+            .holding => .inactive,
+        };
     }
 
-    fn backoffReady(self: *SourceReadRuntime) bool {
-        const boundary = self.backoff_admission_start orelse return true;
-        if (self.next_read_admission.load(.acquire) <= boundary) return false;
-        self.backoff_admission_start = null;
-        return true;
+    /// Born busy: the gates already carry the controller's width; the first
+    /// window is fenced before any worker can admit a read.
+    fn start(self: *SourceReadRuntime, io: std.Io) void {
+        self.applyDecision(io, self.controller.currentDecision());
     }
 
     fn applyBlindGrowth(
@@ -2844,30 +2842,30 @@ const SourceReadRuntime = struct {
         self.measurement = .blind;
     }
 
+    fn evidenceFrom(
+        self: *const SourceReadRuntime,
+        probe: VectoredLoadMetrics.Snapshot,
+        now_ns: u64,
+    ) ?SourceReadWidthController.Evidence {
+        if (probe.probe_epoch != self.controller.generation) return null;
+        // Do not charge a rung for prior-generation DMA drain before its
+        // first source admission can begin.
+        if (probe.probe_first_read_ns == 0) return null;
+        const evidence: SourceReadWidthController.Evidence = .{
+            .completed_requests = @intCast(probe.probe_read_operations),
+            .elapsed_ns = self.clock.busyNs(probe.probe_first_read_ns, now_ns),
+            .bytes = probe.probe_read_bytes,
+            .exercised_width = probe.probe_peak_reads,
+        };
+        return if (evidence.scoreable(self.controller.width())) evidence else null;
+    }
+
     fn currentEvidence(
         self: *SourceReadRuntime,
         io: std.Io,
-        remaining_full_jobs: usize,
+        now_ns: u64,
     ) ?SourceReadWidthController.Evidence {
-        const probe = self.metrics.snapshot(io);
-        if (probe.probe_epoch != self.controller.generation) return null;
-        const now_ns: u64 = @intCast(@max(
-            std.Io.Timestamp.now(io, .awake).nanoseconds,
-            1,
-        ));
-        const evidence: SourceReadWidthController.Evidence = .{
-            .completed_requests = @intCast(probe.probe_read_operations),
-            // Do not charge a candidate for prior-generation DMA drain before
-            // its first source admission can begin.
-            .elapsed_ns = if (probe.probe_first_read_ns == 0)
-                0
-            else
-                now_ns -| probe.probe_first_read_ns,
-            .bytes = probe.probe_read_bytes,
-            .exercised_width = probe.probe_peak_reads,
-            .remaining_full_jobs = remaining_full_jobs,
-        };
-        return if (evidence.scoreable(self.controller.width())) evidence else null;
+        return self.evidenceFrom(self.metrics.snapshot(io), now_ns);
     }
 
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
@@ -2876,52 +2874,12 @@ const SourceReadRuntime = struct {
         self.metrics.clearProbe(io);
     }
 
-    /// Busy to idle. Scores a frozen or complete interval, then puts both
-    /// gates at the controller's width: nothing is in flight, so no drain is
-    /// needed, and neither a scoring freeze nor a pending transition may
-    /// leave the read gate closed or at a previous rung for the next
-    /// submission.
-    fn finishIdleMeasurement(self: *SourceReadRuntime, io: std.Io) void {
-        _ = self.takeRemoteBackpressure();
-        if (self.controller.phase != .settled) {
-            switch (self.measurement) {
-                .scoring => |pending| {
-                    var evidence = pending;
-                    evidence.remaining_full_jobs = std.math.maxInt(usize);
-                    _ = self.controller.observe(evidence);
-                },
-                .measuring => if (self.currentEvidence(io, std.math.maxInt(usize))) |evidence| {
-                    _ = self.controller.observe(evidence);
-                },
-                else => {},
-            }
-        }
-        self.metrics.clearProbe(io);
-        self.metrics.config_epoch.store(self.controller.generation, .release);
-        self.measurement = .inactive;
-        const limits: RequestGateLimits = .init(self.controller.width(), self.pinned_feasible_width);
-        self.reported_width = self.controller.width();
-        self.read_gate.setLimit(io, limits.read);
-        self.request_gate.setLimit(io, limits.lifecycle);
-    }
-
-    /// Idle to busy. The gates already carry the controller's width, so an
-    /// unsettled controller starts a clean generation at that width without
-    /// touching them; the admission fence excludes reads admitted before
-    /// this tick. A settled controller has nothing to measure.
-    fn resumeMeasurement(self: *SourceReadRuntime, io: std.Io) void {
-        std.debug.assert(self.measurement == .inactive);
-        if (self.controller.phase == .settled) return;
-        self.metrics.prepareProbe(
-            io,
-            self.controller.generation,
-            self.next_read_admission.load(.acquire),
-        );
-        self.measurement = .measuring;
+    fn awakeNs(io: std.Io) u64 {
+        return @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
     }
 
     fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
-        const started: std.Io.Timestamp = .now(io, .awake);
+        self.clock.tick(awakeNs(io), false);
         while (true) {
             self.control.waitTimeout(io, .{ .duration = .{
                 .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),
@@ -2935,56 +2893,30 @@ const SourceReadRuntime = struct {
                 self.finalize(io);
                 break;
             }
+            const now_ns = awakeNs(io);
 
             if (self.takeRemoteBackpressure()) {
-                // Feedback collected while the old generation drains belongs
-                // to that transition and must not trigger another rung.
-                switch (self.measurement) {
-                    .transitioning => continue,
-                    else => {},
+                // A read admitted under the current generation has begun
+                // once the window fenced at its start saw a read.
+                const fresh_admissions = self.metrics.snapshot(io).probe_peak_reads != 0;
+                if (self.controller.backoff(fresh_admissions)) |decision| {
+                    load_log.debug("source width backoff: generation={d}, width={d}, fresh_admissions={}", .{
+                        decision.generation,
+                        decision.width,
+                        fresh_admissions,
+                    });
+                    self.applyDecision(io, decision);
                 }
-                if (!self.backoffReady()) continue;
-                self.applyDecision(io, self.controller.backoff());
+                self.clock.tick(now_ns, false);
                 continue;
             }
             if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
             const scheduler_snapshot = self.scheduler.snapshot(io);
-            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
             if (scheduler_snapshot.remaining_jobs != 0 and self.read_gate.currentLimit(io) == 0)
                 self.gate_closed_ticks += 1;
 
-            const idle = scheduler_snapshot.remaining_jobs == 0 and
-                self.metrics.pending_source_jobs.load(.acquire) == 0 and
-                self.read_gate.inUse(io) == 0;
-            if (idle) {
-                if (!self.scheduler_idle) {
-                    self.finishIdleMeasurement(io);
-                    self.scheduler_idle = true;
-                }
-                continue;
-            }
-            if (self.scheduler_idle) {
-                self.scheduler_idle = false;
-                self.resumeMeasurement(io);
-                continue;
-            }
-
-            // Blind admissions deliberately overlap generations so a remote
-            // source can ramp before its first response. Once any response is
-            // visible, close the read gate and start a clean generation only
-            // after every blind admission has returned.
-            switch (self.measurement) {
-                .blind => if (self.source_response_observed) {
-                    self.controller.generation +|= 1;
-                    var decision = self.controller.currentDecision();
-                    decision.changed = true;
-                    self.applyDecision(io, decision);
-                    continue;
-                },
-                else => {},
-            }
-
             if (!self.source_response_observed) {
+                self.clock.tick(now_ns, false);
                 if (now_ns -| self.last_blind_growth_ns >= 10 * std.time.ns_per_ms and
                     shouldBootstrapSource(
                         self.source_bootstrap_enabled,
@@ -2996,56 +2928,54 @@ const SourceReadRuntime = struct {
                     ))
                 {
                     self.last_blind_growth_ns = now_ns;
-                    if (self.controller.blindGrow(scheduler_snapshot.remaining_jobs)) |decision| {
+                    if (self.controller.blindGrow()) |decision| {
                         self.applyBlindGrowth(io, decision);
                     }
                 }
                 continue;
             }
 
-            if (self.controller.phase == .settled) continue;
-
-            // Hold a completed score until all calls admitted at that width
-            // have drained, keeping generation attribution unambiguous.
             switch (self.measurement) {
-                .scoring => |pending| {
-                    if (self.read_gate.inUse(io) != 0) continue;
-                    _ = self.takeRemoteBackpressure();
-                    var evidence = pending;
-                    evidence.remaining_full_jobs = scheduler_snapshot.remaining_jobs;
-                    const decision = self.controller.observe(evidence);
-                    self.measurement = .inactive;
-                    self.applyDecision(io, decision);
+                // Blind admissions overlap generations. The first response
+                // opens the first measured window at the reached width; the
+                // fence excludes what was admitted before it.
+                .blind => {
+                    self.applyDecision(io, self.controller.newGeneration());
+                    self.clock.tick(now_ns, false);
                     continue;
                 },
-                else => {},
-            }
-
-            switch (self.measurement) {
-                .transitioning => {
-                    _ = self.activatePendingProbe(io);
+                .inactive => {
+                    self.clock.tick(now_ns, false);
                     continue;
                 },
-                else => {},
+                .measuring => {},
             }
 
-            switch (self.measurement) {
-                .measuring => if (self.currentEvidence(
-                    io,
-                    scheduler_snapshot.remaining_jobs,
-                )) |evidence| {
-                    // Freeze a complete interval, then drain admissions that
-                    // raced with the snapshot. Their bytes are excluded.
-                    self.read_gate.setLimit(io, 0);
-                    self.measurement = .{ .scoring = evidence };
-                    continue;
-                },
-                else => {},
-            }
+            const probe = self.metrics.snapshot(io);
+            const idle = scheduler_snapshot.remaining_jobs == 0 and
+                self.metrics.pending_source_jobs.load(.acquire) == 0 and
+                self.read_gate.inUse(io) == 0;
+            // Idle before the window's first admission is not its time.
+            self.clock.tick(now_ns, idle and probe.probe_first_read_ns != 0);
+            if (idle) continue;
+            const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
+            const scored_index = self.controller.index;
+            const decision = self.controller.observe(evidence);
+            load_log.debug("source width window: generation={d}, width={d}, rate={Bi:.2}/s, busy_ms={d:.1}, completed={d}, exercised={d}, samples={d}, next_width={d}, state={s}", .{
+                probe.probe_epoch,
+                read_width_ladder[scored_index],
+                @as(u64, @intFromFloat(evidence.bytesPerSecond())),
+                @as(f64, @floatFromInt(evidence.elapsed_ns)) / std.time.ns_per_ms,
+                evidence.completed_requests,
+                evidence.exercised_width,
+                self.controller.samples[scored_index],
+                decision.width,
+                @tagName(self.controller.state),
+            });
+            self.applyDecision(io, decision);
         }
     }
 };
-
 /// Blind growth is warranted while a high-latency source has not answered
 /// and the read gate is the limiter: at least `read_limit` workers hold a
 /// lifecycle credit (taken before the claim, returned after the last DMA
@@ -3131,6 +3061,18 @@ pub const DirectLoader = struct {
                 config.max_in_flight_per_device,
             );
         }
+        // Map the working set of every rung the controller may climb through
+        // now, so no pinned slab grows inside a scored window; the arenas
+        // stay with the platform for later loaders.
+        const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
+        const retained_before = resources.retainedMappedBytes();
+        try resources.ensureSourceWorkingSet(
+            maximum_blocks_per_job,
+            DmaPlatformSettings.preallocated_source_width,
+            node_reserves,
+        );
+        const pregrown_bytes = resources.retainedMappedBytes() - retained_before;
+        const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
         // The per-node reserves are deliberately non-materialized. They keep
         // enough mapped-budget capacity available for devices that join a
         // later submission without paying their allocation cost at init.
@@ -3222,13 +3164,12 @@ pub const DirectLoader = struct {
             .reported_width = controller.width(),
         };
         // Born busy: both gates are open at the controller's width and the
-        // first generation is prepared before any worker can admit a read,
-        // so it measures from the first read and the gate is never closed at
-        // startup.
-        self.controller_runtime.resumeMeasurement(io);
+        // first window is fenced before any worker can admit a read, so it
+        // measures from the first read and the gate is never closed.
+        self.controller_runtime.start(io);
         errdefer self.stopWorkers();
         try self.startWorkers(source_parallelism.maximum());
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, feasible_width={d}, mapped={Bi:.2}", .{
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
@@ -3236,6 +3177,8 @@ pub const DirectLoader = struct {
             source_parallelism.maximum(),
             feasible_width,
             self.pool.mappedBytes(),
+            pregrown_bytes,
+            @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
         });
         return self;
     }
@@ -3747,19 +3690,7 @@ test "adaptive request gate reductions drain without cancelling active requests"
     try std.testing.expectEqual(@as(usize, 0), gate.inUse(io));
 }
 
-test "settled backoff waits for a new-generation admission" {
-    var next_admission: std.atomic.Value(u64) = .init(41);
-    var runtime: SourceReadRuntime = undefined;
-    runtime.next_read_admission = &next_admission;
-    runtime.backoff_admission_start = 41;
-
-    try std.testing.expect(!runtime.backoffReady());
-    next_admission.store(42, .release);
-    try std.testing.expect(runtime.backoffReady());
-    try std.testing.expect(runtime.backoffReady());
-}
-
-test "activity transitions keep both gates at the controller width" {
+test "source read runtime never closes the read gate across decisions" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
     var read_gate: AdaptiveRequestGate = .init(12);
@@ -3780,25 +3711,12 @@ test "activity transitions keep both gates at the controller width" {
         .source_bootstrap_enabled = false,
     };
 
-    // A scoring freeze had closed the read gate when the submission ran out
-    // of jobs. Going idle scores it, which moves the controller to the next
-    // rung, and reopens both gates at that rung.
-    read_gate.setLimit(io, 0);
-    runtime.measurement = .{ .scoring = sourceReadTestEvidence(&runtime.controller, 100, 0) };
-    runtime.finishIdleMeasurement(io);
-    try std.testing.expect(runtime.measurement == .inactive);
-    try std.testing.expect(runtime.controller.phase != .settled);
-    try std.testing.expectEqual(@as(usize, 16), runtime.controller.width());
-    try std.testing.expectEqual(@as(usize, 16), runtime.reported_width);
-    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 17), request_gate.currentLimit(io));
-
-    // Busy again: the probe restarts at the current width without touching
-    // the gates, and only reads admitted from now on are attributed to it.
-    runtime.resumeMeasurement(io);
+    // Born busy: the first window is fenced at the next admission and
+    // measures at the initial width with both gates open.
+    runtime.start(io);
     try std.testing.expect(runtime.measurement == .measuring);
-    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 17), request_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
     try std.testing.expectEqual(runtime.controller.generation, metrics.snapshot(io).probe_epoch);
     metrics.beginRead(io, runtime.controller.generation, 40);
     try std.testing.expectEqual(@as(usize, 0), metrics.snapshot(io).probe_active_reads);
@@ -3807,23 +3725,121 @@ test "activity transitions keep both gates at the controller width" {
     metrics.endRead(io, runtime.controller.generation, 40);
     metrics.endRead(io, runtime.controller.generation, 41);
 
-    // An interval too short to score is dropped at idle and the rung stays.
-    runtime.finishIdleMeasurement(io);
+    // A scored window moves one rung up without touching the gate limit
+    // below the new width; a hold at another width does the same.
+    var expected_generation = runtime.controller.generation;
+    for ([_]f64{ 100, 100, 90 }) |rate| {
+        next_admission.store(next_admission.load(.acquire) + 5, .release);
+        const decision = runtime.controller.observe(sourceReadTestEvidence(&runtime.controller, rate));
+        runtime.applyDecision(io, decision);
+        expected_generation += 1;
+        try std.testing.expectEqual(expected_generation, decision.generation);
+        try std.testing.expect(read_gate.currentLimit(io) > 0);
+        try std.testing.expect(request_gate.currentLimit(io) > read_gate.currentLimit(io));
+        try std.testing.expectEqual(decision.width, read_gate.currentLimit(io));
+        try std.testing.expectEqual(decision.width, runtime.reported_width);
+        try std.testing.expectEqual(decision.generation, metrics.snapshot(io).probe_epoch);
+        try std.testing.expectEqual(decision.generation, metrics.config_epoch.load(.acquire));
+        try std.testing.expectEqual(next_admission.load(.acquire), metrics.probe_admission_start);
+        try std.testing.expect((runtime.measurement == .measuring) == (runtime.controller.state == .climbing));
+    }
+    // 12 -> 16 (not better) -> the downward probe of 8 (10% below) -> hold 12.
+    try std.testing.expect(runtime.controller.state == .holding);
     try std.testing.expect(runtime.measurement == .inactive);
-    try std.testing.expectEqual(@as(usize, 16), runtime.controller.width());
-    try std.testing.expectEqual(@as(usize, 16), read_gate.currentLimit(io));
-
-    // A settled controller: idle applies its width, busy measures nothing.
-    _ = runtime.controller.backoff();
-    try std.testing.expect(runtime.controller.phase == .settled);
-    runtime.finishIdleMeasurement(io);
-    try std.testing.expectEqual(@as(usize, 12), runtime.reported_width);
     try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
     try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
-    runtime.resumeMeasurement(io);
+    try std.testing.expectEqual(@as(u64, 0), runtime.gate_closed_ticks);
+
+    // Backoff while holding: one rung down, gate still open, window fenced
+    // so a fresh admission can be told from delayed old-width feedback.
+    try std.testing.expectEqual(@as(usize, 0), metrics.snapshot(io).probe_peak_reads);
+    const backoff = runtime.controller.backoff(false).?;
+    runtime.applyDecision(io, backoff);
+    try std.testing.expectEqual(@as(usize, 8), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 9), request_gate.currentLimit(io));
     try std.testing.expect(runtime.measurement == .inactive);
+    try std.testing.expect(runtime.controller.backoff(false) == null);
+    metrics.beginRead(io, runtime.controller.generation, next_admission.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), metrics.snapshot(io).probe_peak_reads);
+    try std.testing.expectEqual(@as(usize, 4), runtime.controller.backoff(true).?.width);
+}
+
+test "source read runtime measures from the reached width after a blind bootstrap" {
+    const io = std.testing.io;
+    var metrics: VectoredLoadMetrics = .{};
+    var read_gate: AdaptiveRequestGate = .init(12);
+    var request_gate: AdaptiveRequestGate = .init(13);
+    var next_admission: std.atomic.Value(u64) = .init(1);
+    var runtime: SourceReadRuntime = .{
+        .controller = SourceReadWidthController.init(
+            .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+            128,
+        ),
+        .read_gate = &read_gate,
+        .request_gate = &request_gate,
+        .metrics = &metrics,
+        .next_read_admission = &next_admission,
+        .scheduler = undefined,
+        .pinned_feasible_width = 128,
+        .read_stats = null,
+        .source_bootstrap_enabled = true,
+    };
+    runtime.start(io);
+    runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
+    try std.testing.expect(runtime.measurement == .blind);
+    try std.testing.expectEqual(@as(usize, 24), read_gate.currentLimit(io));
     try std.testing.expectEqual(std.math.maxInt(u64), metrics.snapshot(io).probe_epoch);
-    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
+    runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
+    try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
+
+    // The first response opens a measured window at 32 without a drain.
+    next_admission.store(33, .release);
+    runtime.applyDecision(io, runtime.controller.newGeneration());
+    try std.testing.expect(runtime.measurement == .measuring);
+    try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
+    try std.testing.expectEqual(@as(usize, 33), request_gate.currentLimit(io));
+    try std.testing.expectEqual(runtime.controller.generation, metrics.snapshot(io).probe_epoch);
+    try std.testing.expectEqual(@as(u64, 33), metrics.probe_admission_start);
+    try std.testing.expectEqual(@as(usize, 32), read_width_ladder[runtime.controller.start_index]);
+}
+
+test "source read runtime scores a window from its first admission on busy time" {
+    const io = std.testing.io;
+    var metrics: VectoredLoadMetrics = .{};
+    var runtime: SourceReadRuntime = undefined;
+    runtime.controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    runtime.metrics = &metrics;
+    runtime.clock = .{};
+    metrics.prepareProbe(io, runtime.controller.generation, 1);
+    // No admission yet: nothing to score however long the window has been open.
+    try std.testing.expect(runtime.currentEvidence(io, std.math.maxInt(u64)) == null);
+    for (1..13) |admission| {
+        metrics.beginRead(io, runtime.controller.generation, admission);
+    }
+    for (1..13) |admission| {
+        metrics.recordProbeRead(io, runtime.controller.generation, admission, max_load_read_request_size);
+        metrics.endRead(io, runtime.controller.generation, admission);
+    }
+    const first_read_ns = metrics.snapshot(io).probe_first_read_ns;
+    try std.testing.expect(first_read_ns != 0);
+    runtime.clock.tick(first_read_ns, false);
+    // 40 ms busy, 200 ms idle, 40 ms busy: 80 ms of busy time is too short.
+    runtime.clock.tick(first_read_ns + 40 * std.time.ns_per_ms, false);
+    runtime.clock.tick(first_read_ns + 240 * std.time.ns_per_ms, true);
+    const short_ns = first_read_ns + 280 * std.time.ns_per_ms;
+    try std.testing.expectEqual(80 * std.time.ns_per_ms, runtime.clock.busyNs(first_read_ns, short_ns));
+    try std.testing.expect(runtime.currentEvidence(io, short_ns) == null);
+    // Another 20 ms of busy time completes the 100 ms window.
+    const scored_ns = short_ns + 20 * std.time.ns_per_ms;
+    runtime.clock.tick(scored_ns, false);
+    const evidence = runtime.currentEvidence(io, scored_ns).?;
+    try std.testing.expectEqual(100 * std.time.ns_per_ms, evidence.elapsed_ns);
+    try std.testing.expectEqual(@as(usize, 12), evidence.completed_requests);
+    try std.testing.expectEqual(@as(usize, 12), evidence.exercised_width);
+    try std.testing.expectEqual(@as(u64, 12 * max_load_read_request_size), evidence.bytes);
 }
 
 test "vectored final transfers wait for every prior destination submission" {

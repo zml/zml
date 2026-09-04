@@ -242,8 +242,38 @@ pub const DmaPlatformSettings = struct {
             return error.DmaMappedBudgetExceeded;
     }
 
-    fn retainedMappedBytes(self: *const DmaPlatformSettings) usize {
+    pub fn retainedMappedBytes(self: *const DmaPlatformSettings) usize {
         return self.workspace.allocatedBytes();
+    }
+
+    /// The widest source rung whose working set is mapped before a load
+    /// starts. The adaptive controller climbs from 12 through 16 and 24 to
+    /// 32 on every local backend measured so far and holds at or below 24
+    /// on all of them, so every NUMA pool that feeds a device is grown at
+    /// loader creation to serve 32 concurrent requests plus the lifecycle
+    /// spare: a pinned slab mapped mid-load (146 ms for the first 64 MiB
+    /// hipHostMalloc slab on MI300X) would otherwise land inside a scored
+    /// window. A high-latency bootstrap above 32 still grows on demand.
+    pub const preallocated_source_width = 32;
+
+    /// Grows the retained arenas so that `width + 1` requests of
+    /// `request_blocks` blocks can be leased from each pool without mapping
+    /// a slab during the load, clipped to the largest width whose growth
+    /// leaves the mapped ceiling room for the non-materialized per-node
+    /// `feed_reserves`. The arenas stay owned by the platform settings and
+    /// are reused by every later loader.
+    pub fn ensureSourceWorkingSet(
+        self: *DmaPlatformSettings,
+        request_blocks: usize,
+        width: usize,
+        feed_reserves: []const usize,
+    ) !void {
+        return self.workspace.ensureSourceWorkingSet(
+            self.config.block_size,
+            request_blocks,
+            width,
+            feed_reserves,
+        );
     }
 
     fn numaPoolCount(self: *const DmaPlatformSettings) usize {
@@ -774,6 +804,59 @@ pub const DmaBenchmarkSourcePools = struct {
         return self.ensureBlockReserves(block_size, request_blocks, calibrated_reserves);
     }
 
+    fn usableBlocks(pool: *const DmaBenchmarkSourcePool, block_size: usize) !usize {
+        var usable: usize = 0;
+        for (pool.allocations.items) |arena| {
+            usable = std.math.add(usize, usable, arena.data().len / block_size) catch
+                return error.DmaMappedBudgetExceeded;
+        }
+        return usable;
+    }
+
+    /// See `DmaPlatformSettings.ensureSourceWorkingSet`. Every pool gets the
+    /// same target because a strict-affinity load draws a device's blocks
+    /// from its own node.
+    fn ensureSourceWorkingSet(
+        self: *DmaBenchmarkSourcePools,
+        block_size: usize,
+        request_blocks: usize,
+        width: usize,
+        feed_reserves: []const usize,
+    ) !void {
+        if (block_size == 0 or request_blocks == 0 or feed_reserves.len != self.pools.len)
+            return error.InvalidDmaLoadConfig;
+        const targets = try self.allocator.alloc(usize, self.pools.len);
+        defer self.allocator.free(targets);
+        var fitted_width = width;
+        while (true) : (fitted_width -= 1) {
+            const target_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
+                return error.DmaMappedBudgetExceeded;
+            var growth_bytes: usize = 0;
+            var reserved_bytes: usize = 0;
+            for (self.pools, feed_reserves, targets) |*pool, reserve, *target| {
+                const usable = try usableBlocks(pool, block_size);
+                target.* = target_blocks;
+                growth_bytes = std.math.add(
+                    usize,
+                    growth_bytes,
+                    (target_blocks -| usable) * block_size,
+                ) catch return error.DmaMappedBudgetExceeded;
+                reserved_bytes = std.math.add(
+                    usize,
+                    reserved_bytes,
+                    (reserve -| @max(usable, target_blocks)) * block_size,
+                ) catch return error.DmaMappedBudgetExceeded;
+            }
+            const committed = std.math.add(usize, growth_bytes, reserved_bytes) catch
+                return error.DmaMappedBudgetExceeded;
+            if (self.allocatedBytes() +| committed <= self.max_mapped_bytes) break;
+            // Not even one request's working set fits beyond what is
+            // retained: leave growth to the load.
+            if (fitted_width == 0) return;
+        }
+        return self.ensureBlockReserves(block_size, request_blocks, targets);
+    }
+
     fn ensureBlockReserves(
         self: *DmaBenchmarkSourcePools,
         block_size: usize,
@@ -783,15 +866,8 @@ pub const DmaBenchmarkSourcePools = struct {
         const missing_bytes = try self.allocator.alloc(usize, self.pools.len);
         defer self.allocator.free(missing_bytes);
         var missing_total: usize = 0;
-        for (self.pools, calibrated_reserves, missing_bytes) |pool, reserve, *missing| {
-            var usable_blocks: usize = 0;
-            for (pool.allocations.items) |arena| {
-                usable_blocks = std.math.add(
-                    usize,
-                    usable_blocks,
-                    arena.data().len / block_size,
-                ) catch return error.DmaMappedBudgetExceeded;
-            }
+        for (self.pools, calibrated_reserves, missing_bytes) |*pool, reserve, *missing| {
+            const usable_blocks = try usableBlocks(pool, block_size);
             const required_blocks = @max(reserve, request_blocks);
             const missing_blocks = required_blocks -| usable_blocks;
             missing.* = std.math.mul(usize, missing_blocks, block_size) catch

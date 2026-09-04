@@ -56,7 +56,7 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
       the controller evidence from MI300 made task 8 the next priority).
 - [ ] 6. Per-file incremental publish; identity fair order for one device.
 - [ ] 7. VFS: throttle classification, two-class backpressure, dead timing.
-- [ ] 8. Climb-and-hold controller without gate drains (gated, revertible).
+- [x] 8. Climb-and-hold controller without gate drains (gated, revertible).
 - [ ] 9. Per-plan preallocated contexts and event retirement (gated).
 - [ ] 10. VFS range/retry consolidation (gated on tests).
 - [ ] 11. Calibration reporting cleanup.
@@ -438,6 +438,61 @@ probe belongs to this task.
 - Validation: per-rung rate table on B70 reproduces the ordering; matrix and
   S3Proxy within spread; gate-closed counter zero. Revert the whole task if
   any anchor moves outside spread.
+
+Result (2026-09-04): `SourceReadWidthController` is `{fixed_width, index,
+start_index, max_index, best_index, rates (per-rung mean), samples, state:
+climbing|holding, borderline_used, probed_down, generation,
+last_backoff_generation}`. `observe` folds the window's rate into the rung's
+mean; a climb sample (the best rung or the one above it) that beats the best
+by 3% moves one rung up, or holds at the pinned clip; otherwise the hold rung
+is the lowest measured rung at or below the best within 3% of it, re-measured
+once when its retention is within 0.02 of 0.97, and probed one rung lower
+once when it is the start rung; then hold. Every decision opens a generation.
+`backoff(fresh_admissions)` lowers one rung, clips `max_index` there and
+holds; a second sample in the generation a backoff opened is ignored unless a
+read admitted under it has begun (`probe_peak_reads != 0` on the window
+`applyDecision` fences for every generation, holding or not). Blind growth
+moves the start rung to the reached width. Deleted: `Phase`, `Confirmation`,
+`confirmation_used`, `restartAt`, `refine_down`, `beginRefineOrSettle`,
+`probeCost`/`probeFitsTail`, `ramp_scores`/`unchanged_candidates`,
+`recomputePeakAndSelection`, `settle`, `Decision.changed/settled`,
+`Evidence.remaining_full_jobs`, `selectedWidth`. Runtime `Measurement =
+{inactive, measuring, blind}`; `applyDecision` sets both gate limits, fences
+the generation's window at the next admission and measures while climbing;
+`start` (born busy) replaces `resumeMeasurement`; the blind-to-measured
+transition is a new generation at the reached width. Deleted
+`.transitioning`, `.scoring`, `activatePendingProbe`,
+`backoff_admission_start`/`backoffReady`, `finishIdleMeasurement`,
+`scheduler_idle`. `BusyWindowClock`: a control tick that finds nothing
+unclaimed, pending or admitted after the window's first admission charges
+the interval since the previous tick to idle, subtracted from the window's
+elapsed time, so a window spans submissions and idle gaps never score or
+reset it. Pre-growth: `DmaPlatformSettings.ensureSourceWorkingSet` at
+`create` grows every NUMA pool to `(32 + 1) * maximum_blocks_per_job`
+blocks, clipped to the largest width whose growth leaves the mapped ceiling
+room for the non-materialized feed reserves (B70: 264 MiB retained, 8 MiB
+beyond calibration's 256 MiB in 1.5 ms; 16 MiB blocks and requests: 528
+MiB; 2 MiB blocks with 8 MiB requests: 132 MiB); the ready line logs
+`retained`, `pregrown`, `pregrowth_ms` and every scored window logs
+`source width window: generation, width, rate, busy_ms, completed,
+exercised, samples, next_width, state`. Tests 236 -> 238. Local B70, Llama:
+plain 0.672/0.658/0.657/0.657/0.666 s (task 4: 0.777-0.828), widths
+12/12/16/16/12, windows 12 at 21.8-23.1 GiB/s, 16 at 22.3-22.6, then 8 at
+20.3-21.8 (hold 12) or 24 at 21.6 (hold 16); fixed 12 0.631/0.628/0.627 s;
+packs width 16 window 1 pack phase 0.668/0.684/0.692 s, total
+0.764/0.778/0.787 s (task 4: 0.74-0.75 / 0.83-0.85), width 16 (16 at
+24.8-25.3 against 12 at 21.8-23.2); window 2 pack phase 0.674/0.675/0.669
+s, total 0.773/0.768/0.768 s, width 12; window 4 pack phase
+0.688/0.651/0.666 s, total 0.787/0.747/0.757 s, widths 8/24/12 (the pack
+rates at window 4 spread 17.8-20.0 GiB/s per rung between runs);
+`gate_closed_ticks` 0 in all 17 runs. Not reproduced as written: the
+recorded B70 curve holds 12 without the borderline re-measure of 16 the task
+text expected, because the re-measure applies to the hold rung below the
+best (16 above 12 at 0.970 can neither climb nor become the hold), so the
+replay's third window is the downward probe of 8 (test: 19.90 GiB/s, hold
+12). The B70 8 MiB curve is flat between 12 and 16 within the band (16 beat
+12 by 3.5% in two of five plain runs), so the held width alternates 12/16
+at equal load times. MI300/CUDA confirmation pending.
 
 ### 9. Per-plan preallocated contexts and event retirement (gated)
 
