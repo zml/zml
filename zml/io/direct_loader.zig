@@ -438,16 +438,26 @@ fn selectLoaderDmaDevice(
     return null;
 }
 
-/// One planned submission: the immutable plan the scheduler hands out, the
-/// per-tensor items it writes, and every request, block and event context
-/// created while loading it. `remaining` counts completion units: one per
-/// job plus a publish sentinel. A job's unit is released exactly once, by
-/// whichever of these happens: its request's last reference drops (final DMA
-/// callback or abandonment), a worker abandons the claimed job before a
-/// request exists, or `FairVectoredReadScheduler.fail` retires it unclaimed.
-/// The batch is done when `remaining` reaches zero; the awaiting task then
+/// One submission: its plans (one per source file, published as each file
+/// is planned), the per-tensor items it writes, and every request, block and
+/// event context created while loading it. `remaining` counts completion
+/// units: one per published job plus a publish sentinel held until the
+/// submission is sealed. A job's unit is released exactly once, by whichever
+/// of these happens: its request's last reference drops (final DMA callback
+/// or abandonment), a worker abandons the claimed job before a request
+/// exists, or `FairVectoredReadScheduler.fail` retires it unclaimed. The
+/// batch is done when `remaining` reaches zero; the awaiting task then
 /// retires it, so releasing a unit is the last permitted access to the batch.
 pub const Batch = struct {
+    /// One file's jobs in claim order with their transfer records.
+    const Plan = struct {
+        jobs: []FairVectoredReadScheduler.Job,
+        transfers: []VectoredLoadPipeline.PlannedTransfer,
+        planning_ns: u64,
+        /// Next job to claim; owned by the scheduler mutex.
+        cursor: usize = 0,
+    };
+
     const Diagnostics = struct {
         /// Submission number within the loader, for log correlation.
         sequence: usize = 0,
@@ -457,24 +467,41 @@ pub const Batch = struct {
         source_runs: usize = 0,
         source_items: usize = 0,
         planned_transfers: usize = 0,
+        /// Published plans and their planning time in total.
+        plans: usize = 0,
         planning_ns: u64 = 0,
+        /// The first publish; a submission without plans is stamped at its
+        /// seal.
         published_at: ?std.Io.Timestamp = null,
+        sealed_at: ?std.Io.Timestamp = null,
         /// Stamped by the scheduler when the first job is claimed.
         first_claim_at: ?std.Io.Timestamp = null,
+        /// Awake-clock nanoseconds of the first read admitted for the batch,
+        /// stamped by the worker that admitted it; 0 until then.
+        first_read_ns: std.atomic.Value(u64) = .init(0),
         /// Aggregate source statistics at publish; the completion log reports
         /// the delta against them (loader-wide while batches overlap).
         source_stats: ?VFS.ReadStats = null,
+
+        fn noteRead(self: *Diagnostics, io: std.Io) void {
+            if (self.first_read_ns.load(.monotonic) != 0) return;
+            _ = self.first_read_ns.cmpxchgStrong(0, awakeNs(io), .monotonic, .monotonic);
+        }
     };
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    jobs: []FairVectoredReadScheduler.Job,
-    transfers: []VectoredLoadPipeline.PlannedTransfer,
-    /// Owned once published; empty before so an unpublished batch can be
-    /// destroyed while the caller still owns the items.
+    /// Published plans in file order: appended by the submitting task and
+    /// read by claims, both under the scheduler mutex; freed at `destroy`.
+    plans: std.ArrayListUnmanaged(Plan) = .empty,
+    /// First plan that may hold unclaimed jobs; owned by the scheduler mutex.
+    plan_cursor: usize = 0,
+    /// No further plan will be published; owned by the scheduler mutex.
+    sealed: bool = false,
+    /// In the scheduler's queue; owned by the scheduler mutex.
+    queued: bool = false,
+    /// Owned by the batch and freed at `destroy`.
     items: []*LoaderLoadItem = &.{},
-    /// Next job to claim; owned by the scheduler mutex.
-    cursor: usize = 0,
     remaining: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
     requests: std.ArrayListUnmanaged(*VectoredLoadPipeline.RequestContext) = .empty,
@@ -484,31 +511,74 @@ pub const Batch = struct {
     /// Set by retirement so a unit released after `done` trips `finishJobs`.
     freeing: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
 
-    /// Takes ownership of the plan's jobs and transfers. The sentinel keeps
-    /// the batch from completing before the publisher has made it visible.
-    fn create(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        plan: *FairVectoredReadScheduler.PreparedBatch,
-        diagnostics: Diagnostics,
-    ) !*Batch {
+    /// An open batch holding its publish sentinel and nothing else. The
+    /// sentinel keeps the batch from completing before its last plan is
+    /// visible.
+    fn create(allocator: std.mem.Allocator, io: std.Io, diagnostics: Diagnostics) !*Batch {
         const self = try allocator.create(Batch);
         self.* = .{
             .allocator = allocator,
             .io = io,
-            .jobs = plan.jobs,
-            .transfers = plan.transfers,
-            .remaining = .init(1 + plan.jobs.len),
+            .remaining = .init(1),
             .diagnostics = diagnostics,
         };
-        plan.* = undefined;
         return self;
+    }
+
+    /// Scheduler mutex. Takes ownership of a prepared plan and adds one
+    /// completion unit per job; the caller reserved the list capacity, so
+    /// the plan and its units appear together.
+    fn appendPlanAssumeCapacity(
+        self: *Batch,
+        plan: *FairVectoredReadScheduler.PreparedPlan,
+        planning_ns: u64,
+    ) void {
+        self.plans.appendAssumeCapacity(.{
+            .jobs = plan.jobs,
+            .transfers = plan.transfers,
+            .planning_ns = planning_ns,
+        });
+        _ = self.remaining.fetchAdd(plan.jobs.len, .acq_rel);
+        plan.* = undefined;
+    }
+
+    /// Scheduler mutex. The next unclaimed job in plan order, or null when
+    /// every published plan is exhausted.
+    fn claimJob(self: *Batch) ?FairVectoredReadScheduler.Job {
+        while (self.plan_cursor < self.plans.items.len) : (self.plan_cursor += 1) {
+            const plan = &self.plans.items[self.plan_cursor];
+            if (plan.cursor == plan.jobs.len) continue;
+            const job = plan.jobs[plan.cursor];
+            plan.cursor += 1;
+            return job;
+        }
+        return null;
+    }
+
+    /// Scheduler mutex. Every published job is claimed or retired.
+    fn exhausted(self: *const Batch) bool {
+        for (self.plans.items[self.plan_cursor..]) |plan| {
+            if (plan.cursor != plan.jobs.len) return false;
+        }
+        return true;
+    }
+
+    /// Scheduler mutex. Marks every unclaimed job claimed and returns their
+    /// number; the caller releases their units.
+    fn retireUnclaimed(self: *Batch) usize {
+        var retired: usize = 0;
+        for (self.plans.items[self.plan_cursor..]) |*plan| {
+            retired += plan.jobs.len - plan.cursor;
+            plan.cursor = plan.jobs.len;
+        }
+        self.plan_cursor = self.plans.items.len;
+        return retired;
     }
 
     /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
     /// caller's final access to the batch and to anything it owns (requests,
-    /// blocks, events, items, jobs, transfers). The last unit sets `done`,
-    /// and the awaiting task frees all of it as soon as it observes the event.
+    /// blocks, events, items, plans). The last unit sets `done`, and the
+    /// awaiting task frees all of it as soon as it observes the event.
     fn finishJobs(self: *Batch, count: usize) void {
         if (count == 0) return;
         if (builtin.mode == .Debug) std.debug.assert(!self.freeing);
@@ -517,16 +587,19 @@ pub const Batch = struct {
         if (previous == count) self.done.set(self.io);
     }
 
-    /// Frees the items and the plan. Contexts must already have been retired
-    /// by `VectoredLoadPipeline.retireBatch`.
+    /// Frees the items and the plans. Contexts must already have been
+    /// retired by `VectoredLoadPipeline.retireBatch`.
     fn destroy(self: *Batch) void {
         std.debug.assert(self.requests.items.len == 0);
         std.debug.assert(self.blocks.items.len == 0);
         std.debug.assert(self.events.items.len == 0);
         for (self.items) |item| item.deinit(self.allocator);
         self.allocator.free(self.items);
-        self.allocator.free(self.transfers);
-        self.allocator.free(self.jobs);
+        for (self.plans.items) |plan| {
+            self.allocator.free(plan.transfers);
+            self.allocator.free(plan.jobs);
+        }
+        self.plans.deinit(self.allocator);
         self.requests.deinit(self.allocator);
         self.blocks.deinit(self.allocator);
         self.events.deinit(self.allocator);
@@ -1196,6 +1269,7 @@ const VectoredReadRequest = struct {
         }
 
         if (!beginRead(request, pipeline)) return;
+        request.batch.diagnostics.noteRead(pipeline.io);
         const read_result = readAbsoluteAllV(
             pipeline.io,
             file,
@@ -1254,12 +1328,18 @@ const VectoredReadRequest = struct {
     }
 };
 
-/// A strict FIFO of published batches. Within a batch, jobs are handed out in
-/// the planned order (fair by destination-device bytes, predecessor-safe);
-/// a later batch's first job is claimed only after every job of the earlier
-/// ones. The queue holds only batches with unclaimed jobs: a batch is popped
-/// with its last claim (or by `fail`), and it can only be freed after `done`,
-/// which needs every job claimed or retired, so a queued batch is never freed.
+/// A strict FIFO of published batches. A batch holds one plan per source
+/// file, published as soon as that file is planned. Within a plan, jobs are
+/// handed out in the planned order (fair by destination-device bytes,
+/// predecessor-safe); plans in file order; a later batch's first job only
+/// after every job of the earlier ones. The queue holds only batches that
+/// are open (their submission is still planning) or have unclaimed jobs: a
+/// sealed batch is popped with its last claim, at its seal when already
+/// exhausted, or by `fail`, and a batch can only be freed after `done`,
+/// which needs the sentinel dropped after the seal and every job claimed or
+/// retired, so a queued batch is never freed. An open head whose published
+/// plans are exhausted keeps the head and the workers wait for its next
+/// plan, at most one file's planning time.
 const FairVectoredReadScheduler = struct {
     const Job = struct {
         source_slot: *LoaderSourceSlot,
@@ -1288,15 +1368,16 @@ const FairVectoredReadScheduler = struct {
         job: Job,
     };
 
-    /// The planner's output; `Batch.create` takes ownership of it.
-    const PreparedBatch = struct {
+    /// The planner's output for one file; `Batch.appendPlanAssumeCapacity`
+    /// takes ownership of it.
+    const PreparedPlan = struct {
         allocator: std.mem.Allocator,
         jobs: []Job,
         transfers: []VectoredLoadPipeline.PlannedTransfer,
         source_bytes: u64,
         source_runs: usize,
 
-        fn deinit(self: *PreparedBatch) void {
+        fn deinit(self: *PreparedPlan) void {
             self.allocator.free(self.jobs);
             self.allocator.free(self.transfers);
             self.* = undefined;
@@ -1304,7 +1385,8 @@ const FairVectoredReadScheduler = struct {
     };
 
     allocator: std.mem.Allocator,
-    /// Batches with unclaimed jobs in publish order; `head` is the first.
+    /// Open batches and batches with unclaimed jobs in publish order; `head`
+    /// is the first.
     queue: std.ArrayListUnmanaged(*Batch) = .empty,
     head: usize = 0,
     unclaimed_total: usize = 0,
@@ -1322,7 +1404,6 @@ const FairVectoredReadScheduler = struct {
         self.queue.deinit(self.allocator);
         self.* = undefined;
     }
-
     fn fairOrder(
         allocator: std.mem.Allocator,
         jobs: []const PlanningJob,
@@ -1452,53 +1533,10 @@ const FairVectoredReadScheduler = struct {
         }
     }
 
-    fn prepareBatch(
-        allocator: std.mem.Allocator,
-        device_count: usize,
-        items: []const *LoaderLoadItem,
-        block_size: usize,
-        request_size: usize,
-    ) !PreparedBatch {
-        const scatter_limit = std.math.mul(
-            usize,
-            block_size,
-            max_load_positional_iovecs,
-        ) catch std.math.maxInt(usize);
-        const maximum_job_len = @min(request_size, scatter_limit);
-        if (maximum_job_len == 0) return error.InvalidLoaderJob;
-        const TensorPlan = struct {
-            dispatch_spans: DispatchSpans,
-            device_indices: []usize,
-            total: usize,
-        };
-        const plans = try allocator.alloc(TensorPlan, items.len);
-        var initialized_plans: usize = 0;
-        defer {
-            for (plans[0..initialized_plans]) |*plan| {
-                plan.dispatch_spans.deinit(allocator);
-                allocator.free(plan.device_indices);
-            }
-            allocator.free(plans);
-        }
-        for (items, plans) |item, *plan| {
-            const packed_shape = item.shape.packedShape();
-            plan.* = .{
-                .dispatch_spans = try .init(allocator, packed_shape, item.sharding),
-                .device_indices = &.{},
-                .total = packed_shape.byteSize(),
-            };
-            initialized_plans += 1;
-            if (plan.total != item.source.byteSize()) return error.InvalidLoaderJob;
-            const ordered_devices = item.sharding.devicesInCanonicalOrder();
-            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
-            for (ordered_devices, plan.device_indices) |device, *device_index| {
-                device_index.* = @intCast(device.id);
-                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
-            }
-        }
-
+    /// Item indices sorted by file URI, offset, size and index: the planner's
+    /// input, taken one file group at a time (`fileGroupEnd`).
+    fn sortedItemOrder(allocator: std.mem.Allocator, items: []const *LoaderLoadItem) ![]usize {
         const order = try allocator.alloc(usize, items.len);
-        defer allocator.free(order);
         for (order, 0..) |*index, i| index.* = i;
         const SortContext = struct {
             items: []const *LoaderLoadItem,
@@ -1517,6 +1555,70 @@ const FairVectoredReadScheduler = struct {
             }
         };
         std.mem.sort(usize, order, SortContext{ .items = items }, SortContext.lessThan);
+        return order;
+    }
+
+    /// The end of the file group that begins at `order[start]`.
+    fn fileGroupEnd(items: []const *LoaderLoadItem, order: []const usize, start: usize) usize {
+        const uri = items[order[start]].source.file_uri;
+        var end = start + 1;
+        while (end < order.len and std.mem.eql(u8, uri, items[order[end]].source.file_uri)) : (end += 1) {}
+        return end;
+    }
+
+    /// Plans one file: `order` indexes `items` sorted by offset then size,
+    /// all on the same file. Runs of touching ranges are cut into the
+    /// minimum number of jobs at tensor-safe boundaries, each job chained to
+    /// the previous one so a tail is never claimed before its prefix, in a
+    /// fair order across the destination devices (the planning order when
+    /// there is one device).
+    fn preparePlan(
+        allocator: std.mem.Allocator,
+        device_count: usize,
+        items: []const *LoaderLoadItem,
+        order: []const usize,
+        block_size: usize,
+        request_size: usize,
+    ) !PreparedPlan {
+        const scatter_limit = std.math.mul(
+            usize,
+            block_size,
+            max_load_positional_iovecs,
+        ) catch std.math.maxInt(usize);
+        const maximum_job_len = @min(request_size, scatter_limit);
+        if (maximum_job_len == 0) return error.InvalidLoaderJob;
+        const TensorPlan = struct {
+            dispatch_spans: DispatchSpans,
+            device_indices: []usize,
+            total: usize,
+        };
+        const tensor_plans = try allocator.alloc(TensorPlan, order.len);
+        var initialized_plans: usize = 0;
+        defer {
+            for (tensor_plans[0..initialized_plans]) |*plan| {
+                plan.dispatch_spans.deinit(allocator);
+                allocator.free(plan.device_indices);
+            }
+            allocator.free(tensor_plans);
+        }
+        for (order, tensor_plans) |item_index, *plan| {
+            const item = items[item_index];
+            std.debug.assert(std.mem.eql(u8, item.source.file_uri, items[order[0]].source.file_uri));
+            const packed_shape = item.shape.packedShape();
+            plan.* = .{
+                .dispatch_spans = try .init(allocator, packed_shape, item.sharding),
+                .device_indices = &.{},
+                .total = packed_shape.byteSize(),
+            };
+            initialized_plans += 1;
+            if (plan.total != item.source.byteSize()) return error.InvalidLoaderJob;
+            const ordered_devices = item.sharding.devicesInCanonicalOrder();
+            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
+            for (ordered_devices, plan.device_indices) |device, *device_index| {
+                device_index.* = @intCast(device.id);
+                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
+            }
+        }
 
         var jobs_list: std.ArrayList(PlanningJob) = .empty;
         defer jobs_list.deinit(allocator);
@@ -1526,177 +1628,162 @@ const FairVectoredReadScheduler = struct {
         defer physical_list.deinit(allocator);
         var safe_boundaries: std.ArrayList(u64) = .empty;
         defer safe_boundaries.deinit(allocator);
+        // One device is charged every job, so the fair order is the planning
+        // order and the queues stay empty.
         const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
-        errdefer allocator.free(queues);
+        defer allocator.free(queues);
         @memset(queues, .empty);
-        errdefer for (queues) |*queue| queue.deinit(allocator);
+        defer for (queues) |*queue| queue.deinit(allocator);
         var source_bytes: u64 = 0;
         var source_runs: usize = 0;
-        var file_start: usize = 0;
-        while (file_start < order.len) {
-            const first_item = items[order[file_start]];
-            var file_end = file_start + 1;
-            while (file_end < order.len and std.mem.eql(
-                u8,
-                first_item.source.file_uri,
-                items[order[file_end]].source.file_uri,
-            )) : (file_end += 1) {}
-
-            var previous_job: ?usize = null;
-            var run_cursor = file_start;
-            while (run_cursor < file_end) {
-                safe_boundaries.clearRetainingCapacity();
-                const first_index = order[run_cursor];
-                const first_offset = items[first_index].source.offset;
-                var run_end = std.math.add(
-                    u64,
-                    first_offset,
-                    items[first_index].source.byteSize(),
-                ) catch return error.InvalidLoaderJob;
-                if (run_end == first_offset) {
-                    run_cursor += 1;
-                    continue;
+        var previous_job: ?usize = null;
+        var run_cursor: usize = 0;
+        while (run_cursor < order.len) {
+            safe_boundaries.clearRetainingCapacity();
+            const first_index = order[run_cursor];
+            const first_offset = items[first_index].source.offset;
+            var run_end = std.math.add(
+                u64,
+                first_offset,
+                items[first_index].source.byteSize(),
+            ) catch return error.InvalidLoaderJob;
+            if (run_end == first_offset) {
+                run_cursor += 1;
+                continue;
+            }
+            var run_item_end = run_cursor + 1;
+            while (run_item_end < order.len) : (run_item_end += 1) {
+                const candidate = items[order[run_item_end]].source;
+                if (candidate.offset > run_end) break;
+                const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
+                    return error.InvalidLoaderJob;
+                // A touching range starts where every preceding range has
+                // ended. Unlike an arbitrary tensor end, this is safe even
+                // when the batch contains overlapping or duplicate ranges.
+                if (candidate.byteSize() != 0 and candidate.offset == run_end and
+                    (safe_boundaries.items.len == 0 or
+                        safe_boundaries.items[safe_boundaries.items.len - 1] != candidate.offset))
+                {
+                    try safe_boundaries.append(allocator, candidate.offset);
                 }
-                var run_item_end = run_cursor + 1;
-                while (run_item_end < file_end) : (run_item_end += 1) {
-                    const candidate = items[order[run_item_end]].source;
-                    if (candidate.offset > run_end) break;
+                run_end = @max(run_end, candidate_end);
+            }
+            source_runs += 1;
+
+            var job_start = first_offset;
+            var candidate_start = run_cursor;
+            var boundary_cursor: usize = 0;
+            const run_len = run_end - first_offset;
+            var jobs_remaining: usize = @intCast(std.math.divCeil(
+                u64,
+                run_len,
+                @intCast(maximum_job_len),
+            ) catch unreachable);
+            while (jobs_remaining != 0) {
+                const hard_end = @min(
+                    run_end,
+                    std.math.add(u64, job_start, maximum_job_len) catch run_end,
+                );
+                const job_end = if (jobs_remaining == 1)
+                    run_end
+                else boundary: {
+                    const remaining_capacity = std.math.mul(
+                        u64,
+                        @intCast(jobs_remaining - 1),
+                        @intCast(maximum_job_len),
+                    ) catch return error.InvalidLoaderJob;
+                    const minimum_end = @max(job_start + 1, run_end - remaining_capacity);
+                    const maximum_end = @min(
+                        hard_end,
+                        run_end - @as(u64, @intCast(jobs_remaining - 1)),
+                    );
+                    while (boundary_cursor < safe_boundaries.items.len and
+                        safe_boundaries.items[boundary_cursor] <= job_start)
+                    {
+                        boundary_cursor += 1;
+                    }
+                    var scan = boundary_cursor;
+                    var selected: ?u64 = null;
+                    while (scan < safe_boundaries.items.len and
+                        safe_boundaries.items[scan] <= maximum_end) : (scan += 1)
+                    {
+                        if (safe_boundaries.items[scan] >= minimum_end)
+                            selected = safe_boundaries.items[scan];
+                    }
+                    boundary_cursor = scan;
+                    break :boundary selected orelse maximum_end;
+                };
+                const job_len: usize = @intCast(job_end - job_start);
+                const job_index = jobs_list.items.len;
+                const transfer_start = transfers_list.items.len;
+                try physical_list.appendNTimes(allocator, 0, device_count);
+                const row = physical_list.items[job_index * device_count ..][0..device_count];
+                while (candidate_start < run_item_end) {
+                    const candidate = items[order[candidate_start]].source;
                     const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
                         return error.InvalidLoaderJob;
-                    // A touching range starts where every preceding range has
-                    // ended. Unlike an arbitrary tensor end, this is safe even
-                    // when the batch contains overlapping or duplicate ranges.
-                    if (candidate.byteSize() != 0 and candidate.offset == run_end and
-                        (safe_boundaries.items.len == 0 or
-                            safe_boundaries.items[safe_boundaries.items.len - 1] != candidate.offset))
-                    {
-                        try safe_boundaries.append(allocator, candidate.offset);
-                    }
-                    run_end = @max(run_end, candidate_end);
+                    if (candidate_end > job_start) break;
+                    candidate_start += 1;
                 }
-                source_runs += 1;
-
-                var job_start = first_offset;
-                var candidate_start = run_cursor;
-                var boundary_cursor: usize = 0;
-                const run_len = run_end - first_offset;
-                var jobs_remaining: usize = @intCast(std.math.divCeil(
-                    u64,
-                    run_len,
-                    @intCast(maximum_job_len),
-                ) catch unreachable);
-                while (jobs_remaining != 0) {
-                    const hard_end = @min(
-                        run_end,
-                        std.math.add(u64, job_start, maximum_job_len) catch run_end,
+                for (order[candidate_start..run_item_end], candidate_start..) |item_index, position| {
+                    const item = items[item_index];
+                    if (item.source.offset >= job_end) break;
+                    const item_end = std.math.add(u64, item.source.offset, item.source.byteSize()) catch
+                        return error.InvalidLoaderJob;
+                    const intersection_start = @max(job_start, item.source.offset);
+                    const intersection_end = @min(job_end, item_end);
+                    if (intersection_start >= intersection_end) continue;
+                    try appendTransfers(
+                        allocator,
+                        &transfers_list,
+                        transfer_start,
+                        item,
+                        @intCast(intersection_start - item.source.offset),
+                        @intCast(intersection_end - intersection_start),
+                        job_start,
+                        block_size,
+                        tensor_plans[position].dispatch_spans,
+                        tensor_plans[position].device_indices,
+                        row,
                     );
-                    const job_end = if (jobs_remaining == 1)
-                        run_end
-                    else boundary: {
-                        const remaining_capacity = std.math.mul(
-                            u64,
-                            @intCast(jobs_remaining - 1),
-                            @intCast(maximum_job_len),
-                        ) catch return error.InvalidLoaderJob;
-                        const minimum_end = @max(job_start + 1, run_end - remaining_capacity);
-                        const maximum_end = @min(
-                            hard_end,
-                            run_end - @as(u64, @intCast(jobs_remaining - 1)),
-                        );
-                        while (boundary_cursor < safe_boundaries.items.len and
-                            safe_boundaries.items[boundary_cursor] <= job_start)
-                        {
-                            boundary_cursor += 1;
-                        }
-                        var scan = boundary_cursor;
-                        var selected: ?u64 = null;
-                        while (scan < safe_boundaries.items.len and
-                            safe_boundaries.items[scan] <= maximum_end) : (scan += 1)
-                        {
-                            if (safe_boundaries.items[scan] >= minimum_end)
-                                selected = safe_boundaries.items[scan];
-                        }
-                        boundary_cursor = scan;
-                        break :boundary selected orelse maximum_end;
-                    };
-                    const job_len: usize = @intCast(job_end - job_start);
-                    const job_index = jobs_list.items.len;
-                    const transfer_start = transfers_list.items.len;
-                    try physical_list.appendNTimes(allocator, 0, device_count);
-                    const row = physical_list.items[job_index * device_count ..][0..device_count];
-                    while (candidate_start < run_item_end) {
-                        const candidate = items[order[candidate_start]].source;
-                        const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
-                            return error.InvalidLoaderJob;
-                        if (candidate_end > job_start) break;
-                        candidate_start += 1;
-                    }
-                    for (order[candidate_start..run_item_end]) |item_index| {
-                        const item = items[item_index];
-                        if (item.source.offset >= job_end) break;
-                        const item_end = std.math.add(u64, item.source.offset, item.source.byteSize()) catch
-                            return error.InvalidLoaderJob;
-                        const intersection_start = @max(job_start, item.source.offset);
-                        const intersection_end = @min(job_end, item_end);
-                        if (intersection_start >= intersection_end) continue;
-                        try appendTransfers(
-                            allocator,
-                            &transfers_list,
-                            transfer_start,
-                            item,
-                            @intCast(intersection_start - item.source.offset),
-                            @intCast(intersection_end - intersection_start),
-                            job_start,
-                            block_size,
-                            plans[item_index].dispatch_spans,
-                            plans[item_index].device_indices,
-                            row,
-                        );
-                    }
-                    std.debug.assert(transfers_list.items.len > transfer_start);
-                    try jobs_list.append(allocator, .{
-                        .source_slot = first_item.source_slot,
-                        .file_offset = job_start,
-                        .len = job_len,
-                        .transfer_start = transfer_start,
-                        .transfer_len = transfers_list.items.len - transfer_start,
-                        .predecessor = previous_job,
-                    });
-                    source_bytes +|= @intCast(job_len);
-                    previous_job = job_index;
+                }
+                std.debug.assert(transfers_list.items.len > transfer_start);
+                try jobs_list.append(allocator, .{
+                    .source_slot = items[first_index].source_slot,
+                    .file_offset = job_start,
+                    .len = job_len,
+                    .transfer_start = transfer_start,
+                    .transfer_len = transfers_list.items.len - transfer_start,
+                    .predecessor = previous_job,
+                });
+                source_bytes +|= @intCast(job_len);
+                previous_job = job_index;
+                if (device_count > 1) {
                     for (row, queues) |bytes, *queue| {
                         if (bytes != 0) try queue.append(allocator, job_index);
                     }
-                    job_start = job_end;
-                    jobs_remaining -= 1;
                 }
-                std.debug.assert(job_start == run_end);
-                run_cursor = run_item_end;
+                job_start = job_end;
+                jobs_remaining -= 1;
             }
-            file_start = file_end;
+            std.debug.assert(job_start == run_end);
+            run_cursor = run_item_end;
         }
 
-        const planning_jobs = try jobs_list.toOwnedSlice(allocator);
-        defer allocator.free(planning_jobs);
+        const planning_jobs = jobs_list.items;
         const transfers = try transfers_list.toOwnedSlice(allocator);
         errdefer allocator.free(transfers);
-        const physical_bytes = try physical_list.toOwnedSlice(allocator);
-        defer allocator.free(physical_bytes);
-        const fair_order = try fairOrder(allocator, planning_jobs, physical_bytes, queues);
-        defer allocator.free(fair_order);
         const jobs = try allocator.alloc(Job, planning_jobs.len);
         errdefer allocator.free(jobs);
-        for (jobs, fair_order) |*job, planning_index| {
-            const planned = planning_jobs[planning_index];
-            job.* = .{
-                .source_slot = planned.source_slot,
-                .file_offset = planned.file_offset,
-                .len = planned.len,
-                .transfers = transfers[planned.transfer_start..][0..planned.transfer_len],
-            };
+        if (device_count == 1) {
+            for (jobs, planning_jobs) |*job, planned| job.* = finalJob(planned, transfers);
+        } else {
+            const fair_order = try fairOrder(allocator, planning_jobs, physical_list.items, queues);
+            defer allocator.free(fair_order);
+            for (jobs, fair_order) |*job, planning_index| {
+                job.* = finalJob(planning_jobs[planning_index], transfers);
+            }
         }
-        for (queues) |*queue| queue.deinit(allocator);
-        allocator.free(queues);
         return .{
             .allocator = allocator,
             .jobs = jobs,
@@ -1706,17 +1793,113 @@ const FairVectoredReadScheduler = struct {
         };
     }
 
-    /// Appends a batch behind every earlier one. A batch without jobs is not
-    /// queued: it completes when its publisher drops the sentinel.
-    fn publish(self: *FairVectoredReadScheduler, io: std.Io, batch: *Batch) !void {
+    fn finalJob(planned: PlanningJob, transfers: []VectoredLoadPipeline.PlannedTransfer) Job {
+        return .{
+            .source_slot = planned.source_slot,
+            .file_offset = planned.file_offset,
+            .len = planned.len,
+            .transfers = transfers[planned.transfer_start..][0..planned.transfer_len],
+        };
+    }
+
+    /// Plans `items` one file at a time and publishes each plan as soon as
+    /// it exists, so workers claim the first file while the rest is planned.
+    /// Stops at the first error; the caller seals or fails the batch.
+    fn publishFiles(
+        self: *FairVectoredReadScheduler,
+        io: std.Io,
+        batch: *Batch,
+        device_count: usize,
+        items: []const *LoaderLoadItem,
+        block_size: usize,
+        request_size: usize,
+    ) !void {
+        const order = try sortedItemOrder(self.allocator, items);
+        defer self.allocator.free(order);
+        var file_start: usize = 0;
+        while (file_start < order.len) {
+            const file_end = fileGroupEnd(items, order, file_start);
+            const planning_started: std.Io.Timestamp = .now(io, .awake);
+            var plan = try preparePlan(
+                self.allocator,
+                device_count,
+                items,
+                order[file_start..file_end],
+                block_size,
+                request_size,
+            );
+            const planning_ns: u64 = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
+            self.publish(io, batch, &plan, planning_ns) catch |err| {
+                plan.deinit();
+                return err;
+            };
+            file_start = file_end;
+        }
+    }
+    /// Publishes one plan of an open batch behind every earlier plan and
+    /// batch. The batch joins the queue with its first plan that has jobs;
+    /// a plan without jobs only counts in the diagnostics.
+    fn publish(
+        self: *FairVectoredReadScheduler,
+        io: std.Io,
+        batch: *Batch,
+        plan: *PreparedPlan,
+        planning_ns: u64,
+    ) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.stopping) return error.LoaderShuttingDown;
-        if (batch.jobs.len == 0) return;
-        std.debug.assert(batch.cursor == 0);
-        try self.queue.append(self.allocator, batch);
-        self.unclaimed_total += batch.jobs.len;
-        self.condition.broadcast(io);
+        std.debug.assert(!batch.sealed);
+        const job_count = plan.jobs.len;
+        const joins_queue = !batch.queued and job_count != 0;
+        try batch.plans.ensureUnusedCapacity(batch.allocator, 1);
+        if (joins_queue) try self.queue.ensureUnusedCapacity(self.allocator, 1);
+        // Nothing below fails: the plan, its units and the queue entry
+        // appear together.
+        const diagnostics = &batch.diagnostics;
+        if (diagnostics.published_at == null) diagnostics.published_at = .now(io, .awake);
+        diagnostics.plans += 1;
+        diagnostics.planning_ns += planning_ns;
+        diagnostics.source_bytes += plan.source_bytes;
+        diagnostics.source_jobs += job_count;
+        diagnostics.source_runs += plan.source_runs;
+        diagnostics.planned_transfers += plan.transfers.len;
+        batch.appendPlanAssumeCapacity(plan, planning_ns);
+        if (joins_queue) {
+            self.queue.appendAssumeCapacity(batch);
+            batch.queued = true;
+        }
+        self.unclaimed_total += job_count;
+        if (job_count != 0) self.condition.broadcast(io);
+    }
+
+    /// No further plan for the batch. A batch whose published plans are
+    /// already exhausted leaves the queue here; otherwise its last claim
+    /// pops it. The publisher drops the sentinel only after this, so the
+    /// batch cannot complete while still queued.
+    fn seal(self: *FairVectoredReadScheduler, io: std.Io, batch: *Batch) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(!batch.sealed);
+        batch.sealed = true;
+        const now: std.Io.Timestamp = .now(io, .awake);
+        if (batch.diagnostics.published_at == null) batch.diagnostics.published_at = now;
+        batch.diagnostics.sealed_at = now;
+        if (batch.queued and batch.exhausted()) {
+            // Only the head can have been claimed empty.
+            std.debug.assert(self.queue.items[self.head] == batch);
+            self.popHead();
+        }
+    }
+
+    /// Scheduler mutex.
+    fn popHead(self: *FairVectoredReadScheduler) void {
+        self.queue.items[self.head].queued = false;
+        self.head += 1;
+        if (self.head == self.queue.items.len) {
+            self.queue.clearRetainingCapacity();
+            self.head = 0;
+        }
     }
 
     fn stop(self: *FairVectoredReadScheduler, io: std.Io) void {
@@ -1726,18 +1909,20 @@ const FairVectoredReadScheduler = struct {
         self.condition.broadcast(io);
     }
 
-    /// Stops claims and retires the unclaimed units of every queued batch so
-    /// each still reaches `done` through its claimed requests. Claims and
-    /// this pass both move cursors under the mutex, so they partition the
-    /// jobs exactly: every claimed job keeps its unit with its worker.
+    /// Stops claims and retires the unclaimed units of every plan of every
+    /// queued batch so each still reaches `done` through its claimed
+    /// requests (an open batch through its seal and sentinel as well).
+    /// Claims and this pass both move cursors under the mutex, so they
+    /// partition the jobs exactly: every claimed job keeps its unit with its
+    /// worker.
     fn fail(self: *FairVectoredReadScheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.stopping = true;
         self.condition.broadcast(io);
         for (self.queue.items[self.head..]) |batch| {
-            const unclaimed = batch.jobs.len - batch.cursor;
-            batch.cursor = batch.jobs.len;
+            batch.queued = false;
+            const unclaimed = batch.retireUnclaimed();
             // Last access: the retired units may complete the batch.
             batch.finishJobs(unclaimed);
         }
@@ -1746,28 +1931,23 @@ const FairVectoredReadScheduler = struct {
         self.unclaimed_total = 0;
     }
 
-    /// Hands out the head batch's next job; the batch leaves the queue with
-    /// its last one.
+    /// Hands out the head batch's next job; a sealed batch leaves the queue
+    /// with its last one. An open head whose published plans are exhausted
+    /// hands out nothing until its next plan is published.
     fn claim(self: *FairVectoredReadScheduler, io: std.Io) ?Claim {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.head == self.queue.items.len) return null;
         const batch = self.queue.items[self.head];
-        std.debug.assert(batch.cursor < batch.jobs.len);
-        if (batch.cursor == 0) batch.diagnostics.first_claim_at = .now(io, .awake);
-        const job = batch.jobs[batch.cursor];
-        batch.cursor += 1;
+        const job = batch.claimJob() orelse {
+            std.debug.assert(!batch.sealed);
+            return null;
+        };
+        if (batch.diagnostics.first_claim_at == null) batch.diagnostics.first_claim_at = .now(io, .awake);
         self.unclaimed_total -= 1;
-        if (batch.cursor == batch.jobs.len) {
-            self.head += 1;
-            if (self.head == self.queue.items.len) {
-                self.queue.clearRetainingCapacity();
-                self.head = 0;
-            }
-        }
+        if (batch.sealed and batch.exhausted()) self.popHead();
         return .{ .batch = batch, .job = job };
     }
-
     fn waitForWork(self: *FairVectoredReadScheduler, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -1836,39 +2016,59 @@ fn expectFairOrder(
     try std.testing.expectEqualSlices(usize, expected, order);
 }
 
-/// A batch of `job_count` unit jobs (`file_offset` = index) whose sentinel
-/// is still held; publish it with `publishTestBatch`.
-fn testBatch(allocator: std.mem.Allocator, job_count: usize) !*Batch {
+/// A plan of `job_count` unit jobs (`file_offset` = index).
+fn testPlan(allocator: std.mem.Allocator, job_count: usize) !FairVectoredReadScheduler.PreparedPlan {
     const jobs = try allocator.alloc(FairVectoredReadScheduler.Job, job_count);
-    errdefer allocator.free(jobs);
     for (jobs, 0..) |*job, index| job.* = .{
         .source_slot = undefined,
         .file_offset = index,
         .len = 1,
         .transfers = &.{},
     };
-    var plan: FairVectoredReadScheduler.PreparedBatch = .{
+    return .{
         .allocator = allocator,
         .jobs = jobs,
         .transfers = &.{},
         .source_bytes = job_count,
         .source_runs = job_count,
     };
-    return Batch.create(allocator, std.testing.io, &plan, .{});
 }
 
-/// `DirectLoader.submit`'s publish sequence.
-fn publishTestBatch(scheduler: *FairVectoredReadScheduler, job_count: usize) !*Batch {
-    const io = std.testing.io;
-    const batch = try testBatch(std.testing.allocator, job_count);
-    scheduler.publish(io, batch) catch |err| {
-        batch.destroy();
+/// Publishes a plan of `job_count` unit jobs into an open batch.
+fn publishTestPlan(scheduler: *FairVectoredReadScheduler, batch: *Batch, job_count: usize) !void {
+    var plan = try testPlan(std.testing.allocator, job_count);
+    scheduler.publish(std.testing.io, batch, &plan, 0) catch |err| {
+        plan.deinit();
         return err;
     };
+}
+
+/// `DirectLoader.submit`'s sequence for a one-file submission: publish,
+/// seal, drop the sentinel.
+fn publishTestBatch(scheduler: *FairVectoredReadScheduler, job_count: usize) !*Batch {
+    const io = std.testing.io;
+    const batch = try Batch.create(std.testing.allocator, io, .{});
+    errdefer batch.destroy();
+    try publishTestPlan(scheduler, batch, job_count);
+    scheduler.seal(io, batch);
     batch.finishJobs(1);
     return batch;
 }
 
+/// Claims out, seals and frees an open batch that a test only inspected;
+/// it must be the only queued batch.
+fn discardTestBatch(scheduler: *FairVectoredReadScheduler, batch: *Batch) void {
+    const io = std.testing.io;
+    var claimed: usize = 0;
+    while (scheduler.claim(io)) |claim| {
+        std.debug.assert(claim.batch == batch);
+        claimed += 1;
+    }
+    scheduler.seal(io, batch);
+    batch.finishJobs(1 + claimed);
+    std.debug.assert(batch.done.isSet());
+    batch.destroy();
+}
 test "fair order rotates sharded devices by scheduled bytes" {
     try expectFairOrder(2, &.{
         .{ .tensor_index = 0, .physical_bytes = &.{ 10, 0 } },
@@ -1878,7 +2078,7 @@ test "fair order rotates sharded devices by scheduled bytes" {
     }, &.{ 0, 2, 1, 3 });
 }
 
-test "source batch coalesces exact adjacent and overlapping tensor ranges" {
+test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
@@ -1914,28 +2114,34 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
         device_count = @max(device_count, @as(usize, @intCast(device.id)) + 1);
     }
 
-    var batch = try FairVectoredReadScheduler.prepareBatch(
-        allocator,
-        device_count,
-        &item_ptrs,
-        4,
-        8,
-    );
-    defer batch.deinit();
+    var scheduler: FairVectoredReadScheduler = .init(allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(allocator, io, .{});
+    try scheduler.publishFiles(io, batch, device_count, &item_ptrs, 4, 8);
 
-    // a:[10,18) merges adjacency and the duplicate, a:[20,24) remains exact,
-    // and b:[3,15) is split at the request-size boundary.
-    try std.testing.expectEqual(@as(usize, 3), batch.source_runs);
-    try std.testing.expectEqual(@as(usize, 4), batch.jobs.len);
-    try std.testing.expectEqual(@as(u64, 24), batch.source_bytes);
-    try std.testing.expectEqual(@as(usize, 7), batch.transfers.len);
-    try std.testing.expectEqual(@as(u64, 10), batch.jobs[0].file_offset);
-    try std.testing.expectEqual(@as(usize, 8), batch.jobs[0].len);
-    try std.testing.expectEqual(@as(usize, 3), batch.jobs[0].transfers.len);
-    try std.testing.expectEqual(@as(u64, 20), batch.jobs[1].file_offset);
-    try std.testing.expectEqual(@as(u64, 3), batch.jobs[2].file_offset);
-    try std.testing.expectEqual(@as(usize, 8), batch.jobs[2].len);
-    try std.testing.expectEqual(@as(usize, 4), batch.jobs[3].len);
+    // One plan per file. a:[10,18) merges adjacency and the duplicate,
+    // a:[20,24) remains exact, and b:[3,15) is split at the request-size
+    // boundary.
+    const plans = batch.plans.items;
+    try std.testing.expectEqual(@as(usize, 2), plans.len);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), plans[0].transfers.len);
+    try std.testing.expectEqual(@as(u64, 10), plans[0].jobs[0].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), plans[0].jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 3), plans[0].jobs[0].transfers.len);
+    try std.testing.expectEqual(@as(u64, 20), plans[0].jobs[1].file_offset);
+    try std.testing.expectEqual(@as(usize, 2), plans[1].jobs.len);
+    try std.testing.expectEqual(@as(usize, 3), plans[1].transfers.len);
+    try std.testing.expectEqual(@as(u64, 3), plans[1].jobs[0].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), plans[1].jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 4), plans[1].jobs[1].len);
+    // The totals equal the former single-plan numbers for the same inputs.
+    try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
+    try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_runs);
+    try std.testing.expectEqual(@as(usize, 4), batch.diagnostics.source_jobs);
+    try std.testing.expectEqual(@as(u64, 24), batch.diagnostics.source_bytes);
+    try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_transfers);
+    discardTestBatch(&scheduler, batch);
 
     var iov_source: safetensors.Tensor = .{
         .file_uri = "iov",
@@ -1952,17 +2158,18 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
         .sharding = platform.replicated_sharding,
         .output = &iov_output,
     };
-    var iov_batch = try FairVectoredReadScheduler.prepareBatch(
+    var iov_plan = try FairVectoredReadScheduler.preparePlan(
         allocator,
         device_count,
         &.{&iov_item},
+        &.{0},
         1,
         max_load_positional_iovecs + 1,
     );
-    defer iov_batch.deinit();
-    try std.testing.expectEqual(@as(usize, 2), iov_batch.jobs.len);
-    try std.testing.expectEqual(max_load_positional_iovecs, iov_batch.jobs[0].len);
-    try std.testing.expectEqual(@as(usize, 1), iov_batch.jobs[1].len);
+    defer iov_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), iov_plan.jobs.len);
+    try std.testing.expectEqual(max_load_positional_iovecs, iov_plan.jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 1), iov_plan.jobs[1].len);
 
     var aligned_sources = [_]safetensors.Tensor{
         .{ .file_uri = "aligned", .name = "aligned0", .shape = .init(.{7}, .u8), .offset = 0 },
@@ -1983,21 +2190,92 @@ test "source batch coalesces exact adjacent and overlapping tensor ranges" {
         };
         item_ptr.* = item;
     }
-    var aligned_batch = try FairVectoredReadScheduler.prepareBatch(
+    var aligned_plan = try FairVectoredReadScheduler.preparePlan(
         allocator,
         device_count,
         &aligned_item_ptrs,
+        &.{ 0, 1, 2 },
         4,
         8,
     );
-    defer aligned_batch.deinit();
-    try std.testing.expectEqual(@as(usize, 3), aligned_batch.jobs.len);
-    try std.testing.expectEqual(@as(usize, 6), aligned_batch.transfers.len);
-    try std.testing.expectEqual(@as(usize, 7), aligned_batch.jobs[0].len);
-    try std.testing.expectEqual(@as(usize, 8), aligned_batch.jobs[1].len);
-    try std.testing.expectEqual(@as(usize, 5), aligned_batch.jobs[2].len);
+    defer aligned_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 3), aligned_plan.jobs.len);
+    try std.testing.expectEqual(@as(usize, 6), aligned_plan.transfers.len);
+    try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].len);
+    try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].len);
 }
 
+test "scheduler publishes a submission one file at a time and claims the files in order" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+
+    // Submitted out of file order: the sort groups "a" before "b".
+    var sources = [_]safetensors.Tensor{
+        .{ .file_uri = "b", .name = "b0", .shape = .init(.{4}, .u8), .offset = 0 },
+        .{ .file_uri = "a", .name = "a1", .shape = .init(.{4}, .u8), .offset = 4 },
+        .{ .file_uri = "a", .name = "a0", .shape = .init(.{4}, .u8), .offset = 0 },
+    };
+    var slots = [_]LoaderSourceSlot{
+        .{ .uri = "a" },
+        .{ .uri = "b" },
+    };
+    var outputs: [sources.len]Buffer = undefined;
+    var items: [sources.len]LoaderLoadItem = undefined;
+    var item_ptrs: [sources.len]*LoaderLoadItem = undefined;
+    for (&items, &item_ptrs, 0..) |*item, *item_ptr, i| {
+        item.* = .{
+            .source = &sources[i],
+            .source_slot = if (i == 0) &slots[1] else &slots[0],
+            .shape = sources[i].shape,
+            .sharding = platform.replicated_sharding,
+            .output = &outputs[i],
+        };
+        item_ptr.* = item;
+    }
+    var device_count: usize = 0;
+    for (platform.replicated_sharding.devicesInCanonicalOrder()) |device| {
+        device_count = @max(device_count, @as(usize, @intCast(device.id)) + 1);
+    }
+
+    var scheduler: FairVectoredReadScheduler = .init(allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(allocator, io, .{});
+    try scheduler.publishFiles(io, batch, device_count, &item_ptrs, 4, 4);
+    try std.testing.expectEqual(@as(usize, 2), batch.plans.items.len);
+    try std.testing.expectEqual(@as(usize, 2), batch.plans.items[0].jobs.len);
+    try std.testing.expectEqual(@as(usize, 1), batch.plans.items[1].jobs.len);
+    try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
+    try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_jobs);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expect(batch.diagnostics.published_at != null);
+    try std.testing.expect(batch.diagnostics.sealed_at == null);
+
+    // File a's jobs in offset order, then file b's.
+    var claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(&slots[0], claim.job.source_slot);
+    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(&slots[0], claim.job.source_slot);
+    try std.testing.expectEqual(@as(u64, 4), claim.job.file_offset);
+    claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(&slots[1], claim.job.source_slot);
+    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    // Open and exhausted: the batch keeps the head until it is sealed.
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.queue.items.len);
+    scheduler.seal(io, batch);
+    try std.testing.expect(batch.diagnostics.sealed_at != null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
+    batch.finishJobs(1);
+    try std.testing.expect(!batch.done.isSet());
+    batch.finishJobs(3);
+    try std.testing.expect(batch.done.isSet());
+    batch.destroy();
+}
 test "fair order preserves per-tensor request order" {
     try expectFairOrder(2, &.{
         .{ .tensor_index = 0, .physical_bytes = &.{ 1, 0 } },
@@ -2229,6 +2507,110 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
     }
 }
 
+test "fifo scheduler keeps an open batch at the head until its next plan is published" {
+    const io = std.testing.io;
+    var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(std.testing.allocator, io, .{});
+    try publishTestPlan(&scheduler, batch, 1);
+    var claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(batch, claim.batch);
+    // The published plan is exhausted but the batch is open: nothing to
+    // claim, and the head is kept.
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expect(batch.queued);
+    try std.testing.expect(!batch.done.isSet());
+
+    // A worker sleeps until the next plan is published.
+    var woke: std.atomic.Value(u8) = .init(0);
+    var group: std.Io.Group = .init;
+    const Waiter = struct {
+        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, woke_: *std.atomic.Value(u8)) void {
+            woke_.store(if (scheduler_.waitForWork(io_)) 1 else 2, .release);
+        }
+    };
+    try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(@as(u8, 0), woke.load(.acquire));
+    try publishTestPlan(&scheduler, batch, 2);
+    try group.await(io);
+    try std.testing.expectEqual(@as(u8, 1), woke.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
+    try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_jobs);
+
+    // The new plan's jobs follow within the same batch; sealed with a job
+    // left, the last claim pops it.
+    claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(batch, claim.batch);
+    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    scheduler.seal(io, batch);
+    try std.testing.expect(batch.queued);
+    claim = scheduler.claim(io).?;
+    try std.testing.expectEqual(@as(u64, 1), claim.job.file_offset);
+    try std.testing.expect(!batch.queued);
+    try std.testing.expect(scheduler.claim(io) == null);
+    batch.finishJobs(1);
+    try std.testing.expect(!batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 3), batch.remaining.load(.acquire));
+    batch.finishJobs(3);
+    try std.testing.expect(batch.done.isSet());
+    batch.destroy();
+
+    // A batch sealed while already exhausted leaves the queue at its seal.
+    const exhausted = try Batch.create(std.testing.allocator, io, .{});
+    try publishTestPlan(&scheduler, exhausted, 1);
+    try std.testing.expectEqual(exhausted, scheduler.claim(io).?.batch);
+    scheduler.seal(io, exhausted);
+    try std.testing.expect(!exhausted.queued);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
+    exhausted.finishJobs(2);
+    try std.testing.expect(exhausted.done.isSet());
+    exhausted.destroy();
+}
+
+test "fifo scheduler failure retires every published plan of an open batch" {
+    const io = std.testing.io;
+    var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(std.testing.allocator, io, .{});
+    try publishTestPlan(&scheduler, batch, 2);
+    try publishTestPlan(&scheduler, batch, 3);
+    try std.testing.expectEqual(@as(usize, 5), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 6), batch.remaining.load(.acquire));
+    try std.testing.expectEqual(batch, scheduler.claim(io).?.batch);
+
+    // The claim keeps its unit; the four unclaimed jobs of both plans are
+    // retired; the sentinel is still held.
+    scheduler.fail(io);
+    try std.testing.expect(!batch.done.isSet());
+    try std.testing.expect(!batch.queued);
+    try std.testing.expectEqual(@as(usize, 2), batch.remaining.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expect(scheduler.claim(io) == null);
+    // The submission goes on: its next plan is refused, and the seal with
+    // the sentinel drop leaves only the claim to complete it.
+    try std.testing.expectError(error.LoaderShuttingDown, publishTestPlan(&scheduler, batch, 1));
+    scheduler.seal(io, batch);
+    batch.finishJobs(1);
+    try std.testing.expect(!batch.done.isSet());
+    batch.finishJobs(1);
+    try std.testing.expect(batch.done.isSet());
+    batch.destroy();
+}
+
+test "fair order is the identity for one device" {
+    // Every job charges the one device, so `preparePlan` skips the fair
+    // order and keeps the planning order for `device_count == 1`.
+    try expectFairOrder(1, &.{
+        .{ .tensor_index = 0, .physical_bytes = &.{10} },
+        .{ .tensor_index = 0, .physical_bytes = &.{5} },
+        .{ .tensor_index = 1, .physical_bytes = &.{1} },
+        .{ .tensor_index = 2, .physical_bytes = &.{20} },
+        .{ .tensor_index = 2, .physical_bytes = &.{20} },
+        .{ .tensor_index = 1, .physical_bytes = &.{2} },
+    }, &.{ 0, 1, 2, 3, 4, 5 });
+}
 const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
 
 /// Source-only adaptive state. DMA width and request size never enter its
@@ -3001,10 +3383,6 @@ const SourceReadRuntime = struct {
         self.metrics.clearProbe(io);
     }
 
-    fn awakeNs(io: std.Io) u64 {
-        return @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
-    }
-
     fn run(self: *SourceReadRuntime, io: std.Io) std.Io.Cancelable!void {
         self.clock.tick(awakeNs(io), false);
         while (true) {
@@ -3128,6 +3506,10 @@ fn shouldBootstrapSource(
 
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
+}
+
+fn awakeNs(io: std.Io) u64 {
+    return @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
 }
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
@@ -3423,55 +3805,70 @@ pub const DirectLoader = struct {
         return item;
     }
 
-    /// Plans and publishes `specs` as one batch behind every earlier one.
-    /// Work may start before this returns. The batch owns its items until
-    /// `awaitBatch` retires it; nothing is published when this fails.
-    pub fn submit(self: *DirectLoader, specs: []const LoadSpec) !*Batch {
-        try self.checkOpen();
+    /// Creates the batch's items; on failure nothing stays allocated.
+    fn createItems(
+        self: *DirectLoader,
+        specs: []const LoadSpec,
+        logical_bytes: *usize,
+    ) ![]*LoaderLoadItem {
         const items = try self.allocator.alloc(*LoaderLoadItem, specs.len);
         errdefer self.allocator.free(items);
         var initialized: usize = 0;
         errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
-        var logical_bytes: usize = 0;
         for (specs, items) |spec, *item| {
             item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output);
             initialized += 1;
-            logical_bytes = try std.math.add(usize, logical_bytes, spec.source.shape.byteSize());
+            logical_bytes.* = try std.math.add(usize, logical_bytes.*, spec.source.shape.byteSize());
         }
-        const planning_started: std.Io.Timestamp = .now(self.io, .awake);
-        var plan = try FairVectoredReadScheduler.prepareBatch(
-            self.allocator,
+        return items;
+    }
+
+    /// Plans `specs` one source file at a time, publishes each file's plan
+    /// as soon as it exists behind every earlier submission, then seals the
+    /// batch: work on the first file starts while the rest is planned. The
+    /// batch owns its items until `awaitBatch` retires it. Nothing is
+    /// published when a failure precedes the first plan; a later planning
+    /// failure fails the loader (a partial submission can never complete),
+    /// the batch is awaited here and the caller sees only the error.
+    pub fn submit(self: *DirectLoader, specs: []const LoadSpec) !*Batch {
+        try self.checkOpen();
+        const batch = try Batch.create(self.allocator, self.io, .{
+            .sequence = self.batch_count,
+            .source_items = specs.len,
+            .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
+        });
+        errdefer if (batch.diagnostics.plans == 0) batch.destroy();
+        batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes);
+        self.scheduler.publishFiles(
+            self.io,
+            batch,
             self.platform.devices.len,
-            items,
+            batch.items,
             self.dma_resources.config.block_size,
             self.source_request_size,
-        );
-        const planning_elapsed = planning_started.untilNow(self.io, .awake);
-        const batch = Batch.create(self.allocator, self.io, &plan, .{
-            .sequence = self.batch_count,
-            .logical_bytes = logical_bytes,
-            .source_bytes = plan.source_bytes,
-            .source_jobs = plan.jobs.len,
-            .source_runs = plan.source_runs,
-            .source_items = items.len,
-            .planned_transfers = plan.transfers.len,
-            .planning_ns = @intCast(@max(planning_elapsed.nanoseconds, 0)),
-            .published_at = .now(self.io, .awake),
-            .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
-        }) catch |err| {
-            plan.deinit();
-            return err;
+        ) catch |err| {
+            if (batch.diagnostics.plans == 0) return err;
+            return self.failPublished(batch, err);
         };
-        errdefer batch.destroy();
-        try self.scheduler.publish(self.io, batch);
-        batch.items = items;
+        self.scheduler.seal(self.io, batch);
         self.batch_count += 1;
-        // The plan is visible: drop the publish sentinel. A batch without
+        // Every plan is visible: drop the publish sentinel. A batch without
         // jobs completes right here.
         batch.finishJobs(1);
         return batch;
     }
 
+    /// Planning failed after part of the batch was published: the pipeline
+    /// fails with that error, the batch is sealed and awaited here, and the
+    /// loader's sticky error goes to the caller instead of a batch.
+    fn failPublished(self: *DirectLoader, batch: *Batch, err: anyerror) anyerror {
+        self.pipeline.recordError(err);
+        self.scheduler.seal(self.io, batch);
+        self.batch_count += 1;
+        batch.finishJobs(1);
+        self.awaitBatch(batch) catch |sticky| return sticky;
+        return err;
+    }
     /// Waits for the batch's last completion unit, retires it and returns
     /// the loader's sticky error if the pipeline failed. Targets the failure
     /// left unsubmitted are marked so their buffers never report ready.
@@ -3517,7 +3914,15 @@ pub const DirectLoader = struct {
             }
         }
         const published_at = diagnostics.published_at orelse self.created_at;
+        const sealed_at = diagnostics.sealed_at orelse published_at;
         const first_claim_at = diagnostics.first_claim_at orelse published_at;
+        const first_read_ns = diagnostics.first_read_ns.load(.acquire);
+        const first_read_at: std.Io.Timestamp = if (first_read_ns == 0)
+            first_claim_at
+        else
+            std.Io.Timestamp.fromNanoseconds(@intCast(first_read_ns));
+        var longest_planning_ns: u64 = 0;
+        for (batch.plans.items) |plan| longest_planning_ns = @max(longest_planning_ns, plan.planning_ns);
         const average_read_size = if (diagnostics.source_jobs == 0)
             0
         else
@@ -3527,16 +3932,20 @@ pub const DirectLoader = struct {
         else
             @as(f64, @floatFromInt(diagnostics.source_items)) /
                 @as(f64, @floatFromInt(diagnostics.source_jobs));
-        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, published=+{d:.3}s, first_claim=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, planning_elapsed={d:.3}s, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
+        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
             diagnostics.sequence,
             successful,
             diagnostics.logical_bytes,
             diagnostics.source_bytes,
             secondsBetween(self.created_at, published_at),
+            secondsBetween(self.created_at, sealed_at),
             secondsBetween(self.created_at, first_claim_at),
+            secondsBetween(self.created_at, first_read_at),
             secondsBetween(self.created_at, done_at),
             secondsBetween(published_at, done_at),
+            diagnostics.plans,
             @as(f64, @floatFromInt(diagnostics.planning_ns)) / std.time.ns_per_s,
+            @as(f64, @floatFromInt(longest_planning_ns)) / std.time.ns_per_s,
             diagnostics.source_jobs,
             diagnostics.source_runs,
             diagnostics.source_items,
@@ -3551,7 +3960,6 @@ pub const DirectLoader = struct {
             source_throttles,
         });
     }
-
     fn logSummary(self: *DirectLoader) void {
         load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
