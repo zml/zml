@@ -2825,19 +2825,28 @@ const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 
 /// the admission fence to the rung in effect when its reads were admitted,
 /// so a rung change never drains the read gate. The controller climbs the
 /// ladder one rung per window while each rung beats the best rate seen by
-/// 3%, then holds at the lowest rung within 3% of the best. One borderline
-/// re-measure of the hold rung and one downward probe below the start rung
-/// bound the number of windows a load spends away from its final width.
+/// 3%, tolerating one rung that does not, then holds at the lowest rung
+/// within 3% of the best. One downward probe below the start rung bounds the
+/// number of windows a load spends away from its final width; the probe is
+/// adopted only when it beats the best rate, never on retention.
 const SourceReadWidthController = struct {
     const State = enum { climbing, holding };
 
     /// A rung must beat the best rate by this factor to keep the climb going.
     const improvement_ratio = 1.03;
+    /// Consecutive rungs that may fail `improvement_ratio` before the climb
+    /// stops. A single window resolves a 3% difference only when the rungs
+    /// differ by more than the window's noise, which a DMA-bound source does
+    /// not: on a GB300 loading DeepSeek-V4 the rungs from 12 to 48 measure
+    /// 44.8 to 48.8 GiB/s with a per-window spread of the same size, so one
+    /// unlucky window at 16 ended the climb at 12 (3.3 s against 3.05 s at
+    /// 32). Climbing past one such rung reaches the plateau: the rung above
+    /// a stall is compared with the same best rate, so a real decline still
+    /// stops the climb one window later, and the hold rule then picks the
+    /// lowest rung within the band whatever the climb passed through.
+    const stall_tolerance = 2;
     /// The hold rung is the lowest rung retaining this fraction of the best.
     const hold_ratio = 0.97;
-    /// A hold rung whose retention is this close to `hold_ratio` is measured
-    /// a second time before the decision stands.
-    const borderline_band = 0.02;
 
     const Evidence = struct {
         completed_requests: usize,
@@ -2877,7 +2886,8 @@ const SourceReadWidthController = struct {
     rates: [read_width_ladder.len]?f64 = @splat(null),
     samples: [read_width_ladder.len]u8 = @splat(0),
     state: State,
-    borderline_used: bool = false,
+    /// Consecutive climb samples that failed `improvement_ratio`.
+    stalls: u8 = 0,
     probed_down: bool = false,
     generation: u64 = 0,
     last_backoff_generation: u64 = std.math.maxInt(u64),
@@ -2959,16 +2969,22 @@ const SourceReadWidthController = struct {
         const rate = self.addSample(self.index, evidence.bytesPerSecond());
         const improved = if (best_rate) |best| rate > improvement_ratio * best else true;
         if (improved) self.best_index = self.index;
-        if (climb_sample and improved) {
-            if (self.index < self.max_index) return self.moveTo(self.index + 1);
-            return self.hold(self.index);
+        if (climb_sample) {
+            self.stalls = if (improved) 0 else self.stalls +| 1;
+            if (self.index < self.max_index and (improved or self.stalls < stall_tolerance))
+                return self.moveTo(self.index + 1);
+            if (improved) return self.hold(self.index);
         }
 
+        // A rung below the start rung is the downward probe. Its one window
+        // reads high when it inherits the wider rung's queued transfers: on
+        // a GB300 a probe at 8 measured 41 GiB/s right after 16 against 36.9
+        // sustained, and retention then held the whole load at the narrowest
+        // rung it ever tried (3.70 s against 3.05 s at 32). Only an
+        // improvement adopts it.
+        if (self.index < self.start_index and !improved) return self.hold(self.start_index);
+
         const hold_index = self.holdIndex();
-        if (!self.borderline_used and self.isBorderline(hold_index)) {
-            self.borderline_used = true;
-            return self.moveTo(hold_index);
-        }
         if (hold_index == self.start_index and self.start_index > 0 and !self.probed_down) {
             self.probed_down = true;
             return self.moveTo(self.start_index - 1);
@@ -2996,12 +3012,6 @@ const SourceReadWidthController = struct {
             if (rate >= hold_ratio * best_rate) return index;
         }
         return self.best_index;
-    }
-
-    fn isBorderline(self: *const SourceReadWidthController, index: usize) bool {
-        if (index == self.best_index) return false;
-        const retention = self.rates[index].? / self.rates[self.best_index].?;
-        return @abs(retention - hold_ratio) <= borderline_band;
     }
 
     fn moveTo(self: *SourceReadWidthController, index: usize) Decision {
@@ -3043,6 +3053,7 @@ const SourceReadWidthController = struct {
             self.best_index = self.index;
             self.rates[self.index] = null;
             self.samples[self.index] = 0;
+            self.stalls = 0;
         }
         return self.openBackoffGeneration();
     }
@@ -3151,7 +3162,7 @@ test "source read evidence requires enough concurrency and duration" {
 test "source read controller replays the B70 32 MiB curve and holds 12" {
     // Recorded on one B70 at 32 MiB requests (CTX "Source request size is
     // backend-dependent"), GiB/s. Eight was not screened there; the probe
-    // below the start rung gets a value below the 3% band.
+    // below the start rung gets a value below the best.
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
@@ -3163,12 +3174,13 @@ test "source read controller replays the B70 32 MiB curve and holds 12" {
         .{ .width = 24, .rate = 18.90 },
         .{ .width = 32, .rate = 17.33 },
     });
-    // 12, 16 (0.970 of 12: the climb stops), the downward probe of 8.
-    try std.testing.expectEqual(@as(usize, 3), windows);
+    // 12, 16 (0.970 of 12: the first stall), 24 (0.886: the second stops the
+    // climb), the downward probe of 8. A declining curve costs one window
+    // more than it did on a single-strike rule and reaches the same rung.
+    try std.testing.expectEqual(@as(usize, 4), windows);
     try std.testing.expectEqual(@as(usize, 12), controller.width());
     try std.testing.expect(controller.probed_down);
-    try std.testing.expect(!controller.borderline_used);
-    try std.testing.expectEqual(@as(u8, 0), controller.samples[SourceReadWidthController.widthIndexAtMost(24)]);
+    try std.testing.expectEqual(@as(u8, 1), controller.samples[SourceReadWidthController.widthIndexAtMost(24)]);
     // Holding: further evidence and blind growth change nothing.
     const held = controller.observe(sourceReadTestEvidence(&controller, 30));
     try std.testing.expectEqual(@as(usize, 12), held.width);
@@ -3176,24 +3188,57 @@ test "source read controller replays the B70 32 MiB curve and holds 12" {
     try std.testing.expect(controller.blindGrow() == null);
 }
 
-test "source read controller re-measures a borderline hold rung once" {
-    // 8 retains 0.975 of 12 on the first window and 0.960 on the mean of two,
-    // so the second window moves the hold to 12.
+test "source read controller climbs past one rung inside the noise band" {
+    // gb300-2 loading DeepSeek-V4 at 16 MiB requests: the rungs from 12 to 48
+    // sustain 44.8 to 48.8 GiB/s over a whole load while one 120 ms window at
+    // a single rung spreads 37.8 to 53.1, so a rung is regularly measured
+    // below its neighbour by more than the 3% band. Run 6 of the baseline set
+    // read 40.50 at 12 and 41.61 at 16 (1.027 of it) and ended its climb
+    // there.
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
     );
-    const width8 = SourceReadWidthController.widthIndexAtMost(8);
-    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
-    _ = controller.observe(sourceReadTestEvidence(&controller, 101));
-    try std.testing.expectEqual(@as(usize, 8), controller.width());
-    _ = controller.observe(sourceReadTestEvidence(&controller, 97.5));
-    try std.testing.expect(controller.borderline_used);
-    try std.testing.expectEqual(SourceReadWidthController.State.climbing, controller.state);
-    try std.testing.expectEqual(@as(usize, 8), controller.width());
-    _ = controller.observe(sourceReadTestEvidence(&controller, 94.5));
-    try std.testing.expectEqual(@as(u8, 2), controller.samples[width8]);
+    _ = controller.observe(sourceReadTestEvidence(&controller, 40.50));
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    // The stalled rung carries the climb on instead of ending it.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 41.61));
+    try std.testing.expectEqual(@as(usize, 24), controller.width());
+    try std.testing.expectEqual(@as(u8, 1), controller.stalls);
+    // The rung above it is the sustained plateau, and clears the stall.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 48.20));
+    try std.testing.expectEqual(@as(usize, 32), controller.width());
+    try std.testing.expectEqual(@as(u8, 0), controller.stalls);
+    // Two rungs in a row inside the band stop the climb; the hold rule then
+    // picks the lowest rung within 3% of the best, whatever the climb passed
+    // through.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 48.80));
+    try std.testing.expectEqual(@as(usize, 48), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 47.30));
     try std.testing.expectEqual(SourceReadWidthController.State.holding, controller.state);
+    try std.testing.expectEqual(@as(usize, 24), controller.width());
+}
+
+test "source read controller keeps the start rung when the probe only matches it" {
+    // Same host, run 6: the climb stopped at 12 and the probe at 8 read
+    // 41.07 GiB/s, above 12's 40.50 window but well under the 36.9 that 8
+    // sustains -- a rung stepped down to inherits the wider rung's queued
+    // transfers. Retention used to adopt it and hold the load at 8 (3.70 s
+    // against 3.05 s at 32).
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+    );
+    const windows = try replaySourceReadCurve(&controller, &.{
+        .{ .width = 8, .rate = 41.07 },
+        .{ .width = 12, .rate = 40.50 },
+        .{ .width = 16, .rate = 39.00 },
+        .{ .width = 24, .rate = 39.50 },
+    });
+    // 12, 16, 24, then the probe of 8: 1.014 of the best is not the 3% an
+    // adoption needs, so the load holds the rung it started from.
+    try std.testing.expectEqual(@as(usize, 4), windows);
+    try std.testing.expect(controller.probed_down);
     try std.testing.expectEqual(@as(usize, 12), controller.width());
 }
 
@@ -3210,9 +3255,9 @@ test "source read controller holds at the lowest rung within 3% on a flat curve"
         .{ .width = 32, .rate = 950 },
         .{ .width = 48, .rate = 950 },
     });
-    // 12, 16 (better by 4.4%), 24 (not better by 3%): hold at 16, the lowest
-    // rung within 3% of it; 12 at 0.957 is below the band.
-    try std.testing.expectEqual(@as(usize, 3), windows);
+    // 12, 16 (better by 4.4%), 24 and 32 (not better by 3%): hold at 16, the
+    // lowest rung within 3% of it; 12 at 0.957 is below the band.
+    try std.testing.expectEqual(@as(usize, 4), windows);
     try std.testing.expectEqual(@as(usize, 16), controller.width());
     try std.testing.expectEqual(@as(usize, 16), read_width_ladder[controller.best_index]);
     try std.testing.expect(!controller.probed_down);
@@ -3227,9 +3272,11 @@ test "source read controller probes below the start rung once" {
         .{ .width = 8, .rate = 105 },
         .{ .width = 12, .rate = 100 },
         .{ .width = 16, .rate = 100 },
+        .{ .width = 24, .rate = 100 },
     });
-    // 12, 16 (flat), 8 (better by 5%): hold 8 without climbing further down.
-    try std.testing.expectEqual(@as(usize, 3), windows);
+    // 12, 16 and 24 (flat), 8 (better by 5%): hold 8 without climbing further
+    // down.
+    try std.testing.expectEqual(@as(usize, 4), windows);
     try std.testing.expectEqual(@as(usize, 8), controller.width());
     try std.testing.expectEqual(@as(usize, 8), read_width_ladder[controller.best_index]);
 
@@ -3241,6 +3288,7 @@ test "source read controller probes below the start rung once" {
     _ = try replaySourceReadCurve(&from_one, &.{
         .{ .width = 1, .rate = 100 },
         .{ .width = 2, .rate = 100 },
+        .{ .width = 4, .rate = 100 },
     });
     try std.testing.expectEqual(@as(usize, 1), from_one.width());
     try std.testing.expect(!from_one.probed_down);
@@ -3310,8 +3358,9 @@ test "source read controller steps down on transient backpressure and climbs aga
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
     );
-    // 12 -> 16 (not better) -> the downward probe of 8 (10% below) -> hold 12.
-    for ([_]f64{ 100, 100, 90 }) |rate| _ = holding.observe(sourceReadTestEvidence(&holding, rate));
+    // 12 -> 16 and 24 (not better) -> the downward probe of 8 (10% below the
+    // best) -> hold 12.
+    for ([_]f64{ 100, 100, 90, 90 }) |rate| _ = holding.observe(sourceReadTestEvidence(&holding, rate));
     try std.testing.expectEqual(@as(usize, 12), holding.width());
     try std.testing.expectEqual(SourceReadWidthController.State.holding, holding.state);
     try std.testing.expectEqual(@as(usize, 8), holding.stepDownTransient(false).?.width);
@@ -4645,7 +4694,7 @@ test "source read runtime never closes the read gate across decisions" {
     // A scored window moves one rung up without touching the gate limit
     // below the new width; a hold at another width does the same.
     var expected_generation = runtime.controller.generation;
-    for ([_]f64{ 100, 100, 90 }) |rate| {
+    for ([_]f64{ 100, 100, 90, 90 }) |rate| {
         next_admission.store(next_admission.load(.acquire) + 5, .release);
         const decision = runtime.controller.observe(sourceReadTestEvidence(&runtime.controller, rate));
         runtime.applyDecision(io, decision);
@@ -4660,7 +4709,8 @@ test "source read runtime never closes the read gate across decisions" {
         try std.testing.expectEqual(next_admission.load(.acquire), metrics.probe_admission_start);
         try std.testing.expect((runtime.measurement == .measuring) == (runtime.controller.state == .climbing));
     }
-    // 12 -> 16 (not better) -> the downward probe of 8 (10% below) -> hold 12.
+    // 12 -> 16 and 24 (not better) -> the downward probe of 8 (10% below the
+    // best) -> hold 12.
     try std.testing.expect(runtime.controller.state == .holding);
     try std.testing.expect(runtime.measurement == .inactive);
     try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
