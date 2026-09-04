@@ -203,6 +203,10 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
+            if (try envUsize(init.environ_map, "ZML_LOAD_EVENT_RETIRE_CHECK", 0) != 0) {
+                try EventRetireCheck.run(allocator, io, platform, init.environ_map);
+            }
+
             const load_dma_block_sizes = try envMibList(
                 init.arena.allocator(),
                 init.environ_map,
@@ -594,6 +598,212 @@ fn checkPacks(
     }
     log.info("pack check: ok packs_checked={d} of {d}", .{ checked, packs.len });
 }
+
+/// `ZML_LOAD_EVENT_RETIRE_CHECK=1`: the loader's event retirement against
+/// the plugin, without the loader. Every device receives a stream of async
+/// host-to-device transfers out of pinned blocks, at most `in_flight` per
+/// device; each event's `onReady` callback hands the event to a retire
+/// task, which destroys it on its own thread right away while the transfers
+/// keep flowing. Events are destroyed before their manager, as the loader
+/// does. A plugin objection shows up here as an error or an abort rather
+/// than inside a load.
+const EventRetireCheck = struct {
+    const Slot = struct {
+        check: *EventRetireCheck,
+        device: usize,
+        block: []u8,
+        event: ?*zml.pjrt.Event = null,
+        err: ?*zml.pjrt.Error = null,
+    };
+
+    io: std.Io,
+    api: *const zml.pjrt.Api,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    /// Callback to retire task: slots whose event fired.
+    fired: std.ArrayListUnmanaged(*Slot),
+    /// Retire task to submitter: slots whose event was destroyed, per device.
+    free: []std.ArrayListUnmanaged(*Slot),
+    fired_count: usize = 0,
+    destroyed: usize = 0,
+    errors: usize = 0,
+    done: bool = false,
+
+    fn onReady(err: ?*zml.pjrt.Error, slot: *Slot) void {
+        const self = slot.check;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        slot.err = err;
+        self.fired.appendAssumeCapacity(slot);
+        self.fired_count += 1;
+        self.condition.broadcast(self.io);
+    }
+
+    fn retire(self: *EventRetireCheck) void {
+        const io = self.io;
+        while (true) {
+            self.mutex.lockUncancelable(io);
+            while (self.fired.items.len == 0 and !self.done) {
+                self.condition.waitUncancelable(io, &self.mutex);
+            }
+            const slot = self.fired.pop() orelse {
+                self.mutex.unlock(io);
+                return;
+            };
+            self.mutex.unlock(io);
+            // Another thread, right after the callback: the pattern under test.
+            const event = slot.event.?;
+            slot.event = null;
+            event.deinit(self.api);
+            const errored = slot.err != null;
+            if (slot.err) |err| err.deinit(self.api);
+            slot.err = null;
+            self.mutex.lockUncancelable(io);
+            self.destroyed += 1;
+            if (errored) self.errors += 1;
+            self.free[slot.device].appendAssumeCapacity(slot);
+            self.condition.broadcast(io);
+            self.mutex.unlock(io);
+        }
+    }
+
+    /// A slot of `device` whose previous event was destroyed.
+    fn takeFree(self: *EventRetireCheck, device: usize) *Slot {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.free[device].items.len == 0) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+        return self.free[device].pop().?;
+    }
+
+    /// Every event of `device` destroyed.
+    fn waitIdle(self: *EventRetireCheck, device: usize, in_flight: usize) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.free[device].items.len != in_flight) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+    }
+
+    fn run(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        environ_map: *const std.process.Environ.Map,
+    ) !void {
+        const rounds = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_ROUNDS", 64);
+        const transfer_bytes = try envMib(environ_map, "ZML_LOAD_EVENT_RETIRE_TRANSFER_MIB", 8);
+        const in_flight = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_IN_FLIGHT", 8);
+        const transfers_per_buffer = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_TRANSFERS", 32);
+        if (transfer_bytes == 0 or in_flight == 0 or transfers_per_buffer == 0) return error.InvalidArgument;
+        const buffer_bytes = transfer_bytes * transfers_per_buffer;
+        const device_count = platform.devices.len;
+        const api = platform.pjrt_api;
+
+        const free = try allocator.alloc(std.ArrayListUnmanaged(*Slot), device_count);
+        defer allocator.free(free);
+        @memset(free, .empty);
+        defer for (free) |*list| list.deinit(allocator);
+        for (free) |*list| try list.ensureTotalCapacity(allocator, in_flight);
+        var check: EventRetireCheck = .{
+            .io = io,
+            .api = api,
+            .fired = try .initCapacity(allocator, device_count * in_flight),
+            .free = free,
+        };
+        defer check.fired.deinit(allocator);
+
+        var dma: zml.mem.DmaAllocator = .init(allocator, &platform.devices[0]);
+        const pinned = dma.allocator();
+        const slots = try allocator.alloc(Slot, device_count * in_flight);
+        defer allocator.free(slots);
+        var pinned_count: usize = 0;
+        defer for (slots[0..pinned_count]) |slot| pinned.free(slot.block);
+        for (slots, 0..) |*slot, index| {
+            slot.* = .{
+                .check = &check,
+                .device = index / in_flight,
+                .block = try pinned.alloc(u8, transfer_bytes),
+            };
+            pinned_count += 1;
+            free[slot.device].appendAssumeCapacity(slot);
+        }
+
+        var group: std.Io.Group = .init;
+        try group.concurrent(io, EventRetireCheck.retire, .{&check});
+        defer {
+            check.mutex.lockUncancelable(io);
+            check.done = true;
+            check.condition.broadcast(io);
+            check.mutex.unlock(io);
+            group.await(io) catch {};
+        }
+
+        const shape_spec: zml.pjrt.ShapeSpec = .init(&.{@intCast(buffer_bytes)}, zml.pjrtx.bufferTypeFromDtype(.u8));
+        const managers = try allocator.alloc(*zml.pjrt.AsyncHostToDeviceTransferManager, device_count);
+        defer allocator.free(managers);
+        const buffers = try allocator.alloc(*zml.pjrt.Buffer, device_count);
+        defer allocator.free(buffers);
+        var transfers: usize = 0;
+        const started: std.Io.Timestamp = .now(io, .awake);
+        for (0..rounds) |_| {
+            for (managers, buffers, platform.devices) |*manager, *buffer, *device| {
+                const memory = device.memory(.default).?;
+                manager.* = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                    .shape_specs = &.{shape_spec},
+                    .memory = memory.pjrt_memory,
+                });
+                buffer.* = try manager.*.retrieveBuffer(api, 0);
+            }
+            for (0..transfers_per_buffer) |chunk| {
+                for (managers, 0..) |manager, device_index| {
+                    const slot = check.takeFree(device_index);
+                    const event = try manager.transferData(
+                        api,
+                        0,
+                        slot.block,
+                        @intCast(chunk * transfer_bytes),
+                        chunk + 1 == transfers_per_buffer,
+                    );
+                    slot.event = event;
+                    slot.err = null;
+                    try event.onReady(api, Slot, onReady, slot);
+                    transfers += 1;
+                }
+            }
+            for (managers, buffers, 0..) |manager, buffer, device_index| {
+                const ready = buffer.readyEvent(api);
+                defer ready.deinit(api);
+                try ready.await(api, io);
+                check.waitIdle(device_index, in_flight);
+                buffer.deinit(api);
+                manager.deinit(api);
+            }
+        }
+        const took = started.untilNow(io, .awake);
+        const bytes = transfers * transfer_bytes;
+        check.mutex.lockUncancelable(io);
+        const fired_count = check.fired_count;
+        const destroyed = check.destroyed;
+        const errors = check.errors;
+        check.mutex.unlock(io);
+        log.info("event retire check: devices={d} rounds={d} transfer={Bi:.2} in_flight={d} transfers={d} bytes={Bi:.2} elapsed={f} GiB/s={d:.2} fired={d} destroyed={d} errors={d}", .{
+            device_count,
+            rounds,
+            transfer_bytes,
+            in_flight,
+            transfers,
+            bytes,
+            took,
+            gibPerSecond(bytes, took),
+            fired_count,
+            destroyed,
+            errors,
+        });
+        if (errors != 0 or fired_count != transfers or destroyed != transfers) return error.EventRetireCheckFailed;
+    }
+};
 
 fn gibPerSecond(bytes: usize, took: anytype) f64 {
     const seconds = @as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s;

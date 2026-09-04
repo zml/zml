@@ -68,8 +68,9 @@ ref is still current.
   retains none of the unused store/options; the direct backend retains only
   the load profile and progress pointer needed after construction.
 - Both backends count a submission's logical bytes only when its await
-  succeeds. Direct diagnostics are batch-owned (publish, first-claim and
-  completion offsets from loader creation, planned jobs/runs/items/transfers,
+  succeeds. Direct diagnostics are batch-owned (publish, seal, first-claim,
+  first-read and completion offsets from loader creation, planned
+  jobs/runs/items/transfers, plan count with total and longest per-file
   planning time, VFS delta since publish) and logged once per batch at await;
   loader-wide totals (reads, DMA submissions, pool high-water/mapped, width)
   are logged once at `destroy`.
@@ -85,13 +86,28 @@ ref is still current.
   short-read resumption and local `IOV_MAX` batching; `TensorReader` adds tensor
   range validation and borrowed readers over a shared open file. Each distinct
   safetensor object is opened once per model-wide load.
-- HTTP, S3, GCS, and HF issue one whole Range request per admitted positional
-  call. Retries are serial inside that caller's source credit; the retired
-  backend-local `parallel_read` pools must not return.
-- Shared Range handling validates a covering `Content-Range`, handles a server
-  returning `200` and ignoring Range by discarding the prefix, then scatters
-  into caller buffers; there is no response timing (the one-byte first-body
-  probe and `ResponseTiming` were dead and are gone). Retry classification is
+- HTTP, S3, GCS, and HF share one range read loop,
+  `range_read.performRangeRead`: one whole Range request per admitted
+  positional call, retries serial inside that caller's source credit (the
+  retired backend-local `parallel_read` pools must not return). A backend
+  contributes a `RequestSpec`: its name and the object for log lines, what a
+  503 means, and a `prepare` hook called for every attempt that returns the
+  URI, the authorization value and its extra headers; the loop appends
+  `Range`. S3 recomputes the SigV4 timestamp and signature in the hook per
+  attempt, GCS copies (refreshing when expired) its bearer per attempt, HTTP
+  and HF return a static request. The backends keep URL construction,
+  credential assembly and their `backend()` profile; retry settings are one
+  `RetryConfig` built from each backend's `InitOpts`, and the stats provider
+  is `AtomicReadStats.provider()`.
+- Registration is `VFS.registerBackend` only (`VFS.register` is gone);
+  `loadProfile` resolves a bare path through the registered `file` backend and
+  falls back to `LoadProfile.local`.
+- Shared Range handling reads `Content-Range` before taking the body reader
+  (which releases the head bytes), validates that it covers the request,
+  handles a server returning `200` and ignoring Range by discarding the
+  prefix, then scatters into caller buffers; there is no response timing (the
+  one-byte first-body probe and `ResponseTiming` were dead and are gone).
+  Retry classification is
   one function (`range_read.classifyStatus`): 408 is a timeout, 429 a
   throttle, other 5xx a server failure, and 503 is a throttle on S3
   (`SlowDown`) and GCS but a server failure on generic HTTP and HF. A retried
@@ -107,13 +123,17 @@ ref is still current.
 ### Coalesced source planner
 
 The old planner made jobs tensor-local. `source_request_size` was only a cap,
-so small adjacent tensors each caused a source operation. The current
-`prepareBatch` instead:
+so small adjacent tensors each caused a source operation. `DirectLoader.submit`
+now sorts the selected ranges once by file URI, absolute source offset and
+size (`sortedItemOrder`) and plans one file at a time (`preparePlan`),
+publishing each file's plan as soon as it exists (`publishFiles`), so the
+workers read the first file while the later ones are planned. Each plan:
 
-1. Sorts selected ranges by file URI and absolute source offset.
+1. Covers one file group of the sorted order.
 2. Forms the union of touching or overlapping requested ranges. It never reads
-   across an unrequested gap or file boundary. Duplicate/overlapping bindings
-   are read once but retain a transfer piece for every output.
+   across an unrequested gap (or a file boundary, which is now a plan
+   boundary). Duplicate/overlapping bindings are read once but retain a
+   transfer piece for every output.
 3. Partitions each merged run into the minimum number of jobs permitted by the
    request/block/`IOV_MAX` limit.
 4. Keeps that minimum count while preferring tensor-safe boundaries. For
@@ -123,19 +143,24 @@ so small adjacent tensors each caused a source operation. The current
    touching interval begins at the current union end, which preserves overlap
    and duplicate coverage.
 
-Coalescing is batch-local to one immutable loader epoch. Planning uses
-per-device physical-byte charges and same-file predecessors to compute a
-deterministic fair, predecessor-safe job order, then discards the temporary
-queues and charges. While those spans are available, the planner also emits
+Coalescing is plan-local: one plan per source file within a submission, and
+a submission's plans are claimed in file order. Planning uses per-device
+physical-byte charges and same-file predecessors to compute a deterministic
+fair, predecessor-safe job order per plan (`fairOrder`), then discards the
+temporary queues and charges; for one device the fair order is the identity
+(every job charges that device and predecessors precede their tails in
+planning order; asserted by a test), so the planner keeps the planning order
+and skips the queues. While those spans are available, the planner also emits
 the final item, block index/offset, writer mask, destination offset, and length
 records. The published plan owns source jobs physically arranged in final fair
 order and their final transfer records; runtime tensor state does not own
 another dispatch plan. Planning-only predecessors, order indirection, and
 remaining-work suffix arrays are discarded. Physical source bytes are distinct from logical tensor
 bytes so duplication and replication do not distort diagnostics or fairness.
-Planning is `O(tensors log tensors)` and took about 0.40 s for DeepSeek-V4-Flash
-before the fair-order/final-record changes; remeasure after the second
-simplification pass.
+Planning is `O(tensors log tensors)` per submission and took 0.32 s for
+DeepSeek-V4-Flash as one plan on MI300 (task 3 tree, 46 shards); as per-file
+plans only the first file's planning delays the first claim, and the rest
+overlaps the reads (Llama: 4 plans, 1-2 ms in total).
 
 ### Pinned blocks, scattering, and ownership
 
@@ -157,10 +182,12 @@ simplification pass.
   once. The prior per-piece enqueue caused roughly 69k--79k locks and pumps.
   Pre-reservation makes allocation failure atomic.
 - Workers retain scratch for leases, affinities, reference counts, iovecs,
-  block contexts, queue counts, and the pool's affinity-matching search.
-  Positional-read rewrite scratch is stack bounded. A source job performs no
-  allocator calls for pool matching in steady state; each caller has separate
-  matching scratch, so blocked acquisitions cannot overwrite one another.
+  queue counts, and the pool's affinity-matching search; request, block and
+  event contexts come preallocated with the plan (below). Positional-read
+  rewrite scratch is stack bounded. A source job performs no allocator call
+  in steady state, neither for pool matching nor for its contexts; each
+  caller has separate matching scratch, so blocked acquisitions cannot
+  overwrite one another.
 - Source coalescing deliberately preserves per-tensor device buffers. Roughly
   one DMA submission per tensor is therefore the natural floor. Going much
   lower requires packed device allocations or a device-side scatter/copy stage
@@ -169,42 +196,70 @@ simplification pass.
 ### Scheduling and concurrency
 
 - Planning charges a coalesced job's physical bytes to every destination device
-  and simulates the fairness policy once per submission; the plan's jobs are
-  stored in that immutable order. Same-file predecessor order and per-target
+  and simulates the fairness policy once per plan (one source file of a
+  submission); the plan's jobs are stored in that immutable order and a
+  submission's plans are claimed in file order. Same-file predecessor order and per-target
   submitted-prefix accounting preserve ordering while unrelated reads and DMA
   complete out of order. There are no live device queues, debt counters,
   claimed bitmap, runtime order indirection, or suffix-metadata arrays.
 - `FairVectoredReadScheduler` is a strict FIFO of published batches under one
-  mutex and condition: `publish` appends a batch behind every earlier one
-  (a batch without jobs is never queued), `claim` hands out the head batch's
-  next job by advancing that batch's plain cursor and pops the batch with
-  its last job, `waitForWork` sleeps while nothing is unclaimed, `fail`
-  retires the unclaimed units of every queued batch and clears the queue,
-  `snapshot` reports the unclaimed total. A later batch's first job is
-  claimed only after every job of the earlier ones; fairness is intra-batch
-  and the caller's submission order is the cross-batch policy. The queue
-  holds only batches with unclaimed jobs, and a batch can only be freed after
-  `done`, which needs every job claimed or retired; both pop the batch, so a
-  queued batch is never freed and no worker rendezvous is needed. Persistent
-  workers loop `waitForWork` -> lifecycle credit -> `claim` -> read ->
-  enqueue; the claim takes the mutex the idle wait already takes.
-- A `Batch` owns its plan (jobs, transfers), its items and every request,
-  block and event context created for it. It completes when `remaining`
-  (one publish sentinel plus one unit per job) reaches zero and sets `done`.
-  A job's unit is released exactly once: at the request's final reference
-  drop (last DMA callback or abandonment; `completeOne` releases the
-  lifecycle credit first and calls `finishJobs` last), by the worker when
-  `registerRequest` fails after a claim, or by `scheduler.fail` for unclaimed
-  jobs. Callback order rule: the PJRT ready callback and the submission
-  failure path copy `pipeline`, `device_index` and `block` into locals,
-  call `eventCompleted`, then `block.complete()` last, because the block's
-  completion may free the batch. `DirectLoader.submit` creates the items,
-  plans, publishes and drops the sentinel; `awaitBatch` waits `done` (after
-  which no worker or callback touches the batch), marks unsubmitted targets
-  when the pipeline failed, retires the contexts under `metadata_mutex` (so
-  `abortReady` cannot race the free), logs the batch and frees items and
-  plan. Nothing drains the gates or the controller per batch and there is no
-  barrier: the controller sees submissions only as activity (below). A
+  mutex and condition: `publish(batch, plan)` appends a plan to an open batch
+  behind every earlier plan and batch (the batch joins the queue with its
+  first plan that has jobs; capacity is reserved first so the plan, its
+  completion units and the queue entry appear together), `seal(batch)` ends
+  the submission, `claim` walks the head batch's plans in order and hands out
+  the next job by advancing that plan's plain cursor, `waitForWork` sleeps
+  while nothing is unclaimed, `fail` retires the unclaimed units of every
+  plan of every queued batch and clears the queue, `snapshot` reports the
+  unclaimed total. A later batch's first job is claimed only after every job
+  of the earlier ones; fairness is intra-plan, plans follow file order and
+  the caller's submission order is the cross-batch policy. The queue holds
+  only open batches (their submission still planning) and batches with
+  unclaimed jobs: a sealed batch is popped with its last claim, at its seal
+  when already exhausted, or by `fail`. An open head whose published plans
+  are exhausted keeps the head; the unclaimed total is then 0, so workers
+  sleep in `waitForWork` until the next plan's broadcast, at most one file's
+  planning time. A batch can only be freed after `done`, which needs the
+  sentinel (dropped only after the seal) and every job claimed or retired,
+  so a queued batch is never freed and no worker rendezvous is needed.
+  Persistent workers loop `waitForWork` -> lifecycle credit -> `claim` ->
+  read -> enqueue; the claim takes the mutex the idle wait already takes.
+- A `Batch` owns its plans (heap `Plan{jobs, transfers, requests, blocks,
+  events, events_used, planning_ns, cursor}`, one per file in file order)
+  and its items from creation. The planner preallocates every context a
+  plan's jobs can need: one `RequestContext` per job (initialised idle:
+  nothing pending, completed), one `BlockContext` per job block (exact
+  `divCeil(len, block_size)`; `Job.blocks` is the job's slice) and one
+  `EventContext` per planned DMA submission (the transfers' writer count,
+  `planned_dma_submissions` on the batch line), handed out in submission
+  order under `metadata_mutex`. A `Job` carries its request and block
+  slots and a `Claim` its plan, so `registerRequest` and `registerBlock`
+  cannot fail and take no lock; a load allocates only per file. The batch
+  completes when `remaining` (one publish sentinel held until the seal,
+  plus one unit per job added as each plan is published) reaches zero and
+  sets `done`. A job's unit is released exactly once: at the request's
+  final reference drop (last DMA callback or abandonment; `completeOne`
+  releases the lifecycle credit first and calls `finishJobs` last) or by
+  `scheduler.fail` for unclaimed jobs, whose request slots stay idle.
+  Callback order rule: the PJRT ready callback and the submission failure
+  path copy `pipeline`, `device_index` and `block` into locals, call
+  `eventCompleted` (which may pump on the callback's thread), push the
+  context onto the pipeline's `retired` stack, then `block.complete()`
+  last, because the block's completion may free the batch.
+  `DirectLoader.submit` creates the batch and its items, sorts once, plans
+  and publishes one file at a time, seals and
+  drops the sentinel; a planning failure before the first publish destroys
+  the batch and returns the error, and one after it fails the pipeline with
+  that error (a partial submission can never complete), seals, awaits and
+  retires the batch inside `submit`, so the caller sees only the sticky
+  error. `awaitBatch` waits `done` (after which no worker or callback
+  touches the batch), marks unsubmitted targets when the pipeline failed,
+  retires the contexts under `metadata_mutex` (so neither `abortReady` nor
+  a pump draining `retired` can race the free: leftover events are
+  destroyed, the batch's contexts unlinked, and the completion asserts run
+  over the arrays), logs the batch and frees items and plans with their
+  arrays. Nothing drains the gates or the controller per batch and there is
+  no barrier: the controller sees submissions only as activity (below). A
   pipeline failure is sticky: every open handle's await returns it and later
   submissions are rejected with it. There is no loader-wide context list or
   reap. The buffered backend mirrors this with `BufferedBatch{pending, done}`
@@ -307,6 +362,16 @@ simplification pass.
 - DMA width is fixed at eight per device by default after calibration work
   showed adaptive DMA width added substantial complexity and little load
   value. There is no global DMA parallelism cap.
+- DMA event lifetime (`retire_events_early`, enabled): a ready callback
+  hands its `EventContext` to the pipeline's intrusive `retired` stack
+  under `metadata_mutex`, after its own `eventCompleted` (and any pump it
+  ran) and before `block.complete()`; `pump` destroys the stack at the top
+  of every iteration under the lock, so an event is destroyed by a later
+  pump or by `retireBatch`, never inside its own callback. Live PJRT events
+  are bounded by devices x 8 plus one pump batch instead of a submission's
+  transfer count. Checked against the oneAPI plugin under sustained load
+  with the playground's `ZML_LOAD_EVENT_RETIRE_CHECK` (PLAN.md task 9); the
+  constant turns it off.
 
 ### DMA memory and calibration
 
@@ -656,20 +721,23 @@ decoupled, low pinned memory.
 - Direct backend: a strict FIFO of immutable batches; claim under the
   scheduler mutex (already taken every worker iteration; ~9.5k claims per
   DeepSeek load); `Batch.remaining` (sentinel + jobs) decremented at the
-  `RequestContext` 1->0 transition, by the `registerRequest` failure path,
-  and by `scheduler.fail` for unclaimed jobs; `done` event; per-batch
-  request/block/event lists retired by the awaiting task under
-  `metadata_mutex`. Callback order rule: locals first, `eventCompleted`
-  before `block.complete()`, `finishJobs` is the last access to batch memory.
+  `RequestContext` 1->0 transition and by `scheduler.fail` for unclaimed
+  jobs; `done` event; per-plan preallocated request/block/event arrays
+  (task 9) retired by the awaiting task under `metadata_mutex`, DMA events
+  destroyed by the pump once their callback ran. Callback order rule:
+  locals first, `eventCompleted`, the retired push, `block.complete()`
+  last; `finishJobs` is the last access to batch memory.
 - Unchanged: planner and tensor-aware cuts, fair predecessor-safe order per
   plan, two gates and lifecycle credit, pool with NUMA matching, calibration,
   per-tensor PJRT managers, VFS data plane, blind bootstrap for
   `high_latency`, fixed-width benchmark control.
-- Later, separately measured: per-file incremental publish (planner already
-  groups by file and resets predecessors per file), climb-and-hold width
+- Later, separately measured: per-file incremental publish (done in task 6:
+  the planner already grouped by file and reset predecessors per file, so
+  per-file plans keep the same jobs and transfers), climb-and-hold width
   controller without gate drains and with a busy-time window clock, per-plan
-  preallocated contexts, VFS consolidation, calibration reporting cleanup,
-  NUMA experiment (measurement only; deletion would be a follow-up).
+  preallocated contexts and event retirement (done in task 9), VFS
+  consolidation, calibration reporting cleanup, NUMA experiment (measurement
+  only; deletion would be a follow-up).
 - Rejected: an in-loader executor (`Execute` orders behind definition events
   so it would work, but caller-task execution keeps today's proven PJRT
   lifetime order and needs no thread); evaluating the controller only at
@@ -684,9 +752,13 @@ decoupled, low pinned memory.
   device memory is freed when async operations complete. zml passes an empty
   `non_donatable_input_indices`, so inputs may be donated: never reuse them.
 - Event destroy from another thread after the callback returned is current
-  practice (`retireBatch`, `Buffer.await`); never inside the callback.
-  Manager destroy before its transfers complete is undocumented: destroy only
-  after completion, which per-batch retirement guarantees.
+  practice (`retireBatch`, `Buffer.await`, and since task 9 the pump for
+  every callback-retired event); never inside the callback. Checked against
+  the oneAPI plugin under sustained load (playground
+  `ZML_LOAD_EVENT_RETIRE_CHECK`: 16k events per run destroyed right after
+  their callback, 0 errors). Manager destroy before its transfers complete
+  is undocumented: destroy only after completion, which per-batch retirement
+  guarantees; events are destroyed before their manager either way.
 - No blanket thread-safety statement; concurrent `Execute` on one executable
   is undocumented, so executions stay on one awaiting task.
 
@@ -793,6 +865,31 @@ decoupled, low pinned memory.
   tasks. Hence the on-demand pool. The first measurement window is biased
   low by startup (lazy PJRT managers, file opens), so the climb usually
   visits one rung above the start before holding.
+- Laguna-XS-2.1 through the migrated llmd on MI300 (device 0, warm): 40
+  submissions (one bulk plus one two-pack submission per sparse layer),
+  7,984 reads, 32,431 DMA pieces, 62.29 GiB in 12.19 s with a window of one
+  and 12.21 s with a two-layer budget, 355-368 ms to first token, 64-72
+  tokens/s. The comparison is VOID: calibration inside the server took
+  4-7 s and chose 2 MiB blocks because the host had degraded (see next
+  bullet), so the load was DMA-bound at 5.6 GiB/s regardless of the window.
+- MI300 host degradation (2026-09-04, about 03:00 session time): the same
+  tree that loaded Llama in 0.49-0.60 s two hours earlier took 3.05 s;
+  calibration measured 6.9-7.9 GiB/s for every block size on both GPU 0 and
+  GPU 1 (43 GiB/s at 16 MiB before) and took 3.5-5 s. This is the staged
+  transfer signature (CTX: a stale plugin measured 6.5 GiB/s), not a loader
+  change (CUDA and the local host were unaffected). Host state at the time:
+  MemFree 21 GB of 2 TiB, page cache 1.84 TiB, Mlocked 27 MB. Left for the
+  ROCm host investigation; redo the Laguna measurement afterwards.
+- After task 6 (per-file incremental publish, identity fair order for one
+  device; local B70, Llama, one GPU, 3 runs each): plain 0.635-0.651 s
+  (23.0-23.6 GiB/s), the batch line `plans=4, planning_elapsed=0.001-0.002s,
+  published=+0.001s, sealed=+0.002-0.003s, first_claim=+0.001s,
+  first_read=+0.001s`, 1918 jobs / 2187 transfers unchanged; packs width 16
+  window 2 total 0.701-0.726 s (pack phase 0.616-0.640 s), reads 1977,
+  bulk batch 4 plans; two B70 sharded packs window 2: 0.891 s (task 3:
+  0.900 s), pack checks ok. Neutral here by construction (Llama plans in
+  1-2 ms); DeepSeek on MI300 is the measurement that can move, pending a
+  trusted host (see the degradation bullet above).
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 

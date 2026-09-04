@@ -54,11 +54,11 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [x] 4. Controller continuity across submissions (minimal).
 - [ ] 5. Monorepo migration and Laguna window measurement (after task 8:
       the controller evidence from MI300 made task 8 the next priority).
-- [ ] 6. Per-file incremental publish; identity fair order for one device.
+- [x] 6. Per-file incremental publish; identity fair order for one device.
 - [x] 7. VFS: throttle classification, two-class backpressure, dead timing.
 - [x] 8. Climb-and-hold controller without gate drains (gated, revertible).
-- [ ] 9. Per-plan preallocated contexts and event retirement (gated).
-- [ ] 10. VFS range/retry consolidation (gated on tests).
+- [x] 9. Per-plan preallocated contexts and event retirement (gated).
+- [x] 10. VFS range/retry consolidation (gated on tests).
 - [x] 11. Calibration reporting cleanup.
 - [ ] 12. NUMA placement experiment (measurement only).
 - [ ] 13. Final validation and documentation reconciliation.
@@ -464,6 +464,63 @@ lines (`grep -a`, the logo makes the log binary for grep).
   upper bound of the win); multi-device sharded medians within spread.
   Fallback: whole-model planning for `device_count > 1`.
 
+Result (2026-09-04): `Batch` owns `plans: ArrayListUnmanaged(Plan)` with
+`Plan{jobs, transfers, planning_ns, cursor}`, a `plan_cursor`, `sealed` and
+`queued` (all scheduler-mutex state) and its items from creation; `remaining`
+starts at the sentinel and grows by each plan's job count as
+`scheduler.publish(batch, plan)` appends it (list and queue capacity reserved
+first, so the plan, its units and the queue entry appear together).
+`DirectLoader.submit` creates the batch and its items, then
+`scheduler.publishFiles` sorts once by (file URI, offset, size, index)
+(`sortedItemOrder`, `fileGroupEnd`), plans each file group with `preparePlan`
+(the former `prepareBatch` without its file loop; `finalJob` builds the
+claimable job) and publishes it immediately; `seal` ends the submission
+before the sentinel drop. The queue holds open batches and batches with
+unclaimed jobs: `claim` walks the head's plans in order, pops a sealed
+exhausted batch with its last claim and returns null on an open exhausted
+head (the unclaimed total is 0 then, so workers sleep in `waitForWork` until
+the next plan's broadcast); `seal` pops a batch that is already exhausted;
+`fail` retires the unclaimed units of every plan of every queued batch. A
+planning failure before the first publish destroys the batch and returns
+the error; after it, `failPublished` records the error on the pipeline,
+seals, drops the sentinel, awaits and retires the batch inside `submit` and
+returns the sticky error. `preparePlan` skips `fairOrder` and the device
+queues for `device_count == 1`. Diagnostics: `plans`, total `planning_ns`
+and per-plan `planning_ns`, `sealed_at`, `first_read_ns` (atomic, stamped by
+the first admitted read); the batch line gained `sealed`, `first_read`,
+`plans`, `longest_planning`. Tests 239 -> 243 passed, 3 skipped: fair order
+is the identity for one device; a two-file submission is published as two
+plans claimed in file order; the coalescing test plans per file through
+`publishFiles` with the totals unchanged (4 jobs, 7 transfers, 24 bytes, 3
+runs over two plans); an open head keeps the head with nothing to claim and
+a waiting worker wakes at the next publish, a batch sealed while exhausted
+leaves the queue at its seal; `fail` on an open batch with two published
+plans retires the unclaimed units and the seal plus sentinel complete it;
+the FIFO tests are unchanged through `publishTestBatch` (publish, seal,
+sentinel). Local B70, Llama, 3 runs each: plain 0.644/0.635/0.651 s
+(23.2/23.6/23.0 GiB/s, widths 12/12/16), the batch line `plans=4,
+planning_elapsed=0.001-0.002s, longest_planning<=0.001s,
+planned_source_jobs=1918, planned_transfers=2187, published=+0.001s,
+sealed=+0.002-0.003s, first_claim=+0.001s, first_read=+0.001s`; packs=64
+width 16 window 2: total 0.701/0.726/0.724 s (pack phase 0.616/0.640/0.639
+s), reads 1977, bulk batch `plans=4` with 313 jobs / 317 transfers, pack
+checks ok; two B70 (`level_zero:0,1`) sharded packs window 2: 0.891 s,
+complete, pack check ok (task 3: 0.900 s). Llama plans in 1-2 ms, so the
+change is neutral here by construction. DeepSeek on MI300 (46 shards) is
+pending a trusted host (the CTX degradation bullet): look for `plans=46`,
+`planned_source_jobs=9524`, `planned_transfers=69572`, `first_claim` and
+`first_read` within one file's planning time of `published` (about 7 ms;
+`longest_planning` bounds the wait), `sealed - published` close to the old
+0.32 s planning time now overlapped with reads, and a median wall below
+the 7.09-7.22 s post-task-8 anchor by at most that time. Deviation: the
+fallback (whole-model planning for `device_count > 1`) was not implemented.
+Per-file plans change the multi-device order only across files: the old
+single plan could interleave a later file's jobs to balance device bytes,
+while now a file's jobs are claimed before the next file's; sharded loads
+charge every device in every job, so their order is unchanged (two-device
+sharded within spread). A model whose files map to disjoint device sets
+would now be read file by file; revisit if such a layout appears.
+
 ### 7. VFS throttle classification and two-class backpressure
 
 - S3/GCS `503` -> `.throttle`. Delete `ResponseTiming`,
@@ -626,12 +683,113 @@ because the CDN caps each connection near 19 MiB/s. Pinned high-water
   and the pump destroys them; `awaitBatch` drains the rest. Plugin check first.
 - Validation: tests; DeepSeek median and peak RSS; no PJRT error in debug.
 
+Result (2026-09-04): Part A: `preparePlan` returns a heap `Batch.Plan{jobs,
+transfers, requests, blocks, events, events_used, source_bytes, source_runs,
+planning_ns, cursor}` (`PreparedPlan` is gone; `Batch.plans` holds `*Plan`
+so contexts can keep the plan's address): `requests` is one `RequestContext`
+per job, initialised `idle` (nothing pending, completed); `blocks` is one
+`BlockContext` per job block, sized exactly (`PlanningJob.block_start/
+block_len` = `divCeil(len, block_size)`, so `Job.blocks` is the job's slice)
+rather than `jobs x maximum_blocks_per_job`; `events` is one `EventContext`
+per planned DMA submission (`sum popCount(writer_mask)`, reported as
+`planned_dma_submissions` on the batch line; equals `dma_submissions`).
+`Job` carries `request` and `blocks`, `Claim` carries the plan;
+`registerRequest(claim)` and `registerBlock` cannot fail and take no lock,
+`submitTransfer` takes the next event slot under `metadata_mutex`, and
+`reserveBlockCapacity`, `abandonSourceJob`, the worker's register-failure
+path and the scratch block-pointer array are gone (the zero-reference check
+moved before the block lease). `retireBatch` walks the arrays with the same
+asserts (request completed, registered leases complete; idle slots pass by
+construction) and `Batch.destroy` frees the plans. Steady state: about 6k
+`allocator.create` calls per Llama load (1918 requests, 1918 blocks, 2187
+events) plus three per-batch list growths became zero; a load allocates
+per file (the plan object and its five arrays). Part B is enabled
+(`retire_events_early = true`): `EventContext{pjrt_event: ?, next_retired}`;
+the ready callback, after `eventCompleted` (and any pump it ran) and before
+`block.complete()`, pushes its context onto the pipeline's intrusive
+`retired` stack under `metadata_mutex`; `pump` destroys the stack at the
+top of every iteration under the lock, so an event is destroyed by a later
+pump or by `retireBatch`, never inside its own callback; `retireBatch`
+destroys what is left and unlinks the batch's contexts (`pjrt_event ==
+null`) before the batch is freed; `deinit` asserts the stack is empty. Live
+PJRT events are bounded by devices x 8 plus one pump batch. Plugin check
+first: the playground's `ZML_LOAD_EVENT_RETIRE_CHECK=1` (`EventRetireCheck`:
+per-device streams of 8 MiB pinned transfers, 8 in flight, every event
+handed by its callback to a retire task that destroys it at once on another
+thread, events destroyed before their manager) on the B70: 2048 events at
+23.5 GiB/s, 16384 at 43.7 GiB/s (128 GiB), two devices 16384 at 53.7 GiB/s,
+and 8192 on the final build at 38.8 GiB/s, each with fired = destroyed and
+0 errors, no plugin objection. Tests 243 -> 244 passed, 3 skipped: removed
+"claimed job abandoned before its request" (the path no longer exists),
+added "retirement accepts the idle slots of jobs a failure retired" and
+"retired events are destroyed by the next pump or unlinked by the batch
+retirement"; the coalescing test checks the array sizes and job slices, the
+lifecycle tests that claims take their plan slots; vfs/stdx pass. Local
+B70, Llama, 3 runs each: before (baseline) plain 0.638/0.645/0.628 s, peak
+RSS 1,870,544/1,869,448/1,869,940 kB; after Part A plain 0.650/0.636/0.634
+s, RSS 1,870,740/1,870,408/1,869,556 kB; final (A+B) plain
+0.637/0.637/0.637 s (23.5 GiB/s, widths 16/12/12, pinned high-water
+136-200 MiB), RSS 1,871,820/1,870,976/1,870,056 kB, `planned_source_jobs=
+1918, planned_transfers=2187, planned_dma_submissions=2187`,
+`dma_submissions=2187`; packs=64 width 16 window 2: total 0.697/0.723/0.725
+s (pack phase 0.612/0.637/0.639 s), reads 1977, 15 batches, pack checks ok;
+two B70 sharded packs window 2: 0.860 s (task 6: 0.891 s), pack check ok;
+Debug build: plain 0.644 s, packs 0.758 s, two devices 0.882 s, no
+assertion or PJRT error. RSS is unchanged because Llama's contexts are
+about 0.4 MiB either way against 1.78 GiB of pinned memory and plugin
+state; the DeepSeek median and RSS on MI300 (9,524 jobs, 69,572 events)
+are pending a trusted host, as for task 6. Deviations: blocks are sized
+exactly per job, plans are heap objects, and the retired list is an
+intrusive stack instead of an index list (no capacity bound to reason
+about).
+
 ### 10. VFS range/retry consolidation (gated)
 
 - One `range_read.performRangeRead(io, client, stats, retry, spec, data,
   offset, size)` with a per-attempt request hook (S3 SigV4 stays per attempt);
   HTTP/S3/GCS/HF keep URL/auth/profile only. Delete `VFS.register` in favour
   of `registerBackend`. Validation: `//vfs:test` and the acceptance tests.
+
+Result (2026-09-04): `range_read.performRangeRead(io, client, stats, retry,
+spec, data, offset, size)` is the one range read loop: one GET with `Range:
+bytes=off-(off+size-1)` per attempt, `recordAttempt` before each,
+`classifyStatus(status, spec.unavailable)`, `recordFailure`, `recordRetry`,
+`recordRetryDelay`, `serverRetryDelay` else full-jitter backoff,
+`error.RetriesExhausted` after `retry.max_retries`, non-retried statuses fail
+at once, `readResponse` for 206/200, `recordSuccess(size)`. `spec` is a
+`RequestSpec{backend, target, unavailable, context, prepare}` whose
+`prepare(context, Attempt{ordinal, range})` returns a `PreparedRequest{uri,
+authorization, extra_headers}` for every attempt; the loop appends `Range`
+itself (a hook returning `&.{range}` would hand back a dangling temporary) and
+owns the one `backend: stage for target failed` log line. S3's
+`SignedRequest.prepare` recomputes the SigV4 timestamp and signature per
+attempt; GCS's `BearerRequest.prepare` copies the bearer per attempt, so a
+token that expired during a retry delay is refreshed (before, it was copied
+once per read: the one semantic change); HTTP and HF pass a static
+`PreparedRequest` through `prepareStatic`. `RetryConfig.fromOptions(InitOpts)`
+replaces the three retry fields and `assertValidOptions` without changing any
+public `InitOpts`; `AtomicReadStats.provider()` replaces the four
+`readStatsSnapshot` trampolines; the per-backend `classifyStatus` wrappers
+became `S3.unavailable`/`GCS.unavailable` declarations used by the spec and by
+the task 7 tests. `VFS.register` is deleted (no callers here or in the
+monorepo); `loadProfile` resolves a bare path through a registered `file`
+backend and falls back to `LoadProfile.local`. Lines: http 540 -> 395, s3
+995 -> 852, gcs 1167 -> 1029, hf 951 -> 803, range_read 228 -> 432, vfs
+549 -> 545, base 802 -> 811, acceptance test 417 -> 514 (net -160). Tests:
+vfs 18 -> 20 (`RetryConfig.fromOptions`; "the shared range loop prepares the
+request once per attempt": an S3-style spec stamps an `x-attempt` header the
+mock server checks on every GET, a zero-budget call returns
+`RetriesExhausted` after one attempt and one hook call, a one-retry call
+succeeds after two, counters 3 requests / 1 retry / 2 server failures),
+zml 243 passed, 3 skipped. The acceptance tests caught one bug in the pass:
+`Response.reader` releases the head bytes, so `Content-Range` is read before
+the body reader is taken. Runs on `level_zero:0`: S3Proxy (`LATENCY_MS=20
+SPEED_MIB=800`) `Loaded weights [14.96GiB, 2.007s, 7.45GiB/s]`, 960
+source_requests, 0 retries, 0 throttles, climb 32/48/64/96 at
+7.10/7.62/8.47/6.43 GiB/s, hold 64, `pinned_high_water=1.52GiB`,
+`gate_closed_ticks=0`; HF `hf://Qwen/Qwen3.5-9B` `[17.98GiB, 19.641s,
+937.40MiB/s]`, 577 requests, 0 retries, width 48; local Llama
+0.649/0.627/0.642 s (23.0-23.9 GiB/s), logged as `profile=file`.
 
 ### 11. Calibration reporting cleanup
 

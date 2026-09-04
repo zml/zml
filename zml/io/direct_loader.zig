@@ -22,6 +22,15 @@ const Sharding = @import("../Sharding.zig");
 
 const load_log = std.log.scoped(.@"zml/io/load");
 
+/// Destroy a DMA event as soon as its ready callback has run, from the next
+/// pump (never inside the callback), instead of at its batch's retirement:
+/// live PJRT events are then bounded by the DMA width plus one pump batch
+/// rather than by a submission's transfer count. Checked against the oneAPI
+/// plugin under sustained load with the playground's
+/// `ZML_LOAD_EVENT_RETIRE_CHECK`; set to false to keep every event until its
+/// batch retires.
+const retire_events_early = true;
+
 const Parallelism = loader_types.Parallelism;
 const LoaderOptions = loader_types.LoaderOptions;
 const max_load_read_parallelism = load_limits.max_read_parallelism;
@@ -449,13 +458,36 @@ fn selectLoaderDmaDevice(
 /// batch is done when `remaining` reaches zero; the awaiting task then
 /// retires it, so releasing a unit is the last permitted access to the batch.
 pub const Batch = struct {
-    /// One file's jobs in claim order with their transfer records.
+    /// One file's jobs in claim order with their transfer records and every
+    /// context the jobs can need, allocated by the planner: one request per
+    /// job, the job's blocks (`Job.blocks` slices `blocks`) and one event per
+    /// planned DMA submission, handed out in submission order. Contexts hold
+    /// the plan's address, so plans are heap objects freed with the batch.
     const Plan = struct {
+        allocator: std.mem.Allocator,
         jobs: []FairVectoredReadScheduler.Job,
         transfers: []VectoredLoadPipeline.PlannedTransfer,
-        planning_ns: u64,
+        requests: []VectoredLoadPipeline.RequestContext,
+        blocks: []VectoredLoadPipeline.BlockContext,
+        events: []VectoredLoadPipeline.EventContext,
+        /// Event slots handed out so far; owned by `metadata_mutex`.
+        events_used: usize = 0,
+        source_bytes: u64,
+        source_runs: usize,
+        planning_ns: u64 = 0,
         /// Next job to claim; owned by the scheduler mutex.
         cursor: usize = 0,
+
+        /// Frees the plan; the pipeline retired its contexts first.
+        fn destroy(self: *Plan) void {
+            const allocator = self.allocator;
+            allocator.free(self.events);
+            allocator.free(self.blocks);
+            allocator.free(self.requests);
+            allocator.free(self.transfers);
+            allocator.free(self.jobs);
+            allocator.destroy(self);
+        }
     };
 
     const Diagnostics = struct {
@@ -467,6 +499,7 @@ pub const Batch = struct {
         source_runs: usize = 0,
         source_items: usize = 0,
         planned_transfers: usize = 0,
+        planned_dma_submissions: usize = 0,
         /// Published plans and their planning time in total.
         plans: usize = 0,
         planning_ns: u64 = 0,
@@ -493,7 +526,7 @@ pub const Batch = struct {
     io: std.Io,
     /// Published plans in file order: appended by the submitting task and
     /// read by claims, both under the scheduler mutex; freed at `destroy`.
-    plans: std.ArrayListUnmanaged(Plan) = .empty,
+    plans: std.ArrayListUnmanaged(*Plan) = .empty,
     /// First plan that may hold unclaimed jobs; owned by the scheduler mutex.
     plan_cursor: usize = 0,
     /// No further plan will be published; owned by the scheduler mutex.
@@ -504,9 +537,6 @@ pub const Batch = struct {
     items: []*LoaderLoadItem = &.{},
     remaining: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
-    requests: std.ArrayListUnmanaged(*VectoredLoadPipeline.RequestContext) = .empty,
-    blocks: std.ArrayListUnmanaged(*VectoredLoadPipeline.BlockContext) = .empty,
-    events: std.ArrayListUnmanaged(*VectoredLoadPipeline.EventContext) = .empty,
     diagnostics: Diagnostics,
     /// Set by retirement so a unit released after `done` trips `finishJobs`.
     freeing: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else {},
@@ -528,29 +558,21 @@ pub const Batch = struct {
     /// Scheduler mutex. Takes ownership of a prepared plan and adds one
     /// completion unit per job; the caller reserved the list capacity, so
     /// the plan and its units appear together.
-    fn appendPlanAssumeCapacity(
-        self: *Batch,
-        plan: *FairVectoredReadScheduler.PreparedPlan,
-        planning_ns: u64,
-    ) void {
-        self.plans.appendAssumeCapacity(.{
-            .jobs = plan.jobs,
-            .transfers = plan.transfers,
-            .planning_ns = planning_ns,
-        });
+    fn appendPlanAssumeCapacity(self: *Batch, plan: *Plan, planning_ns: u64) void {
+        plan.planning_ns = planning_ns;
+        self.plans.appendAssumeCapacity(plan);
         _ = self.remaining.fetchAdd(plan.jobs.len, .acq_rel);
-        plan.* = undefined;
     }
 
     /// Scheduler mutex. The next unclaimed job in plan order, or null when
     /// every published plan is exhausted.
-    fn claimJob(self: *Batch) ?FairVectoredReadScheduler.Job {
+    fn claimJob(self: *Batch) ?FairVectoredReadScheduler.Claim {
         while (self.plan_cursor < self.plans.items.len) : (self.plan_cursor += 1) {
-            const plan = &self.plans.items[self.plan_cursor];
+            const plan = self.plans.items[self.plan_cursor];
             if (plan.cursor == plan.jobs.len) continue;
             const job = plan.jobs[plan.cursor];
             plan.cursor += 1;
-            return job;
+            return .{ .batch = self, .plan = plan, .job = job };
         }
         return null;
     }
@@ -567,7 +589,7 @@ pub const Batch = struct {
     /// number; the caller releases their units.
     fn retireUnclaimed(self: *Batch) usize {
         var retired: usize = 0;
-        for (self.plans.items[self.plan_cursor..]) |*plan| {
+        for (self.plans.items[self.plan_cursor..]) |plan| {
             retired += plan.jobs.len - plan.cursor;
             plan.cursor = plan.jobs.len;
         }
@@ -587,22 +609,13 @@ pub const Batch = struct {
         if (previous == count) self.done.set(self.io);
     }
 
-    /// Frees the items and the plans. Contexts must already have been
-    /// retired by `VectoredLoadPipeline.retireBatch`.
+    /// Frees the items and the plans with their contexts, which
+    /// `VectoredLoadPipeline.retireBatch` must already have retired.
     fn destroy(self: *Batch) void {
-        std.debug.assert(self.requests.items.len == 0);
-        std.debug.assert(self.blocks.items.len == 0);
-        std.debug.assert(self.events.items.len == 0);
         for (self.items) |item| item.deinit(self.allocator);
         self.allocator.free(self.items);
-        for (self.plans.items) |plan| {
-            self.allocator.free(plan.transfers);
-            self.allocator.free(plan.jobs);
-        }
+        for (self.plans.items) |plan| plan.destroy();
         self.plans.deinit(self.allocator);
-        self.requests.deinit(self.allocator);
-        self.blocks.deinit(self.allocator);
-        self.events.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };
@@ -611,11 +624,28 @@ const VectoredLoadPipeline = struct {
     const RequestContext = struct {
         pipeline: *VectoredLoadPipeline,
         batch: *Batch,
+        plan: *Batch.Plan,
+        /// The job's block contexts; its worker registers them in order.
+        blocks: []BlockContext,
+        blocks_registered: usize = 0,
         pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
         completed: std.atomic.Value(bool) = .init(false),
         source_finished: std.atomic.Value(bool) = .init(false),
         read_epoch: u64,
         admission_id: u64 = 0,
+
+        /// The slot of a job that was never claimed: nothing pending, so the
+        /// retirement checks hold.
+        const idle: RequestContext = .{
+            .pipeline = undefined,
+            .batch = undefined,
+            .plan = undefined,
+            .blocks = &.{},
+            .pending = .init(0),
+            .completed = .init(true),
+            .source_finished = .init(true),
+            .read_epoch = 0,
+        };
 
         fn addBlock(self: *RequestContext) void {
             _ = self.pending.fetchAdd(1, .acq_rel);
@@ -686,9 +716,20 @@ const VectoredLoadPipeline = struct {
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
         block: *BlockContext,
-        pjrt_event: *pjrt.Event,
+        /// Null once destroyed, by a pump or by the batch's retirement.
+        pjrt_event: ?*pjrt.Event,
         err: ?*pjrt.Error = null,
         device_index: usize,
+        /// Link of `VectoredLoadPipeline.retired`; owned by `metadata_mutex`.
+        next_retired: ?*EventContext = null,
+
+        /// `metadata_mutex`. Destroys the event and its error, once.
+        fn destroyEvent(self: *EventContext) void {
+            if (self.pjrt_event) |event| event.deinit(self.pipeline.platform.pjrt_api);
+            self.pjrt_event = null;
+            if (self.err) |err| err.deinit(self.pipeline.platform.pjrt_api);
+            self.err = null;
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -712,6 +753,10 @@ const VectoredLoadPipeline = struct {
     pumping: bool = false,
     active_events: usize = 0,
     ready_entries: usize = 0,
+    /// Contexts whose callback fired, for the next pump to destroy: an
+    /// intrusive stack through `EventContext.next_retired`, owned by
+    /// `metadata_mutex`. Empty unless `retire_events_early`.
+    retired: ?*EventContext = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -757,6 +802,7 @@ const VectoredLoadPipeline = struct {
         // context may outlive its batch.
         std.debug.assert(self.active_events == 0);
         std.debug.assert(self.ready_entries == 0);
+        std.debug.assert(self.retired == null);
         std.debug.assert(self.request_gate.inUse(self.io) == 0);
         for (self.ready_queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.ready_queues);
@@ -782,72 +828,92 @@ const VectoredLoadPipeline = struct {
         }
     }
 
-    fn registerRequest(self: *VectoredLoadPipeline, batch: *Batch) !*RequestContext {
-        const request = try self.allocator.create(RequestContext);
-        errdefer self.allocator.destroy(request);
+    /// Takes the claimed job's request context. The claim holds the batch's
+    /// completion unit; the request's final reference drop releases it.
+    fn registerRequest(
+        self: *VectoredLoadPipeline,
+        claim: FairVectoredReadScheduler.Claim,
+    ) *RequestContext {
+        const request = claim.job.request;
         request.* = .{
             .pipeline = self,
-            .batch = batch,
+            .batch = claim.batch,
+            .plan = claim.plan,
+            .blocks = claim.job.blocks,
             .read_epoch = 0,
         };
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        try batch.requests.append(self.allocator, request);
         return request;
     }
 
-    /// Destroys every context a done batch owns. Runs under `metadata_mutex`
-    /// so an `abortReady` still iterating queued entries cannot race the free.
-    /// PJRT events are destroyed here, from the awaiting task after their
-    /// callbacks fired, exactly as `pjrt.Event.await` does.
+    /// Retires the contexts of a done batch: destroys the PJRT events a pump
+    /// has not destroyed yet (from the awaiting task after their callbacks
+    /// fired, exactly as `pjrt.Event.await` does), unlinks the batch's
+    /// contexts from `retired` and checks that every request and block
+    /// completed. Runs under `metadata_mutex` so an `abortReady` still
+    /// iterating queued entries or a pump draining `retired` cannot race the
+    /// free that follows.
     fn retireBatch(self: *VectoredLoadPipeline, batch: *Batch) void {
         std.debug.assert(batch.done.isSet());
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         if (builtin.mode == .Debug) batch.freeing = true;
-        for (batch.events.items) |ctx| {
-            ctx.pjrt_event.deinit(self.platform.pjrt_api);
-            if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
-            self.allocator.destroy(ctx);
+        for (batch.plans.items) |plan| {
+            for (plan.events[0..plan.events_used]) |*ctx| ctx.destroyEvent();
+            for (plan.requests) |*request| {
+                std.debug.assert(request.completed.load(.acquire));
+                for (request.blocks[0..request.blocks_registered]) |*block| {
+                    std.debug.assert(block.lease.isComplete());
+                }
+            }
         }
-        for (batch.blocks.items) |block| {
-            std.debug.assert(block.lease.isComplete());
-            self.allocator.destroy(block);
+        // Only this batch's contexts have a destroyed event while still
+        // linked: a pump unlinks what it destroys.
+        var link = &self.retired;
+        while (link.*) |ctx| {
+            if (ctx.pjrt_event == null) link.* = ctx.next_retired else link = &ctx.next_retired;
         }
-        for (batch.requests.items) |request| {
-            std.debug.assert(request.completed.load(.acquire));
-            self.allocator.destroy(request);
+    }
+
+    /// Hands a context whose callback fired to the next pump. Under
+    /// `metadata_mutex`, so the batch's retirement sees it before the batch
+    /// is freed.
+    fn retireEvent(self: *VectoredLoadPipeline, ctx: *EventContext) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        ctx.next_retired = self.retired;
+        self.retired = ctx;
+        self.metadata_mutex.unlock(self.io);
+    }
+
+    /// `metadata_mutex`. Destroys every retired event: their callbacks have
+    /// run, and only the pump or the batch's retirement destroys an event,
+    /// never its own callback.
+    fn destroyRetired(self: *VectoredLoadPipeline) void {
+        while (self.retired) |ctx| {
+            self.retired = ctx.next_retired;
+            ctx.next_retired = null;
+            ctx.destroyEvent();
         }
-        batch.events.clearRetainingCapacity();
-        batch.blocks.clearRetainingCapacity();
-        batch.requests.clearRetainingCapacity();
     }
 
     fn reserveSourceJob(self: *VectoredLoadPipeline) void {
         _ = self.metrics.pending_source_jobs.fetchAdd(1, .acq_rel);
     }
 
-    fn abandonSourceJob(self: *VectoredLoadPipeline) void {
-        const previous = self.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
-        std.debug.assert(previous > 0);
-    }
-
+    /// Takes the request's next block context for a leased block. Only the
+    /// request's worker touches its slots, in order.
     fn registerBlock(
         self: *VectoredLoadPipeline,
         request: *RequestContext,
         dma_block: mem.DmaBlockPool.Block,
         references: usize,
-    ) !*BlockContext {
-        const block = try self.allocator.create(BlockContext);
-        errdefer self.allocator.destroy(block);
+    ) *BlockContext {
+        const block = &request.blocks[request.blocks_registered];
         block.* = .{
             .pipeline = self,
             .request = request,
             .lease = .init(self.pool, self.io, dma_block, references),
         };
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        try request.batch.blocks.append(self.allocator, block);
+        request.blocks_registered += 1;
         request.addBlock();
         return block;
     }
@@ -865,7 +931,7 @@ const VectoredLoadPipeline = struct {
     fn enqueueBlocks(
         self: *VectoredLoadPipeline,
         transfers: []const PlannedTransfer,
-        blocks: []const *BlockContext,
+        blocks: []BlockContext,
         queue_counts: []const usize,
     ) !void {
         std.debug.assert(queue_counts.len == self.ready_queues.len);
@@ -877,7 +943,7 @@ const VectoredLoadPipeline = struct {
             try queue.ensureUnusedCapacity(self.allocator, count);
         }
         for (transfers) |transfer| {
-            const block = blocks[transfer.block_index];
+            const block = &blocks[transfer.block_index];
             const tensor = &transfer.item.state.value;
             var mask = transfer.writer_mask;
             while (mask != 0) {
@@ -897,12 +963,6 @@ const VectoredLoadPipeline = struct {
         }
         self.metadata_mutex.unlock(self.io);
         self.requestPump();
-    }
-
-    fn reserveBlockCapacity(self: *VectoredLoadPipeline, batch: *Batch, count: usize) !void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
-        try batch.blocks.ensureUnusedCapacity(self.allocator, count);
     }
 
     /// Drops `count` never-submitted references of a registered block. Only
@@ -932,6 +992,7 @@ const VectoredLoadPipeline = struct {
         while (true) {
             var selected: ?ReadyTransfer = null;
             self.metadata_mutex.lockUncancelable(self.io);
+            if (retire_events_early) self.destroyRetired();
             if (!self.failed()) {
                 const limit = self.dma_limit;
                 var ready_mask: u64 = 0;
@@ -1003,28 +1064,21 @@ const VectoredLoadPipeline = struct {
         if (is_last) transfer.target.final_submitted = true;
         _ = transfer.target.submitted_bytes.fetchAdd(transfer.len, .release);
 
-        const ctx = self.allocator.create(EventContext) catch |err| {
-            event.awaitRaw(api) catch {};
-            event.deinit(api);
-            return err;
-        };
+        // The plan holds one event slot per planned submission; the batch
+        // owns it. A pump destroys the event once its callback has run, or
+        // the batch's retirement does.
+        const plan = transfer.block.request.plan;
+        self.metadata_mutex.lockUncancelable(self.io);
+        std.debug.assert(plan.events_used < plan.events.len);
+        const ctx = &plan.events[plan.events_used];
+        plan.events_used += 1;
+        self.metadata_mutex.unlock(self.io);
         ctx.* = .{
             .pipeline = self,
             .block = transfer.block,
             .pjrt_event = event,
             .device_index = transfer.target.device_index,
         };
-
-        const batch = transfer.block.request.batch;
-        self.metadata_mutex.lockUncancelable(self.io);
-        batch.events.append(self.allocator, ctx) catch |err| {
-            self.metadata_mutex.unlock(self.io);
-            event.awaitRaw(api) catch {};
-            event.deinit(api);
-            self.allocator.destroy(ctx);
-            return err;
-        };
-        self.metadata_mutex.unlock(self.io);
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
         event.onReady(api, EventContext, struct {
@@ -1033,7 +1087,8 @@ const VectoredLoadPipeline = struct {
                 // `block.complete()` may complete that batch, after which the
                 // awaiting task frees the context, the block and the batch.
                 // Load every field first, store the error, retire the DMA
-                // slot, and complete the block last.
+                // slot (which may pump on this thread), hand the context to
+                // the next pump, and complete the block last.
                 const pipeline = ctx_.pipeline;
                 const device_index = ctx_.device_index;
                 const block = ctx_.block;
@@ -1042,6 +1097,10 @@ const VectoredLoadPipeline = struct {
                     pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
                 }
                 pipeline.eventCompleted(device_index);
+                // After the pump this callback may have run, so the event is
+                // destroyed by a later pump or by the batch's retirement,
+                // never inside its own callback.
+                if (retire_events_early) pipeline.retireEvent(ctx_);
                 block.complete();
             }
         }.call, ctx) catch |err| {
@@ -1091,7 +1150,6 @@ const VectoredReadRequest = struct {
         affinities: []mem.DmaBlockPool.Affinity,
         references: []usize,
         iovecs: [][]u8,
-        blocks: []*VectoredLoadPipeline.BlockContext,
         queue_counts: []usize,
         pool: mem.DmaBlockPool.AcquireScratch,
 
@@ -1109,8 +1167,6 @@ const VectoredReadRequest = struct {
             errdefer allocator.free(references);
             const iovecs = try allocator.alloc([]u8, maximum_blocks);
             errdefer allocator.free(iovecs);
-            const blocks = try allocator.alloc(*VectoredLoadPipeline.BlockContext, maximum_blocks);
-            errdefer allocator.free(blocks);
             const queue_counts = try allocator.alloc(usize, device_count);
             errdefer allocator.free(queue_counts);
             const pool_scratch = try pool.acquireScratch(allocator, maximum_blocks);
@@ -1120,7 +1176,6 @@ const VectoredReadRequest = struct {
                 .affinities = affinities,
                 .references = references,
                 .iovecs = iovecs,
-                .blocks = blocks,
                 .queue_counts = queue_counts,
                 .pool = pool_scratch,
             };
@@ -1129,7 +1184,6 @@ const VectoredReadRequest = struct {
         fn deinit(self: *Scratch) void {
             self.pool.deinit();
             self.allocator.free(self.queue_counts);
-            self.allocator.free(self.blocks);
             self.allocator.free(self.iovecs);
             self.allocator.free(self.references);
             self.allocator.free(self.affinities);
@@ -1207,6 +1261,7 @@ const VectoredReadRequest = struct {
         }
 
         std.debug.assert(block_count <= scratch.leased.len);
+        std.debug.assert(block_count == request.blocks.len);
         const leased = scratch.leased[0..block_count];
         @memset(leased, .{ .data = &.{}, .node_index = 0 });
         defer for (leased) |block| {
@@ -1251,10 +1306,14 @@ const VectoredReadRequest = struct {
             }
         }
 
-        pipeline.reserveBlockCapacity(request.batch, block_count) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
+        // Every block of a job is covered by a transfer: a block without a
+        // reference would never be released.
+        for (references) |refs| {
+            if (refs == 0) {
+                pipeline.recordError(error.InvalidLoaderJob);
+                return;
+            }
+        }
         pipeline.pool.acquireMany(pipeline.io, leased, affinities, &scratch.pool) catch |err| {
             pipeline.recordError(err);
             return;
@@ -1295,30 +1354,15 @@ const VectoredReadRequest = struct {
         endRead(request, pipeline);
         if (pipeline.failed()) return;
 
-        const blocks = scratch.blocks[0..block_count];
-        var initialized_blocks: usize = 0;
-        for (blocks, leased, references) |*block, *lease, refs| {
-            if (refs == 0) {
-                for (blocks[0..initialized_blocks], references[0..initialized_blocks]) |initialized, initialized_refs| {
-                    VectoredLoadPipeline.abandonSubmissions(initialized, initialized_refs);
-                }
-                pipeline.recordError(error.InvalidLoaderJob);
-                return;
-            }
-            block.* = pipeline.registerBlock(request, lease.*, refs) catch |err| {
-                for (blocks[0..initialized_blocks], references[0..initialized_blocks]) |initialized, initialized_refs| {
-                    VectoredLoadPipeline.abandonSubmissions(initialized, initialized_refs);
-                }
-                pipeline.recordError(err);
-                return;
-            };
+        const blocks = request.blocks;
+        for (leased, references) |*lease, refs| {
+            _ = pipeline.registerBlock(request, lease.*, refs);
             lease.data = &.{};
-            initialized_blocks += 1;
         }
         pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
             for (transfers) |transfer| {
                 VectoredLoadPipeline.abandonSubmissions(
-                    blocks[transfer.block_index],
+                    &blocks[transfer.block_index],
                     @popCount(transfer.writer_mask),
                 );
             }
@@ -1341,11 +1385,15 @@ const VectoredReadRequest = struct {
 /// plans are exhausted keeps the head and the workers wait for its next
 /// plan, at most one file's planning time.
 const FairVectoredReadScheduler = struct {
+    /// A claimable job: its source range, its transfer records and the
+    /// contexts the plan preallocated for it.
     const Job = struct {
         source_slot: *LoaderSourceSlot,
         file_offset: u64,
         len: usize,
         transfers: []const VectoredLoadPipeline.PlannedTransfer,
+        request: *VectoredLoadPipeline.RequestContext,
+        blocks: []VectoredLoadPipeline.BlockContext,
     };
 
     const PlanningJob = struct {
@@ -1354,6 +1402,8 @@ const FairVectoredReadScheduler = struct {
         len: usize,
         transfer_start: usize,
         transfer_len: usize,
+        block_start: usize,
+        block_len: usize,
         predecessor: ?usize,
     };
 
@@ -1361,27 +1411,12 @@ const FairVectoredReadScheduler = struct {
         remaining_jobs: usize,
     };
 
-    /// A claimed job and the batch that owns it. The claim holds one of the
-    /// batch's completion units until the worker releases it.
+    /// A claimed job with the plan and batch that own it. The claim holds
+    /// one of the batch's completion units until the request releases it.
     const Claim = struct {
         batch: *Batch,
+        plan: *Batch.Plan,
         job: Job,
-    };
-
-    /// The planner's output for one file; `Batch.appendPlanAssumeCapacity`
-    /// takes ownership of it.
-    const PreparedPlan = struct {
-        allocator: std.mem.Allocator,
-        jobs: []Job,
-        transfers: []VectoredLoadPipeline.PlannedTransfer,
-        source_bytes: u64,
-        source_runs: usize,
-
-        fn deinit(self: *PreparedPlan) void {
-            self.allocator.free(self.jobs);
-            self.allocator.free(self.transfers);
-            self.* = undefined;
-        }
     };
 
     allocator: std.mem.Allocator,
@@ -1571,7 +1606,9 @@ const FairVectoredReadScheduler = struct {
     /// minimum number of jobs at tensor-safe boundaries, each job chained to
     /// the previous one so a tail is never claimed before its prefix, in a
     /// fair order across the destination devices (the planning order when
-    /// there is one device).
+    /// there is one device). The plan also carries the contexts its jobs
+    /// need: one request per job, one block per job block, one event per
+    /// DMA submission (a transfer's writer count).
     fn preparePlan(
         allocator: std.mem.Allocator,
         device_count: usize,
@@ -1579,7 +1616,7 @@ const FairVectoredReadScheduler = struct {
         order: []const usize,
         block_size: usize,
         request_size: usize,
-    ) !PreparedPlan {
+    ) !*Batch.Plan {
         const scatter_limit = std.math.mul(
             usize,
             block_size,
@@ -1636,6 +1673,7 @@ const FairVectoredReadScheduler = struct {
         defer for (queues) |*queue| queue.deinit(allocator);
         var source_bytes: u64 = 0;
         var source_runs: usize = 0;
+        var block_total: usize = 0;
         var previous_job: ?usize = null;
         var run_cursor: usize = 0;
         while (run_cursor < order.len) {
@@ -1748,14 +1786,18 @@ const FairVectoredReadScheduler = struct {
                     );
                 }
                 std.debug.assert(transfers_list.items.len > transfer_start);
+                const block_len = std.math.divCeil(usize, job_len, block_size) catch unreachable;
                 try jobs_list.append(allocator, .{
                     .source_slot = items[first_index].source_slot,
                     .file_offset = job_start,
                     .len = job_len,
                     .transfer_start = transfer_start,
                     .transfer_len = transfers_list.items.len - transfer_start,
+                    .block_start = block_total,
+                    .block_len = block_len,
                     .predecessor = previous_job,
                 });
+                block_total += block_len;
                 source_bytes +|= @intCast(job_len);
                 previous_job = job_index;
                 if (device_count > 1) {
@@ -1771,34 +1813,53 @@ const FairVectoredReadScheduler = struct {
         }
 
         const planning_jobs = jobs_list.items;
+        var dma_submissions: usize = 0;
+        for (transfers_list.items) |transfer| dma_submissions += @popCount(transfer.writer_mask);
         const transfers = try transfers_list.toOwnedSlice(allocator);
         errdefer allocator.free(transfers);
         const jobs = try allocator.alloc(Job, planning_jobs.len);
         errdefer allocator.free(jobs);
-        if (device_count == 1) {
-            for (jobs, planning_jobs) |*job, planned| job.* = finalJob(planned, transfers);
-        } else {
-            const fair_order = try fairOrder(allocator, planning_jobs, physical_list.items, queues);
-            defer allocator.free(fair_order);
-            for (jobs, fair_order) |*job, planning_index| {
-                job.* = finalJob(planning_jobs[planning_index], transfers);
-            }
-        }
-        return .{
+        const requests = try allocator.alloc(VectoredLoadPipeline.RequestContext, planning_jobs.len);
+        errdefer allocator.free(requests);
+        @memset(requests, VectoredLoadPipeline.RequestContext.idle);
+        const blocks = try allocator.alloc(VectoredLoadPipeline.BlockContext, block_total);
+        errdefer allocator.free(blocks);
+        const events = try allocator.alloc(VectoredLoadPipeline.EventContext, dma_submissions);
+        errdefer allocator.free(events);
+        const plan = try allocator.create(Batch.Plan);
+        errdefer allocator.destroy(plan);
+        plan.* = .{
             .allocator = allocator,
             .jobs = jobs,
             .transfers = transfers,
+            .requests = requests,
+            .blocks = blocks,
+            .events = events,
             .source_bytes = source_bytes,
             .source_runs = source_runs,
         };
+        if (device_count == 1) {
+            for (jobs, planning_jobs, 0..) |*job, planned, index| job.* = finalJob(plan, planned, index);
+        } else {
+            const fair_order = try fairOrder(allocator, planning_jobs, physical_list.items, queues);
+            defer allocator.free(fair_order);
+            for (jobs, fair_order, 0..) |*job, planning_index, index| {
+                job.* = finalJob(plan, planning_jobs[planning_index], index);
+            }
+        }
+        return plan;
     }
 
-    fn finalJob(planned: PlanningJob, transfers: []VectoredLoadPipeline.PlannedTransfer) Job {
+    /// The claimable job at `index` of `plan`: its transfers, its request
+    /// slot and its block slots.
+    fn finalJob(plan: *Batch.Plan, planned: PlanningJob, index: usize) Job {
         return .{
             .source_slot = planned.source_slot,
             .file_offset = planned.file_offset,
             .len = planned.len,
-            .transfers = transfers[planned.transfer_start..][0..planned.transfer_len],
+            .transfers = plan.transfers[planned.transfer_start..][0..planned.transfer_len],
+            .request = &plan.requests[index],
+            .blocks = plan.blocks[planned.block_start..][0..planned.block_len],
         };
     }
 
@@ -1820,7 +1881,7 @@ const FairVectoredReadScheduler = struct {
         while (file_start < order.len) {
             const file_end = fileGroupEnd(items, order, file_start);
             const planning_started: std.Io.Timestamp = .now(io, .awake);
-            var plan = try preparePlan(
+            const plan = try preparePlan(
                 self.allocator,
                 device_count,
                 items,
@@ -1829,8 +1890,8 @@ const FairVectoredReadScheduler = struct {
                 request_size,
             );
             const planning_ns: u64 = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
-            self.publish(io, batch, &plan, planning_ns) catch |err| {
-                plan.deinit();
+            self.publish(io, batch, plan, planning_ns) catch |err| {
+                plan.destroy();
                 return err;
             };
             file_start = file_end;
@@ -1843,7 +1904,7 @@ const FairVectoredReadScheduler = struct {
         self: *FairVectoredReadScheduler,
         io: std.Io,
         batch: *Batch,
-        plan: *PreparedPlan,
+        plan: *Batch.Plan,
         planning_ns: u64,
     ) !void {
         self.mutex.lockUncancelable(io);
@@ -1864,6 +1925,7 @@ const FairVectoredReadScheduler = struct {
         diagnostics.source_jobs += job_count;
         diagnostics.source_runs += plan.source_runs;
         diagnostics.planned_transfers += plan.transfers.len;
+        diagnostics.planned_dma_submissions += plan.events.len;
         batch.appendPlanAssumeCapacity(plan, planning_ns);
         if (joins_queue) {
             self.queue.appendAssumeCapacity(batch);
@@ -1939,14 +2001,14 @@ const FairVectoredReadScheduler = struct {
         defer self.mutex.unlock(io);
         if (self.head == self.queue.items.len) return null;
         const batch = self.queue.items[self.head];
-        const job = batch.claimJob() orelse {
+        const claimed = batch.claimJob() orelse {
             std.debug.assert(!batch.sealed);
             return null;
         };
         if (batch.diagnostics.first_claim_at == null) batch.diagnostics.first_claim_at = .now(io, .awake);
         self.unclaimed_total -= 1;
         if (batch.sealed and batch.exhausted()) self.popHead();
-        return .{ .batch = batch, .job = job };
+        return claimed;
     }
     fn waitForWork(self: *FairVectoredReadScheduler, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
@@ -1995,6 +2057,8 @@ fn testFairOrder(
             .len = 1,
             .transfer_start = 0,
             .transfer_len = 0,
+            .block_start = 0,
+            .block_len = 0,
             .predecessor = if (job.tensor_index < jobs.len) previous_jobs[job.tensor_index] else null,
         };
         if (job.tensor_index < jobs.len) previous_jobs[job.tensor_index] = job_index;
@@ -2016,29 +2080,45 @@ fn expectFairOrder(
     try std.testing.expectEqualSlices(usize, expected, order);
 }
 
-/// A plan of `job_count` unit jobs (`file_offset` = index).
-fn testPlan(allocator: std.mem.Allocator, job_count: usize) !FairVectoredReadScheduler.PreparedPlan {
+/// A plan of `job_count` unit jobs (`file_offset` = index), each with one
+/// block slot and one event slot, and no transfers.
+fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
     const jobs = try allocator.alloc(FairVectoredReadScheduler.Job, job_count);
-    for (jobs, 0..) |*job, index| job.* = .{
+    errdefer allocator.free(jobs);
+    const requests = try allocator.alloc(VectoredLoadPipeline.RequestContext, job_count);
+    errdefer allocator.free(requests);
+    @memset(requests, VectoredLoadPipeline.RequestContext.idle);
+    const blocks = try allocator.alloc(VectoredLoadPipeline.BlockContext, job_count);
+    errdefer allocator.free(blocks);
+    const events = try allocator.alloc(VectoredLoadPipeline.EventContext, job_count);
+    errdefer allocator.free(events);
+    for (jobs, requests, 0..) |*job, *request, index| job.* = .{
         .source_slot = undefined,
         .file_offset = index,
         .len = 1,
         .transfers = &.{},
+        .request = request,
+        .blocks = blocks[index..][0..1],
     };
-    return .{
+    const plan = try allocator.create(Batch.Plan);
+    plan.* = .{
         .allocator = allocator,
         .jobs = jobs,
         .transfers = &.{},
+        .requests = requests,
+        .blocks = blocks,
+        .events = events,
         .source_bytes = job_count,
         .source_runs = job_count,
     };
+    return plan;
 }
 
 /// Publishes a plan of `job_count` unit jobs into an open batch.
 fn publishTestPlan(scheduler: *FairVectoredReadScheduler, batch: *Batch, job_count: usize) !void {
-    var plan = try testPlan(std.testing.allocator, job_count);
-    scheduler.publish(std.testing.io, batch, &plan, 0) catch |err| {
-        plan.deinit();
+    const plan = try testPlan(std.testing.allocator, job_count);
+    scheduler.publish(std.testing.io, batch, plan, 0) catch |err| {
+        plan.destroy();
         return err;
     };
 }
@@ -2141,6 +2221,22 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 4), batch.diagnostics.source_jobs);
     try std.testing.expectEqual(@as(u64, 24), batch.diagnostics.source_bytes);
     try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_transfers);
+    // One writer per transfer on one device: one event per transfer. Each
+    // job's contexts are slices of its plan's arrays, blocks by 4-byte block.
+    try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_dma_submissions);
+    try std.testing.expectEqual(@as(usize, 4), plans[0].events.len);
+    try std.testing.expectEqual(@as(usize, 3), plans[1].events.len);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].requests.len);
+    try std.testing.expectEqual(@as(usize, 3), plans[0].blocks.len);
+    try std.testing.expectEqual(&plans[0].requests[1], plans[0].jobs[1].request);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[0].blocks.len);
+    try std.testing.expectEqual(plans[0].blocks[2..3], plans[0].jobs[1].blocks);
+    try std.testing.expectEqual(@as(usize, 3), plans[1].blocks.len);
+    try std.testing.expectEqual(plans[1].blocks[0..2], plans[1].jobs[0].blocks);
+    try std.testing.expectEqual(plans[1].blocks[2..3], plans[1].jobs[1].blocks);
+    for (plans) |plan| {
+        for (plan.requests) |*request| try std.testing.expect(request.completed.load(.acquire));
+    }
     discardTestBatch(&scheduler, batch);
 
     var iov_source: safetensors.Tensor = .{
@@ -2158,7 +2254,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         .sharding = platform.replicated_sharding,
         .output = &iov_output,
     };
-    var iov_plan = try FairVectoredReadScheduler.preparePlan(
+    const iov_plan = try FairVectoredReadScheduler.preparePlan(
         allocator,
         device_count,
         &.{&iov_item},
@@ -2166,7 +2262,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         1,
         max_load_positional_iovecs + 1,
     );
-    defer iov_plan.deinit();
+    defer iov_plan.destroy();
     try std.testing.expectEqual(@as(usize, 2), iov_plan.jobs.len);
     try std.testing.expectEqual(max_load_positional_iovecs, iov_plan.jobs[0].len);
     try std.testing.expectEqual(@as(usize, 1), iov_plan.jobs[1].len);
@@ -2190,7 +2286,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         };
         item_ptr.* = item;
     }
-    var aligned_plan = try FairVectoredReadScheduler.preparePlan(
+    const aligned_plan = try FairVectoredReadScheduler.preparePlan(
         allocator,
         device_count,
         &aligned_item_ptrs,
@@ -2198,7 +2294,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         4,
         8,
     );
-    defer aligned_plan.deinit();
+    defer aligned_plan.destroy();
     try std.testing.expectEqual(@as(usize, 3), aligned_plan.jobs.len);
     try std.testing.expectEqual(@as(usize, 6), aligned_plan.transfers.len);
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].len);
@@ -2322,6 +2418,8 @@ test "fair order validates jobs and cleans up allocation failures" {
         .len = 1,
         .transfer_start = 0,
         .transfer_len = 0,
+        .block_start = 0,
+        .block_len = 0,
         .predecessor = null,
     }};
     const queues = [_]std.ArrayListUnmanaged(usize){ .empty, .empty };
@@ -3734,15 +3832,7 @@ pub const DirectLoader = struct {
                 continue;
             };
             self.pipeline.reserveSourceJob();
-            const request = self.pipeline.registerRequest(claim.batch) catch |err| {
-                self.pipeline.abandonSourceJob();
-                self.request_gate.release(self.io);
-                // The job is claimed, so `fail` will not retire its unit;
-                // release it here (last access to the batch) before failing.
-                claim.batch.finishJobs(1);
-                self.pipeline.recordError(err);
-                return;
-            };
+            const request = self.pipeline.registerRequest(claim);
             // The request's scheduling sentinel keeps the batch, and with it
             // `job.transfers`, alive until `runCoalesced` returns.
             VectoredReadRequest.runCoalesced(
@@ -3932,7 +4022,7 @@ pub const DirectLoader = struct {
         else
             @as(f64, @floatFromInt(diagnostics.source_items)) /
                 @as(f64, @floatFromInt(diagnostics.source_jobs));
-        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
+        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
             diagnostics.sequence,
             successful,
             diagnostics.logical_bytes,
@@ -3950,6 +4040,7 @@ pub const DirectLoader = struct {
             diagnostics.source_runs,
             diagnostics.source_items,
             diagnostics.planned_transfers,
+            diagnostics.planned_dma_submissions,
             coalescing_ratio,
             average_read_size,
             self.controller_runtime.reported_width,
@@ -4476,7 +4567,7 @@ const TestPipeline = struct {
         const claim = scheduler.claim(io) orelse return error.NoJob;
         try std.testing.expect(self.gate.acquire(io));
         self.pipeline.reserveSourceJob();
-        return self.pipeline.registerRequest(claim.batch);
+        return self.pipeline.registerRequest(claim);
     }
 };
 
@@ -4536,8 +4627,8 @@ test "late vectored callback failure drains and signals completion" {
     var scratch = try pool.acquireScratch(allocator, 1);
     defer scratch.deinit();
     try pool.acquireMany(io, &leased, &.{.{}}, &scratch);
-    try pipeline.reserveBlockCapacity(batch, 1);
-    const block = try pipeline.registerBlock(request, leased[0], 1);
+    const block = pipeline.registerBlock(request, leased[0], 1);
+    try std.testing.expectEqual(&batch.plans.items[0].blocks[0], block);
     var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
     try fixture.queues[0].append(allocator, .{
         .target = &target,
@@ -4588,37 +4679,84 @@ test "batch completes when every claimed request completes" {
     try std.testing.expect(batch.done.isSet());
     try std.testing.expectEqual(@as(usize, 0), batch.remaining.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
-    try std.testing.expectEqual(@as(usize, 3), batch.requests.items.len);
+    // Each claim took its job's slot of the plan's request array.
+    for (requests, batch.plans.items[0].requests) |request, *slot| {
+        try std.testing.expectEqual(slot, request);
+    }
 
     fixture.pipeline.retireBatch(batch);
     batch.destroy();
 }
 
-test "batch completes when a claimed job is abandoned before its request" {
+test "retirement accepts the idle slots of jobs a failure retired" {
+    const io = std.testing.io;
+    var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(1, null, &scheduler);
+    defer fixture.deinit();
+
+    const batch = try publishTestBatch(&scheduler, 3);
+    const request = try fixture.claimRequest(&scheduler);
+    // `fail` retires the two unclaimed jobs; their request slots stay idle.
+    scheduler.fail(io);
+    try std.testing.expect(!batch.done.isSet());
+    request.finishScheduling();
+    try std.testing.expect(batch.done.isSet());
+    const plan = batch.plans.items[0];
+    try std.testing.expectEqual(&plan.requests[0], request);
+    for (plan.requests[1..]) |*idle| {
+        try std.testing.expectEqual(@as(usize, 0), idle.pending.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), idle.blocks.len);
+    }
+    // Every slot passes the retirement checks, claimed or idle.
+    fixture.pipeline.retireBatch(batch);
+    batch.destroy();
+}
+
+test "retired events are destroyed by the next pump or unlinked by the batch retirement" {
+    // Without PJRT, contexts with a null event stand in for destroyed ones;
+    // the list mechanics are the subject.
     const io = std.testing.io;
     var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
     fixture.init(2, null, &scheduler);
     defer fixture.deinit();
+    const pipeline = &fixture.pipeline;
 
     const batch = try publishTestBatch(&scheduler, 2);
-    const request = try fixture.claimRequest(&scheduler);
-    // The worker's `registerRequest` failure path: the claim holds the unit,
-    // so the worker must release it itself.
-    const abandoned = scheduler.claim(io).?;
-    try std.testing.expect(fixture.gate.acquire(io));
-    fixture.pipeline.reserveSourceJob();
-    fixture.pipeline.abandonSourceJob();
-    fixture.gate.release(io);
-    try std.testing.expect(!batch.done.isSet());
-    abandoned.batch.finishJobs(1);
-    try std.testing.expect(!batch.done.isSet());
+    const requests = [_]*VectoredLoadPipeline.RequestContext{
+        try fixture.claimRequest(&scheduler),
+        try fixture.claimRequest(&scheduler),
+    };
+    const plan = batch.plans.items[0];
+    plan.events_used = 2;
+    for (plan.events, requests) |*ctx, request| ctx.* = .{
+        .pipeline = pipeline,
+        .block = &request.blocks[0],
+        .pjrt_event = null,
+        .device_index = 0,
+    };
+    // Two callbacks fired: the next pump destroys both, newest first.
+    pipeline.retireEvent(&plan.events[0]);
+    pipeline.retireEvent(&plan.events[1]);
+    try std.testing.expectEqual(&plan.events[1], pipeline.retired);
+    try std.testing.expectEqual(&plan.events[0], plan.events[1].next_retired);
+    pipeline.metadata_mutex.lockUncancelable(io);
+    pipeline.destroyRetired();
+    pipeline.metadata_mutex.unlock(io);
+    try std.testing.expect(pipeline.retired == null);
+    try std.testing.expect(plan.events[0].next_retired == null);
+    try std.testing.expect(plan.events[1].next_retired == null);
 
-    request.finishScheduling();
+    // A callback that fires after the last pump leaves its context linked;
+    // the batch's retirement unlinks it before the batch is freed.
+    pipeline.retireEvent(&plan.events[0]);
+    for (requests) |request| request.finishScheduling();
     try std.testing.expect(batch.done.isSet());
-    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.pending_source_jobs.load(.acquire));
-    fixture.pipeline.retireBatch(batch);
+    pipeline.retireBatch(batch);
+    try std.testing.expect(pipeline.retired == null);
     batch.destroy();
 }
 
@@ -4641,14 +4779,7 @@ test "overlapping batches complete under concurrent claims and retirement" {
                     continue;
                 };
                 fixture_.pipeline.reserveSourceJob();
-                if (claim.job.file_offset % 3 == 2) {
-                    // The `registerRequest` failure path.
-                    fixture_.pipeline.abandonSourceJob();
-                    fixture_.gate.release(io_);
-                    claim.batch.finishJobs(1);
-                    continue;
-                }
-                const request = fixture_.pipeline.registerRequest(claim.batch) catch unreachable;
+                const request = fixture_.pipeline.registerRequest(claim);
                 request.finishScheduling();
             }
         }
@@ -4675,11 +4806,6 @@ test "overlapping batches complete under concurrent claims and retirement" {
             index -= 1;
             const batch = batches[index];
             batch.done.waitUncancelable(io);
-            var expected_requests: usize = 0;
-            for (0..job_counts[index]) |job| {
-                if (job % 3 != 2) expected_requests += 1;
-            }
-            try std.testing.expectEqual(expected_requests, batch.requests.items.len);
             fixture.pipeline.retireBatch(batch);
             batch.destroy();
         }
