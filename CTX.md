@@ -5,11 +5,11 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-03 at the start of the third pass (caller-controlled
-concurrency), on commit `2f9cac2b`. `PLAN.md` is the sequential implementation
+Last consolidated: 2026-09-04 at the end of the third pass (caller-controlled
+concurrency), on commit `67464f3c`. `PLAN.md` is the sequential implementation
 checklist; this file is the canonical description of the code after each
-completed task. The "Current design" section describes the second-pass code
-until third-pass tasks rewrite it; "Third-pass design" records the target.
+completed task. "Current design" describes the code as it exists; "Third-pass
+design" records the target, the evidence gathered, and the day's baselines.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
 
@@ -658,31 +658,42 @@ same-host medians.
 
 ## Final validation state
 
-- DeepSeek CUDA loads completed repeatedly. Focused loader tests separately
-  exercised tensor shape/content correctness.
-- VFS tests passed, including exact scatter, retries, and concurrency.
-- Source-planner/final-record, three-phase adaptive-controller, immutable
-  scheduler fairness/order, concurrent atomic claims, short-read,
-  replication/sharding, NUMA-affinity, pool-scratch allocation failure and
-  reuse, failure cleanup, and overlapping-batch tests passed. Public loader
-  tests cover out-of-order handle awaits, a two-binding submission, `deinit`
-  with open handles, the `Window`, a sticky read failure, and cumulative byte
-  accounting.
-- Zig formatting passes for `zml/io.zig`, every `zml/io/*.zig` module,
-  `zml/mem.zig`, and `zml/safetensors.zig` with the repository's Bazel-managed
-  toolchain. Buildifier check mode passes for `zml/BUILD.bazel`.
-- `bazel build //examples/io:playground`, `bazel test //vfs:test`, and
-  `bazel test //stdx:test` passed.
-- `bazel test //zml:test --@zml//platforms:cuda=true
-  --@zml//platforms:cpu=true` passes the loader-inclusive suite. The default
-  configuration is still blocked at compilation by the
-  existing missing `platforms/cuda/flashinfer_cutlass_moe` module mapping in
+- 2026-09-04, commit `67464f3c`: `bazel test --@zml//platforms:cpu=true
+  --@zml//platforms:cuda=true //zml:test //vfs:test //stdx:test` passes
+  (zml 244 passed / 3 unrelated skips; vfs 20; stdx 18); `zig fmt --check`
+  passes for `zml/io.zig`, every `zml/io/*.zig`, `zml/mem.zig`,
+  `zml/platform.zig`, `zml/safetensors.zig`, `vfs/*.zig` and the two example
+  mains; no BUILD file changed; `//examples/llm:all`, `//examples/mnist:all`
+  and `//examples/io:playground` build on the CPU platform and the playground
+  builds in release for oneAPI, CUDA and ROCm (the remote runs build it).
+- Loader-related test blocks 76 to 93: batch completion and retirement,
+  FIFO order and open-batch head, concurrent claims across batches, handle
+  awaits out of order, two-binding submissions, `Window` budgeting, sticky
+  failure across handles, `deinit` with open handles, controller replays of
+  the recorded B70 and flat curves, busy-time clock, gate-never-closed
+  invariant, two-class backpressure, per-attempt request hook, throttle
+  classification, Retry-After, preallocated context retirement.
+- Playground `load` at the final tree: local B70 0.636-0.655 s plain and
+  0.704-0.712 s for the 14-pack workload at window 2 (0.739-0.764 s at
+  window 1); CUDA 0.513-0.524 s plain, 0.457-0.512 s packs at window 2;
+  content checks pass on every host and configuration, including two-device
+  sharded and four-MI300X sharded pack runs. MI300 numbers before its
+  degradation are in the results table.
+- Event retirement from the pump thread was accepted by all three plugins:
+  oneAPI (16,384 events, two devices, 53.7 GiB/s), CUDA (2,048 events, 30.8
+  GiB/s), ROCm (2,048 events, on the degraded host at 5.7 GiB/s), each with
+  every fired event destroyed and zero errors.
+- Remote fixtures: HF `hf://Qwen/Qwen3.5-9B` 19.6-19.7 s at 934-938 MiB/s
+  with 577 requests and no retries; local S3Proxy runs complete with zero
+  retries and throttles; a single 503 injection is covered by unit tests
+  only (the proxy has no fault injection); real AWS not run (no credentials).
+- The migrated monorepo (`loader-third-pass`, `d426dde4`) builds for oneAPI
+  and ROCm; llmd serves Llama-3.1-8B on the local B70 (load 0.640 s, TTFT
+  112 ms) and Laguna-XS-2.1 on MI300 (62.29 GiB, 40 submissions, TTFT
+  355-368 ms, 64-72 tokens/s); its window comparison is void, see Open work.
+- The default bazel configuration is still blocked at compilation by the
+  pre-existing missing `platforms/cuda/flashinfer_cutlass_moe` mapping in
   `zml/moe/cutlass_flashinfer.zig`; it does not reach loader tests.
-- Optimized playground builds had passed for CUDA, ROCm, and oneAPI during the
-  preceding audits. Runtime coverage depends on hardware available per machine;
-  oneAPI and remote-service behavior should be rechecked after relevant changes.
-- ROCm-enabled aggregate tests were previously blocked before loader coverage
-  by an existing CUDA flashinfer import in `zml/moe/cutlass_flashinfer.zig`.
 
 ## Third-pass design (target, 2026-09-03)
 
@@ -893,10 +904,57 @@ decoupled, low pinned memory.
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 
+### Third-pass results (2026-09-04, commit 67464f3c, warm, one GPU)
+
+| workload | day one (2f9cac2b) | final | notes |
+|---|---:|---:|---|
+| local B70, Llama plain | 0.758-0.794 s | 0.636-0.655 s | held width 12, 13 workers, pinned high-water 136 MiB |
+| local B70, 14 packs window 2 | 1.005-1.086 s (synchronous) | 0.704-0.712 s | pack phase 0.62 s at 21 GiB/s |
+| CUDA 5090, Llama plain | 0.606-0.609 s | 0.513-0.524 s | 28.5-29.1 GiB/s |
+| CUDA 5090, 14 packs window 2 | 0.750-0.757 s | 0.457-0.512 s | pack phase 0.40-0.44 s at 29-32 GiB/s |
+| MI300X, Llama plain | 1.102-1.152 s | 0.486-0.508 s | measured before the host degraded; fixed 12 is 0.41 s |
+| MI300X, 14 packs window 2 | 0.957-1.024 s | 0.537-0.594 s | before the degradation |
+| MI300X, DeepSeek-V4-Flash | 8.20-8.26 s | 7.09-7.22 s | 9,524 jobs, 69,572 transfers, before the degradation |
+| HF Qwen3.5-9B (local host) | 21.0-22.3 s | 19.6-19.7 s | 934-938 MiB/s, per-connection cap near 19 MiB/s |
+
+Every final run: gate never closed (`gate_closed_ticks=0`), workers spawned
+on demand, 528 MiB pinned working set mapped in calibration, no steady-state
+allocation. Event retirement from the pump was accepted by the oneAPI plugin
+(16,384 events, two devices, 53.7 GiB/s) and the CUDA plugin (2,048 events,
+30.8 GiB/s); see the ROCm line in "Final validation state".
+
+Size: production lines in `direct_loader.zig` 3,152 to 3,542 and `io.zig`
+791 to 1,135 (batch FIFO, plans, handles, window, controller), calibration
+1,816 to 1,667, VFS backends 4,612 to 3,370 with `range_read.zig` 174 to
+347; tests 76 to 93 blocks (+790 lines). What shrank is the machinery: three
+epoch flags, the single plan slot with its atomic cursor and worker
+rendezvous, the controller epoch barrier, the three-phase controller with
+its confirmation sub-machine and tail budget, the five-state measurement
+union with two drain states, per-epoch reclamation, four copies of the
+range/retry loop, per-sample calibration reporting, and 128 persistent
+workers.
+
 ## Open work
 
-The third pass is in progress; `PLAN.md` holds the checklist. Both earlier
-simplification passes are complete. They removed remaining
+Third-pass items left open; `PLAN.md` holds the checklist.
+
+- Laguna window measurement (task 5) and the NUMA placement experiment
+  (task 12) need a healthy MI300 host; the 2026-09-04 host degradation (DMA
+  at 7 GiB/s with any tree) voids the Laguna comparison taken that day. The
+  MI300 checkouts are on the `loader-third-pass` branches (zml `67464f3c`
+  or later, monorepo `d426dde4`); the previous heads were zml `db961721` and
+  monorepo `9efec789`.
+- The first measurement window of a load is biased low by startup (lazy PJRT
+  managers, file opens), so the climb usually visits one rung above the
+  start; a short warm-up window would remove one probe per load.
+- The 8% smallest-near-peak block rule is fragile on a busy host (it chose
+  2 MiB on MI300 while degraded). Calibration caching per host/plugin, or
+  re-screening when the measured rate is implausibly low, remains open.
+- One oneAPI plugin abort on the failure path (`Check failed:
+  definition_events_[buffer_index]` after a transfer error at width 128
+  against the throttled proxy) was seen once and not reproduced.
+- Backpressure is process-global and load-untagged (CTX assumption); real
+  AWS runs need credentials this machine lacks. They removed remaining
 planning/runtime genericity, consolidated epoch completion, specialized
 representative-device calibration, narrowed the DMA pool, shared loader-front-
 end preparation, and split the former monolithic IO module by responsibility.

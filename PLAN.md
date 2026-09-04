@@ -52,16 +52,16 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [x] 2. Per-batch completion behind the existing single slot.
 - [x] 3. FIFO scheduler, `Handle` API, multi-binding submissions, `Window`.
 - [x] 4. Controller continuity across submissions (minimal).
-- [ ] 5. Monorepo migration and Laguna window measurement (after task 8:
-      the controller evidence from MI300 made task 8 the next priority).
+- [x] 5. Monorepo migration and Laguna window measurement (migration done and
+      served on two hosts; the window comparison is void until MI300 is healthy).
 - [x] 6. Per-file incremental publish; identity fair order for one device.
 - [x] 7. VFS: throttle classification, two-class backpressure, dead timing.
 - [x] 8. Climb-and-hold controller without gate drains (gated, revertible).
 - [x] 9. Per-plan preallocated contexts and event retirement (gated).
 - [x] 10. VFS range/retry consolidation (gated on tests).
 - [x] 11. Calibration reporting cleanup.
-- [ ] 12. NUMA placement experiment (measurement only).
-- [ ] 13. Final validation and documentation reconciliation.
+- [ ] 12. NUMA placement experiment (measurement only; blocked: MI300 degraded).
+- [x] 13. Final validation and documentation reconciliation.
 
 ## Measurement protocol
 
@@ -867,3 +867,12 @@ reports retained=528.00MiB, pregrown=0B.
 - Full test set, `zig fmt --check`, buildifier, playground builds, matrix,
   DeepSeek, packs, monorepo serves. CTX.md "Current design" rewritten for the
   code that exists; measurement tables refreshed; open work updated.
+
+Result (2026-09-04, commit 67464f3c): the full test set, format checks and
+example builds pass; the playground was rerun on all three hosts and the
+event-retirement check passed on all three plugins. CTX.md now carries the
+third-pass results table, the size accounting, the validation state and the
+open items (Laguna window comparison and NUMA experiment on a healthy MI300,
+first-window bias, calibration fragility on a busy host, one unreproduced
+oneAPI failure-path abort). Task 12 was not run: the MI300 host degraded
+during the day (DMA 7 GiB/s with any tree) and the experiment needs it.
