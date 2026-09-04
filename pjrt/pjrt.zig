@@ -77,7 +77,7 @@ pub const ApiError = error{
 inline fn interpretPjrtError(api: *const Api, pjrt_error: *Error, context: []const u8) ApiError {
     defer pjrt_error.deinit(api);
     const err_code = pjrt_error.getCode(api).toApiError();
-    log.err("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
+    log.warn("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
     return err_code;
 }
 

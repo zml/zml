@@ -87,11 +87,16 @@ pub const Error = std.mem.Allocator.Error ||
     pjrtx.Client.CompileError ||
     error{MissingDeviceInTile};
 
+pub const Donation = union(enum) {
+    implicit: u32,
+    explicit: u32,
+};
+
 pub const Scope = struct {
     compiler: *Compiler,
     block: *mlir.Block,
     id_to_argument: std.AutoArrayHashMapUnmanaged(Tensor.Id, *const mlir.Value),
-    id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, usize),
+    id_to_donation: std.AutoArrayHashMapUnmanaged(Tensor.Id, Donation),
     id_to_memory: std.AutoArrayHashMapUnmanaged(Tensor.Id, Memory.Kind),
     arena: std.heap.ArenaAllocator,
 
@@ -473,7 +478,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
 
             // Associate each input argument with their own buffer
-            ctx.scope.id_to_donation.putNoClobber(ctx.scope.arena.allocator(), tensor.id, ctx.current_argument_id) catch @panic("OOM");
+            ctx.scope.id_to_donation.putNoClobber(ctx.scope.arena.allocator(), tensor.id, .{ .implicit = ctx.current_argument_id }) catch @panic("OOM");
 
             defer ctx.current_argument_id += 1;
 
@@ -545,13 +550,17 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     _ = fn_return.appendTo(fn_scope.block);
 
     // Resolve donations
-    for (output_info.items(.id), 0..) |output_id, output_index| {
-        if (fn_scope.id_to_donation.get(output_id)) |donated_input| {
+    for (0.., output_info.items(.id)) |output_index, output_id| {
+        if (fn_scope.id_to_donation.get(output_id)) |donation| {
+            const donated_input = switch (donation) {
+                // don't emit implicit donation since they modify the way the function is called
+                .implicit => continue,
+                .explicit => |input| input,
+            };
             const aliasing_output: *?u32 = &input_info.items(.aliasing_output)[donated_input];
             if (aliasing_output.*) |previous_aliased_output| {
                 std.debug.panic("Input {d} buffer {} was reused twice with `reuseBuffer` for output {} and output {}. Expected `reuseBuffer` to be called at most once", .{ donated_input, input_info.items(.shape)[donated_input], previous_aliased_output, output_index });
             }
-
             aliasing_output.* = @intCast(output_index);
         }
     }
@@ -676,6 +685,23 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, num_partitions);
             c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, true);
             c.xla_ExecutableBuildOptionsProto_set_use_shardy_partitioner(exec_build_options, use_shardy_partitioner);
+
+            // Tell XLA how much device memory PJRT actually made available.
+            // Without this, the GPU scheduler falls back to 80% of physical
+            // memory. Programs whose donated inputs and outputs exceed that
+            // artificial limit get a zero-byte temporary-memory budget and
+            // can trigger excessive rematerialization.
+            var device_memory_size: ?u64 = null;
+            for (platform.devices) |device| {
+                const bytes_limit = device.memoryStats().bytes_limit orelse {
+                    device_memory_size = null;
+                    break;
+                };
+                device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
+            }
+            if (device_memory_size) |bytes_limit| {
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+            }
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);

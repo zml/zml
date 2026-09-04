@@ -189,25 +189,22 @@ pub fn fusedExpertsImpl(
     const expert_ids = topk_ids.reshape(.{ .token = num_tokens, .top_expert = top_expert }).withTags(.{ .token, .top_expert })
         .merge(.{ .r = .{ .token, .top_expert } }).convert(.i32);
 
-    const gate_up_w = if (gate_up.dtype() == .u8) zml.nn.unpackFp4(gate_up, .d) else gate_up;
-    const down_w = if (down.dtype() == .u8) zml.nn.unpackFp4(down, .dout) else down;
-
     const gate_up_out = try applyGateUpGlobalScale(moeGemm(
         x_rows,
-        gate_up_w,
+        gate_up,
         opts.w1_scale,
         expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .out = gate_up_w.dim(.dout) }, act_dtype),
+        zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), opts.w1_global_scale, expert_ids);
     const activated = applyActivation(gate_up_out, opts.activation);
 
     const down_out = try applyDownGlobalScale(moeGemm(
         activated,
-        down_w,
+        down,
         opts.w2_scale,
         expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .d = down_w.dim(.d) }, act_dtype),
+        zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype),
         mode,
     ), opts.w2_global_scale, expert_ids);
 

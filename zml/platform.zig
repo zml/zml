@@ -3,8 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-const platforms = @import("platforms");
-pub const Target = platforms.Platform;
+pub const Target = @import("platforms").Platform;
 const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
@@ -51,10 +50,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
 
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
-        inline else => |tag| api_map.get(tag) orelse b: {
+        inline else => |tgt| api_map.get(tgt) orelse b: {
             disableXlaLogs();
-            const api = try platforms.load(allocator, io, tag);
-            api_map.set(tag, api);
+            const api = try tgt.load(allocator, io);
+            api_map.set(tgt, api);
             break :b api;
         },
     };
@@ -287,7 +286,7 @@ pub const Platform = struct {
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
 
-    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
+    pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -528,7 +527,7 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
-        if (comptime platforms.isEnabled(.cuda)) {
+        if (comptime Target.cuda.isEnabled()) {
             self.state.deinit();
         }
         self.physical_mesh.deinit(self.arena.allocator());
@@ -675,7 +674,7 @@ pub const Platform = struct {
         // but given it's compiled out (except for TPU), I'm not gonna care for now.
         return switch (platform.target) {
             .tpu => {
-                if (comptime !platforms.isEnabled(.tpu)) unreachable;
+                if (comptime !Target.tpu.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();

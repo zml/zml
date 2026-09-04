@@ -42,8 +42,8 @@ pub const LayerIndexBuffer = union(enum) {
 pub const RunArgs = struct {
     io: std.Io,
     tokens_buffer: *zml.Buffer,
-    full_attention_token_index_buffer: *zml.Buffer,
-    linear_attention_token_index_buffer: *zml.Buffer,
+    token_index_buffer: *zml.Buffer,
+    active_length_buffer: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
@@ -184,7 +184,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.full_attention_token_index_buffer.*,
+                        .token_index = args.token_index_buffer.*,
                         .cache = layer_cache,
                         .moe_metadata = args.moe_metadata_buffers,
                     },
@@ -206,7 +206,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.linear_attention_token_index_buffer.*,
+                        .active_length = args.active_length_buffer.*,
                         .cache = layer_cache,
                         .moe_metadata = args.moe_metadata_buffers,
                     },
@@ -222,12 +222,12 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
         .inputs = .{
             .hidden = hidden_buffer,
             .rng = args.rng_buffers.*,
-            .token_index = args.full_attention_token_index_buffer.*,
+            .token_index = args.token_index_buffer.*,
         },
         .outputs = .{
             .tokens = args.tokens_buffer,
             .rng = args.rng_buffers,
-            .token_index = args.full_attention_token_index_buffer,
+            .token_index = args.token_index_buffer,
         },
     });
 }
@@ -299,7 +299,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
-        .token_index = zml.Tensor.init(.{}, .u32),
+        .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
             .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,

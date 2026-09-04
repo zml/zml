@@ -75,10 +75,23 @@ pub const Buffer = struct {
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._platform.pjrt_api);
         }
+        self._shards = .empty;
     }
 
+    /// Given a flat struct (static size, no slices) containing `zml.Buffer`, `deinit` each one of them.
     pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
         meta.visitFlatStruct(struct {
+            fn deinit(_: void, x: *Buffer) void {
+                x.deinit();
+            }
+        }.deinit, {}, buffers);
+    }
+
+    /// Given an arbitrary struct `deinit` all `zml.Buffer` containing.
+    /// If the struct contains slices of `zml.Buffer` the memory of the slices will NOT be freed,
+    /// This only impacts device memory.
+    pub fn freeDeviceMemoryButKeepHostMetadataMemory(T: type, buffers: *mem.Bufferized(T)) void {
+        meta.visit(struct {
             fn deinit(_: void, x: *Buffer) void {
                 x.deinit();
             }
@@ -203,13 +216,15 @@ pub const Buffer = struct {
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        std.log.warn("uninitialized {f}", .{shape_});
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };

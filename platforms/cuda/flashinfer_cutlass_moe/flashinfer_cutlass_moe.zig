@@ -136,16 +136,30 @@ pub fn apiForDevice(device: i32) !*Api {
 }
 
 test "select host and GPU architecture-specific FlashInfer CUTLASS MoE library" {
-    var buffer: [160]u8 = undefined;
-    const path = try libraryRunfile(120, &buffer);
-    const expected = switch (builtin.cpu.arch) {
-        .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm120.so",
-        .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm120.so",
-        else => return,
+    const test_case = &.{
+        .{
+            .compat_version = 120,
+            .expected = switch (builtin.cpu.arch) {
+                .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm120.so",
+                .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm120.so",
+            },
+        },
+        .{
+            .compat_version = 103,
+            .expected = switch (builtin.cpu.arch) {
+                .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm103.so",
+                .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm103.so",
+            },
+        },
     };
-    try std.testing.expectEqualStrings(expected, path);
 
-    try load(std.testing.allocator, std.testing.io, 120);
-    const api = if (loaded_api) |*value| value else return error.NotLoaded;
-    try std.testing.expectEqual(@as(i32, 120), api.compiledSm());
+    inline for (test_case) |t| {
+        var buffer: [160]u8 = undefined;
+        const path = try libraryRunfile(t.compat_version, &buffer);
+        try std.testing.expectEqualStrings(t.expected, path);
+
+        try load(std.testing.allocator, std.testing.io, 120);
+        const api = if (loaded_api) |*value| value else return error.NotLoaded;
+        try std.testing.expectEqual(@as(i32, 120), api.compiledSm());
+    }
 }

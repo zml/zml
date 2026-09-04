@@ -33,6 +33,7 @@ pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
 pub const moe = @import("moe/moe.zig");
 pub const nn = @import("nn.zig");
+pub const Quantization = @import("quantization.zig").Quantization;
 pub const ops = @import("ops.zig");
 pub const pjrtx = @import("pjrtx.zig");
 pub const platform = @import("platform.zig");

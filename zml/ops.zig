@@ -1909,33 +1909,10 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
 }
 
 pub fn manualComputation(
-    inputs: anytype,
-    outputs: anytype,
-    body_context: anytype,
     comptime body_fn: anytype,
+    inputs: stdx.meta.FnParam(body_fn, 0),
+    outputs: anytype,
 ) manualComputationReturnType(body_fn) {
-    const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
-        .@"struct" => |struct_info| b: {
-            if (@TypeOf(inputs) == Tensor) {
-                break :b &[1]Tensor{inputs};
-            }
-            if (!struct_info.is_tuple) @compileError("Expected tuple inputs");
-            var inputs_flat: [struct_info.fields.len]Tensor = undefined;
-            meta.collectBuf((struct {
-                pub fn func(t: Tensor) Tensor {
-                    return t;
-                }
-            }).func, {}, &inputs, &inputs_flat);
-            break :b &inputs_flat;
-        },
-        .array => &inputs,
-        .pointer => |pointer_info| b: {
-            if (pointer_info.size != .slice) @compileError("Expected input slice");
-            break :b inputs;
-        },
-        else => @compileError("Unsupported manualComputation input type: " ++ @typeName(@TypeOf(inputs))),
-    };
-
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
@@ -1959,22 +1936,39 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const sharded_outputs: []const Tensor = manualComputationInternal(inputs_, output_shapes, body_context, body_fn) catch |err| switch (err) {
+    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, body_fn) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM"),
     };
     const ReturnT = manualComputationReturnType(body_fn);
     return manualComputationSliceToReturn(ReturnT, sharded_outputs);
 }
 
+fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype, local_tensors: []const Tensor) !@TypeOf(inputs) {
+    const Context = struct {
+        local_tensors: []const Tensor,
+        input_idx: usize = 0,
+
+        fn localize(self: *@This(), _: Tensor) Tensor {
+            stdx.debug.assert(self.input_idx < self.local_tensors.len, "manualComputation ran out of localized inputs", .{});
+            defer self.input_idx += 1;
+            return self.local_tensors[self.input_idx];
+        }
+    };
+
+    var context: Context = .{ .local_tensors = local_tensors };
+    var local_inputs: @TypeOf(inputs) = undefined;
+    try meta.mapAlloc(Context.localize, allocator, &context, inputs, &local_inputs);
+    stdx.debug.assert(context.input_idx == local_tensors.len, "manualComputation localized {} inputs, expected {}", .{ context.input_idx, local_tensors.len });
+    return local_inputs;
+}
+
 fn manualComputationInternal(
-    inputs: []const Tensor,
+    inputs: anytype,
     outputs: []const Shape,
-    body_context: anytype,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
-    const BodyInputsT = stdx.meta.FnParam(body_fn, 2);
-    const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 3);
+    const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 1);
 
     const ctx = Compiler.current();
     const scope = ctx.currentScope();
@@ -1983,16 +1977,12 @@ fn manualComputationInternal(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const input_shapes = try arena.alloc(Shape, inputs.len);
-    const input_values = try arena.alloc(*const mlir.Value, inputs.len);
+    const input_shapes = try meta.collectAlloc(Tensor.shape, {}, arena, &inputs);
+    const input_values = try meta.collectAlloc(Tensor.value, {}, arena, &inputs);
 
-    for (inputs, 0..) |input, i| {
-        input_shapes[i] = input.shape();
-        input_values[i] = input.value();
-    }
-    const local_input_shapes = try arena.alloc(Shape, inputs.len);
+    const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
-    const input_shardings = try arena.alloc(Sharding, inputs.len);
+    const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
     for (input_shapes, 0..) |shape, i| {
@@ -2022,11 +2012,11 @@ fn manualComputationInternal(
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
             const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings, outputs, output_shardings);
 
-            const block_types = try arena.alloc(*const mlir.Type, inputs.len);
+            const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
                 block_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, input_shape);
             }
-            const block_locs = try arena.alloc(*const mlir.Location, inputs.len);
+            const block_locs = try arena.alloc(*const mlir.Location, input_shapes.len);
             @memset(block_locs, mlir.Location.unknown(ctx.mlir_ctx));
 
             const manual_block = mlir.Block.init(block_types, block_locs);
@@ -2035,17 +2025,17 @@ fn manualComputationInternal(
             const manual_scope = ctx.pushBlock(manual_block);
             defer manual_scope.pop();
 
-            const local_inputs = try arena.alloc(Tensor, inputs.len);
-            for (0..inputs.len) |i| {
-                local_inputs[i] = Tensor._result(local_input_shapes[i], manual_block.argument(i));
+            const local_input_tensors = try arena.alloc(Tensor, input_shapes.len);
+            for (0..input_shapes.len) |i| {
+                local_input_tensors[i] = Tensor._result(local_input_shapes[i], manual_block.argument(i));
             }
 
             ctx.manual_computation_depth += 1;
             defer ctx.manual_computation_depth -= 1;
 
-            const body_inputs = manualComputationInputsArg(BodyInputsT, local_inputs);
+            const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
-            const body_result = @call(.auto, body_fn, .{ body_context, arena, body_inputs, body_output_shapes });
+            const body_result = @call(.auto, body_fn, .{ local_inputs, body_output_shapes });
             const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
 
@@ -2087,8 +2077,8 @@ fn manualComputationInternal(
             return sharded_outputs;
         },
         .gspmd => {
-            const local_input_values = try arena.alloc(*const mlir.Value, inputs.len);
-            for (0..inputs.len) |i| {
+            const local_input_values = try arena.alloc(*const mlir.Value, input_shapes.len);
+            for (0..input_shapes.len) |i| {
                 const local_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_input_shapes[i]);
                 const full_to_shard = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
@@ -2107,16 +2097,16 @@ fn manualComputationInternal(
                 local_input_values[i] = full_to_shard.result(0);
             }
 
-            const local_inputs = try arena.alloc(Tensor, inputs.len);
-            for (0..inputs.len) |i| {
-                local_inputs[i] = Tensor._result(local_input_shapes[i], local_input_values[i]);
+            const local_input_tensors = try arena.alloc(Tensor, input_shapes.len);
+            for (0..input_shapes.len) |i| {
+                local_input_tensors[i] = Tensor._result(local_input_shapes[i], local_input_values[i]);
             }
 
             ctx.manual_computation_depth += 1;
             defer ctx.manual_computation_depth -= 1;
-            const body_inputs = manualComputationInputsArg(BodyInputsT, local_inputs);
+            const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
-            const body_result = @call(.auto, body_fn, .{ body_context, arena, body_inputs, body_output_shapes });
+            const body_result = @call(.auto, body_fn, .{ local_inputs, body_output_shapes });
             const local_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
             for (0..outputs.len) |i| {
@@ -2165,6 +2155,112 @@ fn manualComputationInternal(
     };
 }
 
+test "manualComputation handler API" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    const block = mlir.Block.init(&.{}, &.{});
+    const scope = comp.pushBlock(block);
+    defer scope.pop();
+
+    const shape = Shape.init(.{8}, .f32);
+    const lhs = Tensor.constant(DataType.f32.constant(1)).broad(shape);
+    const rhs = Tensor.constant(DataType.f32.constant(2)).broad(shape);
+
+    const Configured = struct {
+        lhs: Tensor,
+        bias: ?Tensor,
+        missing_bias: ?Tensor,
+        enabled: bool,
+        rhs: Tensor,
+
+        pub fn compute(self: @This(), output_shape: Shape) Tensor {
+            stdx.debug.assert(self.enabled, "manualComputation did not preserve handler configuration", .{});
+            stdx.debug.assert(self.missing_bias == null, "manualComputation did not preserve a null optional tensor", .{});
+            return self.lhs.add(self.rhs).add(self.bias.?).reshape(output_shape);
+        }
+    };
+    const configured = manualComputation(
+        Configured.compute,
+        .{
+            .lhs = lhs,
+            .bias = rhs,
+            .missing_bias = null,
+            .enabled = true,
+            .rhs = rhs,
+        },
+        shape,
+    );
+    try zml.testing.expectEqualShapes(shape, configured.shape());
+
+    const passthrough = manualComputation(
+        (struct {
+            input: Tensor,
+
+            pub fn call(self: @This(), output_shape: Shape) Tensor {
+                return self.input.reshape(output_shape);
+            }
+        }).call,
+        .{ .input = configured },
+        shape,
+    );
+    try zml.testing.expectEqualShapes(shape, passthrough.shape());
+
+    const NestedInputs = struct {
+        pair: [2]Tensor,
+        optional: ?struct { tensor: Tensor },
+    };
+    const slice_inputs = [_]Tensor{ lhs, rhs };
+    const original_values = [_]usize{
+        @intFromPtr(lhs.value()),
+        @intFromPtr(rhs.value()),
+        @intFromPtr(lhs.value()),
+        @intFromPtr(lhs.value()),
+        @intFromPtr(rhs.value()),
+    };
+
+    const NestedStruct = struct {
+        nested_inputs: NestedInputs,
+        slice_inputs: []const Tensor,
+        original_values: [5]usize,
+
+        pub fn compute(self: @This(), output_shape: Shape) Tensor {
+            const localized_inputs = [_]Tensor{
+                self.nested_inputs.pair[0],
+                self.nested_inputs.pair[1],
+                self.nested_inputs.optional.?.tensor,
+                self.slice_inputs[0],
+                self.slice_inputs[1],
+            };
+            for (localized_inputs, self.original_values) |input, original_value| {
+                stdx.debug.assert(@intFromPtr(input.value()) != original_value, "manualComputation did not localize a nested input", .{});
+            }
+
+            var result = localized_inputs[0];
+            for (localized_inputs[1..]) |input| result = result.add(input);
+            return result.reshape(output_shape);
+        }
+    };
+    const nested = manualComputation(
+        NestedStruct.compute,
+        .{
+            .nested_inputs = .{
+                .pair = .{ lhs, rhs },
+                .optional = .{ .tensor = lhs },
+            },
+            .slice_inputs = &slice_inputs,
+            .original_values = original_values,
+        },
+        shape,
+    );
+    try zml.testing.expectEqualShapes(shape, nested.shape());
+}
+
 fn manualComputationReturnType(comptime body_fn: anytype) type {
     const ReturnT = stdx.meta.FnReturn(body_fn);
     if (ReturnT == void or ReturnT == Tensor) return ReturnT;
@@ -2189,30 +2285,6 @@ fn manualComputationBodyToSlice(comptime ReturnT: type, allocator: std.mem.Alloc
     }
 
     return result;
-}
-
-fn manualComputationInputsArg(comptime InputsT: type, local_inputs: []const Tensor) InputsT {
-    if (InputsT == void) {
-        stdx.debug.assert(local_inputs.len == 0, "manualComputation body expects no inputs, got {}", .{local_inputs.len});
-        return;
-    }
-    if (InputsT == Tensor) {
-        stdx.debug.assert(local_inputs.len == 1, "manualComputation body expects one input, got {}", .{local_inputs.len});
-        return local_inputs[0];
-    }
-
-    return switch (@typeInfo(InputsT)) {
-        .pointer => |pointer_info| b: {
-            if (pointer_info.size != .slice or pointer_info.child != Tensor) {
-                @compileError("manualComputation body inputs must be void, Tensor, []Tensor, or []const Tensor; got " ++ @typeName(InputsT));
-            }
-            break :b if (pointer_info.is_const)
-                local_inputs
-            else
-                @constCast(local_inputs);
-        },
-        else => @compileError("manualComputation body inputs must be void, Tensor, []Tensor, or []const Tensor; got " ++ @typeName(InputsT)),
-    };
 }
 
 fn manualComputationOutputShapesArg(comptime OutputShapesT: type, local_output_shapes: []const Shape) OutputShapesT {
@@ -2416,22 +2488,24 @@ pub fn shardingAwareTypedCustomCall(
     const Output = @TypeOf(output);
     const Attributes = @TypeOf(attributes);
 
-    // Convert to slices so that manualComputationInternal can inspect the input/output.
-    var input_tensors: [@typeInfo(Input).@"struct".fields.len]Tensor = undefined;
-    inline for (@typeInfo(Input).@"struct".fields, 0..) |field, i| {
-        input_tensors[i] = @field(input, field.name);
-    }
-
     var output_shapes: [@typeInfo(Output).@"struct".fields.len]Shape = undefined;
     inline for (@typeInfo(Output).@"struct".fields, 0..) |field, i| {
         output_shapes[i] = @field(output, field.name);
     }
 
-    const output_tensors: []const Tensor = manualComputationInternal(&input_tensors, &output_shapes, attributes, (struct {
-        fn body(attributes_: Attributes, _: std.mem.Allocator, sharded_input_tensors: []const Tensor, sharded_output_shapes: []const Shape) []const Tensor {
-            return typedCustomCall(target_name, opts, sharded_input_tensors, sharded_output_shapes, attributes_);
+    const Handler = struct {
+        input: Input,
+        attributes: Attributes,
+
+        fn body(self: @This(), sharded_output_shapes: []const Shape) []const Tensor {
+            return typedCustomCall(target_name, opts, self.input, sharded_output_shapes, self.attributes);
         }
-    }).body) catch @panic("OOM");
+    };
+    const output_tensors = manualComputation(
+        Handler.body,
+        .{ .input = input, .attributes = attributes },
+        @as([]const Shape, &output_shapes),
+    );
 
     // Convert the slice back to a struct
     var out: ShapeToTensor(Output) = undefined;

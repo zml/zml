@@ -285,6 +285,7 @@ pub const TensorRegistry = struct {
         repo: std.Io.Dir,
     ) !TensorRegistry {
         const entrypoint = try resolveModelEntrypoint(io, repo);
+        defer entrypoint.close(io);
         return try fetchRegistry(allocator, io, repo, entrypoint);
     }
 
@@ -294,15 +295,16 @@ pub const TensorRegistry = struct {
         path: []const u8,
     ) !TensorRegistry {
         var repo = try resolveModelRepo(io, path);
+        defer repo.close(io);
 
-        if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
+        const entrypoint = if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
             std.mem.endsWith(u8, path, ".safetensors"))
-        {
-            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, path, .{ .mode = .read_only }));
-        } else {
-            const entrypoint = try resolveModelEntrypoint(io, repo);
-            return try fetchRegistry(allocator, io, repo, entrypoint);
-        }
+            try repo.openFile(io, path, .{ .mode = .read_only })
+        else
+            try resolveModelEntrypoint(io, repo);
+        defer entrypoint.close(io);
+
+        return try fetchRegistry(allocator, io, repo, entrypoint);
     }
 
     pub fn deinit(self: *TensorRegistry) void {

@@ -103,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
     //
     log.info("Resolving model repository..", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    defer repo.close(io);
 
     log.info("Initializing model..", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);

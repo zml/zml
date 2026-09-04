@@ -1,14 +1,14 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-_RELEASE = "cutlass-moe-v0.1.0"
+_RELEASE = "cutlass-moe-v0.2.0"
 
 _ASSETS = {
     "amd64": {
-        "sha256": "d40348ad771e2bc34b3dd59602ed5f3ef47b58da06ddad582a1fd993f872fb40",
+        "sha256": "5c3a29da0fd91e2281d046eb2e467a7a40aeb24a0be8ba0487006356d45fecc4",
         "url": "https://github.com/zml/flashinfer/releases/download/{release}/flashinfer-cutlass-moe_linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "4278b3900d789e2ad6c207f7e698728a0b68ab200a0fc815625dfc25a2a6e1a8",
+        "sha256": "60b6fdbd193e11c24589add1eb206f59a3900cde4760e53719d6b2add492343e",
         "url": "https://github.com/zml/flashinfer/releases/download/{release}/flashinfer-cutlass-moe_linux-arm64.tar.gz",
     },
 }

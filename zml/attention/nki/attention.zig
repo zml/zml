@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const platforms = @import("platforms");
 
 const zml = @import("../../zml.zig");
@@ -54,46 +52,60 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             .withPartitioning(.{ .row = .replicated, .col = .replicated });
 
         return zml.ops.manualComputation(
-            .{ q_sharded, k_sharded, v_sharded, token_index_2d },
-            q_sharded.shape(),
-            parameters,
             (struct {
-                fn body(context: Parameters, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
-                    stdx.debug.assert(sharded_inputs.len == 4, "NKI decode attention expects 4 sharded inputs, got {}", .{sharded_inputs.len});
-                    const kernel = context.decode_kernel;
+                q: zml.Tensor,
+                k: zml.Tensor,
+                v: zml.Tensor,
+                token_index: zml.Tensor,
+                parameters: Parameters,
+
+                fn body(self: @This(), output: zml.Shape) zml.Tensor {
+                    const kernel = self.parameters.decode_kernel;
                     return zml.ops.neuronNki(
-                        .{ sharded_inputs[0], sharded_inputs[1], sharded_inputs[2], sharded_inputs[3] },
+                        .{ self.q, self.k, self.v, self.token_index },
                         .{output},
                         .{
                             .name = kernel.name,
                             .entrypoint = kernel.entrypoint,
                             .source_path = kernel.source_path,
-                            .compiler_target = context.compiler_target,
+                            .compiler_target = self.parameters.compiler_target,
                         },
                     )[0];
                 }
             }).body,
+            .{
+                .q = q_sharded,
+                .k = k_sharded,
+                .v = v_sharded,
+                .token_index = token_index_2d,
+                .parameters = parameters,
+            },
+            q_sharded.shape(),
         ).convert(q.dtype());
     }
 
     return zml.ops.manualComputation(
-        .{ q_sharded, k_sharded, v_sharded },
-        q_sharded.shape(),
-        parameters,
         (struct {
-            fn body(context: Parameters, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
-                const kernel = context.prefill_kernel;
+            q: zml.Tensor,
+            k: zml.Tensor,
+            v: zml.Tensor,
+            parameters: Parameters,
+
+            fn body(self: @This(), output: zml.Shape) zml.Tensor {
+                const kernel = self.parameters.prefill_kernel;
                 return zml.ops.neuronNki(
-                    .{ sharded_inputs[0], sharded_inputs[1], sharded_inputs[2] },
+                    .{ self.q, self.k, self.v },
                     .{output},
                     .{
                         .name = kernel.name,
                         .entrypoint = kernel.entrypoint,
                         .source_path = kernel.source_path,
-                        .compiler_target = context.compiler_target,
+                        .compiler_target = self.parameters.compiler_target,
                     },
                 )[0];
             }
         }).body,
+        .{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .parameters = parameters },
+        q_sharded.shape(),
     ).convert(q.dtype());
 }
