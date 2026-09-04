@@ -283,7 +283,10 @@ const BufferedMemoryWriter = struct {
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
+    /// `staging` is exactly `shape.byteSize()` bytes owned by the caller: the
+    /// writer fills it and `flush` hands it to `Buffer.from`.
+    fn init(io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer, staging: []u8) BufferedMemoryWriter {
+        std.debug.assert(staging.len == shape.byteSize());
         return .{
             .io = io,
             .platform = platform,
@@ -291,7 +294,7 @@ const BufferedMemoryWriter = struct {
             .sharding = sharding,
             .buffer = buffer,
             .interface = .{
-                .buffer = try allocator.alloc(u8, shape.byteSize()),
+                .buffer = staging,
                 .vtable = &.{
                     .drain = std.Io.Writer.fixedDrain,
                     .flush = flush,
@@ -299,12 +302,6 @@ const BufferedMemoryWriter = struct {
                 },
             },
         };
-    }
-
-    fn deinit(self: *BufferedMemoryWriter, allocator: std.mem.Allocator) void {
-        if (self.interface.buffer.len > 0) {
-            allocator.free(self.interface.buffer);
-        }
     }
 
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -902,6 +899,98 @@ pub const Window = struct {
     }
 };
 
+/// Host staging for the buffered backend: one buffer per running read task,
+/// handed back on completion instead of freed. Mapping, faulting and then
+/// unmapping a whole tensor's worth of pages for every tensor was half of a
+/// serial buffered load of a 14.96 GiB checkpoint, and a fifth of a
+/// concurrent one.
+///
+/// The pool retains at most as many bytes as the running tasks ever held at
+/// once, so it at most doubles host staging the backend already had to fit.
+const StagingPool = struct {
+    mutex: std.Io.Mutex = .init,
+    /// Buffers no task holds, and their total length.
+    free: std.ArrayListUnmanaged([]u8) = .empty,
+    retained_bytes: usize = 0,
+    /// What the running tasks hold now, and the most they ever held.
+    live_bytes: usize = 0,
+    peak_live_bytes: usize = 0,
+
+    /// A whole allocation of at least `size` bytes, with undefined contents:
+    /// the allocation itself, not a slice of one. The caller slices it for
+    /// its own use and returns this exact slice to `release`, whatever
+    /// happens.
+    fn acquire(self: *StagingPool, allocator: std.mem.Allocator, io: std.Io, size: usize) ![]u8 {
+        if (self.take(io, size)) |buffer| return buffer;
+        const fresh = try allocator.alloc(u8, size);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.addLive(fresh.len);
+        return fresh;
+    }
+
+    /// `buffer` must be what `acquire` returned, not a slice of it.
+    fn release(self: *StagingPool, allocator: std.mem.Allocator, io: std.Io, buffer: []u8) void {
+        const retained = retained: {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.live_bytes -= buffer.len;
+            // Over budget: drop retained buffers this one supersedes, so the
+            // pool keeps the sizes that satisfy the most requests instead of
+            // whatever happened to be released first.
+            while (self.retained_bytes + buffer.len > self.peak_live_bytes) {
+                const index = self.smallest() orelse break;
+                if (self.free.items[index].len >= buffer.len) break;
+                const dropped = self.free.swapRemove(index);
+                self.retained_bytes -= dropped.len;
+                allocator.free(dropped);
+            }
+            if (self.retained_bytes + buffer.len > self.peak_live_bytes) break :retained false;
+            self.free.append(allocator, buffer) catch break :retained false;
+            self.retained_bytes += buffer.len;
+            break :retained true;
+        };
+        if (!retained) allocator.free(buffer);
+    }
+
+    /// Every task is done, so every buffer is back.
+    fn deinit(self: *StagingPool, allocator: std.mem.Allocator) void {
+        for (self.free.items) |buffer| allocator.free(buffer);
+        self.free.deinit(allocator);
+    }
+
+    /// The smallest retained buffer that fits, so the big ones stay free for
+    /// the big tensors.
+    fn take(self: *StagingPool, io: std.Io, size: usize) ?[]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        var best: ?usize = null;
+        for (self.free.items, 0..) |buffer, i| {
+            if (buffer.len < size) continue;
+            if (best == null or buffer.len < self.free.items[best.?].len) best = i;
+        }
+        const buffer = self.free.swapRemove(best orelse return null);
+        self.retained_bytes -= buffer.len;
+        self.addLive(buffer.len);
+        return buffer;
+    }
+
+    fn smallest(self: *const StagingPool) ?usize {
+        if (self.free.items.len == 0) return null;
+        var index: usize = 0;
+        for (self.free.items, 0..) |buffer, i| {
+            if (buffer.len < self.free.items[index].len) index = i;
+        }
+        return index;
+    }
+
+    /// Called with `mutex` held.
+    fn addLive(self: *StagingPool, bytes: usize) void {
+        self.live_bytes += bytes;
+        self.peak_live_bytes = @max(self.peak_live_bytes, self.live_bytes);
+    }
+};
+
 /// One buffered submission: `pending` counts a publish sentinel plus one
 /// unit per tensor task; the last one sets `done`.
 const BufferedBatch = struct {
@@ -918,6 +1007,7 @@ const BufferedLoader = struct {
     io: std.Io,
     platform: *const Platform,
     group: stdx.Io.LimitedGroup,
+    staging: StagingPool = .{},
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
 
@@ -956,16 +1046,22 @@ const BufferedLoader = struct {
         if (self.first_error.load(.acquire) != 0) return;
         var reader = try source.reader(self.io, &.{}, .{});
         defer reader.deinit();
-        var writer = try BufferedMemoryWriter.init(
-            self.allocator,
+        const tensor_bytes = shape.byteSize();
+        const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
+        defer self.staging.release(self.allocator, self.io, staging);
+        var writer: BufferedMemoryWriter = .init(
             self.io,
             self.platform,
             shape,
             sharding,
             output,
+            staging[0..tensor_bytes],
         );
-        defer writer.deinit(self.allocator);
-        _ = try reader.interface.streamRemaining(&writer.interface);
+        const read = try reader.interface.streamRemaining(&writer.interface);
+        // Staging is reused, so its tail holds another tensor's bytes: a
+        // short source would publish those instead of the zeroes a fresh
+        // allocation used to give.
+        if (read != tensor_bytes) return error.IncompleteSourceRead;
         try writer.interface.flush();
     }
 
@@ -1023,6 +1119,7 @@ const BufferedLoader = struct {
     /// Every batch was awaited, so the group is idle.
     fn destroy(self: *BufferedLoader) void {
         self.group.await(self.io) catch {};
+        self.staging.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };
@@ -1127,6 +1224,41 @@ const LoaderTestFixture = struct {
         try std.testing.expectEqualSlices(u8, expected, loaded.constData());
     }
 };
+
+test "staging pool retains up to the peak the tasks held and prefers the sizes that fit" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool: StagingPool = .{};
+    defer pool.deinit(allocator);
+
+    // Two buffers live at once sets the budget: the pool may retain 24 bytes.
+    const small = try pool.acquire(allocator, io, 8);
+    const large = try pool.acquire(allocator, io, 16);
+    try std.testing.expectEqual(@as(usize, 24), pool.peak_live_bytes);
+    pool.release(allocator, io, small);
+    pool.release(allocator, io, large);
+    try std.testing.expectEqual(@as(usize, 24), pool.retained_bytes);
+
+    // The smallest buffer that fits comes back, so the 16 stays free for a
+    // request the 8 cannot serve.
+    const reused = try pool.acquire(allocator, io, 4);
+    try std.testing.expectEqual(@as(usize, 8), reused.len);
+    try std.testing.expectEqual(@as(usize, 16), pool.retained_bytes);
+    const fits = try pool.acquire(allocator, io, 12);
+    try std.testing.expectEqual(@as(usize, 16), fits.len);
+    try std.testing.expectEqual(@as(usize, 0), pool.retained_bytes);
+    pool.release(allocator, io, reused);
+    pool.release(allocator, io, fits);
+
+    // A buffer no retained one can serve evicts the ones it supersedes
+    // rather than being dropped itself.
+    const big = try pool.acquire(allocator, io, 24);
+    try std.testing.expectEqual(@as(usize, 24), big.len);
+    pool.release(allocator, io, big);
+    try std.testing.expectEqual(@as(usize, 1), pool.free.items.len);
+    try std.testing.expectEqual(@as(usize, 24), pool.free.items[0].len);
+    try std.testing.expectEqual(@as(usize, 24), pool.retained_bytes);
+}
 
 test "loader handles complete out of order and count bytes once each" {
     const allocator = std.testing.allocator;
