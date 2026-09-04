@@ -3401,33 +3401,33 @@ test "one load-profile feedback cursor reports only new backpressure" {
     try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
 }
 
-test "source warm-up window is discarded once when credits held the workers as long as the reads" {
+test "source warm-up window is discarded once when the DMA stage held requests as long as the reads" {
     var metrics: VectoredLoadMetrics = .{};
     var runtime: SourceReadRuntime = undefined;
     runtime.metrics = &metrics;
-    runtime.window_wait_base_ns = 0;
+    runtime.window_dma_base_ns = 0;
     runtime.window_read_base_ns = 0;
     runtime.warmup_pending = true;
-    // Reads dominated the window (a burst touched the gate for a moment):
-    // the first window is scored.
+    // Reads dominated the window (a network load): the first window is
+    // scored.
     metrics.read_ns.store(1000, .monotonic);
-    metrics.lifecycle_wait_ns.store(10, .monotonic);
+    metrics.dma_stage_ns.store(10, .monotonic);
     try std.testing.expect(!runtime.discardWarmup());
     try std.testing.expect(!runtime.warmup_pending);
 
-    // The workers waited for credits longer than they read: discarded.
+    // Requests sat in the DMA stage longer than they read: discarded.
     runtime.warmup_pending = true;
-    metrics.lifecycle_wait_ns.store(3000, .monotonic);
+    metrics.dma_stage_ns.store(3000, .monotonic);
     try std.testing.expect(runtime.discardWarmup());
     // Only once: the re-measured window is scored even under pressure.
     try std.testing.expect(!runtime.discardWarmup());
 
-    // Waits are counted from the generation's start, not the load's.
+    // Residency is counted from the generation's start, not the load's.
     runtime.warmup_pending = true;
-    runtime.window_wait_base_ns = 3000;
+    runtime.window_dma_base_ns = 3000;
     runtime.window_read_base_ns = 1000;
     metrics.read_ns.store(2000, .monotonic);
-    metrics.lifecycle_wait_ns.store(3005, .monotonic);
+    metrics.dma_stage_ns.store(3005, .monotonic);
     try std.testing.expect(!runtime.discardWarmup());
 }
 
@@ -3488,11 +3488,9 @@ test "busy window clock subtracts idle intervals from a window" {
     try std.testing.expectEqual(25 * std.time.ns_per_ms, clock.busyNs(now_ns, now_ns + 25 * std.time.ns_per_ms));
 }
 
-/// Worker tasks are spawned on demand: enough to fill the lifecycle gate at
-/// the current width, never more than the configured maximum. Idle tasks
-/// above the gate limit only add scheduling noise (128 persistent workers
-/// cost about 7% on one MI300X while the controller held width 12).
-/// Worker tasks, spawned as the width first needs them and never retired.
+/// Worker tasks, spawned as the width first needs them (`width + 1`, never
+/// more than the configured maximum; 128 persistent workers cost about 7%
+/// on one MI300X while the controller held width 12) and never retired.
 /// A worker whose index is beyond what the current width needs parks
 /// between jobs instead of competing for lifecycle credits: after a rung
 /// steps down, the workers spawned for the wider rung would otherwise queue
@@ -3563,18 +3561,21 @@ const SourceReadRuntime = struct {
     /// Lifecycle credits: see `RequestGateLimits`.
     retained_credits: usize = 1,
     dma_stage_requests: usize = 1,
-    /// The load's first scoreable window is a warm-up when the workers
-    /// waited for lifecycle credits at least as long as they read during
-    /// it: it opened on an empty DMA stage and measured the burst that
-    /// filled it (47 GiB/s on a GB300 whose steady DMA-bound rate was 42),
-    /// which no later rung can beat. Such a window is discarded and the
-    /// start rung measured again. A read-bound load keeps its first window
-    /// whatever a burst of completions does to the gate's occupancy: on a
-    /// Hugging Face load the gate touched its limit for a few ticks while
-    /// the workers waited a millisecond per 1.3 s read.
+    /// The load's first scoreable window is a warm-up when the load is
+    /// DMA-bound, which the window itself shows: the requests completing in
+    /// it spent at least as long in the DMA stage (enqueue to last
+    /// callback) as reading. Such a window opened on an empty DMA stage and
+    /// measured the burst that filled it (47 GiB/s on a GB300 whose steady
+    /// rate was 42), which no later rung can beat, so it is discarded and
+    /// the start rung measured again. A read-bound load keeps its first
+    /// window: on a Hugging Face load a request spends a millisecond in the
+    /// DMA stage per 1.3 s read, whatever a burst of completions does to
+    /// the credit gate's occupancy. Credit waiting is not the signal: at a
+    /// narrow start rung on a GB300 the workers wait 2 ms per 3 ms read
+    /// while the stage holds each request for 10.
     warmup_pending: bool = true,
-    /// `lifecycle_wait_ns` and `read_ns` when the current generation opened.
-    window_wait_base_ns: u64 = 0,
+    /// `dma_stage_ns` and `read_ns` when the current generation opened.
+    window_dma_base_ns: u64 = 0,
     window_read_base_ns: u64 = 0,
     /// Grown with the lifecycle limit; null in unit tests without workers.
     workers: ?*WorkerPool = null,
@@ -3614,7 +3615,7 @@ const SourceReadRuntime = struct {
         _ = self.takeRemoteBackpressure();
         self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
         self.clock.reset();
-        self.window_wait_base_ns = self.metrics.lifecycle_wait_ns.load(.monotonic);
+        self.window_dma_base_ns = self.metrics.dma_stage_ns.load(.monotonic);
         self.window_read_base_ns = self.metrics.read_ns.load(.monotonic);
         self.measurement = switch (self.controller.state) {
             .climbing => .measuring,
@@ -3669,15 +3670,15 @@ const SourceReadRuntime = struct {
     }
 
     /// Once per load: the first scoreable window is dropped when the
-    /// workers waited for lifecycle credits at least as long as they read
-    /// inside it.
+    /// requests completing inside it spent at least as long in the DMA
+    /// stage as reading.
     fn discardWarmup(self: *SourceReadRuntime) bool {
         const pending = self.warmup_pending;
         self.warmup_pending = false;
         if (!pending) return false;
-        const waited = self.metrics.lifecycle_wait_ns.load(.monotonic) -| self.window_wait_base_ns;
+        const staged = self.metrics.dma_stage_ns.load(.monotonic) -| self.window_dma_base_ns;
         const read = self.metrics.read_ns.load(.monotonic) -| self.window_read_base_ns;
-        return waited != 0 and waited >= read;
+        return staged != 0 and staged >= read;
     }
 
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
