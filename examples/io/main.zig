@@ -615,9 +615,10 @@ fn checkPacks(
 
 /// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest
 /// eligible one back to host and compares the bytes with the source, so a
-/// buffer that reported ready before every piece landed is caught. A
+/// buffer that reported ready before every piece landed is caught. A fully
 /// replicated buffer is compared on every replica; a partitioned one is
-/// assembled with `toSliceAlloc`. Each source file is opened once (an
+/// assembled with `toSliceAlloc`, which keeps the last replica of a region
+/// that several devices hold. Each source file is opened once (an
 /// `hf://` open is a HEAD plus a redirect). Skipped: tensors with several
 /// sources, and sub-byte tensors partitioned over several devices
 /// (`toSliceAlloc` places their shards by element stride).

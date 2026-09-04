@@ -813,6 +813,14 @@ decoupled, low pinned memory.
   libpjrt_oneapi (manual-2026-08-17) binaries carry
   `CommonAsyncHostToDeviceTransferManager` symbols and none of the old
   manager (`strings` check, 2026-09-04).
+- The transfer's done event never carries an error: the manager's
+  `on_done` has no status and the C API wrapper resolves the event's
+  promise with an OK status (`pjrt_c_api_wrapper_impl.cc`, the
+  `on_done_with_d2h_transfer` lambda), so `PJRT_Event_OnReady` always
+  passes a null error. A copy that fails asynchronously errors the
+  buffer's definition event, which surfaces when the buffer is first used
+  (execute, host copy); the loader's `recordError` branch in the ready
+  callback is dead on the shipped plugins.
 
 ### Baseline 2026-09-03 (commit 2f9cac2b, Llama-3.1-8B 14.96 GiB, one GPU, warm)
 
@@ -1131,10 +1139,14 @@ Change (commits `d082a614`, `a9802595`, `41e73088`, `ab874827`,
   transfers failed, and a later `SetBufferError` trips a CHECK and aborts
   the process (the oneAPI abort in "Open work" is the same class, on the
   pump's side). `Target.closed` (set by the pump before the flagged call)
-  and `Target.errored` (set by the ready callback) now keep `awaitBatch`
-  from marking such buffers; the outputs of a failed submission are
-  undefined either way. `DirectLoader.submit` rejects empty sources
-  itself; the DMA-stage timer ignores a request whose enqueue failed.
+  now keeps `awaitBatch` from marking such buffers; the outputs of a
+  failed submission are undefined either way. An asynchronous transfer
+  failure is invisible to the loader (PJRT fact below), so a buffer that
+  failed that way and is then marked after a second, unrelated failure
+  still aborts; a first version carried a per-target error flag set from
+  the ready callback, which can never fire. `DirectLoader.submit` rejects
+  empty sources itself; the DMA-stage timer ignores a request whose
+  enqueue failed.
 - The warm-up rule discards the first scoreable window when the requests
   completing in it spent at least as long in the DMA stage as reading
   (`dma_stage_ns` against `read_ns`, deltas since the generation opened),

@@ -191,16 +191,15 @@ const VectoredTensorTransfer = struct {
         submitted_bytes: usize = 0,
         /// The pump issued the last-transfer call, accepted or not: PJRT
         /// then decides the buffer's outcome and a `SetBufferError` would
-        /// trip its checks.
+        /// trip its checks. A transfer that fails asynchronously is not
+        /// visible here: the transfer's done event always resolves without
+        /// an error and the failure surfaces on the buffer's definition
+        /// event when the buffer is first used.
         closed: bool = false,
-        /// PJRT reported an error on one of this target's transfers and
-        /// errored the buffer itself; set from the ready callback.
-        errored: std.atomic.Value(bool) = .init(false),
 
-        /// Whether the loader may still mark the buffer as failed: PJRT has
-        /// neither closed it nor errored it.
+        /// Whether the loader may still mark the buffer as failed.
         fn canFail(self: *const Target) bool {
-            return !self.closed and !self.errored.load(.acquire);
+            return !self.closed;
         }
 
         /// Whether a submission of `len` bytes closes the buffer.
@@ -842,7 +841,6 @@ const VectoredLoadPipeline = struct {
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
         block: *BlockContext,
-        target: *VectoredTensorTransfer.Target,
         /// Null once destroyed, by a pump or by the batch's retirement.
         pjrt_event: ?*pjrt.Event,
         err: ?*pjrt.Error = null,
@@ -1200,7 +1198,6 @@ const VectoredLoadPipeline = struct {
         ctx.* = .{
             .pipeline = self,
             .block = transfer.block,
-            .target = target,
             .pjrt_event = event,
             .device_index = target.device_index,
             .len = transfer.len,
@@ -1220,10 +1217,10 @@ const VectoredLoadPipeline = struct {
                 const len = ctx_.len;
                 const block = ctx_.block;
                 ctx_.err = err;
+                // The shipped plugins resolve this event without an error
+                // whatever happened to the copy (the C API wrapper sets the
+                // promise with an OK status); kept for a plugin that reports.
                 if (err) |pjrt_error| {
-                    // The manager errored the buffer itself; the awaiting
-                    // task must not touch it again.
-                    ctx_.target.errored.store(true, .release);
                     pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
                 }
                 pipeline.eventCompleted(device_index, len);
@@ -4204,9 +4201,12 @@ pub const DirectLoader = struct {
     /// Waits for the batch's last completion unit, retires it and returns
     /// the loader's sticky error if the pipeline failed. Targets the failure
     /// left open are marked so their buffers never report ready; a target
-    /// PJRT already closed (its last call went out, accepted or not) or
-    /// errored is left to PJRT, whose shared transfer manager drops the
-    /// definition event in both cases and aborts on a further call. The
+    /// PJRT already closed (its last call went out, accepted or not) is left
+    /// to PJRT, whose shared transfer manager has dropped the definition
+    /// event and aborts on a further call. The same manager drops the event
+    /// when a transfer fails asynchronously, which the loader cannot see
+    /// (the done event carries no error), so a buffer that failed that way
+    /// and is then marked here aborts too: two failures in one load. The
     /// outputs of a failed submission are undefined either way. A batch that
     /// completed without an error must have closed every target (the pump
     /// flagged the submission that completed its bytes); one that did not
@@ -4990,9 +4990,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     };
     const plan = batch.plans.items[0];
     plan.events_used = 2;
-    var event_target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
     for (plan.events, requests) |*ctx, request| ctx.* = .{
-        .target = &event_target,
         .pipeline = pipeline,
         .block = &request.blocks[0],
         .pjrt_event = null,
