@@ -303,10 +303,13 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   protected by one mutex; only the source-call configuration generation
   remains atomic for lock-free worker admission.
 - Two gates separate clean read-measurement generations from complete request
-  lifecycles. All workers compete for lifecycle capacity, configured
-  as active reads plus one shared spare and clipped by pinned feasibility; the
-  read gate alone limits source calls. A request returns lifecycle credit only
-  after all its DMA children finish.
+  lifecycles. All workers compete for lifecycle capacity
+  (`RequestGateLimits`): `min(feasible, max(retained, width + dma_stage))`,
+  where `retained` is the pre-grown pinned capacity in requests and
+  `dma_stage` the calibrated per-device DMA depth in requests, so the DMA
+  stage keeps its depth whatever the read width (fourth pass); the read gate
+  alone limits source calls. A request returns lifecycle credit only after
+  all its DMA children finish.
 - Nothing closes the read gate. A changed width sets the new limit and the
   reads admitted under the previous generation return at their own pace,
   excluded from the new window by the fence. Source backpressure has two
@@ -354,21 +357,26 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   528 MiB in about 90 ms on B70). The ready line logs `retained`, `pregrown`
   and `pregrowth_ms`.
 - Worker tasks are spawned on demand (`WorkerPool`): the decision that opens
-  the gates spawns as many workers as the lifecycle limit admits, and a
-  raised width spawns more, up to the configured maximum. On one MI300X, 128
+  the gates spawns `min(lifecycle, width + 1)` workers (a worker hands its
+  request to the DMA stage and claims the next, so credits beyond the read
+  width need no workers), and a raised width spawns more, up to the
+  configured maximum. On one MI300X, 128
   persistent workers cost about 7% at a held width of 12 and made every rung
   measure slower (width 16: 21 GiB/s with 128 tasks, 36 GiB/s with 16); 13
   workers serve width 12.
-- DMA width is fixed at eight per device by default after calibration work
-  showed adaptive DMA width added substantial complexity and little load
-  value. There is no global DMA parallelism cap.
+- DMA depth is fixed at eight blocks per device by default after calibration
+  work showed adaptive DMA width added substantial complexity and little
+  load value. The pump enforces it as a byte budget
+  (`max_in_flight_per_device x block_size`) with a cap of 64 pieces in
+  flight per device, so a block of small tensors keeps the calibrated bytes
+  moving (fourth pass). There is no global DMA parallelism cap.
 - DMA event lifetime (`retire_events_early`, enabled): a ready callback
   hands its `EventContext` to the pipeline's intrusive `retired` stack
   under `metadata_mutex`, after its own `eventCompleted` (and any pump it
   ran) and before `block.complete()`; `pump` destroys the stack at the top
   of every iteration under the lock, so an event is destroyed by a later
   pump or by `retireBatch`, never inside its own callback. Live PJRT events
-  are bounded by devices x 8 plus one pump batch instead of a submission's
+  are bounded by devices x 64 plus one pump batch instead of a submission's
   transfer count. Checked against the oneAPI plugin under sustained load
   with the playground's `ZML_LOAD_EVENT_RETIRE_CHECK` (PLAN.md task 9); the
   constant turns it off.
