@@ -11,6 +11,10 @@ const limits = @import("limits.zig");
 
 const log = std.log.scoped(.@"zml/io");
 
+fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
+    return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
+}
+
 const max_load_dma_parallelism = limits.max_dma_parallelism;
 const max_load_read_request_size = limits.max_read_request_size;
 const maximumCoalescedJobBlocks = limits.maximumCoalescedJobBlocks;
@@ -24,14 +28,13 @@ pub const default_dma_benchmark_block_sizes = [_]usize{
 };
 
 const dma_benchmark_repeats = 3;
+const max_dma_devices = 64;
 
 /// The selection made on the representative device: exactly the tuple the
 /// loader applies, plus the rate that chose it.
 const DeviceDmaRecommendation = struct {
     device_index: usize,
-    device_id: u32,
     dma_block_size: usize,
-    dma_parallelism: usize,
     measured_bytes_per_second: f64,
 };
 
@@ -44,12 +47,40 @@ pub const DmaLoadConfig = struct {
     max_mapped_bytes: usize,
 };
 
+const KnownDmaPoolTopology = struct {
+    pool_count: usize = 0,
+    pool_nodes: [max_dma_devices]usize = undefined,
+    first_device_indices: [max_dma_devices]usize = undefined,
+    device_counts: [max_dma_devices]usize = @splat(0),
+    device_pool_indices: [max_dma_devices]usize = undefined,
+
+    fn init(device_numa_nodes: []const ?usize) !KnownDmaPoolTopology {
+        var result: KnownDmaPoolTopology = .{};
+        devices: for (device_numa_nodes, 0..) |maybe_node, device_index| {
+            const node = maybe_node orelse return error.InvalidDmaLoadConfig;
+            for (result.pool_nodes[0..result.pool_count], 0..) |known, pool_index| {
+                if (known == node) {
+                    result.device_counts[pool_index] += 1;
+                    result.device_pool_indices[device_index] = pool_index;
+                    continue :devices;
+                }
+            }
+            const pool_index = result.pool_count;
+            result.pool_nodes[pool_index] = node;
+            result.first_device_indices[pool_index] = device_index;
+            result.device_counts[pool_index] = 1;
+            result.device_pool_indices[device_index] = pool_index;
+            result.pool_count += 1;
+        }
+        return result;
+    }
+};
+
 /// Blocks a load cannot start without: every pool feeds its own devices and
 /// must still hold one maximal coalesced job. Validation only; the pool grows
 /// on demand up to the mapped ceiling.
 pub fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
-    const max_devices = 64;
-    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_devices)
+    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_dma_devices)
         return error.InvalidDmaLoadConfig;
     const maximum_request_blocks = try maximumCoalescedJobBlocks(
         max_load_read_request_size,
@@ -70,25 +101,9 @@ pub fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
         ) catch error.InvalidDmaLoadConfig;
     }
 
-    // One pass counts the devices of every node, in first-seen pool order.
-    var nodes: [max_devices]usize = undefined;
-    var device_counts: [max_devices]usize = @splat(0);
-    var pool_count: usize = 0;
-    devices: for (config.device_numa_nodes) |maybe_node| {
-        const node = maybe_node orelse return error.InvalidDmaLoadConfig;
-        for (nodes[0..pool_count], device_counts[0..pool_count]) |known, *count| {
-            if (known == node) {
-                count.* += 1;
-                continue :devices;
-            }
-        }
-        nodes[pool_count] = node;
-        device_counts[pool_count] = 1;
-        pool_count += 1;
-    }
-
+    const topology = try KnownDmaPoolTopology.init(config.device_numa_nodes);
     var required_blocks: usize = 0;
-    for (device_counts[0..pool_count]) |device_count| {
+    for (topology.device_counts[0..topology.pool_count]) |device_count| {
         const feed_blocks = std.math.mul(
             usize,
             device_count,
@@ -105,7 +120,7 @@ pub fn requiredDmaWorkspaceBytes(config: DmaLoadConfig) !usize {
 }
 
 fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
-    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > 64 or
+    if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_dma_devices or
         config.block_size == 0 or config.max_in_flight_per_device == 0 or
         config.max_in_flight_per_device > max_load_dma_parallelism or
         config.block_size > max_load_read_request_size or
@@ -128,7 +143,6 @@ fn validateDmaLoadConfig(config: DmaLoadConfig) !void {
 }
 
 fn dupeDmaLoadConfig(allocator: std.mem.Allocator, config: DmaLoadConfig) !DmaLoadConfig {
-    try validateDmaLoadConfig(config);
     const nodes = try allocator.dupe(?usize, config.device_numa_nodes);
     return .{
         .device_numa_nodes = nodes,
@@ -277,10 +291,7 @@ pub const DmaPlatformSettings = struct {
         const mapped_bytes = self.workspace.allocatedBytes();
         const started = std.Io.Timestamp.now(io, .awake);
         self.workspace.deinit();
-        const elapsed_ns: u64 = @intCast(@max(
-            started.untilNow(io, .awake).nanoseconds,
-            0,
-        ));
+        const elapsed_ns = elapsedNanoseconds(started, std.Io.Timestamp.now(io, .awake));
         log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
             mapped_bytes,
             @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
@@ -451,8 +462,6 @@ pub const BenchTransferOptions = struct {
     device_numa_nodes: []const usize = &.{},
 };
 
-const DmaBenchmarkOpts = BenchTransferOptions;
-
 const DmaBenchmarkNumaAllocator = struct {
     const max_nodes = 1024;
     const mpol_bind = 2;
@@ -606,17 +615,18 @@ pub const DmaBenchmarkSourcePools = struct {
         device_numa_nodes: []const ?usize,
         max_mapped_bytes: usize,
     ) !DmaBenchmarkSourcePools {
-        var unique_nodes: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        defer unique_nodes.deinit(allocator);
-        for (device_numa_nodes) |maybe_node| {
-            if (maybe_node) |node| try unique_nodes.put(allocator, node, {});
-        }
-        const pool_count = @max(@as(usize, 1), unique_nodes.count());
+        if (device_numa_nodes.len != platform.devices.len)
+            return error.DmaDeviceMismatch;
+        const topology: ?KnownDmaPoolTopology = if (device_numa_nodes[0] == null)
+            null
+        else
+            try .init(device_numa_nodes);
+        const pool_count = if (topology) |known| known.pool_count else 1;
         const pools = try allocator.alloc(DmaBenchmarkSourcePool, pool_count);
         errdefer allocator.free(pools);
         const device_pool_indices = try allocator.alloc(usize, platform.devices.len);
         errdefer allocator.free(device_pool_indices);
-        if (unique_nodes.count() == 0) {
+        if (topology == null) {
             const pool = &pools[0];
             pool.numa_allocator = .{ .parent = allocator, .node = null };
             pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
@@ -637,37 +647,23 @@ pub const DmaBenchmarkSourcePools = struct {
             };
         }
 
-        var nodes: std.ArrayListUnmanaged(usize) = .empty;
-        defer nodes.deinit(allocator);
-        for (device_numa_nodes, 0..) |maybe_node, device_index| {
-            const node = maybe_node orelse {
-                device_pool_indices[device_index] = 0;
-                continue;
-            };
-            var pool_index: ?usize = null;
-            for (nodes.items, 0..) |existing, index| {
-                if (existing == node) {
-                    pool_index = index;
-                    break;
-                }
-            }
-            if (pool_index == null) {
-                pool_index = nodes.items.len;
-                try nodes.append(allocator, node);
-                const pool = &pools[pool_index.?];
-                pool.numa_allocator = .{ .parent = allocator, .node = node };
-                pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
-                pool.pjrt_host_memory = if (platform.target == .rocm)
-                    platform.devices[device_index].memory(.host_pinned) orelse
-                        return error.PinnedHostMemoryUnavailable
-                else
-                    null;
-                pool.allocations = .empty;
-                pool.source = &.{};
-            }
-            device_pool_indices[device_index] = pool_index.?;
+        const known = topology.?;
+        @memcpy(device_pool_indices, known.device_pool_indices[0..device_numa_nodes.len]);
+        for (
+            known.pool_nodes[0..known.pool_count],
+            known.first_device_indices[0..known.pool_count],
+            pools,
+        ) |node, device_index, *pool| {
+            pool.numa_allocator = .{ .parent = allocator, .node = node };
+            pool.dma_map_allocator = .init(pool.numa_allocator.allocator(), platform);
+            pool.pjrt_host_memory = if (platform.target == .rocm)
+                platform.devices[device_index].memory(.host_pinned) orelse
+                    return error.PinnedHostMemoryUnavailable
+            else
+                null;
+            pool.allocations = .empty;
+            pool.source = &.{};
         }
-        std.debug.assert(nodes.items.len == pools.len);
         return .{
             .allocator = allocator,
             .io = io,
@@ -730,11 +726,11 @@ pub const DmaBenchmarkSourcePools = struct {
         _ = self.allocated_bytes.fetchAdd(replacement.len, .release);
         pool.source = replacement;
         const finished_at = std.Io.Timestamp.now(self.io, .awake);
-        const map_ns: u64 = if (pool.pjrt_host_memory != null)
+        const map_ns = if (pool.pjrt_host_memory != null)
             0
         else
-            @intCast(@max(started.durationTo(mapped_at).nanoseconds, 0));
-        const elapsed_ns: u64 = @intCast(@max(started.durationTo(finished_at).nanoseconds, 0));
+            elapsedNanoseconds(started, mapped_at);
+        const elapsed_ns = elapsedNanoseconds(started, finished_at);
         const allocation_kind = if (pool.pjrt_host_memory != null) "pjrt_host" else "dma_map";
         if (pool.numa_allocator.node) |node| {
             log.info("DMA mapped arena numa_node={d} allocator={s} address=0x{x} size={Bi:.2} allocation_ms={d:.3} dma_map_ms={d:.3}", .{
@@ -1129,7 +1125,7 @@ fn runReusableDmaBenchmarkWindow(
     const measured_at = std.Io.Timestamp.now(io, .awake);
     start.set(io);
     while (true) {
-        const elapsed_ns: u64 = @intCast(@max(measured_at.untilNow(io, .awake).nanoseconds, 0));
+        const elapsed_ns = elapsedNanoseconds(measured_at, std.Io.Timestamp.now(io, .awake));
         const error_code = cohort.first_error.load(.acquire);
         if (error_code != 0) {
             stop.store(true, .release);
@@ -1287,7 +1283,7 @@ fn medianDmaMetricRatioIndex(
 
 fn confirmAndSelectDmaBenchmarkCandidate(
     session: *ReusableDmaBenchmarkSession,
-    opts: DmaBenchmarkOpts,
+    opts: BenchTransferOptions,
     candidates: []const DmaBenchmarkCandidate,
     source: []const u8,
     parallelism: usize,
@@ -1301,10 +1297,13 @@ fn confirmAndSelectDmaBenchmarkCandidate(
     defer session.allocator.free(confirmed_metrics);
     @memset(confirmed_metrics, null);
 
-    var peak_index: usize = 0;
-    for (candidates, medians, 0..) |candidate, *median, index| {
+    for (candidates, medians) |candidate, *median| {
         median.* = candidate.median();
-        if (median.bytesPerSecond() > medians[peak_index].bytesPerSecond()) peak_index = index;
+    }
+    var peak_index: usize = 0;
+    for (medians[1..], 1..) |median, index| {
+        if (median.bytesPerSecond() > medians[peak_index].bytesPerSecond())
+            peak_index = index;
     }
     const peak_rate = medians[peak_index].bytesPerSecond();
     for (medians, ratios) |median, *ratio| {
@@ -1398,7 +1397,7 @@ fn measureDmaBenchmarkCandidates(
 
 fn tuneDmaBenchmarkDevice(
     session: *ReusableDmaBenchmarkSession,
-    opts: DmaBenchmarkOpts,
+    opts: BenchTransferOptions,
     source_pools: *DmaBenchmarkSourcePools,
     device_index: usize,
 ) !DeviceDmaRecommendation {
@@ -1451,9 +1450,7 @@ fn tuneDmaBenchmarkDevice(
 
     return .{
         .device_index = device_index,
-        .device_id = session.platform.devices[device_index].id(),
         .dma_block_size = selected_cohort.block_size,
-        .dma_parallelism = opts.block_parallelism,
         .measured_bytes_per_second = block_decision.metrics.bytesPerSecond(),
     };
 }
@@ -1463,8 +1460,6 @@ fn resolveDmaNumaNodes(
     platform: *const Platform,
     override: []const usize,
 ) ![]?usize {
-    const result = try allocator.alloc(?usize, platform.devices.len);
-    @memset(result, null);
     if (override.len != 0) {
         if (override.len != platform.devices.len) return error.InvalidDmaBenchmarkOptions;
         if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
@@ -1472,6 +1467,11 @@ fn resolveDmaNumaNodes(
             if (node >= DmaBenchmarkNumaAllocator.max_nodes)
                 return error.InvalidDmaBenchmarkOptions;
         }
+    }
+
+    const result = try allocator.alloc(?usize, platform.devices.len);
+    @memset(result, null);
+    if (override.len != 0) {
         for (override, result) |node, *stored| stored.* = node;
         return result;
     }
@@ -1498,10 +1498,10 @@ fn benchmarkSyntheticDma(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    opts: DmaBenchmarkOpts,
+    opts: BenchTransferOptions,
 ) !DmaBenchmarkReport {
     const benchmark_started = std.Io.Timestamp.now(io, .awake);
-    if (platform.target != .cuda and platform.target != .rocm and platform.target != .oneapi)
+    if (!isDirectTransferPlatform(platform))
         return error.DmaBenchmarkUnsupported;
     if (platform.devices.len == 0 or opts.block_sizes.len == 0)
         return error.NoFeasibleDmaBenchmarkTuple;
@@ -1512,29 +1512,14 @@ fn benchmarkSyntheticDma(
     if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
         !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
         return error.InvalidDmaBenchmarkOptions;
-    var maximum_feasible_block_size: usize = 0;
+    var has_feasible_block = false;
     for (opts.block_sizes) |block_size| {
         if (block_size == 0) return error.InvalidDmaBenchmarkOptions;
         if (dmaBenchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
-            maximum_feasible_block_size = @max(maximum_feasible_block_size, block_size);
+            has_feasible_block = true;
     }
-    if (maximum_feasible_block_size == 0) return error.NoFeasibleDmaBenchmarkTuple;
-    if (opts.device_numa_nodes.len != 0 and
-        opts.device_numa_nodes.len != platform.devices.len)
-        return error.InvalidDmaBenchmarkOptions;
-    if (opts.device_numa_nodes.len != 0) {
-        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
-        for (opts.device_numa_nodes) |node| {
-            if (node >= DmaBenchmarkNumaAllocator.max_nodes)
-                return error.InvalidDmaBenchmarkOptions;
-        }
-    }
-
-    const representative_kind = platform.devices[0].kind();
-    for (platform.devices[1..]) |device| {
-        if (!std.mem.eql(u8, representative_kind, device.kind()))
-            return error.HeterogeneousDmaUnsupported;
-    }
+    if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
+    try validateDmaPlatform(platform);
     const resolved_numa_nodes = try resolveDmaNumaNodes(
         allocator,
         platform,
@@ -1545,10 +1530,10 @@ fn benchmarkSyntheticDma(
     const device_warmup_started = std.Io.Timestamp.now(io, .awake);
     try platform.warmupDeviceAllocators(io);
     const calibration_started = std.Io.Timestamp.now(io, .awake);
-    const device_allocator_warmup_ns: u64 = @intCast(@max(
-        device_warmup_started.durationTo(calibration_started).nanoseconds,
-        0,
-    ));
+    const device_allocator_warmup_ns = elapsedNanoseconds(
+        device_warmup_started,
+        calibration_started,
+    );
     var source_pools: DmaBenchmarkSourcePools = try .init(
         allocator,
         io,
@@ -1577,13 +1562,13 @@ fn benchmarkSyntheticDma(
     // retained working set is mapped.
     session.deinit(&source_pools);
     session_active = false;
-    const calibration_ns: u64 = @intCast(@max(
-        calibration_started.untilNow(io, .awake).nanoseconds,
-        0,
-    ));
+    const calibration_ns = elapsedNanoseconds(
+        calibration_started,
+        std.Io.Timestamp.now(io, .awake),
+    );
 
     const uniform_block_size = representative.dma_block_size;
-    const uniform_parallelism = representative.dma_parallelism;
+    const uniform_parallelism = opts.block_parallelism;
     const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
     defer allocator.free(calibrated_node_reserves);
     @memset(calibrated_node_reserves, 0);
@@ -1629,10 +1614,10 @@ fn benchmarkSyntheticDma(
     return .{
         .resources = resources,
         .recommendation = representative,
-        .elapsed_ns = @intCast(@max(
-            benchmark_started.untilNow(io, .awake).nanoseconds,
-            0,
-        )),
+        .elapsed_ns = elapsedNanoseconds(
+            benchmark_started,
+            std.Io.Timestamp.now(io, .awake),
+        ),
         .calibration_ns = calibration_ns,
         .device_allocator_warmup_ns = device_allocator_warmup_ns,
     };
@@ -1647,7 +1632,7 @@ fn logDmaBenchmarkReport(platform: *const Platform, result: *const DmaBenchmarkR
         platform.devices.len,
         platform.devices[recommendation.device_index].kind(),
         recommendation.dma_block_size,
-        recommendation.dma_parallelism,
+        result.resources.config.max_in_flight_per_device,
         recommendation.measured_bytes_per_second / (1024 * 1024 * 1024),
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
@@ -1699,7 +1684,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .io = undefined,
         .platform = undefined,
     };
-    const opts: DmaBenchmarkOpts = .{};
+    const opts: BenchTransferOptions = .{};
 
     var candidates = [_]DmaBenchmarkCandidate{
         .{ .value = 2, .cohort = undefined },
