@@ -3379,18 +3379,33 @@ test "one load-profile feedback cursor reports only new backpressure" {
     try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
 }
 
-test "source warm-up window is discarded once when credits ran out" {
+test "source warm-up window is discarded once when credits held the workers as long as the reads" {
+    var metrics: VectoredLoadMetrics = .{};
     var runtime: SourceReadRuntime = undefined;
+    runtime.metrics = &metrics;
+    runtime.window_wait_base_ns = 0;
+    runtime.window_read_base_ns = 0;
     runtime.warmup_pending = true;
-    runtime.credits_exhausted = false;
-    // Credits never ran out: the first window is scored.
+    // Reads dominated the window (a burst touched the gate for a moment):
+    // the first window is scored.
+    metrics.read_ns.store(1000, .monotonic);
+    metrics.lifecycle_wait_ns.store(10, .monotonic);
     try std.testing.expect(!runtime.discardWarmup());
     try std.testing.expect(!runtime.warmup_pending);
 
+    // The workers waited for credits longer than they read: discarded.
     runtime.warmup_pending = true;
-    runtime.credits_exhausted = true;
+    metrics.lifecycle_wait_ns.store(3000, .monotonic);
     try std.testing.expect(runtime.discardWarmup());
     // Only once: the re-measured window is scored even under pressure.
+    try std.testing.expect(!runtime.discardWarmup());
+
+    // Waits are counted from the generation's start, not the load's.
+    runtime.warmup_pending = true;
+    runtime.window_wait_base_ns = 3000;
+    runtime.window_read_base_ns = 1000;
+    metrics.read_ns.store(2000, .monotonic);
+    metrics.lifecycle_wait_ns.store(3005, .monotonic);
     try std.testing.expect(!runtime.discardWarmup());
 }
 
@@ -3455,22 +3470,53 @@ test "busy window clock subtracts idle intervals from a window" {
 /// the current width, never more than the configured maximum. Idle tasks
 /// above the gate limit only add scheduling noise (128 persistent workers
 /// cost about 7% on one MI300X while the controller held width 12).
+/// Worker tasks, spawned as the width first needs them and never retired.
+/// A worker whose index is beyond what the current width needs parks
+/// between jobs instead of competing for lifecycle credits: after a rung
+/// steps down, the workers spawned for the wider rung would otherwise queue
+/// at the credit gate for the rest of the load and inflate the credit wait
+/// the summary reports without moving a byte.
 const WorkerPool = struct {
     loader: *DirectLoader,
     maximum: usize,
     mutex: std.Io.Mutex = .init,
+    /// Parked workers; woken when `wanted` grows or the pool stops.
+    condition: std.Io.Condition = .init,
     spawned: usize = 0,
+    /// Workers the current width needs (`RequestGateLimits.workers`).
+    wanted: usize = 0,
+    stopping: bool = false,
 
     fn ensure(self: *WorkerPool, io: std.Io, wanted: usize) void {
         const target = @min(wanted, self.maximum);
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        self.wanted = target;
         while (self.spawned < target) : (self.spawned += 1) {
-            self.loader.worker_group.concurrent(io, DirectLoader.workerMain, .{self.loader}) catch |err| {
+            self.loader.worker_group.concurrent(io, DirectLoader.workerMain, .{ self.loader, self.spawned }) catch |err| {
                 load_log.err("cannot spawn source worker {d}: {}", .{ self.spawned + 1, err });
-                return;
+                break;
             };
         }
+        self.condition.broadcast(io);
+    }
+
+    /// Parks worker `index` while the width does not need it. False once
+    /// the pool stops.
+    fn admit(self: *WorkerPool, io: std.Io, index: usize) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (!self.stopping and index >= self.wanted) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        return !self.stopping;
+    }
+
+    fn stop(self: *WorkerPool, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.stopping = true;
+        self.condition.broadcast(io);
     }
 };
 
@@ -3492,13 +3538,19 @@ const SourceReadRuntime = struct {
     /// Lifecycle credits: see `RequestGateLimits`.
     retained_credits: usize = 1,
     dma_stage_requests: usize = 1,
-    /// The load's first scoreable window is a warm-up when the lifecycle
-    /// credits ran out during it: it opened on an empty DMA stage and
-    /// measured the burst that filled it (47 GiB/s on a GB300 whose steady
-    /// DMA-bound rate was 42), which no later rung can beat. Such a window
-    /// is discarded and the start rung measured again.
+    /// The load's first scoreable window is a warm-up when the workers
+    /// waited for lifecycle credits at least as long as they read during
+    /// it: it opened on an empty DMA stage and measured the burst that
+    /// filled it (47 GiB/s on a GB300 whose steady DMA-bound rate was 42),
+    /// which no later rung can beat. Such a window is discarded and the
+    /// start rung measured again. A read-bound load keeps its first window
+    /// whatever a burst of completions does to the gate's occupancy: on a
+    /// Hugging Face load the gate touched its limit for a few ticks while
+    /// the workers waited a millisecond per 1.3 s read.
     warmup_pending: bool = true,
-    credits_exhausted: bool = false,
+    /// `lifecycle_wait_ns` and `read_ns` when the current generation opened.
+    window_wait_base_ns: u64 = 0,
+    window_read_base_ns: u64 = 0,
     /// Grown with the lifecycle limit; null in unit tests without workers.
     workers: ?*WorkerPool = null,
     source_response_observed: bool = false,
@@ -3537,7 +3589,8 @@ const SourceReadRuntime = struct {
         _ = self.takeRemoteBackpressure();
         self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
         self.clock.reset();
-        self.credits_exhausted = false;
+        self.window_wait_base_ns = self.metrics.lifecycle_wait_ns.load(.monotonic);
+        self.window_read_base_ns = self.metrics.read_ns.load(.monotonic);
         self.measurement = switch (self.controller.state) {
             .climbing => .measuring,
             .holding => .inactive,
@@ -3591,11 +3644,15 @@ const SourceReadRuntime = struct {
     }
 
     /// Once per load: the first scoreable window is dropped when the
-    /// lifecycle credits ran out inside it.
+    /// workers waited for lifecycle credits at least as long as they read
+    /// inside it.
     fn discardWarmup(self: *SourceReadRuntime) bool {
         const pending = self.warmup_pending;
         self.warmup_pending = false;
-        return pending and self.credits_exhausted;
+        if (!pending) return false;
+        const waited = self.metrics.lifecycle_wait_ns.load(.monotonic) -| self.window_wait_base_ns;
+        const read = self.metrics.read_ns.load(.monotonic) -| self.window_read_base_ns;
+        return waited != 0 and waited >= read;
     }
 
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
@@ -3690,8 +3747,6 @@ const SourceReadRuntime = struct {
             // Idle before the window's first admission is not its time.
             self.clock.tick(now_ns, idle and probe.probe_window_start_ns != 0);
             if (idle) continue;
-            if (self.request_gate.inUse(io) >= self.request_gate.currentLimit(io))
-                self.credits_exhausted = true;
             const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
             if (self.discardWarmup()) {
                 load_log.debug("source width warm-up window discarded: generation={d}, width={d}, rate={Bi:.2}/s", .{
@@ -3965,7 +4020,7 @@ pub const DirectLoader = struct {
         self.controller_started = true;
     }
 
-    fn workerMain(self: *DirectLoader) void {
+    fn workerMain(self: *DirectLoader, index: usize) void {
         var scratch = VectoredReadRequest.Scratch.init(
             self.allocator,
             &self.pool,
@@ -3977,6 +4032,7 @@ pub const DirectLoader = struct {
         };
         defer scratch.deinit();
         while (true) {
+            if (!self.worker_pool.admit(self.io, index)) return;
             if (!self.scheduler.waitForWork(self.io)) return;
             if (self.pipeline.failed()) return;
             const credit_wait_started = awakeNs(self.io);
@@ -4006,6 +4062,7 @@ pub const DirectLoader = struct {
 
     fn stopWorkers(self: *DirectLoader) void {
         self.scheduler.stop(self.io);
+        self.worker_pool.stop(self.io);
         self.read_gate.close(self.io);
         self.request_gate.close(self.io);
         if (self.controller_started) {
