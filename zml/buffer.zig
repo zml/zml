@@ -220,7 +220,7 @@ pub const Buffer = struct {
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
-        std.log.warn("uninitialized {f}", .{shape_});
+        std.log.debug("uninitialized {f}", .{shape_});
         const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
