@@ -37,6 +37,7 @@ pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
     token_index_buf: *zml.Buffer,
+    active_length_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
 };
@@ -188,7 +189,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.token_index_buf.*,
+                        .active_length = args.active_length_buf.*,
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
@@ -276,7 +277,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
-        .token_index = parameters.token_index,
+        .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
             .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,

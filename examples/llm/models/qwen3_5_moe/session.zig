@@ -137,14 +137,14 @@ pub const Session = struct {
         defer tokens_buffer.deinit();
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer token_index_buffer.deinit();
-        var valid_len_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
-        defer valid_len_buffer.deinit();
+        var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
+        defer active_length_buffer.deinit();
 
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buffer = &tokens_buffer,
-            .full_attention_token_index_buffer = &token_index_buffer,
-            .linear_attention_token_index_buffer = &valid_len_buffer,
+            .token_index_buffer = &token_index_buffer,
+            .active_length_buffer = &active_length_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .moe_metadata_buffers = self.prefill_moe_metadata_buffers,
             .rng_buffers = &self.rng_buffers,
@@ -165,6 +165,8 @@ pub const Session = struct {
         defer current_token_buffer.deinit();
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
         defer token_index_buffer.deinit();
+        var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 1), .u32);
+        defer active_length_buffer.deinit();
 
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
@@ -182,8 +184,8 @@ pub const Session = struct {
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buffer = &current_token_buffer,
-                .full_attention_token_index_buffer = &token_index_buffer,
-                .linear_attention_token_index_buffer = &token_index_buffer,
+                .token_index_buffer = &token_index_buffer,
+                .active_length_buffer = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .moe_metadata_buffers = self.decode_moe_metadata_buffers,
                 .rng_buffers = &self.rng_buffers,
