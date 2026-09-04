@@ -189,6 +189,19 @@ const VectoredTensorTransfer = struct {
         /// Owned by the pump; read by the awaiting task once the batch is
         /// done and nothing submits any more.
         submitted_bytes: usize = 0,
+        /// The pump issued the last-transfer call, accepted or not: PJRT
+        /// then decides the buffer's outcome and a `SetBufferError` would
+        /// trip its checks.
+        closed: bool = false,
+        /// PJRT reported an error on one of this target's transfers and
+        /// errored the buffer itself; set from the ready callback.
+        errored: std.atomic.Value(bool) = .init(false),
+
+        /// Whether the loader may still mark the buffer as failed: PJRT has
+        /// neither closed it nor errored it.
+        fn canFail(self: *const Target) bool {
+            return !self.closed and !self.errored.load(.acquire);
+        }
 
         /// Whether a submission of `len` bytes closes the buffer.
         fn nextIsLast(self: *const Target, len: usize) bool {
@@ -829,6 +842,7 @@ const VectoredLoadPipeline = struct {
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
         block: *BlockContext,
+        target: *VectoredTensorTransfer.Target,
         /// Null once destroyed, by a pump or by the batch's retirement.
         pjrt_event: ?*pjrt.Event,
         err: ?*pjrt.Error = null,
@@ -1162,12 +1176,15 @@ const VectoredLoadPipeline = struct {
     fn submitTransfer(self: *VectoredLoadPipeline, transfer: ReadyTransfer) !void {
         const api = self.platform.pjrt_api;
         const target = transfer.target;
+        const is_last = target.nextIsLast(transfer.len);
+        // Even a rejected last call closes the buffer on PJRT's side.
+        if (is_last) target.closed = true;
         const event = try target.manager.transferData(
             api,
             0,
             transfer.block.lease.data[transfer.source_offset..][0..transfer.len],
             @intCast(transfer.destination_offset),
-            target.nextIsLast(transfer.len),
+            is_last,
         );
         target.noteSubmitted(transfer.len);
 
@@ -1183,8 +1200,9 @@ const VectoredLoadPipeline = struct {
         ctx.* = .{
             .pipeline = self,
             .block = transfer.block,
+            .target = target,
             .pjrt_event = event,
-            .device_index = transfer.target.device_index,
+            .device_index = target.device_index,
             .len = transfer.len,
         };
 
@@ -1203,6 +1221,9 @@ const VectoredLoadPipeline = struct {
                 const block = ctx_.block;
                 ctx_.err = err;
                 if (err) |pjrt_error| {
+                    // The manager errored the buffer itself; the awaiting
+                    // task must not touch it again.
+                    ctx_.target.errored.store(true, .release);
                     pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
                 }
                 pipeline.eventCompleted(device_index, len);
@@ -1477,6 +1498,7 @@ const VectoredReadRequest = struct {
         }
         request.enqueued_ns = awakeNs(pipeline.io);
         pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
+            request.enqueued_ns = 0;
             for (transfers) |transfer| {
                 VectoredLoadPipeline.abandonSubmissions(
                     &blocks[transfer.block_index],
@@ -3491,6 +3513,9 @@ const WorkerPool = struct {
         const target = @min(wanted, self.maximum);
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        // A controller tick racing `stopWorkers` must not spawn into a
+        // group being awaited.
+        if (self.stopping) return;
         self.wanted = target;
         while (self.spawned < target) : (self.spawned += 1) {
             self.loader.worker_group.concurrent(io, DirectLoader.workerMain, .{ self.loader, self.spawned }) catch |err| {
@@ -4119,6 +4144,9 @@ pub const DirectLoader = struct {
         var initialized: usize = 0;
         errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
         for (specs, items) |spec, *item| {
+            // An empty source has no transfer, so its output would never be
+            // written; the front ends reject it too.
+            if (spec.source.byteSize() == 0) return error.EmptyTensor;
             item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output);
             initialized += 1;
             logical_bytes.* = try std.math.add(usize, logical_bytes.*, spec.source.shape.byteSize());
@@ -4174,11 +4202,15 @@ pub const DirectLoader = struct {
     }
     /// Waits for the batch's last completion unit, retires it and returns
     /// the loader's sticky error if the pipeline failed. Targets the failure
-    /// left unsubmitted are marked so their buffers never report ready. A
-    /// batch that completed without an error must have closed every target
-    /// (the pump flagged the submission that completed its bytes); one that
-    /// did not would leave a buffer that never becomes ready, so it fails
-    /// the loader instead.
+    /// left open are marked so their buffers never report ready; a target
+    /// PJRT already closed (its last call went out, accepted or not) or
+    /// errored is left to PJRT, whose shared transfer manager drops the
+    /// definition event in both cases and aborts on a further call. The
+    /// outputs of a failed submission are undefined either way. A batch that
+    /// completed without an error must have closed every target (the pump
+    /// flagged the submission that completed its bytes); one that did not
+    /// would leave a buffer that never becomes ready, so it fails the
+    /// loader instead.
     pub fn awaitBatch(self: *DirectLoader, batch: *Batch) !void {
         batch.done.waitUncancelable(self.io);
         const done_at: std.Io.Timestamp = .now(self.io, .awake);
@@ -4193,7 +4225,7 @@ pub const DirectLoader = struct {
             for (batch.items) |item| {
                 const state = item.state.readyValue() orelse continue;
                 for (state.targets) |*target| {
-                    if (!target.fullySubmitted()) {
+                    if (target.canFail()) {
                         target.manager.setBufferErrorUnknown(
                             self.platform.pjrt_api,
                             0,
@@ -4957,7 +4989,9 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     };
     const plan = batch.plans.items[0];
     plan.events_used = 2;
+    var event_target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
     for (plan.events, requests) |*ctx, request| ctx.* = .{
+        .target = &event_target,
         .pipeline = pipeline,
         .block = &request.blocks[0],
         .pjrt_event = null,
