@@ -1527,8 +1527,8 @@ const VectoredReadRequest = struct {
 
 /// A strict FIFO of published batches. A batch holds one plan per source
 /// file, published as soon as that file is planned. Within a plan, jobs are
-/// handed out in the planned order (fair by destination-device bytes,
-/// predecessor-safe); plans in file order; a later batch's first job only
+/// handed out in the planned order (fair by destination-device bytes); plans
+/// in file order; a later batch's first job only
 /// after every job of the earlier ones. The queue holds only batches that
 /// are open (their submission is still planning) or have unclaimed jobs: a
 /// sealed batch is popped with its last claim, at its seal when already
@@ -1557,7 +1557,6 @@ const FairVectoredReadScheduler = struct {
         transfer_len: usize,
         block_start: usize,
         block_len: usize,
-        predecessor: ?usize,
     };
 
     const Snapshot = struct {
@@ -1626,16 +1625,8 @@ const FairVectoredReadScheduler = struct {
                 {
                     cursors[device_index] += 1;
                 }
-                var candidate: ?usize = null;
-                for (queue.items[cursors[device_index]..]) |job_index| {
-                    if (claimed[job_index]) continue;
-                    const predecessor = jobs[job_index].predecessor;
-                    if (predecessor == null or claimed[predecessor.?]) {
-                        candidate = job_index;
-                        break;
-                    }
-                }
-                if (candidate == null) continue;
+                if (cursors[device_index] == queue.items.len) continue;
+                const candidate = queue.items[cursors[device_index]];
                 if (selected_device == null or
                     scheduled[device_index] < scheduled[selected_device.?])
                 {
@@ -1759,10 +1750,10 @@ const FairVectoredReadScheduler = struct {
 
     /// Plans one file: `order` indexes `items` sorted by offset then size,
     /// all on the same file. Runs of touching ranges are cut into the
-    /// minimum number of jobs at tensor-safe boundaries, each job chained to
-    /// the previous one so a tail is never claimed before its prefix, in a
-    /// fair order across the destination devices (the planning order when
-    /// there is one device). The plan also carries the contexts its jobs
+    /// minimum number of jobs at tensor-safe boundaries, in a fair order
+    /// across the destination devices (the planning order when there is one
+    /// device); no job depends on another, since every DMA piece is
+    /// submitted as soon as its block is read. The plan also carries the contexts its jobs
     /// need: one request per job, one block per job block, one event per
     /// DMA submission (a transfer's writer count).
     fn preparePlan(
@@ -1847,7 +1838,6 @@ const FairVectoredReadScheduler = struct {
         var source_bytes: u64 = 0;
         var source_runs: usize = 0;
         var block_total: usize = 0;
-        var previous_job: ?usize = null;
         var run_cursor: usize = 0;
         while (run_cursor < order.len) {
             safe_boundaries.clearRetainingCapacity();
@@ -1968,11 +1958,9 @@ const FairVectoredReadScheduler = struct {
                     .transfer_len = transfers_list.items.len - transfer_start,
                     .block_start = block_total,
                     .block_len = block_len,
-                    .predecessor = previous_job,
                 });
                 block_total += block_len;
                 source_bytes +|= @intCast(job_len);
-                previous_job = job_index;
                 if (device_count > 1) {
                     for (row, queues) |bytes, *queue| {
                         if (bytes != 0) try queue.append(allocator, job_index);
@@ -2203,7 +2191,6 @@ const FairVectoredReadScheduler = struct {
 /// Planning input for the fair-order tests: one job per entry, chained to the
 /// previous job of the same tensor; `file_offset` is the entry index.
 const FairOrderJob = struct {
-    tensor_index: usize,
     physical_bytes: []const usize,
 };
 
@@ -2220,9 +2207,6 @@ fn testFairOrder(
     defer allocator.free(planning_jobs);
     const physical_bytes = try allocator.alloc(usize, jobs.len * device_count);
     defer allocator.free(physical_bytes);
-    const previous_jobs = try allocator.alloc(?usize, jobs.len);
-    defer allocator.free(previous_jobs);
-    @memset(previous_jobs, null);
     for (jobs, planning_jobs, 0..) |job, *planned, job_index| {
         if (job.physical_bytes.len != device_count) return error.InvalidTestJob;
         planned.* = .{
@@ -2233,9 +2217,7 @@ fn testFairOrder(
             .transfer_len = 0,
             .block_start = 0,
             .block_len = 0,
-            .predecessor = if (job.tensor_index < jobs.len) previous_jobs[job.tensor_index] else null,
         };
-        if (job.tensor_index < jobs.len) previous_jobs[job.tensor_index] = job_index;
         for (job.physical_bytes, queues, 0..) |bytes, *queue, device_index| {
             physical_bytes[job_index * device_count + device_index] = bytes;
             if (bytes != 0) try queue.append(allocator, job_index);
@@ -2325,10 +2307,10 @@ fn discardTestBatch(scheduler: *FairVectoredReadScheduler, batch: *Batch) void {
 }
 test "fair order rotates sharded devices by scheduled bytes" {
     try expectFairOrder(2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{ 10, 0 } },
-        .{ .tensor_index = 1, .physical_bytes = &.{ 10, 0 } },
-        .{ .tensor_index = 2, .physical_bytes = &.{ 0, 10 } },
-        .{ .tensor_index = 3, .physical_bytes = &.{ 0, 10 } },
+        .{ .physical_bytes = &.{ 10, 0 } },
+        .{ .physical_bytes = &.{ 10, 0 } },
+        .{ .physical_bytes = &.{ 0, 10 } },
+        .{ .physical_bytes = &.{ 0, 10 } },
     }, &.{ 0, 2, 1, 3 });
 }
 
@@ -2546,21 +2528,13 @@ test "scheduler publishes a submission one file at a time and claims the files i
     try std.testing.expect(batch.done.isSet());
     batch.destroy();
 }
-test "fair order preserves per-tensor request order" {
-    try expectFairOrder(2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{ 1, 0 } },
-        .{ .tensor_index = 0, .physical_bytes = &.{ 0, 2 } },
-        .{ .tensor_index = 1, .physical_bytes = &.{ 0, 3 } },
-    }, &.{ 0, 1, 2 });
-}
-
 test "fair order places a replicated job once and credits every replica" {
     // The replicated entry is skipped in device 1's queue; tie rotation gives
     // that device the next scheduling turn.
     try expectFairOrder(2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{ 20, 20 } },
-        .{ .tensor_index = 1, .physical_bytes = &.{ 10, 0 } },
-        .{ .tensor_index = 2, .physical_bytes = &.{ 0, 10 } },
+        .{ .physical_bytes = &.{ 20, 20 } },
+        .{ .physical_bytes = &.{ 10, 0 } },
+        .{ .physical_bytes = &.{ 0, 10 } },
     }, &.{ 0, 2, 1 });
 }
 
@@ -2568,22 +2542,22 @@ test "fair order compares physical bytes rather than scheduling turns" {
     // Device 0 receives a third turn because it has 8 scheduled bytes while
     // device 1 has 10; a turn-count scheduler would alternate.
     try expectFairOrder(2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{ 4, 0 } },
-        .{ .tensor_index = 1, .physical_bytes = &.{ 4, 0 } },
-        .{ .tensor_index = 2, .physical_bytes = &.{ 4, 0 } },
-        .{ .tensor_index = 3, .physical_bytes = &.{ 0, 10 } },
-        .{ .tensor_index = 4, .physical_bytes = &.{ 0, 10 } },
+        .{ .physical_bytes = &.{ 4, 0 } },
+        .{ .physical_bytes = &.{ 4, 0 } },
+        .{ .physical_bytes = &.{ 4, 0 } },
+        .{ .physical_bytes = &.{ 0, 10 } },
+        .{ .physical_bytes = &.{ 0, 10 } },
     }, &.{ 0, 3, 1, 2, 4 });
 }
 
 test "fair order validates jobs and cleans up allocation failures" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidTestJob, testFairOrder(allocator, 2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{1} },
+        .{ .physical_bytes = &.{1} },
     }));
     // A job that no device queue lists can never be selected.
     try std.testing.expectError(error.InvalidLoaderJob, testFairOrder(allocator, 2, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{ 0, 0 } },
+        .{ .physical_bytes = &.{ 0, 0 } },
     }));
     try std.testing.expectError(error.DmaDeviceMismatch, testFairOrder(allocator, 0, &.{}));
     var planning = [_]FairVectoredReadScheduler.PlanningJob{.{
@@ -2594,7 +2568,6 @@ test "fair order validates jobs and cleans up allocation failures" {
         .transfer_len = 0,
         .block_start = 0,
         .block_len = 0,
-        .predecessor = null,
     }};
     const queues = [_]std.ArrayListUnmanaged(usize){ .empty, .empty };
     try std.testing.expectError(
@@ -2605,8 +2578,8 @@ test "fair order validates jobs and cleans up allocation failures" {
     const AllocationTest = struct {
         fn run(allocator_: std.mem.Allocator) !void {
             const order = try testFairOrder(allocator_, 2, &.{
-                .{ .tensor_index = 0, .physical_bytes = &.{ 1, 1 } },
-                .{ .tensor_index = 1, .physical_bytes = &.{ 1, 0 } },
+                .{ .physical_bytes = &.{ 1, 1 } },
+                .{ .physical_bytes = &.{ 1, 0 } },
             });
             allocator_.free(order);
         }
@@ -2875,12 +2848,12 @@ test "fair order is the identity for one device" {
     // Every job charges the one device, so `preparePlan` skips the fair
     // order and keeps the planning order for `device_count == 1`.
     try expectFairOrder(1, &.{
-        .{ .tensor_index = 0, .physical_bytes = &.{10} },
-        .{ .tensor_index = 0, .physical_bytes = &.{5} },
-        .{ .tensor_index = 1, .physical_bytes = &.{1} },
-        .{ .tensor_index = 2, .physical_bytes = &.{20} },
-        .{ .tensor_index = 2, .physical_bytes = &.{20} },
-        .{ .tensor_index = 1, .physical_bytes = &.{2} },
+        .{ .physical_bytes = &.{10} },
+        .{ .physical_bytes = &.{5} },
+        .{ .physical_bytes = &.{1} },
+        .{ .physical_bytes = &.{20} },
+        .{ .physical_bytes = &.{20} },
+        .{ .physical_bytes = &.{2} },
     }, &.{ 0, 1, 2, 3, 4, 5 });
 }
 const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
