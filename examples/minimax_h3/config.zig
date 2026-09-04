@@ -149,14 +149,8 @@ pub const Shardings = struct {
     }
 
     pub fn init(platform: *zml.Platform) !Shardings {
-        var strategy: zml.Sharding.Strategy = .init;
-        strategy.addBinding(.model, .link);
         return .{
-            .model = try platform.registerShardingWithStrategy(
-                "model",
-                .mesh(.{ .model = .high_bandwidth }),
-                strategy,
-            ),
+            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
         };
     }
 
