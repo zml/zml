@@ -302,40 +302,41 @@ const VectoredTensorTransfer = struct {
 fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anyerror!T) type {
     return struct {
         const Self = @This();
-        const uninitialized = 0;
-        const initializing = 1;
-        const ready = 2;
-        const failed = 3;
+        const Status = enum(u8) {
+            uninitialized,
+            initializing,
+            ready,
+            failed,
+        };
 
         value: T = undefined,
-        status: std.atomic.Value(u8) = .init(uninitialized),
+        status: std.atomic.Value(Status) = .init(.uninitialized),
         error_code: std.atomic.Value(u16) = .init(0),
         initialized: std.Io.Event = .unset,
 
         fn ensure(self: *Self, io: std.Io, ctx: Ctx) !*T {
             while (true) switch (self.status.load(.acquire)) {
-                uninitialized => {
-                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
+                .uninitialized => {
+                    if (self.status.cmpxchgStrong(.uninitialized, .initializing, .acq_rel, .acquire) != null) continue;
                     self.value = initFn(ctx) catch |err| {
                         self.error_code.store(@intFromError(err), .release);
-                        self.status.store(failed, .release);
+                        self.status.store(.failed, .release);
                         self.initialized.set(io);
                         return err;
                     };
-                    self.status.store(ready, .release);
+                    self.status.store(.ready, .release);
                     self.initialized.set(io);
                     return &self.value;
                 },
-                initializing => self.initialized.waitUncancelable(io),
-                ready => return &self.value,
-                failed => return @errorFromInt(self.error_code.load(.acquire)),
-                else => unreachable,
+                .initializing => self.initialized.waitUncancelable(io),
+                .ready => return &self.value,
+                .failed => return @errorFromInt(self.error_code.load(.acquire)),
             };
         }
 
         /// The value when initialization has completed successfully.
         fn readyValue(self: *Self) ?*T {
-            return if (self.status.load(.acquire) == ready) &self.value else null;
+            return if (self.status.load(.acquire) == .ready) &self.value else null;
         }
     };
 }
@@ -2643,34 +2644,35 @@ test "fifo scheduler failure retires the unclaimed units of every queued batch" 
 }
 
 test "fifo scheduler wakes waiting workers on publish and releases them on stop" {
+    const WaitResult = enum(u8) { waiting, work, stopped };
     const io = std.testing.io;
     var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
 
-    var woke: std.atomic.Value(u8) = .init(0);
+    var woke: std.atomic.Value(WaitResult) = .init(.waiting);
     var group: std.Io.Group = .init;
     const Waiter = struct {
-        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, woke_: *std.atomic.Value(u8)) void {
-            woke_.store(if (scheduler_.waitForWork(io_)) 1 else 2, .release);
+        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, woke_: *std.atomic.Value(WaitResult)) void {
+            woke_.store(if (scheduler_.waitForWork(io_)) .work else .stopped, .release);
         }
     };
     try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
     try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expectEqual(@as(u8, 0), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.waiting, woke.load(.acquire));
     const batch = try publishTestBatch(&scheduler, 1);
     try group.await(io);
-    try std.testing.expectEqual(@as(u8, 1), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.work, woke.load(.acquire));
     _ = scheduler.claim(io).?;
     batch.finishJobs(1);
     batch.destroy();
 
-    woke.store(0, .release);
+    woke.store(.waiting, .release);
     try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
     try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expectEqual(@as(u8, 0), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.waiting, woke.load(.acquire));
     scheduler.stop(io);
     try group.await(io);
-    try std.testing.expectEqual(@as(u8, 2), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.stopped, woke.load(.acquire));
 }
 
 test "fifo scheduler concurrent claims across two batches return each job once" {
@@ -2714,6 +2716,7 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
 }
 
 test "fifo scheduler keeps an open batch at the head until its next plan is published" {
+    const WaitResult = enum(u8) { waiting, work, stopped };
     const io = std.testing.io;
     var scheduler: FairVectoredReadScheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
@@ -2729,19 +2732,19 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     try std.testing.expect(!batch.done.isSet());
 
     // A worker sleeps until the next plan is published.
-    var woke: std.atomic.Value(u8) = .init(0);
+    var woke: std.atomic.Value(WaitResult) = .init(.waiting);
     var group: std.Io.Group = .init;
     const Waiter = struct {
-        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, woke_: *std.atomic.Value(u8)) void {
-            woke_.store(if (scheduler_.waitForWork(io_)) 1 else 2, .release);
+        fn run(scheduler_: *FairVectoredReadScheduler, io_: std.Io, woke_: *std.atomic.Value(WaitResult)) void {
+            woke_.store(if (scheduler_.waitForWork(io_)) .work else .stopped, .release);
         }
     };
     try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
     try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expectEqual(@as(u8, 0), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.waiting, woke.load(.acquire));
     try publishTestPlan(&scheduler, batch, 2);
     try group.await(io);
-    try std.testing.expectEqual(@as(u8, 1), woke.load(.acquire));
+    try std.testing.expectEqual(WaitResult.work, woke.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
     try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_jobs);
 

@@ -277,10 +277,8 @@ pub const TransferSettings = struct {
 
 pub const BenchTransferOptions = zml.io.BenchTransferOptions;
 
-/// Operation codes are the `dma_platform_*` constants of
-/// `io/dma_calibration.zig`, which owns every transition.
 const DmaPlatformState = struct {
-    operation: std.atomic.Value(u8) = .init(dma_calibration.dma_platform_idle),
+    operation: std.atomic.Value(dma_calibration.DmaPlatformOperation) = .init(.idle),
     settings: std.atomic.Value(?*anyopaque) = .init(null),
 };
 
@@ -1025,19 +1023,19 @@ test "platform transfer defaults are usable without calibration" {
 
     var state: DmaPlatformState = .{};
     try std.testing.expectEqual(
-        @as(?u8, null),
+        @as(?dma_calibration.DmaPlatformOperation, null),
         state.operation.cmpxchgStrong(
-            dma_calibration.dma_platform_idle,
-            dma_calibration.dma_platform_loading,
+            .idle,
+            .loading,
             .acq_rel,
             .acquire,
         ),
     );
     try std.testing.expectEqual(
-        @as(?u8, dma_calibration.dma_platform_loading),
+        @as(?dma_calibration.DmaPlatformOperation, .loading),
         state.operation.cmpxchgStrong(
-            dma_calibration.dma_platform_idle,
-            dma_calibration.dma_platform_calibrating,
+            .idle,
+            .calibrating,
             .acq_rel,
             .acquire,
         ),
