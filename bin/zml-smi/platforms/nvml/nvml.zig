@@ -211,6 +211,13 @@ pub fn memBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     return width;
 }
 
+const max_query = 4096;
+
+fn sizedCount(count: c_uint) ?c_uint {
+    if (count == 0 or count > max_query) return null;
+    return count;
+}
+
 pub fn computeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
     var count: c_uint = 0;
     const ret = self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, null);
@@ -220,9 +227,7 @@ pub fn computeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle:
         }
         try check(ret);
     }
-    if (count == 0) {
-        return &.{};
-    }
+    count = sizedCount(count) orelse return &.{};
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
     try check(self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
@@ -240,15 +245,11 @@ pub fn graphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle
         try check(ret);
     }
 
-    if (count == 0) {
-        return &.{};
-    }
-
+    count = sizedCount(count) orelse return &.{};
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
 
     try check(self.lib.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
-
     return infos;
 }
 
@@ -263,15 +264,11 @@ pub fn processUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nv
         try check(ret);
     }
 
-    if (count == 0) {
-        return &.{};
-    }
-
+    count = sizedCount(count) orelse return &.{};
     const samples = try allocator.alloc(c.nvmlProcessUtilizationSample_t, count);
     errdefer allocator.free(samples);
 
     try check(self.lib.nvmlDeviceGetProcessUtilization(handle, @ptrCast(samples.ptr), &count, last_seen));
-
     return samples;
 }
 
