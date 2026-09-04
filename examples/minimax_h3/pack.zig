@@ -8,8 +8,8 @@ const std = @import("std");
 const config = @import("config.zig");
 
 /// AdaLN modality tags. Audio (2) is in the checkpoint but unused here.
-pub const tag_video: u8 = 0;
-pub const tag_text: u8 = 1;
+const tag_video: u8 = 0;
+const tag_text: u8 = 1;
 
 /// Official temporal span pattern along latent frames for video RoPE `t`.
 const video_spans = [_]u32{ 1, 4, 4, 4, 4 };

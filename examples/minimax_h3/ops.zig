@@ -1,21 +1,15 @@
-//! Shared load / compile / host-buffer helpers.
+//! Shared load helpers and weight constructors.
 //! Model math is in `encoder.zig`, `pack.zig`, `dit.zig`, and `vae.zig`.
 
 const std = @import("std");
 const zml = @import("zml");
 const config = @import("config.zig");
 
-const log = std.log.scoped(.minimax_h3);
-
-const loader_opts: zml.io.Loader.Opts = .{
+pub const loader_opts: zml.io.Loader.Opts = .{
     .dma_chunks = 8,
     .dma_chunk_size = 64 * zml.MiB,
     .parallelism = 8,
 };
-
-// =============================================================================
-// Run context
-// =============================================================================
 
 /// Allocator, IO, platform, mesh, and progress for one generation.
 pub const Run = struct {
@@ -48,45 +42,6 @@ pub const Run = struct {
     }
 };
 
-// =============================================================================
-// Checkpoints
-// =============================================================================
-
-/// One safetensors index (`*.safetensors.index.json`) plus its tensor store.
-///
-/// Call `open` on a stable `*Checkpoint`: `store` holds a pointer to `reg`.
-pub const Checkpoint = struct {
-    reg: zml.safetensors.TensorRegistry,
-    store: zml.io.TensorStore,
-
-    pub fn open(
-        self: *Checkpoint,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        model_dir: []const u8,
-        index: []const u8,
-    ) !void {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ model_dir, index });
-        self.reg = try .fromPath(allocator, io, path);
-        self.store = .fromRegistry(allocator, &self.reg);
-    }
-
-    pub fn deinit(self: *Checkpoint) void {
-        self.store.deinit();
-        self.reg.deinit();
-    }
-
-    pub fn view(self: *Checkpoint) zml.io.TensorStore.View {
-        return self.store.view();
-    }
-};
-
-// =============================================================================
-// Weight constructors
-// =============================================================================
-
-/// `nn.Linear` from `{name}.weight` and optional `{name}` bias.
 pub fn linear(
     store: zml.io.TensorStore.View,
     weight_name: []const u8,
@@ -113,18 +68,6 @@ pub fn ln(store: zml.io.TensorStore.View, eps: f32) zml.nn.LayerNorm {
     };
 }
 
-pub fn drop(comptime T: type, m: *zml.Bufferized(T)) void {
-    zml.Buffer.deinitAll(T, m);
-}
-
-// =============================================================================
-// Load / compile / host
-// =============================================================================
-
-pub fn initLoader(run: *const Run) !zml.io.Loader {
-    return .init(run.allocator, run.platform, loader_opts);
-}
-
 /// Bufferize `m` and DMA weights from `store`. Pass a shared `loader` when
 /// loading many layers in a loop so DMA stays pipelined.
 pub fn load(
@@ -140,61 +83,11 @@ pub fn load(
         try shared.await(run.io);
         return buffers;
     }
-    var owned = try initLoader(run);
+    var owned: zml.io.Loader = try .init(run.allocator, run.platform, loader_opts);
     defer owned.deinit();
     owned.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
     try owned.await(run.io);
     return buffers;
-}
-
-/// Replicated host→device copy of `items`.
-pub fn host(run: *const Run, shape: zml.Shape, items: anytype) !zml.Buffer {
-    return zml.Buffer.fromBytes(run.io, run.platform, shape, .replicated, std.mem.sliceAsBytes(items));
-}
-
-/// Rank-0 f32 buffer. Euler uses this for σ and σ'.
-pub fn scalarF32(run: *const Run, value: f32) !zml.Buffer {
-    var item = value;
-    return zml.Buffer.fromBytes(run.io, run.platform, .init(.{}, .f32), .replicated, std.mem.asBytes(&item));
-}
-
-/// `values` as f32 or bf16 to match `shape.dtype()`.
-pub fn hostF32(run: *const Run, shape: zml.Shape, values: []const f32) !zml.Buffer {
-    switch (shape.dtype()) {
-        .f32 => return host(run, shape, values),
-        .bf16 => {
-            const converted = try run.allocator.alloc(zml.floats.BFloat16, values.len);
-            defer run.allocator.free(converted);
-            for (converted, values) |*dst, src| dst.* = .fromF32(src);
-            return host(run, shape, converted);
-        },
-        else => return error.UnsupportedEmbedDtype,
-    }
-}
-
-/// Compile `function` with `args` as the example input (shapes + dtypes).
-pub fn compileFn(
-    comptime function: anytype,
-    comptime name: []const u8,
-    run: *const Run,
-    args: std.meta.ArgsTuple(@TypeOf(function)),
-) !zml.FnExe(function) {
-    run.progress.increaseEstimatedTotalItems(1);
-    const now: std.Io.Timestamp = .now(run.io, .awake);
-    const exe = try zml.FnExe(function).compile(
-        run.allocator,
-        run.io,
-        run.platform,
-        .{ .shardings = run.mesh(), .program_name = name },
-        args,
-    );
-    log.info("compile {s}: ok [{f}]", .{ name, now.untilNow(run.io, .awake) });
-    return exe;
-}
-
-/// Linear in the weight dtype, result back in `x`'s dtype.
-pub fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
-    return lin.forward(x.convert(lin.weight.dtype())).convert(x.dtype());
 }
 
 /// 3-axis MM-RoPE (`MiniMaxH3RotaryPosEmbed`): concat t/h/w freqs, then duplicate.

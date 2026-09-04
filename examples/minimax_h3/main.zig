@@ -28,21 +28,25 @@ const Args = struct {
     prompt: []const u8 = "A cinematic wide shot of waves at dusk.",
     seed: u64 = 0,
     out: []const u8 = "out",
-    steps: u32 = config.default_steps,
-    dit_only: bool = false,
+    steps: u32 = 30,
+    width: u32 = 1344,
+    height: u32 = 768,
+    duration: f32 = 5,
 
     pub const help =
         \\minimax_h3 --model=<path> [options]
         \\
-        \\Prompt in, silent video.rgb out. 1344x768, 5s, 30 Euler steps.
+        \\Prompt in, silent video.rgb out. Default 1344x768, 5s, 30 Euler steps.
         \\
         \\Options:
-        \\  --model=<path>     Path to the MiniMax-H3 repository (required)
-        \\  --prompt=<string>  Text prompt (default: a dusk waves shot)
-        \\  --out=<dir>        Output directory for video.rgb (default: out)
-        \\  --seed=<number>    Noise seed (default: 0)
-        \\  --steps=<number>   Sigma points including terminal 0 (default: 30)
-        \\  --dit-only         Stop after DiT; skip VAE compile and decode
+        \\  --model=<path>       Path to the MiniMax-H3 repository (required)
+        \\  --prompt=<string>    Text prompt (default: a dusk waves shot)
+        \\  --out=<dir>          Output directory for video.rgb (default: out)
+        \\  --seed=<number>      Noise seed (default: 0)
+        \\  --steps=<number>     Sigma points including terminal 0 (default: 30)
+        \\  --width=<pixels>     Canvas width, multiple of 32 (default: 1344)
+        \\  --height=<pixels>    Canvas height, multiple of 32 (default: 768)
+        \\  --duration=<seconds> Clip length 5–15 (default: 5)
         \\
     ;
 };
@@ -75,9 +79,24 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const shardings: config.Shardings = try .init(platform);
-    const geo = config.geo;
-    log.info("t2v  {d}x{d}  {d:.1}s  {d} steps  seed {d}  devices={d}", .{
-        geo.pixel_w, geo.pixel_h, config.duration_s, args.steps, args.seed, platform.devices.len,
+    const geo = config.Geometry.init(args.width, args.height, args.duration) catch |err| switch (err) {
+        error.InvalidCanvas => stdx.flags.fatal(
+            "--width/--height must be positive multiples of {d} with area at most {d}",
+            .{ config.canvas_multiple, config.canvas_max_pixels },
+        ),
+        error.InvalidDuration => stdx.flags.fatal(
+            "--duration must be between {d:.0} and {d:.0} seconds",
+            .{ config.min_duration_s, config.max_duration_s },
+        ),
+    };
+    log.info("t2v  {d}x{d}  {d} frames ({d:.1}s)  {d} steps  seed {d}  devices={d}", .{
+        geo.pixel_w,
+        geo.pixel_h,
+        geo.frames,
+        @as(f32, @floatFromInt(geo.frames)) / config.video_fps,
+        args.steps,
+        args.seed,
+        platform.devices.len,
     });
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
@@ -85,24 +104,31 @@ pub fn main(init: std.process.Init) !void {
     const run = ops.Run.init(allocator, io, platform, shardings, &progress);
 
     // =============================================================================
-    // Checkpoints  (HuggingFace MiniMax-H3 layout)
+    // Weights  (HuggingFace MiniMax-H3: three safetensors indexes)
     // =============================================================================
 
-    var enc_ckpt: ops.Checkpoint = undefined;
-    try enc_ckpt.open(allocator, io, args.model, "text_encoder/model.safetensors.index.json");
-    defer enc_ckpt.deinit();
-    var dit_ckpt: ops.Checkpoint = undefined;
-    try dit_ckpt.open(allocator, io, args.model, "transformer/diffusion_pytorch_model.safetensors.index.json");
-    defer dit_ckpt.deinit();
-    var vae_ckpt: ops.Checkpoint = undefined;
-    try vae_ckpt.open(allocator, io, args.model, "vae/diffusion_pytorch_model.safetensors.index.json");
-    defer vae_ckpt.deinit();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    var enc_model = try encoder.Encoder.init(allocator, enc_ckpt.view());
+    var enc_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/text_encoder/model.safetensors.index.json", .{args.model}));
+    defer enc_reg.deinit();
+    var enc_store: zml.io.TensorStore = .fromRegistry(allocator, &enc_reg);
+    defer enc_store.deinit();
+
+    var dit_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/transformer/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
+    defer dit_reg.deinit();
+    var dit_store: zml.io.TensorStore = .fromRegistry(allocator, &dit_reg);
+    defer dit_store.deinit();
+
+    var vae_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/vae/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
+    defer vae_reg.deinit();
+    var vae_store: zml.io.TensorStore = .fromRegistry(allocator, &vae_reg);
+    defer vae_store.deinit();
+
+    var enc_model = try encoder.Encoder.init(allocator, enc_store.view());
     defer enc_model.deinit(allocator);
-    var dit_model = try dit.Dit.init(allocator, dit_ckpt.view());
+    var dit_model = try dit.Dit.init(allocator, dit_store.view());
     defer dit_model.deinit(allocator);
-    var vae_model = try vae.Vae.init(allocator, vae_ckpt.view());
+    var vae_model = try vae.Vae.init(allocator, vae_store.view());
     defer vae_model.deinit(allocator);
 
     // =============================================================================
@@ -132,21 +158,17 @@ pub fn main(init: std.process.Init) !void {
     const compile_start: std.Io.Timestamp = .now(io, .awake);
     try enc_model.compile(&run, @intCast(tokens.len));
     try dit_model.compile(&run, geo, @intCast(tokens.len), packed_run, enc_model.embed_tokens.weight.dtype());
-    if (!args.dit_only) try vae_model.compile(&run);
+    try vae_model.compile(&run);
     log.info("compile all: ok [{f}]", .{compile_start.untilNow(io, .awake)});
 
     // =============================================================================
     // 2–6. Encode → denoise → unpatchify → decode
     // =============================================================================
 
-    var text = try enc_model.encodeText(&run, &enc_ckpt.store, tokens);
+    var text = try enc_model.encodeText(&run, &enc_store, tokens);
     defer text.deinit();
-    const video_tokens = try dit_model.denoise(&run, &dit_ckpt.store, geo, text, @intCast(tokens.len), packed_run, args.seed);
+    const video_tokens = try dit_model.denoise(&run, &dit_store, geo, text, @intCast(tokens.len), packed_run, args.seed);
     defer allocator.free(video_tokens);
-    if (args.dit_only) {
-        log.info("dit-only: skip vae tokens={d}", .{video_tokens.len});
-        return;
-    }
     const thwc = try pack.unpatchify(
         allocator,
         video_tokens,
@@ -157,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
         dit_model.cfg.patch_size,
     );
     defer allocator.free(thwc);
-    const rgb = try vae_model.decodeVideo(&run, &vae_ckpt.store, geo, thwc);
+    const rgb = try vae_model.decodeVideo(&run, &vae_store, geo, thwc);
     defer allocator.free(rgb);
 
     try writeRgb(allocator, io, out, geo, rgb);

@@ -1,6 +1,6 @@
 # MiniMax-H3 text-to-video
 
-Prompt in, silent `video.rgb` out. 1344×768, 5 s, 24 fps, 30 Euler steps.
+Prompt in, silent `video.rgb` out. Default 1344×768, 5 s, 24 fps, 30 Euler steps.
 
 ```
 bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- \
@@ -8,6 +8,8 @@ bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- \
   --prompt='A cinematic wide shot of waves at dusk.' \
   --out=out --seed=42
 ```
+
+`--width` / `--height` must be multiples of 32 (area ≤ 768×1344). `--duration` is 5–15 seconds; frame count is snapped to a VAE-legal `17n+5`.
 
 ```
 ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 1344x768 -r 24 -i out/video.rgb \
@@ -23,8 +25,8 @@ ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 1344x768 -r 24 -i out/video.rgb \
 | `pack.zig` | sequence layout, σ schedule, patchify / unpatchify |
 | `dit.zig` | AdaLN DiT + Euler |
 | `vae.zig` | tiled ViT decoder |
-| `ops.zig` | `Run`, `Checkpoint`, load / compile helpers |
-| `config.zig` | 768P geometry and head-TP mesh |
+| `ops.zig` | `Run`, load, Linear/RMS constructors |
+| `config.zig` | canvas flags, geometry, head-TP mesh |
 
 ## Equations
 

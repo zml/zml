@@ -24,13 +24,8 @@ const log = std.log.scoped(.minimax_h3);
 const DitCfg = config.Config;
 const linear = ops.linear;
 const rms = ops.rms;
-const drop = ops.drop;
 const load = ops.load;
-const host = ops.host;
-const compileFn = ops.compileFn;
-const initLoader = ops.initLoader;
 const ropeCat3 = ops.ropeCat3;
-const scalarF32 = ops.scalarF32;
 const Run = ops.Run;
 const Packed = pack.Packed;
 
@@ -123,7 +118,7 @@ const Attention = struct {
 // Time embedder  (sinusoidal t → temb)
 // =============================================================================
 
-pub const TimeEmbedder = struct {
+const TimeEmbedder = struct {
     proj_in: zml.nn.Linear,
     proj_out: zml.nn.Linear,
     pub const Input = struct { model: TimeEmbedder, timestep: zml.Tensor, freq_dim: i64 };
@@ -161,7 +156,7 @@ pub const TimeEmbedder = struct {
 // =============================================================================
 
 /// Maps temb → (shift, scale, gate) × {msa, mlp}, one set per (timestep, modality).
-pub const AdaLn = struct {
+const AdaLn = struct {
     linear: zml.nn.Linear,
     hidden_size: i64,
     expand: i64,
@@ -195,12 +190,11 @@ pub const AdaLn = struct {
 // Transformer block  (`MiniMaxH3TransformerBlock`)
 // =============================================================================
 
-pub const BlockCore = struct {
+const BlockCore = struct {
     norm1: zml.nn.RmsNorm,
     attn: Attention,
     norm2: zml.nn.RmsNorm,
     mlp: SwiGlu,
-    hidden_size: i64,
     pub const Input = struct {
         layer: BlockCore,
         hidden: zml.Tensor,
@@ -235,7 +229,7 @@ pub const BlockCore = struct {
 };
 
 /// `group_size` BlockCores in one compiled kernel.
-pub const BlockGroup = struct {
+const BlockGroup = struct {
     layers: []BlockCore,
     pub const Input = struct {
         group: BlockGroup,
@@ -266,7 +260,7 @@ pub const BlockGroup = struct {
 };
 
 /// Weights for one layer: AdaLN projector + `BlockCore`.
-pub const DitBlock = struct {
+const DitBlock = struct {
     core: BlockCore,
     adaln: AdaLn,
 
@@ -277,7 +271,6 @@ pub const DitBlock = struct {
                 .attn = .init(store.withPrefix("attn"), cfg),
                 .norm2 = rms(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
                 .mlp = .init(store.withPrefix("ff")),
-                .hidden_size = cfg.hidden_size,
             },
             .adaln = .init(store.withPrefix("adaln_proj"), cfg.hidden_size, 6, config.modality_count),
         };
@@ -423,21 +416,21 @@ pub const Dit = struct {
         return denoiseDit(self, run, store, geo, text, text_len, packed_run, seed);
     }
 
-    pub fn textPrep(self: Dit) TextPrep {
+    fn textPrep(self: Dit) TextPrep {
         return .{ .condition_proj = self.condition_proj, .blocks = self.refiner_blocks, .final_norm = self.refiner_norm };
     }
 
-    pub fn patchEmbed(self: Dit) PatchEmbed {
+    fn patchEmbed(self: Dit) PatchEmbed {
         return .{ .video_proj = self.video_proj, .hidden_size = self.cfg.hidden_size, .seq = 0 };
     }
 
-    pub fn finishCore(self: Dit) FinishCore {
+    fn finishCore(self: Dit) FinishCore {
         return .{ .norm = self.final_layer.norm, .video_out = self.final_layer.video_out };
     }
 };
 
 /// Linear `context_embedder` then two refiner blocks.
-pub const TextPrep = struct {
+const TextPrep = struct {
     condition_proj: zml.nn.Linear,
     blocks: []TokenRefinerBlock,
     final_norm: zml.nn.RmsNorm,
@@ -446,7 +439,7 @@ pub const TextPrep = struct {
 
     fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
         zml.nn.Linear.unloadBuffers(&self.condition_proj);
-        for (self.blocks) |*block| drop(TokenRefinerBlock, block);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(TokenRefinerBlock, block);
         allocator.free(self.blocks);
         self.final_norm.weight.deinit();
     }
@@ -460,7 +453,7 @@ pub const TextPrep = struct {
 };
 
 /// Scatter refined text and projected video patches into the packed sequence.
-pub const PatchEmbed = struct {
+const PatchEmbed = struct {
     video_proj: zml.nn.Linear,
     hidden_size: i64,
     seq: i64 = 0,
@@ -486,7 +479,7 @@ pub const PatchEmbed = struct {
 };
 
 /// Gather video rows, AdaLN, project to 96-wide velocity tokens.
-pub const FinishCore = struct {
+const FinishCore = struct {
     norm: zml.nn.RmsNorm,
     video_out: zml.nn.Linear,
     pub const Input = struct {
@@ -574,19 +567,28 @@ fn compileDit(
     var patch_part = model.patchEmbed();
     patch_part.seq = seq_len;
 
-    const prepare_text = try compileFn(TextPrep.forward, "minimax_h3_prepare_text", run, .{.{
+    const prepare_text = try zml.FnExe(TextPrep.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_prepare_text",
+    }, .{.{
         .model = model.textPrep(),
         .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.text_dim }, text_dt),
     }});
     errdefer prepare_text.deinit();
-    const prepare_rope = try compileFn(Rope.forward, "minimax_h3_prepare_rope", run, .{.{
+    const prepare_rope = try zml.FnExe(Rope.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_prepare_rope",
+    }, .{.{
         .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
         .rope_freq_dim = model.cfg.rope_freq_dim,
         .rope_theta = model.cfg.rope_theta,
         .out_dtype = dt,
     }});
     errdefer prepare_rope.deinit();
-    const embed_patches = try compileFn(PatchEmbed.forward, "minimax_h3_embed_patches", run, .{.{
+    const embed_patches = try zml.FnExe(PatchEmbed.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_embed_patches",
+    }, .{.{
         .model = patch_part,
         .video = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
         .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.hidden_size }, dt),
@@ -594,20 +596,29 @@ fn compileDit(
         .text_indices = .init(.{ .s = text_len }, .u32),
     }});
     errdefer embed_patches.deinit();
-    const prepare_temb = try compileFn(TimeEmbedder.forward, "minimax_h3_prepare_temb", run, .{.{
+    const prepare_temb = try zml.FnExe(TimeEmbedder.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_prepare_temb",
+    }, .{.{
         .model = model.time_embedder,
         .timestep = .init(.{ .n = steps }, .f32),
         .freq_dim = model.cfg.freq_dim,
     }});
     errdefer prepare_temb.deinit();
-    const prepare_adaln = try compileFn(AdaLn.prepare, "minimax_h3_prepare_adaln", run, .{.{
+    const prepare_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_prepare_adaln",
+    }, .{.{
         .adaln = model.blocks[0].adaln,
         .temb = .init(.{ .n = steps, .d = model.time_embedder.outDim() }, .f32),
         .steps = steps,
         .slots = 1,
     }});
     errdefer prepare_adaln.deinit();
-    const prepare_final_adaln = try compileFn(AdaLn.prepare, "minimax_h3_prepare_final_adaln", run, .{.{
+    const prepare_final_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_prepare_final_adaln",
+    }, .{.{
         .adaln = model.final_layer.adaln,
         .temb = .init(.{ .n = steps, .d = model.time_embedder.outDim() }, .f32),
         .steps = steps,
@@ -623,7 +634,10 @@ fn compileDit(
         layer.* = model.blocks[i].core;
         tab.* = zml.Tensor.init(.{ .t = steps, .n = 1, .mod = config.modality_count, .k = 6, .d = model.cfg.hidden_size }, dt);
     }
-    const block_group = try compileFn(BlockGroup.forward, "minimax_h3_block_group", run, .{.{
+    const block_group = try zml.FnExe(BlockGroup.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_block_group",
+    }, .{.{
         .group = .{ .layers = layers },
         .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
         .tables = tables,
@@ -633,7 +647,10 @@ fn compileDit(
         .sin = zml.Tensor.init(.{ .s = seq_len, .f = model.cfg.rotaryDim() }, dt),
     }});
     errdefer block_group.deinit();
-    const finish_exe = try compileFn(FinishCore.forward, "minimax_h3_finish", run, .{.{
+    const finish_exe = try zml.FnExe(FinishCore.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_finish",
+    }, .{.{
         .model = model.finishCore(),
         .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
         .table = zml.Tensor.init(.{ .t = steps, .n = 1, .k = 2, .d = model.cfg.hidden_size }, dt),
@@ -642,7 +659,10 @@ fn compileDit(
         .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
     }});
     errdefer finish_exe.deinit();
-    const apply_video = try compileFn(Euler.apply, "minimax_h3_apply_video", run, .{.{
+    const apply_video = try zml.FnExe(Euler.apply).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_apply_video",
+    }, .{.{
         .sample = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
         .velocity = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
         .sigma = .init(.{}, .f32),
@@ -698,15 +718,15 @@ fn denoiseDit(
     @memset(tidx, 0);
     layout.writeAdalnIndices(adaln, tidx);
 
-    var pos_buf = try host(run, .init(.{ .s = seq, .ax = 3 }, .f32), layout.positions);
+    var pos_buf = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .s = seq, .ax = 3 }, .f32), .replicated, std.mem.sliceAsBytes(layout.positions));
     defer pos_buf.deinit();
-    var video_idx = try host(run, .init(.{ .s = geo.video_tokens }, .u32), layout.video_indices);
+    var video_idx = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .s = geo.video_tokens }, .u32), .replicated, std.mem.sliceAsBytes(layout.video_indices));
     defer video_idx.deinit();
-    var text_idx = try host(run, .init(.{ .s = text_len }, .u32), layout.text_indices);
+    var text_idx = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .s = text_len }, .u32), .replicated, std.mem.sliceAsBytes(layout.text_indices));
     defer text_idx.deinit();
-    var adaln_buf = try host(run, .init(.{ .s = seq }, .u32), adaln);
+    var adaln_buf = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .s = seq }, .u32), .replicated, std.mem.sliceAsBytes(adaln));
     defer adaln_buf.deinit();
-    var time_idx = try host(run, .init(.{ .s = seq }, .u32), tidx);
+    var time_idx = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .s = seq }, .u32), .replicated, std.mem.sliceAsBytes(tidx));
     defer time_idx.deinit();
 
     const text_part = model.textPrep();
@@ -726,7 +746,7 @@ fn denoiseDit(
     defer cos.deinit();
     defer sin.deinit();
 
-    var flat_buf = try host(run, .init(.{ .n = steps }, .f32), flat_t);
+    var flat_buf = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .n = steps }, .f32), .replicated, std.mem.sliceAsBytes(flat_t));
     defer flat_buf.deinit();
     var time_bufs = try load(run, store, TimeEmbedder, &model.time_embedder, null);
     var all_temb: zml.Buffer = undefined;
@@ -736,7 +756,7 @@ fn denoiseDit(
         temb_runner.run(io, .{ .inputs = .{ .timestep = flat_buf }, .outputs = .{ .temb = &all_temb }, .opts = .{ .wait = true } });
     }
     defer all_temb.deinit();
-    drop(TimeEmbedder, &time_bufs);
+    zml.Buffer.deinitAll(TimeEmbedder, &time_bufs);
 
     var tables = try allocator.alloc(zml.Buffer, n_blocks);
     var tables_filled: usize = 0;
@@ -747,21 +767,21 @@ fn denoiseDit(
     var cores = try allocator.alloc(zml.Bufferized(BlockCore), n_blocks);
     var cores_filled: usize = 0;
     errdefer {
-        for (cores[0..cores_filled]) |*core| drop(BlockCore, core);
+        for (cores[0..cores_filled]) |*core| zml.Buffer.deinitAll(BlockCore, core);
         allocator.free(cores);
     }
-    var loader = try initLoader(run);
+    var loader: zml.io.Loader = try .init(allocator, run.platform, ops.loader_opts);
     defer loader.deinit();
     const AdaLnRunner = zml.FnExe(AdaLn.prepare).Runner(.{.adaln});
     var adaln_runner: ?AdaLnRunner = null;
     defer if (adaln_runner) |*r| r.deinit(allocator);
     var prev_adaln: ?zml.Bufferized(AdaLn) = null;
-    defer if (prev_adaln) |*a| drop(AdaLn, a);
+    defer if (prev_adaln) |*a| zml.Buffer.deinitAll(AdaLn, a);
     for (0..n_blocks) |block_i| {
         const adaln_bufs = try load(run, store, AdaLn, &model.blocks[block_i].adaln, &loader);
         if (adaln_runner) |*r| {
             r.rebake(.{ .adaln = adaln_bufs });
-            if (prev_adaln) |*a| drop(AdaLn, a);
+            if (prev_adaln) |*a| zml.Buffer.deinitAll(AdaLn, a);
         } else {
             adaln_runner = try AdaLnRunner.init(&compiled.prepare_adaln, allocator, .{ .adaln = adaln_bufs });
         }
@@ -780,18 +800,18 @@ fn denoiseDit(
         var final_runner = try AdaLnRunner.init(&compiled.prepare_final_adaln, allocator, .{ .adaln = final_adaln });
         defer final_runner.deinit(allocator);
         final_runner.run(io, .{ .inputs = .{ .temb = all_temb }, .outputs = .{ .table = &final_table }, .opts = .{ .wait = true } });
-        drop(AdaLn, &final_adaln);
+        zml.Buffer.deinitAll(AdaLn, &final_adaln);
     }
     defer final_table.deinit();
 
     const patch_part = model.patchEmbed();
     var patch_bufs = try load(run, store, PatchEmbed, &patch_part, null);
-    defer drop(PatchEmbed, &patch_bufs);
+    defer zml.Buffer.deinitAll(PatchEmbed, &patch_bufs);
     var patch_runner = try zml.FnExe(PatchEmbed.forward).Runner(.{.model}).init(&compiled.embed_patches, allocator, .{ .model = patch_bufs });
     defer patch_runner.deinit(allocator);
     const finish_part = model.finishCore();
     var finish_bufs = try load(run, store, FinishCore, &finish_part, null);
-    defer drop(FinishCore, &finish_bufs);
+    defer zml.Buffer.deinitAll(FinishCore, &finish_bufs);
     var finish_runner = try zml.FnExe(FinishCore.forward).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = finish_bufs });
     defer finish_runner.deinit(allocator);
 
@@ -812,7 +832,7 @@ fn denoiseDit(
     }
     var apply_v = try zml.FnExe(Euler.apply).Runner(.{}).init(&compiled.apply_video, allocator, .{});
     defer apply_v.deinit(allocator);
-    var video_buf = try host(run, video_shape, video);
+    var video_buf = try zml.Buffer.fromBytes(io, run.platform, video_shape, .replicated, std.mem.sliceAsBytes(video));
     defer video_buf.deinit();
 
     log.info("denoise: blocks={d} groups={d} seq={d} devices={d}", .{
@@ -829,9 +849,11 @@ fn denoiseDit(
         var step_u32: u32 = @intCast(step_i);
         var step_buf = try zml.Buffer.fromBytes(io, run.platform, .init(.{}, .u32), .replicated, std.mem.asBytes(&step_u32));
         defer step_buf.deinit();
-        var sigma_v = try scalarF32(run, packed_run.video.sigmas[step_i]);
+        var sigma_v_item = packed_run.video.sigmas[step_i];
+        var sigma_v = try zml.Buffer.fromBytes(io, run.platform, .init(.{}, .f32), .replicated, std.mem.asBytes(&sigma_v_item));
         defer sigma_v.deinit();
-        var sigma_v_next = try scalarF32(run, packed_run.video.sigmas[step_i + 1]);
+        var sigma_v_next_item = packed_run.video.sigmas[step_i + 1];
+        var sigma_v_next = try zml.Buffer.fromBytes(io, run.platform, .init(.{}, .f32), .replicated, std.mem.asBytes(&sigma_v_next_item));
         defer sigma_v_next.deinit();
 
         var hidden: zml.Buffer = undefined;
@@ -894,7 +916,7 @@ fn denoiseDit(
     log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
     for (tables) |*tb| tb.deinit();
     allocator.free(tables);
-    for (cores) |*core| drop(BlockCore, core);
+    for (cores) |*core| zml.Buffer.deinitAll(BlockCore, core);
     allocator.free(cores);
     return video;
 }

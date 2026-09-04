@@ -16,14 +16,13 @@ const VaeCfg = config.VisualConfig;
 const linear = ops.linear;
 const rms = ops.rms;
 const ln = ops.ln;
-const drop = ops.drop;
 const load = ops.load;
-const host = ops.host;
-const compileFn = ops.compileFn;
-const initLoader = ops.initLoader;
-const applyLinear = ops.applyLinear;
 const ropeCat3 = ops.ropeCat3;
 const Run = ops.Run;
+
+fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    return lin.forward(x.convert(lin.weight.dtype())).convert(x.dtype());
+}
 
 // =============================================================================
 // Tile / stitch  (256 px tiles, 64 px overlap — official VAE tiling)
@@ -226,10 +225,9 @@ fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []co
     for (values, 0..) |*v, i| v.* = v.* * stddev[i % channels] + mean[i % channels];
 }
 
-fn vitCoords(dim: u32, out: []f32) []f32 {
+fn vitCoords(dim: u32, out: []f32) void {
     const d: f32 = @floatFromInt(dim);
     for (0..dim) |i| out[i] = 2.0 * ((@as(f32, @floatFromInt(i)) + 0.5) / d) - 1.0;
-    return out[0..dim];
 }
 
 fn withModelBatch(like: zml.Tensor, t: zml.Tensor) zml.Tensor {
@@ -251,9 +249,9 @@ fn vaePositions(allocator: std.mem.Allocator, registers: u32) ![]f32 {
     var t_axis: [vae_t]f32 = undefined;
     var h_axis: [vae_h]f32 = undefined;
     var w_axis: [vae_w]f32 = undefined;
-    _ = vitCoords(vae_t, &t_axis);
-    _ = vitCoords(vae_h, &h_axis);
-    _ = vitCoords(vae_w, &w_axis);
+    vitCoords(vae_t, &t_axis);
+    vitCoords(vae_h, &h_axis);
+    vitCoords(vae_w, &w_axis);
     var i: usize = 0;
     for (0..vae_t) |tt| {
         for (0..vae_h) |hh| {
@@ -370,7 +368,7 @@ const VitAttn = struct {
 };
 
 /// Python: `MiniMaxH3VideoTransformerBlock`
-pub const VitBlock = struct {
+const VitBlock = struct {
     norm1: zml.nn.RmsNorm,
     attn: VitAttn,
     scale1: zml.Tensor,
@@ -402,7 +400,7 @@ pub const VitBlock = struct {
 };
 
 /// Post-quant conv, patch project, register tokens, and ViT RoPE.
-pub const EmbedModel = struct {
+const EmbedModel = struct {
     post_quant: zml.nn.Linear,
     proj: zml.nn.Linear,
     register_tokens: zml.Tensor,
@@ -434,7 +432,7 @@ pub const EmbedModel = struct {
 };
 
 /// LayerNorm + linear; drops register and pad tokens from the sequence.
-pub const FinishModel = struct {
+const FinishModel = struct {
     norm_out: zml.nn.LayerNorm,
     proj_out: zml.nn.Linear,
     cfg: VaeCfg,
@@ -568,20 +566,29 @@ fn compileVae(self: *Vae, run: *const Run) !void {
     var node = run.progress.start("Compiling MiniMax-H3 VAE", 3);
     defer node.end();
     const vae_dt = model.embed.proj.weight.dtype();
-    const embed_exe = try compileFn(EmbedModel.forward, "minimax_h3_vae_embed", run, .{.{
+    const embed_exe = try zml.FnExe(EmbedModel.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_vae_embed",
+    }, .{.{
         .model = model.embed,
         .latents = vaeBatchShape(.{ .b = batch, .s = vaeTokens(), .d = model.cfg.latent_channels }, .f32, partition_b),
         .position_ids = .init(.{ .s = seq, .ax = 3 }, .f32),
     }});
     errdefer embed_exe.deinit();
-    const block_exe = try compileFn(VitBlock.forward, "minimax_h3_vae_block", run, .{.{
+    const block_exe = try zml.FnExe(VitBlock.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_vae_block",
+    }, .{.{
         .layer = model.blocks[0],
         .hidden = vaeBatchShape(.{ .b = batch, .s = seq, .d = model.cfg.dim() }, vae_dt, partition_b),
         .cos = .init(.{ .s = seq, .f = model.cfg.rotaryDim() }, vae_dt),
         .sin = .init(.{ .s = seq, .f = model.cfg.rotaryDim() }, vae_dt),
     }});
     errdefer block_exe.deinit();
-    const finish_exe = try compileFn(FinishModel.forward, "minimax_h3_vae_finish", run, .{.{
+    const finish_exe = try zml.FnExe(FinishModel.forward).compile(run.allocator, run.io, run.platform, .{
+        .shardings = run.mesh(),
+        .program_name = "minimax_h3_vae_finish",
+    }, .{.{
         .model = model.finish,
         .hidden = vaeBatchShape(.{ .b = batch, .s = seq, .d = model.cfg.dim() }, vae_dt, partition_b),
     }});
@@ -613,23 +620,23 @@ const VaeCache = struct {
     finish: zml.Bufferized(FinishModel),
 
     pub fn deinit(self: *VaeCache, allocator: std.mem.Allocator) void {
-        drop(EmbedModel, &self.embed);
-        for (self.blocks) |*block| drop(VitBlock, block);
+        zml.Buffer.deinitAll(EmbedModel, &self.embed);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
         allocator.free(self.blocks);
-        drop(FinishModel, &self.finish);
+        zml.Buffer.deinitAll(FinishModel, &self.finish);
     }
 };
 
 fn loadVaeCache(run: *const Run, loaded: *const Vae, store: *zml.io.TensorStore) !VaeCache {
     var embed_bufs = try load(run, store, EmbedModel, &loaded.embed, null);
-    errdefer drop(EmbedModel, &embed_bufs);
+    errdefer zml.Buffer.deinitAll(EmbedModel, &embed_bufs);
     var finish_bufs = try load(run, store, FinishModel, &loaded.finish, null);
-    errdefer drop(FinishModel, &finish_bufs);
+    errdefer zml.Buffer.deinitAll(FinishModel, &finish_bufs);
     const blocks = try run.allocator.alloc(zml.Bufferized(VitBlock), loaded.blocks.len);
     errdefer run.allocator.free(blocks);
     var filled: usize = 0;
-    errdefer for (blocks[0..filled]) |*block| drop(VitBlock, block);
-    var loader = try initLoader(run);
+    errdefer for (blocks[0..filled]) |*block| zml.Buffer.deinitAll(VitBlock, block);
+    var loader: zml.io.Loader = try .init(run.allocator, run.platform, ops.loader_opts);
     defer loader.deinit();
     for (0..loaded.blocks.len) |i| {
         blocks[i] = try load(run, store, VitBlock, &loaded.blocks[i], &loader);
@@ -725,7 +732,7 @@ fn decodeVae(
     defer block.deinit(run.allocator);
     var finish = try FinishRunner.init(&compiled.finish, run.allocator, .{ .model = cache.finish });
     defer finish.deinit(run.allocator);
-    var pos = try host(run, .init(.{ .s = vaeSeq(registers), .ax = 3 }, .f32), positions);
+    var pos = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .s = vaeSeq(registers), .ax = 3 }, .f32), .replicated, std.mem.sliceAsBytes(positions));
     defer pos.deinit();
 
     const plane = geo.pixel_h * geo.pixel_w;

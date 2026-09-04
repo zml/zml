@@ -10,12 +10,7 @@ const ops = @import("ops.zig");
 const EncCfg = config.EncoderConfig;
 const linear = ops.linear;
 const rms = ops.rms;
-const drop = ops.drop;
 const load = ops.load;
-const host = ops.host;
-const hostF32 = ops.hostF32;
-const compileFn = ops.compileFn;
-const initLoader = ops.initLoader;
 const Run = ops.Run;
 
 // =============================================================================
@@ -93,7 +88,7 @@ const SelfAttn = struct {
 // =============================================================================
 
 /// One Qwen block:  h ← h + Attn(RMS(h));  h ← h + MLP(RMS(h)).
-pub const TransformerLayer = struct {
+const TransformerLayer = struct {
     input_layernorm: zml.nn.RmsNorm,
     self_attn: SelfAttn,
     post_attention_layernorm: zml.nn.RmsNorm,
@@ -123,7 +118,7 @@ pub const TransformerLayer = struct {
     }
 };
 
-pub const EmbedTokens = struct {
+const EmbedTokens = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     pub const Input = struct { embedding: EmbedTokens, tokens: zml.Tensor };
     pub const Output = struct { hidden: zml.Tensor };
@@ -136,6 +131,19 @@ pub const EmbedTokens = struct {
         };
     }
 };
+
+fn uploadF32(run: *const Run, shape: zml.Shape, values: []const f32) !zml.Buffer {
+    switch (shape.dtype()) {
+        .f32 => return zml.Buffer.fromBytes(run.io, run.platform, shape, .replicated, std.mem.sliceAsBytes(values)),
+        .bf16 => {
+            const converted = try run.allocator.alloc(zml.floats.BFloat16, values.len);
+            defer run.allocator.free(converted);
+            for (converted, values) |*dst, src| dst.* = .fromF32(src);
+            return zml.Buffer.fromBytes(run.io, run.platform, shape, .replicated, std.mem.sliceAsBytes(converted));
+        },
+        else => return error.UnsupportedEmbedDtype,
+    }
+}
 
 /// Qwen interleaved RoPE: each frequency is written into both halves of the head.
 fn fillInterleavedRope(theta: f32, seq: u32, head_dim: u32, cos: []f32, sin: []f32) void {
@@ -202,12 +210,18 @@ pub const Encoder = struct {
         var node = run.progress.start("Compiling MiniMax-H3 encoder", 2);
         defer node.end();
         const dt = self.embed_tokens.weight.dtype();
-        const embed = try compileFn(EmbedTokens.forward, "minimax_h3_encoder_embed", run, .{.{
+        const embed = try zml.FnExe(EmbedTokens.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_encoder_embed",
+        }, .{.{
             .embedding = .{ .embed_tokens = self.embed_tokens },
             .tokens = .init(.{ .b = 1, .s = text_len }, .u32),
         }});
         errdefer embed.deinit();
-        const layer = try compileFn(TransformerLayer.forward, "minimax_h3_encoder_layer", run, .{.{
+        const layer = try zml.FnExe(TransformerLayer.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_encoder_layer",
+        }, .{.{
             .layer = self.layers[0],
             .hidden = .init(.{ .b = 1, .s = text_len, .d = self.cfg.hidden_size }, dt),
             .cos = .init(.{ .s = text_len, .hd = self.cfg.head_dim }, dt),
@@ -226,12 +240,12 @@ pub const Encoder = struct {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
         const seq: u32 = @intCast(tokens.len);
         const head_dim: u32 = @intCast(self.cfg.head_dim);
-        var token_buf = try host(run, .init(.{ .b = 1, .s = tokens.len }, .u32), tokens);
+        var token_buf = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .b = 1, .s = tokens.len }, .u32), .replicated, std.mem.sliceAsBytes(tokens));
         defer token_buf.deinit();
 
         const embed_part = EmbedTokens{ .embed_tokens = self.embed_tokens };
         var embed_bufs = try load(run, store, EmbedTokens, &embed_part, null);
-        defer drop(EmbedTokens, &embed_bufs);
+        defer zml.Buffer.deinitAll(EmbedTokens, &embed_bufs);
         var embed_runner = try zml.FnExe(EmbedTokens.forward).Runner(.{.embedding}).init(&compiled.embed, run.allocator, .{ .embedding = embed_bufs });
         defer embed_runner.deinit(run.allocator);
         var hidden: zml.Buffer = undefined;
@@ -243,19 +257,19 @@ pub const Encoder = struct {
         const sin = try run.allocator.alloc(f32, seq * head_dim);
         defer run.allocator.free(sin);
         fillInterleavedRope(self.cfg.rope_theta, seq, head_dim, cos, sin);
-        var cos_buf = try hostF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), cos);
+        var cos_buf = try uploadF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), cos);
         defer cos_buf.deinit();
-        var sin_buf = try hostF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), sin);
+        var sin_buf = try uploadF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), sin);
         defer sin_buf.deinit();
 
-        var loader = try initLoader(run);
+        var loader: zml.io.Loader = try .init(run.allocator, run.platform, ops.loader_opts);
         defer loader.deinit();
         const LayerRunner = zml.FnExe(TransformerLayer.forward).Runner(.{.layer});
         var layer_runner: ?LayerRunner = null;
         defer if (layer_runner) |*r| r.deinit(run.allocator);
         for (0..self.layers.len) |layer_i| {
             var layer_bufs = try load(run, store, TransformerLayer, &self.layers[layer_i], &loader);
-            defer drop(TransformerLayer, &layer_bufs);
+            defer zml.Buffer.deinitAll(TransformerLayer, &layer_bufs);
             if (layer_runner) |*r| r.rebake(.{ .layer = layer_bufs }) else layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
             var next: zml.Buffer = undefined;
             layer_runner.?.run(run.io, .{
