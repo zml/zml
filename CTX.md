@@ -5,7 +5,7 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-04 at the end of the third pass (caller-controlled
+Last consolidated: 2026-09-04 (fourth pass) at the end of the third pass (caller-controlled
 concurrency), on commit `67464f3c`. `PLAN.md` is the sequential implementation
 checklist; this file is the canonical description of the code after each
 completed task. "Current design" describes the code as it exists; "Third-pass
@@ -934,6 +934,106 @@ union with two drain states, per-epoch reclamation, four copies of the
 range/retry loop, per-sample calibration reporting, and 128 persistent
 workers.
 
+## Fourth pass: DMA-stage decoupling (2026-09-04, gb300-2)
+
+Trigger: on `gb300-2` (144-core Grace, 34 NUMA nodes, four GB300, DMA
+calibrates at ~180 GiB/s with 16 MiB blocks) the user's DeepSeek-V4-Flash
+load printed a width-16 window that stayed open 3.8 s, then held 8.
+Reproduced there with `CUDA_VISIBLE_DEVICES=0 bazel run --config=release
+--@zml//platforms:cuda=true //examples/io:playground -- load
+/var/models/deepseek-ai/DeepSeek-V4-Flash/` (user `benjamin`, checkout
+`/home/benjamin/github/zml/zml`; GPU 0 is ours there).
+
+Evidence (gb300-2, warm page cache, HEAD `8a5de654`):
+
+- Per 16 MiB request a worker spent 9.2 ms in the claim stage and 3.0 ms
+  reading; pinned-block acquisition, the read gate and the enqueue were
+  under 10 us. The claim stage is the wait for a lifecycle credit, which a
+  request holds until its last DMA callback. With `width + 1` credits the
+  DMA stage held one request at a time.
+- DeepSeek-V4-Flash has 69187 tensors: half are 256 KiB scales, the other
+  half ~4 MiB weights (9524 requests, 69572 DMA pieces, 2.2 MiB mean). The
+  fixed depth of 8 submissions per device therefore kept ~18 MiB in flight
+  where calibration had measured 128 MiB.
+- The pump is not the ceiling: 69572 submissions at 5.8 us each, 0.4 s of
+  a 3.7 s load. Worker start is not a factor either (spawned tasks claimed
+  within 1 ms).
+- Environment sweep at fixed width 16: depth 8 -> 24.3 GiB/s (6.13 s);
+  depth 32 -> 36.1 (4.12 s); depth 64 with 16 extra credits -> 43.8
+  (3.39 s). The read gate held only 2 to 9 of 16 permits at any tick, so
+  the window rule `exercised >= width` waited 0.3 to 4.7 s for a moment
+  with 16 concurrent reads; dropping that rule alone scored the transition
+  and held 12 (6.0 s), so the rule stays.
+- Two rejected intermediate designs, both measured: credits equal to the
+  whole retained capacity with workers spawned to the credits and the read
+  permit taken before the pinned blocks (3.53-3.66 s, but 41 to 74 idle
+  tasks per load, block waits counted as reads in flight, and a warm-up
+  rule that fired on every load because the parked workers held every
+  credit); and an unconditional warm-up window.
+
+Change (commit after `8a5de654`):
+
+- Lifecycle credits: `min(feasible, max(retained, width + dma_stage))`.
+  `retained` is the pre-grown pinned capacity (`DmaBlockPool
+  .retainedRequestWidth`: the 33-request source working set plus the
+  calibrated DMA depth per device, now materialized at calibration; the
+  smallest node under strict NUMA affinity). `dma_stage` is the calibrated
+  in-flight bytes in requests (8 blocks per device), so the DMA stage keeps
+  its depth at widths above the retained capacity. Workers stay at
+  `width + 1`: a worker hands its request to the DMA stage and claims the
+  next, so credits need no workers.
+- The per-device DMA budget is `max_in_flight_per_device x block_size`
+  bytes (8 blocks' worth, the depth calibration measured) with a cap of 64
+  submissions in flight per device against tiny tensors; the documented
+  bound on live PJRT events is now devices x 64 plus one pump batch.
+- Calibration pre-growth targets `(32 + 1) requests + reserve` per pool and
+  falls back to the source set alone when the reserves do not fit the
+  mapped ceiling (logged).
+- The width controller discards the load's first scoreable window when the
+  lifecycle credits ran out during it: that window opened on an empty DMA
+  stage and measured the fill burst (47 to 50 GiB/s where the steady rate
+  was 42). Read-bound loads keep their first window.
+- The pump reuses the ready index found by its budget pass instead of
+  rescanning the chosen queue.
+- The loader summary reports `credit_wait_ms_per_read`,
+  `block_wait_ms_per_read` and `read_ms_per_read`: waits above the read
+  time mean the load is DMA-completion bound and the read width is not the
+  limiter.
+
+Results (same day, same host state; HEAD `8a5de654` against this pass):
+
+| host, workload | HEAD | this pass |
+|---|---:|---:|
+| gb300-2 GPU 0, DeepSeek 148.65 GiB (3 runs each) | 5.83-5.96 s (25 GiB/s) | 3.30-3.57 s (42-45 GiB/s) |
+| gb300-2 GPU 0, fixed width 12 / 24 / 32 (intermediate tree) | - | 3.75 / 3.20-3.81 / 3.65 s |
+| local B70, Llama plain, interleaved (2 each) | 678, 680 ms | 677, 676 ms |
+| local B70, HF Qwen3.5-9B (1 run each) | 20.8 s | 21.9 s |
+| MI300 (degraded, DMA 7.9 GiB/s), DeepSeek (1 run each, intermediate tree) | 27.9 s | 28.6 s |
+
+On gb300-2 the load is DMA-completion bound at ~42 GiB/s at every read
+width (fixed 12, 24 and 32 all land between 3.2 and 3.8 s); the remaining
+ceiling is the per-piece cost of the PJRT/CUDA copy path for 4 MiB and
+256 KiB pieces, not anything the loader schedules. Pinned memory rises by
+the DMA reserve: 528 -> 656 MiB on one GB300, 592 MiB on the B70, 544 MiB
+with 2 MiB blocks; an 8-GPU host with 16 MiB blocks pre-grows 1 GiB more
+at platform init. The CUDA host could not be measured: both visible RTX
+5090s held 29.8 GB of another user's `llmd` and the runs died in device
+OOM. gb300-2 became busy after the final runs (GPU 0 held 255 GB of
+another user's `llmd`, load average 28); a last run there died the same
+way, so the `block_wait_ms_per_read` figure for DeepSeek is unrecorded.
+
+Known limits recorded by the review of this pass: `active_events` remains
+a redundant scalar beside the per-device arrays; the 64-piece cap is a
+bound on event overhead, not a measured optimum, and for a block made of
+tensors under `block / 8` it holds fewer bytes in flight than the budget
+(DeepSeek's blocks mix 4 MiB and 256 KiB pieces, so there it matches);
+on an 8-GPU host with 16 MiB blocks the pre-grown set plus reserves
+(33 + 64 blocks) fills 1552 MiB of the 2 GiB mapped ceiling, and a 32 MiB
+HF request there clips the pre-grown width to 31 with no headroom left
+for growth. The review's claim that `waitForWork` can spin on an open
+exhausted head was refuted: submissions seal before returning, so an open
+head is always the last queued batch.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
@@ -944,9 +1044,13 @@ Third-pass items left open; `PLAN.md` holds the checklist.
   MI300 checkouts are on the `loader-third-pass` branches (zml `67464f3c`
   or later, monorepo `d426dde4`); the previous heads were zml `db961721` and
   monorepo `9efec789`.
-- The first measurement window of a load is biased low by startup (lazy PJRT
-  managers, file opens), so the climb usually visits one rung above the
-  start; a short warm-up window would remove one probe per load.
+- The first measurement window of a load is now discarded as a warm-up
+  (fourth pass); the bias it removes is the DMA-stage fill burst, which is
+  the opposite sign of the startup bias seen on hosts with slower DMA.
+- Fourth-pass follow-ups: the CUDA host regression run (both RTX 5090s were
+  occupied on 2026-09-04); the MI300 comparison once the host is healthy;
+  the gb300-2 hold at 8 in the user's log, which this controller cannot
+  produce from the printed rates (a replay holds 12).
 - The 8% smallest-near-peak block rule is fragile on a busy host (it chose
   2 MiB on MI300 while degraded). Calibration caching per host/plugin, or
   re-screening when the measured rate is implausibly low, remains open.

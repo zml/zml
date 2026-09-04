@@ -249,11 +249,11 @@ pub const DmaPlatformSettings = struct {
     pub const preallocated_request_size: usize = 16 * 1024 * 1024;
 
     /// Grows the retained arenas so that `width + 1` requests of
-    /// `request_blocks` blocks can be leased from each pool without mapping
-    /// a slab during the load, clipped to the largest width whose growth
-    /// leaves the mapped ceiling room for the non-materialized per-node
-    /// `feed_reserves`. The arenas stay owned by the platform settings and
-    /// are reused by every later loader.
+    /// `request_blocks` blocks plus each pool's `feed_reserves` (the DMA
+    /// stage's blocks: the calibrated depth per device) can be leased from
+    /// each pool without mapping a slab during the load, clipped to the
+    /// largest width that fits the mapped ceiling. The arenas stay owned by
+    /// the platform settings and are reused by every later loader.
     pub fn ensureSourceWorkingSet(
         self: *DmaPlatformSettings,
         request_blocks: usize,
@@ -792,8 +792,8 @@ pub const DmaBenchmarkSourcePools = struct {
     }
 
     /// See `DmaPlatformSettings.ensureSourceWorkingSet`. Every pool gets the
-    /// same target because a strict-affinity load draws a device's blocks
-    /// from its own node.
+    /// same source target because a strict-affinity load draws a device's
+    /// blocks from its own node, plus its own DMA reserve.
     fn ensureSourceWorkingSet(
         self: *DmaBenchmarkSourcePools,
         block_size: usize,
@@ -805,32 +805,37 @@ pub const DmaBenchmarkSourcePools = struct {
             return error.InvalidDmaLoadConfig;
         const targets = try self.allocator.alloc(usize, self.pools.len);
         defer self.allocator.free(targets);
+        // Reserves first; when not even one request fits beside them the
+        // reserves stay non-materialized and the source set alone is fitted.
+        var with_reserves = true;
         var fitted_width = width;
         while (true) : (fitted_width -= 1) {
-            const target_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
+            const source_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
                 return error.DmaMappedBudgetExceeded;
             var growth_bytes: usize = 0;
-            var reserved_bytes: usize = 0;
             for (self.pools, feed_reserves, targets) |*pool, reserve, *target| {
                 const usable = try usableBlocks(pool, block_size);
-                target.* = target_blocks;
+                target.* = std.math.add(usize, source_blocks, if (with_reserves) reserve else 0) catch
+                    return error.DmaMappedBudgetExceeded;
                 growth_bytes = std.math.add(
                     usize,
                     growth_bytes,
-                    (target_blocks -| usable) * block_size,
-                ) catch return error.DmaMappedBudgetExceeded;
-                reserved_bytes = std.math.add(
-                    usize,
-                    reserved_bytes,
-                    (reserve -| @max(usable, target_blocks)) * block_size,
+                    (target.* -| usable) * block_size,
                 ) catch return error.DmaMappedBudgetExceeded;
             }
-            const committed = std.math.add(usize, growth_bytes, reserved_bytes) catch
-                return error.DmaMappedBudgetExceeded;
-            if (self.allocatedBytes() +| committed <= self.max_mapped_bytes) break;
-            // Not even one request's working set fits beyond what is
-            // retained: leave growth to the load.
-            if (fitted_width == 0) return;
+            if (self.allocatedBytes() +| growth_bytes <= self.max_mapped_bytes) break;
+            if (fitted_width == 0) {
+                if (!with_reserves) return; // Leave growth to the load.
+                with_reserves = false;
+                fitted_width = width + 1;
+            }
+        }
+        if (fitted_width < width or !with_reserves) {
+            log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}, reserves_materialized={}", .{
+                fitted_width,
+                width,
+                with_reserves,
+            });
         }
         return self.growToBlockTargets(block_size, targets);
     }

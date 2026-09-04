@@ -58,6 +58,12 @@ const VectoredLoadMetrics = struct {
     read_bytes: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
     pending_source_jobs: std.atomic.Value(usize) = .init(0),
+    /// Time workers spend waiting for a lifecycle credit, for pinned
+    /// blocks, and inside the source read, summed over requests: waits
+    /// above the read time mean the load is DMA-completion bound.
+    lifecycle_wait_ns: std.atomic.Value(u64) = .init(0),
+    block_wait_ns: std.atomic.Value(u64) = .init(0),
+    read_ns: std.atomic.Value(u64) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: u64 = std.math.maxInt(u64),
     probe_admission_start: u64 = std.math.maxInt(u64),
@@ -348,7 +354,13 @@ const AdaptiveRequestGate = struct {
     in_use: usize = 0,
     closed: bool = false,
     mutex: std.Io.Mutex = .init,
+    /// Admission waiters; one release wakes one of them.
     condition: std.Io.Condition = .init,
+    /// `waitEmpty` waiters, woken when the gate drains. Kept apart from the
+    /// admission waiters: workers spawned for a wide rung stay parked on
+    /// the read gate after a backoff, and at width 1 every completion
+    /// drains the gate.
+    drained: std.Io.Condition = .init,
 
     fn init(limit: usize) AdaptiveRequestGate {
         return .{ .limit = limit };
@@ -370,10 +382,7 @@ const AdaptiveRequestGate = struct {
         defer self.mutex.unlock(io);
         std.debug.assert(self.in_use > 0);
         self.in_use -= 1;
-        if (self.in_use == 0) {
-            self.condition.broadcast(io);
-            return;
-        }
+        if (self.in_use == 0) self.drained.broadcast(io);
         // One release creates one admission slot. Waking every worker here
         // turns a high adaptive cap into a thundering herd even when the
         // active limit is small.
@@ -383,7 +392,7 @@ const AdaptiveRequestGate = struct {
     fn waitEmpty(self: *AdaptiveRequestGate, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        while (self.in_use != 0) self.condition.waitUncancelable(io, &self.mutex);
+        while (self.in_use != 0) self.drained.waitUncancelable(io, &self.mutex);
     }
 
     fn setLimit(self: *AdaptiveRequestGate, io: std.Io, new_limit: usize) void {
@@ -413,32 +422,78 @@ const AdaptiveRequestGate = struct {
     }
 };
 
+/// Read permits and lifecycle credits at one width. A request holds a
+/// lifecycle credit from its claim to its last DMA callback, so the credits
+/// beyond the read width are the requests the DMA stage can hold and, with
+/// the pinned blocks each holds, bound the pinned memory in use. They are
+/// the pre-grown capacity (`retained`: the source working set plus the
+/// calibrated DMA depth per device), so the DMA stage takes every block
+/// the reads leave free and nothing grows during a load; above that width
+/// the stage keeps `dma_stage` requests, the calibrated in-flight bytes.
+/// One credit beyond the width fed the DMA engines one request at a time:
+/// on a GB300 loading DeepSeek-V4 (pieces of 4 MiB and 256 KiB) that was
+/// 24 GiB/s at width 16 against 44 GiB/s with eight requests queued, and
+/// the workers spent 9 ms per request waiting for a credit against 3 ms
+/// reading. Workers stay at `read + 1`: a worker hands its request to the
+/// DMA stage and claims the next, so credits need no workers of their own.
 const RequestGateLimits = struct {
     read: usize,
     lifecycle: usize,
 
-    fn init(read: usize, feasible_width: usize) RequestGateLimits {
-        std.debug.assert(feasible_width > 0);
+    fn init(read: usize, feasible_width: usize, retained: usize, dma_stage: usize) RequestGateLimits {
+        std.debug.assert(feasible_width > 0 and dma_stage > 0);
         const effective_read = @min(read, feasible_width);
         return .{
             .read = effective_read,
-            .lifecycle = @min(feasible_width, effective_read +| 1),
+            .lifecycle = @min(feasible_width, @max(effective_read +| dma_stage, retained)),
         };
+    }
+
+    fn workers(self: RequestGateLimits) usize {
+        return @min(self.lifecycle, self.read +| 1);
     }
 };
 
+/// Requests whose pieces fill the DMA stage: `per_device` blocks of
+/// in-flight bytes on every device, counted in requests of `request_size`.
+/// Calibration pre-grows the same blocks per device as the stage's floor;
+/// the lifecycle credits bound what the stage holds beyond it.
+fn dmaStageRequests(per_device: usize, devices: usize, block_size: usize, request_size: usize) usize {
+    std.debug.assert(request_size > 0);
+    const bytes = per_device *| devices *| block_size;
+    return @max(@as(usize, 1), std.math.divCeil(usize, bytes, request_size) catch 1);
+}
+
+test "DMA stage requests cover the per-device in-flight bytes" {
+    const mib = 1024 * 1024;
+    try std.testing.expectEqual(@as(usize, 8), dmaStageRequests(8, 1, 16 * mib, 16 * mib));
+    try std.testing.expectEqual(@as(usize, 32), dmaStageRequests(8, 4, 16 * mib, 16 * mib));
+    // A 32 MiB HF request holds two blocks: half as many requests.
+    try std.testing.expectEqual(@as(usize, 4), dmaStageRequests(8, 1, 16 * mib, 32 * mib));
+    try std.testing.expectEqual(@as(usize, 1), dmaStageRequests(1, 1, 16 * mib, 64 * mib));
+}
+
+/// Round-robin over devices with a ready transfer whose in-flight bytes are
+/// under the per-device budget. The budget is in bytes, not submissions:
+/// the calibrated depth is `max_in_flight_per_device` blocks, and a piece
+/// is one tensor's slice of a block, so a model of small tensors needs many
+/// more pieces in flight to keep the same bytes moving (DeepSeek-V4 on a
+/// GB300: 8 pieces of 2.2 MiB reached 24 GiB/s, 58 reached 44).
 fn selectLoaderDmaDevice(
-    active: []const usize,
-    per_device_limit: usize,
+    active_bytes: []const usize,
+    active_pieces: []const usize,
+    budget_bytes: usize,
     ready_mask: u64,
     next_device: usize,
 ) ?usize {
-    std.debug.assert(active.len > 0 and active.len <= 64);
-    std.debug.assert(per_device_limit > 0 and next_device < active.len);
-    for (0..active.len) |offset| {
-        const device_index = (next_device + offset) % active.len;
+    std.debug.assert(active_bytes.len > 0 and active_bytes.len <= 64);
+    std.debug.assert(active_pieces.len == active_bytes.len);
+    std.debug.assert(budget_bytes > 0 and next_device < active_bytes.len);
+    for (0..active_bytes.len) |offset| {
+        const device_index = (next_device + offset) % active_bytes.len;
         if (ready_mask & (@as(u64, 1) << @intCast(device_index)) == 0 or
-            active[device_index] >= per_device_limit)
+            active_bytes[device_index] >= budget_bytes or
+            active_pieces[device_index] >= max_dma_pieces_per_device)
         {
             continue;
         }
@@ -446,6 +501,11 @@ fn selectLoaderDmaDevice(
     }
     return null;
 }
+
+/// Submissions in flight per device on top of the byte budget: a bound on
+/// event and callback overhead when a block holds many tiny tensors, above
+/// the depth that saturated a GB300 (64 pieces of DeepSeek-V4).
+const max_dma_pieces_per_device: usize = 64;
 
 /// One submission: its plans (one per source file, published as each file
 /// is planned), the per-tensor items it writes, and every request, block and
@@ -720,6 +780,8 @@ const VectoredLoadPipeline = struct {
         pjrt_event: ?*pjrt.Event,
         err: ?*pjrt.Error = null,
         device_index: usize,
+        /// Bytes this submission holds against the device's in-flight budget.
+        len: usize,
         /// Link of `VectoredLoadPipeline.retired`; owned by `metadata_mutex`.
         next_retired: ?*EventContext = null,
 
@@ -747,8 +809,12 @@ const VectoredLoadPipeline = struct {
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
     ready_queues: []std.ArrayListUnmanaged(ReadyTransfer),
-    active_by_device: []usize,
-    dma_limit: usize,
+    /// In-flight DMA bytes and submissions per device, owned by
+    /// `metadata_mutex`.
+    active_bytes_by_device: []usize,
+    active_pieces_by_device: []usize,
+    /// Per-device in-flight budget: the calibrated depth in blocks, in bytes.
+    dma_budget_bytes: usize,
     next_device: usize = 0,
     pumping: bool = false,
     active_events: usize = 0,
@@ -770,15 +836,19 @@ const VectoredLoadPipeline = struct {
         numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
         scheduler: *FairVectoredReadScheduler,
-        dma_limit: usize,
+        dma_budget_bytes: usize,
     ) !VectoredLoadPipeline {
         std.debug.assert(platform.devices.len <= 64);
+        std.debug.assert(dma_budget_bytes > 0);
         const ready_queues = try allocator.alloc(std.ArrayListUnmanaged(ReadyTransfer), platform.devices.len);
         errdefer allocator.free(ready_queues);
         @memset(ready_queues, .empty);
-        const active_by_device = try allocator.alloc(usize, platform.devices.len);
-        errdefer allocator.free(active_by_device);
-        @memset(active_by_device, 0);
+        const active_bytes_by_device = try allocator.alloc(usize, platform.devices.len);
+        errdefer allocator.free(active_bytes_by_device);
+        @memset(active_bytes_by_device, 0);
+        const active_pieces_by_device = try allocator.alloc(usize, platform.devices.len);
+        errdefer allocator.free(active_pieces_by_device);
+        @memset(active_pieces_by_device, 0);
         return .{
             .allocator = allocator,
             .io = io,
@@ -792,8 +862,9 @@ const VectoredLoadPipeline = struct {
             .metrics = metrics,
             .scheduler = scheduler,
             .ready_queues = ready_queues,
-            .active_by_device = active_by_device,
-            .dma_limit = dma_limit,
+            .active_bytes_by_device = active_bytes_by_device,
+            .active_pieces_by_device = active_pieces_by_device,
+            .dma_budget_bytes = dma_budget_bytes,
         };
     }
 
@@ -806,7 +877,8 @@ const VectoredLoadPipeline = struct {
         std.debug.assert(self.request_gate.inUse(self.io) == 0);
         for (self.ready_queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.ready_queues);
-        self.allocator.free(self.active_by_device);
+        self.allocator.free(self.active_bytes_by_device);
+        self.allocator.free(self.active_pieces_by_device);
     }
 
     fn failed(self: *const VectoredLoadPipeline) bool {
@@ -994,34 +1066,35 @@ const VectoredLoadPipeline = struct {
             self.metadata_mutex.lockUncancelable(self.io);
             if (retire_events_early) self.destroyRetired();
             if (!self.failed()) {
-                const limit = self.dma_limit;
+                const budget = self.dma_budget_bytes;
                 var ready_mask: u64 = 0;
+                var first_ready: [64]usize = undefined;
                 for (self.ready_queues, 0..) |queue, device_index| {
-                    if (self.active_by_device[device_index] >= limit) continue;
-                    for (queue.items) |transfer| {
+                    if (self.active_bytes_by_device[device_index] >= budget or
+                        self.active_pieces_by_device[device_index] >= max_dma_pieces_per_device) continue;
+                    for (queue.items, 0..) |transfer, i| {
                         if (self.transferReady(transfer)) {
                             ready_mask |= @as(u64, 1) << @intCast(device_index);
+                            first_ready[device_index] = i;
                             break;
                         }
                     }
                 }
                 const device_index = selectLoaderDmaDevice(
-                    self.active_by_device,
-                    limit,
+                    self.active_bytes_by_device,
+                    self.active_pieces_by_device,
+                    budget,
                     ready_mask,
                     self.next_device,
                 );
                 if (device_index) |index| {
                     const queue = &self.ready_queues[index];
-                    for (queue.items, 0..) |transfer, i| {
-                        if (!self.transferReady(transfer)) continue;
-                        selected = queue.swapRemove(i);
-                        break;
-                    }
-                    std.debug.assert(selected != null);
+                    selected = queue.swapRemove(first_ready[index]);
                     self.next_device = (index + 1) % self.ready_queues.len;
-                    self.active_by_device[index] += 1;
-                    std.debug.assert(self.active_by_device[index] <= limit);
+                    // The piece that crosses the budget is admitted: a
+                    // device with room always has a transfer in flight.
+                    self.active_bytes_by_device[index] += selected.?.len;
+                    self.active_pieces_by_device[index] += 1;
                     self.active_events += 1;
                     self.ready_entries -= 1;
                 }
@@ -1043,10 +1116,11 @@ const VectoredLoadPipeline = struct {
     /// calls `block.complete()` last.
     fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer) void {
         const device_index = transfer.target.device_index;
+        const len = transfer.len;
         const block = transfer.block;
         self.submitTransfer(transfer) catch |err| {
             self.recordError(err);
-            self.eventCompleted(device_index);
+            self.eventCompleted(device_index, len);
             block.complete();
         };
     }
@@ -1078,6 +1152,7 @@ const VectoredLoadPipeline = struct {
             .block = transfer.block,
             .pjrt_event = event,
             .device_index = transfer.target.device_index,
+            .len = transfer.len,
         };
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
@@ -1091,12 +1166,13 @@ const VectoredLoadPipeline = struct {
                 // the next pump, and complete the block last.
                 const pipeline = ctx_.pipeline;
                 const device_index = ctx_.device_index;
+                const len = ctx_.len;
                 const block = ctx_.block;
                 ctx_.err = err;
                 if (err) |pjrt_error| {
                     pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
                 }
-                pipeline.eventCompleted(device_index);
+                pipeline.eventCompleted(device_index, len);
                 // After the pump this callback may have run, so the event is
                 // destroyed by a later pump or by the batch's retirement,
                 // never inside its own callback.
@@ -1110,12 +1186,14 @@ const VectoredLoadPipeline = struct {
         };
     }
 
-    fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize) void {
+    fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize, len: usize) void {
         self.metadata_mutex.lockUncancelable(self.io);
         std.debug.assert(self.active_events > 0);
-        std.debug.assert(self.active_by_device[device_index] > 0);
+        std.debug.assert(self.active_bytes_by_device[device_index] >= len);
+        std.debug.assert(self.active_pieces_by_device[device_index] > 0);
         self.active_events -= 1;
-        self.active_by_device[device_index] -= 1;
+        self.active_bytes_by_device[device_index] -= len;
+        self.active_pieces_by_device[device_index] -= 1;
         self.metadata_mutex.unlock(self.io);
         // A ready callback can be the first place an asynchronous PJRT error
         // becomes visible. Once outside the metadata lock, retire every
@@ -1314,10 +1392,12 @@ const VectoredReadRequest = struct {
                 return;
             }
         }
+        const block_wait_started = awakeNs(pipeline.io);
         pipeline.pool.acquireMany(pipeline.io, leased, affinities, &scratch.pool) catch |err| {
             pipeline.recordError(err);
             return;
         };
+        _ = pipeline.metrics.block_wait_ns.fetchAdd(awakeNs(pipeline.io) -| block_wait_started, .monotonic);
         if (pipeline.failed()) return;
 
         const iovecs = scratch.iovecs[0..block_count];
@@ -1329,6 +1409,7 @@ const VectoredReadRequest = struct {
 
         if (!beginRead(request, pipeline)) return;
         request.batch.diagnostics.noteRead(pipeline.io);
+        const read_started = awakeNs(pipeline.io);
         const read_result = readAbsoluteAllV(
             pipeline.io,
             file,
@@ -1336,6 +1417,7 @@ const VectoredReadRequest = struct {
             file_offset,
             pipeline.metrics,
         );
+        _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(pipeline.io) -| read_started, .monotonic);
         read_result catch |err| {
             endRead(request, pipeline);
             pipeline.recordError(err);
@@ -3290,6 +3372,21 @@ test "one load-profile feedback cursor reports only new backpressure" {
     try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
 }
 
+test "source warm-up window is discarded once when credits ran out" {
+    var runtime: SourceReadRuntime = undefined;
+    runtime.warmup_pending = true;
+    runtime.credits_exhausted = false;
+    // Credits never ran out: the first window is scored.
+    try std.testing.expect(!runtime.discardWarmup());
+    try std.testing.expect(!runtime.warmup_pending);
+
+    runtime.warmup_pending = true;
+    runtime.credits_exhausted = true;
+    try std.testing.expect(runtime.discardWarmup());
+    // Only once: the re-measured window is scored even under pressure.
+    try std.testing.expect(!runtime.discardWarmup());
+}
+
 test "source measurement rejects another controller generation" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
@@ -3385,6 +3482,16 @@ const SourceReadRuntime = struct {
     pinned_feasible_width: usize,
     read_stats: ?ReadStatsCursor,
     source_bootstrap_enabled: bool,
+    /// Lifecycle credits: see `RequestGateLimits`.
+    retained_credits: usize = 1,
+    dma_stage_requests: usize = 1,
+    /// The load's first scoreable window is a warm-up when the lifecycle
+    /// credits ran out during it: it opened on an empty DMA stage and
+    /// measured the burst that filled it (47 GiB/s on a GB300 whose steady
+    /// DMA-bound rate was 42), which no later rung can beat. Such a window
+    /// is discarded and the start rung measured again.
+    warmup_pending: bool = true,
+    credits_exhausted: bool = false,
     /// Grown with the lifecycle limit; null in unit tests without workers.
     workers: ?*WorkerPool = null,
     source_response_observed: bool = false,
@@ -3413,16 +3520,17 @@ const SourceReadRuntime = struct {
         io: std.Io,
         decision: SourceReadWidthController.Decision,
     ) void {
-        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width, self.retained_credits, self.dma_stage_requests);
         std.debug.assert(limits.read > 0);
         self.reported_width = decision.width;
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
-        if (self.workers) |pool| pool.ensure(io, limits.lifecycle);
+        if (self.workers) |pool| pool.ensure(io, limits.workers());
         // Advance the diagnostic baseline at the generation boundary.
         _ = self.takeRemoteBackpressure();
         self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
         self.clock.reset();
+        self.credits_exhausted = false;
         self.measurement = switch (self.controller.state) {
             .climbing => .measuring,
             .holding => .inactive,
@@ -3440,11 +3548,11 @@ const SourceReadRuntime = struct {
         io: std.Io,
         decision: SourceReadWidthController.Decision,
     ) void {
-        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width);
+        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width, self.retained_credits, self.dma_stage_requests);
         self.reported_width = decision.width;
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
-        if (self.workers) |pool| pool.ensure(io, limits.lifecycle);
+        if (self.workers) |pool| pool.ensure(io, limits.workers());
         self.metrics.clearProbe(io);
         self.metrics.config_epoch.store(decision.generation, .release);
         self.measurement = .blind;
@@ -3473,6 +3581,14 @@ const SourceReadRuntime = struct {
         now_ns: u64,
     ) ?SourceReadWidthController.Evidence {
         return self.evidenceFrom(self.metrics.snapshot(io), now_ns);
+    }
+
+    /// Once per load: the first scoreable window is dropped when the
+    /// lifecycle credits ran out inside it.
+    fn discardWarmup(self: *SourceReadRuntime) bool {
+        const pending = self.warmup_pending;
+        self.warmup_pending = false;
+        return pending and self.credits_exhausted;
     }
 
     fn finalize(self: *SourceReadRuntime, io: std.Io) void {
@@ -3567,7 +3683,18 @@ const SourceReadRuntime = struct {
             // Idle before the window's first admission is not its time.
             self.clock.tick(now_ns, idle and probe.probe_window_start_ns != 0);
             if (idle) continue;
+            if (self.request_gate.inUse(io) >= self.request_gate.currentLimit(io))
+                self.credits_exhausted = true;
             const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
+            if (self.discardWarmup()) {
+                load_log.debug("source width warm-up window discarded: generation={d}, width={d}, rate={Bi:.2}/s", .{
+                    probe.probe_epoch,
+                    self.controller.width(),
+                    @as(u64, @intFromFloat(evidence.bytesPerSecond())),
+                });
+                self.applyDecision(io, self.controller.newGeneration());
+                continue;
+            }
             const scored_index = self.controller.index;
             const decision = self.controller.observe(evidence);
             load_log.debug("source width window: generation={d}, width={d}, rate={Bi:.2}/s, busy_ms={d:.1}, completed={d}, exercised={d}, samples={d}, next_width={d}, state={s}", .{
@@ -3604,6 +3731,11 @@ fn shouldBootstrapSource(
 
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
+}
+
+/// Mean milliseconds per unit of a summed duration (zero units: the total).
+fn millisecondsPer(total_ns: u64, units: u64) f64 {
+    return @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(@max(units, 1)));
 }
 
 fn awakeNs(io: std.Io) u64 {
@@ -3688,9 +3820,9 @@ pub const DirectLoader = struct {
         );
         const pregrown_bytes = resources.retainedMappedBytes() - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        // The per-node reserves are deliberately non-materialized. They keep
-        // enough mapped-budget capacity available for devices that join a
-        // later submission without paying their allocation cost at init.
+        // The per-node reserves were materialized by calibration (the DMA
+        // stage's blocks); the pool keeps them as the growth floor of each
+        // node for devices that join a later submission.
         var pool = try mem.DmaBlockPool.initFromProvider(
             allocator,
             resources.workspace.blockPoolArenaProvider(),
@@ -3713,7 +3845,14 @@ pub const DirectLoader = struct {
 
         const source_parallelism = opts.read_parallelism;
         const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
-        const limits: RequestGateLimits = .init(controller.width(), feasible_width);
+        const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job, strict_affinity);
+        const dma_stage_requests = dmaStageRequests(
+            config.max_in_flight_per_device,
+            platform.devices.len,
+            config.block_size,
+            request_size,
+        );
+        const limits: RequestGateLimits = .init(controller.width(), feasible_width, retained_credits, dma_stage_requests);
         const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
             const initial = provider.snapshot();
             break :cursor .{ .provider = provider, .previous = initial };
@@ -3763,11 +3902,14 @@ pub const DirectLoader = struct {
             strict_affinity,
             &self.metrics,
             &self.scheduler,
-            config.max_in_flight_per_device,
+            config.max_in_flight_per_device * config.block_size,
         );
         errdefer self.pipeline.deinit();
 
-        self.worker_pool = .{ .loader = self, .maximum = source_parallelism.maximum() };
+        self.worker_pool = .{
+            .loader = self,
+            .maximum = RequestGateLimits.init(source_parallelism.maximum(), feasible_width, retained_credits, dma_stage_requests).workers(),
+        };
         self.controller_runtime = .{
             .controller = controller,
             .read_gate = &self.read_gate,
@@ -3779,6 +3921,8 @@ pub const DirectLoader = struct {
             .pinned_feasible_width = feasible_width,
             .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
+            .retained_credits = retained_credits,
+            .dma_stage_requests = dma_stage_requests,
             .reported_width = controller.width(),
         };
         // Born busy: both gates are open at the controller's width, the
@@ -3788,11 +3932,13 @@ pub const DirectLoader = struct {
         self.workers_started = true;
         self.controller_runtime.start(io);
         try self.startController();
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, workers={d}, max_workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
             config.block_size,
+            self.pipeline.dma_budget_bytes,
+            limits.lifecycle,
             self.worker_pool.spawned,
             self.worker_pool.maximum,
             feasible_width,
@@ -3826,11 +3972,14 @@ pub const DirectLoader = struct {
         while (true) {
             if (!self.scheduler.waitForWork(self.io)) return;
             if (self.pipeline.failed()) return;
+            const credit_wait_started = awakeNs(self.io);
             if (!self.request_gate.acquire(self.io)) return;
+            const credit_wait_ns = awakeNs(self.io) -| credit_wait_started;
             const claim = self.scheduler.claim(self.io) orelse {
                 self.request_gate.release(self.io);
                 continue;
             };
+            _ = self.pipeline.metrics.lifecycle_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
             self.pipeline.reserveSourceJob();
             const request = self.pipeline.registerRequest(claim);
             // The request's scheduling sentinel keeps the batch, and with it
@@ -4052,12 +4201,13 @@ pub const DirectLoader = struct {
         });
     }
     fn logSummary(self: *DirectLoader) void {
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        const reads = self.metrics.read_operations.load(.acquire);
+        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.bytesLoaded(),
             secondsBetween(self.created_at, .now(self.io, .awake)),
-            self.metrics.read_operations.load(.acquire),
+            reads,
             self.metrics.source_calls.load(.acquire),
             self.metrics.transfer_pieces.load(.acquire),
             self.metrics.dma_submissions.load(.acquire),
@@ -4066,6 +4216,9 @@ pub const DirectLoader = struct {
             self.source_request_size,
             self.pool.highWaterBytes(),
             self.pool.mappedBytes(),
+            millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
         });
     }
 
@@ -4101,14 +4254,16 @@ pub const DirectLoader = struct {
     }
 };
 
-test "loader DMA admission rotates and respects per-device limits" {
+test "loader DMA admission rotates and respects per-device budgets" {
     const all_ready: u64 = 0b1111;
     var active = [_]usize{ 0, 0, 0, 0 };
+    var pieces = [_]usize{ 0, 0, 0, 0 };
     var next_device: usize = 0;
 
     for ([_]usize{ 0, 1, 2, 3, 0, 1, 2, 3 }) |expected| {
         const selected = selectLoaderDmaDevice(
             &active,
+            &pieces,
             8,
             all_ready,
             next_device,
@@ -4117,14 +4272,20 @@ test "loader DMA admission rotates and respects per-device limits" {
         next_device = (selected + 1) % active.len;
     }
 
+    // Bytes at the budget close a device; so does the piece cap.
     active = .{ 8, 0, 8, 0 };
     try std.testing.expectEqual(
         @as(?usize, 1),
-        selectLoaderDmaDevice(&active, 8, all_ready, 0),
+        selectLoaderDmaDevice(&active, &pieces, 8, all_ready, 0),
     );
     try std.testing.expectEqual(
         @as(?usize, null),
-        selectLoaderDmaDevice(&active, 8, 0b0101, 0),
+        selectLoaderDmaDevice(&active, &pieces, 8, 0b0101, 0),
+    );
+    pieces = .{ 0, max_dma_pieces_per_device, 0, 0 };
+    try std.testing.expectEqual(
+        @as(?usize, 3),
+        selectLoaderDmaDevice(&active, &pieces, 8, all_ready, 0),
     );
 }
 
@@ -4248,14 +4409,22 @@ test "partial source jobs contribute adaptive evidence" {
     try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.probe_read_bytes);
 }
 
-test "request lifecycle gate permits one shared spare request" {
-    const normal: RequestGateLimits = .init(12, 64);
+test "request lifecycle gate holds the DMA stage beyond the read width" {
+    const normal: RequestGateLimits = .init(12, 64, 41, 8);
     try std.testing.expectEqual(@as(usize, 12), normal.read);
-    try std.testing.expectEqual(@as(usize, 13), normal.lifecycle);
+    try std.testing.expectEqual(@as(usize, 41), normal.lifecycle);
+    try std.testing.expectEqual(@as(usize, 13), normal.workers());
 
-    const clipped: RequestGateLimits = .init(32, 32);
+    // Above the retained capacity the stage keeps its calibrated depth.
+    const wide: RequestGateLimits = .init(48, 128, 41, 8);
+    try std.testing.expectEqual(@as(usize, 48), wide.read);
+    try std.testing.expectEqual(@as(usize, 56), wide.lifecycle);
+    try std.testing.expectEqual(@as(usize, 49), wide.workers());
+    // The pinned ceiling clips everything.
+    const clipped: RequestGateLimits = .init(32, 32, 41, 8);
     try std.testing.expectEqual(@as(usize, 32), clipped.read);
     try std.testing.expectEqual(@as(usize, 32), clipped.lifecycle);
+    try std.testing.expectEqual(@as(usize, 32), clipped.workers());
 }
 
 test "request lifecycle gate waits for every active request" {
@@ -4527,6 +4696,7 @@ const TestPipeline = struct {
     gate: AdaptiveRequestGate,
     queues: [1]std.ArrayListUnmanaged(VectoredLoadPipeline.ReadyTransfer) = .{.empty},
     active: [1]usize = .{0},
+    active_pieces: [1]usize = .{0},
     pipeline: VectoredLoadPipeline,
 
     fn init(
@@ -4549,8 +4719,9 @@ const TestPipeline = struct {
             .metrics = &self.metrics,
             .scheduler = scheduler,
             .ready_queues = &self.queues,
-            .active_by_device = &self.active,
-            .dma_limit = 1,
+            .active_bytes_by_device = &self.active,
+            .active_pieces_by_device = &self.active_pieces,
+            .dma_budget_bytes = 64,
         };
     }
 
@@ -4639,12 +4810,13 @@ test "late vectored callback failure drains and signals completion" {
     });
     pipeline.ready_entries = 1;
     pipeline.active_events = 1;
-    fixture.active[0] = 1;
+    fixture.active[0] = 64;
+    fixture.active_pieces[0] = 1;
     request.finishScheduling();
     try std.testing.expect(!batch.done.isSet());
     pipeline.first_error.store(@intFromError(error.Unknown), .release);
 
-    pipeline.eventCompleted(0);
+    pipeline.eventCompleted(0, 64);
     try std.testing.expectEqual(@as(usize, 0), pipeline.active_events);
     try std.testing.expectEqual(@as(usize, 0), pipeline.ready_entries);
     try std.testing.expect(block.lease.isComplete());
@@ -4737,6 +4909,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
         .block = &request.blocks[0],
         .pjrt_event = null,
         .device_index = 0,
+        .len = 64,
     };
     // Two callbacks fired: the next pump destroys both, newest first.
     pipeline.retireEvent(&plan.events[0]);

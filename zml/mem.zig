@@ -623,6 +623,28 @@ pub const DmaBlockPool = struct {
         return total;
     }
 
+    fn capacityBlocks(self: *const DmaBlockPool) usize {
+        var blocks: usize = 0;
+        for (self.nodes) |node| blocks += node.capacity;
+        return blocks;
+    }
+
+    /// Requests of `blocks_per_request` blocks the pool holds without
+    /// mapping anything: the retained (pre-grown) capacity of every node,
+    /// or of the smallest node when every request must come from one node
+    /// (`strict_affinity`), since a submission may put all of them there.
+    pub fn retainedRequestWidth(
+        self: *const DmaBlockPool,
+        blocks_per_request: usize,
+        strict_affinity: bool,
+    ) !usize {
+        if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
+        if (!strict_affinity) return self.capacityBlocks() / blocks_per_request;
+        var smallest: usize = std.math.maxInt(usize);
+        for (self.nodes) |node| smallest = @min(smallest, node.capacity);
+        return smallest / blocks_per_request;
+    }
+
     /// Returns the largest request width that the pool could support if each
     /// request consumes `blocks_per_request` blocks and admissions may draw
     /// from aggregate capacity. Arena tails count against the mapped-byte cap
@@ -632,9 +654,7 @@ pub const DmaBlockPool = struct {
         blocks_per_request: usize,
     ) !usize {
         if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
-        var usable_blocks: usize = 0;
-        for (self.nodes) |node| usable_blocks += node.capacity;
-        return (usable_blocks + self.remainingBlockBudget()) / blocks_per_request;
+        return (self.capacityBlocks() + self.remainingBlockBudget()) / blocks_per_request;
     }
 
     /// Returns the smallest request width that any one strict-affinity node

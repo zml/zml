@@ -62,6 +62,14 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [x] 11. Calibration reporting cleanup.
 - [ ] 12. NUMA placement experiment (measurement only; blocked: MI300 degraded).
 - [x] 13. Final validation and documentation reconciliation.
+- [x] 14. Fourth pass (2026-09-04): decouple the DMA stage from the read
+  width (lifecycle credits = max(pre-grown pinned capacity, width + the
+  calibrated DMA depth), workers stay at width + 1, byte-based per-device
+  DMA budget with a 64-piece cap, DMA reserves materialized at calibration
+  with a ceiling fallback, warm-up window when credits ran out, stage
+  timers in the summary). Result: gb300-2 DeepSeek 5.9 s -> 3.3-3.6 s;
+  B70, HF and degraded MI300 at parity; CUDA host unmeasured (GPUs
+  occupied). Details in CTX.md "Fourth pass".
 
 ## Measurement protocol
 
