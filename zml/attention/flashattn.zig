@@ -118,6 +118,61 @@ fn bufferFromFfiBuffer(ffi_buffer: *const ffi.Buffer) Buffer {
     };
 }
 
+pub fn fa2RoundHeadDim(head_dim: i64) i64 {
+    if (head_dim <= 0) return 32;
+    if (head_dim <= 192) return std.mem.alignForward(i64, head_dim, 32);
+    return 256;
+}
+
+pub fn fa3RoundHeadDim(head_dim: i64) i64 {
+    if (head_dim <= 64) return 64;
+    if (head_dim <= 96) return 96;
+    if (head_dim <= 128) return 128;
+    if (head_dim <= 192) return 192;
+    return 256;
+}
+
+fn resolvedHeadDim(head_dim: i64) i64 {
+    return if (head_dim > 0) head_dim else 256;
+}
+
+fn modelAxisPartitions(shape: zml.Shape) i32 {
+    const ctx = zml.Compiler.current();
+    return @intCast(ctx.partitioning.numPartitionsForLogicalAxis(shape, .model) catch |err|
+        std.debug.panic("flash attention requires a covering sharding for axis .model: {s}", .{@errorName(err)}));
+}
+
+const DenseBatch = struct {
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    bs: i64,
+};
+
+fn flattenDense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) DenseBatch {
+    if (q_.shape().hasTag(.b)) |_| {
+        return .{
+            .q = q_.merge(.{ .tot = .{ .b, .q } }),
+            .k = k_.merge(.{ .tot = .{ .b, .k } }),
+            .v = v_.merge(.{ .tot = .{ .b, .k } }),
+            .bs = q_.dim(.b),
+        };
+    }
+    return .{
+        .q = q_.rename(.{ .q = .tot }),
+        .k = k_.rename(.{ .k = .tot }),
+        .v = v_.rename(.{ .k = .tot }),
+        .bs = 1,
+    };
+}
+
+fn unflattenDense(o: zml.Tensor, q_: zml.Tensor, bs: i64) zml.Tensor {
+    return if (q_.shape().hasTag(.b)) |_|
+        o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
+    else
+        o.rename(.{ .tot = .q });
+}
+
 fn getScalarAttributeAs(comptime T: type, call_frame: *ffi.CallFrame, attribute_name: []const u8) ?T {
     const attribute = call_frame.attrs.getByName(.scalar, attribute_name) orelse return null;
     return attribute.get(T);
@@ -233,19 +288,21 @@ pub const fa2 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
+            head_dim: i64 = 0,
         };
 
         pub fn init(opts: InitOptions) Metadata {
+            const hd_ws = fa2RoundHeadDim(resolvedHeadDim(opts.head_dim));
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
                     .withTags(.{ .s, .h, .dummy })
                     .withPartitioning(.{ .h = .model })),
 
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, hd_ws }, .f32)
                     .withTags(.{ .dummy, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
 
-                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
+                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, hd_ws }, .f32)
                     .withTags(.{ .s, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
             };
@@ -353,6 +410,66 @@ pub const fa2 = struct {
         else
             o.rename(.{ .tot = .q });
     }
+
+    pub const DenseOpts = struct {
+        is_causal: bool = false,
+        softmax_scale: ?f32 = null,
+    };
+
+    /// Dense (possibly non-causal) FA2. Scratch tensors are graph-local and reused
+    /// across sequential runs of the same compiled executable.
+    pub fn dense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, opts: DenseOpts) zml.Tensor {
+        const flat = flattenDense(q_, k_, v_);
+        const max_seqlen_q: i32 = @intCast(q_.dim(.q));
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const num_heads: i32 = @intCast(q_.dim(.h));
+        const head_dim = flat.q.dim(.hd);
+
+        const scratch = Metadata.init(.{
+            .seqlen = flat.q.dim(.tot),
+            .num_heads = q_.dim(.h),
+            .head_dim = head_dim,
+        });
+        const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
+        const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
+        const out_accum = zml.Tensor.uninitialized(scratch.out_accum.shape());
+
+        const cu_seqlens_q: zml.Tensor = .arange(.{ .end = max_seqlen_q * (flat.bs + 1), .step = max_seqlen_q }, .i32);
+        const cu_seqlens_k: zml.Tensor = .arange(.{ .end = max_seqlen_k * (flat.bs + 1), .step = max_seqlen_k }, .i32);
+        const seqused_k = zml.Tensor.scalar(max_seqlen_k, .i32).broad(.init(.{ .b = flat.bs }, .i32));
+
+        const q_sharded = flat.q.withPartitioning(.{ .h = .model });
+        const model_partitions: i32 = modelAxisPartitions(q_sharded.shape());
+        const scale = opts.softmax_scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+
+        const output = fa2_mha_varlen_fwd.call(
+            .{
+                .q = q_sharded,
+                .k = flat.k.withPartitioning(.{ .h = .model }),
+                .v = flat.v.withPartitioning(.{ .h = .model }),
+                .cu_seqlens_q = cu_seqlens_q,
+                .cu_seqlens_k = cu_seqlens_k,
+                .seqused_k = seqused_k,
+                .softmax_lse = softmax_lse,
+                .softmax_lse_accum = softmax_lse_accum,
+                .out_accum = out_accum,
+            },
+            .{
+                .o = q_sharded.shape(),
+            },
+            .{
+                .softmax_scale = scale,
+                .is_causal = opts.is_causal,
+                .window_size_left = -1,
+                .window_size_right = -1,
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+                .num_heads = @divExact(num_heads, model_partitions),
+            },
+        );
+
+        return unflattenDense(output.o, q_, flat.bs);
+    }
 };
 
 pub const fa3 = struct {
@@ -389,12 +506,13 @@ pub const fa3 = struct {
         const ctx: *ffi.ExecutionContext = @constCast(call_frame.ctx);
         const stream = call_frame.api.stream(ctx);
 
+        const num_splits: i32 = getScalarAttributeAs(i32, call_frame, "num_splits") orelse 0;
         const params: flashattn.FA3MhaFwdParams = .{
             .max_seqlen_q = max_seqlen_q,
             .max_seqlen_k = max_seqlen_k,
             .softcap = 0.0,
             .is_rotary_interleaved = false,
-            .num_splits = 0,
+            .num_splits = num_splits,
             .sm_margin = 0,
             .is_causal = is_causal,
             .softmax_scale = softmax_scale,
@@ -448,17 +566,21 @@ pub const fa3 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
+            head_dim: i64 = 0,
+            batch: i64 = 1,
         };
 
         pub fn init(opts: InitOptions) Metadata {
+            const hd = resolvedHeadDim(opts.head_dim);
+            const batch = if (opts.batch > 0) opts.batch else 1;
             return .{
                 .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * hd * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
+                .scheduler_metadata = .fromShape(zml.Shape.init(.{batch + 1}, .i32)
                     .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
             };
         }
@@ -526,7 +648,96 @@ pub const fa3 = struct {
 
         return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
     }
+
+    pub const DenseOpts = struct {
+        is_causal: bool = false,
+        softmax_scale: ?f32 = null,
+    };
+
+    /// Dense (possibly non-causal) FA3. Scratch is graph-local, same layout as `attention`.
+    pub fn dense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, opts: DenseOpts) zml.Tensor {
+        const flat = flattenDense(q_, k_, v_);
+        const max_seqlen_q: i32 = @intCast(q_.dim(.q));
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const head_dim = flat.q.dim(.hd);
+        const scratch = Metadata.init(.{
+            .seqlen = flat.q.dim(.tot),
+            .num_heads = q_.dim(.h),
+            .head_dim = head_dim,
+            .batch = flat.bs,
+        });
+        const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
+        const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
+        const out_accum = zml.Tensor.uninitialized(scratch.out_accum.shape());
+        const scheduler_metadata = zml.Tensor.uninitialized(scratch.scheduler_metadata.shape());
+
+        const cu_seqlens_q = zml.Tensor.arange(.{ .end = max_seqlen_q * (flat.bs + 1), .step = max_seqlen_q }, .i32)
+            .withPartitioning(.{ ._0 = .replicated });
+        const cu_seqlens_k = zml.Tensor.arange(.{ .end = max_seqlen_k * (flat.bs + 1), .step = max_seqlen_k }, .i32)
+            .withPartitioning(.{ ._0 = .replicated });
+        const scale = opts.softmax_scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+
+        const q_sharded = flat.q.withPartitioning(.{ .h = .model });
+        const o = zml.ops.customCall(
+            custom_call_name,
+            .{
+                q_sharded,
+                flat.k.withPartitioning(.{ .h = .model }),
+                flat.v.withPartitioning(.{ .h = .model }),
+                cu_seqlens_q,
+                cu_seqlens_k,
+                softmax_lse,
+                softmax_lse_accum,
+                out_accum,
+                scheduler_metadata,
+            },
+            .{q_sharded.shape()},
+            .{
+                .softmax_scale = scale,
+                .is_causal = opts.is_causal,
+                .window_size_left = @as(i32, -1),
+                .window_size_right = @as(i32, -1),
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+                .num_splits = @as(i32, 1),
+            },
+            .{
+                .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
+                .has_side_effect = false,
+            },
+        );
+
+        return unflattenDense(o, q_, flat.bs);
+    }
 };
+
+test "FA2/FA3 scratch sizing matches C ABI rounding" {
+    const fa2_cases = [_][2]i64{
+        .{ 8, 32 },    .{ 16, 32 },   .{ 32, 32 },   .{ 48, 64 },
+        .{ 64, 64 },   .{ 80, 96 },   .{ 96, 96 },   .{ 112, 128 },
+        .{ 128, 128 }, .{ 144, 160 }, .{ 160, 160 }, .{ 176, 192 },
+        .{ 192, 192 }, .{ 208, 256 }, .{ 224, 256 }, .{ 256, 256 },
+    };
+    for (fa2_cases) |c| {
+        try std.testing.expectEqual(c[1], fa2RoundHeadDim(c[0]));
+        const meta = fa2.Metadata.init(.{ .seqlen = 8, .num_heads = 2, .head_dim = c[0] });
+        try std.testing.expectEqual(c[1], meta.out_accum.dim(.hd));
+    }
+
+    const unknown = fa2.Metadata.init(.{ .seqlen = 1, .num_heads = 1 });
+    try std.testing.expectEqual(@as(i64, 256), unknown.out_accum.dim(.hd));
+
+    const fa3_round = [_][2]i64{
+        .{ 48, 64 },   .{ 64, 64 },   .{ 80, 96 },   .{ 96, 96 },
+        .{ 128, 128 }, .{ 144, 192 }, .{ 192, 192 }, .{ 256, 256 },
+    };
+    for (fa3_round) |c| {
+        try std.testing.expectEqual(c[1], fa3RoundHeadDim(c[0]));
+        const meta = fa3.Metadata.init(.{ .seqlen = 8, .num_heads = 2, .head_dim = c[0], .batch = 3 });
+        try std.testing.expectEqual(@as(i64, 4), meta.scheduler_metadata.dim(0));
+        try std.testing.expectEqual(@as(usize, @intCast(2 * 8 * c[0] * 4)), meta.out_accum.shape().count());
+    }
+}
 
 pub const paged_fa2 = struct {
     // God knows why flash attention uses this number and not something else.
@@ -900,7 +1111,6 @@ pub const paged_fa2 = struct {
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
         const ctx = zml.Compiler.current();
-        const window_size_left = windowSizeLeft(opts.sliding_window);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -948,46 +1158,36 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            num_heads: i64,
-                            window_size_left: i32,
-                            softmax_scale: ?f32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q2,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q,
-                            dummy_cu_seqlens_k,
-                            seqused_k,
-                            block_table,
-                            softmax_lse,
-                            softmax_lse_accum,
-                            out_accum,
-                        },
+                        q2,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q,
+                        dummy_cu_seqlens_k,
+                        seqused_k,
+                        block_table,
+                        softmax_lse,
+                        softmax_lse_accum,
+                        out_accum,
+                    },
+                    output_shape,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
                         },
                     },
-                    output_shape,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Decode.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1033,48 +1233,37 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            max_seqlen_q: usize,
-                            num_heads: i64,
-                            window_size_left: i32,
-                            softmax_scale: ?f32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Prefill.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q2,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q_prefill,
-                            dummy_cu_seqlens_k_prefill,
-                            seqused_k_prefill,
-                            block_table_prefill,
-                            softmax_lse_prefill,
-                            softmax_lse_accum_prefill,
-                            out_accum_prefill,
-                        },
+                        q2,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q_prefill,
+                        dummy_cu_seqlens_k_prefill,
+                        seqused_k_prefill,
+                        block_table_prefill,
+                        softmax_lse_prefill,
+                        softmax_lse_accum_prefill,
+                        out_accum_prefill,
+                    },
+                    output_shape,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
                         },
                     },
-                    output_shape,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Prefill.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1109,46 +1298,36 @@ pub const paged_fa2 = struct {
 
                 const output_shape_decode = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            num_heads: i64,
-                            window_size_left: i32,
-                            softmax_scale: ?f32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q_decode,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q_decode,
-                            dummy_cu_seqlens_k_decode,
-                            seqused_k_decode,
-                            block_table_decode,
-                            softmax_lse_decode,
-                            softmax_lse_accum_decode,
-                            out_accum_decode,
-                        },
+                        q_decode,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q_decode,
+                        dummy_cu_seqlens_k_decode,
+                        seqused_k_decode,
+                        block_table_decode,
+                        softmax_lse_decode,
+                        softmax_lse_accum_decode,
+                        out_accum_decode,
+                    },
+                    output_shape_decode,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
                         },
                     },
-                    output_shape_decode,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Decode.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1552,7 +1731,6 @@ pub const paged_fa3 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
-        const window_size_left = windowSizeLeft(opts.sliding_window);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -1589,42 +1767,34 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            window_size_left: i32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q2,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q,
-                            seqused_k,
-                            block_table,
-                            softmax_lse,
-                            softmax_lse_accum,
-                            out_accum,
-                            scheduler_metadata,
-                        },
+                        q2,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q,
+                        seqused_k,
+                        block_table,
+                        softmax_lse,
+                        softmax_lse_accum,
+                        out_accum,
+                        scheduler_metadata,
+                    },
+                    output_shape,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
                         },
                     },
-                    output_shape,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Decode.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1665,42 +1835,33 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            max_seqlen_q: usize,
-                            window_size_left: i32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Prefill.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q2,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q_prefill,
-                            seqused_k_prefill,
-                            block_table_prefill,
-                            softmax_lse_prefill,
-                            softmax_lse_accum_prefill,
-                            out_accum_prefill,
-                            scheduler_metadata_prefill,
-                        },
+                        q2,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q_prefill,
+                        seqused_k_prefill,
+                        block_table_prefill,
+                        softmax_lse_prefill,
+                        softmax_lse_accum_prefill,
+                        out_accum_prefill,
+                        scheduler_metadata_prefill,
+                    },
+                    output_shape,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                         },
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
-                    output_shape,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Prefill.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1731,40 +1892,32 @@ pub const paged_fa3 = struct {
 
                 const decode_output_shape = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    (struct {
-                        inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
-                        metadata: struct {
-                            is_causal: bool,
-                            max_seqlen_k: usize,
-                            window_size_left: i32,
-                        },
-                        opts: zml.ops.CustomCallOptions,
-
-                        fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                            return zml.ops.customCall(Decode.custom_call_name, self.inputs, output, self.metadata, self.opts);
-                        }
-                    }).body,
                     .{
-                        .inputs = .{
-                            q_decode,
-                            k_cache,
-                            v_cache,
-                            cu_seqlens_q_decode,
-                            seqused_k_decode,
-                            block_table_decode,
-                            softmax_lse_decode,
-                            softmax_lse_accum_decode,
-                            out_accum_decode,
-                            scheduler_metadata_decode,
-                        },
+                        q_decode,
+                        k_cache,
+                        v_cache,
+                        cu_seqlens_q_decode,
+                        seqused_k_decode,
+                        block_table_decode,
+                        softmax_lse_decode,
+                        softmax_lse_accum_decode,
+                        out_accum_decode,
+                        scheduler_metadata_decode,
+                    },
+                    decode_output_shape,
+                    .{
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
-                            .window_size_left = window_size_left,
+                            .window_size_left = opts.sliding_window,
                         },
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
-                    decode_output_shape,
+                    (struct {
+                        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                            return zml.ops.customCall(Decode.custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                        }
+                    }).body,
                 );
                 o_decode = o_decode.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
 
@@ -1776,13 +1929,3 @@ pub const paged_fa3 = struct {
         return o;
     }
 };
-
-fn windowSizeLeft(sliding_window: i32) i32 {
-    return if (sliding_window > 0) sliding_window - 1 else sliding_window;
-}
-
-test "FlashAttention sliding window uses an inclusive offset" {
-    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(2048));
-    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(1));
-    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(-1));
-}

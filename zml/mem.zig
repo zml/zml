@@ -329,13 +329,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const ModelBufferized = Bufferized(Model);
 
     if (ModelBufferized == Buffer) {
-        bufferized_.* = .{
-            // I'm not sure I like that. I'd rather set all fields but _shards than leaving most of the m undefined.
-            ._shape = model._shape,
-            ._shards = .empty,
-            ._sharding = undefined,
-            ._platform = undefined,
-        };
+        bufferized_._shards = .empty;
         return;
     }
 
@@ -373,6 +367,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => {
+            for (0..model.len) |i| {
+                try bufferizeInner(allocator, model[i], &bufferized_[i]);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -384,4 +383,12 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "Bufferized maps fixed-size arrays" {
+    const Layer = struct { weight: Tensor };
+    const Model = struct { layers: [2]Layer };
+    const layers_info = @typeInfo(@FieldType(Bufferized(Model), "layers")).array;
+    try std.testing.expectEqual(2, layers_info.len);
+    try std.testing.expectEqual(Buffer, @FieldType(layers_info.child, "weight"));
 }

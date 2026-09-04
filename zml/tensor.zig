@@ -560,10 +560,10 @@ pub const Tensor = struct {
     /// Solves the system of linear equations formed by the input tensors.
     pub fn triangularSolve(self: Tensor, other: Tensor, opts: dialects.stablehlo.TriangularSolveOpts) Tensor {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
-        stdx.debug.assert(self.rank() >= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank >= 2, got {} and {}", .{ self.rank(), other.rank() });
+        stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
 
         const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
-        return _result(other._shape, op.result(0));
+        return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise rounding towards the nearest integer, breaking ties away from zero, of the input Tensor.
@@ -1132,6 +1132,49 @@ pub const Tensor = struct {
             output_batch_dimension: i64 = 0,
             output_feature_dimension: i64 = 1,
             output_spatial_dimensions: []const i64 = &.{ 2, 3 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        });
+    }
+
+    /// 3D convolution. Defaults are (B, C_in, T, H, W) input, (C_out, C_in, T, H, W) kernel.
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 },
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 },
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            window_reversal: []const bool = &.{ false, false, false },
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
             feature_group_count: i64 = 1,
             batch_group_count: i64 = 1,
         },
@@ -4590,14 +4633,11 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation((struct {
-                    input: Tensor,
-                    name: []const u8,
-
-                    fn body(body_ctx: @This(), _: void) void {
-                        ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
+                ops.manualComputation(input, {}, full_name, (struct {
+                    fn body(_full_name: []const u8, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
+                        ops.customCall("zml$print", sharded_input, {}, .{ .name = _full_name }, .{ .has_side_effect = true });
                     }
-                }).body, .{ .input = input, .name = full_name }, {});
+                }).body);
             },
             .oneapi, .neuron => {},
         }

@@ -114,7 +114,7 @@ pub const Exe = struct {
         baked_count: usize = 0,
         shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) error{OutOfMemory}!Arguments {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) !Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -451,6 +451,13 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
+                /// `bake` is incremental; reset the count or the previous prefix stays bound.
+                /// Borrowed `baked` buffers must outlive async `run` until the next `rebake` or `deinit`.
+                pub fn rebake(self: *RunnerSelf, baked: BakedInput) void {
+                    self.args.baked_count = 0;
+                    self.args.bake(baked);
+                }
+
                 pub fn run(self: *RunnerSelf, io: std.Io, call: struct {
                     inputs: NonBakedInput,
                     outputs: Output,
@@ -593,4 +600,103 @@ test "FnExe derives baked and runtime calls from a function" {
         @FieldType(Model.Output, "cache"),
     );
     try std.testing.expect(!@hasField(Model.Output, "metadata"));
+}
+
+const RebakeRegressionModel = struct {
+    scale: Tensor,
+    bias: Tensor,
+};
+
+const RebakeRegressionInput = struct {
+    model: RebakeRegressionModel,
+    x: Tensor,
+};
+
+const RebakeRegressionOutput = struct { y: Tensor };
+
+fn rebakeRegressionForward(input: RebakeRegressionInput) RebakeRegressionOutput {
+    return .{ .y = input.x.mul(input.model.scale).add(input.model.bias) };
+}
+
+test "FnExe Runner rebake replaces borrowed model buffers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = @import("testing.zig").env();
+    const shape = Shape.init(.{ .d = 4 }, .f32);
+    const scale_t = Tensor.fromShape(shape);
+    const bias_t = Tensor.fromShape(shape);
+    const x_t = Tensor.fromShape(shape);
+
+    var exe = try FnExe(rebakeRegressionForward).compile(
+        allocator,
+        io,
+        platform,
+        .{},
+        .{.{ .model = .{ .scale = scale_t, .bias = bias_t }, .x = x_t }},
+    );
+    defer exe.deinit();
+
+    var x = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 2, 3, 4 }));
+    defer x.deinit();
+    var a_scale = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 1, 1, 1 }));
+    var a_bias = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 10, 10, 10, 10 }));
+    var a_live = true;
+    defer if (a_live) {
+        a_scale.deinit();
+        a_bias.deinit();
+    };
+    var b_scale = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 2, 2, 2, 2 }));
+    var b_bias = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 20, 20, 20, 20 }));
+    var b_live = true;
+    defer if (b_live) {
+        b_scale.deinit();
+        b_bias.deinit();
+    };
+    var c_scale = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 3, 3, 3, 3 }));
+    defer c_scale.deinit();
+    var c_bias = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 30, 30, 30, 30 }));
+    defer c_bias.deinit();
+
+    var runner = try FnExe(rebakeRegressionForward).Runner(.{.model}).init(
+        &exe,
+        allocator,
+        .{ .model = .{ .scale = a_scale, .bias = a_bias } },
+    );
+    defer runner.deinit(allocator);
+
+    var actual: [4]f32 = undefined;
+    var output: Buffer = undefined;
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = true } });
+    try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
+    output.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 11, 12, 13, 14 }, &actual);
+
+    runner.rebake(.{ .model = .{ .scale = b_scale, .bias = b_bias } });
+    a_scale.deinit();
+    a_bias.deinit();
+    a_live = false;
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = true } });
+    try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
+    output.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 22, 24, 26, 28 }, &actual);
+
+    runner.rebake(.{ .model = .{ .scale = c_scale, .bias = c_bias } });
+    b_scale.deinit();
+    b_bias.deinit();
+    b_live = false;
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = false } });
+    try output.await(io);
+    try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
+    output.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 33, 36, 39, 42 }, &actual);
+
+    var a2_scale = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 1, 1, 1 }));
+    defer a2_scale.deinit();
+    var a2_bias = try Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(&[_]f32{ 10, 10, 10, 10 }));
+    defer a2_bias.deinit();
+    runner.rebake(.{ .model = .{ .scale = a2_scale, .bias = a2_bias } });
+    runner.run(io, .{ .inputs = .{ .x = x }, .outputs = .{ .y = &output }, .opts = .{ .wait = true } });
+    try output.toSlice(io, .init(shape, std.mem.sliceAsBytes(&actual)));
+    output.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 11, 12, 13, 14 }, &actual);
 }
