@@ -5,7 +5,7 @@ decisions, useful measurements, rejected approaches, and open work. It is not a
 runbook. Re-check code, Git refs, available accelerators, and plugin artifacts
 on each machine before relying on an old result.
 
-Last consolidated: 2026-09-04 (fourth pass) at the end of the third pass (caller-controlled
+Last consolidated: 2026-09-04 (fifth pass) at the end of the third pass (caller-controlled
 concurrency), on commit `67464f3c`. `PLAN.md` is the sequential implementation
 checklist; this file is the canonical description of the code after each
 completed task. "Current design" describes the code as it exists; "Third-pass
@@ -145,17 +145,19 @@ workers read the first file while the later ones are planned. Each plan:
 
 Coalescing is plan-local: one plan per source file within a submission, and
 a submission's plans are claimed in file order. Planning uses per-device
-physical-byte charges and same-file predecessors to compute a deterministic
-fair, predecessor-safe job order per plan (`fairOrder`), then discards the
-temporary queues and charges; for one device the fair order is the identity
-(every job charges that device and predecessors precede their tails in
-planning order; asserted by a test), so the planner keeps the planning order
-and skips the queues. While those spans are available, the planner also emits
-the final item, block index/offset, writer mask, destination offset, and length
-records. The published plan owns source jobs physically arranged in final fair
-order and their final transfer records; runtime tensor state does not own
-another dispatch plan. Planning-only predecessors, order indirection, and
-remaining-work suffix arrays are discarded. Physical source bytes are distinct from logical tensor
+physical-byte charges to compute a deterministic fair job order per plan
+(`fairOrder`), then discards the temporary queues and charges; for one
+device the fair order is the identity (every job charges that device;
+asserted by a test), so the planner keeps the planning order and skips the
+queues. No job depends on another: every DMA piece is submitted as soon as
+its block is read (fifth pass), so the request carrying a tensor's tail may
+be planned, claimed and read before the tensor's earlier requests. While
+those spans are available, the planner also emits the final item, block
+index/offset, writer mask, destination offset, and length records. The
+published plan owns source jobs physically arranged in final fair order and
+their final transfer records; runtime tensor state does not own another
+dispatch plan. Order indirection and remaining-work suffix arrays are
+discarded. Physical source bytes are distinct from logical tensor
 bytes so duplication and replication do not distort diagnostics or fairness.
 Planning is `O(tensors log tensors)` per submission and took 0.32 s for
 DeepSeek-V4-Flash as one plan on MI300 (task 3 tree, 46 shards); as per-file
@@ -198,10 +200,19 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
 - Planning charges a coalesced job's physical bytes to every destination device
   and simulates the fairness policy once per plan (one source file of a
   submission); the plan's jobs are stored in that immutable order and a
-  submission's plans are claimed in file order. Same-file predecessor order and per-target
-  submitted-prefix accounting preserve ordering while unrelated reads and DMA
-  complete out of order. There are no live device queues, debt counters,
-  claimed bitmap, runtime order indirection, or suffix-metadata arrays.
+  submission's plans are claimed in file order. Reads and DMA complete in
+  any order: PJRT makes a buffer ready once every transfer submitted to it
+  has completed and one of them carried the last-transfer flag, so the pump
+  flags the submission that completes the target's placement bytes
+  (`Target.total` against `submitted_bytes`; the pieces partition the
+  placement) and no piece ever waits for another (fifth pass). A batch that
+  completes without an error must have closed every target, or `awaitBatch`
+  fails the loader with `error.IncompleteTransfer` rather than leave a
+  buffer that never becomes ready. Per-device ready queues are
+  `std.Deque`s served in arrival order, so the oldest submission's pieces
+  and the oldest requests' blocks complete first. There are no live device
+  queues, debt counters, claimed bitmap, runtime order indirection, or
+  suffix-metadata arrays.
 - `FairVectoredReadScheduler` is a strict FIFO of published batches under one
   mutex and condition: `publish(batch, plan)` appends a plan to an open batch
   behind every earlier plan and batch (the batch joins the queue with its
@@ -360,7 +371,11 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   the gates spawns `min(lifecycle, width + 1)` workers (a worker hands its
   request to the DMA stage and claims the next, so credits beyond the read
   width need no workers), and a raised width spawns more, up to the
-  configured maximum. On one MI300X, 128
+  configured maximum. Workers are never retired, but one whose index is
+  beyond what the current width needs parks between jobs (fifth pass):
+  after a rung steps down, the workers spawned for the wider rung would
+  otherwise queue at the credit gate for the rest of the load and inflate
+  the reported credit wait without moving a byte. On one MI300X, 128
   persistent workers cost about 7% at a held width of 12 and made every rung
   measure slower (width 16: 21 GiB/s with 128 tasks, 36 GiB/s with 16); 13
   workers serve width 12.
@@ -583,9 +598,13 @@ the userspace copy. The selected fixed artifact measured 26.83--26.90 GiB/s.
 - **Multi-device sharded deadlock (2026-09-01):** destination-debt scheduling
   could claim a tensor tail before its predecessor. Tails filled all lifecycle
   credits while `transferReady` correctly waited for missing prefixes, so no
-  DMA could start. Planning now emits a predecessor-safe order; atomic claims
-  preserve that order. Pre-growing memory and ignoring the DMA global cap did
-  not help and were reverted.
+  DMA could start. Planning then emitted a predecessor-safe order that
+  atomic claims preserved. Pre-growing memory and ignoring the DMA global
+  cap did not help and were reverted. Fifth pass (2026-09-04): the prefix
+  wait itself is gone. PJRT only requires the flagged call to be the last
+  call into the buffer, not the tensor's last bytes, so the flag is set by
+  submission count, no piece waits for another, the deadlock class cannot
+  arise and the predecessor order was deleted.
 - **Coalescing boundary fan-out (2026-09-03):** rigid request-grid cuts reduced
   reads but increased DMA from 69,193 to 78,665. Tensor-aware feasible cuts
   restored 69,572 without increasing source jobs.
@@ -780,6 +799,20 @@ decoupled, low pinned memory.
   guarantees; events are destroyed before their manager either way.
 - No blanket thread-safety statement; concurrent `Execute` on one executable
   is undocumented, so executions stay on one awaiting task.
+- `TransferRawDataToSubBuffer`'s `is_last_transfer` only closes the buffer to
+  further calls: the buffer becomes ready when its in-flight transfer count
+  reaches zero and the flag was seen, in any completion order
+  (`xla/pjrt/host_to_device_transfer_manager.cc`, added by openxla/xla
+  `8dfe2c4ff1` on 2025-04-28 and used by the GPU stream-executor client
+  since `1b19ae012a` on 2025-10-22; the older
+  `GpuAsyncHostToDeviceTransferManager` sequenced the definition event
+  behind the flagged transfer on the one host-to-device stream, which also
+  only needs the flagged call to be the last one). zml's XLA pin
+  `41370d1124` (2026-07-02) contains both commits, and the shipped
+  libpjrt_cuda (manual-2026-07-31), libpjrt_rocm (manual-2026-07-20) and
+  libpjrt_oneapi (manual-2026-08-17) binaries carry
+  `CommonAsyncHostToDeviceTransferManager` symbols and none of the old
+  manager (`strings` check, 2026-09-04).
 
 ### Baseline 2026-09-03 (commit 2f9cac2b, Llama-3.1-8B 14.96 GiB, one GPU, warm)
 
@@ -1000,7 +1033,10 @@ Change (commit after `8a5de654`):
 - The width controller discards the load's first scoreable window when the
   lifecycle credits ran out during it: that window opened on an empty DMA
   stage and measured the fill burst (47 to 50 GiB/s where the steady rate
-  was 42). Read-bound loads keep their first window.
+  was 42). Read-bound loads keep their first window. (Fifth pass: the
+  trigger is now the workers' measured credit waiting against their read
+  time within the window, since gate occupancy also touches the limit on a
+  read-bound network load whenever a burst of reads completes together.)
 - The pump reuses the ready index found by its budget pass instead of
   rescanning the chosen queue.
 - The loader summary reports `credit_wait_ms_per_read`,
@@ -1042,6 +1078,131 @@ for growth. The review's claim that `waitForWork` can spin on an open
 exhausted head was refuted: submissions seal before returning, so an open
 head is always the last queued batch.
 
+## Fifth pass: last transfer by bytes (2026-09-04)
+
+Trigger: a Hugging Face load printed `source width warm-up window
+discarded: generation=3, width=32, rate=1.01GiB/s`, and the B70 HF summary
+showed `credit_wait_ms_per_read` of 194 to 408 against `read_ms_per_read` of
+1200 to 1400 with DMA at 48 GiB/s. The first suspect was the tail rule: the
+loader flagged the piece with the highest destination offset as PJRT's last
+transfer and held it in the ready queue until every other byte of the
+tensor had been submitted (`transferReady`), so the request carrying a tail
+kept its lifecycle credit and one pinned block until the tensor's earlier
+requests were read. Reading XLA (PJRT facts above) showed the positional
+rule was never required: the contract is "last call", not "last bytes".
+
+Removing it did not remove the credit waits, and the new per-request timers
+showed why: on HF a request spends under 1 ms in the DMA stage
+(`dma_stage_ms_per_read`) and 0.02 ms initializing its tensor state. A
+per-tick trace of the gates found the read gate full for the whole load
+(`reads=32/32`, then `48/48`, `64/64`) and credit waiters only for a few
+ticks after each rung rise. The hundreds of milliseconds came from the
+holding phase after a downward step: the workers spawned for the wider rung
+(49 or 65) stayed alive, the credit limit fell back with the width (35 or
+50), and the surplus queued at the credit gate for the rest of the load, so
+every later claim carried a wait of up to a read time while the read gate
+stayed full. Idle workers, not lost throughput, but a diagnostic that lied
+and a warm-up proxy (`inUse >= limit`) that fired whenever a burst of reads
+completed together against two spare credits.
+
+Change (commits `d082a614`, `a9802595`, `41e73088`, `ab874827`,
+`b6f23018`, `e9393f73`, `0af5c4d4`, `16098680`):
+
+- The pump, the only submitter, flags the submission that completes the
+  target's placement bytes (`Target.total` against `submitted_bytes`,
+  `nextIsLast`/`noteSubmitted`/`fullySubmitted`); `transferReady` and the
+  destination-prefix wait are gone, and no piece waits for another. A
+  first version counted planned pieces per (item, writer) in the planner;
+  the review replaced it with the byte total the target already carries
+  (no new arrays, slices or validation, and a shape-derived oracle rather
+  than the planner's own tally).
+- The planner's predecessor order (`PlanningJob.predecessor`, the
+  `fairOrder` constraint and the per-tensor order test) is deleted: no job
+  depends on another. Per-device ready queues are `std.Deque`s.
+- `awaitBatch` fails the loader with `error.IncompleteTransfer` when a
+  batch completed without an error but a target did not receive its last
+  transfer (`Batch.fullySubmitted`): a planner defect now fails the load
+  instead of leaving a buffer that never becomes ready.
+- `WorkerPool` parks workers the current width does not need (`wanted`,
+  `admit`); `stopWorkers` wakes them and the pool refuses to spawn once it
+  is stopping. Credits are unchanged.
+- Failure path: PJRT's shared transfer manager drops a buffer's definition
+  event once its last transfer was issued (accepted or not) or one of its
+  transfers failed, and a later `SetBufferError` trips a CHECK and aborts
+  the process (the oneAPI abort in "Open work" is the same class, on the
+  pump's side). `Target.closed` (set by the pump before the flagged call)
+  and `Target.errored` (set by the ready callback) now keep `awaitBatch`
+  from marking such buffers; the outputs of a failed submission are
+  undefined either way. `DirectLoader.submit` rejects empty sources
+  itself; the DMA-stage timer ignores a request whose enqueue failed.
+- The warm-up rule discards the first scoreable window when the requests
+  completing in it spent at least as long in the DMA stage as reading
+  (`dma_stage_ns` against `read_ns`, deltas since the generation opened),
+  instead of when the lifecycle gate touched its limit. An intermediate
+  version compared credit waiting with read time; the review showed it
+  cannot fire at a narrow start rung on a GB300 (13 workers wait 2 ms per
+  3 ms read while each request sits 7 ms in the stage), and on that tree
+  two of five DeepSeek loads scored the inflated window and held 12.
+- The summary reports `dma_stage_ms_per_read` (enqueue to last DMA
+  callback) and `tensor_init_ms_per_read` (PJRT buffer and manager
+  creation) beside the credit, block and read timers.
+- Playground: `ZML_LOAD_CHECK=n` reads every n-th loaded tensor and the
+  largest eligible one back to host and compares the bytes with the source
+  (`load check: ok tensors_checked=...`). Each source file is opened once;
+  a replicated buffer is compared on every replica (`Buffer.Shard.toHost`);
+  a partitioned one is assembled with `toSliceAlloc`, whose element-stride
+  placement of sub-byte shards is wrong, so sub-byte tensors partitioned
+  over several devices are skipped (pre-existing `toSliceAlloc` defect,
+  open). The `Loaded weights` summary excludes the check; a failing check
+  stores its error and returns it after the buffers' block, since that
+  block's `errdefer` and `defer` both release them.
+
+Results (2026-09-04; baseline `c9fe01d4` measured the same day on the
+same host; "count" is the intermediate tree `a9802595`, "final" is
+`16098680`, `b6f23018` where noted):
+
+| host, workload | baseline | this pass |
+|---|---:|---:|
+| gb300-2 GPU 0, DeepSeek 148.65 GiB, plain (bulk phase) | 2.96 s (climbed to 32), 3.40 s (held 8) | final: 3.17, 3.28, 3.31, 3.33 s (all held 12, first window discarded); `b6f23018`: 2.56 s (32), 3.33 s (12), 3.51 s (16, busy host) |
+| gb300-2 GPU 0, DeepSeek read-back (`ZML_LOAD_CHECK=64`) | - | ok, 1082 tensors, `b6f23018` and final |
+| local B70, Llama sharded, interleaved | 658, 674, 682 ms | count: 676, 681, 674 ms; final: 668 to 676 ms; full read-back ok 291/291 |
+| local B70, HF Qwen3.5-9B (network, one run each unless noted) | 22.7, 22.0 s (climbed to 48) | count: 26.3, 24.0 s (held 32 after a probe at 24); final: 22.5, 23.9 s; no warm-up discard; sampled read-back ok |
+| CUDA 9985wx (RTX 5090), Llama sharded, one GPU, interleaved | 475, 485, 457 ms | count: 443, 449, 463 ms; full read-back ok on one and two GPUs; final unmeasured (both GPUs held by another user's server) |
+| MI300 (degraded: DMA 2.9 to 8.0 GiB/s, load 100 to 150) | void | void; read-back ok: two-GPU Llama 291/291 and DeepSeek 1082 sampled (count) |
+
+Per-request timers on the final tree: gb300-2 DeepSeek credit wait 0.8 to
+0.9 ms, block wait 0.001, read 3.1 to 3.3, DMA stage 6.3 to 6.6, tensor
+init 0.06; B70 HF credit wait 4.5 ms (was 120 to 410), read 1200 to 1260,
+DMA stage 1.0; B70 Llama credit wait 0, read 4.2, DMA stage 0.4.
+
+Known limits recorded by the review of this pass:
+
+- On gb300-2 the fastest loads are the ones whose controller reached 24 or
+  32 (2.56 to 2.96 s at 55 to 58 GiB/s in the windows) and the slowest the
+  ones that held 8 to 12 (3.2 to 3.5 s at 42 to 45). Which happens is
+  decided by whether one window at 16 beats one window at 12 by 3%, and
+  those windows differ by less than the noise (12: 42 to 45; 16: 40 to 48).
+  The fourth-pass "hold at 8" is the same effect. A DMA-bound window
+  (residency at or above read time) is the wrong evidence to end a climb
+  on: a re-measure before stopping, or continuing while the stage stays
+  the limiter, is the next controller change to measure.
+- `Buffer.toSliceAlloc` places sub-byte shards by element stride (1 byte
+  per element for `u4`, `f4e2m1`), so a 4-bit tensor partitioned over two
+  or more devices is assembled at twice its offset: index out of bounds in
+  safe builds. Pre-existing; the loader plans on the packed shape and is
+  unaffected; the playground check skips such tensors.
+- The pump can still submit into a manager whose event just errored
+  (`host_to_device_transfer_manager.cc:342` CHECK, the oneAPI abort in
+  "Open work"): the manager nulls the definition event under its own mutex
+  before our callback runs, so no loader-side flag can close that window.
+- `active_events` and `ready_entries` are derivable from the per-device
+  arrays and the deque lengths; kept as assert witnesses.
+- The load check compares every replica, but `checkPacks` keeps its own
+  read-back loop (three packs, `source.reader`); a shared helper is
+  possible once both need the same open strategy.
+- Credit waiting is undercounted by the waits of workers that lose the
+  claim race after `waitForWork` (pre-existing).
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
@@ -1055,10 +1216,16 @@ Third-pass items left open; `PLAN.md` holds the checklist.
 - The first measurement window of a load is now discarded as a warm-up
   (fourth pass); the bias it removes is the DMA-stage fill burst, which is
   the opposite sign of the startup bias seen on hosts with slower DMA.
-- Fourth-pass follow-ups: the CUDA host regression run (both RTX 5090s were
-  occupied on 2026-09-04); the MI300 comparison once the host is healthy;
-  the gb300-2 hold at 8 in the user's log, which this controller cannot
-  produce from the printed rates (a replay holds 12).
+- Fourth-pass follow-ups: the CUDA host regression run on the final tree
+  (both RTX 5090s were held by another user's server for the whole
+  afternoon of 2026-09-04; the intermediate tree measured 443 to 463 ms
+  against 457 to 485 ms there); the MI300 comparison once the host is
+  healthy. The gb300-2 hold at 8 is explained by the fifth pass: on a
+  DMA-bound host the rungs measure within noise of each other and the
+  single-sample 3% climb rule stops at random; see "Fifth pass".
+- Fifth-pass follow-ups: a controller rule for DMA-bound windows (see the
+  fifth-pass limits); the `toSliceAlloc` sub-byte shard placement; the
+  pump-side race with an errored manager.
 - The 8% smallest-near-peak block rule is fragile on a busy host (it chose
   2 MiB on MI300 while degraded). Calibration caching per host/plugin, or
   re-screening when the measured rate is implausibly low, remains open.

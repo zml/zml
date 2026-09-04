@@ -70,6 +70,20 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
   timers in the summary). Result: gb300-2 DeepSeek 5.9 s -> 3.3-3.6 s;
   B70, HF and degraded MI300 at parity; CUDA host unmeasured (GPUs
   occupied). Details in CTX.md "Fourth pass".
+- [x] 15. Fifth pass (2026-09-04): flag the last DMA transfer by submitted
+  bytes instead of destination position (PJRT only needs the flagged call
+  to be the last call), delete the prefix wait and the planner's
+  predecessor order, `std.Deque` ready queues, `IncompleteTransfer` at
+  await, park workers the width does not need, warm-up window judged by
+  measured credit waiting, DMA-stage and tensor-init timers,
+  `ZML_LOAD_CHECK` read-back in the playground. Result: read-back checks pass on
+  the B70, the CUDA host (one and two GPUs), MI300 (two GPUs, DeepSeek
+  sampled) and gb300-2 (DeepSeek sampled); load times at parity on every
+  host (gb300-2 DeepSeek 3.2 to 3.3 s, B70 Llama 0.67 s, CUDA Llama 0.45 s
+  on the intermediate tree); the HF credit wait fell from 120 to 410 ms per
+  read to 4.5 with no warm-up misfire. Open: the climb rule on DMA-bound
+  hosts (a climb to 32 is 2.6 to 3.0 s there).
+  Details in CTX.md "Fifth pass".
 
 ## Measurement protocol
 
