@@ -2,9 +2,10 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "playground",
+    name = "io",
     args = [],
     data = [],
     main = "main.zig",
     deps = ["//zml"],
+    visibility = ["//visibility:public"],
 )
