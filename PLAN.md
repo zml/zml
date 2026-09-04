@@ -388,6 +388,71 @@ batch inherits it. (2)-(4) are task 8 territory (busy-time clock, no drains).
   identical, peak HBM steps by one layer's inputs, wall time decreasing; the
   loader line shows the VFS profile for an `hf://` model.
 
+Result (2026-09-04, build and Llama verified; Laguna measurement pending):
+`llmd/main.zig`: the five `vfs.register(scheme, x.io())` calls are
+`vfs.registerBackend(scheme, x.backend())`; after the platform block
+`platform.benchTransfer(allocator, io, .{})`, `platform.warmupDeviceAllocators()`
+and `const load_profile = try vfs.loadProfile(args.model)`; new flag
+`--expert-pack-budget=<bytes>` (0 = one layer's packs at a time) stored as
+`models.Options.expert_pack_budget`; `zml/io/load` at debug in
+`std_options` so the two loader lines print; the bench client gets `base_io`
+(the VFS `io` resolves fd 1 through its handle table, so the TTFT line failed
+with `WriteFailed`). `llmd/models.zig`: `Options.expert_pack_budget`,
+`Model.init(..., load_profile, progress)` threaded to every model.
+`llmd/dflash.zig`: `DFlashContext.initOptional(allocator, io, &vfs, ...)`
+computes the drafter repo's own profile, carried in
+`DflashOptions.load_profile`. Eleven loaders (`llama`, `llama_dflash` x2,
+`gemma3_text`, `gemma4_text`, `gemma4_dflash` x2, `ministral3`, `qwen3_5`,
+`lfm2`, `dflash_drafter`, `laguna_dflash` drafter): `Loader.init(allocator,
+io, platform, store, .{ .shardings, .load_profile, .progress })`, `const
+handle = try loader.load(T, model, &buffers); try handle.await();`,
+`bytesLoaded()`; the `initTextOnly` wrappers (`gemma3`, `gemma4`, `mistral3`)
+pass `load_profile` through. `laguna.zig`: `Tensors.loadBuffers(self,
+allocator, io, platform, parallelism, store, load_profile,
+expert_pack_budget, progress)` compiles the packers, submits ONE
+`loader.load(Tensors, self, &buffers)` for every single-source tensor (fused
+bindings skipped), then per sparse layer ONE `Window.submit(&loader, &.{down,
+gate_up})` through `Window.init(allocator, budget orelse 1, 8)`, then
+`window.drain()`, `bulk.await()`, `bytesLoaded()`; the first (dense) layer is a
+different type and has no packs; `Laguna.loadBuffers`,
+`LagunaDecoderLayer.loadBuffers`, `LagunaSparseMoe.loadBuffers`,
+`LagunaExperts.loadBuffers` and the arena are gone, `preloadExpertPackers`,
+`LagunaExperts.preload`, `ExpertPackExecutables`, `tensorsFromSources` and
+the pack functions stay; `laguna_dflash.zig` calls it with
+`options.expert_pack_budget`. Placement validation: the pack tensors carry
+`.expert = .experts`; `pickSharding(shardings, shape, .explicit_axis_binding)`
+returns the `experts` sharding (`tp_mesh` and `replicated` bind no `.experts`
+axis) and the packers are compiled with the same `shardings` list, where
+`Partitioning.selectSharding` (`.any_covering`) picks the same `experts`
+sharding for the `.expert = .experts` output, so `validateSamePlacement`
+compares one registered sharding with itself. Unrelated drift: the monorepo
+was last built against zml of 2026-07-27 and `../zml` HEAD needed
+`zml.Compiler(f)` -> `zml.Compiler.Typed(f)` (42 sites), `slice1d` -> `slice`
+(126 sites), three `dynamicSlice` -> `slice(ax, .dynSingle(i))`,
+`forwardMoe(x, ids, w, Linear, Linear, .{}, metadata, parameters)` (three
+MoE models), `flashinfer_cutlass` in the MoE metadata switches, the
+`stablehlo` paged-attention arm (mirrors `triton`) in `attention.zig` and
+`parallelism.zig`. Build: `cd ~/github/zml/monorepo && bazel build
+--config=release --@zml//platforms:oneapi=true --@zml//platforms:cpu=false
+//llmd:llmd` (green; `zig fmt --check` clean). Local B70:
+`ONEAPI_DEVICE_SELECTOR=level_zero:1 bazel run ... //llmd:llmd --
+--model=/var/models/meta-llama/Llama-3.1-8B-Instruct --bench-prompt="Hello"`
+printed `live loader ready: target=oneapi, profile=local, request_size=8.00MiB,
+dma_block_size=8.00MiB, workers=13, ... retained=528.00MiB`, `Loaded weights
+[14.96GiB, 640.175ms, 23.36GiB/s]`, `loader summary: batches=1,
+successful=true, bytes_loaded=14.96GiB, elapsed=0.640s, reads=1918,
+dma_submissions=2187, selected_source_width=12, gate_closed_ticks=0,
+pinned_high_water=136.00MiB`, `TTFT: 112.44 ms`, `Average decode throughput:
+27.71 tokens/s (23 completion tokens)`. Laguna-XS-2.1 (63 GB) does not fit a
+32 GB B70; on the ROCm host run, from `~/github/zml/monorepo`,
+`ROCR_VISIBLE_DEVICES=0 bazel run --config=release --@zml//platforms:rocm=true
+--@zml//platforms:cpu=false //llmd:llmd --
+--model=/var/models/poolside/Laguna-XS-2.1 --expert-pack-budget=0
+--bench-prompt="Hello"` and the same with `--expert-pack-budget=3221225472`
+(two layers of bf16 pack inputs: down 512 MiB + gate_up 1 GiB per layer), and
+compare `Loaded weights`, `batch completed`, `loader summary` and the bench
+lines (`grep -a`, the logo makes the log binary for grep).
+
 ### 6. Per-file incremental publish; identity fair order for one device
 
 - `DirectLoader.submit`: sort once; per file group `prepareBatch` then
@@ -493,6 +558,23 @@ replay's third window is the downward probe of 8 (test: 19.90 GiB/s, hold
 12). The B70 8 MiB curve is flat between 12 and 16 within the band (16 beat
 12 by 3.5% in two of five plain runs), so the held width alternates 12/16
 at equal load times. MI300/CUDA confirmation pending.
+
+Follow-ups landed after the task 8 measurements (commits 4a046807 and
+f76cd626): (a) the pinned working set is mapped in calibration, not at
+loader creation, after MI300 showed 203-238 ms of hipHostMalloc inside the
+load; (b) worker tasks are spawned on demand from the lifecycle limit
+(MI300, adaptive: 16 tasks 0.424 s epoch, 24 tasks 0.476 s, 32 tasks
+0.572 s, 128 tasks 0.613-0.675 s; even width 16 measured 21 GiB/s with 128
+tasks against 36 GiB/s with 16); (c) windows open at the generation's
+first completed read so a high-latency source is not charged its round trip
+(HF windows 447-495 MiB/s before, 600 MiB/s after, for the same width).
+Results on quiet hosts, Llama one GPU: local B70 0.636-0.672 s (day one
+0.76-0.79); CUDA 0.467-0.548 s (day one 0.61); MI300 0.486-0.508 s (day one
+1.10-1.15; fixed width 12 is 0.41-0.42 s, the remaining gap is one probe
+window); MI300 DeepSeek 7.09-7.22 s (day one 8.2); HF Qwen3.5-9B 19.6-19.7 s
+at 934-938 MiB/s (day one 21-22 s), where the climb to 48-64 is correct
+because the CDN caps each connection near 19 MiB/s. Pinned high-water
+136-272 MiB locally inside a 528 MiB working set; 1.5-2 GiB on HF.
 
 ### 9. Per-plan preallocated contexts and event retirement (gated)
 
