@@ -3936,6 +3936,7 @@ pub const DirectLoader = struct {
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
     dma_resources: *DmaPlatformSettings,
+    owns_dma_resources: bool,
     pool: mem.DmaBlockPool,
     scheduler: FairVectoredReadScheduler,
     metrics: VectoredLoadMetrics = .{},
@@ -3958,6 +3959,11 @@ pub const DirectLoader = struct {
     controller_started: bool = false,
     cleaned: bool = false,
 
+    fn providedDmaSettings(opts: LoaderOptions) ?*DmaPlatformSettings {
+        const optional = opts.dma orelse return null;
+        return if (optional.*) |*settings| settings else null;
+    }
+
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -3966,10 +3972,23 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        const resources = opts.dma orelse return error.DmaResourcesRequired;
-        try resources.acquire(platform);
+        var owned_resources: ?*DmaPlatformSettings = null;
+        const resources = providedDmaSettings(opts) orelse resources: {
+            const owned = try allocator.create(DmaPlatformSettings);
+            errdefer allocator.destroy(owned);
+            owned.* = try dma.calibrate(allocator, io, platform, .{});
+            owned_resources = owned;
+            break :resources owned;
+        };
+        errdefer if (owned_resources) |owned| {
+            owned.deinit();
+            allocator.destroy(owned);
+        };
+        try resources.acquire();
         errdefer resources.release();
         const config = resources.config;
+        if (config.device_numa_nodes.len != platform.devices.len)
+            return error.DmaDeviceMismatch;
         if (config.block_size > max_load_read_request_size or
             config.max_mapped_bytes < max_load_read_request_size)
             return error.InvalidDmaLoadConfig;
@@ -4060,6 +4079,7 @@ pub const DirectLoader = struct {
             .load_profile = opts.load_profile,
             .progress = opts.progress,
             .dma_resources = resources,
+            .owns_dma_resources = owned_resources != null,
             .pool = pool,
             .scheduler = scheduler,
             .read_gate = .init(limits.read),
@@ -4460,6 +4480,10 @@ pub const DirectLoader = struct {
             self.scheduler.deinit();
             self.pool.deinit();
             self.dma_resources.release();
+            if (self.owns_dma_resources) {
+                self.dma_resources.deinit();
+                self.allocator.destroy(self.dma_resources);
+            }
             self.cleaned = true;
         }
         const allocator = self.allocator;

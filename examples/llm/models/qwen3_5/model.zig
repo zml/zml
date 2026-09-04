@@ -78,27 +78,13 @@ pub const LoadedModel = struct {
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-        shardings: common.Shardings,
-        load_profile: zml.io.VFS.LoadProfile,
-        dma_settings: ?*zml.io.dma.DmaPlatformSettings,
+        loader: *zml.io.Loader,
     ) !Buffers {
-        progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
 
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        const all_shardings = shardings.all();
-        var loader = try zml.io.Loader.init(allocator, io, platform, store, .{
-            .dma = dma_settings,
-            .progress = progress,
-            .shardings = &all_shardings,
-            .load_profile = load_profile,
-        });
-        defer loader.deinit();
         const weights_handle = try loader.load(Model, &self.inner, &buffers);
         try weights_handle.await();
         const total_bytes = loader.bytesLoaded();

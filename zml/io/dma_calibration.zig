@@ -829,7 +829,6 @@ pub const DmaPlatformSettings = struct {
     config: DmaLoadConfig,
 
     allocator: std.mem.Allocator,
-    platform: *const Platform,
     workspace: DmaBenchmarkSourcePools,
     status: std.atomic.Value(Status) = .init(.idle),
 
@@ -847,12 +846,11 @@ pub const DmaPlatformSettings = struct {
         return .{
             .config = owned_config,
             .allocator = allocator,
-            .platform = platform,
             .workspace = workspace,
         };
     }
 
-    pub fn acquire(self: *DmaPlatformSettings, platform: *const Platform) !void {
+    pub fn acquire(self: *DmaPlatformSettings) !void {
         if (self.status.cmpxchgStrong(
             .idle,
             .loading,
@@ -862,9 +860,6 @@ pub const DmaPlatformSettings = struct {
         errdefer self.release();
 
         try validateDmaLoadConfig(self.config);
-        if (platform != self.platform) return error.DmaPlatformMismatch;
-        if (self.config.device_numa_nodes.len != platform.devices.len)
-            return error.DmaDeviceMismatch;
         if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
     }

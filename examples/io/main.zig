@@ -318,7 +318,7 @@ pub fn main(init: std.process.Init) !void {
                 var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
                 errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
                 var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, &store, .{
-                    .dma = if (dma_settings) |*settings| settings else null,
+                    .dma = &dma_settings,
                     .shardings = &.{sharded_sharding},
                     .read_parallelism = load_read_parallelism,
                     .load_profile = load_profile,
