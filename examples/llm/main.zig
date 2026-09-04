@@ -87,14 +87,14 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var dma_calibration_fut = try io.concurrent(
-        zml.io.dma.calibrateIfSupported,
+    var dma_benchmark_fut = try io.concurrent(
+        zml.io.dma.benchmarkIfSupported,
         .{ allocator, io, platform, .{} },
     );
-    defer if (dma_calibration_fut.cancel(io)) |maybe_calibration| {
-        if (maybe_calibration) |calibration| {
-            var settings = calibration;
-            settings.deinit();
+    defer if (dma_benchmark_fut.cancel(io)) |maybe_result| {
+        if (maybe_result) |result| {
+            var benchmark_result = result;
+            benchmark_result.deinit();
         }
     } else |_| {};
 
@@ -153,11 +153,11 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers after compilation to leave enough device memory for autotuning.
     const load_profile = try vfs.loadProfile(args.model);
-    var dma_calibration = try dma_calibration_fut.await(io);
+    var dma_benchmark = try dma_benchmark_fut.await(io);
     progress.increaseEstimatedTotalItems(store.view().count());
     const all_shardings = shardings.all();
     var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
-        .dma = &dma_calibration,
+        .dma = &dma_benchmark,
         .progress = &progress,
         .shardings = &all_shardings,
         .load_profile = load_profile,

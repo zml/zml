@@ -46,10 +46,10 @@ pub const LoaderOptions = struct {
     /// Model-wide source tuning prepared from the VFS path. The default is
     /// generic for callers that do not have an explicit VFS profile.
     load_profile: VFS.LoadProfile = .default,
-    /// Reuses an existing calibration on direct-transfer platforms. When
-    /// absent, the loader calibrates and owns its DMA settings. Supplied
-    /// settings must outlive the loader and may be used by only one loader.
-    dma: ?*?dma.Settings = null,
+    /// Reuses an existing benchmark result on direct-transfer platforms. When
+    /// absent, the loader benchmarks and owns its DMA result. A supplied
+    /// result must outlive the loader and may be used by only one loader.
+    dma: ?*?dma.BenchmarkResult = null,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
 };

@@ -3932,7 +3932,7 @@ pub const DirectLoader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
-    dma_resources: *dma.Settings,
+    dma_resources: *dma.BenchmarkResult,
     owns_dma_resources: bool,
     pool: mem.DmaBlockPool,
     scheduler: FairVectoredReadScheduler,
@@ -3956,9 +3956,9 @@ pub const DirectLoader = struct {
     controller_started: bool = false,
     cleaned: bool = false,
 
-    fn providedDmaSettings(opts: LoaderOptions) ?*dma.Settings {
+    fn providedDmaBenchmark(opts: LoaderOptions) ?*dma.BenchmarkResult {
         const optional = opts.dma orelse return null;
-        return if (optional.*) |*settings| settings else null;
+        return if (optional.*) |*result| result else null;
     }
 
     pub fn create(
@@ -3969,11 +3969,11 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        var owned_resources: ?*dma.Settings = null;
-        const resources = providedDmaSettings(opts) orelse resources: {
-            const owned = try allocator.create(dma.Settings);
+        var owned_resources: ?*dma.BenchmarkResult = null;
+        const resources = providedDmaBenchmark(opts) orelse resources: {
+            const owned = try allocator.create(dma.BenchmarkResult);
             errdefer allocator.destroy(owned);
-            owned.* = try dma.calibrate(allocator, io, platform, .{});
+            owned.* = try dma.benchmark(allocator, io, platform, .{});
             owned_resources = owned;
             break :resources owned;
         };
@@ -3983,7 +3983,7 @@ pub const DirectLoader = struct {
         };
         try resources.acquire();
         errdefer resources.release();
-        const config = resources.config;
+        const config = resources.calibration;
         if (config.device_numa_nodes.len != platform.devices.len)
             return error.DmaDeviceMismatch;
         if (config.block_size > max_load_read_request_size or
@@ -4012,12 +4012,12 @@ pub const DirectLoader = struct {
         // Calibration already mapped the working set for a 16 MiB request;
         // this grows the remainder for larger request sizes (HF profiles)
         // so no pinned slab grows inside a scored window. The arenas stay
-        // with the settings for later loaders.
+        // with the benchmark result for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = resources.retainedMappedBytes();
         try resources.ensureSourceWorkingSet(
             maximum_blocks_per_job,
-            dma.Settings.preallocated_source_width,
+            dma.BenchmarkResult.preallocated_source_width,
             node_reserves,
         );
         const pregrown_bytes = resources.retainedMappedBytes() - retained_before;
@@ -4296,7 +4296,7 @@ pub const DirectLoader = struct {
             batch,
             self.platform.devices.len,
             batch.items,
-            self.dma_resources.config.block_size,
+            self.dma_resources.calibration.block_size,
             self.source_request_size,
         ) catch |err| {
             if (batch.diagnostics.plans == 0) return err;
@@ -4566,7 +4566,7 @@ test "coalesced job block bound is independent of device count" {
     );
 
     const shared_numa = [_]?usize{null} ** 8;
-    const config: dma.LoadConfig = .{
+    const config: dma.Calibration = .{
         .device_numa_nodes = &shared_numa,
         .block_size = 16 * 1024 * 1024,
         .max_in_flight_per_device = 1,

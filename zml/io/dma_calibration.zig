@@ -20,9 +20,9 @@ pub const default_benchmark_block_sizes = [_]usize{
 const benchmark_repeats = 3;
 const max_devices = 64;
 
-/// Immutable DMA settings shared by every device participating in one load.
-/// The slices are owned by the enclosing DMA settings.
-pub const LoadConfig = struct {
+/// Immutable DMA calibration shared by every device participating in one load.
+/// The slices are owned by the enclosing benchmark result.
+pub const Calibration = struct {
     device_numa_nodes: []const ?usize,
     block_size: usize,
     max_in_flight_per_device: usize,
@@ -51,19 +51,11 @@ pub const Options = struct {
     device_numa_nodes: []const usize = &.{},
 };
 
-/// The selection made on the representative device: exactly the tuple the
-/// loader applies, plus the rate that chose it.
-const DeviceRecommendation = struct {
-    device_index: usize,
-    dma_block_size: usize,
-    measured_bytes_per_second: f64,
-};
-
-/// What one calibration reports: the workspace and settings it produced, the
+/// What one benchmark reports: the workspace and calibration it produced, the
 /// selected tuple, and the three phase times of the single summary line.
 const BenchmarkReport = struct {
-    resources: Settings,
-    recommendation: DeviceRecommendation,
+    resources: BenchmarkResult,
+    measured_bytes_per_second: f64,
     /// Whole `benchmarkSyntheticTransfer` call, including arena mapping.
     elapsed_ns: u64,
     /// End of the device allocator warm-up to the selected tuple: the
@@ -72,26 +64,26 @@ const BenchmarkReport = struct {
     device_allocator_warmup_ns: u64,
 };
 
-/// Returns calibrated settings for direct-transfer platforms and `null` for
+/// Returns a benchmark result for direct-transfer platforms and `null` for
 /// platforms that use the buffered loader.
-pub fn calibrateIfSupported(
+pub fn benchmarkIfSupported(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !?Settings {
+) !?BenchmarkResult {
     if (!isSupported(platform)) return null;
-    return try calibrate(allocator, io, platform, opts);
+    return try benchmark(allocator, io, platform, opts);
 }
 
 /// Measures one representative device and returns an owned, reusable DMA
 /// workspace configured for every addressable device.
-pub fn calibrate(
+pub fn benchmark(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !Settings {
+) !BenchmarkResult {
     var result = try benchmarkSyntheticTransfer(allocator, io, platform, opts);
     errdefer result.resources.deinit();
     logBenchmarkReport(platform, &result);
@@ -174,7 +166,7 @@ fn benchmarkSyntheticTransfer(
         std.Io.Timestamp.now(io, .awake),
     );
 
-    const uniform_block_size = representative.dma_block_size;
+    const uniform_block_size = representative.value;
     const uniform_parallelism = opts.block_parallelism;
     const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
     defer allocator.free(calibrated_node_reserves);
@@ -200,13 +192,13 @@ fn benchmarkSyntheticTransfer(
     try source_pools.ensureSourceWorkingSet(
         uniform_block_size,
         try limits.maximumCoalescedJobBlocks(
-            @max(uniform_block_size, Settings.preallocated_request_size),
+            @max(uniform_block_size, BenchmarkResult.preallocated_request_size),
             uniform_block_size,
         ),
-        Settings.preallocated_source_width,
+        BenchmarkResult.preallocated_source_width,
         calibrated_node_reserves,
     );
-    const resources = try Settings.adopt(
+    const resources = try BenchmarkResult.adopt(
         allocator,
         platform,
         .{
@@ -220,7 +212,7 @@ fn benchmarkSyntheticTransfer(
     source_pools_active = false;
     return .{
         .resources = resources,
-        .recommendation = representative,
+        .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
             std.Io.Timestamp.now(io, .awake),
@@ -271,7 +263,7 @@ fn tuneDevice(
     opts: Options,
     source_pools: *BenchmarkSourcePools,
     device_index: usize,
-) !DeviceRecommendation {
+) !BenchmarkDecision {
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
@@ -317,13 +309,7 @@ fn tuneDevice(
         opts.block_parallelism,
         opts.block_selection_tolerance,
     );
-    const selected_cohort = block_candidates[block_decision.index].cohort;
-
-    return .{
-        .device_index = device_index,
-        .dma_block_size = selected_cohort.block_size,
-        .measured_bytes_per_second = block_decision.metrics.bytesPerSecond(),
-    };
+    return block_decision;
 }
 
 fn benchmarkTupleFeasible(source_len: usize, block_size: usize, parallelism: usize) bool {
@@ -436,6 +422,7 @@ fn confirmAndSelectBenchmarkCandidate(
     }
     return .{
         .index = selected_index,
+        .value = candidates[selected_index].value,
         .metrics = confirmed_metrics[selected_index] orelse medians[selected_index],
     };
 }
@@ -591,14 +578,13 @@ fn benchmarkWindowComplete(
 /// One line per calibration: what was selected, at what rate, and what it
 /// cost. Per-arena mapping is logged where each arena is mapped.
 fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const BenchmarkReport) void {
-    const recommendation = result.recommendation;
     log.info("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d} numa_pools={d}", .{
         @tagName(platform.target),
         platform.devices.len,
-        platform.devices[recommendation.device_index].kind(),
-        recommendation.dma_block_size,
-        result.resources.config.max_in_flight_per_device,
-        recommendation.measured_bytes_per_second / (1024 * 1024 * 1024),
+        platform.devices[0].kind(),
+        result.resources.calibration.block_size,
+        result.resources.calibration.max_in_flight_per_device,
+        result.measured_bytes_per_second / (1024 * 1024 * 1024),
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
@@ -638,6 +624,7 @@ const BenchmarkCandidate = struct {
 
 const BenchmarkDecision = struct {
     index: usize,
+    value: usize,
     metrics: BenchmarkRunMetrics,
 };
 
@@ -813,14 +800,14 @@ pub fn isSupported(platform: *const platform_mod.Platform) bool {
 /// Owned, reusable host-DMA workspace. A workspace may be borrowed by only one
 /// load at a time, must be deinitialized before its platform, and keeps all
 /// registered arenas mapped until `deinit`.
-pub const Settings = struct {
+pub const BenchmarkResult = struct {
     const Status = enum(u8) {
         idle,
         loading,
         destroying,
     };
 
-    config: LoadConfig,
+    calibration: Calibration,
 
     allocator: std.mem.Allocator,
     workspace: BenchmarkSourcePools,
@@ -829,22 +816,22 @@ pub const Settings = struct {
     fn adopt(
         allocator: std.mem.Allocator,
         platform: *const platform_mod.Platform,
-        config: LoadConfig,
+        calibration: Calibration,
         workspace: BenchmarkSourcePools,
-    ) !Settings {
-        try validateLoadConfig(config);
+    ) !BenchmarkResult {
+        try validateCalibration(calibration);
         try validatePlatform(platform);
-        if (config.device_numa_nodes.len != platform.devices.len)
+        if (calibration.device_numa_nodes.len != platform.devices.len)
             return error.DmaDeviceMismatch;
-        const owned_config = try dupeLoadConfig(allocator, config);
+        const owned_calibration = try dupeCalibration(allocator, calibration);
         return .{
-            .config = owned_config,
+            .calibration = owned_calibration,
             .allocator = allocator,
             .workspace = workspace,
         };
     }
 
-    pub fn acquire(self: *Settings) !void {
+    pub fn acquire(self: *BenchmarkResult) !void {
         if (self.status.cmpxchgStrong(
             .idle,
             .loading,
@@ -853,17 +840,17 @@ pub const Settings = struct {
         ) != null) return error.DmaWorkspaceBusy;
         errdefer self.release();
 
-        try validateLoadConfig(self.config);
-        if (self.workspace.allocatedBytes() > self.config.max_mapped_bytes)
+        try validateCalibration(self.calibration);
+        if (self.workspace.allocatedBytes() > self.calibration.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
     }
 
-    pub fn release(self: *Settings) void {
+    pub fn release(self: *BenchmarkResult) void {
         const previous = self.status.swap(.idle, .release);
         std.debug.assert(previous == .loading);
     }
 
-    pub fn retainedMappedBytes(self: *const Settings) usize {
+    pub fn retainedMappedBytes(self: *const BenchmarkResult) usize {
         return self.workspace.allocatedBytes();
     }
 
@@ -888,32 +875,32 @@ pub const Settings = struct {
     /// stage's blocks: the calibrated depth per device) can be leased from
     /// each pool without mapping a slab during the load, clipped to the
     /// largest width that fits the mapped ceiling. The arenas stay owned by
-    /// these settings and are reused by every later loader.
+    /// this benchmark result and are reused by every later loader.
     pub fn ensureSourceWorkingSet(
-        self: *Settings,
+        self: *BenchmarkResult,
         request_blocks: usize,
         width: usize,
         feed_reserves: []const usize,
     ) !void {
         return self.workspace.ensureSourceWorkingSet(
-            self.config.block_size,
+            self.calibration.block_size,
             request_blocks,
             width,
             feed_reserves,
         );
     }
 
-    pub fn numaPoolCount(self: *const Settings) usize {
+    pub fn numaPoolCount(self: *const BenchmarkResult) usize {
         return self.workspace.pools.len;
     }
 
-    pub fn deinit(self: *Settings) void {
+    pub fn deinit(self: *BenchmarkResult) void {
         if (self.status.cmpxchgStrong(
             .idle,
             .destroying,
             .acq_rel,
             .acquire,
-        ) != null) @panic("Settings.deinit called while borrowed");
+        ) != null) @panic("BenchmarkResult.deinit called while borrowed");
         const io = self.workspace.io;
         const mapped_bytes = self.workspace.allocatedBytes();
         const started = std.Io.Timestamp.now(io, .awake);
@@ -923,7 +910,7 @@ pub const Settings = struct {
             mapped_bytes,
             @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
         });
-        freeLoadConfig(self.allocator, self.config);
+        freeCalibration(self.allocator, self.calibration);
         self.* = undefined;
     }
 };
@@ -941,7 +928,7 @@ fn validatePlatform(platform: *const platform_mod.Platform) !void {
 /// Blocks a load cannot start without: every pool feeds its own devices and
 /// must still hold one maximal coalesced job. Validation only; the pool grows
 /// on demand up to the mapped ceiling.
-pub fn requiredWorkspaceBytes(config: LoadConfig) !usize {
+pub fn requiredWorkspaceBytes(config: Calibration) !usize {
     if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_devices)
         return error.InvalidDmaLoadConfig;
     const maximum_request_blocks = try limits.maximumCoalescedJobBlocks(
@@ -981,7 +968,7 @@ pub fn requiredWorkspaceBytes(config: LoadConfig) !usize {
         error.InvalidDmaLoadConfig;
 }
 
-fn validateLoadConfig(config: LoadConfig) !void {
+fn validateCalibration(config: Calibration) !void {
     if (config.device_numa_nodes.len == 0 or config.device_numa_nodes.len > max_devices or
         config.block_size == 0 or config.max_in_flight_per_device == 0 or
         config.max_in_flight_per_device > limits.max_dma_parallelism or
@@ -1004,7 +991,7 @@ fn validateLoadConfig(config: LoadConfig) !void {
         return error.InvalidDmaLoadConfig;
 }
 
-fn dupeLoadConfig(allocator: std.mem.Allocator, config: LoadConfig) !LoadConfig {
+fn dupeCalibration(allocator: std.mem.Allocator, config: Calibration) !Calibration {
     const nodes = try allocator.dupe(?usize, config.device_numa_nodes);
     return .{
         .device_numa_nodes = nodes,
@@ -1014,7 +1001,7 @@ fn dupeLoadConfig(allocator: std.mem.Allocator, config: LoadConfig) !LoadConfig 
     };
 }
 
-fn freeLoadConfig(allocator: std.mem.Allocator, config: LoadConfig) void {
+fn freeCalibration(allocator: std.mem.Allocator, config: Calibration) void {
     allocator.free(config.device_numa_nodes);
 }
 
@@ -1234,7 +1221,7 @@ pub const BenchmarkSourcePools = struct {
         return usable;
     }
 
-    /// See `Settings.ensureSourceWorkingSet`. Every pool gets the
+    /// See `BenchmarkResult.ensureSourceWorkingSet`. Every pool gets the
     /// same source target because a strict-affinity load draws a device's
     /// blocks from its own node, plus its own DMA reserve.
     fn ensureSourceWorkingSet(
@@ -1524,7 +1511,7 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "DMA calibration is optional on buffered platforms" {
+test "DMA benchmark is optional on buffered platforms" {
     var platform: platform_mod.Platform = .{
         .arena = undefined,
         .target = .cpu,
@@ -1539,25 +1526,25 @@ test "DMA calibration is optional on buffered platforms" {
     };
 
     try std.testing.expect(
-        try calibrateIfSupported(std.testing.allocator, std.testing.io, &platform, .{}) == null,
+        try benchmarkIfSupported(std.testing.allocator, std.testing.io, &platform, .{}) == null,
     );
 }
 
-test "DMA load config validates uniform caps, topology, and workspace budget" {
-    const valid: LoadConfig = .{
+test "DMA calibration validates uniform caps, topology, and workspace budget" {
+    const valid: Calibration = .{
         .device_numa_nodes = &.{ null, null },
         .block_size = 4 * 1024 * 1024,
         .max_in_flight_per_device = 8,
         .max_mapped_bytes = 64 * 1024 * 1024,
     };
-    try validateLoadConfig(valid);
+    try validateCalibration(valid);
 
     var invalid = valid;
     invalid.device_numa_nodes = &.{ 0, null };
-    try std.testing.expectError(error.InvalidDmaLoadConfig, validateLoadConfig(invalid));
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateCalibration(invalid));
     invalid = valid;
     invalid.max_mapped_bytes -= 1;
-    try std.testing.expectError(error.InvalidDmaLoadConfig, validateLoadConfig(invalid));
+    try std.testing.expectError(error.InvalidDmaLoadConfig, validateCalibration(invalid));
 }
 
 test "DMA benchmark completion target has no time cap" {
