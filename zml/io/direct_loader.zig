@@ -2828,7 +2828,9 @@ const read_width_ladder = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 
 /// 3%, tolerating one rung that does not, then holds at the lowest rung
 /// within 3% of the best. One downward probe below the start rung bounds the
 /// number of windows a load spends away from its final width; the probe is
-/// adopted only when it beats the best rate, never on retention.
+/// adopted only when it beats the best rate, never on retention. The climb
+/// stops at the widest rung the pre-grown pinned capacity already covers, so
+/// no scored window pays for a slab the load has yet to map.
 const SourceReadWidthController = struct {
     const State = enum { climbing, holding };
 
@@ -2892,8 +2894,17 @@ const SourceReadWidthController = struct {
     generation: u64 = 0,
     last_backoff_generation: u64 = std.math.maxInt(u64),
 
-    fn init(configured: Parallelism, pinned_feasible_width: usize) SourceReadWidthController {
-        const configured_max = @min(configured.maximum(), pinned_feasible_width);
+    /// `growth_free_width` is the widest read width whose lifecycle credits
+    /// the pool already holds mapped (`retained - dma_stage`): above it a
+    /// scored window maps a new pinned slab, which on a GB300 cost a whole
+    /// window (20.8 GiB/s at 48 against 48.8 sustained at 32). A fixed width
+    /// the caller asked for is not clipped by it, only by feasibility.
+    fn init(
+        configured: Parallelism,
+        pinned_feasible_width: usize,
+        growth_free_width: usize,
+    ) SourceReadWidthController {
+        const configured_max = @min(configured.maximum(), pinned_feasible_width, @max(@as(usize, 1), growth_free_width));
         const max_index = widthIndexAtMost(configured_max);
         if (!configured.isAdaptive()) {
             const fixed = @min(configured.initial(), pinned_feasible_width);
@@ -3101,6 +3112,7 @@ test "source read controller bounds blind growth at 32" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
+        128,
     );
     try std.testing.expectEqual(@as(usize, 12), controller.width());
     try std.testing.expectEqual(@as(usize, 24), controller.blindGrow().?.width);
@@ -3117,6 +3129,7 @@ test "source read controller clips infeasible adaptive and fixed widths" {
     var adaptive = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         10,
+        10,
     );
     try std.testing.expectEqual(@as(usize, 8), adaptive.width());
     try std.testing.expect(adaptive.blindGrow() == null);
@@ -3125,12 +3138,13 @@ test "source read controller clips infeasible adaptive and fixed widths" {
     try std.testing.expectEqual(SourceReadWidthController.State.holding, adaptive.state);
     try std.testing.expectEqual(@as(usize, 8), adaptive.width());
 
-    const fixed = SourceReadWidthController.init(.{ .fixed = 20 }, 7);
+    const fixed = SourceReadWidthController.init(.{ .fixed = 20 }, 7, 7);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
     try std.testing.expectEqual(SourceReadWidthController.State.holding, fixed.state);
 
     const configured_initial = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 48, .maximum = 128 } },
+        128,
         128,
     );
     try std.testing.expectEqual(@as(usize, 48), configured_initial.width());
@@ -3139,6 +3153,7 @@ test "source read controller clips infeasible adaptive and fixed widths" {
 test "source read evidence requires enough concurrency and duration" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
         64,
     );
     var short = sourceReadTestEvidence(&controller, 100);
@@ -3165,6 +3180,7 @@ test "source read controller replays the B70 32 MiB curve and holds 12" {
     // below the start rung gets a value below the best.
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
         128,
     );
     const windows = try replaySourceReadCurve(&controller, &.{
@@ -3198,6 +3214,7 @@ test "source read controller climbs past one rung inside the noise band" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
+        128,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 40.50));
     try std.testing.expectEqual(@as(usize, 16), controller.width());
@@ -3228,6 +3245,7 @@ test "source read controller keeps the start rung when the probe only matches it
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
+        128,
     );
     const windows = try replaySourceReadCurve(&controller, &.{
         .{ .width = 8, .rate = 41.07 },
@@ -3246,6 +3264,7 @@ test "source read controller holds at the lowest rung within 3% on a flat curve"
     // Real AWS shape: 16 MiB requests plateau near 950 MiB/s from 16 up.
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
         128,
     );
     const windows = try replaySourceReadCurve(&controller, &.{
@@ -3267,6 +3286,7 @@ test "source read controller probes below the start rung once" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
+        128,
     );
     const windows = try replaySourceReadCurve(&controller, &.{
         .{ .width = 8, .rate = 105 },
@@ -3283,6 +3303,7 @@ test "source read controller probes below the start rung once" {
     var from_one = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 1, .maximum = 128 } },
         128,
+        128,
     );
     // Nothing below the lowest rung to probe.
     _ = try replaySourceReadCurve(&from_one, &.{
@@ -3297,6 +3318,7 @@ test "source read controller probes below the start rung once" {
 test "source read controller backs off once per generation of fresh admissions" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
         64,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 100));
@@ -3319,6 +3341,7 @@ test "source read controller backs off once per generation of fresh admissions" 
     var floor = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 1, .maximum = 64 } },
         64,
+        64,
     );
     try std.testing.expectEqual(@as(usize, 1), floor.backoff(false).?.width);
 }
@@ -3326,6 +3349,7 @@ test "source read controller backs off once per generation of fresh admissions" 
 test "source read controller steps down on transient backpressure and climbs again" {
     var controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
         64,
     );
     _ = controller.observe(sourceReadTestEvidence(&controller, 100));
@@ -3357,6 +3381,7 @@ test "source read controller steps down on transient backpressure and climbs aga
     var holding = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
+        64,
     );
     // 12 -> 16 and 24 (not better) -> the downward probe of 8 (10% below the
     // best) -> hold 12.
@@ -3370,8 +3395,32 @@ test "source read controller steps down on transient backpressure and climbs aga
     try std.testing.expectEqual(@as(usize, 8), holding.width());
 }
 
+test "source read controller stops climbing at the growth-free width" {
+    // gb300-2: 41 retained credits and a DMA stage of 8 leave 33 requests the
+    // pool already holds mapped, so the climb stops at 32. Above it the
+    // lifecycle limit maps a new pinned slab inside a scored window: one such
+    // window measured 20.8 GiB/s at 48 against 48.8 sustained at 32.
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+        33,
+    );
+    try std.testing.expectEqual(@as(usize, 32), read_width_ladder[controller.max_index]);
+    // Each rung beats the last: the climb runs up to the ceiling and holds.
+    const windows = try replaySourceReadCurve(&controller, &.{
+        .{ .width = 12, .rate = 100 },
+        .{ .width = 16, .rate = 110 },
+        .{ .width = 24, .rate = 120 },
+        .{ .width = 32, .rate = 130 },
+    });
+    try std.testing.expectEqual(@as(usize, 4), windows);
+    try std.testing.expectEqual(@as(usize, 32), controller.width());
+}
+
 test "source read controller keeps a fixed width" {
-    var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
+    // A fixed width the caller asked for is not clipped by the growth-free
+    // width, only by feasibility.
+    var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64, 4);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
     try std.testing.expect(fixed.backoff(true) == null);
     try std.testing.expect(fixed.stepDownTransient(true) == null);
@@ -3483,6 +3532,7 @@ test "source measurement rejects another controller generation" {
     var runtime: SourceReadRuntime = undefined;
     runtime.controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
         64,
     );
     runtime.metrics = &metrics;
@@ -3978,13 +4028,17 @@ pub const DirectLoader = struct {
         if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
 
         const source_parallelism = opts.read_parallelism;
-        const controller = SourceReadWidthController.init(source_parallelism, feasible_width);
         const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job, strict_affinity);
         const dma_stage_requests = dmaStageRequests(
             config.max_in_flight_per_device,
             platform.devices.len,
             config.block_size,
             request_size,
+        );
+        const controller = SourceReadWidthController.init(
+            source_parallelism,
+            feasible_width,
+            retained_credits -| dma_stage_requests,
         );
         const limits: RequestGateLimits = .init(controller.width(), feasible_width, retained_credits, dma_stage_requests);
         const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
@@ -4066,7 +4120,7 @@ pub const DirectLoader = struct {
         self.workers_started = true;
         self.controller_runtime.start(io);
         try self.startController();
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
@@ -4076,6 +4130,7 @@ pub const DirectLoader = struct {
             self.worker_pool.spawned,
             self.worker_pool.maximum,
             feasible_width,
+            read_width_ladder[self.controller_runtime.controller.max_index],
             self.pool.mappedBytes(),
             pregrown_bytes,
             @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
@@ -4666,6 +4721,7 @@ test "source read runtime never closes the read gate across decisions" {
         .controller = SourceReadWidthController.init(
             .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
             64,
+            64,
         ),
         .read_gate = &read_gate,
         .request_gate = &request_gate,
@@ -4741,6 +4797,7 @@ test "source read runtime measures from the reached width after a blind bootstra
         .controller = SourceReadWidthController.init(
             .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
             128,
+            128,
         ),
         .read_gate = &read_gate,
         .request_gate = &request_gate,
@@ -4776,6 +4833,7 @@ test "source read runtime scores a window from its first admission on busy time"
     var runtime: SourceReadRuntime = undefined;
     runtime.controller = SourceReadWidthController.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
         64,
     );
     runtime.metrics = &metrics;
