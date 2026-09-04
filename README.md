@@ -96,15 +96,16 @@ Append one or more platform flags when compiling or running:
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
 - Intel OneAPI: `--@zml//platforms:oneapi=true`
-- Moore Threads MUSA S80: `--@zml//platforms:musa=true`
+- Moore Threads MUSA S4000: `--@zml//platforms:musa=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
 - Disable CPU compilation: `--@zml//platforms:cpu=false`
 
-MUSA support currently targets Linux x86_64 S80 hosts using the rc3.1.1 SDK
-redist and requires the host MUSA driver to provide `libsrv_um_MUSA.so`. The v1
-PJRT integration can build and load the platform; compiled model execution is
-blocked until the MUSA XLA compiler lowering is implemented.
+MUSA support targets Linux x86_64 S4000 hosts using the SDK 5.1.0 `mp_22`
+redist and the isolated MUSA LLVM bridge. See
+[`platforms/musa/S4000.md`](platforms/musa/S4000.md) for the complete local
+PJRT bundle, build, and benchmark commands. A compatible host kernel driver is
+required for execution.
 
 Example on CUDA:
 

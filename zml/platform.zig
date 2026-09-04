@@ -237,6 +237,7 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 pub const State = union(Target) {
     cpu: void,
     cuda: CudaState,
+    musa: void,
     rocm: void,
     tpu: void,
     neuron: void,
@@ -263,6 +264,7 @@ pub const State = union(Target) {
             .neuron => .{ .neuron = {} },
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
+            .musa => .{ .musa = {} },
         };
     }
 
@@ -786,7 +788,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal, .musa => self.xla_gpu.writeNamedValues(&values),
+            .cuda, .rocm, .oneapi, .metal, .musa => self.xla_gpu.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));

@@ -15,12 +15,20 @@ pub fn isEnabled() bool {
 
 fn setupMusaEnv(sandbox_path: []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    _ = c.setenv("MUSA_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{sandbox_path}), 1);
+    _ = c.setenv("MUSA_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{ sandbox_path, "lib", "musa-sdk" }), 1);
+    // Keep the sandbox default while honoring explicit compatibility-test or
+    // deployment overrides; the plugin validates the requested shim fail-closed.
+    _ = c.setenv("XLA_MUSA_MUBLAS_SHIM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{ sandbox_path, "lib", "libxla_musa_mublas_shim.so.1" }), 0);
+    _ = c.setenv("XLA_MUSA_MUDNN_SHIM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{ sandbox_path, "lib", "libxla_musa_mudnn_shim.so.1" }), 1);
+    // muFFT is discovered adjacent to libpjrt_musa in the same sandbox. Do not
+    // turn that default into an explicit FFT requirement: SDK 5.1's muFFT is
+    // unqualified, and must not prevent loading an unrelated GEMM executable.
+    // A user-supplied XLA_MUSA_MUFFT_SHIM_PATH remains untouched and fail-closed.
 }
 
 fn probeMusaRuntime(sandbox_path: []const u8) !void {
     var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libmusa.so" });
+    const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libmusa.so.1" });
     _ = std.c.dlopen(driver_path, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
         const msg = std.c.dlerror();
         if (msg) |err_msg| {
@@ -32,7 +40,7 @@ fn probeMusaRuntime(sandbox_path: []const u8) !void {
     };
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libmusart.so" });
+    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libmusart.so.5" });
     _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
         const msg = std.c.dlerror();
         if (msg) |err_msg| {
