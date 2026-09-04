@@ -385,7 +385,7 @@ pub fn FnExe(comptime function_: anytype) type {
         .@"fn" => |info| info,
         else => @compileError("FnExe expects a function, got " ++ @typeName(@TypeOf(function_))),
     };
-    if (function_info.is_var_args or function_info.params.len != 1) {
+    if (function_info.attrs.varargs or function_info.param_types.len != 1) {
         @compileError("FnExe function must accept exactly one input struct");
     }
 
@@ -435,7 +435,7 @@ pub fn FnExe(comptime function_: anytype) type {
                 const RunnerSelf = @This();
 
                 pub const BakedInput = structFieldRange(Input, 0, count);
-                pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".fields.len);
+                pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".field_names.len);
 
                 pub fn init(exe: *const Self, allocator: std.mem.Allocator, baked: BakedInput) !RunnerSelf {
                     var arguments = try exe.raw.args(allocator);
@@ -474,42 +474,30 @@ fn countBackedFields(comptime Input: type, comptime baked_fields: anytype) usize
         @compileError("FnExe baked fields must be a tuple of enum literals");
     }
 
-    const input_fields = @typeInfo(Input).@"struct".fields;
-    if (baked_info.fields.len > input_fields.len) {
+    const input_info = @typeInfo(Input).@"struct";
+    if (baked_info.field_names.len > input_info.field_names.len) {
         @compileError("FnExe baked fields must be a prefix of its bufferized input fields");
     }
 
-    inline for (baked_info.fields, 0..) |tuple_field, i| {
-        const baked_field = @field(baked_fields, tuple_field.name);
+    inline for (baked_info.field_names, 0..) |tuple_field_name, i| {
+        const baked_field = @field(baked_fields, tuple_field_name);
         if (@TypeOf(baked_field) != @EnumLiteral()) {
             @compileError("FnExe baked fields must be enum literals");
         }
-        if (!std.mem.eql(u8, @tagName(baked_field), input_fields[i].name)) {
+        if (!std.mem.eql(u8, @tagName(baked_field), input_info.field_names[i])) {
             @compileError("FnExe baked fields must be an ordered prefix of its bufferized input fields");
         }
     }
-    return baked_info.fields.len;
+    return baked_info.field_names.len;
 }
 
 fn structFieldRange(comptime Struct: type, comptime start: usize, comptime end: usize) type {
-    const fields = @typeInfo(Struct).@"struct".fields[start..end];
-    var field_names: [fields.len][]const u8 = undefined;
-    var field_types: [fields.len]type = undefined;
-    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-    for (&field_names, &field_types, &field_attrs, fields) |*name, *T, *attrs, field| {
-        name.* = field.name;
-        T.* = field.type;
-        attrs.* = .{
-            .@"comptime" = field.is_comptime,
-            .@"align" = field.alignment,
-            .default_value_ptr = field.default_value_ptr,
-        };
-    }
-    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+    const info = @typeInfo(Struct).@"struct";
+    return @Struct(.auto, null, info.field_names[start..end], info.field_types[start..end], info.field_attrs[start..end]);
 }
 
 fn typedFunctionInput(comptime function_: anytype) type {
-    const Input = @typeInfo(@TypeOf(function_)).@"fn".params[0].type orelse
+    const Input = @typeInfo(@TypeOf(function_)).@"fn".param_types[0] orelse
         @compileError("FnExe function must have a concrete input type");
     validateFnExeStruct("input", Input);
     return Input;
@@ -533,16 +521,13 @@ fn validateFnExeStruct(comptime role: []const u8, comptime T: type) void {
 
 fn typedOutputDestinations(comptime BufferizedOutput: type) type {
     const output_info = @typeInfo(BufferizedOutput).@"struct";
-    const fields = output_info.fields;
-    var field_names: [fields.len][]const u8 = undefined;
-    var field_types: [fields.len]type = undefined;
-    var field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-    for (&field_names, &field_types, &field_attrs, fields) |*name, *T, *attrs, field| {
-        name.* = field.name;
-        T.* = *field.type;
-        attrs.* = .{ .@"align" = @alignOf(*field.type) };
+    var field_types: [output_info.field_names.len]type = undefined;
+    var field_attrs: [output_info.field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+    for (&field_types, &field_attrs, output_info.field_types) |*T, *attrs, Field| {
+        T.* = *Field;
+        attrs.* = .{ .@"align" = @alignOf(*Field) };
     }
-    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+    return @Struct(.auto, null, output_info.field_names, &field_types, &field_attrs);
 }
 
 test "FnExe derives baked and runtime calls from a function" {
