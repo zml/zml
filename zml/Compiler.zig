@@ -775,8 +775,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         }
 
         switch (platform.target) {
-            .rocm, .cuda => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_autotuner_cache_dir", std.mem.span(path), upb_arena);
+            .rocm, .cuda, .oneapi => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_per_fusion_autotune_cache_dir", std.mem.span(path), upb_arena);
             },
             else => {},
         }
