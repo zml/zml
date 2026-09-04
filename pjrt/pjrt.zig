@@ -1338,6 +1338,10 @@ pub const Event = opaque {
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
+            if (self.getEventError(api)) |err| {
+                return interpretPjrtError(api, err, "PJRT_Event_Error");
+            }
+
             return;
         }
 
