@@ -240,7 +240,7 @@ simplification pass.
   protected by one mutex; only the source-call configuration generation
   remains atomic for lock-free worker admission.
 - Two gates separate clean read-measurement generations from complete request
-  lifecycles. All persistent workers compete for lifecycle capacity, configured
+  lifecycles. All workers compete for lifecycle capacity, configured
   as active reads plus one shared spare and clipped by pinned feasibility; the
   read gate alone limits source calls. A request returns lifecycle credit only
   after all its DMA children finish.
@@ -253,27 +253,39 @@ simplification pass.
   feedback cannot ratchet through several rungs. `gate_closed_ticks` in the
   loader summary counts control ticks that found the read gate at 0 with
   jobs unclaimed and is 0 by construction.
-- The window clock counts busy time. The 10/25 ms control tick still runs
+- A window opens at its generation's first completed read, which is not
+  counted; from then on completions arrive at the source's steady rate, so
+  the window's bytes over its busy time is the true throughput even on a
+  high-latency source (a clock started at the first admission charged the
+  whole round trip and reported 450 MiB/s for a width that delivers 600).
+  The window clock counts busy time. The 10/25 ms control tick still runs
   while workers sleep in retries (it samples backpressure); a tick that finds
   nothing unclaimed, no pending source job and no read permit held, after
-  the window's first admission, charges the interval since the previous tick
-  to idle, and the window's elapsed time excludes it. Windows therefore span
+  the window opened, charges the interval since the previous tick to idle,
+  and the window's elapsed time excludes it. Windows therefore span
   submissions: many short submissions jointly complete one window, an idle
   gap neither scores nor resets it, and the controller never learns that
   batches exist. `create` fences the first window before the workers start
   (born busy). Every scored window logs `source width window` (generation,
   width, rate, busy time, completions, exercised width, samples, next width,
   state).
-- Pinned pre-growth: `DirectLoader.create` grows the platform's retained
-  arenas (`DmaPlatformSettings.ensureSourceWorkingSet`) so every NUMA pool
-  can lease `(32 + 1) * blocks_per_request` blocks, clipped to the mapped
-  ceiling with room for the feed reserves, before the first read: the rungs
-  the controller climbs through never map a slab inside a scored window
-  (146 ms per first hipHostMalloc slab on MI300X). With 16 MiB blocks and
-  requests that is 528 MiB, with 8 MiB blocks and requests 264 MiB (B70:
-  8 MiB beyond calibration's 256 MiB, 1.5 ms). The arenas stay with the
-  platform for later loaders; the ready line logs `retained`, `pregrown`
+- Pinned pre-growth happens in calibration, before any load: after
+  selecting the block, `benchTransfer` grows every NUMA pool so it can lease
+  `(32 + 1)` requests of `max(block, 16 MiB)` (`preallocated_source_width`,
+  `preallocated_request_size`), clipped to the mapped ceiling with room for
+  the feed reserves; 528 MiB for blocks up to 16 MiB. The rungs the
+  controller climbs through never map a slab inside a load (146-230 ms of
+  hipHostMalloc on MI300X, which at first sat inside the measured load when
+  the growth ran at loader creation). `DirectLoader.create` only grows the
+  remainder for larger requests (a 32 MiB HF profile with 8 MiB blocks adds
+  528 MiB in about 90 ms on B70). The ready line logs `retained`, `pregrown`
   and `pregrowth_ms`.
+- Worker tasks are spawned on demand (`WorkerPool`): the decision that opens
+  the gates spawns as many workers as the lifecycle limit admits, and a
+  raised width spawns more, up to the configured maximum. On one MI300X, 128
+  persistent workers cost about 7% at a held width of 12 and made every rung
+  measure slower (width 16: 21 GiB/s with 128 tasks, 36 GiB/s with 16); 13
+  workers serve width 12.
 - DMA width is fixed at eight per device by default after calibration work
   showed adaptive DMA width added substantial complexity and little load
   value. There is no global DMA parallelism cap.
@@ -730,6 +742,26 @@ decoupled, low pinned memory.
   ramp (gate drains, probing 16/24/32, slab growth) costs more than the whole
   load on this host and settles on a worse width. This, not the host, is most
   of the "ROCm problem". A CUDA fixed-width sweep was discarded (host busy).
+- After task 8 plus its follow-up (climb-and-hold controller without gate
+  drains, on-demand worker pool, pinned working set mapped in calibration;
+  commit 4a046807, quiet hosts, Llama one GPU):
+  local B70 plain 0.636-0.644 s (23.4 GiB/s; day one 0.76-0.79); packs
+  width 16 window 2 total 0.716-0.722 s.
+  CUDA plain 0.502-0.548 s (27-30 GiB/s; day one 0.61), fixed 12
+  0.488-0.500 s, fixed 16 0.456-0.477 s; packs window 1 total 0.506-0.551 s,
+  window 2 total 0.477-0.511 s (pack phase 0.42-0.44 s at 29-31 GiB/s).
+  MI300 plain 0.486-0.508 s (30 GiB/s; day one 1.10-1.15), fixed 12
+  0.409-0.416 s; packs window 1 total 0.602-0.671 s, window 2 total
+  0.537-0.594 s (pack phase 0.46-0.51 s at 25-28 GiB/s); DeepSeek
+  7.091 / 7.195 s wall (day one 8.20-8.26). Every run: gate never closed,
+  13 workers at width 12 growing with the width, pinned high-water
+  136-272 MiB inside a 528 MiB working set mapped before the load.
+- Worker-count evidence (MI300, task 8 tree, adaptive): 16 worker tasks
+  0.424 s epoch, 24 tasks 0.476 s, 32 tasks 0.572 s, 128 tasks 0.613-0.675 s;
+  with 128 tasks even width 16 measured 21 GiB/s versus 36 GiB/s with 16
+  tasks. Hence the on-demand pool. The first measurement window is biased
+  low by startup (lazy PJRT managers, file opens), so the climb usually
+  visits one rung above the start before holding.
 - Fixtures: S3Proxy jar and a `lfm` bucket linking the Llama shards exist
   locally; no AWS credentials on this machine.
 

@@ -52,7 +52,7 @@ const VectoredLoadMetrics = struct {
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: u64 = std.math.maxInt(u64),
     probe_admission_start: u64 = std.math.maxInt(u64),
-    probe_first_read_ns: u64 = 0,
+    probe_window_start_ns: u64 = 0,
     probe_active_reads: usize = 0,
     probe_peak_reads: usize = 0,
     probe_read_operations: u64 = 0,
@@ -61,7 +61,7 @@ const VectoredLoadMetrics = struct {
 
     const Snapshot = struct {
         probe_epoch: u64,
-        probe_first_read_ns: u64,
+        probe_window_start_ns: u64,
         probe_active_reads: usize,
         probe_peak_reads: usize,
         probe_read_operations: u64,
@@ -73,7 +73,7 @@ const VectoredLoadMetrics = struct {
         defer self.probe_mutex.unlock(io);
         return .{
             .probe_epoch = self.probe_epoch,
-            .probe_first_read_ns = self.probe_first_read_ns,
+            .probe_window_start_ns = self.probe_window_start_ns,
             .probe_active_reads = self.probe_active_reads,
             .probe_peak_reads = self.probe_peak_reads,
             .probe_read_operations = self.probe_read_operations,
@@ -85,8 +85,6 @@ const VectoredLoadMetrics = struct {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
-        if (self.probe_first_read_ns == 0)
-            self.probe_first_read_ns = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
         self.probe_active_reads += 1;
         self.probe_peak_reads = @max(self.probe_peak_reads, self.probe_active_reads);
     }
@@ -109,6 +107,15 @@ const VectoredLoadMetrics = struct {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
+        // The window opens at the generation's first completion, which is
+        // not counted: from then on completions arrive at the source's
+        // steady rate, whereas a clock started at the first admission would
+        // charge a high-latency source its whole round trip and make longer
+        // windows at higher rungs look faster than they are.
+        if (self.probe_window_start_ns == 0) {
+            self.probe_window_start_ns = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
+            return;
+        }
         self.probe_read_operations +|= 1;
         self.probe_read_bytes +|= @intCast(bytes);
     }
@@ -122,7 +129,7 @@ const VectoredLoadMetrics = struct {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         self.probe_epoch = std.math.maxInt(u64);
-        self.probe_first_read_ns = 0;
+        self.probe_window_start_ns = 0;
         self.probe_active_reads = 0;
         self.probe_peak_reads = 0;
         self.probe_read_operations = 0;
@@ -137,7 +144,7 @@ const VectoredLoadMetrics = struct {
         defer self.probe_mutex.unlock(io);
         self.probe_epoch = std.math.maxInt(u64);
         self.probe_admission_start = std.math.maxInt(u64);
-        self.probe_first_read_ns = 0;
+        self.probe_window_start_ns = 0;
         self.probe_active_reads = 0;
         self.probe_peak_reads = 0;
         self.probe_read_operations = 0;
@@ -2875,12 +2882,11 @@ const SourceReadRuntime = struct {
         now_ns: u64,
     ) ?SourceReadWidthController.Evidence {
         if (probe.probe_epoch != self.controller.generation) return null;
-        // Do not charge a rung for prior-generation DMA drain before its
-        // first source admission can begin.
-        if (probe.probe_first_read_ns == 0) return null;
+        // No window before the generation's first completion.
+        if (probe.probe_window_start_ns == 0) return null;
         const evidence: SourceReadWidthController.Evidence = .{
             .completed_requests = @intCast(probe.probe_read_operations),
-            .elapsed_ns = self.clock.busyNs(probe.probe_first_read_ns, now_ns),
+            .elapsed_ns = self.clock.busyNs(probe.probe_window_start_ns, now_ns),
             .bytes = probe.probe_read_bytes,
             .exercised_width = probe.probe_peak_reads,
         };
@@ -2983,7 +2989,7 @@ const SourceReadRuntime = struct {
                 self.metrics.pending_source_jobs.load(.acquire) == 0 and
                 self.read_gate.inUse(io) == 0;
             // Idle before the window's first admission is not its time.
-            self.clock.tick(now_ns, idle and probe.probe_first_read_ns != 0);
+            self.clock.tick(now_ns, idle and probe.probe_window_start_ns != 0);
             if (idle) continue;
             const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
             const scored_index = self.controller.index;
@@ -3606,17 +3612,21 @@ test "source probe excludes pre-boundary admissions" {
     metrics.beginRead(io, 7, 40);
     metrics.recordProbeRead(io, 7, 40, max_load_read_request_size);
     metrics.beginRead(io, 7, 41);
+    // The first in-generation completion opens the window and is not counted.
     metrics.recordProbeRead(io, 7, 41, max_load_read_request_size);
+    metrics.beginRead(io, 7, 42);
+    metrics.recordProbeRead(io, 7, 42, max_load_read_request_size);
     const admitted = metrics.snapshot(io);
-    try std.testing.expect(admitted.probe_first_read_ns != 0);
-    try std.testing.expectEqual(@as(usize, 1), admitted.probe_active_reads);
+    try std.testing.expect(admitted.probe_window_start_ns != 0);
+    try std.testing.expectEqual(@as(usize, 2), admitted.probe_active_reads);
     try std.testing.expectEqual(@as(u64, 1), admitted.probe_read_operations);
     try std.testing.expectEqual(@as(u64, max_load_read_request_size), admitted.probe_read_bytes);
     metrics.endRead(io, 6, 40);
     metrics.endRead(io, 7, 40);
+    metrics.endRead(io, 7, 41);
     const draining = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 1), draining.probe_active_reads);
-    metrics.endRead(io, 7, 41);
+    metrics.endRead(io, 7, 42);
     const drained = metrics.snapshot(io);
     try std.testing.expectEqual(@as(usize, 0), drained.probe_active_reads);
     metrics.clearProbe(io);
@@ -3626,9 +3636,14 @@ test "partial source jobs contribute adaptive evidence" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
     metrics.prepareProbe(io, 3, 1);
+    // A full read opens the window; the partial tail read that follows
+    // contributes its actual byte count.
     metrics.beginRead(io, 3, 1);
-    metrics.recordProbeRead(io, 3, 1, 256 * 1024);
+    metrics.recordProbeRead(io, 3, 1, max_load_read_request_size);
     metrics.endRead(io, 3, 1);
+    metrics.beginRead(io, 3, 2);
+    metrics.recordProbeRead(io, 3, 2, 256 * 1024);
+    metrics.endRead(io, 3, 2);
     const snapshot = metrics.snapshot(io);
     try std.testing.expectEqual(@as(u64, 1), snapshot.probe_read_operations);
     try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.probe_read_bytes);
@@ -3843,14 +3858,15 @@ test "source read runtime scores a window from its first admission on busy time"
     metrics.prepareProbe(io, runtime.controller.generation, 1);
     // No admission yet: nothing to score however long the window has been open.
     try std.testing.expect(runtime.currentEvidence(io, std.math.maxInt(u64)) == null);
-    for (1..13) |admission| {
+    // Thirteen reads: the first completion opens the window uncounted.
+    for (1..14) |admission| {
         metrics.beginRead(io, runtime.controller.generation, admission);
     }
-    for (1..13) |admission| {
+    for (1..14) |admission| {
         metrics.recordProbeRead(io, runtime.controller.generation, admission, max_load_read_request_size);
         metrics.endRead(io, runtime.controller.generation, admission);
     }
-    const first_read_ns = metrics.snapshot(io).probe_first_read_ns;
+    const first_read_ns = metrics.snapshot(io).probe_window_start_ns;
     try std.testing.expect(first_read_ns != 0);
     runtime.clock.tick(first_read_ns, false);
     // 40 ms busy, 200 ms idle, 40 ms busy: 80 ms of busy time is too short.
@@ -3865,7 +3881,7 @@ test "source read runtime scores a window from its first admission on busy time"
     const evidence = runtime.currentEvidence(io, scored_ns).?;
     try std.testing.expectEqual(100 * std.time.ns_per_ms, evidence.elapsed_ns);
     try std.testing.expectEqual(@as(usize, 12), evidence.completed_requests);
-    try std.testing.expectEqual(@as(usize, 12), evidence.exercised_width);
+    try std.testing.expectEqual(@as(usize, 13), evidence.exercised_width);
     try std.testing.expectEqual(@as(u64, 12 * max_load_read_request_size), evidence.bytes);
 }
 
