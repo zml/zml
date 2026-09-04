@@ -147,13 +147,7 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
 }
 
 fn supportsNvfp4InputQuantization(platform: *const Platform) bool {
-    if (platform.target != .cuda) return false;
-
-    const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-    const capability = platform_mod.cuda.tryGetComputeCapabilities(platform, device) orelse return false;
-    const major = std.fmt.parseInt(u8, std.mem.sliceTo(capability, '.'), 10) catch return false;
-
-    return major >= 10;
+    return (platform_mod.cuda.computeCapability(platform) orelse return false).atLeast(10, 0);
 }
 
 fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {

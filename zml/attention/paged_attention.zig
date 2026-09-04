@@ -44,12 +44,7 @@ pub const Backend = enum {
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => {
-                if (platform.target != .cuda) return false;
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-                const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, first_device) orelse return false;
-                return std.mem.eql(u8, cc, "9.0");
-            },
+            .cuda_fa3 => (zml.platform.cuda.computeCapability(platform) orelse return false).is(9, 0),
         };
     }
 };

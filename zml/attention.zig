@@ -25,16 +25,8 @@ pub const Backend = enum {
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => b: {
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    break :b if (std.mem.eql(u8, cc, "9.0"))
-                        .cuda_fa3
-                    else
-                        .cuda_fa2;
-                }
-
-                break :b .vanilla;
+                const cc = zml.platform.cuda.computeCapability(platform) orelse break :b .vanilla;
+                break :b if (cc.is(9, 0)) .cuda_fa3 else .cuda_fa2;
             },
             .neuron => .nki,
             .metal => .metal_fa,
@@ -49,12 +41,7 @@ pub const Backend = enum {
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => {
-                if (platform.target != .cuda) return false;
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-                const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, first_device) orelse return false;
-                return std.mem.eql(u8, cc, "9.0");
-            },
+            .cuda_fa3 => (zml.platform.cuda.computeCapability(platform) orelse return false).is(9, 0),
         };
     }
 };

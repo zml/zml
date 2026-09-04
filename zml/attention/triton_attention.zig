@@ -52,13 +52,9 @@ const SparseMlaConfig = struct {
     parallel_reduce_num_warps: usize = 1,
 };
 
-fn isCudaComputeCapability(expected: []const u8) bool {
+fn isCudaComputeCapability(major: u8, minor: u8) bool {
     const platform = zml.module.CompilationContext.current().platform;
-    if (platform.target != .cuda) return false;
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    if (devices.len == 0) return false;
-    const actual = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse return false;
-    return std.mem.eql(u8, actual, expected);
+    return (zml.platform.cuda.computeCapability(platform) orelse return false).is(major, minor);
 }
 
 fn sparseMlaConfig(paged_opts: paged.PagedSparseMlaOptions, topk_count: usize, cu_count_: usize) SparseMlaConfig {
@@ -74,7 +70,7 @@ fn sparseMlaConfig(paged_opts: paged.PagedSparseMlaOptions, topk_count: usize, c
         .num_splits = 1,
         .direct_programs = undefined,
     };
-    const is_sm103 = isCudaComputeCapability("10.3");
+    const is_sm103 = isCudaComputeCapability(10, 3);
 
     // GB300 (sm_103): a single wide query benefits from more head blocks and
     // wider sparse tiles. The split selection below still derives each layer's
@@ -154,7 +150,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
     // Until we test on other platforms, gate the fix to GB300
-    const is_gb300 = isCudaComputeCapability("10.3");
+    const is_gb300 = isCudaComputeCapability(10, 3);
 
     var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 

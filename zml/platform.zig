@@ -795,14 +795,40 @@ pub const CreateOptions = struct {
 
 // TODO(Corendos): Consider moving that in its own file if its size increase too much.
 pub const cuda = struct {
-    pub fn tryGetComputeCapabilities(platform: *const zml.Platform, device: *const pjrt.Device) ?[]const u8 {
-        stdx.debug.assert(platform.target == .cuda, "tryGetComputeCapabilities expects .cuda platform, got {}", .{platform.target});
-        const description = device.getDescription(platform.pjrt_api);
+    pub const ComputeCapability = struct {
+        major: u8,
+        minor: u8,
 
-        const attributes = description.attributes(platform.pjrt_api);
+        pub fn parse(text: []const u8) ?ComputeCapability {
+            var parts = std.mem.splitScalar(u8, text, '.');
+            return .{
+                .major = std.fmt.parseInt(u8, parts.first(), 10) catch return null,
+                .minor = std.fmt.parseInt(u8, parts.next() orelse "0", 10) catch return null,
+            };
+        }
+
+        pub fn is(self: ComputeCapability, major: u8, minor: u8) bool {
+            return self.major == major and self.minor == minor;
+        }
+
+        pub fn atLeast(self: ComputeCapability, major: u8, minor: u8) bool {
+            return self.major > major or (self.major == major and self.minor >= minor);
+        }
+
+        pub fn sm(self: ComputeCapability) u16 {
+            return @as(u16, self.major) * 10 + self.minor;
+        }
+    };
+
+    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+        if (platform.target != .cuda) return null;
+        const devices = platform.pjrt_client.devices(platform.pjrt_api);
+        if (devices.len == 0) return null;
+
+        const attributes = devices[0].getDescription(platform.pjrt_api).attributes(platform.pjrt_api);
         return for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break attr.value().string;
+                break ComputeCapability.parse(attr.value().string);
             }
         } else null;
     }

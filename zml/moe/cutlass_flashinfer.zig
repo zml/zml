@@ -357,18 +357,11 @@ const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCall
 });
 
 fn computeCapability(platform: *const zml.Platform) !u16 {
-    if (platform.target != .cuda) return error.UnsupportedPlatform;
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    if (devices.len == 0) return error.NoDevices;
-
-    const compute_capability = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
-        return error.UnknownComputeCapability;
-
-    if (std.mem.eql(u8, compute_capability, "9.0")) return 90;
-    if (std.mem.eql(u8, compute_capability, "10.0")) return 100;
-    if (std.mem.eql(u8, compute_capability, "10.3")) return 103;
-    if (std.mem.eql(u8, compute_capability, "12.0")) return 120;
-    return error.UnsupportedArchitecture;
+    const cc = zml.platform.cuda.computeCapability(platform) orelse return error.UnsupportedPlatform;
+    return switch (cc.sm()) {
+        90, 100, 103, 120 => |sm| sm,
+        else => error.UnsupportedArchitecture,
+    };
 }
 
 pub fn load(
