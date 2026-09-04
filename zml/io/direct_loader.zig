@@ -2438,6 +2438,28 @@ const SourceReadWidthController = struct {
         self.index -|= 1;
         self.max_index = self.index;
         self.state = .holding;
+        return self.openBackoffGeneration();
+    }
+
+    /// Transient backpressure (retries, connection failures, 5xx without a
+    /// throttle): one rung down, ceiling and state unchanged. A climbing
+    /// controller restarts its climb at the lower rung: it becomes the best
+    /// rung and its mean is forgotten, so the next window there is a fresh
+    /// climb sample that can lead back above the step. A holding one keeps
+    /// holding. Same once-per-generation rule as `backoff`.
+    fn stepDownTransient(self: *SourceReadWidthController, fresh_admissions: bool) ?Decision {
+        if (!self.isAdaptive()) return null;
+        if (self.last_backoff_generation == self.generation and !fresh_admissions) return null;
+        self.index -|= 1;
+        if (self.state == .climbing) {
+            self.best_index = self.index;
+            self.rates[self.index] = null;
+            self.samples[self.index] = 0;
+        }
+        return self.openBackoffGeneration();
+    }
+
+    fn openBackoffGeneration(self: *SourceReadWidthController) Decision {
         const decision = self.newGeneration();
         self.last_backoff_generation = self.generation;
         return decision;
@@ -2665,10 +2687,57 @@ test "source read controller backs off once per generation of fresh admissions" 
     try std.testing.expectEqual(@as(usize, 1), floor.backoff(false).?.width);
 }
 
+test "source read controller steps down on transient backpressure and climbs again" {
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    const step = controller.stepDownTransient(false).?;
+    try std.testing.expectEqual(@as(usize, 12), step.width);
+    try std.testing.expectEqual(controller.generation, step.generation);
+    // Still climbing, ceiling untouched, the climb restarts at 12.
+    try std.testing.expectEqual(SourceReadWidthController.State.climbing, controller.state);
+    try std.testing.expectEqual(@as(usize, 64), read_width_ladder[controller.max_index]);
+    try std.testing.expectEqual(@as(usize, 12), read_width_ladder[controller.best_index]);
+    try std.testing.expect(controller.rates[controller.index] == null);
+    // Once per generation of fresh admissions, shared with the throttle rule.
+    try std.testing.expect(controller.stepDownTransient(false) == null);
+    try std.testing.expect(controller.backoff(false) == null);
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
+    // A fresh window at 12 is a climb sample: back to 16, then above the step.
+    _ = controller.observe(sourceReadTestEvidence(&controller, 100));
+    try std.testing.expectEqual(@as(usize, 16), controller.width());
+    _ = controller.observe(sourceReadTestEvidence(&controller, 110));
+    try std.testing.expectEqual(@as(usize, 24), controller.width());
+    try std.testing.expectEqual(SourceReadWidthController.State.climbing, controller.state);
+    // A fresh admission under the step's generation admits another step.
+    try std.testing.expectEqual(@as(usize, 16), controller.stepDownTransient(false).?.width);
+    try std.testing.expectEqual(@as(usize, 12), controller.stepDownTransient(true).?.width);
+    try std.testing.expectEqual(@as(usize, 64), read_width_ladder[controller.max_index]);
+
+    // Holding: one rung down, still holding, evidence changes nothing.
+    var holding = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
+        64,
+    );
+    // 12 -> 16 (not better) -> the downward probe of 8 (10% below) -> hold 12.
+    for ([_]f64{ 100, 100, 90 }) |rate| _ = holding.observe(sourceReadTestEvidence(&holding, rate));
+    try std.testing.expectEqual(@as(usize, 12), holding.width());
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, holding.state);
+    try std.testing.expectEqual(@as(usize, 8), holding.stepDownTransient(false).?.width);
+    try std.testing.expectEqual(SourceReadWidthController.State.holding, holding.state);
+    try std.testing.expectEqual(@as(usize, 64), read_width_ladder[holding.max_index]);
+    _ = holding.observe(sourceReadTestEvidence(&holding, 1000));
+    try std.testing.expectEqual(@as(usize, 8), holding.width());
+}
+
 test "source read controller keeps a fixed width" {
     var fixed = SourceReadWidthController.init(.{ .fixed = 7 }, 64);
     try std.testing.expectEqual(@as(usize, 7), fixed.width());
     try std.testing.expect(fixed.backoff(true) == null);
+    try std.testing.expect(fixed.stepDownTransient(true) == null);
     try std.testing.expect(fixed.blindGrow() == null);
     const observed = fixed.observe(sourceReadTestEvidence(&fixed, 100));
     try std.testing.expectEqual(@as(usize, 7), observed.width);
@@ -2680,13 +2749,27 @@ const ReadStatsCursor = struct {
     provider: VFS.ReadStatsProvider,
     previous: VFS.ReadStats,
 
-    fn takeBackpressure(self: *ReadStatsCursor) bool {
+    /// The two classes of source backpressure, exclusive: a throttle in the
+    /// same interval outranks a transient failure.
+    const Backpressure = struct {
+        /// Throttles and timeouts: the source rejects this width.
+        throttle: bool = false,
+        /// Retries, connection failures and other 5xx: an unhealthy request,
+        /// not evidence about the width.
+        transient: bool = false,
+
+        fn any(self: Backpressure) bool {
+            return self.throttle or self.transient;
+        }
+    };
+
+    fn takeBackpressure(self: *ReadStatsCursor) Backpressure {
         const current = self.provider.snapshot();
         const delta = current.sub(self.previous);
         self.previous = current;
-        return delta.retries != 0 or delta.transient_retries != 0 or
-            delta.timeouts != 0 or delta.server_failures != 0 or
-            delta.throttles != 0;
+        const throttle = delta.throttles != 0 or delta.timeouts != 0;
+        const transient = delta.retries != 0 or delta.transient_retries != 0 or delta.server_failures != 0;
+        return .{ .throttle = throttle, .transient = transient and !throttle };
     }
 };
 
@@ -2710,10 +2793,21 @@ test "one load-profile feedback cursor reports only new backpressure" {
         .previous = provider.snapshot(),
     };
 
+    const Backpressure = ReadStatsCursor.Backpressure;
+    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
     fake.stats.retries = 2;
+    fake.stats.server_failures = 1;
+    try std.testing.expectEqual(Backpressure{ .transient = true }, cursor.takeBackpressure());
+    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
+    fake.stats.transient_retries = 1;
+    try std.testing.expectEqual(Backpressure{ .transient = true }, cursor.takeBackpressure());
+    // A throttle outranks the retries it caused in the same interval.
+    fake.stats.retries = 3;
     fake.stats.throttles = 1;
-    try std.testing.expect(cursor.takeBackpressure());
-    try std.testing.expect(!cursor.takeBackpressure());
+    try std.testing.expectEqual(Backpressure{ .throttle = true }, cursor.takeBackpressure());
+    fake.stats.timeouts = 1;
+    try std.testing.expectEqual(Backpressure{ .throttle = true }, cursor.takeBackpressure());
+    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
 }
 
 test "source measurement rejects another controller generation" {
@@ -2825,8 +2919,8 @@ const SourceReadRuntime = struct {
     control: std.Io.Event = .unset,
     done: std.Io.Event = .unset,
 
-    fn takeRemoteBackpressure(self: *SourceReadRuntime) bool {
-        const cursor = if (self.read_stats) |*value| value else return false;
+    fn takeRemoteBackpressure(self: *SourceReadRuntime) ReadStatsCursor.Backpressure {
+        const cursor = if (self.read_stats) |*value| value else return .{};
         return cursor.takeBackpressure();
     }
 
@@ -2928,17 +3022,23 @@ const SourceReadRuntime = struct {
             }
             const now_ns = awakeNs(io);
 
-            if (self.takeRemoteBackpressure()) {
+            const backpressure = self.takeRemoteBackpressure();
+            if (backpressure.any()) {
                 // A read admitted under the current generation has begun
                 // once the window fenced at its start saw a read.
                 const fresh_admissions = self.metrics.snapshot(io).probe_peak_reads != 0;
-                if (self.controller.backoff(fresh_admissions)) |decision| {
-                    load_log.debug("source width backoff: generation={d}, width={d}, fresh_admissions={}", .{
-                        decision.generation,
-                        decision.width,
+                const decision = if (backpressure.throttle)
+                    self.controller.backoff(fresh_admissions)
+                else
+                    self.controller.stepDownTransient(fresh_admissions);
+                if (decision) |value| {
+                    load_log.debug("source width {s}: generation={d}, width={d}, fresh_admissions={}", .{
+                        if (backpressure.throttle) "backoff" else "transient step-down",
+                        value.generation,
+                        value.width,
                         fresh_admissions,
                     });
-                    self.applyDecision(io, decision);
+                    self.applyDecision(io, value);
                 }
                 self.clock.tick(now_ns, false);
                 continue;

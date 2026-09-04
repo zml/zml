@@ -6,6 +6,7 @@ const stdx = @import("stdx");
 const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
+const ReadFailure = @import("base.zig").ReadFailure;
 const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
@@ -1078,18 +1079,12 @@ pub const GCS = struct {
         };
 
         if (res.head.status != .partial_content and res.head.status != .ok) {
-            const retry: range_read.Retry = switch (res.head.status) {
-                .request_timeout => .{ .failure = .timeout },
-                .too_many_requests => .{ .failure = .throttle },
-                else => if (res.head.status.class() == .server_error)
-                    .{ .failure = .server_failure }
-                else {
-                    log.err("Failed to read {s}: {s}", .{ path, res.head.bytes });
-                    return error.RequestFailed;
-                },
+            const failure = classifyStatus(res.head.status) orelse {
+                log.err("Failed to read {s}: {s}", .{ path, res.head.bytes });
+                return error.RequestFailed;
             };
             log.warn("Failed to read {s}: {s}", .{ path, res.head.bytes });
-            return .{ .retry = retry };
+            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
         }
 
         const content_range = blk: {
@@ -1101,8 +1096,7 @@ pub const GCS = struct {
             }
             break :blk null;
         };
-        const timing = range_read.readResponse(
-            self.base.inner,
+        range_read.readResponse(
             res.reader(&.{}),
             res.head.status,
             content_range,
@@ -1120,9 +1114,20 @@ pub const GCS = struct {
             },
         };
         self.read_stats.recordSuccess(read_size);
-        return .{ .success = timing };
+        return .success;
+    }
+
+    /// GCS answers rate limiting with `503` as well as `429`.
+    fn classifyStatus(status: std.http.Status) ?ReadFailure {
+        return range_read.classifyStatus(status, .throttle);
     }
 };
+
+test "GCS classifies 503 as throttling" {
+    try std.testing.expectEqual(ReadFailure.throttle, GCS.classifyStatus(.service_unavailable).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, GCS.classifyStatus(.bad_gateway).?);
+    try std.testing.expect(GCS.classifyStatus(.forbidden) == null);
+}
 
 test "GCS parses XML bucket listing objects and common prefixes" {
     const xml =

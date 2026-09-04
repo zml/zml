@@ -910,21 +910,12 @@ pub const HF = struct {
         };
 
         if (res.head.status != .partial_content and res.head.status != .ok) {
-            const retry: range_read.Retry = switch (res.head.status) {
-                .request_timeout => .{ .failure = .timeout },
-                .too_many_requests => .{
-                    .failure = .throttle,
-                    .delay = hfThrottleDelay(res.head),
-                },
-                else => if (res.head.status.class() == .server_error)
-                    .{ .failure = .server_failure }
-                else {
-                    log.err("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
-                    return error.RequestFailed;
-                },
+            const failure = range_read.classifyStatus(res.head.status, .server_failure) orelse {
+                log.err("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
+                return error.RequestFailed;
             };
             log.warn("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
-            return .{ .retry = retry };
+            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
         }
 
         const content_range = blk: {
@@ -937,8 +928,7 @@ pub const HF = struct {
             break :blk null;
         };
 
-        const timing = range_read.readResponse(
-            self.base.inner,
+        range_read.readResponse(
             res.reader(&.{}),
             res.head.status,
             content_range,
@@ -956,21 +946,6 @@ pub const HF = struct {
             },
         };
         self.read_stats.recordSuccess(read_size);
-        return .{ .success = timing };
-    }
-
-    fn hfThrottleDelay(head: std.http.Client.Response.Head) ?std.Io.Duration {
-        var it = head.iterateHeaders();
-        while (it.next()) |header| {
-            if (!std.ascii.eqlIgnoreCase(header.name, "RateLimit")) continue;
-            var parts = std.mem.splitScalar(u8, header.value, ';');
-            while (parts.next()) |part| {
-                const p = std.mem.trim(u8, part, " \t");
-                if (!std.mem.startsWith(u8, p, "t=")) continue;
-                const seconds = std.fmt.parseInt(u32, p[2..], 10) catch continue;
-                return .fromSeconds(seconds);
-            }
-        }
-        return null;
+        return .success;
     }
 };

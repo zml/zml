@@ -89,9 +89,17 @@ ref is still current.
   call. Retries are serial inside that caller's source credit; the retired
   backend-local `parallel_read` pools must not return.
 - Shared Range handling validates a covering `Content-Range`, handles a server
-  returning `200` and ignoring Range by discarding the prefix, scatters into
-  caller buffers, retries with jitter, and exposes aggregate request, retry,
-  throttle, byte, and delay counters.
+  returning `200` and ignoring Range by discarding the prefix, then scatters
+  into caller buffers; there is no response timing (the one-byte first-body
+  probe and `ResponseTiming` were dead and are gone). Retry classification is
+  one function (`range_read.classifyStatus`): 408 is a timeout, 429 a
+  throttle, other 5xx a server failure, and 503 is a throttle on S3
+  (`SlowDown`) and GCS but a server failure on generic HTTP and HF. A retried
+  status whose response names a delay (`Retry-After` delta-seconds, or the
+  `RateLimit` header's `t=` reset on HF; the HTTP-date form is not parsed)
+  sleeps that long instead of the jittered delay. The backends expose
+  aggregate request, retry, timeout, server-failure, throttle, byte and delay
+  counters.
 - One source job performs one exact absolute scatter read into pinned blocks.
   Extra physical calls occur only for short reads/retries or `IOV_MAX` limits.
   Diagnostics distinguish planned jobs from physical calls.
@@ -246,13 +254,23 @@ simplification pass.
   after all its DMA children finish.
 - Nothing closes the read gate. A changed width sets the new limit and the
   reads admitted under the previous generation return at their own pace,
-  excluded from the new window by the fence. Source backpressure (boolean
-  until task 7) lowers the width one rung, clips the ladder there and holds;
-  a further sample in the generation a backoff opened is ignored unless a
-  read admitted under that generation has begun, so delayed old-width
-  feedback cannot ratchet through several rungs. `gate_closed_ticks` in the
-  loader summary counts control ticks that found the read gate at 0 with
-  jobs unclaimed and is 0 by construction.
+  excluded from the new window by the fence. Source backpressure has two
+  classes, read from the profile's stats side channel every control tick
+  (`ReadStatsCursor.takeBackpressure` returns `{throttle, transient}`; the
+  local file backend has no side channel and never sees either). Throttle (a
+  throttle or timeout moved): `backoff` lowers the width one rung, clips the
+  ladder there and holds. Transient (retries, connection failures or other
+  5xx moved without a throttle): `stepDownTransient` lowers one rung with
+  the ceiling and state unchanged; a climbing controller restarts its climb
+  at that rung (it becomes the best rung and its mean is forgotten, so the
+  next window there is a fresh climb sample and the width can climb back
+  above the step), a holding one keeps holding. Both are limited to once per
+  generation: a further sample in the generation a step opened is ignored
+  unless a read admitted under that generation has begun, so delayed
+  old-width feedback cannot ratchet through several rungs. A single early
+  500 therefore costs one rung and one window instead of pinning the width.
+  `gate_closed_ticks` in the loader summary counts control ticks that found
+  the read gate at 0 with jobs unclaimed and is 0 by construction.
 - A window opens at its generation's first completed read, which is not
   counted; from then on completions arrive at the source's steady rate, so
   the window's bytes over its busy time is the true throughput even on a
@@ -314,19 +332,32 @@ simplification pass.
 - Current detector screens DMA blocks 2/4/8/16/32 MiB at width eight. Default
   screens require at least 2 ms and 32 completions. Borderline results use
   three alternating pairs at 25 ms/256 transfers. The 8% near-peak rule favors
-  a smaller block. It tunes one representative device, warms device allocators
-  on all devices, applies the uniform selected tuple, and grows the retained
-  all-device working set. There is no decision-dead aggregate timing phase.
+  a smaller block. It tunes one representative device, warms every device
+  allocator concurrently through `Platform.warmupDeviceAllocators(io)` (the
+  only warm-up implementation), applies the uniform selected tuple, and grows
+  the retained all-device working set. There is no decision-dead aggregate
+  timing phase.
 - Calibration code is specialized for that representative lane: a window
   returns one metric directly, screen candidates own three inline samples, and
   the report contains one measured recommendation. There are no lane slices,
   one-element result allocations, nullable candidate widths, or synthesized
   recommendations for devices that were not measured.
+- Calibration reports one `dma_bench` summary line: platform, device kind,
+  selected block and width, measured GiB/s, elapsed/calibration/allocator
+  warm-up ms, retained mapped bytes and NUMA pool count. There is no timing
+  decomposition, no per-window `dma_bench_sample` line, and no transfer
+  latency accumulator; per-arena mapping cost is logged where each arena is
+  mapped, and the loader's own `live loader ready` line reports pre-growth.
 - Retained arenas are initial capacity, not the full permissible live set.
   Detection starts with one largest-candidate calibration ring, reuses it,
   grows after selection to the all-device working set, and permits bounded slab
-  growth up to the mapped-memory ceiling. Workspace validation, arena reserves,
-  worker scratch, and adaptive pinned feasibility use the exact maximum
+  growth up to the mapped-memory ceiling. One `allocate(node, bytes)` is the
+  only arena growth path - calibration ring, post-selection reserves,
+  pre-grown working set and load-time demand - and it holds the mapped-ceiling
+  check; `ensureLoadBlockReserves` and `ensureSourceWorkingSet` only compute
+  per-pool block targets and grow independent nodes concurrently. Workspace
+  validation, arena reserves, worker scratch, and adaptive pinned feasibility
+  use the exact maximum
   coalesced-job bound `ceil(max_job_len / block_size)`; device or writer count
   does not inflate the blocks required by one source job.
 
@@ -776,6 +807,16 @@ Longer-term work still includes calibration caching, cross-platform 24/32 MiB
 measurement, completion-aware local pacing, and any explicit
 packed-device-buffer redesign needed to reduce DMA submission count below
 roughly one per tensor.
+
+- One-off, unexplained (2026-09-04, B70 `level_zero:1`, S3Proxy at 20 ms and
+  200 MiB/s per request): an adaptive climb 32/48/64/96 -> 128 aborted in the
+  oneAPI plugin with `host_to_device_transfer_manager.cc:342 Check failed:
+  definition_events_[buffer_index]`, reached from `SetEventAsError` through
+  the pump's `onReady` callback (a transfer error, then the pump's next piece
+  into the same manager). Four further runs (ceiling 64, fixed 128 with 2 GiB
+  pinned, the same adaptive command, 800 MiB/s) completed. If it recurs,
+  make the pump stop submitting into a manager whose event errored and
+  surface the plugin error instead of the CHECK.
 
 ## Suggested upstream decomposition
 

@@ -499,12 +499,12 @@ pub const HTTP = struct {
         };
 
         if (res.head.status != .partial_content and res.head.status != .ok) {
-            const retry = retryForStatus(res.head.status) orelse {
+            const failure = range_read.classifyStatus(res.head.status, .server_failure) orelse {
                 log.err("Failed to read {s}: {s}", .{ url, res.head.bytes });
                 return error.RequestFailed;
             };
             log.warn("Failed to read {s}: {s}", .{ url, res.head.bytes });
-            return .{ .retry = retry };
+            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
         }
 
         const content_range = blk: {
@@ -517,8 +517,7 @@ pub const HTTP = struct {
             break :blk null;
         };
 
-        const timing = range_read.readResponse(
-            self.base.inner,
+        range_read.readResponse(
             res.reader(&.{}),
             res.head.status,
             content_range,
@@ -536,33 +535,6 @@ pub const HTTP = struct {
             },
         };
         self.read_stats.recordSuccess(read_size);
-        return .{ .success = timing };
-    }
-
-    fn retryForStatus(status: std.http.Status) ?range_read.Retry {
-        return switch (status) {
-            .request_timeout => .{ .failure = .timeout },
-            .too_many_requests => .{ .failure = .throttle },
-            else => if (status.class() == .server_error)
-                .{ .failure = .server_failure }
-            else
-                null,
-        };
+        return .success;
     }
 };
-
-test "HTTP retry status classification is typed" {
-    try std.testing.expectEqual(
-        @import("base.zig").ReadFailure.timeout,
-        HTTP.retryForStatus(.request_timeout).?.failure,
-    );
-    try std.testing.expectEqual(
-        @import("base.zig").ReadFailure.throttle,
-        HTTP.retryForStatus(.too_many_requests).?.failure,
-    );
-    try std.testing.expectEqual(
-        @import("base.zig").ReadFailure.server_failure,
-        HTTP.retryForStatus(.bad_gateway).?.failure,
-    );
-    try std.testing.expect(HTTP.retryForStatus(.not_found) == null);
-}

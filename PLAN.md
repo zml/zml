@@ -55,11 +55,11 @@ accounting. Signatures are not a constraint; the monorepo is migrated here.
 - [ ] 5. Monorepo migration and Laguna window measurement (after task 8:
       the controller evidence from MI300 made task 8 the next priority).
 - [ ] 6. Per-file incremental publish; identity fair order for one device.
-- [ ] 7. VFS: throttle classification, two-class backpressure, dead timing.
+- [x] 7. VFS: throttle classification, two-class backpressure, dead timing.
 - [x] 8. Climb-and-hold controller without gate drains (gated, revertible).
 - [ ] 9. Per-plan preallocated contexts and event retirement (gated).
 - [ ] 10. VFS range/retry consolidation (gated on tests).
-- [ ] 11. Calibration reporting cleanup.
+- [x] 11. Calibration reporting cleanup.
 - [ ] 12. NUMA placement experiment (measurement only).
 - [ ] 13. Final validation and documentation reconciliation.
 
@@ -476,6 +476,49 @@ lines (`grep -a`, the logo makes the log binary for grep).
   completes, floor > 1); a single early 500 no longer pins the width; real
   AWS if credentials are available.
 
+Result (2026-09-04): `range_read.classifyStatus(status, unavailable)` is the
+one retry classification: 408 timeout, 429 throttle, other 5xx server
+failure, and 503 is `unavailable`, which S3 (`SlowDown`) and GCS pass as
+`.throttle` and generic HTTP and HF as `.server_failure` (S3 and GCS keep a
+one-line `classifyStatus` with a unit test each). `range_read.serverRetryDelay`
+reads `Retry-After` delta-seconds or the HF `RateLimit` `t=` reset for every
+retried status and replaces the jittered delay when present; the HTTP-date
+form was skipped (a date parser alone is the 40-line budget). Deleted:
+`ResponseTiming`, `writeFirstAndReadScatter`, the one-byte first-body probe,
+`elapsedNanoseconds`, `readResponse`'s `io` parameter, `readScatter`'s
+destination offset, HTTP `retryForStatus`, HF `hfThrottleDelay`;
+`AttemptResult.success` is void and the body path is discard then scatter.
+`ReadStatsCursor.takeBackpressure` returns `{throttle, transient}`: throttle
+when throttles or timeouts moved, transient when retries, transient retries
+or server failures moved without a throttle; no side channel (local files)
+is neither. `backoff` is unchanged (one rung down, ceiling clipped, holding);
+`stepDownTransient` is one rung down with the ceiling and state unchanged,
+and a climbing controller restarts its climb at that rung (it becomes the
+best rung and its mean is forgotten, so the next window there is a fresh
+climb sample and can lead back above the step); both share
+`last_backoff_generation`, so each fires at most once per generation of
+fresh admissions. The runtime logs `source width backoff` or `source width
+transient step-down`. Tests: vfs 15 -> 18 (classification per backend,
+server retry delay, S3 and GCS 503; the HTTP `retryForStatus` test moved to
+`range_read`), zml 242 (239 passed, 3 skipped; +1 controller test, the
+cursor test covers both classes and the throttle-wins rule). S3Proxy (local,
+`LATENCY_MS=20 SPEED_MIB=200`, `level_zero:1`): the first adaptive run
+climbed 32/48/64/96 at 3.07/5.24/6.56/8.69 GiB/s and aborted at the move to
+128 inside the oneAPI plugin (`host_to_device_transfer_manager.cc:342 Check
+failed: definition_events_[buffer_index]`, reached from `SetEventAsError`
+through the pump's `onReady` callback: a transfer error, then the next piece
+submitted into the same manager). It did not reproduce: ceiling 64 loaded in
+2.881 s at 5.19 GiB/s (hold 64, pinned 1.02 GiB); fixed 128 in 1.54 s at
+9.71 GiB/s (pinned 2.00 GiB); the same adaptive command again in 3.761 s at
+3.98 GiB/s (32/48/64 at 3.54/4.26/4.17 GiB/s, hold 48); `SPEED_MIB=800` in
+3.264 s at 4.58 GiB/s (32/48/24 at 7.22/5.04/6.51, hold 32). Every run had 0
+retries, 0 throttles and `gate_closed_ticks` 0, and no backoff or step-down
+fired, so the width path is the one before this task; the uncommitted task
+11 calibration cleanup was compiled into all five runs. S3Proxy has no
+fault-injection middleware (latency, throttled stream, eventual, read-only,
+null only), so the 503 ceiling drop and the early-500 no-pin are covered by
+the unit tests only; real AWS was not run (no credentials).
+
 ### 8. Climb-and-hold controller without gate drains (gated)
 
 Evidence that raised its priority (2026-09-04, MI300, plain Llama): fixed
@@ -596,6 +639,61 @@ because the CDN caps each connection near 19 MiB/s. Pinned high-water
   accumulator (one summary line), the duplicate device-allocator warm-up, and
   the overlapping arena growth entry points. Validation: dma-bench on the
   three hosts selects the same block as today.
+
+Result (2026-09-04): `dma_calibration.zig` 2010 -> 1785 lines (-334/+117).
+Calibration now logs exactly one line per run: `dma_bench version=13
+platform, devices, kind, block_bytes, parallelism, measured_gib_s,
+elapsed_ms, calibration_ms, allocator_warmup_ms, retained_mapped_bytes,
+numa_pools`. Deleted: `DmaBenchmarkSample` and its `dma_bench_sample` line,
+`DmaBenchmarkPhase` (its `phase` argument threaded through `measure`,
+`measureDmaBenchmarkCandidates` and `confirmAndSelectDmaBenchmarkCandidate`),
+`total_latency_ns`/`averageLatencyNs` on the run metrics, the atomic latency
+counter and the per-transfer timestamp that fed it, `DeviceDmaRecommendation
+.average_latency_ns`/`.windows`, the report's `setup_ns`, `sampling_ns`,
+`source_registration_ns`, `benchmark_setup_ns`, `benchmark_overhead_ns`,
+`source_cleanup_ns` (hard-coded 0) and `windows`, `finishDmaBenchmarkReport`,
+the session's `samples`/`setup_ns`/`sampling_ns`/`windows`, the pools'
+`registration_ns`, the `dma_bench_numa` per-device lines (the summary keeps
+`numa_pools`; every arena still logs its own node and mapping cost) and the
+`dma_bench_device` line (folded into the summary). The report keeps
+`elapsed_ns` (whole call), `calibration_ns` (warm-up to selection, measured
+from timestamps) and `device_allocator_warmup_ns`. `DeviceDmaRecommendation`
+keeps only what the selection uses: device index/id, block size, width,
+measured rate. `platform.transferSettings()` and the playground's
+`dma_settings` line use `TransferSettings` and are unchanged.
+`warmupDmaBenchmarkDeviceAllocators` is deleted; its concurrent body moved
+into `Platform.warmupDeviceAllocators(io)` (callers: calibration,
+`examples/io`, `examples/llm`, the platform test). Arena growth is one
+`DmaBenchmarkSourcePools.allocate(node, bytes)` holding the ceiling check and
+the mapping timing, called by the calibration ring (the duplicate
+`growPool` of the same ring in `benchmarkSyntheticDma` is gone), by the
+concurrent `growToBlockTargets` that `ensureLoadBlockReserves` and
+`ensureSourceWorkingSet` (behaviour unchanged) feed per-pool block targets
+to, and directly by the pool's `ArenaProvider.allocateFn`, which no longer
+repeats the budget check; `growPool`, `allocatePool` and `ensureBlockReserves`
+are gone. `requiredDmaWorkspaceBytes` counts each node's devices in one pass
+(first-seen pool order, 64-device stack arrays) instead of the nested
+seen/rescan loops, returns the single-pool formula directly when the topology
+is unknown, and now errors instead of panicking on a mixed config. Decision
+logic untouched: 2/4/8/16/32 MiB at width 8, 2 ms/32 completions, three
+alternating confirmation pairs at 25 ms/256, the 8% prefer-smaller rule,
+retained arenas, `preallocated_source_width`/`preallocated_request_size`.
+Three fixes found while editing: `session.measure` became a wrapper that only
+passed `self.io`, so the two call sites now call
+`runReusableDmaBenchmarkWindow` directly; `pjrtx` was imported only by the
+deleted warm-up; and `tuneDmaBenchmarkDevice` held both an `errdefer` and a
+later `defer` freeing `block_candidates`, a double free on any measurement
+error (one `defer` at the allocation now). No test was added or removed.
+Validation: `//zml:test` 242 tests, 239 pass / 3 skip / 0 fail (the 5
+calibration tests and "platform device allocators can be warmed repeatedly"
+among them); `//vfs:test`, `//stdx:test` pass; `zig fmt --check` clean;
+oneAPI release playground builds. Local B70 dma-bench 3x: 8 MiB at width 8
+every time, 49.44/48.80/49.18 GiB/s, calibration_ms 861/854/851,
+allocator_warmup_ms 348/338/351, retained 528 MiB, numa_pools 1. Llama
+sharded warm loads 0.676/0.654/0.644 s after the final edit (0.626/0.649/
+0.638/0.631 s before it, host load average 1.1-2.5 throughout, another
+agent's runs on the same box), band 0.63-0.68; `live loader ready` still
+reports retained=528.00MiB, pregrown=0B.
 
 ### 12. NUMA placement experiment (measurement only)
 

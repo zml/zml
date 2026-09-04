@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
+const ReadFailure = @import("base.zig").ReadFailure;
 const ReadStats = @import("base.zig").ReadStats;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
@@ -941,18 +942,12 @@ pub const S3 = struct {
         };
 
         if (res.head.status != .partial_content and res.head.status != .ok) {
-            const retry: range_read.Retry = switch (res.head.status) {
-                .request_timeout => .{ .failure = .timeout },
-                .too_many_requests => .{ .failure = .throttle },
-                else => if (res.head.status.class() == .server_error)
-                    .{ .failure = .server_failure }
-                else {
-                    log.err("Failed to read {s}: {s}", .{ url, res.head.bytes });
-                    return error.RequestFailed;
-                },
+            const failure = classifyStatus(res.head.status) orelse {
+                log.err("Failed to read {s}: {s}", .{ url, res.head.bytes });
+                return error.RequestFailed;
             };
             log.warn("Failed to read {s}: {s}", .{ url, res.head.bytes });
-            return .{ .retry = retry };
+            return .{ .retry = .{ .failure = failure, .delay = range_read.serverRetryDelay(res.head) } };
         }
 
         const content_range = blk: {
@@ -964,8 +959,7 @@ pub const S3 = struct {
             }
             break :blk null;
         };
-        const timing = range_read.readResponse(
-            self.base.inner,
+        range_read.readResponse(
             res.reader(&.{}),
             res.head.status,
             content_range,
@@ -983,6 +977,19 @@ pub const S3 = struct {
             },
         };
         self.read_stats.recordSuccess(read_size);
-        return .{ .success = timing };
+        return .success;
+    }
+
+    /// S3 rate limiting is `503 SlowDown` as well as `429`.
+    fn classifyStatus(status: std.http.Status) ?ReadFailure {
+        return range_read.classifyStatus(status, .throttle);
     }
 };
+
+test "S3 classifies 503 SlowDown as throttling" {
+    try std.testing.expectEqual(ReadFailure.throttle, S3.classifyStatus(.service_unavailable).?);
+    try std.testing.expectEqual(ReadFailure.throttle, S3.classifyStatus(.too_many_requests).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, S3.classifyStatus(.internal_server_error).?);
+    try std.testing.expectEqual(ReadFailure.timeout, S3.classifyStatus(.request_timeout).?);
+    try std.testing.expect(S3.classifyStatus(.not_found) == null);
+}
