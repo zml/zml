@@ -17,66 +17,20 @@ const ParseFromValueError = std.json.ParseFromValueError;
 ///
 /// ```zig
 /// const Answer = union {
-///    number: i32,
-///    numbers: []const i32,
+///     number: i32,
+///     numbers: []const i32,
+///
+///     const Helpers = stdx.json.UnionHelpers(@This());
+///     pub const jsonParse = Helpers.jsonParse;
+///     pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+///     pub const jsonStringify = Helpers.jsonStringify;
 /// };
 ///
 /// const Message = struct {
 ///    question: []const u8;
-///    answer: stdx.json.Union(Answer);
+///    answer: Answer;
 /// }
 /// ```
-pub fn Union(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        value: T,
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
-            return jsonParseFromValue(
-                allocator,
-                try std.json.innerParse(std.json.Value, allocator, source, options),
-                options,
-            );
-        }
-
-        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!Self {
-            inline for (std.meta.fields(T)) |field| {
-                switch (field.type) {
-                    bool => if (source == .bool) return .{ .value = @unionInit(T, field.name, source.bool) },
-                    []const u8 => switch (source) {
-                        .string => |v| {
-                            const dupe = try allocator.dupe(u8, v);
-                            return .{ .value = @unionInit(T, field.name, dupe) };
-                        },
-                        .number_string => |v| {
-                            const dupe = try allocator.dupe(u8, v);
-                            return .{ .value = @unionInit(T, field.name, dupe) };
-                        },
-                        else => {},
-                    },
-                    else => switch (@typeInfo(field.type)) {
-                        .int => if (source == .integer) return .{ .value = @unionInit(T, field.name, @intCast(source.integer)) },
-                        .float => if (source == .float) return .{ .value = @unionInit(T, field.name, @floatCast(source.float)) },
-                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
-                        inline else => switch (source) {
-                            .number_string, .array => return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
-                            else => {},
-                        },
-                    },
-                }
-            }
-            return error.UnknownField;
-        }
-
-        pub fn jsonStringify(self: Self, jw: anytype) !void {
-            return switch (self.value) {
-                inline else => |v| jw.write(v),
-            };
-        }
-    };
-}
-
 pub fn UnionHelpers(comptime T: type) type {
     return struct {
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!T {
@@ -92,8 +46,10 @@ pub fn UnionHelpers(comptime T: type) type {
                 switch (field.type) {
                     bool => if (source == .bool) return @unionInit(T, field.name, source.bool),
                     []const u8 => switch (source) {
-                        .string => |v| return @unionInit(T, field.name, v),
-                        .number_string => |v| return @unionInit(T, field.name, v),
+                        .string, .number_string => |v| {
+                            const dupe = try allocator.dupe(u8, v);
+                            return @unionInit(T, field.name, dupe);
+                        },
                         else => {},
                     },
                     else => switch (@typeInfo(field.type)) {
@@ -111,9 +67,33 @@ pub fn UnionHelpers(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: T, jw: anytype) !void {
-            return switch (self.value) {
+            return switch (self) {
                 inline else => |v| jw.write(v),
             };
+        }
+    };
+}
+
+/// Deprecated: prefer importing `stdx.json.UnionHelpers` method into your union.
+/// This will remove the nesting required by `stdx.json.Union`.
+pub fn Union(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        const Helpers = UnionHelpers(T);
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
+            return .{ .value = try Helpers.jsonParse(allocator, source, options) };
+        }
+
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!Self {
+            return .{ .value = try Helpers.jsonParseFromValue(allocator, source, options) };
+        }
+
+        pub fn jsonStringify(self: Self, jw: anytype) !void {
+            return try Helpers.jsonStringify(self.value, jw);
         }
     };
 }
@@ -134,76 +114,17 @@ pub fn UnionHelpers(comptime T: type) type {
 ///
 /// ```zig
 /// const Entry = union {
-///    faq: struct { question: []const u8, answer: u32 },
-///    address: struct { city: []const u8, zipcode: []const u8 },
+///     faq: struct { question: []const u8, answer: u32 },
+///     address: struct { city: []const u8, zipcode: []const u8 },
+///
+///     const Helpers = stdx.json.TaggedUnionHelpers(@This(), "type");
+///     pub const jsonParse = Helpers.jsonParse;
+///     pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+///     pub const jsonStringify = Helpers.jsonStringify;
 /// };
 ///
-/// const Message = []const stdx.json.TaggedUnion(Entry, "type");
+/// const Message = []const Entry;
 /// ```
-pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
-    comptime {
-        if (@typeInfo(T) != .@"union") {
-            @compileError("TaggedUnion expects a union type, found " ++ @typeName(T));
-        }
-        for (std.meta.fields(T)) |field| {
-            if (@typeInfo(field.type) != .@"struct") {
-                @compileError("TaggedUnion member '" ++ field.name ++ "' must be a struct, found " ++ @typeName(field.type));
-            }
-        }
-    }
-
-    return struct {
-        const Self = @This();
-
-        value: T,
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
-            return jsonParseFromValue(
-                allocator,
-                try std.json.innerParse(std.json.Value, allocator, source, options),
-                options,
-            );
-        }
-
-        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!Self {
-            errdefer std.log.warn("failed to parse: {} as {s}", .{ source, @typeName(T) });
-            if (source != .object) return error.UnexpectedToken;
-            var o = source.object;
-            const tag = (o.fetchSwapRemove(tag_name) orelse return error.MissingField).value;
-            if (tag != .string) return error.LengthMismatch;
-            inline for (std.meta.fields(T)) |field| {
-                if (std.mem.eql(u8, field.name, tag.string)) {
-                    const inner: field.type = std.json.parseFromValueLeaky(field.type, allocator, .{ .object = o }, options) catch |err| {
-                        std.log.warn("failed to interpret {s} as a {s}: {}", .{ tag.string, @typeName(field.type), err });
-                        return err;
-                    };
-                    return .{ .value = @unionInit(T, field.name, inner) };
-                }
-            }
-            return error.InvalidEnumTag;
-        }
-
-        pub fn jsonStringify(self: Self, jw: anytype) !void {
-            try jw.beginObject();
-            switch (self.value) {
-                inline else => |v, tag| {
-                    const field_name = @tagName(tag);
-                    try jw.objectField(tag_name);
-                    try jw.write(field_name);
-                    switch (@typeInfo(@TypeOf(v))) {
-                        .@"struct" => inline for (std.meta.fields(@TypeOf(v))) |field| {
-                            try jw.objectField(field.name);
-                            try jw.write(@field(v, field.name));
-                        },
-                        else => unreachable, // Would have failed with comptime check.
-                    }
-                },
-            }
-            try jw.endObject();
-        }
-    };
-}
-
 pub fn TaggedUnionHelpers(comptime T: type, comptime tag_name: [:0]const u8) type {
     comptime {
         if (@typeInfo(T) != .@"union") {
@@ -264,6 +185,30 @@ pub fn TaggedUnionHelpers(comptime T: type, comptime tag_name: [:0]const u8) typ
     };
 }
 
+/// Deprecated: prefer importing `stdx.json.TaggedUnionHelpers` method into your union.
+/// This will remove the nesting required by `stdx.json.TaggedUnion`.
+pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
+    return struct {
+        const Self = @This();
+
+        value: T,
+
+        const Helpers = TaggedUnionHelpers(T, tag_name);
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
+            return .{ .value = try Helpers.jsonParse(allocator, source, options) };
+        }
+
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!Self {
+            return .{ .value = try Helpers.jsonParseFromValue(allocator, source, options) };
+        }
+
+        pub fn jsonStringify(self: Self, jw: anytype) !void {
+            return try Helpers.jsonStringify(self.value, jw);
+        }
+    };
+}
+
 pub fn NeverNull(comptime T: type, comptime default_value: T) type {
     return struct {
         const Self = @This();
@@ -302,11 +247,16 @@ test "union" {
         flag: bool,
         ratio: f64,
         text: []const u8,
+
+        const Helpers = UnionHelpers(@This());
+        pub const jsonParse = Helpers.jsonParse;
+        pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+        pub const jsonStringify = Helpers.jsonStringify;
     };
 
     const Message = struct {
         question: []const u8,
-        answer: Union(Answer),
+        answer: Answer,
     };
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -316,34 +266,34 @@ test "union" {
     const number_case = "{\"question\":\"How old are you?\",\"answer\":5}";
     const parsed_number = try std.json.parseFromSliceLeaky(Message, allocator, number_case, .{});
     try std.testing.expectEqualStrings("How old are you?", parsed_number.question);
-    try std.testing.expectEqual(@as(i32, 5), parsed_number.answer.value.number);
+    try std.testing.expectEqual(@as(i32, 5), parsed_number.answer.number);
     try std.testing.expectFmt(number_case, "{f}", .{std.json.fmt(parsed_number, .{})});
 
     const numbers_case = "{\"question\":\"Count to three.\",\"answer\":[1,2,3]}";
     const parsed_numbers = try std.json.parseFromSliceLeaky(Message, allocator, numbers_case, .{});
-    try std.testing.expectEqual(@as(usize, 3), parsed_numbers.answer.value.numbers.len);
-    try std.testing.expectEqual(@as(i32, 1), parsed_numbers.answer.value.numbers[0]);
-    try std.testing.expectEqual(@as(i32, 2), parsed_numbers.answer.value.numbers[1]);
-    try std.testing.expectEqual(@as(i32, 3), parsed_numbers.answer.value.numbers[2]);
+    try std.testing.expectEqual(@as(usize, 3), parsed_numbers.answer.numbers.len);
+    try std.testing.expectEqual(@as(i32, 1), parsed_numbers.answer.numbers[0]);
+    try std.testing.expectEqual(@as(i32, 2), parsed_numbers.answer.numbers[1]);
+    try std.testing.expectEqual(@as(i32, 3), parsed_numbers.answer.numbers[2]);
     try std.testing.expectFmt(numbers_case, "{f}", .{std.json.fmt(parsed_numbers, .{})});
 
     const flag_case = "{\"question\":\"Are you ready?\",\"answer\":true}";
     const parsed_flag = try std.json.parseFromSliceLeaky(Message, allocator, flag_case, .{});
-    try std.testing.expectEqual(true, parsed_flag.answer.value.flag);
+    try std.testing.expectEqual(true, parsed_flag.answer.flag);
     try std.testing.expectFmt(flag_case, "{f}", .{std.json.fmt(parsed_flag, .{})});
 
     const ratio_case = "{\"question\":\"What is pi?\",\"answer\":3.5}";
     const parsed_ratio = try std.json.parseFromSliceLeaky(Message, allocator, ratio_case, .{});
-    try std.testing.expectEqual(@as(f64, 3.5), parsed_ratio.answer.value.ratio);
+    try std.testing.expectEqual(@as(f64, 3.5), parsed_ratio.answer.ratio);
     try std.testing.expectFmt(ratio_case, "{f}", .{std.json.fmt(parsed_ratio, .{})});
 
     const text_case = "{\"question\":\"Your name?\",\"answer\":\"zml\"}";
     const parsed_text = try std.json.parseFromSliceLeaky(Message, allocator, text_case, .{});
-    try std.testing.expectEqualStrings("zml", parsed_text.answer.value.text);
+    try std.testing.expectEqualStrings("zml", parsed_text.answer.text);
     try std.testing.expectFmt(text_case, "{f}", .{std.json.fmt(parsed_text, .{})});
 
     const null_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "null", .{});
-    try std.testing.expectError(error.UnknownField, Union(Answer).jsonParseFromValue(allocator, null_value, .{}));
+    try std.testing.expectError(error.UnknownField, Answer.jsonParseFromValue(allocator, null_value, .{}));
 }
 
 test "strings in union can be freed" {
@@ -378,7 +328,7 @@ test "strings in union can be freed" {
 }
 
 test "tagged union" {
-    const Entry = union(enum) {
+    const Message = union(enum) {
         faq: struct {
             question: []const u8,
             answer: u32,
@@ -387,9 +337,12 @@ test "tagged union" {
             city: []const u8,
             zipcode: []const u8,
         },
-    };
 
-    const Message = TaggedUnion(Entry, "type");
+        const Helpers = TaggedUnionHelpers(@This(), "type");
+        pub const jsonParse = Helpers.jsonParse;
+        pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+        pub const jsonStringify = Helpers.jsonStringify;
+    };
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -397,14 +350,14 @@ test "tagged union" {
 
     const faq_case = "{\"type\":\"faq\",\"question\":\"How old are you?\",\"answer\":5}";
     const parsed_faq = try std.json.parseFromSliceLeaky(Message, allocator, faq_case, .{});
-    try std.testing.expectEqualStrings("How old are you?", parsed_faq.value.faq.question);
-    try std.testing.expectEqual(@as(u32, 5), parsed_faq.value.faq.answer);
+    try std.testing.expectEqualStrings("How old are you?", parsed_faq.faq.question);
+    try std.testing.expectEqual(@as(u32, 5), parsed_faq.faq.answer);
     try std.testing.expectFmt(faq_case, "{f}", .{std.json.fmt(parsed_faq, .{})});
 
     const address_case = "{\"type\":\"address\",\"city\":\"NYC\",\"zipcode\":\"49130\"}";
     const parsed_address = try std.json.parseFromSliceLeaky(Message, allocator, address_case, .{});
-    try std.testing.expectEqualStrings("NYC", parsed_address.value.address.city);
-    try std.testing.expectEqualStrings("49130", parsed_address.value.address.zipcode);
+    try std.testing.expectEqualStrings("NYC", parsed_address.address.city);
+    try std.testing.expectEqualStrings("49130", parsed_address.address.zipcode);
     try std.testing.expectFmt(address_case, "{f}", .{std.json.fmt(parsed_address, .{})});
 }
 
