@@ -1,4 +1,5 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 patchelf(
@@ -7,22 +8,58 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+patchelf(
+    name = "musa_llvm_bridge",
+    src = "musa-compiler/musa-llvm-bridge",
+    set_rpath = "$ORIGIN/../musa-sdk/lib",
+)
+
+patchelf(
+    name = "libxla_musa_mublas_shim",
+    src = "libxla_musa_mublas_shim.so.1",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
+    name = "libxla_musa_mudnn_shim",
+    src = "libxla_musa_mudnn_shim.so.1",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
+    name = "libxla_musa_mufft_shim",
+    src = "libxla_musa_mufft_shim.so.1",
+    set_rpath = "$ORIGIN",
+)
+
+# The current plugin's defensive muFFT preloader still probes this legacy
+# filename before loading SDK 5's SONAME. Keep the SDK 5 SONAME in the copied
+# object so later libmusart.so.5 dependencies resolve to the same image.
+genrule(
+    name = "libmusart_compat",
+    srcs = ["@musa_sdk//:libmusart_5_1_0"],
+    outs = ["libmusart.so.1.5"],
+    cmd = "cp $(location @musa_sdk//:libmusart_5_1_0) $@",
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":libpjrt_musa_so",
-        "libxla_musa_mublas_shim.so.1",
-        "musa-compiler/musa-llvm-bridge",
-        "musa_compiler_bundle.conf",
-        "musa-sdk/bin/clang-14",
-        "musa-sdk/bin/clang-offload-bundler",
-        "musa-sdk/bin/lld",
-        "musa-sdk/bin/llvm-readobj",
-        "musa-sdk/include/clang/Basic/BuiltinsMTGPU.def",
-        "musa-sdk/include/llvm/IR/IntrinsicsMUSA.td",
-        "musa-sdk/lib/libclang-cpp.so.14",
-        "musa-sdk/mtgpu/bitcode/libdevice.bc",
         "musa-sdk/toolchain-identity.txt",
+        ":libmusart_compat",
+        ":libpjrt_musa_so",
+        ":libxla_musa_mublas_shim",
+        ":libxla_musa_mudnn_shim",
+        ":libxla_musa_mufft_shim",
+        ":musa_llvm_bridge",
+        "@musa_sdk//:builtins_mtgpu_def",
+        "@musa_sdk//:clang_offload_bundler",
+        "@musa_sdk//:intrinsics_musa_td",
+        "@musa_sdk//:libclang_cpp",
+        "@musa_sdk//:libdevice",
+        "@musa_sdk//:lld",
+        "@musa_sdk//:llvm_readobj",
+        "@musa_sdk//:mcc",
         "@musa_sdk//:runtime_libs",
     ],
     add_directory_to_runfiles = False,
@@ -30,12 +67,22 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     replace_prefixes = {
+        "bin/clang-offload-bundler": "lib/musa-sdk/bin/clang-offload-bundler",
+        "bin/lld": "lib/musa-sdk/bin/lld",
+        "bin/llvm-readobj": "lib/musa-sdk/bin/llvm-readobj",
+        "bin/clang-14": "lib/musa-sdk/bin/clang-14",
+        "include/clang/Basic/BuiltinsMTGPU.def": "lib/musa-sdk/include/clang/Basic/BuiltinsMTGPU.def",
+        "include/llvm/IR/IntrinsicsMUSA.td": "lib/musa-sdk/include/llvm/IR/IntrinsicsMUSA.td",
         "lib": "lib",
-        "libxla_musa_mublas_shim.so.1": "lib/libxla_musa_mublas_shim.so.1",
+        "lib/libclang-cpp.so.14": "lib/musa-sdk/lib/libclang-cpp.so.14",
+        "mtgpu/bitcode/libdevice.bc": "lib/musa-sdk/mtgpu/bitcode/libdevice.bc",
+        "libmusart.so.1.5": "lib/libmusart.so.1.5",
         "libpjrt_musa_so": "lib",
-        "musa-compiler": "lib/musa-compiler",
+        "libxla_musa_mublas_shim": "lib",
+        "libxla_musa_mudnn_shim": "lib",
+        "libxla_musa_mufft_shim": "lib",
         "musa-sdk": "lib/musa-sdk",
-        "musa_compiler_bundle.conf": "lib/musa_compiler_bundle.conf",
+        "musa_llvm_bridge": "lib/musa-compiler",
     },
     root_paths = ["."],
 )

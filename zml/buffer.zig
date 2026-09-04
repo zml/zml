@@ -277,6 +277,7 @@ pub const Buffer = struct {
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
             if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
             }
         }
@@ -297,6 +298,7 @@ pub const Buffer = struct {
             const sub_slice = placement.shardSlice(device.coords, slice);
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
             }
 
