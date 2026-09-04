@@ -474,21 +474,39 @@ pub const Platform = struct {
     /// fixed arena until its first non-empty allocation. The temporary buffer
     /// is released immediately; caching allocators retain their initialized
     /// pools for subsequent allocations. Calling this more than once is safe.
-    pub fn warmupDeviceAllocators(self: *const Platform) !void {
-        const dims: []const i64 = &.{1};
-        const element_type = pjrtx.bufferTypeFromDtype(.u8);
-        const layout = self.defaultMemoryLayout(dims, .u8);
+    /// Devices are warmed concurrently: a serial pass over eight GPUs costs
+    /// measurable milliseconds ahead of a load.
+    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
+        const Worker = struct {
+            platform: *const Platform,
+            device_index: usize,
+            first_error: *std.atomic.Value(u16),
 
-        for (self.devices) |*device| {
-            const memory = device.memory(.default).?;
-            const buffer = try self.pjrt_client.createUninitializedBuffer(self.pjrt_api, .{
-                .dims = dims,
-                .element_type = element_type,
-                .layout = layout,
-                .dst = .{ .memory = memory.pjrt_memory },
-            });
-            buffer.deinit(self.pjrt_api);
-        }
+            fn run(worker: @This()) void {
+                const dims: []const i64 = &.{1};
+                const memory = worker.platform.devices[worker.device_index].memory(.default).?;
+                const buffer = worker.platform.pjrt_client.createUninitializedBuffer(worker.platform.pjrt_api, .{
+                    .dims = dims,
+                    .element_type = pjrtx.bufferTypeFromDtype(.u8),
+                    .layout = worker.platform.defaultMemoryLayout(dims, .u8),
+                    .dst = .{ .memory = memory.pjrt_memory },
+                }) catch |err| {
+                    _ = worker.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+                    return;
+                };
+                buffer.deinit(worker.platform.pjrt_api);
+            }
+        };
+        var first_error: std.atomic.Value(u16) = .init(0);
+        var group: std.Io.Group = .init;
+        for (self.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
+            .platform = self,
+            .device_index = device_index,
+            .first_error = &first_error,
+        }});
+        try group.await(io);
+        const error_code = first_error.load(.acquire);
+        if (error_code != 0) return @errorFromInt(error_code);
     }
 
     /// Calibrates synthetic host-to-device transfers for every addressable
@@ -1072,6 +1090,6 @@ test "platform defaultMemoryLayout is boring" {
 test "platform device allocators can be warmed repeatedly" {
     const platform = zml.testing.env();
 
-    try platform.warmupDeviceAllocators();
-    try platform.warmupDeviceAllocators();
+    try platform.warmupDeviceAllocators(std.testing.io);
+    try platform.warmupDeviceAllocators(std.testing.io);
 }

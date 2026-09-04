@@ -282,7 +282,7 @@ pub fn main(init: std.process.Init) !void {
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
-            try platform.warmupDeviceAllocators();
+            try platform.warmupDeviceAllocators(io);
 
             const pack_outputs = try allocator.alloc(zml.Buffer, pack_plan.packs.len);
             defer allocator.free(pack_outputs);
