@@ -107,7 +107,7 @@ fn benchmarkSyntheticTransfer(
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !BenchmarkReport {
-    const benchmark_started = std.Io.Timestamp.now(io, .awake);
+    const benchmark_started: std.Io.Timestamp = .now(io, .awake);
     const resolved_numa_nodes = try resolveNumaNodes(
         allocator,
         platform,
@@ -116,9 +116,9 @@ fn benchmarkSyntheticTransfer(
     );
     defer allocator.free(resolved_numa_nodes);
 
-    const device_warmup_started = std.Io.Timestamp.now(io, .awake);
+    const device_warmup_started: std.Io.Timestamp = .now(io, .awake);
     try platform.warmupDeviceAllocators(io);
-    const calibration_started = std.Io.Timestamp.now(io, .awake);
+    const calibration_started: std.Io.Timestamp = .now(io, .awake);
     const device_allocator_warmup_ns = elapsedNanoseconds(
         device_warmup_started,
         calibration_started,
@@ -153,7 +153,7 @@ fn benchmarkSyntheticTransfer(
     session_active = false;
     const calibration_ns = elapsedNanoseconds(
         calibration_started,
-        std.Io.Timestamp.now(io, .awake),
+        .now(io, .awake),
     );
 
     const uniform_block_size = representative.value;
@@ -201,7 +201,7 @@ fn benchmarkSyntheticTransfer(
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
-            std.Io.Timestamp.now(io, .awake),
+            .now(io, .awake),
         ),
         .calibration_ns = calibration_ns,
         .device_allocator_warmup_ns = device_allocator_warmup_ns,
@@ -513,10 +513,10 @@ fn runBenchmarkWindow(
         };
     }
     while (ready.load(.acquire) != parallelism) try io.sleep(.fromMilliseconds(1), .awake);
-    const measured_at = std.Io.Timestamp.now(io, .awake);
+    const measured_at: std.Io.Timestamp = .now(io, .awake);
     start.set(io);
     while (true) {
-        const elapsed_ns = elapsedNanoseconds(measured_at, std.Io.Timestamp.now(io, .awake));
+        const elapsed_ns = elapsedNanoseconds(measured_at, .now(io, .awake));
         const error_code = cohort.first_error.load(.acquire);
         if (error_code != 0) {
             stop.store(true, .release);
@@ -873,9 +873,9 @@ pub const BenchmarkResult = struct {
         ) != null) @panic("BenchmarkResult.deinit called while borrowed");
         const io = self.workspace.io;
         const mapped_bytes = self.workspace.allocatedBytes();
-        const started = std.Io.Timestamp.now(io, .awake);
+        const started: std.Io.Timestamp = .now(io, .awake);
         self.workspace.deinit();
-        const elapsed_ns = elapsedNanoseconds(started, std.Io.Timestamp.now(io, .awake));
+        const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
         log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
             mapped_bytes,
             @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
@@ -1058,7 +1058,7 @@ pub const BenchmarkSourcePools = struct {
         if (try std.math.add(usize, self.allocatedBytes(), bytes) > self.max_mapped_bytes)
             return error.DmaMappedBudgetExceeded;
         const pool = &self.pools[pool_index];
-        const started = std.Io.Timestamp.now(self.io, .awake);
+        const started: std.Io.Timestamp = .now(self.io, .awake);
         var allocation: BenchmarkSourceAllocation = if (pool.pjrt_host_memory) |host_memory|
             .{ .pjrt_host = try .init(host_memory, bytes) }
         else blk: {
@@ -1070,12 +1070,12 @@ pub const BenchmarkSourcePools = struct {
             ) };
         };
         errdefer allocation.deinit(pool.dma_map_allocator.allocator());
-        const mapped_at = std.Io.Timestamp.now(self.io, .awake);
+        const mapped_at: std.Io.Timestamp = .now(self.io, .awake);
         try pool.allocations.append(self.allocator, allocation);
         const replacement = allocation.data();
         _ = self.allocated_bytes.fetchAdd(replacement.len, .release);
         pool.source = replacement;
-        const finished_at = std.Io.Timestamp.now(self.io, .awake);
+        const finished_at: std.Io.Timestamp = .now(self.io, .awake);
         const map_ns = if (pool.pjrt_host_memory != null)
             0
         else

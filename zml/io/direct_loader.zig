@@ -139,7 +139,8 @@ const VectoredLoadMetrics = struct {
         // charge a high-latency source its whole round trip and make longer
         // windows at higher rungs look faster than they are.
         if (self.probe_window_start_ns == 0) {
-            self.probe_window_start_ns = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
+            const now: std.Io.Timestamp = .now(io, .awake);
+            self.probe_window_start_ns = @intCast(@max(now.nanoseconds, 1));
             return;
         }
         self.probe_read_operations +|= 1;
@@ -3958,7 +3959,8 @@ fn millisecondsPer(total_ns: u64, units: u64) f64 {
 }
 
 fn awakeNs(io: std.Io) u64 {
-    return @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
+    const now: std.Io.Timestamp = .now(io, .awake);
+    return @intCast(@max(now.nanoseconds, 1));
 }
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
