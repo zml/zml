@@ -382,6 +382,11 @@ pub fn main(init: std.process.Init) !void {
                     for (loaded.tensors) |*buffer_| buffer_.deinit();
                     init.arena.allocator().free(loaded.tensors);
                 }
+
+                const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
+                if (check_stride != 0) {
+                    try checkLoaded(allocator, io, &store, tensors, loaded.tensors, check_stride);
+                }
             }
 
             if (pack_options.check and pack_plan.packs.len > 0) {
@@ -597,6 +602,54 @@ fn checkPacks(
         checked += 1;
     }
     log.info("pack check: ok packs_checked={d} of {d}", .{ checked, packs.len });
+}
+
+/// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest one
+/// back to host and compares the bytes with the source, so a buffer that
+/// reported ready before every piece landed is caught.
+fn checkLoaded(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: *const zml.io.TensorStore,
+    tensors: []const zml.Tensor,
+    buffers: []const zml.Buffer,
+    stride: usize,
+) !void {
+    if (tensors.len != buffers.len) return error.LoadContentMismatch;
+    var largest: usize = 0;
+    for (tensors, 0..) |tensor, i| {
+        if (tensor.byteSize() > tensors[largest].byteSize()) largest = i;
+    }
+    const started: std.Io.Timestamp = .now(io, .awake);
+    var checked: usize = 0;
+    var checked_bytes: usize = 0;
+    for (tensors, buffers, 0..) |tensor, buffer, i| {
+        if (i % stride != 0 and i != largest) continue;
+        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
+        if (sources.len != 1) continue;
+        const source = sources[0];
+        const slice = try buffer.toSliceAlloc(allocator, io);
+        defer slice.free(allocator);
+        const actual = slice.constData();
+        const expected = try allocator.alloc(u8, @intCast(source.byteSize()));
+        defer allocator.free(expected);
+        var reader = try source.reader(io, &.{}, .{});
+        defer reader.deinit();
+        try reader.readPositionalAll(expected, 0);
+        if (actual.len != expected.len or !std.mem.eql(u8, expected, actual)) {
+            const first_bad = std.mem.indexOfDiff(u8, expected, actual) orelse actual.len;
+            log.err("load check: mismatch tensor={s} bytes={d} first_difference={d}", .{ source.name, expected.len, first_bad });
+            return error.LoadContentMismatch;
+        }
+        checked += 1;
+        checked_bytes += actual.len;
+    }
+    log.info("load check: ok tensors_checked={d} of {d} bytes={Bi:.2} elapsed={f}", .{
+        checked,
+        tensors.len,
+        checked_bytes,
+        started.untilNow(io, .awake),
+    });
 }
 
 /// `ZML_LOAD_EVENT_RETIRE_CHECK=1`: the loader's event retirement against
