@@ -2,6 +2,7 @@ const std = @import("std");
 const VFS = @import("vfs");
 const Sharding = @import("../Sharding.zig");
 const dma = @import("dma_calibration.zig");
+const mem = @import("../mem.zig");
 const limits = @import("limits.zig");
 
 pub const Parallelism = union(enum) {
@@ -48,7 +49,7 @@ pub const LoaderOptions = struct {
     load_profile: VFS.LoadProfile = .default,
     /// Reuses existing mapped DMA source memory. A supplied pool must outlive
     /// the loader and may be used by only one benchmark or loader at a time.
-    dma_pool: ?*dma.BenchmarkSourcePools = null,
+    dma_pool: ?*mem.DmaWorkspace = null,
     /// DMA transfer sizing. The loader uses `Calibration.default` when absent.
     dma_calibration: ?dma.Calibration = null,
     shardings: []const Sharding = &.{},

@@ -14,7 +14,7 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.llm);
 
 fn benchmarkDmaIfPresent(
-    source_pools: ?*zml.io.dma.BenchmarkSourcePools,
+    source_pools: ?*zml.mem.DmaWorkspace,
     platform: *const zml.Platform,
 ) !?zml.io.dma.Calibration {
     const pools = source_pools orelse return null;
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var dma_source_pools: ?zml.io.dma.BenchmarkSourcePools = if (zml.io.dma.isSupported(platform))
+    var dma_source_pools: ?zml.mem.DmaWorkspace = if (zml.io.dma.isSupported(platform))
         try .init(allocator, io, platform, .{})
     else
         null;

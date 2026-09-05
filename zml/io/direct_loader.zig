@@ -39,6 +39,78 @@ const max_load_positional_iovecs = load_limits.max_positional_iovecs;
 const maximumCoalescedJobBlocks = load_limits.maximumCoalescedJobBlocks;
 const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 
+/// The widest source rung pre-grown when a loader borrows the DMA workspace.
+const preallocated_source_width = 32;
+
+/// Ensures every NUMA pool can feed its calibrated devices and hold one
+/// complete fixed-size source request. Independent nodes register their
+/// missing slabs concurrently; existing retained arenas are reused first.
+fn ensureLoadBlockReserves(
+    self: *mem.DmaWorkspace,
+    block_size: usize,
+    calibrated_reserves: []const usize,
+) !void {
+    if (block_size == 0 or calibrated_reserves.len != self.numaPoolCount())
+        return error.InvalidDmaLoadConfig;
+    const request_blocks = try load_limits.maximumCoalescedJobBlocks(
+        load_limits.max_read_request_size,
+        block_size,
+    );
+    const targets = try self.allocator.alloc(usize, self.numaPoolCount());
+    defer self.allocator.free(targets);
+    for (calibrated_reserves, targets) |reserve, *target|
+        target.* = @max(reserve, request_blocks);
+    return self.growToBlockTargets(block_size, targets);
+}
+
+/// Every pool gets the same source target because a strict-affinity load
+/// draws a device's blocks from its own node, plus its own DMA reserve.
+fn ensureSourceWorkingSet(
+    self: *mem.DmaWorkspace,
+    block_size: usize,
+    request_blocks: usize,
+    width: usize,
+    feed_reserves: []const usize,
+) !void {
+    if (block_size == 0 or request_blocks == 0 or feed_reserves.len != self.numaPoolCount())
+        return error.InvalidDmaLoadConfig;
+    const targets = try self.allocator.alloc(usize, self.numaPoolCount());
+    defer self.allocator.free(targets);
+    // Reserves first; when not even one request fits beside them the
+    // reserves stay non-materialized and the source set alone is fitted.
+    var with_reserves = true;
+    var fitted_width = width;
+    while (true) : (fitted_width -= 1) {
+        const source_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
+            return error.DmaMappedBudgetExceeded;
+        var growth_bytes: usize = 0;
+        for (feed_reserves, targets, 0..) |reserve, *target, pool_index| {
+            const usable = try self.usableBlocks(pool_index, block_size);
+            target.* = std.math.add(usize, source_blocks, if (with_reserves) reserve else 0) catch
+                return error.DmaMappedBudgetExceeded;
+            growth_bytes = std.math.add(
+                usize,
+                growth_bytes,
+                (target.* -| usable) * block_size,
+            ) catch return error.DmaMappedBudgetExceeded;
+        }
+        if (self.retainedMappedBytes() +| growth_bytes <= self.maxMappedBytes()) break;
+        if (fitted_width == 0) {
+            if (!with_reserves) return; // Leave growth to the load.
+            with_reserves = false;
+            fitted_width = width + 1;
+        }
+    }
+    if (fitted_width < width or !with_reserves) {
+        load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}, reserves_materialized={}", .{
+            fitted_width,
+            width,
+            with_reserves,
+        });
+    }
+    return self.growToBlockTargets(block_size, targets);
+}
+
 pub const LoadSpec = struct {
     source: *safetensors.Tensor,
     shape: Shape,
@@ -3971,7 +4043,7 @@ pub const DirectLoader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
-    dma_source_pools: *dma.BenchmarkSourcePools,
+    dma_source_pools: *mem.DmaWorkspace,
     owns_dma_source_pools: bool,
     calibration: dma.Calibration,
     pool: mem.DmaBlockPool,
@@ -4004,11 +4076,11 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        var owned_source_pools: ?*dma.BenchmarkSourcePools = null;
+        var owned_source_pools: ?*mem.DmaWorkspace = null;
         const source_pools = opts.dma_pool orelse source_pools: {
-            const owned = try allocator.create(dma.BenchmarkSourcePools);
+            const owned = try allocator.create(mem.DmaWorkspace);
             errdefer allocator.destroy(owned);
-            owned.* = try dma.BenchmarkSourcePools.init(allocator, io, platform, .{});
+            owned.* = try mem.DmaWorkspace.init(allocator, io, platform, .{});
             owned_source_pools = owned;
             break :source_pools owned;
         };
@@ -4036,7 +4108,7 @@ pub const DirectLoader = struct {
             request_size,
             calibration.block_size,
         );
-        const node_reserves = try allocator.alloc(usize, source_pools.pools.len);
+        const node_reserves = try allocator.alloc(usize, source_pools.numaPoolCount());
         defer allocator.free(node_reserves);
         @memset(node_reserves, 0);
         for (platform.devices, 0..) |_, device_index| {
@@ -4051,20 +4123,21 @@ pub const DirectLoader = struct {
         // the mapped arenas remain in the source pools for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = source_pools.retainedMappedBytes();
-        try source_pools.ensureLoadBlockReserves(calibration.block_size, node_reserves);
-        try source_pools.ensureSourceWorkingSet(
+        try ensureLoadBlockReserves(source_pools, calibration.block_size, node_reserves);
+        try ensureSourceWorkingSet(
+            source_pools,
             calibration.block_size,
             maximum_blocks_per_job,
-            dma.BenchmarkSourcePools.preallocated_source_width,
+            preallocated_source_width,
             node_reserves,
         );
         const pregrown_bytes = source_pools.retainedMappedBytes() - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
         // The pool keeps the DMA stage reserves as the growth floor of each
         // node for devices that join a later submission.
-        var pool = try mem.DmaBlockPool.initFromProvider(
+        var pool = try mem.DmaBlockPool.init(
             allocator,
-            source_pools.blockPoolArenaProvider(),
+            source_pools,
             calibration.block_size,
             source_pools.maxMappedBytes(),
             node_reserves,
@@ -4958,46 +5031,15 @@ const TestPipeline = struct {
     }
 };
 
-/// One pre-mapped arena; growth is refused.
-const TestDmaArena = struct {
-    storage: []u8,
-
-    fn provider(self: *TestDmaArena) mem.DmaBlockPool.ArenaProvider {
-        return .{
-            .context = self,
-            .node_count = 1,
-            .arenaCountFn = arenaCount,
-            .arenaFn = arenaAt,
-            .allocateFn = allocate,
-            .mappedBytesFn = mappedBytes,
-        };
-    }
-
-    fn arenaCount(_: *anyopaque, _: usize) usize {
-        return 1;
-    }
-
-    fn arenaAt(context: *anyopaque, _: usize, _: usize) []u8 {
-        const self: *TestDmaArena = @ptrCast(@alignCast(context));
-        return self.storage;
-    }
-
-    fn allocate(_: *anyopaque, _: usize, _: usize) anyerror![]u8 {
-        return error.RequestExceedsCapacity;
-    }
-
-    fn mappedBytes(context: *anyopaque) usize {
-        const self: *TestDmaArena = @ptrCast(@alignCast(context));
-        return self.storage.len;
-    }
-};
-
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var arena: TestDmaArena = .{ .storage = try allocator.alloc(u8, 64) };
-    defer allocator.free(arena.storage);
-    var pool = try mem.DmaBlockPool.initFromProvider(allocator, arena.provider(), 64, 64, &.{0});
+    var workspace = try mem.DmaWorkspace.initForTesting(allocator, io, 1, 64);
+    defer workspace.deinit();
+    try workspace.acquire();
+    defer workspace.release();
+    _ = try workspace.allocate(0, 64);
+    var pool = try mem.DmaBlockPool.init(allocator, &workspace, 64, 64, &.{0});
     defer pool.deinit();
     var scheduler: FairVectoredReadScheduler = .init(allocator);
     defer scheduler.deinit();

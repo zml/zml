@@ -172,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
                 &zml.io.dma.default_benchmark_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            var source_pools = try zml.io.dma.BenchmarkSourcePools.init(allocator, io, platform, .{
+            var source_pools = try zml.mem.DmaWorkspace.init(allocator, io, platform, .{
                 .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
                 .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
                 .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_BLOCK_MIB",
                 &zml.io.dma.default_benchmark_block_sizes,
             );
-            var dma_source_pools: ?zml.io.dma.BenchmarkSourcePools = if (zml.io.dma.isSupported(platform))
+            var dma_source_pools: ?zml.mem.DmaWorkspace = if (zml.io.dma.isSupported(platform))
                 try .init(allocator, io, platform, .{
                     .device_numa_nodes = try dmaBenchmarkNumaNodes(init.arena.allocator(), init.environ_map),
                     .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
