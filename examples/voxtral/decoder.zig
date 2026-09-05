@@ -67,9 +67,9 @@ pub const Decoder = struct {
         }
 
         return .{
-            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .voc, .d }),
+            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensor("weight", .{ .voc, .d }, .replicated),
             .layers = layers,
-            .norm = store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
+            .norm = store.withPrefix("norm").createTensor("weight", .{.d}, .replicated),
             .norm_eps = config.norm_eps,
             .config = config,
         };
@@ -163,9 +163,9 @@ pub const DecoderLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) DecoderLayer {
         return .{
-            .attention_norm = store.withPrefix("attention_norm").createTensorWithTags("weight", .{.d}),
+            .attention_norm = store.withPrefix("attention_norm").createTensor("weight", .{.d}, .replicated),
             .attention = SelfAttention.init(store.withPrefix("attention")),
-            .ffn_norm = store.withPrefix("ffn_norm").createTensorWithTags("weight", .{.d}),
+            .ffn_norm = store.withPrefix("ffn_norm").createTensor("weight", .{.d}, .replicated),
             .feed_forward = SwiGluFfn.init(store.withPrefix("feed_forward")),
             .ada_norm = AdaRmsNorm.init(store),
             .norm_eps = config.norm_eps,

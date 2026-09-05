@@ -26,8 +26,8 @@ pub const Encoder = struct {
 
         pub fn initBuffer(self: ConvState, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(ConvState) {
             return .{
-                .conv1 = try .uninitialized(io, platform, self.conv1.shape(), .{}),
-                .conv2 = try .uninitialized(io, platform, self.conv2.shape(), .{}),
+                .conv1 = try .uninitialized(io, platform, self.conv1.shape(), .replicated, .{}),
+                .conv2 = try .uninitialized(io, platform, self.conv2.shape(), .replicated, .{}),
             };
         }
 
@@ -52,12 +52,12 @@ pub const Encoder = struct {
         const conv1_store = conv_store.withLayer(1).withPrefix("conv");
 
         return .{
-            .conv0_weight = conv0_store.createTensorWithTags("weight", .{ .cout, .cin, .k }),
-            .conv0_bias = conv0_store.createTensorWithTags("bias", .{.channels}),
-            .conv1_weight = conv1_store.createTensorWithTags("weight", .{ .cout, .cin, .k }),
-            .conv1_bias = conv1_store.createTensorWithTags("bias", .{.channels}),
+            .conv0_weight = conv0_store.createTensor("weight", .{ .cout, .cin, .k }, .replicated),
+            .conv0_bias = conv0_store.createTensor("bias", .{.channels}, .replicated),
+            .conv1_weight = conv1_store.createTensor("weight", .{ .cout, .cin, .k }, .replicated),
+            .conv1_bias = conv1_store.createTensor("bias", .{.channels}, .replicated),
             .layers = layers,
-            .norm = transformer_store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
+            .norm = transformer_store.withPrefix("norm").createTensor("weight", .{.d}, .replicated),
             .norm_eps = enc.norm_eps,
             .config = config,
         };
@@ -102,8 +102,8 @@ pub const Encoder = struct {
         const conv0_time: u32 = @intCast(conv0_out.dim(.time));
 
         return .{ output, .{
-            .conv1 = h.slice1d(.time, .{ .start = h_time - 2 }),
-            .conv2 = conv0_out.slice1d(.time, .{ .start = conv0_time - 2 }),
+            .conv1 = h.slice(.time, .{ .start = h_time - 2 }),
+            .conv2 = conv0_out.slice(.time, .{ .start = conv0_time - 2 }),
         } };
     }
 
@@ -121,14 +121,14 @@ pub const Encoder = struct {
         var conv0_out = conv0_input.conv1d(self.conv0_weight, .{ .window_strides = 1 });
         conv0_out = conv0_out.add(self.conv0_bias.broad(conv0_out.shape())).gelu();
         const mel_time: u32 = @intCast(mel_with_batch.dim(.time));
-        const new_conv1_state = mel_with_batch.slice1d(.time, .{ .start = mel_time - 2 });
+        const new_conv1_state = mel_with_batch.slice(.time, .{ .start = mel_time - 2 });
 
         // Conv1 (stride=2): concat state with conv0 output, conv1d with no padding
         const conv1_input = Tensor.concatenate(&.{ conv_state.conv2, conv0_out }, .time);
         var conv1_out = conv1_input.conv1d(self.conv1_weight, .{ .window_strides = 2 });
         conv1_out = conv1_out.add(self.conv1_bias.broad(conv1_out.shape())).gelu();
         const conv0_out_time: u32 = @intCast(conv0_out.dim(.time));
-        const new_conv2_state = conv0_out.slice1d(.time, .{ .start = conv0_out_time - 2 });
+        const new_conv2_state = conv0_out.slice(.time, .{ .start = conv0_out_time - 2 });
 
         // Reshape to [s=dsf, d=enc_dim]
         const output = conv1_out.squeeze(.batch)
@@ -173,9 +173,9 @@ pub const TransformerLayer = struct {
     pub fn init(store: zml.io.TensorStore.View, config: Config) TransformerLayer {
         const enc = config.encoder();
         return .{
-            .attention_norm = store.withPrefix("attention_norm").createTensorWithTags("weight", .{.d}),
+            .attention_norm = store.withPrefix("attention_norm").createTensor("weight", .{.d}, .replicated),
             .attention = SelfAttention.init(store.withPrefix("attention")),
-            .ffn_norm = store.withPrefix("ffn_norm").createTensorWithTags("weight", .{.d}),
+            .ffn_norm = store.withPrefix("ffn_norm").createTensor("weight", .{.d}, .replicated),
             .feed_forward = SwiGluFfn.init(store.withPrefix("feed_forward")),
             .norm_eps = enc.norm_eps,
         };

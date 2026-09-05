@@ -68,7 +68,7 @@ pub const LogMelSpectrogram = struct {
         const slice = zml.Slice.init(self.mel_filters.shape(), mel_filters_data);
 
         return .{
-            .mel_filters = try zml.Buffer.fromSlice(io, platform, slice),
+            .mel_filters = try zml.Buffer.fromSlice(io, platform, slice, .replicated),
         };
     }
 
@@ -85,10 +85,41 @@ pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, pr
 
     windows = windows.mul(weight.broadcastLeft(windows.shape()));
 
+    // The Metal PJRT backend does not implement FFT. A 400-point real DFT
+    // is small enough to express as GPU multiply/reduce operations instead.
+    if (zml.Compiler.current().platform.target == .metal) {
+        return dftPower(windows.convert(precision)).convert(waveform.dtype());
+    }
+
     var fft = windows.convert(precision).fft(.{ .kind = .RFFT, .length = &.{fft_len} });
     const spectrogram = fft.abs();
 
     return spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{ .frames, .freq_bins });
+}
+
+pub fn dftPower(windows: Tensor) Tensor {
+    const n: usize = @intCast(windows.dim(-1));
+    const bins = n / 2 + 1;
+    const allocator = zml.Compiler.current().allocator;
+    const real = allocator.alloc(f32, n * bins) catch @panic("out of memory");
+    defer allocator.free(real);
+    const imag = allocator.alloc(f32, n * bins) catch @panic("out of memory");
+    defer allocator.free(imag);
+    for (0..n) |sample| {
+        for (0..bins) |bin| {
+            const angle = -2.0 * std.math.pi * @as(f64, @floatFromInt(sample * bin)) / @as(f64, @floatFromInt(n));
+            real[sample * bins + bin] = @floatCast(@cos(angle));
+            imag[sample * bins + bin] = @floatCast(@sin(angle));
+        }
+    }
+    const shape = zml.Shape.init(.{ .samples = n, .freq_bins = bins }, .f32);
+    const input = windows.withTags(.{ .frames, .samples });
+    const full_shape = zml.Shape.init(.{ .frames = windows.dim(0), .samples = n, .freq_bins = bins }, input.dtype());
+    // Tensor.dot currently requests fast (reduced) precision. Cancellation in
+    // the Fourier sums needs f32 products, especially for low-energy bins.
+    const re = input.broad(full_shape).mul(Tensor.constantTensor(shape, std.mem.sliceAsBytes(real)).convert(input.dtype()).broad(full_shape)).sum(.samples);
+    const im = input.broad(full_shape).mul(Tensor.constantTensor(shape, std.mem.sliceAsBytes(imag)).convert(input.dtype()).broad(full_shape)).sum(.samples);
+    return re.mul(re).add(im.mul(im)).squeeze(.samples);
 }
 
 pub const AudioWindow = enum {

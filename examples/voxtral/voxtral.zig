@@ -23,6 +23,7 @@ const KvCache = common.KvCache;
 
 const terminalwave = @import("terminalwave/terminalwave.zig");
 const tesc = terminalwave.esc;
+pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
 
 pub const CompiledExes = struct {
     mel_step: *zml.Exe,
@@ -65,7 +66,8 @@ fn compileStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling " ++ label ++ "...", 1);
     defer node.end();
-    return try platform.compile(allocator, io, model, method, inputs);
+    log.info("Compiling " ++ label ++ "...", .{});
+    return try platform.compile(allocator, io, model, method, inputs, .{ .program_name = label });
 }
 
 /// Compiles LogMelSpectrogram.melStep for streaming (one chunk at a time).
@@ -195,23 +197,20 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
         }
     }.call;
 
-    var prefill_future = try io.concurrent(compilePrefill, .{ allocator, io, platform, model, prompt_len, dec_kv_cache, dim, attention_metadata, attention_parameters, progress });
-    var decode_future = try io.concurrent(compileDecode, .{ allocator, io, platform, model, dec_kv_cache, dim, attention_metadata, attention_parameters, progress });
-
-    return .{
-        try prefill_future.await(io),
-        try decode_future.await(io),
-    };
+    const prefill = try compilePrefill(allocator, io, platform, model, prompt_len, dec_kv_cache, dim, attention_metadata, attention_parameters, progress);
+    errdefer prefill.deinit();
+    const decode = try compileDecode(allocator, io, platform, model, dec_kv_cache, dim, attention_metadata, attention_parameters, progress);
+    return .{ prefill, decode };
 }
 
-pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
+pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !Tokenizer {
     progress.increaseEstimatedTotalItems(1);
 
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
 
     const bytes = b: {
-        const file = try dir.openFile(io, "tokenizer.json", .{});
+        const file = try dir.openFile(io, "tekken.json", .{});
         defer file.close(io);
 
         var reader = file.reader(io, &.{});
@@ -219,7 +218,7 @@ pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, 
     };
     defer allocator.free(bytes);
 
-    return try .fromBytes(allocator, io, bytes);
+    return try .fromBytes(allocator, bytes);
 }
 
 /// Sinusoidal time embedding: encodes a scalar t into a [dim]-dimensional vector.
@@ -246,10 +245,8 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
     const allocator = ctx.allocator;
     const io = ctx.io;
     const platform = ctx.platform;
-    const config = ctx.config;
     const sp = ctx.sp;
 
-    const enc_dim = sp.enc_dim;
     const prompt_len = sp.prompt_len;
 
     // Mel prefill: single kernel, produces [channels=128, time=prompt_len*mel_per_step] on device
@@ -261,10 +258,8 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
             .init(.{full_audio_len}, .f32),
             std.mem.sliceAsBytes(padded_audio[0..full_audio_len]),
         );
-        var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
+        var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice, .replicated);
         defer audio_buffer.deinit();
-
-        mel_prefill_output = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.prompt_len * sp.mel_per_step }, .f32), .{});
 
         var args = try ctx.exes.mel_prefill.args(allocator);
         defer args.deinit(allocator);
@@ -283,9 +278,6 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
     log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * sp.mel_per_step});
     var conv_prefill_output: zml.Buffer = undefined;
     {
-        const prefill_enc_frames = prompt_len * sp.dsf;
-        conv_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prefill_enc_frames, .d = enc_dim }, .bf16), .{});
-
         var args = try ctx.exes.conv_stem_prefill.args(allocator);
         defer args.deinit(allocator);
         var results = try ctx.exes.conv_stem_prefill.results(allocator);
@@ -293,6 +285,7 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 
         args.set(.{ ctx.buffers.encoder, mel_prefill_output });
         ctx.exes.conv_stem_prefill.call(args, &results);
+        Encoder.ConvState.deinitBuffer(ctx.buffers.conv_state);
         results.fill(.{ &conv_prefill_output, ctx.buffers.conv_state });
     }
     defer conv_prefill_output.deinit();
@@ -305,9 +298,6 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
         var enc_token_index: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
         defer enc_token_index.deinit();
 
-        const prefill_frames = prompt_len * sp.dsf;
-        encoder_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prefill_frames, .d = enc_dim }, .bf16), .{});
-
         var args = try ctx.exes.encoder_prefill.args(allocator);
         defer args.deinit(allocator);
         var results = try ctx.exes.encoder_prefill.results(allocator);
@@ -315,7 +305,9 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 
         args.set(.{ ctx.buffers.encoder, conv_prefill_output, enc_token_index, ctx.buffers.enc_kv, ctx.buffers.enc_attention_metadata });
         ctx.exes.encoder_prefill.call(args, &results);
-        results.fill(.{ &encoder_prefill_output, ctx.buffers.enc_kv });
+        KvCache.deinitBuffer(ctx.buffers.enc_kv);
+        enc_token_index.deinit();
+        results.fill(.{ &encoder_prefill_output, ctx.buffers.enc_kv, &enc_token_index });
     }
     defer encoder_prefill_output.deinit();
     log.info("Encoder prefill done.", .{});
@@ -324,8 +316,6 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
     log.info("Running adapter...", .{});
     var adapter_prefill_output: zml.Buffer = undefined;
     {
-        adapter_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prompt_len, .d = config.dim }, .bf16), .{});
-
         var args = try ctx.exes.adapter.args(allocator);
         defer args.deinit(allocator);
         var results = try ctx.exes.adapter.results(allocator);
@@ -350,7 +340,7 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
             .init(.{prompt_len}, .u32),
             std.mem.sliceAsBytes(prompt_tokens),
         );
-        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_data_slice);
+        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_data_slice, .replicated);
         defer token_buffer.deinit();
 
         var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
@@ -358,12 +348,15 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 
         var prefill_output_slice: zml.Slice = try .alloc(allocator, .init(.{prompt_len}, .u32));
         defer prefill_output_slice.free(allocator);
-        var prefill_output: zml.Buffer = try .uninitialized(io, platform, .init(.{prompt_len}, .u32), .{});
-        defer prefill_output.deinit();
+        var prefill_output: zml.Buffer = undefined;
 
         args.set(.{ ctx.buffers.decoder, token_buffer, adapter_prefill_output, token_index_buffer, ctx.buffers.dec_kv, ctx.buffers.t_cond, ctx.buffers.rng.*, ctx.buffers.dec_attention_metadata });
         ctx.exes.decoder_prefill.call(args, &results);
-        results.fill(.{ &prefill_output, ctx.buffers.dec_kv, ctx.buffers.rng });
+        KvCache.deinitBuffer(ctx.buffers.dec_kv);
+        Tensor.Rng.deinitBuffer(ctx.buffers.rng);
+        token_index_buffer.deinit();
+        results.fill(.{ &prefill_output, ctx.buffers.dec_kv, ctx.buffers.rng, &token_index_buffer });
+        defer prefill_output.deinit();
 
         // Extract last token from prefill output (first generated token)
         try prefill_output.toSlice(io, prefill_output_slice);
@@ -373,14 +366,12 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 }
 
 /// Run the streaming decode loop: step-by-step conv_stem -> encoder -> adapter -> decoder.
-fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer, initial_overlap: []const f32, stdin_reader: *std.Io.Reader, generated_token_slice: zml.Slice) !void {
+fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *Tokenizer, initial_overlap: []const f32, stdin_reader: *std.Io.Reader, generated_token_slice: zml.Slice) !void {
     const allocator = ctx.allocator;
     const io = ctx.io;
     const platform = ctx.platform;
-    const config = ctx.config;
     const sp = ctx.sp;
 
-    const enc_dim = sp.enc_dim;
     const prompt_len = sp.prompt_len;
     const new_audio_per_step = sp.new_audio_per_step;
     const audio_overlap = sp.audio_overlap;
@@ -425,19 +416,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     var decode_results = try ctx.exes.decoder_decode.results(allocator);
     defer decode_results.deinit(allocator);
 
-    var mel_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.mel_per_step }, .f32), .{});
-    defer mel_step_output.deinit();
-
-    var conv_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = sp.dsf, .d = enc_dim }, .bf16), .{});
-    defer conv_step_output.deinit();
-
-    var enc_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = sp.dsf, .d = enc_dim }, .bf16), .{});
-    defer enc_step_output.deinit();
-
-    var adapter_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = 1, .d = config.dim }, .bf16), .{});
-    defer adapter_step_output.deinit();
-
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, .replicated);
     defer current_token_buffer.deinit();
 
     // Pre-allocate reusable stdin sample buffers
@@ -454,31 +433,35 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
 
     // Wave visualization + transcript accumulation
     var stdout = std.Io.File.stdout().writer(io, &.{});
-    var wave = terminalwave.State.init(.{
+    const interactive = try std.Io.File.stdout().isTty(io);
+    var wave: terminalwave.State = if (interactive) .init(.{
         .title = "Voxtral Realtime",
         .sensitivity = 5.0,
         .num_bars = 50,
         .half_height = 20,
-    }, &stdout.interface);
-    errdefer wave.deinit();
+    }, &stdout.interface) else undefined;
+    errdefer if (interactive) wave.deinit();
 
     var transcript: std.ArrayListUnmanaged(u8) = .empty;
     defer transcript.deinit(allocator);
 
     // Set up scroll region: wave is fixed at top, transcript scrolls below
-    const title_rows: u16 = if (wave.config.show_title) 3 else 0;
-    const transcript_start_row: u16 = title_rows + wave.config.half_height + 4;
+    if (interactive) {
+        const title_rows: u16 = if (wave.config.show_title) 3 else 0;
+        const transcript_start_row: u16 = title_rows + wave.config.half_height + 4;
 
-    // Render initial empty wave + separator, set scroll region
-    _ = wave.render(0);
-    wave.renderSeparator();
-    wave.fmt(tesc.set_scroll_region_fmt, .{transcript_start_row});
-    wave.fmt(tesc.move_cursor_fmt, .{ transcript_start_row, wave.config.padding_left + 1 });
-    wave.put(tesc.clear_to_end);
-    wave.flush();
+        // Render initial empty wave + separator, set scroll region
+        _ = wave.render(0);
+        wave.renderSeparator();
+        wave.fmt(tesc.set_scroll_region_fmt, .{transcript_start_row});
+        wave.fmt(tesc.move_cursor_fmt, .{ transcript_start_row, wave.config.padding_left + 1 });
+        wave.put(tesc.clear_to_end);
+        wave.flush();
+    }
 
     var last_transcript_len: usize = 0;
     var num_generated: usize = 0;
+    var flush_steps = sp.n_delay_tokens + 2;
     while (true) {
         const generated_token = generated_token_slice.items(u32)[0];
         num_generated += 1;
@@ -492,28 +475,31 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
         if (generated_token == eos_token) break;
 
         // Read new audio from stdin
-        readStdinSamplesInto(stdin_reader, raw_buf, sample_buf) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-
-        // Save cursor position (in transcript scroll region)
-        wave.writer.writeAll(tesc.save_cursor) catch {};
-
-        // Render wave with current audio level (fixed area above scroll region)
-        const rms = terminalwave.computeRms(sample_buf);
-        _ = wave.render(rms);
-        wave.renderSeparator();
-
-        // Restore cursor and print only new transcript text
-        wave.put(tesc.restore_cursor);
-        if (transcript.items.len > last_transcript_len) {
-            wave.put(tesc.bright_white);
-            wave.put(transcript.items[last_transcript_len..]);
-            wave.put(tesc.reset);
-            last_transcript_len = transcript.items.len;
+        const samples_read = try readStdinSamplesInto(stdin_reader, raw_buf, sample_buf);
+        if (samples_read == 0) {
+            if (flush_steps == 0) break;
+            flush_steps -= 1;
         }
-        wave.flush();
+
+        if (interactive) {
+            // Save cursor position (in transcript scroll region)
+            wave.writer.writeAll(tesc.save_cursor) catch {};
+
+            // Render wave with current audio level (fixed area above scroll region)
+            const rms = terminalwave.computeRms(sample_buf);
+            _ = wave.render(rms);
+            wave.renderSeparator();
+
+            // Restore cursor and print only new transcript text
+            wave.put(tesc.restore_cursor);
+            if (transcript.items.len > last_transcript_len) {
+                wave.put(tesc.bright_white);
+                wave.put(transcript.items[last_transcript_len..]);
+                wave.put(tesc.reset);
+                last_transcript_len = transcript.items.len;
+            }
+            wave.flush();
+        }
 
         // Shift history left, append new samples
         @memmove(audio_buf[0..audio_overlap], audio_buf[new_audio_per_step..]);
@@ -523,45 +509,60 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
             .init(.{sp.chunk_audio}, .f32),
             std.mem.sliceAsBytes(audio_buf),
         );
-        var audio_buffer: zml.Buffer = try .fromSliceOpts(io, platform, audio_slice, .{ .wait = false });
+        var audio_buffer: zml.Buffer = try .fromSliceOpts(io, platform, audio_slice, .replicated, .{ .wait = false });
         defer audio_buffer.deinit();
 
+        var mel_step_output: zml.Buffer = undefined;
         mel_step_args.set(.{ ctx.buffers.mel_spectrum, audio_buffer });
         ctx.exes.mel_step.call(mel_step_args, &mel_step_results);
         mel_step_results.fill(.{&mel_step_output});
+        defer mel_step_output.deinit();
 
         // Conv stem step: mel + conv states → output + updated conv states
+        var conv_step_output: zml.Buffer = undefined;
         conv_step_args.set(.{ ctx.buffers.encoder, mel_step_output, ctx.buffers.conv_state });
         ctx.exes.conv_stem_step.call(conv_step_args, &conv_step_results);
+        Encoder.ConvState.deinitBuffer(ctx.buffers.conv_state);
         conv_step_results.fill(.{ &conv_step_output, ctx.buffers.conv_state });
+        defer conv_step_output.deinit();
 
         // Encoder step: conv stem output -> encoded chunk
+        var enc_step_output: zml.Buffer = undefined;
         enc_step_args.set(.{ ctx.buffers.encoder, conv_step_output, enc_token_index, ctx.buffers.enc_kv, ctx.buffers.enc_attention_metadata });
         ctx.exes.encoder_step.call(enc_step_args, &enc_step_results);
+        KvCache.deinitBuffer(ctx.buffers.enc_kv);
+        enc_token_index.deinit();
         enc_step_results.fill(.{ &enc_step_output, ctx.buffers.enc_kv, &enc_token_index });
+        defer enc_step_output.deinit();
 
         // Adapter step: encoded chunk -> 1 audio embedding
+        var adapter_step_output: zml.Buffer = undefined;
         adp_step_args.set(.{ ctx.buffers.adapter, enc_step_output });
         ctx.exes.adapter_step.call(adp_step_args, &adp_step_results);
         adp_step_results.fill(.{&adapter_step_output});
+        defer adapter_step_output.deinit();
 
         // Decoder decode: 1 token + 1 audio embedding -> next token
         decode_args.set(.{ ctx.buffers.decoder, current_token_buffer, adapter_step_output, dec_token_index, ctx.buffers.dec_kv, ctx.buffers.t_cond, ctx.buffers.rng.*, ctx.buffers.dec_attention_metadata });
         ctx.exes.decoder_decode.call(decode_args, &decode_results);
+        current_token_buffer.deinit();
+        KvCache.deinitBuffer(ctx.buffers.dec_kv);
+        Tensor.Rng.deinitBuffer(ctx.buffers.rng);
+        dec_token_index.deinit();
         decode_results.fill(.{ &current_token_buffer, ctx.buffers.dec_kv, ctx.buffers.rng, &dec_token_index });
 
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
 
     // Reset scroll region and exit wave visualization (returns to main screen)
-    wave.deinit();
+    if (interactive) wave.deinit();
 
     const decode_duration = decode_start.untilNow(io, .awake);
-    stdout.interface.print("\n" ++ tesc.bold ++ "Transcription:" ++ tesc.reset ++ "\n{s}\n\n", .{transcript.items}) catch {};
-    log.info("Decode done. Generated {} tokens in {D}: {:.3}tok/s", .{
+    try stdout.interface.print("{s}\n", .{transcript.items});
+    log.info("Decode done. Generated {} tokens in {f}: {:.3}tok/s", .{
         num_generated,
-        stdx.fmt.fmtDuration(decode_duration),
-        stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(decode_duration, num_generated)),
+        decode_duration,
+        @as(f64, @floatFromInt(num_generated)) * std.time.ns_per_s / @as(f64, @floatFromInt(@max(1, decode_duration.nanoseconds))),
     });
 }
 
@@ -570,7 +571,7 @@ pub fn runPipeline(
     io: std.Io,
     platform: *zml.Platform,
     config: Config,
-    tokenizer: *zml.tokenizer.Tokenizer,
+    tokenizer: *Tokenizer,
     prompt_tokens: []const u32,
     sp: StreamParams,
     exes: CompiledExes,
@@ -583,11 +584,12 @@ pub fn runPipeline(
     conv_state: Encoder.ConvState,
     enc_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
+    input: std.Io.File,
 ) !void {
     log.info("Running inference pipeline...", .{});
 
     var stdin_buff: [2560 * 4]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buff);
+    var stdin_reader = input.reader(io, &stdin_buff);
     const stdin_reader_interface = &stdin_reader.interface;
 
     // 0. Read initial audio from stdin and build padded buffer for prefill
@@ -599,7 +601,7 @@ pub fn runPipeline(
     defer allocator.free(prefill_raw_buf);
     const stdin_audio = try allocator.alloc(f32, n_prefill_stdin);
     defer allocator.free(stdin_audio);
-    try readStdinSamplesInto(stdin_reader_interface, prefill_raw_buf, stdin_audio);
+    if (try readStdinSamplesInto(stdin_reader_interface, prefill_raw_buf, stdin_audio) == 0) return;
 
     // Pad: [left_pad zeros | stdin audio]
     const prefill_audio = try allocator.alloc(f32, full_audio_len);
@@ -625,10 +627,10 @@ pub fn runPipeline(
         .init(.{config.dim}, .f32),
         std.mem.sliceAsBytes(t_cond_data),
     );
-    var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
+    var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice, .replicated);
     defer t_cond_buffer.deinit();
 
-    var rng_buffers = try Tensor.Rng.initBuffer(platform, 0, io);
+    var rng_buffers = try Tensor.Rng.initBuffer(io, platform, .replicated, 0);
     defer Tensor.Rng.deinitBuffer(&rng_buffers);
 
     // 2. Assemble pipeline context
@@ -665,9 +667,12 @@ pub fn runPipeline(
     try runGenerationLoop(&ctx, tokenizer, prefill_audio[full_audio_len - audio_overlap ..], stdin_reader_interface, generated_token_slice);
 }
 
-fn readStdinSamplesInto(reader: *std.Io.Reader, raw_buf: []u8, samples: []f32) !void {
-    try reader.readSliceAll(raw_buf);
+fn readStdinSamplesInto(reader: *std.Io.Reader, raw_buf: []u8, samples: []f32) !usize {
+    const bytes_read = try reader.readSliceShort(raw_buf);
+    if (bytes_read % 2 != 0) return error.IncompleteAudioSample;
+    @memset(raw_buf[bytes_read..], 0);
     for (0..samples.len) |i| {
-        samples[i] = @as(f32, @floatFromInt(std.mem.bytesToValue(i16, raw_buf[i * 2 ..][0..2]))) / 32768.0;
+        samples[i] = @as(f32, @floatFromInt(std.mem.readInt(i16, raw_buf[i * 2 ..][0..2], .little))) / 32768.0;
     }
+    return bytes_read / 2;
 }

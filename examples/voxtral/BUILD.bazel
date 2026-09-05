@@ -1,43 +1,62 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "voxtral",
-    main = "main.zig",
     srcs = [
-        "voxtral.zig",
-        "mel_spectrogram.zig",
-        "config.zig",
-        "encoder.zig",
-        "decoder.zig",
         "common.zig",
-        "terminalwave/terminalwave.zig"
+        "config.zig",
+        "decoder.zig",
+        "encoder.zig",
+        "mel_spectrogram.zig",
+        "terminalwave/terminalwave.zig",
+        "tokenizer.zig",
+        "voxtral.zig",
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
     ],
+    main = "main.zig",
     deps = ["//zml"],
 )
 
 zig_binary(
     name = "voxtral_test",
-    main = "test.zig",
     srcs = [
-        "voxtral.zig",
-        "mel_spectrogram.zig",
-        "config.zig",
-        "encoder.zig",
-        "decoder.zig",
         "common.zig",
-        "terminalwave/terminalwave.zig"
+        "config.zig",
+        "decoder.zig",
+        "encoder.zig",
+        "mel_spectrogram.zig",
+        "terminalwave/terminalwave.zig",
+        "tokenizer.zig",
+        "voxtral.zig",
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
     ],
+    main = "test.zig",
     deps = ["//zml"],
 )
 
 build_test(
     name = "test",
     targets = [":voxtral_test"],
+)
+
+zig_test(
+    name = "tokenizer_test",
+    main = "tokenizer.zig",
+)
+
+zig_test(
+    name = "kernel_test",
+    srcs = [
+        "common.zig",
+        "config.zig",
+        "mel_spectrogram.zig",
+    ],
+    extra_srcs = ["//examples/voxtral/assets:voxtral_mel_filter"],
+    main = "kernel_test.zig",
+    deps = ["//zml"],
 )

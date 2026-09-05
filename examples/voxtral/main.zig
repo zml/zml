@@ -24,6 +24,8 @@ const KvCache = common.KvCache;
 
 const voxtral = @import("voxtral.zig");
 
+pub const std_options: std.Options = .{ .log_level = .info };
+
 const CliArgs = struct {
     input: ?[]const u8 = null,
     model: []const u8,
@@ -48,12 +50,18 @@ pub fn main(init: std.process.Init) !void {
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
     const io = init.io;
+    const input = if (args.input) |path| try std.Io.Dir.cwd().openFile(io, path, .{}) else std.Io.File.stdin();
+    defer if (args.input != null) input.close(io);
 
     var progress = std.Progress.start(io, .{ .root_name = "Voxtral" });
 
     const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
+    defer model_dir.close(io);
 
-    var model_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.model);
+    // The repository also ships HF-renamed model.safetensors; use native Mistral keys.
+    const model_file = try model_dir.openFile(io, if (std.mem.endsWith(u8, args.model, ".safetensors")) std.fs.path.basename(args.model) else "consolidated.safetensors", .{});
+    defer model_file.close(io);
+    var model_registry = try zml.safetensors.fetchRegistry(allocator, io, model_dir, model_file);
     defer model_registry.deinit();
 
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
@@ -63,21 +71,19 @@ pub fn main(init: std.process.Init) !void {
     defer parsed_config.deinit();
     const config = parsed_config.value;
 
-    const sp: StreamParams = .init(config, args.transcription_delay_ms, n_left_pad_tokens);
-
-    const delay_ms: u32 = @intFromFloat(args.transcription_delay_ms);
-    if (delay_ms < 80 or delay_ms > 2400 or delay_ms % 80 != 0) {
-        std.debug.panic("transcription_delay_ms must be a multiple of 80 in range [80, 2400], got {}", .{delay_ms});
+    const delay = args.transcription_delay_ms;
+    if (!std.math.isFinite(delay) or delay < 80 or delay > 2400 or @mod(delay, 80) != 0) {
+        log.err("transcription_delay_ms must be a multiple of 80 in range [80, 2400], got {d}", .{delay});
+        return error.InvalidTranscriptionDelay;
     }
+    const sp: StreamParams = .init(config, delay, n_left_pad_tokens);
 
     // Build prompt_tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
     const prompt_tokens = try allocator.alloc(u32, sp.prompt_len);
     defer allocator.free(prompt_tokens);
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{
-        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.75 } } },
-    });
-    defer platform.deinit(allocator);
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
     const backend = args.backend orelse b: {
@@ -97,8 +103,13 @@ pub fn main(init: std.process.Init) !void {
     defer decoder_model.deinit(allocator);
 
     const enc_cfg = config.encoder();
-    const enc_kv_size = args.enc_kv_size orelse enc_cfg.sliding_window;
+    // Preserve the oldest history needed by the first query of a multi-frame step.
+    const enc_kv_size = args.enc_kv_size orelse (enc_cfg.sliding_window + sp.dsf - 1);
     const dec_kv_size = args.dec_kv_size orelse config.sliding_window;
+    if (enc_kv_size < @max(enc_cfg.sliding_window + sp.dsf - 1, sp.prompt_len * sp.dsf) or dec_kv_size < @max(config.sliding_window, sp.prompt_len)) {
+        log.err("KV caches must cover the sliding window and prefill", .{});
+        return error.InvalidCacheSize;
+    }
 
     // KV cache shapes for encoder and decoder, sized to sliding_window for memory efficiency
     const enc_dtype = encoder_model.norm.dtype();
@@ -117,31 +128,12 @@ pub fn main(init: std.process.Init) !void {
         .hd = config.head_dim,
     }, dec_dtype));
 
-    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_kv_size)));
-    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(dec_kv_size)));
+    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_kv_size), config.encoder().n_heads));
+    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(dec_kv_size), config.n_heads));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
 
-    // Launch concurrent compilation and buffer loading
-    var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
-
-    var compiled_mel_step_future = try io.concurrent(voxtral.compileMelStep, .{ allocator, io, platform, melspectro_model, sp, &progress });
-    var compiled_mel_prefill_future = try io.concurrent(voxtral.compileMelPrefill, .{ allocator, io, platform, melspectro_model, sp, &progress });
-
-    var compiled_conv_stem_prefill_future = try io.concurrent(voxtral.compileConvStemPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
-    var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, sp, &progress });
-    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
-    var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
-    var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, sp.prompt_len, config, &progress });
-    var compiled_adapter_step_future = try io.concurrent(voxtral.compileAdapterStep, .{ allocator, io, platform, adapter, config, &progress });
-    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, sp.prompt_len, dec_kv_cache, dec_attention_metadata, attention_parameters, &progress });
-
-    var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
-    var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
-    var adapter_buffers_future = try io.concurrent(Adapter.load, .{ &adapter, allocator, io, platform, &model_store, &progress });
-    var decoder_buffers_future = try io.concurrent(Decoder.load, .{ &decoder_model, allocator, io, platform, &model_store, &progress });
-
-    // Await tokenizer and look up special token IDs
-    var tokenizer = try tokenizer_future.await(io);
+    // Load tokenizer and look up special token IDs.
+    var tokenizer = try voxtral.loadTokenizer(allocator, io, model_dir, &progress);
     defer tokenizer.deinit();
 
     const token_bos = tokenizer.tokenToId("<s>") orelse @panic("tokenizer missing <s> token");
@@ -149,50 +141,51 @@ pub fn main(init: std.process.Init) !void {
     prompt_tokens[0] = token_bos;
     @memset(prompt_tokens[1..], token_streaming_pad);
 
-    var compiled_mel_step = try compiled_mel_step_future.await(io);
+    // Compile before loading weights to leave room for compiler/autotune allocations.
+    var compiled_mel_step = try voxtral.compileMelStep(allocator, io, platform, melspectro_model, sp, &progress);
     defer compiled_mel_step.deinit();
 
-    var compiled_mel_prefill = try compiled_mel_prefill_future.await(io);
+    var compiled_mel_prefill = try voxtral.compileMelPrefill(allocator, io, platform, melspectro_model, sp, &progress);
     defer compiled_mel_prefill.deinit();
 
-    var compiled_conv_stem_prefill = try compiled_conv_stem_prefill_future.await(io);
+    var compiled_conv_stem_prefill = try voxtral.compileConvStemPrefill(allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress);
     defer compiled_conv_stem_prefill.deinit();
 
-    var compiled_conv_stem_step = try compiled_conv_stem_step_future.await(io);
+    var compiled_conv_stem_step = try voxtral.compileConvStemStep(allocator, io, platform, encoder_model, sp, &progress);
     defer compiled_conv_stem_step.deinit();
 
-    var compiled_encoder_prefill = try compiled_encoder_prefill_future.await(io);
+    var compiled_encoder_prefill = try voxtral.compileEncoderPrefill(allocator, io, platform, encoder_model, sp.prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress);
     defer compiled_encoder_prefill.deinit();
 
-    var compiled_encoder_step = try compiled_encoder_step_future.await(io);
+    var compiled_encoder_step = try voxtral.compileEncoderStep(allocator, io, platform, encoder_model, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress);
     defer compiled_encoder_step.deinit();
 
-    var compiled_adapter = try compiled_adapter_future.await(io);
+    var compiled_adapter = try voxtral.compileAdapter(allocator, io, platform, adapter, sp.prompt_len, config, &progress);
     defer compiled_adapter.deinit();
 
-    var compiled_adapter_step = try compiled_adapter_step_future.await(io);
+    var compiled_adapter_step = try voxtral.compileAdapterStep(allocator, io, platform, adapter, config, &progress);
     defer compiled_adapter_step.deinit();
 
-    var compiled_decoder_prefill, var compiled_decoder_decode = try compiled_decoder_future.await(io);
+    var compiled_decoder_prefill, var compiled_decoder_decode = try voxtral.compileDecoder(allocator, io, platform, decoder_model, sp.prompt_len, dec_kv_cache, dec_attention_metadata, attention_parameters, &progress);
     defer compiled_decoder_prefill.deinit();
     defer compiled_decoder_decode.deinit();
 
-    var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
+    var mel_spectrum_buffers = try LogMelSpectrogram.load(&melspectro_model, io, platform);
     defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
 
-    var encoder_buffers = try encoder_buffers_future.await(io);
+    var encoder_buffers = try Encoder.load(&encoder_model, allocator, io, platform, &model_store, &progress);
     defer Encoder.unload(&encoder_buffers, allocator);
 
-    var adapter_buffers = try adapter_buffers_future.await(io);
+    var adapter_buffers = try Adapter.load(&adapter, allocator, io, platform, &model_store, &progress);
     defer Adapter.unload(&adapter_buffers);
 
-    var decoder_buffers = try decoder_buffers_future.await(io);
+    var decoder_buffers = try Decoder.load(&decoder_model, allocator, io, platform, &model_store, &progress);
     defer Decoder.unload(&decoder_buffers, allocator);
 
-    var enc_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try enc_attention_metadata.initBuffer(io, platform);
+    var enc_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try enc_attention_metadata.initBuffer(io, platform, .replicated);
     defer zml.attention.Metadata.deinitBuffer(&enc_attention_metadata_buffers);
 
-    var dec_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try dec_attention_metadata.initBuffer(io, platform);
+    var dec_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try dec_attention_metadata.initBuffer(io, platform, .replicated);
     defer zml.attention.Metadata.deinitBuffer(&dec_attention_metadata_buffers);
 
     progress.end();
@@ -231,5 +224,6 @@ pub fn main(init: std.process.Init) !void {
         conv_state,
         &enc_attention_metadata_buffers,
         &dec_attention_metadata_buffers,
+        input,
     );
 }

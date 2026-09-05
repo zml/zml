@@ -11,23 +11,46 @@ const cfg = @import("config.zig");
 /// Recursively deinit all Buffer fields in a Bufferized struct.
 /// For models with allocated slices (e.g. layers), the caller must also free the slice.
 pub fn deinitBufferized(bufferized: anytype) void {
-    zml.meta.visit((struct {
-        fn cb(_: void, buf: *zml.Buffer) void {
+    zml.meta.forEachVisit(bufferized, *zml.Buffer, (struct {
+        fn cb(_: usize, buf: *zml.Buffer) void {
             buf.deinit();
         }
-    }).cb, {}, bufferized);
+    }).cb, .{});
 }
 
 pub fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
     return .init(
-        store.createTensorWithTags("weight", .{ .dout, .d }),
-        store.maybeCreateTensorWithTags("bias", .{.dout}),
+        store.createTensor("weight", .{ .dout, .d }, .replicated),
+        store.maybeCreateTensor("bias", .{.dout}, .replicated),
         .d,
     );
 }
 
 pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f32) Tensor {
     return zml.nn.rmsNorm(x, .d, eps).mul(weight.broad(x.shape()));
+}
+
+pub fn attention(q: Tensor, k: Tensor, v: Tensor, token_index: Tensor, metadata: zml.attention.Metadata, parameters: zml.attention.Parameters, window: u32) Tensor {
+    // Chunked circular caches retain window + chunk - 1 entries. Mask the
+    // extra history per query, including when a chunk crosses the ring boundary.
+    if (k.dim(.k) > window or (parameters == .metal_fa and q.dim(.q) > 1)) {
+        const positions = Tensor.arange(.{ .end = q.dim(.q) }, .i32).withTags(.{.q}).add(token_index.convert(.i32));
+        const keys = Tensor.arange(.{ .end = k.dim(.k) }, .i32).withTags(.{.k});
+        const mask_shape = Shape.init(.{ .q = q.dim(.q), .k = k.dim(.k) }, .i32);
+        const qp = positions.broad(mask_shape);
+        const kp = keys.broad(mask_shape);
+        const valid = kp.cmp(.LE, qp).select(kp.cmp(.GT, qp.addConstant(-@as(i64, window))), Tensor.scalar(false, .bool).broad(mask_shape.withDtype(.bool)));
+        const mask = valid.select(Tensor.scalar(0, q.dtype()).broad(mask_shape.withDtype(q.dtype())), Tensor.scalar(-std.math.inf(f32), q.dtype()).broad(mask_shape.withDtype(q.dtype())));
+        // Unwritten cache entries may contain NaNs; a -inf attention mask alone
+        // cannot remove those (nor can zero probabilities multiplied by NaN V).
+        const populated = keys.cmp(.LE, token_index.convert(.i32).addConstant(q.dim(.q) - 1).broad(keys.shape()));
+        const safe_k = populated.broad(k.shape().withDtype(.bool)).select(k, Tensor.scalar(0, k.dtype()).broad(k.shape()));
+        const safe_v = populated.broad(v.shape().withDtype(.bool)).select(v, Tensor.scalar(0, v.dtype()).broad(v.shape()));
+        return zml.nn.sdpa(q, safe_k, safe_v, .{ .attn_mask = mask });
+    }
+    var md = metadata;
+    if (md == .metal_fa) md.metal_fa.num_tokens = Tensor.scalar(q.dim(.q), .u32);
+    return zml.attention.attention(q, k, v, token_index, md, parameters);
 }
 
 pub fn loadModel(
@@ -43,24 +66,25 @@ pub fn loadModel(
     progress.increaseEstimatedTotalItems(store.view().count());
 
     const now: std.Io.Timestamp = .now(io, .awake);
-    var total_bytes: usize = 0;
+    var loader: zml.io.Loader = try .init(allocator, platform, .{
+        .dma_chunks = 4,
+        .dma_chunk_size = 16 * zml.MiB,
+        .parallelism = 4,
+    });
+    defer loader.deinit();
     defer {
         const took = now.untilNow(io, .awake);
-        log.info("Loaded " ++ label ++ " weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-            total_bytes,
-            stdx.fmt.fmtDuration(took),
-            total_bytes / @as(usize, @intCast(took.toNanoseconds())) * std.time.ns_per_s,
+        log.info("Loaded " ++ label ++ " weights [{Bi:.2}, {f}, {d:.0} bytes/s]", .{
+            loader.bytes_loaded.raw,
+            took,
+            @as(f64, @floatFromInt(loader.bytes_loaded.raw)) * std.time.ns_per_s / @as(f64, @floatFromInt(@max(1, took.nanoseconds))),
         });
     }
 
-    return zml.io.load(T, self, allocator, io, platform, .{
-        .dma_chunks = 32,
-        .dma_chunk_size = 128 * zml.MiB,
-        .progress = progress,
-        .store = store,
-        .parallelism = 16,
-        .total_bytes = &total_bytes,
-    });
+    var buffers = try zml.mem.bufferize(allocator, T, self);
+    try loader.load(io, T, self, &buffers, store, &.{}, .{ .progress = progress });
+    try loader.await(io);
+    return buffers;
 }
 
 /// Unified self-attention with KV cache.
@@ -111,7 +135,7 @@ pub fn SelfAttention(comptime circular_buffer: bool) type {
 
             const rope_opts: zml.nn.RopeOpts = .{
                 .layout = .interleaved,
-                .freq_base = attn_config.rope_theta,
+                .scaling = .{ .default = .{ .rope_theta = attn_config.rope_theta } },
             };
 
             q = zml.nn.rope(q, pos_index, rope_opts);
@@ -145,9 +169,7 @@ pub fn SelfAttention(comptime circular_buffer: bool) type {
                 // Cap token_index so seqused_k doesn't exceed cache bounds
                 const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
                 const attn_token_index = token_index.minimum(max_token_index);
-                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
-                    .sliding_window = @intCast(attn_config.sliding_window),
-                });
+                const attn_out = attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, attn_config.sliding_window);
 
                 const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
@@ -159,9 +181,7 @@ pub fn SelfAttention(comptime circular_buffer: bool) type {
                 v = new_kv_cache.values().convert(dtype);
 
                 const attn_token_index = token_index;
-                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
-                    .sliding_window = @intCast(attn_config.sliding_window),
-                });
+                const attn_out = attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, attn_config.sliding_window);
 
                 const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
                 return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
@@ -221,8 +241,8 @@ pub const KvCache = struct {
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
-            .k = try .uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try .uninitialized(io, platform, self.v.shape(), .{}),
+            .k = try .uninitialized(io, platform, self.k.shape(), .replicated, .{}),
+            .v = try .uninitialized(io, platform, self.v.shape(), .replicated, .{}),
             .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
         };
     }
@@ -234,11 +254,11 @@ pub const KvCache = struct {
     }
 
     pub fn keys(self: KvCache) Tensor {
-        return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        return self.k.slice(.layer, .dynSingle(self.layer_index));
     }
 
     pub fn values(self: KvCache) Tensor {
-        return self.v.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        return self.v.slice(.layer, .dynSingle(self.layer_index));
     }
 
     pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
@@ -252,7 +272,8 @@ pub const KvCache = struct {
     fn scatterCache(cache: Tensor, new: Tensor, layer_index: Tensor, token_index: ?Tensor) Tensor {
         const k_shape = cache.shape().drop(.layer);
         const converted = new.convert(cache.dtype()).transpose(k_shape);
-        const scatter_opts: Tensor.ScatterOpts = .{ .indices_are_sorted = true, .update_fn = Tensor.ScatterOpts.override };
+        // Ring-buffer positions are not sorted when a chunk wraps around.
+        const scatter_opts: Tensor.ScatterOpts = .{ .update_fn = Tensor.ScatterOpts.override };
 
         return if (token_index) |idx|
             cache.scatterSlices(.{ .layer = layer_index.broad(idx.shape()), .k = idx }, converted, scatter_opts).reuseBuffer(cache)
