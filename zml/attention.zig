@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 pub const attnd = @import("attention/attnd.zig");
 pub const flashattn = @import("attention/flashattn.zig");
@@ -188,6 +189,25 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };
+}
+
+pub const DenseOpts = struct {
+    is_causal: bool = false,
+};
+
+pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
+    switch (backend) {
+        .cuda_fa2, .cuda_fa3 => return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+        .vanilla, .attnd, .nki, .metal_fa => {},
+    }
+    if (opts.is_causal) {
+        stdx.debug.assert(q.dim(.q) == k.dim(.k), "dense causal SDPA expects square q/k, got q={f} k={f}", .{ q, k });
+    }
+    const mask = if (opts.is_causal)
+        zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
+    else
+        null;
+    return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
 }
 
 test "attention: q=1,qh=64,kh=8" {
