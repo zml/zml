@@ -27,7 +27,6 @@ pub const Options = struct {
     /// Upper bound for the direct backend's host arenas, not a growth target.
     max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
     numa: mem.dma.NumaPlacement = .memory_nodes,
-    progress: ?*std.Progress.Node = null,
 };
 
 /// Backend contract: one resolved source placement and its caller-owned output.

@@ -40,14 +40,14 @@ const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, *bool);
 
 /// Loads checkpoint sources and optionally executes bindings over them.
 /// The platform and options' borrowed values must outlive the loader. Each
-/// submission borrows its store's source metadata and outputs until completion.
+/// submission borrows its store's source metadata, outputs, and optional progress
+/// parent until completion.
 /// Submit and await handles serially on the owning task; source reads and
 /// transfers run concurrently inside the selected backend.
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    opts: Options,
     backend: Backend,
     /// Every handle this loader created, in publish order. `deinit` awaits
     /// the open ones and frees them all; a `Handle` is invalid afterwards.
@@ -78,7 +78,6 @@ pub const Loader = struct {
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .opts = opts,
             .backend = switch (backendFor(platform.target)) {
                 .direct => .{ .direct = try DirectLoader.create(allocator, io, platform, opts) },
                 .buffered => .{ .buffered = try BufferedLoader.create(
@@ -115,7 +114,8 @@ pub const Loader = struct {
     /// already have been delivered by awaiting `loadExecute`; they are skipped.
     /// Missing deliveries fail before any work is submitted. A zero-byte source
     /// is `error.EmptyTensor`. Shardings are selected during this call; an empty
-    /// slice uses replicated placement.
+    /// slice uses replicated placement. Progress counts loaded sources, excluding
+    /// skipped transformed tensors. The caller owns the estimated total.
     pub fn load(
         self: *Loader,
         comptime ModelType: type,
@@ -123,6 +123,7 @@ pub const Loader = struct {
         buffers: *Bufferized(ModelType),
         store: *const TensorStore,
         shardings: []const Sharding,
+        progress: ?*std.Progress.Node,
     ) !Handle {
         const specs = try prepareModelLoad(
             self.allocator,
@@ -135,20 +136,21 @@ pub const Loader = struct {
             buffers,
         );
         defer self.allocator.free(specs);
-        return self.submit(specs, &.{});
+        return self.submit(specs, &.{}, progress);
     }
 
     /// Submits one tensor through the same validation and handle lifecycle as load.
-    pub fn loadBuffer(self: *Loader, tensor: Tensor, output: *Buffer, store: *const TensorStore, shardings: []const Sharding) !Handle {
-        return self.load(Tensor, &tensor, output, store, shardings);
+    pub fn loadBuffer(self: *Loader, tensor: Tensor, output: *Buffer, store: *const TensorStore, shardings: []const Sharding, progress: ?*std.Progress.Node) !Handle {
+        return self.load(Tensor, &tensor, output, store, shardings, progress);
     }
 
     /// Submits the sources of every binding as one planned submission, so
     /// adjacent sources of different bindings coalesce into shared reads.
     /// `Handle.await` runs the executables in binding order on the awaiting
     /// task and frees their inputs. Input and output placement come from each
-    /// executable.
-    pub fn loadExecute(self: *Loader, store: *const TensorStore, bindings: []const Binding) !Handle {
+    /// executable. Progress counts input sources across all bindings, before
+    /// execution. The caller owns the estimated total.
+    pub fn loadExecute(self: *Loader, store: *const TensorStore, bindings: []const Binding, progress: ?*std.Progress.Node) !Handle {
         const executables = try self.allocator.alloc(BoundExecutable, bindings.len);
         var prepared: usize = 0;
         errdefer {
@@ -187,7 +189,7 @@ pub const Loader = struct {
                 next += 1;
             }
         }
-        return self.submit(specs, executables);
+        return self.submit(specs, executables, progress);
     }
 
     /// Awaits every handle in publish order, running their executables.
@@ -262,7 +264,7 @@ pub const Loader = struct {
 
     /// One submission over `specs`. The handle owns `executables` once the
     /// submission is published; on failure the caller still does.
-    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable) !Handle {
+    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable, progress: ?*std.Progress.Node) !Handle {
         var logical_bytes: usize = 0;
         for (specs) |spec| {
             logical_bytes = try std.math.add(usize, logical_bytes, spec.source.shape.byteSize());
@@ -276,8 +278,8 @@ pub const Loader = struct {
             .executables = executables,
             .logical_bytes = logical_bytes,
             .submission = switch (self.backend) {
-                .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs) } },
-                .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs) } },
+                .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs, progress) } },
+                .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs, progress) } },
             },
         };
         self.handles.appendAssumeCapacity(state);
@@ -340,7 +342,7 @@ pub const Window = struct {
         };
     }
 
-    pub fn submit(self: *Window, loader: *Loader, store: *const TensorStore, bindings: []const Loader.Binding) !void {
+    pub fn submit(self: *Window, loader: *Loader, store: *const TensorStore, bindings: []const Loader.Binding, progress: ?*std.Progress.Node) !void {
         var input_bytes: usize = 0;
         for (bindings) |binding| {
             input_bytes = try std.math.add(
@@ -356,7 +358,7 @@ pub const Window = struct {
             try self.awaitOldest();
         }
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        const handle = try loader.loadExecute(store, bindings);
+        const handle = try loader.loadExecute(store, bindings, progress);
         self.pending.appendAssumeCapacity(.{ .handle = handle, .input_bytes = input_bytes });
         self.pending_bytes += input_bytes;
     }
@@ -750,7 +752,6 @@ const LoaderTestFixture = struct {
                 .allocator = allocator,
                 .io = io,
                 .platform = self.platform,
-                .opts = opts,
                 .backend = .{ .buffered = try BufferedLoader.create(
                     allocator,
                     io,
@@ -804,10 +805,10 @@ test "loader handles complete out of order and count bytes once each" {
         defer mem.deinitBufferized(allocator, Model, &buffers);
 
         var first: Buffer = undefined;
-        const a = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &first)});
+        const a = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &first)}, null);
         var second: Buffer = undefined;
-        const b = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.second, &second)});
-        const c = try loader.load(Model, &model, &buffers, &fixture.store, &.{});
+        const b = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.second, &second)}, null);
+        const c = try loader.load(Model, &model, &buffers, &fixture.store, &.{}, null);
         try std.testing.expectEqual(LoaderTestFixture.contents.len, a.logicalBytes());
 
         try b.await();
@@ -830,7 +831,7 @@ test "loader handles complete out of order and count bytes once each" {
         const empty_model: Empty = .{ .empty = fixture.empty };
         var empty_buffers = try mem.bufferize(allocator, Empty, &empty_model);
         defer mem.deinitBufferized(allocator, Empty, &empty_buffers);
-        try LoaderTestFixture.expectLoadError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers, &fixture.store, &.{}));
+        try LoaderTestFixture.expectLoadError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers, &fixture.store, &.{}, null));
     }
 }
 
@@ -849,8 +850,8 @@ test "one loader accepts pending submissions from different stores" {
         var second: Buffer = undefined;
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
-        const a = try loader.loadBuffer(fixture.value, &first, &fixture.store, &.{});
-        const b = try loader.loadBuffer(other, &second, &other_store, &.{});
+        const a = try loader.loadBuffer(fixture.value, &first, &fixture.store, &.{}, null);
+        const b = try loader.loadBuffer(other, &second, &other_store, &.{}, null);
         try b.await();
         defer second.deinit();
         try a.await();
@@ -874,7 +875,7 @@ test "bulk loading preserves transformed tensors after their executable complete
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
         var output: Buffer = undefined;
-        const handle = try loader.loadExecute(&fixture.store, &.{fixture.binding(transformed, &output)});
+        const handle = try loader.loadExecute(&fixture.store, &.{fixture.binding(transformed, &output)}, null);
         try std.testing.expect(!loader.delivered.get(transformed.id).?.*);
         // Other submissions can grow the map while this handle is pending.
         for (0..32) |_| {
@@ -884,7 +885,7 @@ test "bulk loading preserves transformed tensors after their executable complete
         try handle.await();
         defer output.deinit();
         try std.testing.expect(loader.delivered.get(transformed.id).?.*);
-        const bulk = try loader.loadBuffer(transformed, &output, &fixture.store, &.{});
+        const bulk = try loader.loadBuffer(transformed, &output, &fixture.store, &.{}, null);
         try std.testing.expectEqual(0, bulk.logicalBytes());
         try bulk.await();
         try LoaderTestFixture.expectContents(allocator, io, &output, &LoaderTestFixture.contents);
@@ -906,7 +907,7 @@ test "loader runs every binding of one submission" {
         const handle = try loader.loadExecute(&fixture.store, &.{
             fixture.binding(fixture.value, &outputs[0]),
             fixture.binding(fixture.second, &outputs[1]),
-        });
+        }, null);
         try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, handle.logicalBytes());
         try handle.await();
         defer for (&outputs) |*output| output.deinit();
@@ -930,8 +931,8 @@ test "loader deinit awaits open handles without running their executables" {
         var buffers = try mem.bufferize(allocator, Model, &model);
         defer mem.deinitBufferized(allocator, Model, &buffers);
         var never_written: Buffer = undefined;
-        _ = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)});
-        const bulk = try loader.load(Model, &model, &buffers, &fixture.store, &.{});
+        _ = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null);
+        const bulk = try loader.load(Model, &model, &buffers, &fixture.store, &.{}, null);
         loader.deinit();
         _ = bulk;
     }
@@ -953,12 +954,12 @@ test "loader window awaits the oldest handle before exceeding its budget" {
         defer window.deinit();
 
         var first: Buffer = undefined;
-        try window.submit(&loader, &fixture.store, &.{fixture.binding(fixture.value, &first)});
+        try window.submit(&loader, &fixture.store, &.{fixture.binding(fixture.value, &first)}, null);
         try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
         var second: Buffer = undefined;
         // The budget holds one submission: the first is awaited before the second
         // is submitted.
-        try window.submit(&loader, &fixture.store, &.{fixture.binding(fixture.second, &second)});
+        try window.submit(&loader, &fixture.store, &.{fixture.binding(fixture.second, &second)}, null);
         defer first.deinit();
         try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
         try std.testing.expectEqual(LoaderTestFixture.contents.len, loader.bytesLoaded());
@@ -991,13 +992,13 @@ test "loader read failure fails every pending handle and later submissions" {
         defer mem.deinitBufferized(allocator, Broken, &broken_buffers);
 
         var never_written: Buffer = undefined;
-        const good = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)});
-        const broken = try loader.load(Broken, &broken_model, &broken_buffers, &fixture.store, &.{});
+        const good = try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null);
+        const broken = try loader.load(Broken, &broken_model, &broken_buffers, &fixture.store, &.{}, null);
         try std.testing.expectError(error.FileNotFound, broken.await());
         try std.testing.expectError(error.FileNotFound, good.await());
         try std.testing.expectError(error.FileNotFound, good.await());
-        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.load(Model, &model, &buffers, &fixture.store, &.{}));
-        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}));
+        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.load(Model, &model, &buffers, &fixture.store, &.{}, null));
+        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null));
         try std.testing.expectError(error.FileNotFound, loader.awaitAll());
         try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
     }

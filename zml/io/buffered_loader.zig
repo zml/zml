@@ -70,7 +70,7 @@ pub const Loader = struct {
     }
 
     /// Spawns one bounded read task per spec. Nothing runs when this fails.
-    pub fn submit(self: *Loader, specs: []const LoadSpec) !*Batch {
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) !*Batch {
         try self.checkOpen();
         var largest: usize = 0;
         for (specs) |spec| largest = @max(largest, spec.shape.byteSize());
@@ -78,7 +78,7 @@ pub const Loader = struct {
         const batch = try self.allocator.create(Batch);
         batch.* = .{ .pending = .init(1 + specs.len) };
         for (specs) |spec| {
-            self.submitOne(batch, spec.source, spec.shape, spec.sharding, spec.output);
+            self.submitOne(batch, spec.source, spec.shape, spec.sharding, spec.output, progress);
         }
         // Every task is spawned: drop the sentinel.
         batch.finish(self.io);
@@ -200,6 +200,7 @@ pub const Loader = struct {
         shape: Shape,
         sharding: Sharding,
         output: *Buffer,
+        progress: ?*std.Progress.Node,
     ) void {
         self.group.async(self.io, struct {
             fn run(
@@ -209,11 +210,14 @@ pub const Loader = struct {
                 shape_: Shape,
                 sharding_: Sharding,
                 output_: *Buffer,
+                progress_: ?*std.Progress.Node,
             ) void {
                 defer batch_.finish(loader.io);
+                var node = if (progress_) |parent| parent.start(source_.name, 1) else null;
+                defer if (node) |*n| n.end();
                 loader.loadOne(source_, shape_, sharding_, output_) catch |err| loader.recordError(err);
             }
-        }.run, .{ self, batch, source, shape, sharding, output });
+        }.run, .{ self, batch, source, shape, sharding, output, progress });
     }
 };
 

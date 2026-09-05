@@ -51,7 +51,6 @@ pub const Loader = struct {
     io: std.Io,
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
-    progress: ?*std.Progress.Node,
     workspace: *host_memory.Workspace,
     calibration: dma_calibration.Calibration,
     pool: host_memory.BlockPool,
@@ -155,7 +154,6 @@ pub const Loader = struct {
             .io = io,
             .platform = platform,
             .load_profile = opts.load_profile,
-            .progress = opts.progress,
             .workspace = workspace,
             .calibration = calibration,
             .pool = pool,
@@ -243,7 +241,7 @@ pub const Loader = struct {
     /// published when a failure precedes the first plan; a later planning
     /// failure fails the loader (a partial submission can never complete),
     /// the batch is awaited here and the caller sees only the error.
-    pub fn submit(self: *Loader, specs: []const LoadSpec) !*Batch {
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) !*Batch {
         try self.checkOpen();
         const batch = try Batch.create(self.allocator, self.io, .{
             .sequence = self.batch_count,
@@ -251,7 +249,7 @@ pub const Loader = struct {
             .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
         });
         errdefer if (batch.diagnostics.plans == 0) batch.destroy();
-        batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes);
+        batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes, progress);
         Planner.publishFiles(
             &self.scheduler,
             self.io,
@@ -351,6 +349,7 @@ pub const Loader = struct {
         self: *Loader,
         specs: []const LoadSpec,
         logical_bytes: *usize,
+        progress: ?*std.Progress.Node,
     ) ![]*Item {
         const items = try self.allocator.alloc(*Item, specs.len);
         errdefer self.allocator.free(items);
@@ -360,7 +359,7 @@ pub const Loader = struct {
             // An empty source has no transfer, so its output would never be
             // written; the front ends reject it too.
             if (spec.source.byteSize() == 0) return error.EmptyTensor;
-            item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output);
+            item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output, progress);
             initialized += 1;
             logical_bytes.* += spec.source.shape.byteSize();
         }
@@ -373,6 +372,7 @@ pub const Loader = struct {
         shape: Shape,
         sharding: Sharding,
         output: *Buffer,
+        progress: ?*std.Progress.Node,
     ) !*Item {
         const item = try self.allocator.create(Item);
         errdefer self.allocator.destroy(item);
@@ -382,6 +382,7 @@ pub const Loader = struct {
             .shape = shape,
             .sharding = sharding,
             .output = output,
+            .progress = progress,
         };
         return item;
     }
@@ -780,7 +781,7 @@ const Item = struct {
             ctx.item.shape,
             ctx.item.sharding,
             ctx.item.output,
-            ctx.direct.progress,
+            ctx.item.progress,
         );
     }
 
@@ -789,6 +790,7 @@ const Item = struct {
     shape: Shape,
     sharding: Sharding,
     output: *Buffer,
+    progress: ?*std.Progress.Node = null,
     state: LazyOnce(TensorTransfer, InitContext, initTransfer) = .{},
 
     fn ensureState(self: *Item, direct: *Loader) !*TensorTransfer {

@@ -17,6 +17,19 @@ The tenth-pass review below updates the module/API map and ownership fixes.
 Earlier snapshots and measurements retain their historical names. The current
 reader-facing design is in `docs/learn/loader.md`.
 
+## Per-submission progress follow-up (2026-09-05)
+
+Progress is the final optional argument to `load`, `loadBuffer`, `loadExecute`,
+and `Window.submit`, rather than a Loader option. Direct transfer items retain
+only their submission's progress parent until completion. After reconsidering
+the estimate policy, callers own totals: `store.view().count()` estimates a
+whole checkpoint loaded once. Both backends complete one item per loaded
+source; transformed tensors skipped by bulk loading contribute zero.
+`loadExecute` counts input sources, not outputs, and completes source progress
+before execution in `Handle.await`. Keep the parent alive through all handles.
+Initialization no longer retains the options struct; calibration still happens
+only in init.
+
 ## Per-submission store follow-up (2026-09-05)
 
 `Loader.init` no longer takes or retains a TensorStore. `load` and `loadBuffer`

@@ -15,7 +15,7 @@ var loader = try zml.io.Loader.init(allocator, io, platform, .{
 });
 defer loader.deinit();
 
-const handle = try loader.load(Model, &model, &buffers, &store, shardings);
+const handle = try loader.load(Model, &model, &buffers, &store, shardings, null);
 try handle.await();
 ```
 
@@ -25,6 +25,15 @@ output shardings. The loader does not retain the shardings slice.
 
 The store is passed to each `load`, `loadBuffer`, or `loadExecute` submission;
 `Window.submit` forwards it to `loadExecute`. Initialization needs no store.
+These submission calls also accept an optional progress node as their final
+argument (`null` disables reporting). Keep it alive until the handle completes.
+The caller owns the estimated total. For a whole checkpoint loaded once,
+`store.view().count()` estimates the number of source tensors. Each loaded
+source completes one item; bulk loads skip already delivered transformed
+tensors, and executable loads count their input sources, not their outputs.
+Unused or repeatedly loaded sources can make the checkpoint estimate inexact.
+Source progress completes before the executable runs; keep the enclosing node
+alive until all handles finish to cover the full loading lifecycle.
 The caller owns the store, platform, model buffers, and executable outputs.
 Each submission borrows the store’s source metadata until its handle completes.
 The loader owns its backend and handles. Declare cleanup in

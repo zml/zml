@@ -292,9 +292,10 @@ pub fn main(init: std.process.Init) !void {
 
             var progress = std.Progress.start(io, .{
                 .root_name = "zml.examples.load",
+                .estimated_total_items = store.view().count(),
                 .disable_printing = true,
             });
-            progress.increaseEstimatedTotalItems(load_count);
+
             defer progress.end();
 
             try platform.warmupDeviceAllocators(io);
@@ -336,7 +337,6 @@ pub fn main(init: std.process.Init) !void {
                     },
                     .read_parallelism = load_read_parallelism,
                     .load_profile = load_profile,
-                    .progress = &progress,
                 });
                 defer loader.deinit();
 
@@ -367,7 +367,7 @@ pub fn main(init: std.process.Init) !void {
                             .exe = &pack_plan.exes[pack.exe_index],
                         };
                     }
-                    try window.submit(&loader, &store, bindings[0..count]);
+                    try window.submit(&loader, &store, bindings[0..count], &progress);
                     next_pack += count;
                 }
                 try window.drain();
@@ -386,7 +386,7 @@ pub fn main(init: std.process.Init) !void {
                 });
 
                 const bulk_start: std.Io.Timestamp = .now(io, .awake);
-                const bulk = try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding});
+                const bulk = try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding}, &progress);
                 try bulk.await();
                 const bulk_took = bulk_start.untilNow(io, .awake);
                 total_bytes = loader.bytesLoaded();

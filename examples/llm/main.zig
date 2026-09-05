@@ -87,6 +87,16 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
+    // Load buffers after compilation to leave enough device memory for autotuning.
+    const load_profile = try vfs.loadProfile(args.model);
+    var loader_fut = try io.concurrent(zml.io.Loader.init, .{ allocator, io, platform, .{
+        .load_profile = load_profile,
+    } });
+    defer if (loader_fut.cancel(io)) |loader| {
+        var l = loader;
+        l.deinit();
+    } else |_| {};
+
     const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
         try zml.attention.attnd.register(allocator, io, platform, .{
             .destination = try .parseLiteral(attnd_ip),
@@ -121,14 +131,6 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // Load buffers after compilation to leave enough device memory for autotuning.
-    const load_profile = try vfs.loadProfile(args.model);
-    var loader = try zml.io.Loader.init(allocator, io, platform, .{
-        .progress = &progress,
-        .load_profile = load_profile,
-    });
-    defer loader.deinit();
-
     const generation: models.GenerationOptions = .{
         .sampling_strategy = .{
             .topk = args.topk,
@@ -150,8 +152,10 @@ pub fn main(init: std.process.Init) !void {
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
+    var loader = try loader_fut.await(io);
+
     progress.increaseEstimatedTotalItems(store.view().count());
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, &loader, &store, &all_shardings);
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, &loader, &progress, &store, &all_shardings);
     defer model.unloadBuffers(&model_buffers, allocator);
 
     const tokenizer = try tokenizer_fut.await(io);

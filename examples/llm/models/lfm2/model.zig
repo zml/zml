@@ -77,6 +77,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         loader: *zml.io.Loader,
+        progress: ?*std.Progress.Node,
         store: *const zml.io.TensorStore,
         shardings: []const zml.Sharding,
     ) !Buffers {
@@ -85,7 +86,7 @@ pub const LoadedModel = struct {
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        const weights_handle = try loader.load(Model, &self.inner, &buffers, store, shardings);
+        const weights_handle = try loader.load(Model, &self.inner, &buffers, store, shardings, progress);
         try weights_handle.await();
         const total_bytes = loader.bytesLoaded();
 
@@ -166,18 +167,17 @@ pub const Model = struct {
         shardings: common.Shardings,
         load_profile: zml.io.VFS.LoadProfile,
     ) !zml.Bufferized(Model) {
-        progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
         var buffers = try zml.mem.bufferize(allocator, Model, self);
         errdefer Model.unloadBuffers(&buffers, allocator);
 
         const all_shardings = shardings.all();
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
-            .progress = progress,
             .load_profile = load_profile,
         });
         defer loader.deinit();
-        const weights_handle = try loader.load(Model, self, &buffers, store, &all_shardings);
+        progress.increaseEstimatedTotalItems(store.view().count());
+        const weights_handle = try loader.load(Model, self, &buffers, store, &all_shardings, progress);
         try weights_handle.await();
         const total_bytes = loader.bytesLoaded();
 
