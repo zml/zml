@@ -852,8 +852,9 @@ decoupled, low pinned memory.
   GPU 0 busy) the same configuration measured 0.7 to 1.3 s. Check host state
   before every measurement; a width/block sweep taken under that load was
   discarded.
-- NUMA topology: only mi300 is multi-node (two nodes, GPUs split 4/4); the
-  CUDA and B70 hosts are single-node, so NUMA matching never engaged there.
+- NUMA topology: mi300 (two nodes, GPUs split 4/4) and gb300-2 (two memory
+  nodes, GPUs split 2/2) are both multi-node; the CUDA and B70 hosts are
+  single-node, so NUMA matching never engaged there. See "Seventh pass".
 - Laguna-XS-2.1 (local, 63 GB, 14 shards): 39 sparse layers x 256 experts;
   per expert down [2048,512], gate [512,2048], up [512,2048] at 2 MiB each,
   adjacent in file order; a layer's 768 expert tensors form one contiguous
@@ -1336,13 +1337,377 @@ Known limits:
   gb300-2 spreads 10 to 15% at every rung. The confidence a rate comparison
   deserves is a property of the host, and the controller does not measure it.
 
+## Seventh pass: does NUMA placement matter? (2026-09-05)
+
+Trigger: the NUMA placement experiment (task 12) had never been run on a
+healthy multi-node host. Both bench hosts turn out to be two-node for GPUs,
+which corrects an earlier note in this file:
+
+- `mi300`: 8 MI300X, four on node 0 (`1b,3d,4e,5f`), four on node 1
+  (`9d,bd,cd,dd`); 2 x 1 TiB.
+- `gb300-2`: 4 GB300, two on node 0 (`0008,0009`), two on node 1
+  (`0018,0019`); 2 x 490 GB. The other 32 NUMA nodes carry no CPU and no
+  host memory (they are the device-coherent HBM nodes), so only 0 and 1 can
+  ever back a DmaMapped arena.
+
+`ZML_DMA_BENCH_NUMA_OFF=1` (new `Options.disable_numa_pools`) forces the
+single shared unbound pool that a single-node host already gets;
+`ZML_DMA_BENCH_NUMA_NODES=...` (already existed for `dma-bench`, now also
+honoured by `load`) forces every device onto one node. Four arms: `local`
+(default, one mbind-ed pool per device node), `off`, `node0`, `node1`.
+
+### The MI300 host was not degraded, its plugin was stale
+
+The released ROCm artifact (`manual-2026-07-20T15-30-00Z`) contains zero
+occurrences of `IsHostMemoryPinned`; XLA's GPU pinned-range detection is
+absent, so every DmaMapped transfer is staged. That is the whole of the
+"MI300 degradation" recorded on 2026-09-04: 4.5 to 7.6 GiB/s at any block
+size, any device count, any tree. Pointing `platforms/rocm/rocm.bzl` at a
+locally built `libpjrt_c_api_gpu_plugin.so` (openxla/xla, 2026-09-03, 3
+occurrences) restored 44 to 47 GiB/s immediately. Check the symbol before
+blaming the host.
+
+### Placement is worth 1.6x on GB300 and nothing on MI300X
+
+Synthetic H2D only (`dma-bench`, 16 MiB blocks, one visible device, pinned
+arena forced onto each node in turn). This measures the representative
+device's link alone, so it is a clean locality probe:
+
+| device (home node) | pinned on node 0 | pinned on node 1 |
+| --- | --- | --- |
+| GB300 0 (node 0) | **175.8** | 109.9 |
+| GB300 1 (node 0) | **176.7** | 109.5 |
+| GB300 2 (node 1) | 110.8 | **179.5** |
+| GB300 3 (node 1) | 111.2 | **183.8** |
+| MI300X 0 (node 0) | 46.0 | 46.7 |
+| MI300X 3 (node 0) | 46.4 | 43.6 |
+| MI300X 4 (node 1) | 46.0 | 47.2 |
+| MI300X 7 (node 1) | 46.0 | 44.2 |
+
+Remote costs 38% of H2D bandwidth on GB300, symmetrically in both
+directions, and is free on MI300X. This is an interconnect fact, not a host
+state: each GB300's NVLink-C2C lands on its own Grace socket, so a remote
+arena crosses the inter-socket link, while an MI300X sits behind a PCIe root
+complex whose ~50 GiB/s is below the cross-socket cost either way. It
+confirms and explains the older raw-HIP observation (local and cross-NUMA
+H2D both near 49--50 GiB/s on MI300X).
+
+Device count does not change it: 1, 2 (same node), 2 (split) and 4 GB300
+measure 176.2 / 176.5 / 176.3 / 179.3 local against 109.7 / 109.8 / 110.1 /
+111.2 unbound.
+
+### The loader does not benefit, because it is read-bound
+
+DeepSeek-V4-Flash replicated across all four GB300 (148.65 GiB to each
+device, so 594 GiB of DMA), 16 MiB blocks, five interleaved repetitions.
+Load seconds, mean of five:
+
+| arm | fixed width 32 | adaptive |
+| --- | --- | --- |
+| local | 5.48 | 5.41 |
+| off | 5.40 | 5.38 |
+| node0 | 5.89 | 5.70 |
+| node1 | 5.58 | 5.24 |
+
+`local` and `off` are indistinguishable, and the within-arm spread (`off`
+ranged 5.03 to 5.96) is larger than any between-arm gap. The reason is
+arithmetic: 148.65 GiB per device in 5.4 s is 27.5 GiB/s per link, a quarter
+of even the remote 110 GiB/s ceiling. The DMA link is not the constraint;
+the page-cache read path is. Only `node0`, which forces all four links and
+every reader copy onto one node's memory controller, is repeatably worse,
+and by about 5%.
+
+So the 1.6x is real headroom, not realised throughput. It would begin to
+matter only if the source could feed a GB300 faster than 110 GiB/s per
+device, which no file source here does.
+
+### Llama on gb300-2 inverts the recommendation
+
+Llama-3.1-8B replicated on four GB300 is the large-tensor case and drives
+almost twice DeepSeek's per-link DMA rate (46 GiB/s against 26.5). On an idle
+host it separates the arms cleanly, seven interleaved repetitions, spread
+under 2%:
+
+| arm | mean load | against best |
+| --- | --- | --- |
+| off | 307.1 ms | -- |
+| node1 | 306.4 ms | -- |
+| local | 321.7 ms | +4.8% |
+| node0 | 413.1 ms | +34% |
+
+Node-local placement is a small **loss**, and `node0` against `node1` is the
+decisive pair: both put all four links on one node, so pure GPU locality
+would make them equal. They differ by 34%. The file's page cache sits on
+node 0, so binding the pinned blocks there makes one memory controller serve
+the page-cache reads and all four DMA engines at once. `local` is mildly bad
+for the same reason -- it puts half the blocks on the busy node.
+
+The loader's constraint is therefore host memory bandwidth on the node
+holding the page cache, not the GPU link. The right placement rule is "away
+from the page cache", which is the opposite of what strict affinity does, and
+which no static `numa_node` attribute can express: it depends on where the
+file was read, not where the device is.
+
+### DeepSeek replicated is bound by submission count
+
+Replicated DeepSeek on gb300-2 scales badly with device count, and it is not
+the read path (`reads` stays at 9,524 and `read_ms_per_read` is flat):
+
+| devices | GiB/s | read ms/read | dma_stage ms/read | DMA submissions |
+| --- | --- | --- | --- | --- |
+| 1 | 47.6 / 48.2 | 5.3 / 2.7 | 6.2 / 9.9 | 69,572 |
+| 2 | 42.6 / 41.5 | 5.7 / 2.1 | 8.4 / 15.6 | 139,144 |
+| 4 | 27.5 / 25.6 | 4.9 / 3.9 | 27.9 / 32.3 | 278,288 |
+
+At four devices each link carries 27.5 GiB/s against a measured 176: 16% of
+capacity, so bandwidth is not the limit either. The cost is the 278,288
+separate H2D submissions (69,572 tensor pieces x 4 devices; reads coalesce
+7.26:1 but DMA submissions do not coalesce at all), about 51,500 per second
+on transfers averaging 2.24 MiB, which take ~13 us each at link speed.
+Submission overhead is on par with transfer time.
+
+Deepening the DMA stage recovers part of it. Six interleaved pairs, 16 MiB
+blocks, `max_in_flight_per_device` 8 against 32:
+
+| depth | mean | pinned high-water |
+| --- | --- | --- |
+| 8 | 5.536 s | 0.9 to 1.0 GiB |
+| 32 | **5.024 s** (-9.2%, 6/6 wins) | 2.36 to 2.50 GiB |
+
+A real 9% for 2.5x the pinned working set, which trades directly against the
+"keep pinned host memory low" goal; 32 MiB blocks gain nothing at any depth.
+The larger prize is structural: coalescing adjacent same-device tensor pieces
+into one H2D call the way reads already coalesce, or replicating with one
+H2D plus NVLink device-to-device broadcast instead of four H2D copies.
+
+Measurement note: the `load` path passed only `block_sizes` to
+`benchmarkIfSupported`, so `ZML_DMA_BENCH_BLOCK_PARALLELISM` never reached
+it and a first depth sweep measured nothing (`dma_budget_per_device` stayed
+128 MiB at every depth). It is wired now. Check that line before trusting a
+depth result.
+
+### What the policy costs
+
+Strict affinity takes the smallest node's capacity rather than the sum
+(`DmaBlockPool.retainedRequestWidth`), and maps one pre-grown arena per
+node. Measured on the same runs:
+
+| | gb300-2 (4 dev) | mi300 (8 dev) |
+| --- | --- | --- |
+| `feasible_width` local / off | 79 / 128 | 64 / 128 |
+| retained pinned local / off | 1.53 GiB / 1.02 GiB | 2.00 GiB / 1.52 GiB |
+| `width_ceiling` local / off | 16 / 32 | **1** / 32 |
+
+The pinned working set grows 1.3 to 1.5x and the feasible width roughly
+halves, both against the project goal of keeping pinned host memory low.
+
+### Defect: the growth-free ceiling mixes per-node and per-machine scopes
+
+Calibration grows each NUMA arena correctly. `calibrated_node_reserves`
+accumulates `max_in_flight_per_device` **per pool**, walking devices and
+charging each one to its own node, and `ensureSourceWorkingSet` then grows
+that node to `(preallocated_source_width + 1)` requests plus that node's own
+reserve. Measured: gb300-2 has 2 devices per node, so 33 + 16 = 49 blocks =
+784 MiB per node; mi300 has 4 per node, so 33 + 32 = 65, clipped to 64 by
+the 2 GiB `max_mapped_bytes` ceiling.
+
+The width ceiling then subtracts a quantity of a different scope
+(`direct_loader.zig`, sixth pass `a7589b08`):
+
+    retained_credits   = pool.retainedRequestWidth(.., strict_affinity)  // smallest NODE
+    dma_stage_requests = dmaStageRequests(per_device, platform.devices.len, ..)  // ALL devices
+    growth_free        = retained_credits -| dma_stage_requests
+
+Under strict affinity `retained_credits` counts one node while
+`dma_stage_requests` counts every device on the machine, so each node's pool
+is charged for the other node's DMA stage as well:
+
+| host | retained/node | stage charged | stage on that node | ceiling | correct |
+| --- | --- | --- | --- | --- | --- |
+| gb300-2 (4 dev) | 49 | 32 | 16 | 16 | **32** |
+| mi300 (8 dev) | 64 | 64 | 32 | **1** | **32** |
+
+Both corrected values equal the non-strict ceiling, which is the tell. The
+bug cannot fire without strict affinity: with one shared pool serving every
+device, the all-device stage count is the correct one, and `off`, `node0`
+and `node1` all read 32.
+
+The consequence on eight MI300X is that every adaptive load runs at **width
+1**: five of five Llama-3.1-8B replicated runs took 4.5 to 5.9 s against 1.3
+to 1.6 s with `ZML_DMA_BENCH_NUMA_OFF=1` (means 5.34 s against 1.42 s,
+**3.7x**). Nothing to do with memory locality, and not a memory shortage
+either: the node holds 64 requests and needs 32 for its own stage.
+
+The `@max(1, ...)` floor in `SourceReadWidthController.init` is a second,
+smaller defect: it turns "no growth-free headroom" into the worst possible
+operating point instead of declining to clip. It only fires here because of
+the miscount, but a genuinely tight pool deserves "accept some mid-load
+growth", not width 1.
+
+### The fix and its verification
+
+`DmaBlockPool.growthFreeRequestWidth(blocks_per_request, strict_affinity)`
+now does the subtraction node-wise, using each node's own `reserve`: the
+minimum of `(capacity -| reserve) / blocks_per_request` over nodes when
+strict, the sum otherwise. `SourceReadWidthController.init` takes it directly,
+so `dmaStageRequests` is gone from the ceiling path and the scopes cannot
+diverge again (it still feeds `RequestGateLimits`, where an all-device count
+is correct). The `@max(1, ..)` floor became `@max(configured.initial(), ..)`:
+the ceiling bounds the climb and must never force a start below the rung the
+caller asked for.
+
+`Options.max_mapped_bytes` went from 2 GiB to 16 GiB. It is a safety guard on
+total pinned host memory, not a target -- the pool only grows to the
+pre-grown working set plus each node's stage -- and at 2 GiB it was silently
+clipping that working set on eight MI300X (65 blocks per node trimmed to 64).
+
+Verified on both hosts, same fixtures, five interleaved repetitions:
+
+- `width_ceiling` is **32 in all four arms on both hosts**, where strict
+  affinity previously read 1 (mi300) and 16 (gb300-2).
+- mi300, Llama-3.1-8B replicated on eight MI300X: `local` **5.34 s -> 1.26 s**
+  mean, now the fastest arm rather than 3.7x the slowest (`off` 1.47,
+  `node0` 1.40, `node1` 1.55; the host carried a load average of 37, so read
+  these as parity). Selected width is 16 to 24 instead of 1, and the pinned
+  high-water mark is *lower* than the aggregate pool's: 1.25 to 1.38 GiB
+  against 1.52 GiB.
+- gb300-2, DeepSeek replicated on four GB300: unchanged, `local` 5.63 against
+  `off` 5.60, `node0` still worst at 5.99. The read-bound conclusion above
+  stands.
+- mi300 retained rose from 2.00 GiB (clipped) to 2.03 GiB, the full 65 blocks
+  per node, and `feasible_width` from 64 to 959 now that the guard is not
+  binding.
+
+Regression tests: `DmaBlockPool growth-free width subtracts each node's own
+DMA stage` (the eight-MI300X arithmetic: 64 retained, 64 machine-wide stage,
+32 on that node, answer 32), `DmaBlockPool growth-free width saturates when a
+reserve covers the node`, and `source read controller starts at the
+configured rung without headroom`.
+
+### Recommendation
+
+The 38% link penalty is real, but no fixture reaches the link, and the two
+loader-level measurements point the other way: strict affinity is neutral on
+DeepSeek and a 4.8% loss on Llama, while costing 1.3 to 1.5x pinned memory.
+Node-local pinned blocks are the wrong default today.
+
+- Do not derive strict affinity from the presence of `numa_node` attributes.
+  It buys nothing measured, costs pinned memory, and its worst case (`node0`,
+  everything on the page-cache node) is 34%.
+- If placement is ever steered, steer it away from the node holding the
+  source's page cache, not toward the device. That is a property of the file,
+  not of the topology.
+- Keep the mechanism: it is what makes the locality measurable, and it will
+  matter if a source ever outruns 110 GiB/s per device.
+- On MI300X the aggregate pool is strictly better: same throughput, 25% less
+  pinned memory, twice the feasible width.
+
+### Defect: the growth-free ceiling mixes per-node and per-machine scopes
+
+Calibration grows each NUMA arena correctly. `calibrated_node_reserves`
+accumulates `max_in_flight_per_device` **per pool**, walking devices and
+charging each one to its own node, and `ensureSourceWorkingSet` then grows
+that node to `(preallocated_source_width + 1)` requests plus that node's own
+reserve. Measured: gb300-2 has 2 devices per node, so 33 + 16 = 49 blocks =
+784 MiB per node; mi300 has 4 per node, so 33 + 32 = 65, clipped to 64 by
+the 2 GiB `max_mapped_bytes` ceiling.
+
+The width ceiling then subtracts a quantity of a different scope
+(`direct_loader.zig`, sixth pass `a7589b08`):
+
+    retained_credits   = pool.retainedRequestWidth(.., strict_affinity)  // smallest NODE
+    dma_stage_requests = dmaStageRequests(per_device, platform.devices.len, ..)  // ALL devices
+    growth_free        = retained_credits -| dma_stage_requests
+
+Under strict affinity `retained_credits` counts one node while
+`dma_stage_requests` counts every device on the machine, so each node's pool
+is charged for the other node's DMA stage as well:
+
+| host | retained/node | stage charged | stage on that node | ceiling | correct |
+| --- | --- | --- | --- | --- | --- |
+| gb300-2 (4 dev) | 49 | 32 | 16 | 16 | **32** |
+| mi300 (8 dev) | 64 | 64 | 32 | **1** | **32** |
+
+Both corrected values equal the non-strict ceiling, which is the tell. The
+bug cannot fire without strict affinity: with one shared pool serving every
+device, the all-device stage count is the correct one, and `off`, `node0`
+and `node1` all read 32.
+
+The consequence on eight MI300X is that every adaptive load runs at **width
+1**: five of five Llama-3.1-8B replicated runs took 4.5 to 5.9 s against 1.3
+to 1.6 s with `ZML_DMA_BENCH_NUMA_OFF=1` (means 5.34 s against 1.42 s,
+**3.7x**). Nothing to do with memory locality, and not a memory shortage
+either: the node holds 64 requests and needs 32 for its own stage.
+
+The `@max(1, ...)` floor in `SourceReadWidthController.init` is a second,
+smaller defect: it turns "no growth-free headroom" into the worst possible
+operating point instead of declining to clip. It only fires here because of
+the miscount, but a genuinely tight pool deserves "accept some mid-load
+growth", not width 1.
+
+### The fix and its verification
+
+`DmaBlockPool.growthFreeRequestWidth(blocks_per_request, strict_affinity)`
+now does the subtraction node-wise, using each node's own `reserve`: the
+minimum of `(capacity -| reserve) / blocks_per_request` over nodes when
+strict, the sum otherwise. `SourceReadWidthController.init` takes it directly,
+so `dmaStageRequests` is gone from the ceiling path and the scopes cannot
+diverge again (it still feeds `RequestGateLimits`, where an all-device count
+is correct). The `@max(1, ..)` floor became `@max(configured.initial(), ..)`:
+the ceiling bounds the climb and must never force a start below the rung the
+caller asked for.
+
+`Options.max_mapped_bytes` went from 2 GiB to 16 GiB. It is a safety guard on
+total pinned host memory, not a target -- the pool only grows to the
+pre-grown working set plus each node's stage -- and at 2 GiB it was silently
+clipping that working set on eight MI300X (65 blocks per node trimmed to 64).
+
+Verified on both hosts, same fixtures, five interleaved repetitions:
+
+- `width_ceiling` is **32 in all four arms on both hosts**, where strict
+  affinity previously read 1 (mi300) and 16 (gb300-2).
+- mi300, Llama-3.1-8B replicated on eight MI300X: `local` **5.34 s -> 1.26 s**
+  mean, now the fastest arm rather than 3.7x the slowest (`off` 1.47,
+  `node0` 1.40, `node1` 1.55; the host carried a load average of 37, so read
+  these as parity). Selected width is 16 to 24 instead of 1, and the pinned
+  high-water mark is *lower* than the aggregate pool's: 1.25 to 1.38 GiB
+  against 1.52 GiB.
+- gb300-2, DeepSeek replicated on four GB300: unchanged, `local` 5.63 against
+  `off` 5.60, `node0` still worst at 5.99. The read-bound conclusion above
+  stands.
+- mi300 retained rose from 2.00 GiB (clipped) to 2.03 GiB, the full 65 blocks
+  per node, and `feasible_width` from 64 to 959 now that the guard is not
+  binding.
+
+Regression tests: `DmaBlockPool growth-free width subtracts each node's own
+DMA stage` (the eight-MI300X arithmetic: 64 retained, 64 machine-wide stage,
+32 on that node, answer 32), `DmaBlockPool growth-free width saturates when a
+reserve covers the node`, and `source read controller starts at the
+configured rung without headroom`.
+
+### Recommendation
+
+Keep NUMA-local pools for CUDA/GB300 - the 38% link penalty is real and will
+matter as soon as a source outruns 110 GiB/s per device - but stop paying for
+them where they buy nothing:
+
+- Derive strict affinity from a measured local/remote ratio rather than from
+  the mere presence of `numa_node` attributes. One `dma-bench` pass per node
+  already measures it (176 against 110, or 46 against 46).
+- The width-ceiling scope mismatch is fixed; strict affinity is now at
+  parity on eight MI300X instead of a 3.7x regression.
+- On MI300X the aggregate pool is strictly better: same throughput, 25% less
+  pinned memory, twice the feasible width.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
 
-- Laguna window measurement (task 5) and the NUMA placement experiment
-  (task 12) need a healthy MI300 host; the 2026-09-04 host degradation (DMA
-  at 7 GiB/s with any tree) voids the Laguna comparison taken that day. The
+- The NUMA placement experiment (task 12) is done; see "Seventh pass". The
+  2026-09-04 "MI300 host degradation" was a stale ROCm plugin, so the Laguna
+  window measurement (task 5) can be retaken once the plugin fix lands
+  properly (`platforms/rocm/rocm.bzl` currently carries a machine-local
+  `file://` override that must not be committed). The
   MI300 checkouts are on the `loader-third-pass` branches (zml `67464f3c`
   or later, monorepo `d426dde4`); the previous heads were zml `db961721` and
   monorepo `9efec789`.

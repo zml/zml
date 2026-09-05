@@ -178,8 +178,9 @@ pub fn main(init: std.process.Init) !void {
                 .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
                 .minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
-                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 2048),
+                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
                 .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
+                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
             });
             defer benchmark_result.deinit();
             try stdout_writer.interface.print(
@@ -214,6 +215,9 @@ pub fn main(init: std.process.Init) !void {
             );
             var dma_benchmark = try zml.io.dma.benchmarkIfSupported(allocator, io, platform, .{
                 .block_sizes = load_dma_block_sizes,
+                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                .device_numa_nodes = try dmaBenchmarkNumaNodes(init.arena.allocator(), init.environ_map),
+                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
             });
             defer if (dma_benchmark) |*result| result.deinit();
 

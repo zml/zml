@@ -645,6 +645,30 @@ pub const DmaBlockPool = struct {
         return smallest / blocks_per_request;
     }
 
+    /// Requests of `blocks_per_request` blocks that can be leased without
+    /// mapping a slab and without eating into the DMA stage, which every node
+    /// reserves for the devices attached to it. The subtraction has to stay
+    /// node-wise: `Node.reserve` is that node's stage, so charging a
+    /// machine-wide stage count against one node's capacity makes every node
+    /// look emptier than it is. On eight MI300X that charged 64 stage
+    /// requests against a node holding 64, left nothing, and pinned every
+    /// adaptive load to width 1 (5.34 s against 1.42 s with one shared pool).
+    pub fn growthFreeRequestWidth(
+        self: *const DmaBlockPool,
+        blocks_per_request: usize,
+        strict_affinity: bool,
+    ) !usize {
+        if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
+        if (!strict_affinity) {
+            var total: usize = 0;
+            for (self.nodes) |node| total +|= node.capacity -| node.reserve;
+            return total / blocks_per_request;
+        }
+        var smallest: usize = std.math.maxInt(usize);
+        for (self.nodes) |node| smallest = @min(smallest, node.capacity -| node.reserve);
+        return smallest / blocks_per_request;
+    }
+
     /// Returns the largest request width that the pool could support if each
     /// request consumes `blocks_per_request` blocks and admissions may draw
     /// from aggregate capacity. Arena tails count against the mapped-byte cap
@@ -1260,6 +1284,61 @@ test "DmaBlockPool potential request widths account for retained arena tails" {
         error.InvalidRequestBlockCount,
         pool.minimumStrictAffinityRequestWidth(0),
     );
+}
+
+test "DmaBlockPool growth-free width subtracts each node's own DMA stage" {
+    const allocator = std.testing.allocator;
+    var provider: TestDmaArenaProvider = .init(allocator, 2);
+    defer provider.deinit();
+    _ = try provider.addArena(0, 64 * 64);
+    _ = try provider.addArena(1, 64 * 64);
+
+    // Eight MI300X: four devices per node at eight in-flight blocks each, so
+    // every node retains 64 blocks and reserves 32 of them for its own stage.
+    var pool = try DmaBlockPool.initFromProvider(
+        allocator,
+        provider.provider(),
+        64,
+        2 * 64 * 64,
+        &.{ 32, 32 },
+    );
+    defer pool.deinit();
+
+    try std.testing.expectEqual(@as(usize, 64), try pool.retainedRequestWidth(1, true));
+    // The machine-wide stage is 64 requests. Charging all of it against one
+    // node left nothing and pinned the read width to 1; only that node's own
+    // 32 may be subtracted.
+    try std.testing.expectEqual(@as(usize, 32), try pool.growthFreeRequestWidth(1, true));
+    try std.testing.expectEqual(@as(usize, 64), try pool.growthFreeRequestWidth(1, false));
+    try std.testing.expectEqual(@as(usize, 16), try pool.growthFreeRequestWidth(2, true));
+    try std.testing.expectError(
+        error.InvalidRequestBlockCount,
+        pool.growthFreeRequestWidth(0, true),
+    );
+}
+
+test "DmaBlockPool growth-free width saturates when a reserve covers the node" {
+    const allocator = std.testing.allocator;
+    var provider: TestDmaArenaProvider = .init(allocator, 2);
+    defer provider.deinit();
+    _ = try provider.addArena(0, 8 * 64);
+    _ = try provider.addArena(1, 2 * 64);
+
+    // Node 1 has not grown to its reserve yet, which the pool allows only
+    // while the mapped-byte budget can still cover the deficit.
+    var pool = try DmaBlockPool.initFromProvider(
+        allocator,
+        provider.provider(),
+        64,
+        16 * 64,
+        &.{ 4, 5 },
+    );
+    defer pool.deinit();
+
+    // Node 1 holds two blocks against a reserve of five: no headroom, and no
+    // underflow. The strict answer is the emptiest node's.
+    try std.testing.expectEqual(@as(usize, 0), try pool.growthFreeRequestWidth(1, true));
+    try std.testing.expectEqual(@as(usize, 4), try pool.growthFreeRequestWidth(1, false));
 }
 
 test "DmaBlockPool rejects impossible and invalid affinities without leasing" {

@@ -41,11 +41,19 @@ pub const Options = struct {
     /// Prefer a smaller transaction once it supplies enough headroom over the
     /// source pipeline instead of maximizing isolated copy-engine throughput.
     block_selection_tolerance: f64 = 0.08,
-    max_mapped_bytes: usize = 2 * 1024 * 1024 * 1024,
+    /// Safety guard on total pinned host memory, not a target: the pool only
+    /// grows to the pre-grown working set plus each node's DMA stage. Set high
+    /// so it cannot silently clip that working set (it did on eight MI300X,
+    /// where 2 GiB trimmed the per-node reserve from 65 blocks to 64).
+    max_mapped_bytes: usize = 16 * 1024 * 1024 * 1024,
     /// Optional device-index to NUMA-node override. When absent, complete PJRT
     /// `numa_node` attributes select local pools; incomplete or unsupported
     /// topology falls back to one shared DmaMapped pool.
     device_numa_nodes: []const usize = &.{},
+    /// Forces the shared unbound pool even when the topology is known, which
+    /// is what a single-node host already gets. It exists to measure what
+    /// node-local placement is worth before keeping the policy.
+    disable_numa_pools: bool = false,
 };
 
 /// What one benchmark reports: the workspace and calibration it produced, the
@@ -104,6 +112,7 @@ fn benchmarkSyntheticTransfer(
         allocator,
         platform,
         opts.device_numa_nodes,
+        opts.disable_numa_pools,
     );
     defer allocator.free(resolved_numa_nodes);
 
@@ -203,9 +212,11 @@ fn resolveNumaNodes(
     allocator: std.mem.Allocator,
     platform: *const platform_mod.Platform,
     override: []const usize,
+    disabled: bool,
 ) ![]?usize {
     const result = try allocator.alloc(?usize, platform.devices.len);
     @memset(result, null);
+    if (disabled) return result;
     if (override.len != 0) {
         for (override, result) |node, *stored| stored.* = node;
         return result;
@@ -893,6 +904,7 @@ fn validateOptions(opts: Options, device_count: usize) !void {
         !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
         return error.InvalidDmaBenchmarkOptions;
     if (opts.device_numa_nodes.len != 0) {
+        if (opts.disable_numa_pools) return error.InvalidDmaBenchmarkOptions;
         if (opts.device_numa_nodes.len != device_count)
             return error.InvalidDmaBenchmarkOptions;
         if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;

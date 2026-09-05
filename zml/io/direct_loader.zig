@@ -2892,17 +2892,21 @@ const SourceReadWidthController = struct {
     generation: u64 = 0,
     last_backoff_generation: u64 = std.math.maxInt(u64),
 
-    /// `growth_free_width` is the widest read width whose lifecycle credits
-    /// the pool already holds mapped (`retained - dma_stage`): above it a
-    /// scored window maps a new pinned slab, which on a GB300 cost a whole
-    /// window (20.8 GiB/s at 48 against 48.8 sustained at 32). A fixed width
-    /// the caller asked for is not clipped by it, only by feasibility.
+    /// `growth_free_width` is the widest read width the pool already holds
+    /// mapped beyond the DMA stage (`DmaBlockPool.growthFreeRequestWidth`):
+    /// above it a scored window maps a new pinned slab, which on a GB300 cost
+    /// a whole window (20.8 GiB/s at 48 against 48.8 sustained at 32). It is
+    /// a ceiling on the climb, never a reason to start below the configured
+    /// rung: a pool with no growth-free headroom is better served by starting
+    /// where the caller asked and accepting some growth than by reading one
+    /// request at a time. A fixed width is not clipped by it, only by
+    /// feasibility.
     fn init(
         configured: Parallelism,
         pinned_feasible_width: usize,
         growth_free_width: usize,
     ) SourceReadWidthController {
-        const configured_max = @min(configured.maximum(), pinned_feasible_width, @max(@as(usize, 1), growth_free_width));
+        const configured_max = @min(configured.maximum(), pinned_feasible_width, @max(configured.initial(), growth_free_width));
         const max_index = widthIndexAtMost(configured_max);
         if (!configured.isAdaptive()) {
             const fixed = @min(configured.initial(), pinned_feasible_width);
@@ -3394,8 +3398,8 @@ test "source read controller steps down on transient backpressure and climbs aga
 }
 
 test "source read controller stops climbing at the growth-free width" {
-    // gb300-2: 41 retained credits and a DMA stage of 8 leave 33 requests the
-    // pool already holds mapped, so the climb stops at 32. Above it the
+    // gb300-2: a node holding 49 blocks against its own 16-block DMA stage
+    // leaves 33 growth-free requests, so the climb stops at 32. Above it the
     // lifecycle limit maps a new pinned slab inside a scored window: one such
     // window measured 20.8 GiB/s at 48 against 48.8 sustained at 32.
     var controller = SourceReadWidthController.init(
@@ -3413,6 +3417,21 @@ test "source read controller stops climbing at the growth-free width" {
     });
     try std.testing.expectEqual(@as(usize, 4), windows);
     try std.testing.expectEqual(@as(usize, 32), controller.width());
+}
+
+test "source read controller starts at the configured rung without headroom" {
+    // A pool whose nodes are fully covered by their own DMA stage reports a
+    // growth-free width of 0. Clipping the ceiling to 1 there made every
+    // adaptive load on eight MI300X read one request at a time (5.34 s
+    // against 1.42 s); starting where the caller asked and accepting some
+    // mid-load growth is strictly better.
+    var controller = SourceReadWidthController.init(
+        .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
+        128,
+        0,
+    );
+    try std.testing.expectEqual(@as(usize, 12), controller.width());
+    try std.testing.expectEqual(@as(usize, 12), read_width_ladder[controller.max_index]);
 }
 
 test "source read controller keeps a fixed width" {
@@ -4054,7 +4073,7 @@ pub const DirectLoader = struct {
         const controller = SourceReadWidthController.init(
             source_parallelism,
             feasible_width,
-            retained_credits -| dma_stage_requests,
+            try pool.growthFreeRequestWidth(maximum_blocks_per_job, strict_affinity),
         );
         const limits: RequestGateLimits = .init(controller.width(), feasible_width, retained_credits, dma_stage_requests);
         const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
