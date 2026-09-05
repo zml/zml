@@ -122,13 +122,13 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   execution, and output ownership similarly live once above the backend
   split; buffered and direct loaders implement only `submit(specs)` and
   `awaitBatch`. The buffered memory writer is private.
-- `zml/io.zig` is the public/store front end and buffered backend. Direct
-  planning, scheduling, adaptive control, transfer lifecycle, and their tests
-  are in `zml/io/direct_loader.zig`; platform-owned DMA settings, retained
-  arenas, and calibration are in `zml/io/dma_calibration.zig`; pure
-  sharding-to-byte-span expansion is in `zml/io/dispatch_spans.zig`. Shared
-  loader limits and option types are small leaf modules, and `zml.io` continues
-  to re-export the existing public names.
+- `zml/io.zig` is the public facade. The shared loader front end is in
+  `zml/io/loader.zig`, while `zml/io/backend.zig` owns backend selection,
+  submission dispatch, and the `LoadSpec` contract. Direct planning,
+  scheduling, adaptive control, transfer lifecycle, and their tests are in
+  `zml/io/direct_loader.zig`; platform-owned DMA settings, retained arenas,
+  and calibration are in `zml/io/dma_calibration.zig`; pure sharding-to-byte-span
+  expansion is in `zml/io/DispatchSpans.zig`.
 - `Loader` owns IO, platform, store, and front-end options directly rather than
   recovering duplicated state from its active backend. The buffered backend
   retains none of the unused store/options; the direct backend retains only
@@ -2130,7 +2130,7 @@ backend, byte for byte, until their transfer path can be measured.
   line is now `DMA arena kind={dma_map,pageable,pjrt_host} placement=...
   map_ms=...`. Huge-page alignment and advice apply only to allocations of
   at least one huge page, so tiny test arenas are plain.
-- The five end-to-end `loader ...` tests in `zml/io.zig` run on both
+- The five end-to-end `loader ...` tests in `zml/io/loader.zig` run on both
   backends on the CPU platform (`LoaderTestFixture.backends`): the direct
   one through `Loader.init`, the buffered one built directly, since nothing
   else in the tree constructs it any more.
@@ -2226,12 +2226,13 @@ boundaries and ownership in the code's structure.
   arenas; a pool is a load-scoped free-list/lease view. Duplicate arena lists,
   overlap scans inherited from external arena attachment, latest-arena state,
   and an unused retained-byte counter are removed.
-- `io.zig` starts with `Loader`, `Handle`, and `Window`, followed by shared
-  preparation, handle/executable internals, and integration tests. Checkpoint
-  lookup moves to `io/tensor_store.zig`; whole-tensor staging and its unit
-  tests move to `io/buffered_loader.zig`. Both backends consume
-  `loader_types.LoadSpec`; neither backend defines the other one's input
-  contract. Sharding is resolved once by shared preparation.
+- `io.zig` is the public facade. `io/loader.zig` starts with `Loader`,
+  `Handle`, and `Window`, followed by shared preparation, handle/executable
+  internals, and integration tests. Checkpoint lookup lives in
+  `io/TensorStore.zig`; whole-tensor staging and its unit tests live in
+  `io/buffered_loader.zig`. Both backends consume `backend.LoadSpec`; neither
+  backend defines the other one's input contract. Sharding is resolved once
+  by shared preparation.
 - `direct_loader.Loader` now precedes its implementation. `Planner` owns
   coalescing, transfer planning, and fair ordering; `Scheduler` owns FIFO
   publication and claims. Immutable `Job` and `Transfer` descriptors belong
@@ -2240,8 +2241,8 @@ boundaries and ownership in the code's structure.
   prefixes. The ineffective `cleaned` flag is removed: `destroy` frees self.
 - `source_concurrency.zig` is a std-only policy module exposing `Parallelism`
   and `Controller`, with the existing curve/evidence tests. Runtime
-  measurement/gates stay with the direct pipeline. Dispatch is
-  `dispatch.Spans` with nested `Span`.
+  measurement/gates stay with the direct pipeline. `DispatchSpans.zig` is the
+  dispatch container type, with nested `Span`.
 - Calibration reads from public API into measurement, block selection, and
   private machinery. Workspace names replace stale plural source pools;
   private Benchmark prefixes and generic candidate `value` names are gone.

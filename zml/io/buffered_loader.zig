@@ -9,9 +9,9 @@ const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
-const loader_types = @import("loader_types.zig");
-const Parallelism = loader_types.Parallelism;
-const LoadSpec = loader_types.LoadSpec;
+const backend = @import("backend.zig");
+const LoadSpec = backend.LoadSpec;
+const Parallelism = backend.Parallelism;
 
 pub const Loader = struct {
     allocator: std.mem.Allocator,

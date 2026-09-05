@@ -10,11 +10,11 @@ const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
+const backend = @import("backend.zig");
 const host_memory = @import("host_memory.zig");
 const dma_calibration = @import("dma_calibration.zig");
-const dispatch = @import("dispatch_spans.zig");
+const DispatchSpans = @import("DispatchSpans.zig");
 const load_limits = @import("limits.zig");
-const loader_types = @import("loader_types.zig");
 const platform_mod = @import("../platform.zig");
 const pjrtx = @import("../pjrtx.zig");
 const safetensors = @import("../safetensors.zig");
@@ -24,9 +24,9 @@ const source_concurrency = @import("source_concurrency.zig");
 const tracer = @import("../profiling/tracer.zig");
 
 const CreateOptions = platform_mod.CreateOptions;
+const Config = backend.Config;
+const LoadSpec = backend.LoadSpec;
 const Platform = platform_mod.Platform;
-const Options = loader_types.Options;
-const LoadSpec = loader_types.LoadSpec;
 
 const load_log = std.log.scoped(.@"zml/io/load");
 
@@ -78,7 +78,7 @@ pub const Loader = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        opts: Options,
+        opts: Config,
     ) !*Loader {
         const workspace = try allocator.create(host_memory.Workspace);
         errdefer allocator.destroy(workspace);
@@ -1016,7 +1016,7 @@ const Planner = struct {
         const maximum_job_len = @min(request_size, scatter_limit);
         if (maximum_job_len == 0) return error.InvalidLoaderJob;
         const TensorPlan = struct {
-            dispatch_spans: dispatch.Spans,
+            dispatch_spans: DispatchSpans,
             device_indices: []usize,
             total: usize,
         };
@@ -1277,7 +1277,7 @@ const Planner = struct {
         len: usize,
         job_file_offset: u64,
         block_size: usize,
-        spans: dispatch.Spans,
+        spans: DispatchSpans,
         device_indices: []const usize,
         physical_bytes: []usize,
     ) !void {
@@ -4597,7 +4597,7 @@ const DispatchTest = struct {
         request_size: usize,
         block_size: usize,
     ) !void {
-        const dispatch_spans: dispatch.Spans = try .init(allocator, shape, sharding);
+        const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
         defer dispatch_spans.deinit(allocator);
 
         const ordered_devices = sharding.devicesInCanonicalOrder();

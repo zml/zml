@@ -58,12 +58,13 @@ everything and reports the first error; `Window.deinit` drains and drops errors.
 
 | Module | Responsibility |
 | --- | --- |
-| `zml/io.zig` | Public loader, handles, execution window, source preparation and executable ownership |
-| `zml/io/tensor_store.zig` | Checkpoint lookup, source bindings and prefixed model views |
-| `zml/io/loader_types.zig` | Loader options and the shared `LoadSpec` backend contract |
+| `zml/io.zig` | Public IO facade |
+| `zml/io/loader.zig` | Loader options, handles, execution window, source preparation and executable ownership |
+| `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
+| `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
 | `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
 | `zml/io/source_concurrency.zig` | Pure adaptive source-width policy and its evidence |
-| `zml/io/dispatch_spans.zig` | Pure expansion of sharding into source ranges and destination offsets |
+| `zml/io/DispatchSpans.zig` | Pure expansion of sharding into source ranges and destination offsets |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
 | `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |

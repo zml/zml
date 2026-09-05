@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
                 option_allocator,
                 init.environ_map,
                 "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma.default_block_sizes,
+                &zml.io.dma_calibration.default_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
             var loader = try zml.io.Loader.init(allocator, io, platform, .{
@@ -226,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
                 init.arena.allocator(),
                 init.environ_map,
                 "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma.default_block_sizes,
+                &zml.io.dma_calibration.default_block_sizes,
             );
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
@@ -463,7 +463,7 @@ const DmaConcurrentOptions = struct {
 
 /// Drives every device at once from one process, `depth` synchronous slots
 /// per device, and reports the aggregate submission rate. The calibration in
-/// `zml.io.dma` measures one device at a time, so it cannot say whether the
+/// `zml.io.dma_calibration` measures one device at a time, so it cannot say whether the
 /// host can submit to four devices concurrently; the loader's single pump
 /// thread cannot either.
 fn dmaConcurrent(
