@@ -12,7 +12,7 @@ pub const std_options: std.Options = .{
     },
 };
 
-const Command = enum { cat, tree, ls, cp, stat, realpath, safetensors, @"dma-bench", load };
+const Command = enum { cat, tree, ls, cp, stat, realpath, safetensors, @"dma-bench", @"dma-conc", load };
 
 // -- ls hf://openai/gpt-oss-20b@6cee5e8
 // -- ls hf://Qwen/Qwen3-235B-A22B-Instruct-2507
@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
     const command: Command = std.meta.stringToEnum(Command, it.next() orelse return error.MissingCommand) orelse return error.CommandInvalid;
-    const path = if (command == .@"dma-bench")
+    const path = if (command == .@"dma-bench" or command == .@"dma-conc")
         ""
     else
         it.next() orelse return error.MissingPath;
@@ -193,6 +193,25 @@ pub fn main(init: std.process.Init) !void {
                     benchmark_result.numaPoolCount(),
                 },
             );
+            try stdout_writer.flush();
+        },
+        .@"dma-conc" => {
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator, io);
+            try dmaConcurrent(allocator, io, platform, &stdout_writer.interface, .{
+                .block_size = try envMib(init.environ_map, "ZML_DMA_CONC_BLOCK_MIB", 1),
+                .depth = try envUsize(init.environ_map, "ZML_DMA_CONC_DEPTH", 8),
+                .window_ms = try envUsize(init.environ_map, "ZML_DMA_CONC_WINDOW_MS", 500),
+                .serial_submit = try envUsize(init.environ_map, "ZML_DMA_CONC_SERIAL_SUBMIT", 0) != 0,
+                .callback_submit = try envUsize(init.environ_map, "ZML_DMA_CONC_CALLBACK", 0) != 0,
+                .buffers = std.meta.stringToEnum(DmaConcurrentOptions.Buffers, init.environ_map.get("ZML_DMA_CONC_BUFFERS") orelse "reuse") orelse return error.InvalidArgument,
+                .prebuilt_per_device = try envUsize(init.environ_map, "ZML_DMA_CONC_PREBUILT", 4096),
+                .shared_source = try envUsize(init.environ_map, "ZML_DMA_CONC_SHARED_SOURCE", 0) != 0,
+                .small_piece = try envUsize(init.environ_map, "ZML_DMA_CONC_SMALL_KIB", 0) * 1024,
+                .source_bytes = try envMib(init.environ_map, "ZML_DMA_CONC_SOURCE_MIB", 0),
+                .misalign = try envUsize(init.environ_map, "ZML_DMA_CONC_MISALIGN", 0),
+                .writers = try envUsize(init.environ_map, "ZML_DMA_CONC_WRITERS", 0),
+            });
             try stdout_writer.flush();
         },
         .load => {
@@ -408,6 +427,427 @@ pub fn main(init: std.process.Init) !void {
             }
         },
     }
+}
+
+const DmaConcurrentOptions = struct {
+    block_size: usize,
+    depth: usize,
+    window_ms: usize,
+    /// Serialises the submit call behind one mutex, which is what a single
+    /// pump thread does; completions still overlap.
+    serial_submit: bool,
+    /// Resubmits each slot from its PJRT ready callback instead of from a
+    /// blocked thread, which is how the loader's pumps run: whatever thread
+    /// PJRT delivers callbacks on is then the only submitting thread.
+    callback_submit: bool,
+    /// `reuse`: `depth` buffers per device, each transferred to again and
+    /// again, never flagged last. `fresh`: every transfer creates its own
+    /// manager and buffer and is flagged last, the loader's pattern for a
+    /// tensor smaller than a block. `prebuilt`: the managers are created
+    /// before the window; only the last-flagged transfer is measured.
+    buffers: Buffers,
+    prebuilt_per_device: usize,
+    /// Every device reads the same pinned source, as a replicated load does,
+    /// instead of one source per device.
+    shared_source: bool,
+    /// When non-zero, every other transfer of a slot is this many bytes
+    /// instead of a full block: DeepSeek-V4-Flash is half 256 KiB scales
+    /// and half ~4 MiB weights by count.
+    small_piece: usize,
+    /// Pinned source footprint per device (at least `block_size * depth`):
+    /// each slot walks the whole ring instead of re-reading one block, as
+    /// the loader reads every block of its pool once.
+    source_bytes: usize,
+    /// Bytes added to every source address: a safetensors file packs tensors
+    /// back to back, so the loader's DMA sources sit at 2- or 16-byte
+    /// alignment, never at a cache line.
+    misalign: usize,
+    /// CPU threads that keep copying into the source rings while the engines
+    /// read them, as the loader's page-cache reads do: the engines then read
+    /// lines the CPU just dirtied instead of cold memory.
+    writers: usize,
+
+    const Buffers = enum { reuse, fresh, prebuilt };
+};
+
+/// Drives every device at once from one process, `depth` synchronous slots
+/// per device, and reports the aggregate submission rate. The calibration in
+/// `zml.io.dma` measures one device at a time, so it cannot say whether the
+/// host can submit to four devices concurrently; the loader's single pump
+/// thread cannot either.
+fn dmaConcurrent(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    writer: *std.Io.Writer,
+    opts: DmaConcurrentOptions,
+) !void {
+    const api = platform.pjrt_api;
+    const device_count = platform.devices.len;
+    if (opts.depth == 0 or opts.block_size == 0) return error.InvalidArgument;
+
+    const Managed = struct {
+        manager: *zml.pjrt.AsyncHostToDeviceTransferManager,
+        buffer: *zml.pjrt.Buffer,
+    };
+    const Slot = struct {
+        manager: *zml.pjrt.AsyncHostToDeviceTransferManager,
+        buffer: *zml.pjrt.Buffer,
+        data: []const u8,
+        device_index: usize,
+        /// Buffers a `fresh` transfer created; they live until the end like
+        /// weights do.
+        kept: std.ArrayListUnmanaged(*zml.pjrt.Buffer) = .empty,
+        small_next: bool = false,
+        source: []u8,
+        offset: usize,
+        stride: usize,
+    };
+    const Shared = struct {
+        api: *const zml.pjrt.Api,
+        io: std.Io,
+        ready: std.atomic.Value(usize) = .init(0),
+        start: std.Io.Event = .unset,
+        stop: std.atomic.Value(bool) = .init(false),
+        first_error: std.atomic.Value(u32) = .init(0),
+        chains_active: std.atomic.Value(usize) = .init(0),
+        submit_ns: std.atomic.Value(u64) = .init(0),
+        written: std.atomic.Value(u64) = .init(0),
+        submit_mutex: ?*std.Io.Mutex,
+        bytes: []std.atomic.Value(u64),
+        transfers: []std.atomic.Value(u64),
+        allocator: std.mem.Allocator,
+        client: *const zml.pjrt.Client,
+        buffers: DmaConcurrentOptions.Buffers,
+        shape_spec: *const zml.pjrt.ShapeSpec,
+        memories: []*const zml.pjrt.Memory,
+        prebuilt: [][]Managed,
+        prebuilt_next: []std.atomic.Value(usize),
+        small_piece: usize,
+        misalign: usize,
+
+        fn recordError(self: *@This(), err: anyerror) void {
+            _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+            self.stop.store(true, .release);
+        }
+
+        fn transfer(self: *@This(), slot: *Slot, count: bool) void {
+            var manager = slot.manager;
+            var is_last = false;
+            var data = slot.data;
+            if (count) {
+                slot.offset += slot.stride;
+                if (slot.offset + slot.data.len + self.misalign > slot.source.len) slot.offset %= slot.stride;
+                data = slot.source[slot.offset + self.misalign ..][0..slot.data.len];
+            }
+            if (self.small_piece != 0 and count) {
+                if (slot.small_next) data = data[0..self.small_piece];
+                slot.small_next = !slot.small_next;
+            }
+            if (count) switch (self.buffers) {
+                .reuse => {},
+                .fresh => {
+                    manager = self.client.createBuffersForAsyncHostToDevice(self.api, .{
+                        .shape_specs = &.{self.shape_spec.*},
+                        .memory = self.memories[slot.device_index],
+                    }) catch |err| return self.recordError(err);
+                    const buffer = manager.retrieveBuffer(self.api, 0) catch |err| return self.recordError(err);
+                    slot.kept.append(self.allocator, buffer) catch |err| return self.recordError(err);
+                    is_last = true;
+                },
+                .prebuilt => {
+                    const index = self.prebuilt_next[slot.device_index].fetchAdd(1, .monotonic);
+                    if (index >= self.prebuilt[slot.device_index].len) {
+                        self.stop.store(true, .release);
+                        return;
+                    }
+                    manager = self.prebuilt[slot.device_index][index].manager;
+                    is_last = true;
+                },
+            };
+            if (self.submit_mutex) |mutex| mutex.lockUncancelable(self.io);
+            const submit_started = std.Io.Timestamp.now(self.io, .awake);
+            const event = manager.transferData(self.api, 0, data, 0, is_last) catch |err| {
+                if (self.submit_mutex) |mutex| mutex.unlock(self.io);
+                self.recordError(err);
+                return;
+            };
+            if (count) _ = self.submit_ns.fetchAdd(@intCast(@max(submit_started.untilNow(self.io, .awake).nanoseconds, 0)), .monotonic);
+            if (self.submit_mutex) |mutex| mutex.unlock(self.io);
+            event.await(self.api, self.io) catch |err| {
+                event.deinit(self.api);
+                self.recordError(err);
+                return;
+            };
+            event.deinit(self.api);
+            if (count and self.buffers == .fresh) manager.deinit(self.api);
+            if (count) {
+                _ = self.bytes[slot.device_index].fetchAdd(data.len, .monotonic);
+                _ = self.transfers[slot.device_index].fetchAdd(1, .monotonic);
+            }
+        }
+
+        fn run(self: *@This(), slot: *Slot) void {
+            _ = self.ready.fetchAdd(1, .release);
+            self.start.waitUncancelable(self.io);
+            while (!self.stop.load(.acquire)) self.transfer(slot, true);
+        }
+
+        /// Copies a 16 MiB scratch over every ring, region after region,
+        /// until told to stop.
+        fn write(self: *@This(), rings: []const []u8, scratch: []const u8, index: usize) void {
+            var position: usize = index * scratch.len;
+            while (!self.stop.load(.acquire)) {
+                for (rings) |ring| {
+                    if (position + scratch.len > ring.len) position = 0;
+                    @memcpy(ring[position..][0..scratch.len], scratch);
+                    _ = self.written.fetchAdd(scratch.len, .monotonic);
+                }
+                position += scratch.len;
+            }
+        }
+    };
+    // One slot's callback chain. The event whose callback is running is
+    // never destroyed inside it: `submit` destroys the one before.
+    const Chain = struct {
+        shared: *Shared,
+        slot: Slot,
+        current: ?*zml.pjrt.Event = null,
+        previous: ?*zml.pjrt.Event = null,
+
+        fn submit(self: *@This()) void {
+            const shared = self.shared;
+            if (self.previous) |event| event.deinit(shared.api);
+            self.previous = self.current;
+            self.current = null;
+            if (shared.stop.load(.acquire)) {
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+                return;
+            }
+            const submit_started = std.Io.Timestamp.now(shared.io, .awake);
+            const event = self.slot.manager.transferData(shared.api, 0, self.slot.data, 0, false) catch |err| {
+                shared.recordError(err);
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+                return;
+            };
+            _ = shared.submit_ns.fetchAdd(@intCast(@max(submit_started.untilNow(shared.io, .awake).nanoseconds, 0)), .monotonic);
+            self.current = event;
+            event.onReady(shared.api, @This(), onReady, self) catch |err| {
+                event.awaitRaw(shared.api) catch {};
+                shared.recordError(err);
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+            };
+        }
+
+        fn onReady(err: ?*zml.pjrt.Error, self: *@This()) void {
+            const shared = self.shared;
+            if (err) |pjrt_error| {
+                pjrt_error.deinit(shared.api);
+                shared.recordError(error.TransferFailed);
+            }
+            _ = shared.bytes[self.slot.device_index].fetchAdd(self.slot.data.len, .monotonic);
+            _ = shared.transfers[self.slot.device_index].fetchAdd(1, .monotonic);
+            self.submit();
+        }
+    };
+
+    var dma_map: zml.mem.DmaMapAllocator = .init(std.heap.page_allocator, platform);
+    const pinned = dma_map.allocator();
+    const bytes = try allocator.alloc(std.atomic.Value(u64), device_count);
+    defer allocator.free(bytes);
+    const transfers = try allocator.alloc(std.atomic.Value(u64), device_count);
+    defer allocator.free(transfers);
+    for (bytes, transfers) |*b, *t| {
+        b.* = .init(0);
+        t.* = .init(0);
+    }
+    var dims = [_]i64{@intCast(opts.block_size)};
+    const shape_spec: zml.pjrt.ShapeSpec = .init(&dims, .u8);
+    const memories = try allocator.alloc(*const zml.pjrt.Memory, device_count);
+    defer allocator.free(memories);
+    for (platform.devices, memories) |*device, *memory| {
+        memory.* = (device.memory(.default) orelse return error.DmaDeviceMismatch).pjrt_memory;
+    }
+    const prebuilt = try allocator.alloc([]Managed, device_count);
+    defer allocator.free(prebuilt);
+    @memset(prebuilt, &.{});
+    const prebuilt_next = try allocator.alloc(std.atomic.Value(usize), device_count);
+    defer allocator.free(prebuilt_next);
+    @memset(prebuilt_next, .init(0));
+    defer for (prebuilt) |managed| {
+        for (managed) |item| {
+            item.manager.deinit(api);
+            item.buffer.deinit(api);
+        }
+        allocator.free(managed);
+    };
+    if (opts.buffers == .prebuilt) {
+        for (prebuilt, memories) |*managed, memory| {
+            managed.* = try allocator.alloc(Managed, opts.prebuilt_per_device);
+            var built: usize = 0;
+            errdefer managed.* = managed.*[0..built];
+            for (managed.*) |*item| {
+                item.manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                    .shape_specs = &.{shape_spec},
+                    .memory = memory,
+                });
+                item.buffer = try item.manager.retrieveBuffer(api, 0);
+                built += 1;
+            }
+        }
+    }
+    var submit_mutex: std.Io.Mutex = .init;
+    var shared: Shared = .{
+        .api = api,
+        .io = io,
+        .submit_mutex = if (opts.serial_submit) &submit_mutex else null,
+        .bytes = bytes,
+        .transfers = transfers,
+        .allocator = allocator,
+        .client = platform.pjrt_client,
+        .buffers = opts.buffers,
+        .shape_spec = &shape_spec,
+        .memories = memories,
+        .prebuilt = prebuilt,
+        .prebuilt_next = prebuilt_next,
+        .small_piece = opts.small_piece,
+        .misalign = opts.misalign,
+    };
+
+    var slots: std.ArrayListUnmanaged(Slot) = .empty;
+    defer slots.deinit(allocator);
+    var sources: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (slots.items) |*slot| {
+            const event = slot.manager.transferData(api, 0, slot.data, 0, true) catch null;
+            if (event) |done| {
+                done.await(api, io) catch {};
+                done.deinit(api);
+            }
+            slot.manager.deinit(api);
+            slot.buffer.deinit(api);
+            for (slot.kept.items) |buffer| buffer.deinit(api);
+            slot.kept.deinit(allocator);
+        }
+        for (sources.items) |source| pinned.free(source);
+        sources.deinit(allocator);
+    }
+
+    const source_len = @max(opts.block_size * opts.depth, opts.source_bytes) + std.heap.page_size_min;
+    for (memories, 0..) |memory, device_index| {
+        const source = if (opts.shared_source and sources.items.len != 0) sources.items[0] else blk: {
+            const fresh = try pinned.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), source_len);
+            @memset(fresh, 0);
+            try sources.append(allocator, fresh);
+            break :blk fresh;
+        };
+        for (0..opts.depth) |slot_index| {
+            const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                .shape_specs = &.{shape_spec},
+                .memory = memory,
+            });
+            const buffer = try manager.retrieveBuffer(api, 0);
+            try slots.append(allocator, .{
+                .manager = manager,
+                .buffer = buffer,
+                .data = source[slot_index * opts.block_size ..][0..opts.block_size],
+                .device_index = device_index,
+                .source = source,
+                .offset = slot_index * opts.block_size,
+                .stride = opts.block_size * opts.depth,
+            });
+        }
+    }
+    // Warm every slot the way the calibration does: the first transfer on a
+    // buffer pays for its allocation.
+    for (slots.items) |*slot| {
+        shared.transfer(slot, false);
+        shared.transfer(slot, false);
+    }
+    if (shared.first_error.load(.acquire) != 0) return @errorFromInt(@as(u16, @intCast(shared.first_error.load(.acquire))));
+
+    const scratch = try allocator.alloc(u8, 16 * 1024 * 1024);
+    defer allocator.free(scratch);
+    @memset(scratch, 1);
+    var writer_group: std.Io.Group = .init;
+    defer {
+        shared.stop.store(true, .release);
+        writer_group.await(io) catch {};
+    }
+    for (0..opts.writers) |index| {
+        try writer_group.concurrent(io, Shared.write, .{ &shared, sources.items, scratch, index });
+    }
+    var elapsed_ns: u64 = 1;
+    if (opts.callback_submit) {
+        const chains = try allocator.alloc(Chain, slots.items.len);
+        defer allocator.free(chains);
+        for (chains, slots.items) |*chain, *slot| chain.* = .{ .shared = &shared, .slot = slot.* };
+        shared.chains_active.store(chains.len, .release);
+        const started = std.Io.Timestamp.now(io, .awake);
+        for (chains) |*chain| chain.submit();
+        try io.sleep(.fromMilliseconds(@intCast(opts.window_ms)), .awake);
+        shared.stop.store(true, .release);
+        while (shared.chains_active.load(.acquire) != 0) try io.sleep(.fromMilliseconds(1), .awake);
+        elapsed_ns = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 1));
+        // The last callback of each chain may still be unwinding when its
+        // counter drops; give it a moment before its events go.
+        try io.sleep(.fromMilliseconds(50), .awake);
+        for (chains) |*chain| {
+            if (chain.previous) |event| event.deinit(api);
+            if (chain.current) |event| event.deinit(api);
+        }
+    } else {
+        var group: std.Io.Group = .init;
+        for (slots.items) |*slot| {
+            group.concurrent(io, Shared.run, .{ &shared, slot }) catch |err| {
+                shared.stop.store(true, .release);
+                shared.start.set(io);
+                group.await(io) catch {};
+                return err;
+            };
+        }
+        while (shared.ready.load(.acquire) != slots.items.len) try io.sleep(.fromMilliseconds(1), .awake);
+        const started = std.Io.Timestamp.now(io, .awake);
+        shared.start.set(io);
+        try io.sleep(.fromMilliseconds(@intCast(opts.window_ms)), .awake);
+        shared.stop.store(true, .release);
+        try group.await(io);
+        elapsed_ns = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 1));
+    }
+    if (shared.first_error.load(.acquire) != 0) return @errorFromInt(@as(u16, @intCast(shared.first_error.load(.acquire))));
+
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    var total_bytes: u64 = 0;
+    var total_transfers: u64 = 0;
+    for (bytes, transfers, 0..) |*b, *t, device_index| {
+        const device_bytes = b.load(.acquire);
+        const device_transfers = t.load(.acquire);
+        total_bytes += device_bytes;
+        total_transfers += device_transfers;
+        try writer.print("dma_conc device={d} gib_s={d:.2} submissions_s={d:.0}\n", .{
+            device_index,
+            @as(f64, @floatFromInt(device_bytes)) / seconds / (1024 * 1024 * 1024),
+            @as(f64, @floatFromInt(device_transfers)) / seconds,
+        });
+    }
+    try writer.print("dma_conc total devices={d} block_bytes={d} depth={d} serial_submit={} callback_submit={} buffers={s} shared_source={} small_piece={d} source_mib={d} misalign={d} writers={d} cpu_write_gib_s={d:.1} elapsed_ms={d:.1} gib_s={d:.2} submissions_s={d:.0} submit_us={d:.1}\n", .{
+        device_count,
+        opts.block_size,
+        opts.depth,
+        opts.serial_submit,
+        opts.callback_submit,
+        @tagName(opts.buffers),
+        opts.shared_source,
+        opts.small_piece,
+        source_len / (1024 * 1024),
+        opts.misalign,
+        opts.writers,
+        @as(f64, @floatFromInt(shared.written.load(.acquire))) / seconds / (1024 * 1024 * 1024),
+        seconds * 1000,
+        @as(f64, @floatFromInt(total_bytes)) / seconds / (1024 * 1024 * 1024),
+        @as(f64, @floatFromInt(total_transfers)) / seconds,
+        @as(f64, @floatFromInt(shared.submit_ns.load(.acquire))) / 1000 / @as(f64, @floatFromInt(@max(total_transfers, 1))),
+    });
 }
 
 fn dmaBenchmarkNumaNodes(

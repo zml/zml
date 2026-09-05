@@ -62,6 +62,15 @@ const VectoredLoadMetrics = struct {
     /// From a request's enqueue to its last DMA callback: how long the DMA
     /// stage holds a lifecycle credit and pinned blocks per request.
     dma_stage_ns: std.atomic.Value(u64) = .init(0),
+    /// Inside `submitTransfer` (the PJRT call and the callback registration)
+    /// and from a submission to its ready callback, summed over submissions.
+    dma_submit_ns: std.atomic.Value(u64) = .init(0),
+    dma_piece_ns: std.atomic.Value(u64) = .init(0),
+    /// Why a device pump stopped: nothing queued, or no room under the
+    /// device's budget. A pump that mostly stops empty is starved by the
+    /// reads; one that mostly stops full is waiting on the engine.
+    pump_stops_empty: std.atomic.Value(u64) = .init(0),
+    pump_stops_full: std.atomic.Value(u64) = .init(0),
     /// Inside `ensureState` for a claimed job's items: the first worker to
     /// touch a tensor creates its PJRT buffers and transfer managers there,
     /// and the other workers of the same tensor wait for it.
@@ -512,38 +521,6 @@ test "DMA stage requests cover the per-device in-flight bytes" {
     try std.testing.expectEqual(@as(usize, 1), dmaStageRequests(1, 1, 16 * mib, 64 * mib));
 }
 
-/// Round-robin over devices with a ready transfer whose in-flight bytes are
-/// under the per-device budget. The budget is in bytes, not submissions:
-/// the calibrated depth is `max_in_flight_per_device` blocks, and a piece
-/// is one tensor's slice of a block, so a model of small tensors needs many
-/// more pieces in flight to keep the same bytes moving (DeepSeek-V4 on a
-/// GB300: 8 pieces of 2.2 MiB reached 24 GiB/s, 58 reached 44).
-fn selectLoaderDmaDevice(
-    active_bytes: []const usize,
-    active_pieces: []const usize,
-    budget_bytes: usize,
-    ready_mask: u64,
-    next_device: usize,
-) ?usize {
-    std.debug.assert(active_bytes.len > 0 and active_bytes.len <= 64);
-    std.debug.assert(active_pieces.len == active_bytes.len);
-    std.debug.assert(budget_bytes > 0 and next_device < active_bytes.len);
-    for (0..active_bytes.len) |offset| {
-        const device_index = (next_device + offset) % active_bytes.len;
-        if (ready_mask & (@as(u64, 1) << @intCast(device_index)) == 0 or
-            active_bytes[device_index] >= budget_bytes or
-            active_pieces[device_index] >= max_dma_pieces_per_device)
-        {
-            continue;
-        }
-        return device_index;
-    }
-    return null;
-}
-
-/// Submissions in flight per device on top of the byte budget: a bound on
-/// event and callback overhead when a block holds many tiny tensors, above
-/// the depth that saturated a GB300 (64 pieces of DeepSeek-V4).
 const max_dma_pieces_per_device: usize = 64;
 
 /// One submission: its plans (one per source file, published as each file
@@ -569,8 +546,9 @@ pub const Batch = struct {
         requests: []VectoredLoadPipeline.RequestContext,
         blocks: []VectoredLoadPipeline.BlockContext,
         events: []VectoredLoadPipeline.EventContext,
-        /// Event slots handed out so far; owned by `metadata_mutex`.
-        events_used: usize = 0,
+        /// Event slots handed out so far, one `fetchAdd` per submission from
+        /// any device's pump.
+        events_used: std.atomic.Value(usize) = .init(0),
         source_bytes: u64,
         source_runs: usize,
         planning_ns: u64 = 0,
@@ -830,9 +808,62 @@ const VectoredLoadPipeline = struct {
     };
 
     /// Transfers ready for one device, submitted in arrival order so the
-    /// oldest requests and submissions complete first. Owned by
-    /// `metadata_mutex`.
+    /// oldest requests and submissions complete first. Owned by the
+    /// device's `DevicePump.mutex`.
     const ReadyQueue = std.Deque(ReadyTransfer);
+
+    /// One device's submission state. Its pump runs on whichever thread
+    /// finds work -- a worker after enqueueing, a ready callback after a
+    /// completion -- one at a time per device, and shares nothing with the
+    /// other devices' pumps: four GB300 take ~180k submissions/s from
+    /// per-device submitters against 55k from one pump serialised on a
+    /// single mutex over all devices (DeepSeek replicated, CTX.md seventh
+    /// pass). One submitter per device is a correctness requirement, not a
+    /// performance choice: a tensor's pieces for one device are flagged
+    /// last by `Target.nextIsLast` in submission order, and two threads
+    /// submitting pieces of the same tensor concurrently left targets
+    /// unclosed (`IncompleteTransfer` on Llama, whose tensors span blocks).
+    /// Concurrent submitters measured no faster anyway: a submission blocks
+    /// ~28 us in the driver once four GB300 each hold ~32 pieces in flight,
+    /// but the engine's own latency for the loader's traffic is what bounds
+    /// the rate, not the submitter. A dedicated task per device woken by
+    /// completions, with or without hysteresis, was no better either.
+    const DevicePump = struct {
+        mutex: std.Io.Mutex = .init,
+        queue: ReadyQueue = .empty,
+        /// In-flight DMA bytes and submissions; owned by `mutex`.
+        active_bytes: usize = 0,
+        active_pieces: usize = 0,
+        pumping: bool = false,
+        active_events: usize = 0,
+        ready_entries: usize = 0,
+        /// Contexts whose callback fired, for the next pump to destroy: an
+        /// intrusive stack through `EventContext.next_retired`, owned by
+        /// `mutex`. Empty unless `retire_events_early`.
+        retired: ?*EventContext = null,
+
+        /// Whether the next queued transfer may go. The budget is in bytes,
+        /// not submissions: the calibrated depth is `max_in_flight_per_device`
+        /// blocks, and a piece is one tensor's slice of a block, so a model of
+        /// small tensors needs many more pieces in flight to keep the same
+        /// bytes moving (DeepSeek-V4 on a GB300: 8 pieces of 2.2 MiB reached
+        /// 24 GiB/s, 58 reached 44). The piece that crosses the budget is
+        /// admitted: a device with room always has a transfer in flight.
+        fn hasRoom(self: *const DevicePump, budget_bytes: usize) bool {
+            return self.active_bytes < budget_bytes and self.active_pieces < max_dma_pieces_per_device;
+        }
+
+        /// `mutex`. Destroys every retired event: their callbacks have run,
+        /// and only the pump or the batch's retirement destroys an event,
+        /// never its own callback.
+        fn destroyRetired(self: *DevicePump) void {
+            while (self.retired) |ctx| {
+                self.retired = ctx.next_retired;
+                ctx.next_retired = null;
+                ctx.destroyEvent();
+            }
+        }
+    };
 
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
@@ -843,10 +874,11 @@ const VectoredLoadPipeline = struct {
         device_index: usize,
         /// Bytes this submission holds against the device's in-flight budget.
         len: usize,
-        /// Link of `VectoredLoadPipeline.retired`; owned by `metadata_mutex`.
+        submitted_ns: u64 = 0,
+        /// Link of the device pump's `retired`; owned by that pump's mutex.
         next_retired: ?*EventContext = null,
 
-        /// `metadata_mutex`. Destroys the event and its error, once.
+        /// Pump mutex. Destroys the event and its error, once.
         fn destroyEvent(self: *EventContext) void {
             if (self.pjrt_event) |event| event.deinit(self.pipeline.platform.pjrt_api);
             self.pjrt_event = null;
@@ -868,22 +900,12 @@ const VectoredLoadPipeline = struct {
     scheduler: *FairVectoredReadScheduler,
     next_read_admission: std.atomic.Value(u64) = .init(1),
     first_error: std.atomic.Value(u16) = .init(0),
-    metadata_mutex: std.Io.Mutex = .init,
-    ready_queues: []ReadyQueue,
-    /// In-flight DMA bytes and submissions per device, owned by
-    /// `metadata_mutex`.
-    active_bytes_by_device: []usize,
-    active_pieces_by_device: []usize,
+    /// One per device. Where several are locked at once (`enqueueBlocks`,
+    /// `retireBatch`) they are taken in device order; a pump, a completion
+    /// and `abortReady` hold one at a time.
+    pumps: []DevicePump,
     /// Per-device in-flight budget: the calibrated depth in blocks, in bytes.
     dma_budget_bytes: usize,
-    next_device: usize = 0,
-    pumping: bool = false,
-    active_events: usize = 0,
-    ready_entries: usize = 0,
-    /// Contexts whose callback fired, for the next pump to destroy: an
-    /// intrusive stack through `EventContext.next_retired`, owned by
-    /// `metadata_mutex`. Empty unless `retire_events_early`.
-    retired: ?*EventContext = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -901,15 +923,9 @@ const VectoredLoadPipeline = struct {
     ) !VectoredLoadPipeline {
         std.debug.assert(platform.devices.len <= 64);
         std.debug.assert(dma_budget_bytes > 0);
-        const ready_queues = try allocator.alloc(ReadyQueue, platform.devices.len);
-        errdefer allocator.free(ready_queues);
-        @memset(ready_queues, .empty);
-        const active_bytes_by_device = try allocator.alloc(usize, platform.devices.len);
-        errdefer allocator.free(active_bytes_by_device);
-        @memset(active_bytes_by_device, 0);
-        const active_pieces_by_device = try allocator.alloc(usize, platform.devices.len);
-        errdefer allocator.free(active_pieces_by_device);
-        @memset(active_pieces_by_device, 0);
+        const pumps = try allocator.alloc(DevicePump, platform.devices.len);
+        errdefer allocator.free(pumps);
+        @memset(pumps, .{});
         return .{
             .allocator = allocator,
             .io = io,
@@ -922,9 +938,7 @@ const VectoredLoadPipeline = struct {
             .numa_explicit = numa_explicit,
             .metrics = metrics,
             .scheduler = scheduler,
-            .ready_queues = ready_queues,
-            .active_bytes_by_device = active_bytes_by_device,
-            .active_pieces_by_device = active_pieces_by_device,
+            .pumps = pumps,
             .dma_budget_bytes = dma_budget_bytes,
         };
     }
@@ -932,14 +946,26 @@ const VectoredLoadPipeline = struct {
     fn deinit(self: *VectoredLoadPipeline) void {
         // Every batch was retired: no DMA event, queued transfer or request
         // context may outlive its batch.
-        std.debug.assert(self.active_events == 0);
-        std.debug.assert(self.ready_entries == 0);
-        std.debug.assert(self.retired == null);
         std.debug.assert(self.request_gate.inUse(self.io) == 0);
-        for (self.ready_queues) |*queue| queue.deinit(self.allocator);
-        self.allocator.free(self.ready_queues);
-        self.allocator.free(self.active_bytes_by_device);
-        self.allocator.free(self.active_pieces_by_device);
+        for (self.pumps) |*device_pump| {
+            std.debug.assert(device_pump.active_events == 0);
+            std.debug.assert(device_pump.ready_entries == 0);
+            std.debug.assert(device_pump.retired == null);
+            device_pump.queue.deinit(self.allocator);
+        }
+        self.allocator.free(self.pumps);
+    }
+
+    fn lockAllPumps(self: *VectoredLoadPipeline) void {
+        for (self.pumps) |*device_pump| device_pump.mutex.lockUncancelable(self.io);
+    }
+
+    fn unlockAllPumps(self: *VectoredLoadPipeline) void {
+        var index = self.pumps.len;
+        while (index > 0) {
+            index -= 1;
+            self.pumps[index].mutex.unlock(self.io);
+        }
     }
 
     fn failed(self: *const VectoredLoadPipeline) bool {
@@ -982,16 +1008,16 @@ const VectoredLoadPipeline = struct {
     /// has not destroyed yet (from the awaiting task after their callbacks
     /// fired, exactly as `pjrt.Event.await` does), unlinks the batch's
     /// contexts from `retired` and checks that every request and block
-    /// completed. Runs under `metadata_mutex` so an `abortReady` still
-    /// iterating queued entries or a pump draining `retired` cannot race the
-    /// free that follows.
+    /// completed. Runs with every pump locked so an `abortReady` still
+    /// iterating queued entries or a pump draining its `retired` cannot race
+    /// the free that follows.
     fn retireBatch(self: *VectoredLoadPipeline, batch: *Batch) void {
         std.debug.assert(batch.done.isSet());
-        self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
+        self.lockAllPumps();
+        defer self.unlockAllPumps();
         if (builtin.mode == .Debug) batch.freeing = true;
         for (batch.plans.items) |plan| {
-            for (plan.events[0..plan.events_used]) |*ctx| ctx.destroyEvent();
+            for (plan.events[0..plan.events_used.load(.acquire)]) |*ctx| ctx.destroyEvent();
             for (plan.requests) |*request| {
                 std.debug.assert(request.completed.load(.acquire));
                 for (request.blocks[0..request.blocks_registered]) |*block| {
@@ -1001,31 +1027,23 @@ const VectoredLoadPipeline = struct {
         }
         // Only this batch's contexts have a destroyed event while still
         // linked: a pump unlinks what it destroys.
-        var link = &self.retired;
-        while (link.*) |ctx| {
-            if (ctx.pjrt_event == null) link.* = ctx.next_retired else link = &ctx.next_retired;
+        for (self.pumps) |*device_pump| {
+            var link = &device_pump.retired;
+            while (link.*) |ctx| {
+                if (ctx.pjrt_event == null) link.* = ctx.next_retired else link = &ctx.next_retired;
+            }
         }
     }
 
-    /// Hands a context whose callback fired to the next pump. Under
-    /// `metadata_mutex`, so the batch's retirement sees it before the batch
+    /// Hands a context whose callback fired to its device's next device_pump. Under
+    /// that pump's mutex, so the batch's retirement sees it before the batch
     /// is freed.
     fn retireEvent(self: *VectoredLoadPipeline, ctx: *EventContext) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        ctx.next_retired = self.retired;
-        self.retired = ctx;
-        self.metadata_mutex.unlock(self.io);
-    }
-
-    /// `metadata_mutex`. Destroys every retired event: their callbacks have
-    /// run, and only the pump or the batch's retirement destroys an event,
-    /// never its own callback.
-    fn destroyRetired(self: *VectoredLoadPipeline) void {
-        while (self.retired) |ctx| {
-            self.retired = ctx.next_retired;
-            ctx.next_retired = null;
-            ctx.destroyEvent();
-        }
+        const device_pump = &self.pumps[ctx.device_index];
+        device_pump.mutex.lockUncancelable(self.io);
+        ctx.next_retired = device_pump.retired;
+        device_pump.retired = ctx;
+        device_pump.mutex.unlock(self.io);
     }
 
     fn reserveSourceJob(self: *VectoredLoadPipeline) void {
@@ -1057,13 +1075,15 @@ const VectoredLoadPipeline = struct {
         blocks: []BlockContext,
         queue_counts: []const usize,
     ) !void {
-        std.debug.assert(queue_counts.len == self.ready_queues.len);
-        self.metadata_mutex.lockUncancelable(self.io);
-        errdefer self.metadata_mutex.unlock(self.io);
-        // Reserve every destination before mutating any queue so the batch is
-        // either fully visible or not visible at all.
-        for (self.ready_queues, queue_counts) |*queue, count| {
-            try queue.ensureUnusedCapacity(self.allocator, count);
+        std.debug.assert(queue_counts.len == self.pumps.len);
+        // Every pump is held while the request's transfers land, and every
+        // destination is reserved before any queue changes, so the request
+        // is either fully queued or not queued at all: the caller abandons
+        // all of its submissions on failure.
+        self.lockAllPumps();
+        errdefer self.unlockAllPumps();
+        for (self.pumps, queue_counts) |*device_pump, count| {
+            try device_pump.queue.ensureUnusedCapacity(self.allocator, count);
         }
         for (transfers) |transfer| {
             const block = &blocks[transfer.block_index];
@@ -1073,19 +1093,22 @@ const VectoredLoadPipeline = struct {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
                 const target = &tensor.targets[writer_index];
-                self.ready_queues[target.device_index].pushBackAssumeCapacity(.{
+                const device_pump = &self.pumps[target.device_index];
+                device_pump.queue.pushBackAssumeCapacity(.{
                     .target = target,
                     .block = block,
                     .source_offset = transfer.block_offset,
                     .destination_offset = transfer.destination_offset,
                     .len = transfer.len,
                 });
-                self.ready_entries += 1;
+                device_pump.ready_entries += 1;
             }
             _ = self.metrics.transfer_pieces.fetchAdd(1, .monotonic);
         }
-        self.metadata_mutex.unlock(self.io);
-        self.requestPump();
+        self.unlockAllPumps();
+        for (queue_counts, 0..) |count, device_index| {
+            if (count != 0) self.requestPump(device_index);
+        }
     }
 
     /// Drops `count` never-submitted references of a registered block. Only
@@ -1100,54 +1123,45 @@ const VectoredLoadPipeline = struct {
         for (0..count) |_| block.complete();
     }
 
-    fn requestPump(self: *VectoredLoadPipeline) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        if (self.pumping or self.failed()) {
-            self.metadata_mutex.unlock(self.io);
+    /// Runs the device's pump on this thread unless one is already running.
+    fn requestPump(self: *VectoredLoadPipeline, device_index: usize) void {
+        const device_pump = &self.pumps[device_index];
+        device_pump.mutex.lockUncancelable(self.io);
+        if (device_pump.pumping or self.failed()) {
+            device_pump.mutex.unlock(self.io);
             return;
         }
-        self.pumping = true;
-        self.metadata_mutex.unlock(self.io);
-        self.pump();
+        device_pump.pumping = true;
+        device_pump.mutex.unlock(self.io);
+        self.pump(device_index);
     }
 
-    fn pump(self: *VectoredLoadPipeline) void {
+    /// Submits from the device's queue, in arrival order, until the device
+    /// has no room or nothing is queued. Any queued transfer can go: nothing
+    /// waits for another piece. Exactly one pump runs per device at a time,
+    /// see `DevicePump`.
+    fn pump(self: *VectoredLoadPipeline, device_index: usize) void {
+        const device_pump = &self.pumps[device_index];
         while (true) {
             var selected: ?ReadyTransfer = null;
-            self.metadata_mutex.lockUncancelable(self.io);
-            if (retire_events_early) self.destroyRetired();
+            device_pump.mutex.lockUncancelable(self.io);
+            if (retire_events_early) device_pump.destroyRetired();
             if (!self.failed()) {
-                // Any queued transfer can go: nothing waits for another
-                // piece, so each queue is served in arrival order.
-                var ready_mask: u64 = 0;
-                for (self.ready_queues, 0..) |queue, device_index| {
-                    if (queue.len != 0) ready_mask |= @as(u64, 1) << @intCast(device_index);
-                }
-                const device_index = selectLoaderDmaDevice(
-                    self.active_bytes_by_device,
-                    self.active_pieces_by_device,
-                    self.dma_budget_bytes,
-                    ready_mask,
-                    self.next_device,
-                );
-                if (device_index) |index| {
-                    selected = self.ready_queues[index].popFront().?;
-                    self.next_device = (index + 1) % self.ready_queues.len;
-                    // The piece that crosses the budget is admitted: a
-                    // device with room always has a transfer in flight.
-                    self.active_bytes_by_device[index] += selected.?.len;
-                    self.active_pieces_by_device[index] += 1;
-                    self.active_events += 1;
-                    self.ready_entries -= 1;
+                if (!device_pump.hasRoom(self.dma_budget_bytes)) {
+                    _ = self.metrics.pump_stops_full.fetchAdd(1, .monotonic);
+                } else if (device_pump.queue.popFront()) |transfer| {
+                    device_pump.active_bytes += transfer.len;
+                    device_pump.active_pieces += 1;
+                    device_pump.active_events += 1;
+                    device_pump.ready_entries -= 1;
+                    selected = transfer;
+                } else {
+                    _ = self.metrics.pump_stops_empty.fetchAdd(1, .monotonic);
                 }
             }
-            if (selected == null) {
-                self.pumping = false;
-                self.metadata_mutex.unlock(self.io);
-                return;
-            }
-            self.metadata_mutex.unlock(self.io);
-            self.submitOne(selected.?);
+            if (selected == null) device_pump.pumping = false;
+            device_pump.mutex.unlock(self.io);
+            if (selected) |transfer| self.submitOne(transfer) else return;
         }
     }
 
@@ -1173,6 +1187,7 @@ const VectoredLoadPipeline = struct {
         const is_last = target.nextIsLast(transfer.len);
         // Even a rejected last call closes the buffer on PJRT's side.
         if (is_last) target.closed = true;
+        const submit_started = awakeNs(self.io);
         const event = try target.manager.transferData(
             api,
             0,
@@ -1186,17 +1201,16 @@ const VectoredLoadPipeline = struct {
         // owns it. A pump destroys the event once its callback has run, or
         // the batch's retirement does.
         const plan = transfer.block.request.plan;
-        self.metadata_mutex.lockUncancelable(self.io);
-        std.debug.assert(plan.events_used < plan.events.len);
-        const ctx = &plan.events[plan.events_used];
-        plan.events_used += 1;
-        self.metadata_mutex.unlock(self.io);
+        const event_index = plan.events_used.fetchAdd(1, .monotonic);
+        std.debug.assert(event_index < plan.events.len);
+        const ctx = &plan.events[event_index];
         ctx.* = .{
             .pipeline = self,
             .block = transfer.block,
             .pjrt_event = event,
             .device_index = target.device_index,
             .len = transfer.len,
+            .submitted_ns = submit_started,
         };
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
@@ -1212,6 +1226,7 @@ const VectoredLoadPipeline = struct {
                 const device_index = ctx_.device_index;
                 const len = ctx_.len;
                 const block = ctx_.block;
+                _ = pipeline.metrics.dma_piece_ns.fetchAdd(awakeNs(pipeline.io) -| ctx_.submitted_ns, .monotonic);
                 ctx_.err = err;
                 // The shipped plugins resolve this event without an error
                 // whatever happened to the copy (the C API wrapper sets the
@@ -1231,39 +1246,42 @@ const VectoredLoadPipeline = struct {
             event.awaitRaw(api) catch {};
             return err;
         };
+        _ = self.metrics.dma_submit_ns.fetchAdd(awakeNs(self.io) -| submit_started, .monotonic);
     }
 
     fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize, len: usize) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        std.debug.assert(self.active_events > 0);
-        std.debug.assert(self.active_bytes_by_device[device_index] >= len);
-        std.debug.assert(self.active_pieces_by_device[device_index] > 0);
-        self.active_events -= 1;
-        self.active_bytes_by_device[device_index] -= len;
-        self.active_pieces_by_device[device_index] -= 1;
-        self.metadata_mutex.unlock(self.io);
+        const device_pump = &self.pumps[device_index];
+        device_pump.mutex.lockUncancelable(self.io);
+        std.debug.assert(device_pump.active_events > 0);
+        std.debug.assert(device_pump.active_bytes >= len);
+        std.debug.assert(device_pump.active_pieces > 0);
+        device_pump.active_events -= 1;
+        device_pump.active_bytes -= len;
+        device_pump.active_pieces -= 1;
+        device_pump.mutex.unlock(self.io);
         // A ready callback can be the first place an asynchronous PJRT error
-        // becomes visible. Once outside the metadata lock, retire every
-        // queued transfer so request lifecycles cannot wait forever on entries
-        // that the failed pump will no longer submit.
+        // becomes visible. Once outside the pump lock, retire every queued
+        // transfer so request lifecycles cannot wait forever on entries that
+        // the failed pumps will no longer submit.
         if (self.failed())
             self.abortReady()
         else
-            self.requestPump();
+            self.requestPump(device_index);
     }
 
-    /// Force-completes every queued transfer. A completion here may finish
-    /// its batch, but the batch is retired under `metadata_mutex`, which this
-    /// holds, so no queued entry is touched after its block completes.
+    /// Force-completes every queued transfer, one device at a time. A
+    /// completion here may finish its batch, but a batch still has an entry
+    /// queued until its last one is popped, and it is retired with every
+    /// pump locked, so no queued entry is touched after its block completes.
     fn abortReady(self: *VectoredLoadPipeline) void {
-        self.metadata_mutex.lockUncancelable(self.io);
-        for (self.ready_queues) |*queue| {
-            while (queue.popFront()) |transfer| {
+        for (self.pumps) |*device_pump| {
+            device_pump.mutex.lockUncancelable(self.io);
+            while (device_pump.queue.popFront()) |transfer| {
                 transfer.block.complete();
-                self.ready_entries -= 1;
+                device_pump.ready_entries -= 1;
             }
+            device_pump.mutex.unlock(self.io);
         }
-        self.metadata_mutex.unlock(self.io);
     }
 };
 
@@ -4447,7 +4465,7 @@ pub const DirectLoader = struct {
     }
     fn logSummary(self: *DirectLoader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.bytesLoaded(),
@@ -4466,6 +4484,10 @@ pub const DirectLoader = struct {
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.dma_submit_ns.load(.acquire), self.metrics.dma_submissions.load(.acquire)) * 1000,
+            millisecondsPer(self.metrics.dma_piece_ns.load(.acquire), self.metrics.dma_submissions.load(.acquire)),
+            self.metrics.pump_stops_empty.load(.acquire),
+            self.metrics.pump_stops_full.load(.acquire),
         });
     }
 
@@ -4505,39 +4527,16 @@ pub const DirectLoader = struct {
     }
 };
 
-test "loader DMA admission rotates and respects per-device budgets" {
-    const all_ready: u64 = 0b1111;
-    var active = [_]usize{ 0, 0, 0, 0 };
-    var pieces = [_]usize{ 0, 0, 0, 0 };
-    var next_device: usize = 0;
-
-    for ([_]usize{ 0, 1, 2, 3, 0, 1, 2, 3 }) |expected| {
-        const selected = selectLoaderDmaDevice(
-            &active,
-            &pieces,
-            8,
-            all_ready,
-            next_device,
-        ).?;
-        try std.testing.expectEqual(expected, selected);
-        next_device = (selected + 1) % active.len;
-    }
-
-    // Bytes at the budget close a device; so does the piece cap.
-    active = .{ 8, 0, 8, 0 };
-    try std.testing.expectEqual(
-        @as(?usize, 1),
-        selectLoaderDmaDevice(&active, &pieces, 8, all_ready, 0),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, null),
-        selectLoaderDmaDevice(&active, &pieces, 8, 0b0101, 0),
-    );
-    pieces = .{ 0, max_dma_pieces_per_device, 0, 0 };
-    try std.testing.expectEqual(
-        @as(?usize, 3),
-        selectLoaderDmaDevice(&active, &pieces, 8, all_ready, 0),
-    );
+test "device pump admits by bytes and by pieces" {
+    var pump: VectoredLoadPipeline.DevicePump = .{};
+    try std.testing.expect(pump.hasRoom(8));
+    // The piece that crosses the budget was admitted; the next is not.
+    pump.active_bytes = 8;
+    try std.testing.expect(!pump.hasRoom(8));
+    pump.active_bytes = 7;
+    try std.testing.expect(pump.hasRoom(8));
+    pump.active_pieces = max_dma_pieces_per_device;
+    try std.testing.expect(!pump.hasRoom(8));
 }
 
 test "source bootstrap requires a high-latency source with no observed response" {
@@ -4914,9 +4913,7 @@ test "the submission that completes a target's bytes carries the last flag" {
 const TestPipeline = struct {
     metrics: VectoredLoadMetrics = .{},
     gate: AdaptiveRequestGate,
-    queues: [1]VectoredLoadPipeline.ReadyQueue = .{.empty},
-    active: [1]usize = .{0},
-    active_pieces: [1]usize = .{0},
+    pumps: [1]VectoredLoadPipeline.DevicePump = .{.{}},
     pipeline: VectoredLoadPipeline,
 
     fn init(
@@ -4938,15 +4935,13 @@ const TestPipeline = struct {
             .numa_explicit = false,
             .metrics = &self.metrics,
             .scheduler = scheduler,
-            .ready_queues = &self.queues,
-            .active_bytes_by_device = &self.active,
-            .active_pieces_by_device = &self.active_pieces,
+            .pumps = &self.pumps,
             .dma_budget_bytes = 64,
         };
     }
 
     fn deinit(self: *TestPipeline) void {
-        self.queues[0].deinit(std.testing.allocator);
+        self.pumps[0].queue.deinit(std.testing.allocator);
     }
 
     /// The worker's claim-to-request sequence.
@@ -5021,24 +5016,24 @@ test "late vectored callback failure drains and signals completion" {
     const block = pipeline.registerBlock(request, leased[0], 1);
     try std.testing.expectEqual(&batch.plans.items[0].blocks[0], block);
     var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
-    try fixture.queues[0].pushBack(allocator, .{
+    try fixture.pumps[0].queue.pushBack(allocator, .{
         .target = &target,
         .block = block,
         .source_offset = 0,
         .destination_offset = 0,
         .len = 64,
     });
-    pipeline.ready_entries = 1;
-    pipeline.active_events = 1;
-    fixture.active[0] = 64;
-    fixture.active_pieces[0] = 1;
+    fixture.pumps[0].ready_entries = 1;
+    fixture.pumps[0].active_events = 1;
+    fixture.pumps[0].active_bytes = 64;
+    fixture.pumps[0].active_pieces = 1;
     request.finishScheduling();
     try std.testing.expect(!batch.done.isSet());
     pipeline.first_error.store(@intFromError(error.Unknown), .release);
 
     pipeline.eventCompleted(0, 64);
-    try std.testing.expectEqual(@as(usize, 0), pipeline.active_events);
-    try std.testing.expectEqual(@as(usize, 0), pipeline.ready_entries);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_events);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].ready_entries);
     try std.testing.expect(block.lease.isComplete());
     try std.testing.expect(request.completed.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
@@ -5123,7 +5118,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
         try fixture.claimRequest(&scheduler),
     };
     const plan = batch.plans.items[0];
-    plan.events_used = 2;
+    plan.events_used.store(2, .release);
     for (plan.events, requests) |*ctx, request| ctx.* = .{
         .pipeline = pipeline,
         .block = &request.blocks[0],
@@ -5134,22 +5129,23 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     // Two callbacks fired: the next pump destroys both, newest first.
     pipeline.retireEvent(&plan.events[0]);
     pipeline.retireEvent(&plan.events[1]);
-    try std.testing.expectEqual(&plan.events[1], pipeline.retired);
+    const device_pump = &fixture.pumps[0];
+    try std.testing.expectEqual(&plan.events[1], device_pump.retired);
     try std.testing.expectEqual(&plan.events[0], plan.events[1].next_retired);
-    pipeline.metadata_mutex.lockUncancelable(io);
-    pipeline.destroyRetired();
-    pipeline.metadata_mutex.unlock(io);
-    try std.testing.expect(pipeline.retired == null);
+    device_pump.mutex.lockUncancelable(io);
+    device_pump.destroyRetired();
+    device_pump.mutex.unlock(io);
+    try std.testing.expect(device_pump.retired == null);
     try std.testing.expect(plan.events[0].next_retired == null);
     try std.testing.expect(plan.events[1].next_retired == null);
 
-    // A callback that fires after the last pump leaves its context linked;
+    // A callback that fires after the last device_pump leaves its context linked;
     // the batch's retirement unlinks it before the batch is freed.
     pipeline.retireEvent(&plan.events[0]);
     for (requests) |request| request.finishScheduling();
     try std.testing.expect(batch.done.isSet());
     pipeline.retireBatch(batch);
-    try std.testing.expect(pipeline.retired == null);
+    try std.testing.expect(device_pump.retired == null);
     batch.destroy();
 }
 

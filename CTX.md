@@ -1476,9 +1476,159 @@ blocks, `max_in_flight_per_device` 8 against 32:
 
 A real 9% for 2.5x the pinned working set, which trades directly against the
 "keep pinned host memory low" goal; 32 MiB blocks gain nothing at any depth.
-The larger prize is structural: coalescing adjacent same-device tensor pieces
-into one H2D call the way reads already coalesce, or replicating with one
-H2D plus NVLink device-to-device broadcast instead of four H2D copies.
+
+What the depth buys is queue length, not DMA parallelism. In the same runs
+`lifecycle_credits` went 49 -> 140 while `dma_stage_ms_per_read` went 17-26
+ms -> 56-76 ms and `read_ms_per_read` did not move: in-flight x2.9, latency
+x2.4, throughput x1.17. That is a deeper queue smoothing bursts ahead of a
+serial submission path (~50-60k submissions/s), and the per-device gate was
+already the 64-piece cap at depth 8 (128 MiB / 2.24 MiB). The single sweep
+put depth 16 at ~80% of the gain for 2x pinned instead of 4x. Run-to-run
+spread inside one arm (4.62 to 5.38 s at depth 32) is larger than one rung's
+effect, so an on-the-fly controller would chase noise, and growing the stage
+mid-load maps pinned slabs inside a scored window. If the depth is ever
+derived, derive it once, on the client, from the safetensors header.
+
+The count cannot be coalesced away: a submission is `transferData` on one
+tensor's own transfer manager, so a host range holding several tensors still
+needs one call per destination buffer. DeepSeek-V4-Flash has 69,187 tensors
+and the plan has 69,572 pieces (block straddling adds 0.6%); submissions are
+tensors x devices, and under one buffer per tensor that is the floor. The
+distribution is bimodal, not "2.2 MiB average": 34,759 tensors (50.2%) are
+under 1 MiB and carry 5.6% of the bytes, the median is 0.25 MiB. Half the
+submissions are per-call overhead moving nothing.
+
+### The submission ceiling is the loader's pump, not the driver
+
+`dma-bench` at small blocks (one device, 200 ms windows, three repetitions)
+gives the per-device engine ceiling; depth 8 and 32 are identical, so it is
+a rate, not a latency:
+
+| block | GiB/s | submissions/s | us per submission |
+| --- | --- | --- | --- |
+| 1 MiB | 58-65 | 59,000-66,000 | ~16 |
+| 2 MiB | 104-107 | 53,000-55,000 | ~19 |
+| 4 MiB | 142-153 | 36,000-39,000 | ~26 |
+| 16 MiB | 183-184 | 11,700 | ~85 (link-bound) |
+
+Note that the calibration measures **one device at a time** (`tuneDevice`
+creates a cohort per device and `runBenchmarkWindow` runs one cohort), so
+its `measured_gib_s` is never an aggregate. Four concurrent single-device
+processes at 1 MiB reach 161,000 submissions/s and 640 GiB/s aggregate at
+16 MiB (150-170 per device): neither the driver nor the engines are shared.
+
+The new `dma-conc` subcommand of `//examples/io` drives every device at once
+from one process (`depth` synchronous slots per device) and can serialise
+the submit call behind one mutex, which is what the loader's single pump
+thread does. gb300-2, 500 ms windows, three repetitions, `numactl -m 0`
+for the last row:
+
+| devices | block | submit | GiB/s | submissions/s |
+| --- | --- | --- | --- | --- |
+| 1 | 1 MiB | parallel | 46-55 | 47,000-57,000 |
+| 4 | 1 MiB | parallel | 170-180 | **174,000-184,000** |
+| 4 | 1 MiB | serialised | 88-125 | 90,000-128,000 |
+| 4 | 1 MiB | parallel, node 0 | 199 | **203,000** |
+| 4 | 16 MiB | parallel | 316-385 | 20,000-25,000 |
+
+The loader on DeepSeek replicated submits 51,000-55,000/s across four
+devices: below one device's engine alone, 3.5x below what one process
+reaches with per-device submitters, and half of what a mutex-serialised
+submitter reaches. So the ceiling is `VectoredLoadPipeline.pump` -- one
+thread, one `metadata_mutex`, round-robin over devices, and roughly half of
+its per-submission cost outside the PJRT call. The DMA stage depth was a 9%
+patch on that; the lever is per-device pumps (the queues, active bytes and
+piece counts are already per device, the mutex and the round-robin are not).
+That lever is applied below: -13.5%, not the -40% this paragraph hoped for,
+because the next ceiling is the engine's rate for the loader's own traffic.
+
+Two side results from `dma-conc`: pinned memory it allocates without
+placement landed on node 1 (`membind=1` reproduces 112 GiB/s on device 0,
+`membind=0` gives 185), the same 1.6x link penalty as the seventh-pass
+sweep; and one process can push 385 GiB/s of H2D into four GB300 with
+unplaced memory, so the host is nowhere near limiting a file source.
+
+Packing small tensors into one device buffer would cut the count itself,
+but that is a `Buffer` model change rather than a loader one.
+
+### Per-device pumps: -13.5%, and where the rest of the gap is
+
+`VectoredLoadPipeline` now has one `DevicePump` per device -- its own mutex,
+ready queue, in-flight bytes and pieces, retired-event stack -- instead of
+one `metadata_mutex`, one `pumping` flag and a round-robin over devices.
+`enqueueBlocks` and `retireBatch` take every pump's mutex in device order (a
+request is still queued all-or-nothing); a completion, a pump and
+`abortReady` hold one. `Plan.events_used` is an atomic. Five interleaved
+pairs, DeepSeek replicated on four GB300, depth 8, 16 MiB blocks:
+
+| arm | mean | runs | dma_stage ms/read | credit wait ms/read |
+| --- | --- | --- | --- | --- |
+| one pump | 5.41 s | 5.34 5.51 5.47 5.52 5.21 | 14-30 | 1.4-12.3 |
+| per-device pumps | **4.68 s** (-13.5%, 5/5) | 4.62 4.66 4.52 5.05 4.53 | 9-10.5 | 1.2-1.4 |
+
+Pinned high-water is unchanged or lower (896 MiB). Llama replicated on the
+same host is at parity (320-324 ms against 321-325, four pairs, read-back
+check `ZML_LOAD_CHECK=64` clean). Eight MI300X, Llama replicated, eight
+pairs on a host at load 30: both arms bimodal between 0.88 and 1.49 s, means
+1.19 against 1.28 -- not distinguishable from the host noise, and not a
+clean parity either; worth one idle-host repeat.
+
+Two variants were measured and rejected, both recorded in the `DevicePump`
+doc comment. A dedicated task per device woken by completions was slower
+with a wake per completion (5.0-5.4 s, a futex round trip per piece) and no
+better with hysteresis (wake at half the budget: 4.4-5.1 s). Concurrent
+submitters per device (every completion and enqueue submits, no exclusive
+pump) measured the same (4.56-4.58 s) and is **incorrect**: a tensor's
+pieces for a device are flagged last by `Target.nextIsLast` in submission
+order, and two threads submitting the same tensor left targets unclosed --
+`IncompleteTransfer`, 0 bytes loaded, in two of four Llama runs (DeepSeek's
+single-piece tensors never hit it). One pump per device is a correctness
+requirement.
+
+Where the remaining gap to the read bound (3.1 s on one device) is, from
+the loader's new summary fields (`dma_submit_us_per_piece`,
+`dma_piece_latency_ms`, `pump_stops_empty/full`) and from `dma-conc` modes
+added to reproduce the loader's conditions one at a time:
+
+- The load is not CPU-bound: mid-load the process uses ~1.3 cores, all of
+  it four reader threads in page-cache copies. The DMA path shows no CPU:
+  `submitTransfer` *blocks* 16-28 us in the driver with four devices (5-12
+  on one), and `dma-conc` measures the same 28 us per call once four devices
+  each hold ~32 pieces in flight (5 us at depth 8). `dma-conc` only beats
+  it with 8-32 blocked submitters per device.
+- With per-device pumps each device runs ~15.5k pieces/s, 33 GiB/s, with a
+  submit-to-callback latency of 2.0-2.3 ms at ~31 pieces in flight; the
+  pumps stop mostly for lack of room. `dma-conc` with the loader's traffic
+  (half 256 KiB, half 4 MiB, a fresh buffer per transfer flagged last,
+  four devices) does ~32k pieces/s and 65-70 GiB/s per device: the loader
+  was at half the engine's rate for its own traffic.
+- Reproduced one condition at a time in `dma-conc` (4 devices, depth 32):
+  source footprint 32 MiB to 1.5 GiB, no effect; a source shared by all
+  four engines, no effect; callback-driven resubmission, no effect;
+  **source misalignment -13%** (the files have no 64-byte-aligned tensor:
+  16-byte at best, header base 400 mod 4096, so every DMA source is
+  cache-line misaligned; 280 -> 244 GiB/s, 185 -> 162 on the plain link);
+  **concurrent CPU writes into the rings at the loader's read rate -10%**
+  (35 GB/s; -22% at 100 GB/s); **unplaced memory -23%** (194 against 252
+  on node 0 and 272 on node 1, and the driver call rises to 60 us).
+  Stacked, those put `dma-conc` at ~42-47 GiB/s per device against the
+  loader's 33: the rest, ~1.3x, is unattributed and not in the pump.
+- Neither process gets huge pages: THP is `madvise` and `AnonHugePages` is
+  0 for the loader's arenas (`dma_map`) and for `dma-conc`'s advised source.
+- NUMA placement matters on the loader again now that the pump is not the
+  ceiling: `off` 4.24/4.42 s, `node1` 4.45/4.19, `local` (the current
+  default when devices report `numa_node`) 4.55/5.14, `node0` 5.42/5.42.
+  The seventh-pass recommendation stands and is now measurable: do not
+  derive strict affinity from the attribute; steer away from the page-cache
+  node if anything.
+
+`//examples/io dma-conc` (`ZML_DMA_CONC_*`): drives every device at once
+from one process, `depth` synchronous slots per device; `SERIAL_SUBMIT`
+(one mutex round the submit), `CALLBACK` (resubmit from the ready callback),
+`BUFFERS=reuse|fresh|prebuilt`, `SHARED_SOURCE`, `SMALL_KIB` (alternate
+piece size), `SOURCE_MIB` (ring footprint), `MISALIGN` (bytes), `WRITERS`
+(CPU threads copying into the rings). It reports GiB/s, submissions/s and
+the mean submit call time.
 
 Measurement note: the `load` path passed only `block_sizes` to
 `benchmarkIfSupported`, so `ZML_DMA_BENCH_BLOCK_PARALLELISM` never reached
