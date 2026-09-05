@@ -13,6 +13,10 @@ design" records the target, the evidence gathered, and the day's baselines.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
 
+The tenth-pass review below updates the module/API map and ownership fixes.
+Earlier snapshots and measurements retain their historical names. The current
+reader-facing design is in `docs/learn/loader.md`.
+
 ## Current design
 
 ### Scope and API
@@ -2143,6 +2147,118 @@ into the device pump, which awaits ready events and releases the span. Its
 cost against the block sink is an arena floor of the largest tensor plus the
 read working set and no overlap inside a tensor, which is why the transfer
 manager is preferred wherever it exists.
+
+## Tenth pass: loader design review (2026-09-05)
+
+The review started from `093e065d` and used the earlier passes as constraints.
+The core architecture holds: source coalescing, separate read and request
+lifecycle credits, per-device pumps, reference-counted blocks, and caller-side
+execution/concurrency each solve a distinct problem. Changing these algorithms
+would discard measured decisions. The main simplification is to put their
+boundaries and ownership in the code's structure.
+
+### Design changes
+
+- `mem.dma` owns `Workspace`, `BlockPool`, `Allocator`, `MapAllocator`,
+  `BufferAllocator`, and `NumaPlacement` in `zml/mem/dma.zig`. Generic
+  bufferization and `FixedBufferPool` remain in `mem.zig`. The workspace owns
+  arenas; a pool is a load-scoped free-list/lease view. Duplicate arena lists,
+  overlap scans inherited from external arena attachment, latest-arena state,
+  and an unused retained-byte counter are removed.
+- `io.zig` starts with `Loader`, `Handle`, and `Window`, followed by shared
+  preparation, handle/executable internals, and integration tests. Checkpoint
+  lookup moves to `io/tensor_store.zig`; whole-tensor staging and its unit
+  tests move to `io/buffered_loader.zig`. Both backends consume
+  `loader_types.LoadSpec`; neither backend defines the other one's input
+  contract. Sharding is resolved once by shared preparation.
+- `direct_loader.Loader` now precedes its implementation. `Planner` owns
+  coalescing, transfer planning, and fair ordering; `Scheduler` owns FIFO
+  publication and claims. Immutable `Job` and `Transfer` descriptors belong
+  to `Batch.Plan`. Runtime names are `Pipeline`, `ReadRequest`, `Metrics`,
+  `TensorTransfer`, and `SourceSlot`, without obsolete Fair/Vectored/Loader
+  prefixes. The ineffective `cleaned` flag is removed: `destroy` frees self.
+- `source_concurrency.zig` is a std-only policy module exposing `Parallelism`
+  and `Controller`, with the existing curve/evidence tests. Runtime
+  measurement/gates stay with the direct pipeline. Dispatch is
+  `dispatch.Spans` with nested `Span`.
+- Calibration reads from public API into measurement, block selection, and
+  private machinery. Workspace names replace stale plural source pools;
+  private Benchmark prefixes and generic candidate `value` names are gone.
+- Public API migrations: `Loader.Opts` -> `Loader.Options`, `.dma_pool` ->
+  `.dma_workspace`, `mem.Dma*` -> `mem.dma.*`,
+  `dma.default_benchmark_block_sizes` -> `dma.default_block_sizes`,
+  `.minimum_transfers_per_device` -> `.minimum_transfers`, and
+  `.confirmation_minimum_transfers_per_device` -> `.confirmation_minimum_transfers`.
+  `io.max_load_*` limits become `io.limits.max_*`.
+  Repository examples are migrated. `io.Loader`, `Handle`, `Window`,
+  `TensorStore`, and `Parallelism` keep their public locations.
+- Documented serialized front-end use and borrowed lifetimes. `Handle.isDone`
+  means source reads/transfers finished; an await may still run executables.
+  Backend byte counters remain there so the returned-by-value front-end
+  Loader does not acquire a hidden stable-address requirement.
+
+### Ownership fixes found by the review
+
+- The PJRT-buffer allocator rounded `header + length` instead of reserving
+  padding before the data. At 64-byte alignment and length 100 it allocated
+  128 bytes but placed data at offset 64. It now reserves worst-case padding,
+  aligns from the actual PJRT base, and keeps the header immediately before
+  data so free can recover it. Tests cover alignments 1 through 4096,
+  unaligned bases, multiple lengths, and size overflow.
+- A canceled calibration sleep returned while transfer workers still borrowed
+  the window's stack. Every exit now sets stop, releases the start gate, and
+  joins the group. A CPU-backed cancellation regression covers teardown.
+- Calibration reserved manager-list capacity after retrieving an owned PJRT
+  buffer; append failure leaked it. Capacity is reserved before creating PJRT
+  objects, making publication infallible.
+- A borrowed workspace was never checked against the supplied platform.
+  `Workspace.validateFor` rejects a different platform before loading or
+  calibration can submit memory registered by another client.
+- Recalibration consulted only the newest arena. A smaller arena added during
+  loading could cause another calibration-ring allocation despite an older
+  sufficient arena. `findArena` searches retained arenas before growing;
+  its reuse test fills the budget and verifies the older arena remains usable.
+
+### Remaining issues, separate from the structural refactor
+
+- The prior passes' plugin-sensitive failure behavior remains: a manager can
+  already have lost its definition event when another piece/finalization or
+  `setBufferErrorUnknown` reaches it. The oneAPI abort and the `toSliceAlloc`
+  sub-byte placement issue remain historical findings, not reproduced here.
+- `pjrt.Event.await` returns immediately for an already-ready event without
+  inspecting its error. Calibration uses this shared wrapper, so synchronous
+  readiness can hide an error. This is a PJRT-wide follow-up; the wrapper was
+  not changed as part of moving loader responsibilities.
+- Failed ROCm arena allocation/publication leaves the host-node byte reservation
+  inflated. A subsequent use of the retained workspace may choose a different
+  node than its actual retained bytes warrant. Successful allocation/placement
+  behavior is unchanged; failure-accounting repair is a separate follow-up.
+- No new accelerator throughput measurements were made for this refactor.
+  Existing performance evidence remains historical, and TPU/neuron/metal
+  transfer-manager support still requires the runtime checks described above.
+
+### Validation
+
+On macOS arm64, using the repository's devenv toolchain and Xcode SDK:
+
+- `bazel build //zml //examples/io //examples/llm` passed.
+- `bazel test //zml:test //stdx:test //zml/tokenizer:test //vfs:test //examples/io //examples/llm --test_output=errors`
+  passed all four test targets and built both examples: 303 cases passed,
+  three unrelated attention cases skipped, zero failed. The five front-end
+  integration tests exercised both CPU direct and buffered backends. All
+  original direct-loader tests were retained.
+- `.devenv/profile/bin/zig test zml/io/source_concurrency.zig` passed all 13
+  policy tests independently.
+- Zig formatting, Buildifier checking of `zml/BUILD.bazel`, and
+  `git diff --check` passed.
+- `bazel build //...` and `bazel test //...` both stopped in analysis because
+  `//bin/zml-smi/platforms/nvml:nvml` has only Linux select branches, with no
+  macOS configuration. That target was not changed.
+- Before the refactor, core tests failed to compile on macOS because generic
+  assertion diagnostics traversed Workspace/Handle/callback pointers and
+  instantiated a CUDA-only module. Loader tests now compare pointer identity
+  directly and check fallible creation as a void outcome; assertion semantics
+  are retained and no CUDA module is needed for their error formatting.
 
 ## Open work
 

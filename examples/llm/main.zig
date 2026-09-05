@@ -14,11 +14,13 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.llm);
 
 fn benchmarkDmaIfPresent(
-    source_pools: ?*zml.mem.DmaWorkspace,
+    workspace: ?*zml.mem.dma.Workspace,
     platform: *const zml.Platform,
 ) !?zml.io.dma.Calibration {
-    const pools = source_pools orelse return null;
-    return try zml.io.dma.benchmark(pools, platform, .{});
+    return if (workspace) |available|
+        try zml.io.dma.benchmark(available, platform, .{})
+    else
+        null;
 }
 
 const Args = struct {
@@ -95,14 +97,14 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var dma_source_pools: ?zml.mem.DmaWorkspace = if (zml.io.dma.isSupported(platform))
+    var dma_workspace: ?zml.mem.dma.Workspace = if (zml.io.dma.isSupported(platform))
         try .init(allocator, io, platform, .{})
     else
         null;
-    defer if (dma_source_pools) |*pools| pools.deinit();
+    defer if (dma_workspace) |*workspace| workspace.deinit();
     var dma_benchmark_fut = try io.concurrent(
         benchmarkDmaIfPresent,
-        .{ if (dma_source_pools) |*pools| pools else null, platform },
+        .{ if (dma_workspace) |*workspace| workspace else null, platform },
     );
     defer _ = dma_benchmark_fut.cancel(io) catch {};
 
@@ -165,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
     progress.increaseEstimatedTotalItems(store.view().count());
     const all_shardings = shardings.all();
     var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
-        .dma_pool = if (dma_source_pools) |*pools| pools else null,
+        .dma_workspace = if (dma_workspace) |*workspace| workspace else null,
         .dma_calibration = dma_calibration,
         .progress = &progress,
         .shardings = &all_shardings,

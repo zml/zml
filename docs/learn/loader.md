@@ -1,0 +1,105 @@
+# Loading checkpoints
+
+`zml.io.Loader` turns checkpoint sources into device buffers. `load` submits
+the single-source tensors of a model; `loadExecute` submits the sources of
+executable bindings. Both return a `Handle`. Reads and transfers may start
+before submission returns, while executable bindings run when their handle
+is awaited.
+
+```zig
+var buffers = try zml.mem.bufferize(allocator, Model, &model);
+defer zml.mem.deinitBufferized(allocator, Model, &buffers);
+
+var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
+    .load_profile = profile,
+    .shardings = shardings,
+});
+defer loader.deinit();
+
+const handle = try loader.load(Model, &model, &buffers);
+try handle.await();
+```
+
+The caller owns the store, platform, model buffers, and executable outputs.
+The loader borrows them and owns its backend and handles. Declare cleanup in
+the order above so the loader finishes using buffers before they are freed.
+Submit and await serially on the owning task; the backend provides the read
+and transfer concurrency. A loader may have any number of outstanding handles.
+
+`Handle.await` is idempotent and caches its outcome. For `loadExecute`, it
+runs each executable in binding order and frees the inputs. Loaded logical
+bytes are counted only after a successful await. `Handle.isDone` reports
+completion of the source reads and transfers; awaiting may still execute the
+bindings. Handles remain valid until `Loader.deinit`, which waits for pending
+transfers and frees inputs without executing pending bindings.
+
+`zml.io.Window` adds a caller-side budget for executable inputs per device and
+a maximum outstanding-handle count. It awaits the oldest handle before a new
+submission would exceed either limit. An otherwise empty window always admits
+one submission, even when its inputs exceed the budget. `Window.drain` awaits
+everything and reports the first error; `Window.deinit` drains and drops errors.
+
+## Implementation map
+
+| Module | Responsibility |
+| --- | --- |
+| `zml/io.zig` | Public loader, handles, execution window, source preparation and executable ownership |
+| `zml/io/tensor_store.zig` | Checkpoint lookup, source bindings and prefixed model views |
+| `zml/io/loader_types.zig` | Loader options and the shared `LoadSpec` backend contract |
+| `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
+| `zml/io/source_concurrency.zig` | Pure adaptive source-width policy and its evidence |
+| `zml/io/dispatch_spans.zig` | Pure expansion of sharding into source ranges and destination offsets |
+| `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
+| `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
+| `zml/mem/dma.zig` | Host arenas, block leases, placement and allocation adapters |
+
+The shared front end resolves sources and shardings once. Each `LoadSpec`
+contains a source, target shape, resolved sharding, and caller-owned output.
+Backends consume those specs without knowing about model traversal or
+executable bindings.
+
+The direct backend reads coalesced source ranges into reusable host blocks.
+Its `Planner` produces immutable jobs and transfer records, one plan per file.
+Touching or overlapping source ranges share reads; gaps and file boundaries
+remain separate. The planner also determines fair job order across devices.
+The `Scheduler` publishes and claims those jobs in submission/file order.
+Workers read them, and per-device pumps submit the preplanned transfer pieces.
+
+One block may feed several outputs or devices. Its lease stays alive until
+every consuming transfer completes or is abandoned. A batch owns its plans
+and callback contexts until every job completes. The last-transfer flag goes
+on the submission that completes a destination's byte count, allowing reads
+and DMA to complete out of source order. Failure retires unclaimed work and
+drains existing ownership before batch teardown.
+
+The buffered backend instead stages a whole tensor for `Buffer.from`. It
+uses separate read permits and a byte budget for host staging. CPU, CUDA,
+ROCm and oneAPI use the direct backend; TPU, neuron and metal use the buffered
+backend. CPU's direct arenas are ordinary pages.
+
+## Reusing DMA memory
+
+`zml.mem.dma.Workspace` retains host arenas across calibration and loads.
+It belongs to one platform and may be borrowed by only one loader or benchmark
+at a time. A loader creates its own workspace unless `Loader.Options` supplies
+`.dma_workspace`. The supplied workspace must outlive the loader and be
+deinitialized before its platform.
+
+Each direct load builds a `dma.BlockPool` view over the workspace's arenas.
+The workspace owns storage; the pool owns the free list and block leases.
+This permits a later load to use another block size without remapping retained
+memory. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned
+host buffers from PJRT; CPU uses unregistered pages.
+
+`zml.io.dma.benchmark` borrows a workspace and returns an immutable
+`dma.Calibration`. Its block size and per-device transfer depth are independent
+of source concurrency. Calibration reuses a retained arena that fits its ring;
+CPU returns defaults without measuring. Callers can omit `.dma_calibration`
+to use the defaults on any supported direct backend.
+
+The source profile supplies a minimum read size. The effective request size
+is the larger of that minimum and the selected DMA block, within the supported
+limit. `source_concurrency.Controller` receives completed-read evidence and
+backpressure, then returns a width and measurement generation. Runtime gates
+enforce that width without draining requests on each decision. Request
+lifecycle credits separately cover transfers that still hold host blocks.

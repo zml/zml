@@ -8,16 +8,6 @@ const limits = @import("limits.zig");
 
 const log = std.log.scoped(.@"zml/io");
 
-pub const default_benchmark_block_sizes = [_]usize{
-    2 * 1024 * 1024,
-    4 * 1024 * 1024,
-    8 * 1024 * 1024,
-    16 * 1024 * 1024,
-    32 * 1024 * 1024,
-};
-
-const benchmark_repeats = 3;
-
 /// Immutable DMA calibration shared by every device participating in one load.
 pub const Calibration = struct {
     block_size: usize,
@@ -29,68 +19,83 @@ pub const Calibration = struct {
     };
 };
 
+pub const default_block_sizes = [_]usize{
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+};
+
 pub const Options = struct {
-    block_sizes: []const usize = &default_benchmark_block_sizes,
+    block_sizes: []const usize = &default_block_sizes,
     /// Fixed per-device width used by the block screen and the loader.
     block_parallelism: usize = 8,
     /// A screen window runs for at least this long and, unless the target is
     /// zero, until the representative device completes the transfer target.
     duration_ns: u64 = 2 * std.time.ns_per_ms,
-    minimum_transfers_per_device: u64 = 32,
-    /// Borderline local decisions receive longer alternating paired windows.
+    minimum_transfers: u64 = 32,
+    /// Borderline block candidates receive longer alternating paired windows.
     confirmation_duration_ns: u64 = 25 * std.time.ns_per_ms,
-    confirmation_minimum_transfers_per_device: u64 = 256,
+    confirmation_minimum_transfers: u64 = 256,
     confirmation_margin: f64 = 0.02,
-    /// Prefer a smaller transaction once it supplies enough headroom over the
-    /// source pipeline instead of maximizing isolated copy-engine throughput.
+    /// Prefer the smallest block within this tolerance of the measured peak
+    /// transfer throughput.
     block_selection_tolerance: f64 = 0.08,
-};
-
-/// What one benchmark reports internally for the summary log.
-const BenchmarkReport = struct {
-    calibration: Calibration,
-    source_pools: *const mem.DmaWorkspace,
-    measured_bytes_per_second: f64,
-    /// Whole `benchmarkSyntheticTransfer` call, including arena mapping.
-    elapsed_ns: u64,
-    /// End of the device allocator warm-up to the selected tuple: the
-    /// calibration ring, screening, confirmation and cohort teardown.
-    calibration_ns: u64,
-    device_allocator_warmup_ns: u64,
 };
 
 /// Measures one representative device using the supplied reusable mapped
 /// workspace and returns the selected immutable calibration. On CPU it
 /// returns the defaults without measuring.
 pub fn benchmark(
-    source_pools: *mem.DmaWorkspace,
+    workspace: *mem.dma.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !Calibration {
     if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
+    try workspace.validateFor(platform);
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread and a load takes the same time at every block
     // size, so the defaults stand and the loader grows its own arenas.
     if (platform.target == .cpu) return .default;
-    try mem.DmaWorkspace.validatePlatform(platform);
-    try source_pools.acquire();
-    defer source_pools.release();
-    try validateOptions(opts, source_pools.maxMappedBytes());
-    const result = try benchmarkSyntheticTransfer(source_pools, platform, opts);
-    logBenchmarkReport(platform, &result);
+    try mem.dma.Workspace.validatePlatform(platform);
+    try workspace.acquire();
+    defer workspace.release();
+    try validateOptions(opts, workspace.maxMappedBytes());
+    const result = try measureTransfer(workspace, platform, opts);
+    logReport(platform, &result);
     return result.calibration;
 }
 
-/// Benchmarks synthetic DmaMapped PJRT transfers on one representative device.
+pub fn isSupported(platform: *const platform_mod.Platform) bool {
+    return mem.dma.Workspace.isSupported(platform);
+}
+
+const sample_count = 3;
+
+/// What one benchmark reports internally for the summary log.
+const Report = struct {
+    calibration: Calibration,
+    retained_mapped_bytes: usize,
+    measured_bytes_per_second: f64,
+    /// Whole measurement, including arena mapping.
+    elapsed_ns: u64,
+    /// End of the device allocator warm-up to the selected block size: the
+    /// calibration ring, screening, confirmation and cohort teardown.
+    calibration_ns: u64,
+    device_allocator_warmup_ns: u64,
+};
+
+/// Measures synthetic PJRT transfers on one representative device.
 /// Every addressable device allocator is still warmed; benchmark allocations
 /// remain mapped in the supplied workspace for later use.
-fn benchmarkSyntheticTransfer(
-    source_pools: *mem.DmaWorkspace,
+fn measureTransfer(
+    workspace: *mem.dma.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !BenchmarkReport {
-    const allocator = source_pools.allocator;
-    const io = source_pools.io;
+) !Report {
+    const allocator = workspace.allocator;
+    const io = workspace.io;
     const benchmark_started: std.Io.Timestamp = .now(io, .awake);
     const device_warmup_started: std.Io.Timestamp = .now(io, .awake);
     try platform.warmupDeviceAllocators(io);
@@ -99,36 +104,29 @@ fn benchmarkSyntheticTransfer(
         device_warmup_started,
         calibration_started,
     );
-    var session: BenchmarkSession = .{
-        .allocator = allocator,
-        .io = io,
-        .platform = platform,
+    const representative = selection: {
+        var session: Session = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+        };
+        // Release the cohorts' device buffers before measuring calibration
+        // cost; the mapped host ring remains in the workspace for loading.
+        defer session.deinit(workspace);
+        break :selection try selectBlockSize(&session, opts, workspace);
     };
-    var session_active = true;
-    defer if (session_active) session.deinit(source_pools);
-
-    const representative = try tuneDevice(
-        &session,
-        opts,
-        source_pools,
-        0,
-    );
-    // The candidate cohorts are done; release their device buffers while
-    // retaining the mapped host calibration ring.
-    session.deinit(source_pools);
-    session_active = false;
     const calibration_ns = elapsedNanoseconds(
         calibration_started,
         .now(io, .awake),
     );
 
     const calibration: Calibration = .{
-        .block_size = representative.value,
+        .block_size = representative.block_size,
         .max_in_flight_per_device = opts.block_parallelism,
     };
     return .{
         .calibration = calibration,
-        .source_pools = source_pools,
+        .retained_mapped_bytes = workspace.retainedMappedBytes(),
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
@@ -139,102 +137,80 @@ fn benchmarkSyntheticTransfer(
     };
 }
 
-fn tuneDevice(
-    session: *BenchmarkSession,
+fn selectBlockSize(
+    session: *Session,
     opts: Options,
-    source_pools: *mem.DmaWorkspace,
-    device_index: usize,
-) !BenchmarkDecision {
+    workspace: *mem.dma.Workspace,
+) !Selection {
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!benchmarkTupleFeasible(source_pools.maxMappedBytes(), block_size, opts.block_parallelism))
+        if (!fitsWorkspace(workspace.maxMappedBytes(), block_size, opts.block_parallelism))
             continue;
         block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
     }
-    // One calibration ring, sized for the largest candidate tuple, is mapped
-    // once and reused by every candidate cohort.
-    if (source_pools.latestArena().len < block_source_bytes)
-        _ = try source_pools.allocate(block_source_bytes);
-    const calibration_source = source_pools.latestArena();
+    // Map one ring for the largest candidate at the fixed transfer width;
+    // every candidate cohort reuses it.
+    const calibration_source = workspace.findArena(block_source_bytes) orelse
+        try workspace.allocate(block_source_bytes);
 
-    const block_candidates = try session.allocator.alloc(BenchmarkCandidate, block_count);
+    const block_candidates = try session.allocator.alloc(Candidate, block_count);
     defer session.allocator.free(block_candidates);
     var block_index: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!benchmarkTupleFeasible(source_pools.maxMappedBytes(), block_size, opts.block_parallelism))
+        if (!fitsWorkspace(workspace.maxMappedBytes(), block_size, opts.block_parallelism))
             continue;
         block_candidates[block_index] = .{
-            .value = block_size,
-            .cohort = try session.createCohort(device_index, block_size),
+            .block_size = block_size,
+            .cohort = try session.createCohort(0, block_size),
         };
         block_index += 1;
     }
-    try measureBenchmarkCandidates(
-        session,
-        block_candidates,
-        calibration_source,
-        opts.block_parallelism,
-        opts.duration_ns,
-        opts.minimum_transfers_per_device,
-        benchmark_repeats,
-    );
-    const block_decision = try confirmAndSelectBenchmarkCandidate(
-        session,
-        opts,
-        block_candidates,
-        calibration_source,
-        opts.block_parallelism,
-        opts.block_selection_tolerance,
-    );
-    return block_decision;
+    try measureCandidates(session, opts, block_candidates, calibration_source);
+    return selectCandidate(session, opts, block_candidates, calibration_source);
 }
 
-fn benchmarkTupleFeasible(source_len: usize, block_size: usize, parallelism: usize) bool {
+fn fitsWorkspace(max_mapped_bytes: usize, block_size: usize, parallelism: usize) bool {
     const bytes = std.math.mul(usize, block_size, parallelism) catch return false;
-    return bytes <= source_len;
+    return bytes <= max_mapped_bytes;
 }
 
-fn measureBenchmarkCandidates(
-    session: *BenchmarkSession,
-    candidates: []BenchmarkCandidate,
+fn measureCandidates(
+    session: *Session,
+    opts: Options,
+    candidates: []Candidate,
     source: []const u8,
-    parallelism: usize,
-    duration_ns: u64,
-    minimum_transfers_per_device: u64,
-    repeats: usize,
 ) !void {
-    for (0..repeats) |repeat| {
+    for (0..sample_count) |repeat| {
         for (0..candidates.len) |offset| {
             const index = (offset + repeat) % candidates.len;
             const candidate = &candidates[index];
-            const metrics = try runBenchmarkWindow(
+            const metrics = try runWindow(
                 session.io,
                 candidate.cohort,
-                source[0 .. candidate.cohort.block_size * parallelism],
-                parallelism,
-                duration_ns,
-                minimum_transfers_per_device,
+                source[0 .. candidate.block_size * opts.block_parallelism],
+                opts.block_parallelism,
+                opts.duration_ns,
+                opts.minimum_transfers,
             );
             candidate.appendMetric(metrics);
         }
     }
 }
 
-fn confirmAndSelectBenchmarkCandidate(
-    session: *BenchmarkSession,
+fn selectCandidate(
+    session: *Session,
     opts: Options,
-    candidates: []const BenchmarkCandidate,
+    candidates: []const Candidate,
     source: []const u8,
-    parallelism: usize,
-    tolerance: f64,
-) !BenchmarkDecision {
-    const medians = try session.allocator.alloc(BenchmarkRunMetrics, candidates.len);
+) !Selection {
+    const tolerance = opts.block_selection_tolerance;
+    const medians = try session.allocator.alloc(Measurement, candidates.len);
     defer session.allocator.free(medians);
     const ratios = try session.allocator.alloc(f64, candidates.len);
     defer session.allocator.free(ratios);
-    const confirmed_metrics = try session.allocator.alloc(?BenchmarkRunMetrics, candidates.len);
+    const confirmed_metrics = try session.allocator.alloc(?Measurement, candidates.len);
     defer session.allocator.free(confirmed_metrics);
     @memset(confirmed_metrics, null);
 
@@ -252,29 +228,29 @@ fn confirmAndSelectBenchmarkCandidate(
     }
 
     for (candidates, 0..) |_, candidate_index| {
-        if (!benchmarkCandidateNeedsConfirmation(
+        if (!needsConfirmation(
             candidates,
             candidate_index,
             peak_index,
             tolerance,
             opts.confirmation_margin,
         )) continue;
-        var candidate_runs: [benchmark_repeats]BenchmarkRunMetrics = undefined;
-        var baseline_runs: [benchmark_repeats]BenchmarkRunMetrics = undefined;
-        for (0..benchmark_repeats) |repeat| {
+        var candidate_runs: [sample_count]Measurement = undefined;
+        var baseline_runs: [sample_count]Measurement = undefined;
+        for (0..sample_count) |repeat| {
             const order = if (repeat % 2 == 0)
                 [_]usize{ candidate_index, peak_index }
             else
                 [_]usize{ peak_index, candidate_index };
             for (order) |measured_index| {
                 const measured = candidates[measured_index];
-                const metrics = try runBenchmarkWindow(
+                const metrics = try runWindow(
                     session.io,
                     measured.cohort,
-                    source[0 .. measured.cohort.block_size * parallelism],
-                    parallelism,
+                    source[0 .. measured.block_size * opts.block_parallelism],
+                    opts.block_parallelism,
                     opts.confirmation_duration_ns,
-                    opts.confirmation_minimum_transfers_per_device,
+                    opts.confirmation_minimum_transfers,
                 );
                 if (measured_index == candidate_index)
                     candidate_runs[repeat] = metrics
@@ -282,7 +258,7 @@ fn confirmAndSelectBenchmarkCandidate(
                     baseline_runs[repeat] = metrics;
             }
         }
-        const representative = medianMetricRatioIndex(
+        const representative = medianRatioIndex(
             &candidate_runs,
             &baseline_runs,
         );
@@ -296,17 +272,17 @@ fn confirmAndSelectBenchmarkCandidate(
     const floor = maximum_ratio * (1.0 - tolerance);
     var selected_index = peak_index;
     for (candidates, ratios, 0..) |candidate, ratio, index| {
-        if (ratio >= floor and candidate.value < candidates[selected_index].value)
+        if (ratio >= floor and candidate.block_size < candidates[selected_index].block_size)
             selected_index = index;
     }
     return .{
-        .value = candidates[selected_index].value,
+        .block_size = candidates[selected_index].block_size,
         .metrics = confirmed_metrics[selected_index] orelse medians[selected_index],
     };
 }
 
-fn benchmarkCandidateNeedsConfirmation(
-    candidates: []const BenchmarkCandidate,
+fn needsConfirmation(
+    candidates: []const Candidate,
     candidate_index: usize,
     peak_index: usize,
     tolerance: f64,
@@ -338,18 +314,18 @@ fn benchmarkCandidateNeedsConfirmation(
     return @abs(ratio - (1.0 - tolerance)) <= margin;
 }
 
-fn medianMetricRatioIndex(
-    candidates: []const BenchmarkRunMetrics,
-    baselines: []const BenchmarkRunMetrics,
+fn medianRatioIndex(
+    candidates: []const Measurement,
+    baselines: []const Measurement,
 ) usize {
     std.debug.assert(candidates.len == baselines.len and candidates.len > 0);
-    std.debug.assert(candidates.len <= benchmark_repeats);
-    var order_storage: [benchmark_repeats]usize = undefined;
+    std.debug.assert(candidates.len <= sample_count);
+    var order_storage: [sample_count]usize = undefined;
     const order = order_storage[0..candidates.len];
     for (order, 0..) |*index, i| index.* = i;
     const Context = struct {
-        candidates: []const BenchmarkRunMetrics,
-        baselines: []const BenchmarkRunMetrics,
+        candidates: []const Measurement,
+        baselines: []const Measurement,
     };
     std.mem.sort(usize, order, Context{ .candidates = candidates, .baselines = baselines }, struct {
         fn lessThan(context: Context, lhs: usize, rhs: usize) bool {
@@ -363,22 +339,22 @@ fn medianMetricRatioIndex(
     return order[order.len / 2];
 }
 
-fn runBenchmarkWindow(
+fn runWindow(
     io: std.Io,
-    cohort: *BenchmarkCohort,
+    cohort: *Cohort,
     source: []const u8,
     parallelism: usize,
     duration_ns: u64,
     minimum_transfers: u64,
-) !BenchmarkRunMetrics {
-    var metrics: BenchmarkAtomicMetrics = .{};
+) !Measurement {
+    var metrics: Counters = .{};
     try cohort.ensureReady(source, parallelism);
 
     const Worker = struct {
-        cohort: *BenchmarkCohort,
+        cohort: *Cohort,
         source: []const u8,
         slot: usize,
-        metrics: *BenchmarkAtomicMetrics,
+        metrics: *Counters,
         ready: *std.atomic.Value(usize),
         start: *std.Io.Event,
         stop: *std.atomic.Value(bool),
@@ -397,8 +373,15 @@ fn runBenchmarkWindow(
     var start: std.Io.Event = .unset;
     var stop: std.atomic.Value(bool) = .init(false);
     var group: std.Io.Group = .init;
+    defer {
+        // Workers borrow this window's stack. Every exit, including a canceled
+        // sleep or partial spawn, must release the start gate and join them.
+        stop.store(true, .release);
+        start.set(io);
+        group.await(io) catch {};
+    }
     for (0..parallelism) |slot| {
-        group.concurrent(io, Worker.run, .{Worker{
+        try group.concurrent(io, Worker.run, .{Worker{
             .cohort = cohort,
             .source = source,
             .slot = slot,
@@ -406,12 +389,7 @@ fn runBenchmarkWindow(
             .ready = &ready,
             .start = &start,
             .stop = &stop,
-        }}) catch |err| {
-            stop.store(true, .release);
-            start.set(io);
-            group.await(io) catch {};
-            return err;
-        };
+        }});
     }
     while (ready.load(.acquire) != parallelism) try io.sleep(.fromMilliseconds(1), .awake);
     const measured_at: std.Io.Timestamp = .now(io, .awake);
@@ -419,12 +397,8 @@ fn runBenchmarkWindow(
     while (true) {
         const elapsed_ns = elapsedNanoseconds(measured_at, .now(io, .awake));
         const error_code = cohort.first_error.load(.acquire);
-        if (error_code != 0) {
-            stop.store(true, .release);
-            try group.await(io);
-            return @errorFromInt(error_code);
-        }
-        if (benchmarkWindowComplete(
+        if (error_code != 0) return @errorFromInt(error_code);
+        if (windowComplete(
             elapsed_ns,
             duration_ns,
             metrics.transfers.load(.acquire),
@@ -444,7 +418,7 @@ fn runBenchmarkWindow(
     };
 }
 
-fn benchmarkWindowComplete(
+fn windowComplete(
     elapsed_ns: u64,
     minimum_duration_ns: u64,
     completed_transfers: u64,
@@ -455,7 +429,7 @@ fn benchmarkWindowComplete(
 
 /// One line per calibration: what was selected, at what rate, and what it
 /// cost. Per-arena mapping is logged where each arena is mapped.
-fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const BenchmarkReport) void {
+fn logReport(platform: *const platform_mod.Platform, result: *const Report) void {
     log.info("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d}", .{
         @tagName(platform.target),
         platform.devices.len,
@@ -466,32 +440,32 @@ fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const Ben
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
-        result.source_pools.retainedMappedBytes(),
+        result.retained_mapped_bytes,
     });
 }
 
-const BenchmarkCandidate = struct {
-    value: usize,
-    cohort: *BenchmarkCohort,
-    metrics: [benchmark_repeats]BenchmarkRunMetrics = undefined,
+const Candidate = struct {
+    block_size: usize,
+    cohort: *Cohort,
+    metrics: [sample_count]Measurement = undefined,
     metrics_len: usize = 0,
 
-    fn appendMetric(self: *BenchmarkCandidate, metric: BenchmarkRunMetrics) void {
+    fn appendMetric(self: *Candidate, metric: Measurement) void {
         std.debug.assert(self.metrics_len < self.metrics.len);
         self.metrics[self.metrics_len] = metric;
         self.metrics_len += 1;
     }
 
-    fn metricSlice(self: *const BenchmarkCandidate) []const BenchmarkRunMetrics {
+    fn metricSlice(self: *const Candidate) []const Measurement {
         return self.metrics[0..self.metrics_len];
     }
 
-    fn median(self: BenchmarkCandidate) BenchmarkRunMetrics {
+    fn median(self: Candidate) Measurement {
         std.debug.assert(self.metrics_len > 0);
         var scratch = self.metrics;
         const populated = scratch[0..self.metrics_len];
-        std.mem.sort(BenchmarkRunMetrics, populated, {}, struct {
-            fn lessThan(_: void, lhs: BenchmarkRunMetrics, rhs: BenchmarkRunMetrics) bool {
+        std.mem.sort(Measurement, populated, {}, struct {
+            fn lessThan(_: void, lhs: Measurement, rhs: Measurement) bool {
                 return lhs.bytesPerSecond() < rhs.bytesPerSecond();
             }
         }.lessThan);
@@ -499,23 +473,23 @@ const BenchmarkCandidate = struct {
     }
 };
 
-const BenchmarkDecision = struct {
-    value: usize,
-    metrics: BenchmarkRunMetrics,
+const Selection = struct {
+    block_size: usize,
+    metrics: Measurement,
 };
 
-const BenchmarkSession = struct {
+const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const platform_mod.Platform,
-    cohorts: std.ArrayListUnmanaged(*BenchmarkCohort) = .empty,
+    cohorts: std.ArrayListUnmanaged(*Cohort) = .empty,
 
     fn createCohort(
-        self: *BenchmarkSession,
+        self: *Session,
         device_index: usize,
         block_size: usize,
-    ) !*BenchmarkCohort {
-        const cohort = try self.allocator.create(BenchmarkCohort);
+    ) !*Cohort {
+        const cohort = try self.allocator.create(Cohort);
         errdefer self.allocator.destroy(cohort);
         cohort.* = .init(
             self.allocator,
@@ -528,9 +502,9 @@ const BenchmarkSession = struct {
         return cohort;
     }
 
-    fn deinit(self: *BenchmarkSession, source_pools: *const mem.DmaWorkspace) void {
+    fn deinit(self: *Session, workspace: *const mem.dma.Workspace) void {
         for (self.cohorts.items) |cohort| {
-            cohort.deinit(source_pools.arenaAtLeast(cohort.block_size));
+            cohort.deinit(workspace.findArena(cohort.block_size) orelse unreachable);
             self.allocator.destroy(cohort);
         }
         self.cohorts.deinit(self.allocator);
@@ -538,13 +512,13 @@ const BenchmarkSession = struct {
     }
 };
 
-const BenchmarkCohort = struct {
+const Cohort = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const platform_mod.Platform,
     device_index: usize,
     block_size: usize,
-    managers: std.ArrayListUnmanaged(BenchmarkManager) = .empty,
+    managers: std.ArrayListUnmanaged(TransferBuffer) = .empty,
     warmed_managers: usize = 0,
     first_error: std.atomic.Value(u16) = .init(0),
 
@@ -554,7 +528,7 @@ const BenchmarkCohort = struct {
         platform: *const platform_mod.Platform,
         device_index: usize,
         block_size: usize,
-    ) BenchmarkCohort {
+    ) Cohort {
         return .{
             .allocator = allocator,
             .io = io,
@@ -564,15 +538,15 @@ const BenchmarkCohort = struct {
         };
     }
 
-    fn recordError(self: *BenchmarkCohort, err: anyerror) void {
+    fn recordError(self: *Cohort, err: anyerror) void {
         _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
     }
 
     fn transfer(
-        self: *BenchmarkCohort,
+        self: *Cohort,
         source: []const u8,
         slot: usize,
-        metrics: ?*BenchmarkAtomicMetrics,
+        metrics: ?*Counters,
     ) void {
         const len = self.block_size;
         const source_offset = slot * self.block_size;
@@ -598,20 +572,21 @@ const BenchmarkCohort = struct {
         }
     }
 
-    fn ensureReady(self: *BenchmarkCohort, source: []const u8, parallelism: usize) !void {
+    fn ensureReady(self: *Cohort, source: []const u8, parallelism: usize) !void {
         const required_bytes = std.math.mul(usize, self.block_size, parallelism) catch return error.OutOfMemory;
         if (required_bytes > source.len) return error.DmaBenchmarkPinnedBudgetExceeded;
         var dims = [_]i64{@intCast(self.block_size)};
         const shape_spec: pjrt.ShapeSpec = .init(&dims, .u8);
         const memory = self.platform.devices[self.device_index].memory(.default).?;
         while (self.managers.items.len < parallelism) {
+            try self.managers.ensureUnusedCapacity(self.allocator, 1);
             const manager = try self.platform.pjrt_client.createBuffersForAsyncHostToDevice(self.platform.pjrt_api, .{
                 .shape_specs = &.{shape_spec},
                 .memory = memory.pjrt_memory,
             });
             errdefer manager.deinit(self.platform.pjrt_api);
             const buffer = try manager.retrieveBuffer(self.platform.pjrt_api, 0);
-            try self.managers.append(self.allocator, .{ .manager = manager, .buffer = buffer });
+            self.managers.appendAssumeCapacity(.{ .manager = manager, .buffer = buffer });
         }
         while (self.warmed_managers < parallelism) : (self.warmed_managers += 1) {
             const slot = self.warmed_managers;
@@ -622,7 +597,7 @@ const BenchmarkCohort = struct {
         }
     }
 
-    fn deinit(self: *BenchmarkCohort, source: []const u8) void {
+    fn deinit(self: *Cohort, source: []const u8) void {
         for (self.managers.items) |manager| {
             const event = manager.manager.transferData(
                 self.platform.pjrt_api,
@@ -643,31 +618,27 @@ const BenchmarkCohort = struct {
     }
 };
 
-const BenchmarkManager = struct {
+const TransferBuffer = struct {
     manager: *pjrt.AsyncHostToDeviceTransferManager,
     buffer: *pjrt.Buffer,
 };
 
-const BenchmarkAtomicMetrics = struct {
+const Counters = struct {
     bytes: std.atomic.Value(u64) = .init(0),
     transfers: std.atomic.Value(u64) = .init(0),
 };
 
-const BenchmarkRunMetrics = struct {
+const Measurement = struct {
     bytes: u64,
     transfers: u64,
     elapsed_ns: u64,
 
-    fn bytesPerSecond(self: BenchmarkRunMetrics) f64 {
+    fn bytesPerSecond(self: Measurement) f64 {
         if (self.elapsed_ns == 0) return 0;
         return @as(f64, @floatFromInt(self.bytes)) * std.time.ns_per_s /
             @as(f64, @floatFromInt(self.elapsed_ns));
     }
 };
-
-pub fn isSupported(platform: *const platform_mod.Platform) bool {
-    return mem.DmaWorkspace.isSupported(platform);
-}
 
 fn validateOptions(opts: Options, max_mapped_bytes: usize) !void {
     if (opts.block_sizes.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
@@ -682,7 +653,7 @@ fn validateOptions(opts: Options, max_mapped_bytes: usize) !void {
     for (opts.block_sizes) |block_size| {
         if (block_size == 0 or block_size > limits.max_read_request_size)
             return error.InvalidDmaBenchmarkOptions;
-        if (benchmarkTupleFeasible(max_mapped_bytes, block_size, opts.block_parallelism))
+        if (fitsWorkspace(max_mapped_bytes, block_size, opts.block_parallelism))
             has_feasible_block = true;
     }
     if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
@@ -710,7 +681,8 @@ fn testPlatform(target: platform_mod.Target) platform_mod.Platform {
 
 test "DMA benchmark on CPU returns the defaults without mapping" {
     const platform = testPlatform(.cpu);
-    var workspace = try mem.DmaWorkspace.initForTesting(std.testing.allocator, std.testing.io, 64);
+    var workspace = try mem.dma.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
+    workspace.platform = &platform;
     defer workspace.deinit();
     try std.testing.expectEqual(Calibration.default, try benchmark(&workspace, &platform, .{}));
     try std.testing.expectEqual(0, workspace.retainedMappedBytes());
@@ -744,28 +716,28 @@ test "DMA benchmark validates options" {
 }
 
 test "DMA benchmark completion target has no time cap" {
-    try std.testing.expect(!benchmarkWindowComplete(9, 10, 128, 128));
-    try std.testing.expect(!benchmarkWindowComplete(10, 10, 127, 128));
-    try std.testing.expect(benchmarkWindowComplete(10, 10, 128, 128));
-    try std.testing.expect(benchmarkWindowComplete(1_000, 10, 128, 128));
-    try std.testing.expect(benchmarkWindowComplete(10, 10, 0, 0));
+    try std.testing.expect(!windowComplete(9, 10, 128, 128));
+    try std.testing.expect(!windowComplete(10, 10, 127, 128));
+    try std.testing.expect(windowComplete(10, 10, 128, 128));
+    try std.testing.expect(windowComplete(1_000, 10, 128, 128));
+    try std.testing.expect(windowComplete(10, 10, 0, 0));
 }
 
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
     // No candidate below is borderline, so the production selector never
     // schedules a confirmation window and the session supplies only its
     // allocator.
-    var session: BenchmarkSession = .{
+    var session: Session = .{
         .allocator = std.testing.allocator,
         .io = undefined,
         .platform = undefined,
     };
-    const opts: Options = .{};
+    const opts: Options = .{ .block_selection_tolerance = 0.05 };
 
-    var candidates = [_]BenchmarkCandidate{
-        .{ .value = 2, .cohort = undefined },
-        .{ .value = 4, .cohort = undefined },
-        .{ .value = 8, .cohort = undefined },
+    var candidates = [_]Candidate{
+        .{ .block_size = 2, .cohort = undefined },
+        .{ .block_size = 4, .cohort = undefined },
+        .{ .block_size = 8, .cohort = undefined },
     };
     const rates = [_][3]u64{
         .{ 60, 10, 62 },
@@ -781,23 +753,21 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
             });
         }
     }
-    const decision = try confirmAndSelectBenchmarkCandidate(
+    const decision = try selectCandidate(
         &session,
         opts,
         &candidates,
         &.{},
-        opts.block_parallelism,
-        0.05,
     );
-    try std.testing.expectEqual(@as(usize, 4), decision.value);
+    try std.testing.expectEqual(@as(usize, 4), decision.block_size);
     try std.testing.expectEqual(@as(f64, 98), decision.metrics.bytesPerSecond());
 
     // A dip between two near-peak values must not end the scan early.
-    var bimodal = [_]BenchmarkCandidate{
-        .{ .value = 2, .cohort = undefined },
-        .{ .value = 4, .cohort = undefined },
-        .{ .value = 8, .cohort = undefined },
-        .{ .value = 16, .cohort = undefined },
+    var bimodal = [_]Candidate{
+        .{ .block_size = 2, .cohort = undefined },
+        .{ .block_size = 4, .cohort = undefined },
+        .{ .block_size = 8, .cohort = undefined },
+        .{ .block_size = 16, .cohort = undefined },
     };
     const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
     for (&bimodal, bimodal_rates) |*candidate, rate| {
@@ -807,28 +777,26 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
             .elapsed_ns = std.time.ns_per_s,
         });
     }
-    const bimodal_decision = try confirmAndSelectBenchmarkCandidate(
+    const bimodal_decision = try selectCandidate(
         &session,
         opts,
         &bimodal,
         &.{},
-        opts.block_parallelism,
-        0.05,
     );
-    try std.testing.expectEqual(@as(usize, 4), bimodal_decision.value);
+    try std.testing.expectEqual(@as(usize, 4), bimodal_decision.block_size);
     try std.testing.expectEqual(@as(f64, 100), bimodal_decision.metrics.bytesPerSecond());
 }
 
 test "DMA benchmark tuple feasibility rejects pinned budget overflow" {
-    try std.testing.expect(benchmarkTupleFeasible(128, 16, 8));
-    try std.testing.expect(!benchmarkTupleFeasible(127, 16, 8));
-    try std.testing.expect(!benchmarkTupleFeasible(std.math.maxInt(usize), std.math.maxInt(usize), 2));
+    try std.testing.expect(fitsWorkspace(128, 16, 8));
+    try std.testing.expect(!fitsWorkspace(127, 16, 8));
+    try std.testing.expect(!fitsWorkspace(std.math.maxInt(usize), std.math.maxInt(usize), 2));
 }
 
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
-    var candidates = [_]BenchmarkCandidate{
-        .{ .value = 4, .cohort = undefined },
-        .{ .value = 8, .cohort = undefined },
+    var candidates = [_]Candidate{
+        .{ .block_size = 4, .cohort = undefined },
+        .{ .block_size = 8, .cohort = undefined },
     };
     const rates = [_][3]u64{
         .{ 96, 80, 97 },
@@ -841,11 +809,41 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
             .elapsed_ns = std.time.ns_per_s,
         });
     }
-    try std.testing.expect(benchmarkCandidateNeedsConfirmation(
+    try std.testing.expect(needsConfirmation(
         &candidates,
         0,
         1,
         0.05,
         0.02,
+    ));
+}
+
+test "DMA benchmark cancellation drains transfer workers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = platform_mod.Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+
+    var source: [16]u8 = @splat(0);
+    var cohort: Cohort = .init(allocator, io, platform, 0, source.len);
+    defer cohort.deinit(&source);
+    var vtable = io.vtable.*;
+    vtable.sleep = struct {
+        fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+            return error.Canceled;
+        }
+    }.sleep;
+    const canceled_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    // A cancellation can arrive while workers wait for the start gate or
+    // while they transfer. In either case they must finish before teardown.
+    try std.testing.expectError(error.Canceled, runWindow(
+        canceled_io,
+        &cohort,
+        &source,
+        1,
+        std.math.maxInt(u64),
+        0,
     ));
 }

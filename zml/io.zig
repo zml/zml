@@ -1,13 +1,12 @@
+//! Checkpoint loading: Loader submits work, Handle awaits it, and Window
+//! bounds the caller's outstanding executable inputs. Backends only read
+//! sources into buffers; lookup and execution stay in this shared front end.
 const std = @import("std");
 
-const stdx = @import("stdx");
-pub const VFS = @import("vfs");
-
 const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("zml.zig").Bufferized;
-pub const dma = @import("io/dma_calibration.zig");
+const Bufferized = mem.Bufferized;
+const buffered_loader = @import("io/buffered_loader.zig");
 const direct_loader = @import("io/direct_loader.zig");
-const load_limits = @import("io/limits.zig");
 const loader_types = @import("io/loader_types.zig");
 const platform_mod = @import("platform.zig");
 const Exe = @import("exe.zig").Exe;
@@ -21,360 +20,34 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const load_log = std.log.scoped(.@"zml/io/load");
 
-pub const TensorStore = struct {
-    registry: *safetensors.TensorRegistry,
-    id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, []*safetensors.Tensor),
-    allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
+pub const VFS = @import("vfs");
+pub const dma = @import("io/dma_calibration.zig");
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
-        const arena: std.heap.ArenaAllocator = .init(allocator);
-        return .{
-            .registry = registry,
-            .id_to_sources = .empty,
-            .allocator = allocator,
-            .arena = arena,
-        };
-    }
+pub const limits = @import("io/limits.zig");
 
-    pub fn deinit(self: *TensorStore) void {
-        self.id_to_sources.deinit(self.allocator);
-        self.arena.deinit();
-    }
-
-    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
-        const gop = try self.id_to_sources.getOrPut(self.allocator, id);
-        if (gop.found_existing) {
-            stdx.debug.panic("Id {} already has associated sources", .{id});
-        }
-        errdefer self.id_to_sources.removeByPtr(gop.key_ptr);
-
-        gop.value_ptr.* = sources;
-    }
-
-    fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
-        const tensor_desc_ptr = self.registry.tensors.getPtr(key) orelse return null;
-        return tensor_desc_ptr;
-    }
-
-    fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
-        const entry = self.getPtrFromKey(key) orelse return null;
-
-        const copy = self.arena.allocator().create(safetensors.Tensor) catch @panic("OOM");
-        copy.* = entry.*;
-
-        return copy;
-    }
-
-    fn getPtrFromId(self: *const TensorStore, id: Tensor.Id) ?*safetensors.Tensor {
-        const sources = self.id_to_sources.get(id) orelse return null;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
-        return sources[0];
-    }
-
-    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-        return self.registry.reader(io, key, buffer);
-    }
-
-    pub fn getReaderById(self: *const TensorStore, id: Tensor.Id, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-        const sources = self.id_to_sources.get(id) orelse return error.NotFound;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
-
-        return sources[0].reader(io, buffer, .{});
-    }
-
-    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?[]*safetensors.Tensor {
-        return self.id_to_sources.get(id);
-    }
-
-    pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
-        const entry_ptr = self.getPtrFromKey(key) orelse return null;
-        return entry_ptr.shape;
-    }
-
-    pub fn view(self: *TensorStore) View {
-        return .{ .store = self };
-    }
-
-    pub const View = struct {
-        store: *TensorStore,
-
-        prefix_buffer: [256]u8 = undefined,
-        prefix_length: usize = 0,
-
-        pub fn root(self: *const View) View {
-            return .{
-                .store = self.store,
-            };
-        }
-
-        pub fn parent(self: *const View) View {
-            const slice = self.prefix() orelse unreachable;
-            const index = std.mem.lastIndexOfScalar(u8, slice[0 .. slice.len - 1], '.') orelse return self.root();
-            var buffer: [256]u8 = undefined;
-            @memcpy(buffer[0 .. index + 1], slice[0 .. index + 1]);
-            return .{
-                .store = self.store,
-                .prefix_buffer = buffer,
-                .prefix_length = index + 1,
-            };
-        }
-
-        pub fn withPrefix(self: *const View, prefix_: []const u8) View {
-            var buffer: [256]u8 = undefined;
-            const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
-
-            return .{
-                .store = self.store,
-                .prefix_buffer = buffer,
-                .prefix_length = new_prefix.len,
-            };
-        }
-
-        pub fn withLayer(self: *const View, index: usize) View {
-            var buffer: [256]u8 = undefined;
-            const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
-
-            return .{
-                .store = self.store,
-                .prefix_buffer = buffer,
-                .prefix_length = new_prefix.len,
-            };
-        }
-
-        pub fn prefix(self: *const View) ?[]const u8 {
-            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
-        }
-
-        pub fn hasKey(self: *const View, subkey: []const u8) bool {
-            var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            return for (self.store.registry.tensors.keys()) |k| {
-                if (std.mem.startsWith(u8, k, key)) break true;
-            } else false;
-        }
-
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const source = self.store.dupeSource(key) orelse return null;
-
-            const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
-            errdefer self.store.arena.allocator().free(sources);
-            sources[0] = source;
-
-            var shape = source.shape;
-            shape = applyTags(shape, tagz);
-            shape = applyPartitioning(shape, partitioning);
-
-            const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, sources) catch |e| std.debug.panic("Not handling {} errors", .{e});
-
-            return tensor;
-        }
-
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-        }
-
-        fn applyTags(shape_: Shape, tagz: anytype) Shape {
-            var shape = shape_;
-            if (@TypeOf(tagz) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(tagz))) {
-                    .optional => if (tagz) |t| {
-                        shape = shape.withTags(t);
-                    },
-                    else => shape = shape.withTags(tagz),
-                }
-            }
-            return shape;
-        }
-
-        fn applyPartitioning(shape_: Shape, partitioning: anytype) Shape {
-            var shape = shape_;
-
-            if (@TypeOf(partitioning) == @TypeOf(null)) {
-                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
-            }
-
-            switch (@typeInfo(@TypeOf(partitioning))) {
-                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
-                .enum_literal => switch (partitioning) {
-                    .replicated => shape = shape.withReplicatedPartitioning(),
-                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
-                },
-                else => shape = shape.withPartitioning(partitioning),
-            }
-
-            return shape;
-        }
-
-        pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
-            const arena = self.store.arena.allocator();
-
-            var tensor_list = std.ArrayList(*safetensors.Tensor).initCapacity(arena, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
-            defer tensor_list.deinit(arena);
-
-            var buffer: [256]u8 = undefined;
-            for (sources) |subkey| {
-                const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                const tensor = self.store.dupeSource(key) orelse return null;
-                tensor_list.appendAssumeCapacity(tensor);
-            }
-
-            const tensors = tensor_list.toOwnedSlice(arena) catch unreachable;
-            errdefer arena.free(tensors);
-
-            const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, tensors) catch |e| std.debug.panic("Not handling {} errors", .{e});
-
-            return tensor;
-        }
-
-        pub fn getShape(self: View, subkey: []const u8) ?Shape {
-            var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            return self.store.getShape(key);
-        }
-
-        pub fn getShapeOpts(self: View, subkey: []const u8, opts: struct { no_prefix: bool = false }) ?Shape {
-            var buffer: [256]u8 = undefined;
-            const key = if (opts.no_prefix)
-                subkey
-            else b: {
-                break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            };
-            return self.store.getShape(key);
-        }
-
-        pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-            var key_buffer: [256]u8 = undefined;
-            const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            return self.store.getReader(key, io, buffer);
-        }
-
-        pub fn count(self: View) usize {
-            var count_: usize = 0;
-            const prefix_ = self.prefix() orelse "";
-            var it = self.store.registry.tensors.iterator();
-            while (it.next()) |item| {
-                const key = item.key_ptr.*;
-                if (std.mem.startsWith(u8, key, prefix_)) {
-                    count_ += 1;
-                }
-            }
-            return count_;
-        }
-
-        fn makeKey(buffer: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
-            const key = std.fmt.bufPrint(buffer, fmt, args) catch
-                std.debug.panic("Expected key to be less than {} characters", .{buffer.len});
-            return key;
-        }
-    };
-};
-
-const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
-
-pub const max_load_read_parallelism = load_limits.max_read_parallelism;
-pub const max_load_dma_parallelism = load_limits.max_dma_parallelism;
-pub const max_load_read_request_size = load_limits.max_read_request_size;
-
+pub const TensorStore = @import("io/tensor_store.zig").TensorStore;
 pub const Parallelism = loader_types.Parallelism;
-const DirectLoader = direct_loader.DirectLoader;
-const LoaderLoadSpec = direct_loader.LoadSpec;
+const DirectLoader = direct_loader.Loader;
+const BufferedLoader = buffered_loader.Loader;
+const BufferedBatch = buffered_loader.Batch;
+const LoadSpec = loader_types.LoadSpec;
 
-fn prepareModelLoad(
-    allocator: std.mem.Allocator,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: Loader.Opts,
-    comptime ModelType: type,
-    model: *const ModelType,
-    buffers: *Bufferized(ModelType),
-) ![]LoaderLoadSpec {
-    const tensor_count = meta.count(Tensor, model);
-    const flattened = try allocator.alloc(*Buffer, tensor_count);
-    defer allocator.free(flattened);
-    meta.forEachVisit(buffers, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-            output[i] = buffer;
-        }
-    }.call, .{flattened});
-
-    var specs: std.ArrayListUnmanaged(LoaderLoadSpec) = .empty;
-    errdefer specs.deinit(allocator);
-    try specs.ensureTotalCapacityPrecise(allocator, tensor_count);
-    const Ctx = struct {
-        platform: *const Platform,
-        store: *const TensorStore,
-        opts: Loader.Opts,
-        buffers: []*Buffer,
-        specs: *std.ArrayListUnmanaged(LoaderLoadSpec),
-        err: ?anyerror = null,
-    };
-    var ctx: Ctx = .{
-        .platform = platform,
-        .store = store,
-        .opts = opts,
-        .buffers = flattened,
-        .specs = &specs,
-    };
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
-            if (context.err != null) return;
-            const sources = context.store.getSourcesById(tensor.id) orelse {
-                context.err = error.NotFound;
-                return;
-            };
-            if (sources.len != 1) {
-                load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
-                return;
-            }
-            if (sources[0].byteSize() == 0) {
-                context.err = error.EmptyTensor;
-                return;
-            }
-            const shape = tensor.shape();
-            context.specs.appendAssumeCapacity(.{
-                .source = sources[0],
-                .shape = shape,
-                .sharding = Sharding.pickSharding(
-                    context.opts.shardings,
-                    shape,
-                    .explicit_axis_binding,
-                ) orelse context.platform.replicated_sharding,
-                .output = context.buffers[i],
-            });
-        }
-    }.call, .{&ctx});
-    if (ctx.err) |err| return err;
-    return specs.toOwnedSlice(allocator);
-}
-
+/// Loads checkpoint sources and optionally executes bindings over them.
+/// The store, platform, options' borrowed values, and submitted outputs must
+/// outlive their use. Submit and await handles serially on the owning task;
+/// source reads and transfers run concurrently inside the selected backend.
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
     store: *const TensorStore,
-    opts: Opts,
+    opts: Options,
     backend: Backend,
     /// Every handle this loader created, in publish order. `deinit` awaits
     /// the open ones and frees them all; a `Handle` is invalid afterwards.
     handles: std.ArrayListUnmanaged(*HandleState) = .empty,
 
-    /// `direct` reads into host arenas the platform's async transfer
-    /// manager copies from piecewise: the DMA targets with pinned arenas,
-    /// and CPU with plain pages. `buffered` stages whole tensors for
-    /// `Buffer.from`: TPU, neuron and metal, whose transfer path has not
-    /// been measured.
-    const Backend = union(enum) {
-        direct: *DirectLoader,
-        buffered: *BufferedLoader,
-    };
-
-    pub const Opts = loader_types.LoaderOptions;
+    pub const Options = loader_types.Options;
 
     /// One executable over a binding. `tensor`'s sources are loaded into
     /// fresh input buffers; `Handle.await` runs `exe` over them and writes
@@ -390,9 +63,9 @@ pub const Loader = struct {
         io: std.Io,
         platform: *const Platform,
         store: *const TensorStore,
-        opts: Opts,
+        opts: Options,
     ) !Loader {
-        try validateLoaderOpts(opts);
+        try validateOptions(opts);
         return .{
             .allocator = allocator,
             .io = io,
@@ -435,7 +108,7 @@ pub const Loader = struct {
         return self.submit(specs, &.{});
     }
 
-    /// Submits the sources of every binding as ONE planned submission, so
+    /// Submits the sources of every binding as one planned submission, so
     /// adjacent sources of different bindings coalesce into shared reads.
     /// `Handle.await` runs the executables in binding order on the awaiting
     /// task and frees their inputs.
@@ -458,7 +131,7 @@ pub const Loader = struct {
             prepared += 1;
             source_count += executable.sources.len;
         }
-        const specs = try self.allocator.alloc(LoaderLoadSpec, source_count);
+        const specs = try self.allocator.alloc(LoadSpec, source_count);
         defer self.allocator.free(specs);
         var next: usize = 0;
         for (executables) |executable| {
@@ -479,30 +152,6 @@ pub const Loader = struct {
             }
         }
         return self.submit(specs, executables);
-    }
-
-    /// One submission over `specs`. The handle owns `executables` once the
-    /// submission is published; on failure the caller still does.
-    fn submit(self: *Loader, specs: []const LoaderLoadSpec, executables: []BoundExecutable) !Handle {
-        var logical_bytes: usize = 0;
-        for (specs) |spec| {
-            logical_bytes = try std.math.add(usize, logical_bytes, spec.source.shape.byteSize());
-        }
-        try self.handles.ensureUnusedCapacity(self.allocator, 1);
-        const state = try self.allocator.create(HandleState);
-        errdefer self.allocator.destroy(state);
-        state.* = .{
-            .allocator = self.allocator,
-            .io = self.io,
-            .executables = executables,
-            .logical_bytes = logical_bytes,
-            .submission = switch (self.backend) {
-                .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs) } },
-                .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs) } },
-            },
-        };
-        self.handles.appendAssumeCapacity(state);
-        return .{ .state = state };
     }
 
     /// Awaits every handle in publish order, running their executables.
@@ -551,6 +200,40 @@ pub const Loader = struct {
         }
         self.* = undefined;
     }
+
+    /// `direct` reads into host arenas the platform's async transfer
+    /// manager copies from piecewise: the DMA targets with pinned arenas,
+    /// and CPU with plain pages. `buffered` stages whole tensors for
+    /// `Buffer.from`: TPU, neuron and metal, whose transfer path has not
+    /// been measured.
+    const Backend = union(enum) {
+        direct: *DirectLoader,
+        buffered: *BufferedLoader,
+    };
+
+    /// One submission over `specs`. The handle owns `executables` once the
+    /// submission is published; on failure the caller still does.
+    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable) !Handle {
+        var logical_bytes: usize = 0;
+        for (specs) |spec| {
+            logical_bytes = try std.math.add(usize, logical_bytes, spec.source.shape.byteSize());
+        }
+        try self.handles.ensureUnusedCapacity(self.allocator, 1);
+        const state = try self.allocator.create(HandleState);
+        errdefer self.allocator.destroy(state);
+        state.* = .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .executables = executables,
+            .logical_bytes = logical_bytes,
+            .submission = switch (self.backend) {
+                .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs) } },
+                .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs) } },
+            },
+        };
+        self.handles.appendAssumeCapacity(state);
+        return .{ .state = state };
+    }
 };
 
 /// One submission of a `Loader`: a whole-model `load` or a `loadExecute`.
@@ -568,7 +251,8 @@ pub const Handle = struct {
         return self.state.await(true);
     }
 
-    /// Whether `await` would return without waiting.
+    /// Whether source reads and transfers have finished. `await` may still
+    /// run the submission's executables before returning.
     pub fn isDone(self: Handle) bool {
         return self.state.isDone();
     }
@@ -578,6 +262,151 @@ pub const Handle = struct {
         return self.state.logical_bytes;
     }
 };
+
+/// Caller-side concurrency policy for `loadExecute`: at most `max_handles`
+/// pending submissions whose executable inputs (per device, from
+/// `Loader.executeInputBytesPerDevice`) sum to at most `budget_bytes`.
+/// `submit` awaits the oldest pending handle, running its executables and
+/// freeing its inputs, until the next submission fits; one submission is
+/// always admitted, even above the budget. A window of one serializes
+/// submissions like a synchronous `loadExecute`.
+pub const Window = struct {
+    const Pending = struct {
+        handle: Handle,
+        input_bytes: usize,
+    };
+
+    allocator: std.mem.Allocator,
+    budget_bytes: usize,
+    max_handles: usize,
+    pending: std.ArrayListUnmanaged(Pending) = .empty,
+    pending_bytes: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, budget_bytes: usize, max_handles: usize) Window {
+        std.debug.assert(max_handles > 0);
+        return .{
+            .allocator = allocator,
+            .budget_bytes = budget_bytes,
+            .max_handles = max_handles,
+        };
+    }
+
+    pub fn submit(self: *Window, loader: *Loader, bindings: []const Loader.Binding) !void {
+        var input_bytes: usize = 0;
+        for (bindings) |binding| {
+            input_bytes = try std.math.add(
+                usize,
+                input_bytes,
+                try loader.executeInputBytesPerDevice(binding.exe),
+            );
+        }
+        while (self.pending.items.len != 0 and
+            (self.pending.items.len == self.max_handles or
+                self.pending_bytes +| input_bytes > self.budget_bytes))
+        {
+            try self.awaitOldest();
+        }
+        try self.pending.ensureUnusedCapacity(self.allocator, 1);
+        const handle = try loader.loadExecute(bindings);
+        self.pending.appendAssumeCapacity(.{ .handle = handle, .input_bytes = input_bytes });
+        self.pending_bytes += input_bytes;
+    }
+
+    /// Awaits every pending handle, oldest first. Returns the first error
+    /// after awaiting all of them.
+    pub fn drain(self: *Window) !void {
+        var first_error: ?anyerror = null;
+        while (self.pending.items.len != 0) {
+            self.awaitOldest() catch |err| {
+                first_error = first_error orelse err;
+            };
+        }
+        if (first_error) |err| return err;
+    }
+
+    /// Drains, dropping any error (the loader keeps its sticky error). A
+    /// handle cannot be awaited without running its executables, so this
+    /// runs whatever is still pending; call `drain` first to observe errors.
+    pub fn deinit(self: *Window) void {
+        self.drain() catch {};
+        self.pending.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn awaitOldest(self: *Window) !void {
+        const oldest = self.pending.orderedRemove(0);
+        self.pending_bytes -= oldest.input_bytes;
+        try oldest.handle.await();
+    }
+};
+
+fn prepareModelLoad(
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: Loader.Options,
+    comptime ModelType: type,
+    model: *const ModelType,
+    buffers: *Bufferized(ModelType),
+) ![]LoadSpec {
+    const tensor_count = meta.count(Tensor, model);
+    const flattened = try allocator.alloc(*Buffer, tensor_count);
+    defer allocator.free(flattened);
+    meta.forEachVisit(buffers, *Buffer, struct {
+        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+            output[i] = buffer;
+        }
+    }.call, .{flattened});
+
+    var specs: std.ArrayListUnmanaged(LoadSpec) = .empty;
+    errdefer specs.deinit(allocator);
+    try specs.ensureTotalCapacityPrecise(allocator, tensor_count);
+    const Ctx = struct {
+        platform: *const Platform,
+        store: *const TensorStore,
+        opts: Loader.Options,
+        buffers: []*Buffer,
+        specs: *std.ArrayListUnmanaged(LoadSpec),
+        err: ?anyerror = null,
+    };
+    var ctx: Ctx = .{
+        .platform = platform,
+        .store = store,
+        .opts = opts,
+        .buffers = flattened,
+        .specs = &specs,
+    };
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
+            if (context.err != null) return;
+            const sources = context.store.getSourcesById(tensor.id) orelse {
+                context.err = error.NotFound;
+                return;
+            };
+            if (sources.len != 1) {
+                load_log.debug("skipping fused tensor with {} sources; load it with Loader.loadExecute", .{sources.len});
+                return;
+            }
+            if (sources[0].byteSize() == 0) {
+                context.err = error.EmptyTensor;
+                return;
+            }
+            const shape = tensor.shape();
+            context.specs.appendAssumeCapacity(.{
+                .source = sources[0],
+                .shape = shape,
+                .sharding = (Sharding.pickSharding(
+                    context.opts.shardings,
+                    shape,
+                    .explicit_axis_binding,
+                ) orelse context.platform.replicated_sharding).resolve(context.platform),
+                .output = context.buffers[i],
+            });
+        }
+    }.call, .{&ctx});
+    if (ctx.err) |err| return err;
+    return specs.toOwnedSlice(allocator);
+}
 
 const HandleState = struct {
     const Submission = union(enum) {
@@ -653,11 +482,11 @@ const HandleState = struct {
     }
 };
 
-fn validateLoaderOpts(opts: Loader.Opts) !void {
-    _ = try effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
+fn validateOptions(opts: Loader.Options) !void {
+    _ = try limits.effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
     const initial = opts.read_parallelism.initial();
     const maximum = opts.read_parallelism.maximum();
-    if (initial == 0 or maximum < initial or maximum > max_load_read_parallelism)
+    if (initial == 0 or maximum < initial or maximum > limits.max_read_parallelism)
         return error.InvalidLoadParallelism;
 }
 
@@ -673,7 +502,7 @@ const BoundExecutable = struct {
         allocator: std.mem.Allocator,
         platform: *const Platform,
         store: *const TensorStore,
-        opts: Loader.Opts,
+        opts: Loader.Options,
         binding: Loader.Binding,
     ) !BoundExecutable {
         const sources = store.getSourcesById(binding.tensor.id) orelse return error.NotFound;
@@ -778,540 +607,6 @@ fn validateSamePlacement(shape: Shape, expected: Sharding, actual: Sharding) !vo
     }
 }
 
-/// Caller-side concurrency policy for `loadExecute`: at most `max_handles`
-/// pending submissions whose executable inputs (per device, from
-/// `Loader.executeInputBytesPerDevice`) sum to at most `budget_bytes`.
-/// `submit` awaits the oldest pending handle, running its executables and
-/// freeing its inputs, until the next submission fits; one submission is
-/// always admitted, even above the budget. A window of one serializes
-/// submissions like a synchronous `loadExecute`.
-pub const Window = struct {
-    const Pending = struct {
-        handle: Handle,
-        input_bytes: usize,
-    };
-
-    allocator: std.mem.Allocator,
-    budget_bytes: usize,
-    max_handles: usize,
-    pending: std.ArrayListUnmanaged(Pending) = .empty,
-    pending_bytes: usize = 0,
-
-    pub fn init(allocator: std.mem.Allocator, budget_bytes: usize, max_handles: usize) Window {
-        std.debug.assert(max_handles > 0);
-        return .{
-            .allocator = allocator,
-            .budget_bytes = budget_bytes,
-            .max_handles = max_handles,
-        };
-    }
-
-    pub fn submit(self: *Window, loader: *Loader, bindings: []const Loader.Binding) !void {
-        var input_bytes: usize = 0;
-        for (bindings) |binding| {
-            input_bytes = try std.math.add(
-                usize,
-                input_bytes,
-                try loader.executeInputBytesPerDevice(binding.exe),
-            );
-        }
-        while (self.pending.items.len != 0 and
-            (self.pending.items.len == self.max_handles or
-                self.pending_bytes +| input_bytes > self.budget_bytes))
-        {
-            try self.awaitOldest();
-        }
-        try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        const handle = try loader.loadExecute(bindings);
-        self.pending.appendAssumeCapacity(.{ .handle = handle, .input_bytes = input_bytes });
-        self.pending_bytes += input_bytes;
-    }
-
-    /// Awaits every pending handle, oldest first. Returns the first error
-    /// after awaiting all of them.
-    pub fn drain(self: *Window) !void {
-        var first_error: ?anyerror = null;
-        while (self.pending.items.len != 0) {
-            self.awaitOldest() catch |err| {
-                first_error = first_error orelse err;
-            };
-        }
-        if (first_error) |err| return err;
-    }
-
-    /// Drains, dropping any error (the loader keeps its sticky error). A
-    /// handle cannot be awaited without running its executables, so this
-    /// runs whatever is still pending; call `drain` first to observe errors.
-    pub fn deinit(self: *Window) void {
-        self.drain() catch {};
-        self.pending.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    fn awaitOldest(self: *Window) !void {
-        const oldest = self.pending.orderedRemove(0);
-        self.pending_bytes -= oldest.input_bytes;
-        try oldest.handle.await();
-    }
-};
-
-/// How much host staging the running read tasks may hold. A high-latency
-/// source wants many requests outstanding, and a task count cannot express
-/// that when tensors differ in size by four orders of magnitude: 605 of one
-/// 738-tensor checkpoint are 0.1 MiB and cost a round trip each, while 133
-/// carry all the bytes. Twelve tasks made those small tensors fifty
-/// sequential round trips.
-///
-/// So tasks are admitted on the bytes they stage, up to what a count of
-/// `read_parallelism.initial()` could already reach -- that many of the
-/// largest tensor submitted. Small tensors then run as wide as the read
-/// budget allows and large ones stay as narrow as they always were.
-const StagingAdmission = struct {
-    mutex: std.Io.Mutex = .init,
-    room: std.Io.Condition = .init,
-    in_flight: usize = 0,
-    /// Zero until the first submission reports its largest tensor.
-    budget: usize = 0,
-
-    /// Raises the budget to `slots` of `largest`. Submissions only ever widen
-    /// it, so a later, bigger tensor cannot shrink what is already running.
-    fn widen(self: *StagingAdmission, io: std.Io, largest: usize, slots: usize) void {
-        const wanted = std.math.mul(usize, largest, @max(1, slots)) catch std.math.maxInt(usize);
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (wanted <= self.budget) return;
-        self.budget = wanted;
-        self.room.broadcast(io);
-    }
-
-    fn reserve(self: *StagingAdmission, io: std.Io, bytes: usize) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        // A tensor wider than the whole budget still has to run, so anything
-        // goes when nothing else is staging.
-        while (self.in_flight != 0 and self.in_flight + bytes > self.budget)
-            self.room.waitUncancelable(io, &self.mutex);
-        self.in_flight += bytes;
-    }
-
-    fn release(self: *StagingAdmission, io: std.Io, bytes: usize) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.in_flight -= bytes;
-        self.room.broadcast(io);
-    }
-};
-
-/// Source reads in flight across every task of the buffered backend. A
-/// tensor wider than the profile's `read_chunk_size` splits into concurrent
-/// range reads, and these permits keep the split from putting more reads on
-/// the source than `read_parallelism`. A high-latency backend needs the
-/// split: on `hf://` the profile asks for 32 MiB chunks, so a one-gigabyte
-/// tensor read one chunk at a time is a chain of thirty-odd round trips.
-const ReadPermits = struct {
-    mutex: std.Io.Mutex = .init,
-    available: std.Io.Condition = .init,
-    free: usize,
-
-    fn init(count: usize) ReadPermits {
-        return .{ .free = @max(1, count) };
-    }
-
-    fn acquire(self: *ReadPermits, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        while (self.free == 0) self.available.waitUncancelable(io, &self.mutex);
-        self.free -= 1;
-    }
-
-    /// Up to `count` permits, without waiting: how many were free is how much
-    /// concurrency this tensor gets, so a loaded source is left alone.
-    fn tryAcquire(self: *ReadPermits, io: std.Io, count: usize) usize {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        const taken = @min(count, self.free);
-        self.free -= taken;
-        return taken;
-    }
-
-    fn release(self: *ReadPermits, io: std.Io, count: usize) void {
-        if (count == 0) return;
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.free += count;
-        for (0..count) |_| self.available.signal(io);
-    }
-};
-
-/// One tensor's read, claimed from a shared byte cursor by the owning task
-/// and its helpers. Positional reads do not move the reader, so they can run
-/// concurrently on one `TensorReader`.
-///
-/// A claim is the tensor split `workers` ways, and never smaller than the
-/// profile's `read_chunk_size` -- that field is a minimum request size, and
-/// on a high-latency source a request costs a round trip whether or not it
-/// runs beside another. So one worker takes the whole tensor in a single
-/// read, exactly as before this splitting existed, and only the concurrency
-/// the source can actually carry turns into extra requests.
-const ChunkedRead = struct {
-    reader: *const safetensors.TensorReader,
-    destination: []u8,
-    chunk_size: usize,
-    /// Reads this tensor may have in flight; the owner raises it when it
-    /// takes another permit.
-    workers: std.atomic.Value(usize) = .init(1),
-    /// Bytes already claimed.
-    next: std.atomic.Value(usize) = .init(0),
-    failure: std.atomic.Value(u16) = .init(0),
-
-    fn run(self: *ChunkedRead) void {
-        while (self.readOne()) {}
-    }
-
-    /// Reads the next unclaimed span. False once the tensor is fully claimed,
-    /// or once a read failed.
-    fn readOne(self: *ChunkedRead) bool {
-        if (self.failure.load(.acquire) != 0) return false;
-        const span = self.claim() orelse return false;
-        self.reader.readPositionalAll(span.bytes, span.offset) catch |err| {
-            _ = self.failure.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-            return false;
-        };
-        return true;
-    }
-
-    fn claim(self: *ChunkedRead) ?struct { offset: usize, bytes: []u8 } {
-        var start = self.next.load(.monotonic);
-        while (start < self.destination.len) {
-            const workers = @max(1, self.workers.load(.monotonic));
-            const share = std.math.divCeil(usize, self.destination.len, workers) catch
-                self.destination.len;
-            const len = @min(@max(self.chunk_size, share), self.destination.len - start);
-            if (self.next.cmpxchgWeak(start, start + len, .monotonic, .monotonic)) |actual| {
-                start = actual;
-                continue;
-            }
-            return .{ .offset = start, .bytes = self.destination[start..][0..len] };
-        }
-        return null;
-    }
-};
-
-/// Host staging for the buffered backend: one buffer per running read task,
-/// handed back on completion instead of freed. Mapping, faulting and then
-/// unmapping a whole tensor's worth of pages for every tensor was half of a
-/// serial buffered load of a 14.96 GiB checkpoint, and a fifth of a
-/// concurrent one.
-///
-/// The pool retains at most as many bytes as the running tasks ever held at
-/// once, so it at most doubles host staging the backend already had to fit.
-const StagingPool = struct {
-    mutex: std.Io.Mutex = .init,
-    /// Buffers no task holds, and their total length.
-    free: std.ArrayListUnmanaged([]u8) = .empty,
-    retained_bytes: usize = 0,
-    /// What the running tasks hold now, and the most they ever held.
-    live_bytes: usize = 0,
-    peak_live_bytes: usize = 0,
-
-    /// A whole allocation of at least `size` bytes, with undefined contents:
-    /// the allocation itself, not a slice of one. The caller slices it for
-    /// its own use and returns this exact slice to `release`, whatever
-    /// happens.
-    fn acquire(self: *StagingPool, allocator: std.mem.Allocator, io: std.Io, size: usize) ![]u8 {
-        if (self.take(io, size)) |buffer| return buffer;
-        const fresh = try allocator.alloc(u8, size);
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.addLive(fresh.len);
-        return fresh;
-    }
-
-    /// `buffer` must be what `acquire` returned, not a slice of it.
-    fn release(self: *StagingPool, allocator: std.mem.Allocator, io: std.Io, buffer: []u8) void {
-        const retained = retained: {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-            self.live_bytes -= buffer.len;
-            // Over budget: drop retained buffers this one supersedes, so the
-            // pool keeps the sizes that satisfy the most requests instead of
-            // whatever happened to be released first.
-            while (self.retained_bytes + buffer.len > self.peak_live_bytes) {
-                const index = self.smallest() orelse break;
-                if (self.free.items[index].len >= buffer.len) break;
-                const dropped = self.free.swapRemove(index);
-                self.retained_bytes -= dropped.len;
-                allocator.free(dropped);
-            }
-            if (self.retained_bytes + buffer.len > self.peak_live_bytes) break :retained false;
-            self.free.append(allocator, buffer) catch break :retained false;
-            self.retained_bytes += buffer.len;
-            break :retained true;
-        };
-        if (!retained) allocator.free(buffer);
-    }
-
-    /// Every task is done, so every buffer is back.
-    fn deinit(self: *StagingPool, allocator: std.mem.Allocator) void {
-        for (self.free.items) |buffer| allocator.free(buffer);
-        self.free.deinit(allocator);
-    }
-
-    /// The smallest retained buffer that fits, so the big ones stay free for
-    /// the big tensors.
-    fn take(self: *StagingPool, io: std.Io, size: usize) ?[]u8 {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        var best: ?usize = null;
-        for (self.free.items, 0..) |buffer, i| {
-            if (buffer.len < size) continue;
-            if (best == null or buffer.len < self.free.items[best.?].len) best = i;
-        }
-        const buffer = self.free.swapRemove(best orelse return null);
-        self.retained_bytes -= buffer.len;
-        self.addLive(buffer.len);
-        return buffer;
-    }
-
-    fn smallest(self: *const StagingPool) ?usize {
-        if (self.free.items.len == 0) return null;
-        var index: usize = 0;
-        for (self.free.items, 0..) |buffer, i| {
-            if (buffer.len < self.free.items[index].len) index = i;
-        }
-        return index;
-    }
-
-    /// Called with `mutex` held.
-    fn addLive(self: *StagingPool, bytes: usize) void {
-        self.live_bytes += bytes;
-        self.peak_live_bytes = @max(self.peak_live_bytes, self.live_bytes);
-    }
-};
-
-/// One buffered submission: `pending` counts a publish sentinel plus one
-/// unit per tensor task; the last one sets `done`.
-const BufferedBatch = struct {
-    pending: std.atomic.Value(usize),
-    done: std.Io.Event = .unset,
-
-    fn finish(self: *BufferedBatch, io: std.Io) void {
-        if (self.pending.fetchSub(1, .acq_rel) == 1) self.done.set(io);
-    }
-};
-
-const BufferedLoader = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    group: stdx.Io.LimitedGroup,
-    /// The load profile's minimum read size: one tensor becomes this many
-    /// bytes per positional read.
-    read_chunk_size: usize,
-    /// Reads the source may carry at once, across tensors and across one
-    /// tensor's chunks.
-    read_parallelism: usize,
-    /// The widest fan-out one tensor may take. One on a source whose reads
-    /// are bandwidth-bound rather than round-trip bound: splitting there only
-    /// spends tasks, and measurably so -- a replicated local load, whose long
-    /// transfers keep permits free, lost time to helpers it had no use for.
-    tensor_workers: usize,
-    permits: ReadPermits,
-    /// Concurrent tensors the caller asked for; sizes the staging budget.
-    staging_slots: usize,
-    admission: StagingAdmission = .{},
-    staging: StagingPool = .{},
-    bytes_loaded: std.atomic.Value(usize) = .init(0),
-    first_error: std.atomic.Value(u16) = .init(0),
-
-    fn create(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        read_parallelism: Parallelism,
-        profile: VFS.LoadProfile,
-    ) !*BufferedLoader {
-        // One tensor at a time per task, so the task count is what bounds
-        // host staging: it stays at the configured starting width.
-        const tensors = read_parallelism.initial();
-        // A high-latency source is bounded by requests outstanding rather
-        // than by bandwidth -- on `hf://` a 8.68 GiB checkpoint took 37.3 s
-        // with 12 reads in flight, 20.8 s with 32, and no less with 64. Its
-        // read budget is the caller's ceiling instead, and the surplus over
-        // `tensors` becomes concurrent chunks of the tensors already staging,
-        // which costs no extra staging.
-        const reads = if (profile.high_latency)
-            @max(tensors, read_parallelism.maximum())
-        else
-            tensors;
-        const self = try allocator.create(BufferedLoader);
-        self.* = .{
-            .allocator = allocator,
-            .io = io,
-            .platform = platform,
-            // Tasks are capped by the read budget; the staging budget is
-            // what actually decides how many run.
-            .group = .init(reads),
-            .staging_slots = tensors,
-            .read_chunk_size = profile.read_chunk_size,
-            .read_parallelism = reads,
-            .tensor_workers = if (profile.high_latency) reads else 1,
-            .permits = .init(reads),
-        };
-        return self;
-    }
-
-    fn recordError(self: *BufferedLoader, err: anyerror) void {
-        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-    }
-
-    fn checkOpen(self: *BufferedLoader) !void {
-        const code = self.first_error.load(.acquire);
-        if (code != 0) return @errorFromInt(code);
-    }
-
-    fn loadOne(
-        self: *BufferedLoader,
-        source: *safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
-    ) !void {
-        if (self.first_error.load(.acquire) != 0) return;
-        const tensor_bytes = shape.byteSize();
-        // The whole source becomes this tensor's bytes, so the two sizes are
-        // the same thing. Staging is reused, so a source that does not fill
-        // it would publish another tensor's bytes rather than the zeroes a
-        // fresh allocation used to give.
-        if (source.byteSize() != tensor_bytes) return error.SourceSizeMismatch;
-        self.admission.reserve(self.io, tensor_bytes);
-        defer self.admission.release(self.io, tensor_bytes);
-        var reader = try source.reader(self.io, &.{}, .{});
-        defer reader.deinit();
-        const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
-        defer self.staging.release(self.allocator, self.io, staging);
-        try self.readInto(&reader, staging[0..tensor_bytes]);
-        output.* = try Buffer.from(
-            self.io,
-            self.platform,
-            shape,
-            sharding,
-            staging[0..tensor_bytes],
-            .{ .wait = true },
-        );
-    }
-
-    /// Fills `destination` from `reader`, splitting it across helper tasks
-    /// when the source permits are free. The permits are released before the
-    /// caller's transfer, so a tensor staging to the device lends its read
-    /// budget to one still reading.
-    fn readInto(
-        self: *BufferedLoader,
-        reader: *const safetensors.TensorReader,
-        destination: []u8,
-    ) !void {
-        if (destination.len == 0) return;
-        var work: ChunkedRead = .{
-            .reader = reader,
-            .destination = destination,
-            .chunk_size = self.read_chunk_size,
-        };
-        // Splitting below the profile's chunk buys nothing, so that is the
-        // most workers this tensor can use.
-        const useful_workers = @min(
-            self.tensor_workers,
-            std.math.divCeil(usize, destination.len, self.read_chunk_size) catch 1,
-        );
-
-        self.permits.acquire(self.io);
-        var held: usize = 1;
-        var group: std.Io.Group = .init;
-        while (true) {
-            // Helpers only ever take permits that are already free, so a busy
-            // source sees exactly the one read per tensor it saw before. The
-            // check repeats between claims because the tensors that finish
-            // first hand their budget to the one still reading -- which is
-            // the long tensor that needed the help.
-            // Nothing unclaimed means a helper would only start and stop.
-            if (held < useful_workers and work.next.load(.monotonic) < destination.len) {
-                const extra = self.permits.tryAcquire(self.io, useful_workers - held);
-                if (extra != 0) {
-                    held += extra;
-                    work.workers.store(held, .monotonic);
-                    for (0..extra) |_| group.async(self.io, ChunkedRead.run, .{&work});
-                }
-            }
-            if (!work.readOne()) break;
-        }
-        group.await(self.io) catch {};
-        self.permits.release(self.io, held);
-
-        const code = work.failure.load(.acquire);
-        if (code != 0) return @errorFromInt(code);
-    }
-
-    fn submitOne(
-        self: *BufferedLoader,
-        batch: *BufferedBatch,
-        source: *safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
-    ) void {
-        self.group.async(self.io, struct {
-            fn run(
-                loader: *BufferedLoader,
-                batch_: *BufferedBatch,
-                source_: *safetensors.Tensor,
-                shape_: Shape,
-                sharding_: Sharding,
-                output_: *Buffer,
-            ) void {
-                defer batch_.finish(loader.io);
-                loader.loadOne(source_, shape_, sharding_, output_) catch |err| loader.recordError(err);
-            }
-        }.run, .{ self, batch, source, shape, sharding, output });
-    }
-
-    /// Spawns one bounded read task per spec. Nothing runs when this fails.
-    fn submit(self: *BufferedLoader, specs: []const LoaderLoadSpec) !*BufferedBatch {
-        try self.checkOpen();
-        var largest: usize = 0;
-        for (specs) |spec| largest = @max(largest, spec.shape.byteSize());
-        self.admission.widen(self.io, largest, self.staging_slots);
-        const batch = try self.allocator.create(BufferedBatch);
-        batch.* = .{ .pending = .init(1 + specs.len) };
-        for (specs) |spec| {
-            self.submitOne(batch, spec.source, spec.shape, spec.sharding, spec.output);
-        }
-        // Every task is spawned: drop the sentinel.
-        batch.finish(self.io);
-        return batch;
-    }
-
-    /// Waits for the batch's tasks, frees it and returns the sticky error.
-    fn awaitBatch(self: *BufferedLoader, batch: *BufferedBatch) !void {
-        batch.done.waitUncancelable(self.io);
-        self.allocator.destroy(batch);
-        try self.checkOpen();
-    }
-
-    fn commitBytes(self: *BufferedLoader, logical_bytes: usize) void {
-        _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
-    }
-
-    fn bytesLoaded(self: *const BufferedLoader) usize {
-        return self.bytes_loaded.load(.acquire);
-    }
-
-    /// Every batch was awaited, so the group is idle.
-    fn destroy(self: *BufferedLoader) void {
-        self.group.await(self.io) catch {};
-        self.staging.deinit(self.allocator);
-        self.allocator.destroy(self);
-    }
-};
-
 /// A four-byte tensor `value`, a four-byte `second`, a `missing` entry in a
 /// file that does not exist, an `empty` tensor, a CPU platform and an
 /// identity executable over `value`'s shape. Pinned after `init`.
@@ -1402,7 +697,7 @@ const LoaderTestFixture = struct {
     const backends = [_]BackendKind{ .direct, .buffered };
 
     fn loader(self: *LoaderTestFixture, allocator: std.mem.Allocator, io: std.Io, kind: BackendKind) !Loader {
-        const opts: Loader.Opts = .{ .read_parallelism = .{ .fixed = 2 } };
+        const opts: Loader.Options = .{ .read_parallelism = .{ .fixed = 2 } };
         return switch (kind) {
             .direct => try Loader.init(allocator, io, self.platform, &self.store, opts),
             .buffered => .{
@@ -1426,101 +721,22 @@ const LoaderTestFixture = struct {
         return .{ .tensor = tensor, .output = output, .exe = &self.exe };
     }
 
+    fn expectLoadError(expected: anyerror, result: anyerror!Handle) !void {
+        // Formatting Handle recursively instantiates every platform backend.
+        // Await an unexpected submission before releasing its borrowed outputs.
+        const outcome: anyerror!void = if (result) |handle| success: {
+            handle.state.await(false) catch {};
+            break :success {};
+        } else |err| err;
+        try std.testing.expectError(expected, outcome);
+    }
+
     fn expectContents(allocator: std.mem.Allocator, io: std.Io, buffer: *const Buffer, expected: []const u8) !void {
         const loaded = try buffer.toSliceAlloc(allocator, io);
         defer loaded.free(allocator);
         try std.testing.expectEqualSlices(u8, expected, loaded.constData());
     }
 };
-
-test "chunked read splits a tensor only as wide as it has workers" {
-    var destination: [1000]u8 = undefined;
-    var work: ChunkedRead = .{
-        .reader = undefined,
-        .destination = &destination,
-        .chunk_size = 100,
-    };
-
-    // One worker reads the whole tensor, exactly as an unsplit read would.
-    const whole = work.claim().?;
-    try std.testing.expectEqual(@as(usize, 0), whole.offset);
-    try std.testing.expectEqual(@as(usize, 1000), whole.bytes.len);
-    try std.testing.expect(work.claim() == null);
-
-    // Four workers take a quarter each.
-    work.next = .init(0);
-    work.workers = .init(4);
-    for (0..4) |i| {
-        const span = work.claim().?;
-        try std.testing.expectEqual(i * 250, span.offset);
-        try std.testing.expectEqual(@as(usize, 250), span.bytes.len);
-    }
-    try std.testing.expect(work.claim() == null);
-
-    // Never below the profile's chunk, however many workers there are.
-    work.next = .init(0);
-    work.workers = .init(50);
-    const floored = work.claim().?;
-    try std.testing.expectEqual(@as(usize, 100), floored.bytes.len);
-}
-
-test "staging admission bounds concurrent tensors by bytes and always admits one" {
-    const io = std.testing.io;
-    var admission: StagingAdmission = .{};
-
-    // Three slots of the largest tensor is the budget.
-    admission.widen(io, 100, 3);
-    try std.testing.expectEqual(@as(usize, 300), admission.budget);
-    // A later, smaller submission cannot shrink what is running.
-    admission.widen(io, 10, 3);
-    try std.testing.expectEqual(@as(usize, 300), admission.budget);
-
-    // Small tensors run far wider than the slot count they were sized from.
-    for (0..30) |_| admission.reserve(io, 10);
-    try std.testing.expectEqual(@as(usize, 300), admission.in_flight);
-    for (0..30) |_| admission.release(io, 10);
-
-    // A tensor wider than the whole budget still runs, alone.
-    admission.reserve(io, 900);
-    try std.testing.expectEqual(@as(usize, 900), admission.in_flight);
-    admission.release(io, 900);
-    try std.testing.expectEqual(@as(usize, 0), admission.in_flight);
-}
-
-test "staging pool retains up to the peak the tasks held and prefers the sizes that fit" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool: StagingPool = .{};
-    defer pool.deinit(allocator);
-
-    // Two buffers live at once sets the budget: the pool may retain 24 bytes.
-    const small = try pool.acquire(allocator, io, 8);
-    const large = try pool.acquire(allocator, io, 16);
-    try std.testing.expectEqual(@as(usize, 24), pool.peak_live_bytes);
-    pool.release(allocator, io, small);
-    pool.release(allocator, io, large);
-    try std.testing.expectEqual(@as(usize, 24), pool.retained_bytes);
-
-    // The smallest buffer that fits comes back, so the 16 stays free for a
-    // request the 8 cannot serve.
-    const reused = try pool.acquire(allocator, io, 4);
-    try std.testing.expectEqual(@as(usize, 8), reused.len);
-    try std.testing.expectEqual(@as(usize, 16), pool.retained_bytes);
-    const fits = try pool.acquire(allocator, io, 12);
-    try std.testing.expectEqual(@as(usize, 16), fits.len);
-    try std.testing.expectEqual(@as(usize, 0), pool.retained_bytes);
-    pool.release(allocator, io, reused);
-    pool.release(allocator, io, fits);
-
-    // A buffer no retained one can serve evicts the ones it supersedes
-    // rather than being dropped itself.
-    const big = try pool.acquire(allocator, io, 24);
-    try std.testing.expectEqual(@as(usize, 24), big.len);
-    pool.release(allocator, io, big);
-    try std.testing.expectEqual(@as(usize, 1), pool.free.items.len);
-    try std.testing.expectEqual(@as(usize, 24), pool.free.items[0].len);
-    try std.testing.expectEqual(@as(usize, 24), pool.retained_bytes);
-}
 
 test "loader handles complete out of order and count bytes once each" {
     const allocator = std.testing.allocator;
@@ -1564,7 +780,7 @@ test "loader handles complete out of order and count bytes once each" {
         const empty_model: Empty = .{ .empty = fixture.empty };
         var empty_buffers = try mem.bufferize(allocator, Empty, &empty_model);
         defer mem.deinitBufferized(allocator, Empty, &empty_buffers);
-        try std.testing.expectError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers));
+        try LoaderTestFixture.expectLoadError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers));
     }
 }
 
@@ -1672,8 +888,8 @@ test "loader read failure fails every pending handle and later submissions" {
         try std.testing.expectError(error.FileNotFound, broken.await());
         try std.testing.expectError(error.FileNotFound, good.await());
         try std.testing.expectError(error.FileNotFound, good.await());
-        try std.testing.expectError(error.FileNotFound, loader.load(Model, &model, &buffers));
-        try std.testing.expectError(error.FileNotFound, loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)}));
+        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.load(Model, &model, &buffers));
+        try LoaderTestFixture.expectLoadError(error.FileNotFound, loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)}));
         try std.testing.expectError(error.FileNotFound, loader.awaitAll());
         try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
     }
