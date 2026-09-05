@@ -63,7 +63,7 @@ pub const Backend = union(enum) {
         ) };
     }
 
-    pub fn calibration(self: Backend) ?dma_calibration.Calibration {
+    pub fn calibration(self: Backend) ?dma_calibration.Result {
         return switch (self) {
             .direct => |direct| direct.calibration,
             .buffered => null,

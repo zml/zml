@@ -95,7 +95,7 @@ pub const Loader = struct {
     }
 
     /// Sizing selected during initialization; absent for buffered loading.
-    pub fn calibration(self: *const Loader) ?dma_calibration.Calibration {
+    pub fn calibration(self: *const Loader) ?dma_calibration.Result {
         return self.backend.calibration();
     }
 
@@ -737,7 +737,7 @@ test "loader handles complete out of order and count bytes once each" {
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
         if (kind == .direct) {
-            try std.testing.expectEqual(dma_calibration.Calibration.default, loader.calibration().?);
+            try std.testing.expectEqual(dma_calibration.Result.default, loader.calibration().?);
         } else {
             try std.testing.expect(loader.calibration() == null);
         }

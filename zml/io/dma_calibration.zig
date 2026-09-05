@@ -9,12 +9,12 @@ const limits = @import("limits.zig");
 
 const log = std.log.scoped(.@"zml/io");
 
-/// Immutable DMA calibration shared by every device participating in one load.
-pub const Calibration = struct {
+/// Immutable result shared by every device participating in one load.
+pub const Result = struct {
     block_size: usize,
     max_in_flight_per_device: usize,
 
-    pub const default: Calibration = .{
+    pub const default: Result = .{
         .block_size = 4 * 1024 * 1024,
         .max_in_flight_per_device = 8,
     };
@@ -51,7 +51,7 @@ pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !Calibration {
+) !Result {
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread and a load takes the same time at every block
     // size, so the defaults stand and the loader grows its own arenas.
@@ -67,7 +67,7 @@ const sample_count = 3;
 
 /// What one benchmark reports internally for the summary log.
 const Report = struct {
-    calibration: Calibration,
+    calibration: Result,
     retained_mapped_bytes: usize,
     measured_bytes_per_second: f64,
     /// Whole measurement, including arena mapping.
@@ -112,7 +112,7 @@ fn measureTransfer(
         .now(io, .awake),
     );
 
-    const calibration: Calibration = .{
+    const calibration: Result = .{
         .block_size = representative.block_size,
         .max_in_flight_per_device = opts.block_parallelism,
     };
@@ -675,7 +675,7 @@ test "DMA benchmark on CPU returns the defaults without mapping" {
     var workspace = try host_memory.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
     workspace.backend = .{ .pageable = .{ .platform = &platform } };
     defer workspace.deinit();
-    try std.testing.expectEqual(Calibration.default, try calibrate(&workspace, &platform, .{}));
+    try std.testing.expectEqual(Result.default, try calibrate(&workspace, &platform, .{}));
     try std.testing.expectEqual(0, workspace.mapped_bytes.load(.acquire));
 }
 

@@ -52,7 +52,7 @@ pub const Loader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     workspace: *host_memory.Workspace,
-    calibration: dma_calibration.Calibration,
+    calibration: dma_calibration.Result,
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
