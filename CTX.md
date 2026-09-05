@@ -2174,27 +2174,56 @@ backend, byte for byte, until their transfer path can be measured.
 
 ### Results (B70 host, four CPU devices, warm page cache, adaptive default)
 
-| fixture | buffered (before) | direct (after) |
+Correction (2026-09-05 evening): `examples/io load <path>` defaults to
+`sharded`, so every row below was a sharded load and the "replicated"
+label was wrong. True replicated Llama-3.1-8B (4 x 14.96 GiB of device
+buffers) does not fit this 62 GiB host: the buffered backend is OOM-killed
+at 62.3 GiB RSS and the direct one completes at 60.4 GiB with the page
+cache evicted, so that fixture is void here. The interleaved table in the
+next section is the one to use.
+
+| fixture (all sharded) | buffered (before) | direct (after) |
 |---|---|---|
-| Llama-3.1-8B replicated | 1.36, 1.36, 1.50 s | 1.55, 1.55, 1.58 s |
-| Llama-3.1-8B sharded | not measured | 1.55, 1.56, 1.57 s |
+| Llama-3.1-8B | 1.36, 1.36, 1.50 s | 1.55, 1.55, 1.58 s |
 | Qwen3.5-4B | 0.92, 0.92, 1.23 s | 0.88, 0.91, 1.10 s |
 | Qwen3.5-9B | 2.91, 2.99, 3.87 s | 2.01, 2.04, 2.27 s |
 | `hf://Qwen/Qwen3.5-4B` | (48 s on oneAPI, same hour) | 10.4 s, 278 reads, width 32 |
 
 Host staging high water 292 to 298 MiB locally, 1.06 GiB on HF. Read-back
-(`ZML_LOAD_CHECK=1`): 291/291 sharded and replicated on Llama, 259/775 on
-Qwen3.5-9B sharded. Width held at 12 to 24.
+(`ZML_LOAD_CHECK=1`): 291/291 on Llama, 259/775 on Qwen3.5-9B. Width held
+at 12 to 24.
 
-Llama replicated pays 10%, and the pump metrics say why: on the CPU plugin
-`dma_submit_us_per_piece` equals `dma_piece_latency_ms` (695 us for 2 MiB,
-2.0 ms for 8, 2.9 ms for 16), so `transferData` is a synchronous copy on the
-submitting thread and the one pump per device is the transfer's only thread
-(`dma_stage_ms_per_read` 30 against `read_ms_per_read` 2.3). The buffered
-path spread that copy over twelve workers. Block size does not move it
-(1.55 to 1.60 s at 2, 8 and 16 MiB). One pump per device is a correctness
-requirement (eighth pass), and CPU is not a performance target, so this is
-recorded rather than fixed.
+### Calibration skipped on CPU, and what the CPU pump is doing (2026-09-05)
+
+`dma.benchmark` returns the defaults on CPU (commit `6f75cd37`). The ready
+line reads `dma_block_size=4 MiB, pregrown=392 MiB, pregrowth_ms=20` where
+the benchmark had taken 607 ms, and the loads are unchanged. Two binaries
+from the same tree (the buffered one with `arenaKind(.cpu)` temporarily
+null), interleaved after a warm-up run:
+
+| fixture | direct | buffered |
+|---|---|---|
+| Qwen3.5-4B replicated (34.7 GiB of device buffers) | 2.03, 2.01 s | 2.02, 1.98 s |
+| Qwen3.5-4B sharded | 0.93, 0.92 s | 0.92, 0.91 s |
+| Llama-3.1-8B sharded | 1.55, 1.57 s | 1.38, 1.35 s |
+
+The CPU pump: `dma_submit_us_per_piece` equals `dma_piece_latency_ms`
+(1.26 ms per ~3.1 MiB piece on Llama sharded), so the plugin's
+`transferData` copies on the submitting thread, and the pump is saturated:
+1234 pieces per device x 1.26 ms = 1.55 s, the whole load; true replicated
+Llama is 4101 pieces x 1.26 ms = 5.2 s (measured 5.0 and 5.3 s). The
+readers wait for it (`dma_stage_ms_per_read` 37 against `read_ms_per_read`
+2.3, credit wait 4.8). The copy is not memcpy-bound: it first-touches the
+plugin's fresh device buffers in 4 KiB pages (`/usr/bin/time -v`: 3.94M
+minor faults for 14.96 GiB and 10 s of system time; 15.7M faults for
+replicated), 2.4 GiB/s per pump thread, THP `madvise` on this host. That is
+also why the calibration measured 102 GiB/s into its reused ring and had
+nothing to select. The buffered backend faults the same pages from twelve
+workers and lands on the same time on Qwen in both modes, so more copying
+threads per device are worth at most the 14% seen on Llama sharded, and
+that gap is not attributed. One pump per device stays (eighth pass) and
+CPU is not a performance target. A host with THP `always` would fault at
+2 MiB; untested, it needs root.
 
 ### If a platform ever needs `bufferFromHostBuffer` under the same pipeline
 
@@ -2356,6 +2385,10 @@ Third-pass items left open; `PLAN.md` holds the checklist.
   against the throttled proxy) was seen once and not reproduced.
 - Backpressure is process-global and load-untagged (CTX assumption); real
   AWS runs need credentials this machine lacks.
+- CPU: the direct path is 14% slower than the buffered one on Llama-3.1-8B
+  sharded (parity on Qwen3.5-4B in both modes); the pump is saturated by
+  4 KiB first-touch faults of the plugin's device buffers. Not attributed;
+  THP `always` is the untested lever.
 - Ninth pass: check `TpuClient::CreateBuffersForAsyncHostToDevice` at
   runtime on a TPU host and move TPU to the direct path with pinned arenas
   (`DmaMap` on our pages, or PJRT `pinned_host` buffers as ROCm does; the
