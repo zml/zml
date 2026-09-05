@@ -2,6 +2,139 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+pub const ReadHints = struct {
+    /// Smallest source request expected to avoid excessive per-request cost
+    /// or backend rate limiting. The loader may increase it to match the
+    /// calibrated DMA block size.
+    read_chunk_size: usize = 16 * 1024 * 1024,
+    /// The backend benefits from opening enough source calls to hide request
+    /// latency before the first response arrives.
+    high_latency: bool = false,
+};
+
+pub const ReadStats = struct {
+    physical_requests: u64 = 0,
+    physical_bytes: u64 = 0,
+    retries: u64 = 0,
+    transient_retries: u64 = 0,
+    timeouts: u64 = 0,
+    server_failures: u64 = 0,
+    throttles: u64 = 0,
+    retry_delay_ns: u64 = 0,
+
+    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
+        return .{
+            .physical_requests = self.physical_requests -| previous.physical_requests,
+            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
+            .retries = self.retries -| previous.retries,
+            .transient_retries = self.transient_retries -| previous.transient_retries,
+            .timeouts = self.timeouts -| previous.timeouts,
+            .server_failures = self.server_failures -| previous.server_failures,
+            .throttles = self.throttles -| previous.throttles,
+            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+        };
+    }
+};
+
+pub const ReadFailure = enum {
+    transient,
+    timeout,
+    server_failure,
+    throttle,
+};
+
+pub const AtomicReadStats = struct {
+    physical_requests: std.atomic.Value(u64) = .init(0),
+    physical_bytes: std.atomic.Value(u64) = .init(0),
+    retries: std.atomic.Value(u64) = .init(0),
+    transient_retries: std.atomic.Value(u64) = .init(0),
+    timeouts: std.atomic.Value(u64) = .init(0),
+    server_failures: std.atomic.Value(u64) = .init(0),
+    throttles: std.atomic.Value(u64) = .init(0),
+    retry_delay_ns: std.atomic.Value(u64) = .init(0),
+
+    pub fn recordAttempt(self: *AtomicReadStats) void {
+        _ = self.physical_requests.fetchAdd(1, .monotonic);
+    }
+
+    pub fn recordSuccess(self: *AtomicReadStats, request_size: usize) void {
+        _ = self.physical_bytes.fetchAdd(@intCast(request_size), .monotonic);
+    }
+
+    pub fn recordFailure(self: *AtomicReadStats, failure: ReadFailure) void {
+        switch (failure) {
+            .transient => _ = self.transient_retries.fetchAdd(1, .monotonic),
+            .timeout => _ = self.timeouts.fetchAdd(1, .monotonic),
+            .server_failure => _ = self.server_failures.fetchAdd(1, .monotonic),
+            .throttle => _ = self.throttles.fetchAdd(1, .monotonic),
+        }
+    }
+
+    pub fn recordRetry(self: *AtomicReadStats) void {
+        _ = self.retries.fetchAdd(1, .monotonic);
+    }
+
+    pub fn recordRetryDelay(self: *AtomicReadStats, delay: std.Io.Duration) void {
+        const delay_ns: u64 = @intCast(@max(delay.nanoseconds, 0));
+        _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
+    }
+
+    pub fn snapshot(self: *const AtomicReadStats) ReadStats {
+        return .{
+            .physical_requests = self.physical_requests.load(.acquire),
+            .physical_bytes = self.physical_bytes.load(.acquire),
+            .retries = self.retries.load(.acquire),
+            .transient_retries = self.transient_retries.load(.acquire),
+            .timeouts = self.timeouts.load(.acquire),
+            .server_failures = self.server_failures.load(.acquire),
+            .throttles = self.throttles.load(.acquire),
+            .retry_delay_ns = self.retry_delay_ns.load(.acquire),
+        };
+    }
+
+    pub fn provider(self: *AtomicReadStats) ReadStatsProvider {
+        return .{ .userdata = self, .snapshotFn = snapshotOpaque };
+    }
+
+    fn snapshotOpaque(userdata: *anyopaque) ReadStats {
+        const self: *AtomicReadStats = @ptrCast(@alignCast(userdata));
+        return self.snapshot();
+    }
+};
+
+test "atomic read stats retain aggregate retry feedback" {
+    var stats: AtomicReadStats = .{};
+    const request_size = 16 * 1024 * 1024;
+    stats.recordAttempt();
+    stats.recordFailure(.timeout);
+    stats.recordRetry();
+    stats.recordRetryDelay(.fromMilliseconds(25));
+    stats.recordAttempt();
+    stats.recordSuccess(request_size);
+
+    const snapshot = stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 2), snapshot.physical_requests);
+    try std.testing.expectEqual(@as(u64, request_size), snapshot.physical_bytes);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.retries);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.timeouts);
+    try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), snapshot.retry_delay_ns);
+}
+
+pub const ReadStatsProvider = struct {
+    userdata: *anyopaque,
+    snapshotFn: *const fn (userdata: *anyopaque) ReadStats,
+
+    pub fn snapshot(self: ReadStatsProvider) ReadStats {
+        return self.snapshotFn(self.userdata);
+    }
+};
+
+pub const Backend = struct {
+    io: std.Io,
+    read_hints: ReadHints = .{},
+    read_stats: ?ReadStatsProvider = null,
+};
+
 pub const VFSBase = struct {
     inner: std.Io,
 

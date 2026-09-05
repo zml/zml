@@ -145,8 +145,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
-                .bias = store.createTensor("bias", .{.d_out}, null),
+                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated),
+                .bias = store.createTensor("bias", .{.d_out}, .replicated),
             };
         }
 
@@ -172,9 +172,7 @@ const Mnist = struct {
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
+            .read_parallelism = .{ .fixed = 1 },
         });
     }
 
@@ -196,6 +194,20 @@ const Mnist = struct {
     }
 };
 ```
+
+Direct CUDA, ROCm, oneAPI and CPU loaders (CPU arenas are plain pages) use
+platform-owned 4 MiB/eight-transfer per-device defaults. Applications may
+optionally calibrate synthetic transfers once before loading and hand the
+result to the loader:
+
+```zig
+var pools = try zml.mem.DmaWorkspace.init(allocator, io, platform, .{});
+const calibration = try zml.io.dma.benchmark(&pools, platform, .{});
+```
+
+`benchmark` warms every device allocator first. On CPU it returns the
+defaults without measuring: the plugin's transfer is a memcpy, and a load
+takes the same time at every block size.
 
 For a full walkthrough, see:
 

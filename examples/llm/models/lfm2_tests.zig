@@ -49,7 +49,13 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    const all_shardings = shardings.all();
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{
+        .progress = &progress,
+        .load_profile = .local,
+    });
+    defer loader.deinit();
+    var model_buffers = try repo_model.loadBuffers(allocator, io, &loader, &store, &all_shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse zml.attention.Backend.auto(platform);

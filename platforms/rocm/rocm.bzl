@@ -11,8 +11,13 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "7.14"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-20T15-30-00Z/pjrt-rocm_linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "6fd0515beb299550e298996f6919db09aec79859feee7362443bf2ebff900d0f"
+# LOCAL OVERRIDE, do not commit: the released 2026-07-20 artifact predates
+# XLA's GPU pinned-range detection (no `IsHostMemoryPinned`), so every
+# DmaMapped transfer is staged and an eight-MI300X calibration measures
+# 4 to 7 GiB/s instead of ~46. This points at the locally built plugin on
+# `mi300` (openxla/xla bazel-bin, 2026-09-03) to measure NUMA placement.
+_PJRT_ROCM_URL = "file:///home/brabier/numa-bench/pjrt-rocm-local.tar.gz"
+_PJRT_ROCM_SHA256 = "956faf4608e63f5e10e83216ad21e50125c8f7663de9481ad245870be6dd51b8"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION

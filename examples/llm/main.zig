@@ -73,10 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("gs", gcs_vfs.io());
-    try vfs.register("hf", hf_vfs.io());
-    try vfs.register("s3", s3_vfs.io());
+    try vfs.registerBackend("file", vfs_file.backend());
+    try vfs.registerBackend("gs", gcs_vfs.backend());
+    try vfs.registerBackend("hf", hf_vfs.backend());
+    try vfs.registerBackend("s3", s3_vfs.backend());
 
     const io = vfs.io();
 
@@ -85,7 +85,6 @@ pub fn main(init: std.process.Init) !void {
     //
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
@@ -104,6 +103,16 @@ pub fn main(init: std.process.Init) !void {
     log.info("Resolving model repository..", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
+    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    errdefer progress.end();
+    var tokenizer_fut = try io.concurrent(
+        loadTokenizer,
+        .{ allocator, io, repo, &progress },
+    );
+    defer if (tokenizer_fut.cancel(io)) |tokenizer| {
+        var t = tokenizer;
+        t.deinit();
+    } else |_| {};
 
     log.info("Initializing model..", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -111,6 +120,14 @@ pub fn main(init: std.process.Init) !void {
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
+
+    // Load buffers after compilation to leave enough device memory for autotuning.
+    const load_profile = try vfs.loadProfile(args.model);
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{
+        .progress = &progress,
+        .load_profile = load_profile,
+    });
+    defer loader.deinit();
 
     const generation: models.GenerationOptions = .{
         .sampling_strategy = .{
@@ -123,24 +140,21 @@ pub fn main(init: std.process.Init) !void {
 
     // Defines how the model's tensors are sharded across the available devices.
     const shardings: models.Shardings = try .init(platform);
+    const all_shardings = shardings.all();
 
     //
     // Load the model and compile it
     //
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
-    errdefer progress.end();
-
-    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
-    defer tokenizer.deinit();
-
     var compiled_model = try allocator.create(models.CompiledModel);
     defer allocator.destroy(compiled_model);
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    // Load buffers after the model compilation to be sure to give enough room to the autotune.
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    progress.increaseEstimatedTotalItems(store.view().count());
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, &loader, &store, &all_shardings);
     defer model.unloadBuffers(&model_buffers, allocator);
+
+    const tokenizer = try tokenizer_fut.await(io);
 
     progress.end();
 

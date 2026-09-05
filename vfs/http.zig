@@ -3,10 +3,19 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
+const range_read = @import("range_read.zig");
 
 const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
+    pub const InitOpts = struct {
+        max_retries: usize = 5,
+        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
+        retry_max_delay: std.Io.Duration = .fromSeconds(30),
+    };
+
     const Handle = struct {
         pub const Type = enum {
             file,
@@ -41,16 +50,29 @@ pub const HTTP = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     protocol: Protocol,
+    retry: range_read.RetryConfig,
+    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
+        return initWithOptions(allocator, inner, http_client, protocol, .{});
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        inner: std.Io,
+        http_client: *std.http.Client,
+        protocol: Protocol,
+        opts: InitOpts,
+    ) !HTTP {
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
             .protocol = protocol,
+            .retry = .fromOptions(opts),
         };
     }
 
@@ -91,6 +113,14 @@ pub const HTTP = struct {
                 .fileSeekTo = fileSeekTo,
                 .fileRealPath = fileRealPath,
             }),
+        };
+    }
+
+    pub fn backend(self: *HTTP) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{ .high_latency = true },
+            .read_stats = self.read_stats.provider(),
         };
     }
 
@@ -140,7 +170,7 @@ pub const HTTP = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -163,7 +193,7 @@ pub const HTTP = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
@@ -175,7 +205,7 @@ pub const HTTP = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -192,7 +222,7 @@ pub const HTTP = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
 
         return .{
@@ -211,7 +241,7 @@ pub const HTTP = struct {
     fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
 
@@ -225,7 +255,7 @@ pub const HTTP = struct {
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (dirs) |dir| {
             self.closeHandle(@intCast(dir.handle)) catch unreachable;
         }
@@ -237,20 +267,20 @@ pub const HTTP = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         const handle = self.getFileHandle(file);
 
@@ -268,19 +298,19 @@ pub const HTTP = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
@@ -289,7 +319,7 @@ pub const HTTP = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         handle.pos = if (relative_offset >= 0)
@@ -299,13 +329,13 @@ pub const HTTP = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
@@ -351,77 +381,15 @@ pub const HTTP = struct {
     }
 
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
-            const end = offset + take - 1;
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
-        };
-
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
-        const uri: std.Uri = try .parse(url);
-
-        var req = try self.client.request(.GET, uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to perform read for {s}", .{handle.uri});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
-        }
-
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
-
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start < offset) {
-                try reader.discardAll(offset - cr.start);
-            }
-        }
-
-        return try reader.readSliceShort(data[0]);
-    }
-
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        var request: range_read.PreparedRequest = .{ .uri = try .parse(url) };
+        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
+            .backend = "http",
+            .target = url,
+            .unavailable = .server_failure,
+            .context = &request,
+            .prepare = range_read.prepareStatic,
+        }, data, offset, range_read.readSize(handle.size, offset, data));
     }
 };

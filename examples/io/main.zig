@@ -7,9 +7,12 @@ const log = std.log.scoped(.vfs);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &.{
+        .{ .scope = .@"zml/io/load", .level = .debug },
+    },
 };
 
-const Command = enum { cat, tree, ls, cp, stat, realpath, safetensors, load };
+const Command = enum { cat, tree, ls, cp, stat, realpath, safetensors, @"dma-bench", @"dma-conc", load };
 
 // -- ls hf://openai/gpt-oss-20b@6cee5e8
 // -- ls hf://Qwen/Qwen3-235B-A22B-Instruct-2507
@@ -22,7 +25,10 @@ pub fn main(init: std.process.Init) !void {
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
     const command: Command = std.meta.stringToEnum(Command, it.next() orelse return error.MissingCommand) orelse return error.CommandInvalid;
-    const path = it.next() orelse return error.MissingPath;
+    const path = if (command == .@"dma-bench" or command == .@"dma-conc")
+        ""
+    else
+        it.next() orelse return error.MissingPath;
 
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
 
@@ -47,19 +53,19 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("https", vfs_https.io());
-    try vfs.register("hf", hf_vfs.io());
-    try vfs.register("s3", s3_vfs.io());
-    try vfs.register("gs", gcs_vfs.io());
+    try vfs.registerBackend("file", vfs_file.backend());
+    try vfs.registerBackend("https", vfs_https.backend());
+    try vfs.registerBackend("hf", hf_vfs.backend());
+    try vfs.registerBackend("s3", s3_vfs.backend());
+    try vfs.registerBackend("gs", gcs_vfs.backend());
 
     const io = vfs.io();
 
     const buffer = try allocator.alignedAlloc(u8, .fromByteUnits(4 * 1024), 16 * 1024 * 1024);
     defer allocator.free(buffer);
 
-    var stdout_writer = std.Io.File.stdout().writer(io, buffer);
-    defer stdout_writer.interface.flush() catch {};
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, buffer);
+    defer stdout_writer.flush() catch {};
 
     switch (command) {
         .cat => {
@@ -152,7 +158,57 @@ pub fn main(init: std.process.Init) !void {
 
             try stdout_writer.interface.print("{s}\n", .{path});
             try printTensorTree(&stdout_writer.interface, root, "", true, true);
-            try stdout_writer.interface.flush();
+            try stdout_writer.flush();
+        },
+        .@"dma-bench" => {
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator, io);
+
+            const option_allocator = init.arena.allocator();
+            const block_sizes = try envMibList(
+                option_allocator,
+                init.environ_map,
+                "ZML_DMA_BENCH_BLOCK_MIB",
+                &zml.io.dma.default_block_sizes,
+            );
+            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
+            var loader = try zml.io.Loader.init(allocator, io, platform, .{
+                .max_host_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
+                .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
+                .dma = .{
+                    .block_sizes = block_sizes,
+                    .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                    .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
+                    .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
+                    .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
+                },
+            });
+            defer loader.deinit();
+            const calibration = loader.calibration() orelse return error.DmaBenchmarkUnsupported;
+            try stdout_writer.interface.print(
+                "dma_benchmark block_bytes={d} parallelism={d}\n",
+                .{ calibration.block_size, calibration.max_in_flight_per_device },
+            );
+            try stdout_writer.flush();
+        },
+        .@"dma-conc" => {
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator, io);
+            try dmaConcurrent(allocator, io, platform, &stdout_writer.interface, .{
+                .block_size = try envMib(init.environ_map, "ZML_DMA_CONC_BLOCK_MIB", 1),
+                .depth = try envUsize(init.environ_map, "ZML_DMA_CONC_DEPTH", 8),
+                .window_ms = try envUsize(init.environ_map, "ZML_DMA_CONC_WINDOW_MS", 500),
+                .serial_submit = try envUsize(init.environ_map, "ZML_DMA_CONC_SERIAL_SUBMIT", 0) != 0,
+                .callback_submit = try envUsize(init.environ_map, "ZML_DMA_CONC_CALLBACK", 0) != 0,
+                .buffers = std.meta.stringToEnum(DmaConcurrentOptions.Buffers, init.environ_map.get("ZML_DMA_CONC_BUFFERS") orelse "reuse") orelse return error.InvalidArgument,
+                .prebuilt_per_device = try envUsize(init.environ_map, "ZML_DMA_CONC_PREBUILT", 4096),
+                .shared_source = try envUsize(init.environ_map, "ZML_DMA_CONC_SHARED_SOURCE", 0) != 0,
+                .small_piece = try envUsize(init.environ_map, "ZML_DMA_CONC_SMALL_KIB", 0) * 1024,
+                .source_bytes = try envMib(init.environ_map, "ZML_DMA_CONC_SOURCE_MIB", 0),
+                .misalign = try envUsize(init.environ_map, "ZML_DMA_CONC_MISALIGN", 0),
+                .writers = try envUsize(init.environ_map, "ZML_DMA_CONC_WRITERS", 0),
+            });
+            try stdout_writer.flush();
         },
         .load => {
             const ShardingType = enum { replicated, sharded };
@@ -162,24 +218,66 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
+            if (try envUsize(init.environ_map, "ZML_LOAD_EVENT_RETIRE_CHECK", 0) != 0) {
+                try EventRetireCheck.run(allocator, io, platform, init.environ_map);
+            }
+
+            const load_dma_block_sizes = try envMibList(
+                init.arena.allocator(),
+                init.environ_map,
+                "ZML_DMA_BENCH_BLOCK_MIB",
+                &zml.io.dma.default_block_sizes,
+            );
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
             defer store.deinit();
 
+            const sharded_sharding: zml.Sharding = try platform.registerSharding(
+                "playground_model",
+                .mesh(.{ .model = .high_bandwidth }),
+            );
+
+            // Expert-pack instrument: N bindings of W same-shape rank-2 tensors,
+            // each loaded through `loadExecute` with a stack executable.
+            const pack_options: PackOptions = .{
+                .packs = try envUsize(init.environ_map, "ZML_LOAD_PACKS", 0),
+                .width = try envUsize(init.environ_map, "ZML_LOAD_PACK_WIDTH", 64),
+                .window = try envUsize(init.environ_map, "ZML_LOAD_PACK_WINDOW", 1),
+                .pairs = try envUsize(init.environ_map, "ZML_LOAD_PACK_PAIRS", 0),
+                .check = try envUsize(init.environ_map, "ZML_LOAD_PACK_CHECK", 1) != 0,
+                .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
+            };
+            if (pack_options.width == 0 or pack_options.window == 0) return error.InvalidArgument;
+            const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, sharded_sharding, pack_options);
+            defer for (pack_plan.exes) |*exe| exe.deinit();
+            if (pack_options.packs > 0) {
+                log.info("pack plan: packs={d} requested={d} width={d} window={d} pairs={d} executables={d} bytes={Bi:.2}", .{
+                    pack_plan.packs.len,
+                    pack_options.packs,
+                    pack_options.width,
+                    pack_options.window,
+                    pack_options.pairs,
+                    pack_plan.exes.len,
+                    pack_plan.bytes,
+                });
+            }
+
             const AllTensorsModel = struct {
                 tensors: []zml.Tensor,
             };
 
-            const tensor_count = registry.tensors.count();
+            const tensor_count = registry.tensors.count() - pack_plan.packed_count;
 
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
 
             var registry_it = registry.iterator();
+            var registry_index: usize = 0;
             var load_count: usize = 0;
-            while (registry_it.next()) |entry| : (load_count += 1) {
+            while (registry_it.next()) |entry| : (registry_index += 1) {
+                if (pack_plan.packed_mask[registry_index]) continue;
                 tensors[load_count] = switch (sharding_type) {
                     .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
@@ -187,43 +285,1133 @@ pub fn main(init: std.process.Init) !void {
                     else
                         store.view().createTensor(entry.key_ptr.*, null, .replicated),
                 };
+                load_count += 1;
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_model",
-                .mesh(.{ .model = .high_bandwidth }),
-            );
-
-            var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
+            var progress = std.Progress.start(io, .{
+                .root_name = "zml.examples.load",
+                .disable_printing = true,
+            });
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
-            const now: std.Io.Timestamp = .now(io, .awake);
+            try platform.warmupDeviceAllocators(io);
 
-            var buffers = try zml.mem.bufferize(allocator, AllTensorsModel, &model);
-            defer {
-                for (buffers.tensors) |*b| b.deinit();
-                allocator.free(buffers.tensors);
+            const pack_outputs = try allocator.alloc(zml.Buffer, pack_plan.packs.len);
+            defer allocator.free(pack_outputs);
+            var packs_loaded: usize = 0;
+            defer for (pack_outputs[0..packs_loaded]) |*output| output.deinit();
+
+            var check_error: ?anyerror = null;
+            // Stamped before the read-back check so the summary excludes it.
+            var load_took: ?std.Io.Duration = null;
+            {
+                const now: std.Io.Timestamp = .now(io, .awake);
+                var total_bytes: usize = 0;
+                defer {
+                    const took = load_took orelse now.untilNow(io, .awake);
+                    const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+                    log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+                }
+
+                const load_read_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM")) |fixed|
+                    .{ .fixed = fixed }
+                else
+                    .{ .adaptive = .{
+                        .initial = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12),
+                        .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
+                    } };
+                const load_profile = try vfs.loadProfile(path);
+                const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
+
+                var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
+                errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
+                var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, .{
+                    .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
+                    .dma = .{
+                        .block_sizes = load_dma_block_sizes,
+                        .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                    },
+                    .read_parallelism = load_read_parallelism,
+                    .load_profile = load_profile,
+                    .progress = &progress,
+                });
+                defer loader.deinit();
+
+                // `window` submissions of `packs_per_submission` packs in
+                // flight, budgeted by the largest pack's executable inputs.
+                const packs_per_submission: usize = if (pack_options.pairs != 0) 2 else 1;
+                var pack_input_bytes: usize = 0;
+                for (pack_plan.exes) |*exe| {
+                    pack_input_bytes = @max(pack_input_bytes, try loader.executeInputBytesPerDevice(exe));
+                }
+                const window_budget = pack_options.window * packs_per_submission * pack_input_bytes;
+                var window: zml.io.Window = .init(allocator, window_budget, pack_options.window);
+                defer window.deinit();
+
+                const pack_start: std.Io.Timestamp = .now(io, .awake);
+                var next_pack: usize = 0;
+                while (next_pack < pack_plan.packs.len) {
+                    const count = @min(packs_per_submission, pack_plan.packs.len - next_pack);
+                    var bindings: [2]zml.io.Loader.Binding = undefined;
+                    for (
+                        bindings[0..count],
+                        pack_plan.packs[next_pack..][0..count],
+                        pack_outputs[next_pack..][0..count],
+                    ) |*binding, pack, *output| {
+                        binding.* = .{
+                            .tensor = pack.tensor,
+                            .output = output,
+                            .exe = &pack_plan.exes[pack.exe_index],
+                        };
+                    }
+                    try window.submit(&loader, &store, bindings[0..count]);
+                    next_pack += count;
+                }
+                try window.drain();
+                packs_loaded = pack_plan.packs.len;
+                const pack_took = pack_start.untilNow(io, .awake);
+                const pack_bytes = loader.bytesLoaded();
+                log.info("pack phase: packs={d} width={d} window={d} pairs={d} budget={Bi:.2} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
+                    pack_plan.packs.len,
+                    pack_options.width,
+                    pack_options.window,
+                    pack_options.pairs,
+                    window_budget,
+                    pack_bytes,
+                    pack_took,
+                    gibPerSecond(pack_bytes, pack_took),
+                });
+
+                const bulk_start: std.Io.Timestamp = .now(io, .awake);
+                const bulk = try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding});
+                try bulk.await();
+                const bulk_took = bulk_start.untilNow(io, .awake);
+                total_bytes = loader.bytesLoaded();
+                const bulk_bytes = total_bytes - pack_bytes;
+                log.info("bulk phase: tensors={d} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
+                    load_count,
+                    bulk_bytes,
+                    bulk_took,
+                    gibPerSecond(bulk_bytes, bulk_took),
+                });
+                defer {
+                    for (loaded.tensors) |*buffer_| buffer_.deinit();
+                    init.arena.allocator().free(loaded.tensors);
+                }
+
+                load_took = now.untilNow(io, .awake);
+                // Not `try`: the `errdefer` above and the `defer` just
+                // registered both release the buffers.
+                if (check_stride != 0) {
+                    checkLoaded(allocator, io, &store, tensors, loaded.tensors, check_stride) catch |err| {
+                        check_error = err;
+                    };
+                }
             }
+            if (check_error) |err| return err;
 
-            var loader: zml.io.Loader = try .init(allocator, platform, .{
-                .parallelism = 8,
-                .dma_chunks = 16,
-                .dma_chunk_size = 256 * zml.MiB,
-            });
-            defer loader.deinit();
-
-            try loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
-            try loader.await(io);
-
-            const took = now.untilNow(io, .awake);
-            const total_bytes: u64 = loader.bytes_loaded.raw;
-            const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            if (pack_options.check and pack_plan.packs.len > 0) {
+                try checkPacks(allocator, io, &store, pack_plan.packs, pack_outputs);
+            }
         },
     }
+}
+
+const DmaConcurrentOptions = struct {
+    block_size: usize,
+    depth: usize,
+    window_ms: usize,
+    /// Serialises the submit call behind one mutex, which is what a single
+    /// pump thread does; completions still overlap.
+    serial_submit: bool,
+    /// Resubmits each slot from its PJRT ready callback instead of from a
+    /// blocked thread, which is how the loader's pumps run: whatever thread
+    /// PJRT delivers callbacks on is then the only submitting thread.
+    callback_submit: bool,
+    /// `reuse`: `depth` buffers per device, each transferred to again and
+    /// again, never flagged last. `fresh`: every transfer creates its own
+    /// manager and buffer and is flagged last, the loader's pattern for a
+    /// tensor smaller than a block. `prebuilt`: the managers are created
+    /// before the window; only the last-flagged transfer is measured.
+    buffers: Buffers,
+    prebuilt_per_device: usize,
+    /// Every device reads the same pinned source, as a replicated load does,
+    /// instead of one source per device.
+    shared_source: bool,
+    /// When non-zero, every other transfer of a slot is this many bytes
+    /// instead of a full block: DeepSeek-V4-Flash is half 256 KiB scales
+    /// and half ~4 MiB weights by count.
+    small_piece: usize,
+    /// Pinned source footprint per device (at least `block_size * depth`):
+    /// each slot walks the whole ring instead of re-reading one block, as
+    /// the loader reads every block of its pool once.
+    source_bytes: usize,
+    /// Bytes added to every source address: a safetensors file packs tensors
+    /// back to back, so the loader's DMA sources sit at 2- or 16-byte
+    /// alignment, never at a cache line.
+    misalign: usize,
+    /// CPU threads that keep copying into the source rings while the engines
+    /// read them, as the loader's page-cache reads do: the engines then read
+    /// lines the CPU just dirtied instead of cold memory.
+    writers: usize,
+
+    const Buffers = enum { reuse, fresh, prebuilt };
+};
+
+/// Drives every device at once from one process, `depth` synchronous slots
+/// per device, and reports the aggregate submission rate. The calibration in
+/// `zml.io.dma` measures one device at a time, so it cannot say whether the
+/// host can submit to four devices concurrently; the loader's single pump
+/// thread cannot either.
+fn dmaConcurrent(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    writer: *std.Io.Writer,
+    opts: DmaConcurrentOptions,
+) !void {
+    const api = platform.pjrt_api;
+    const device_count = platform.devices.len;
+    if (opts.depth == 0 or opts.block_size == 0) return error.InvalidArgument;
+
+    const Managed = struct {
+        manager: *zml.pjrt.AsyncHostToDeviceTransferManager,
+        buffer: *zml.pjrt.Buffer,
+    };
+    const Slot = struct {
+        manager: *zml.pjrt.AsyncHostToDeviceTransferManager,
+        buffer: *zml.pjrt.Buffer,
+        data: []const u8,
+        device_index: usize,
+        /// Buffers a `fresh` transfer created; they live until the end like
+        /// weights do.
+        kept: std.ArrayListUnmanaged(*zml.pjrt.Buffer) = .empty,
+        small_next: bool = false,
+        source: []u8,
+        offset: usize,
+        stride: usize,
+    };
+    const Shared = struct {
+        api: *const zml.pjrt.Api,
+        io: std.Io,
+        ready: std.atomic.Value(usize) = .init(0),
+        start: std.Io.Event = .unset,
+        stop: std.atomic.Value(bool) = .init(false),
+        first_error: std.atomic.Value(u32) = .init(0),
+        chains_active: std.atomic.Value(usize) = .init(0),
+        submit_ns: std.atomic.Value(u64) = .init(0),
+        written: std.atomic.Value(u64) = .init(0),
+        submit_mutex: ?*std.Io.Mutex,
+        bytes: []std.atomic.Value(u64),
+        transfers: []std.atomic.Value(u64),
+        allocator: std.mem.Allocator,
+        client: *const zml.pjrt.Client,
+        buffers: DmaConcurrentOptions.Buffers,
+        shape_spec: *const zml.pjrt.ShapeSpec,
+        memories: []*const zml.pjrt.Memory,
+        prebuilt: [][]Managed,
+        prebuilt_next: []std.atomic.Value(usize),
+        small_piece: usize,
+        misalign: usize,
+
+        fn recordError(self: *@This(), err: anyerror) void {
+            _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+            self.stop.store(true, .release);
+        }
+
+        fn transfer(self: *@This(), slot: *Slot, count: bool) void {
+            var manager = slot.manager;
+            var is_last = false;
+            var data = slot.data;
+            if (count) {
+                slot.offset += slot.stride;
+                if (slot.offset + slot.data.len + self.misalign > slot.source.len) slot.offset %= slot.stride;
+                data = slot.source[slot.offset + self.misalign ..][0..slot.data.len];
+            }
+            if (self.small_piece != 0 and count) {
+                if (slot.small_next) data = data[0..self.small_piece];
+                slot.small_next = !slot.small_next;
+            }
+            if (count) switch (self.buffers) {
+                .reuse => {},
+                .fresh => {
+                    manager = self.client.createBuffersForAsyncHostToDevice(self.api, .{
+                        .shape_specs = &.{self.shape_spec.*},
+                        .memory = self.memories[slot.device_index],
+                    }) catch |err| return self.recordError(err);
+                    const buffer = manager.retrieveBuffer(self.api, 0) catch |err| return self.recordError(err);
+                    slot.kept.append(self.allocator, buffer) catch |err| return self.recordError(err);
+                    is_last = true;
+                },
+                .prebuilt => {
+                    const index = self.prebuilt_next[slot.device_index].fetchAdd(1, .monotonic);
+                    if (index >= self.prebuilt[slot.device_index].len) {
+                        self.stop.store(true, .release);
+                        return;
+                    }
+                    manager = self.prebuilt[slot.device_index][index].manager;
+                    is_last = true;
+                },
+            };
+            if (self.submit_mutex) |mutex| mutex.lockUncancelable(self.io);
+            const submit_started = std.Io.Timestamp.now(self.io, .awake);
+            const event = manager.transferData(self.api, 0, data, 0, is_last) catch |err| {
+                if (self.submit_mutex) |mutex| mutex.unlock(self.io);
+                self.recordError(err);
+                return;
+            };
+            if (count) _ = self.submit_ns.fetchAdd(@intCast(@max(submit_started.untilNow(self.io, .awake).nanoseconds, 0)), .monotonic);
+            if (self.submit_mutex) |mutex| mutex.unlock(self.io);
+            event.await(self.api, self.io) catch |err| {
+                event.deinit(self.api);
+                self.recordError(err);
+                return;
+            };
+            event.deinit(self.api);
+            if (count and self.buffers == .fresh) manager.deinit(self.api);
+            if (count) {
+                _ = self.bytes[slot.device_index].fetchAdd(data.len, .monotonic);
+                _ = self.transfers[slot.device_index].fetchAdd(1, .monotonic);
+            }
+        }
+
+        fn run(self: *@This(), slot: *Slot) void {
+            _ = self.ready.fetchAdd(1, .release);
+            self.start.waitUncancelable(self.io);
+            while (!self.stop.load(.acquire)) self.transfer(slot, true);
+        }
+
+        /// Copies a 16 MiB scratch over every ring, region after region,
+        /// until told to stop.
+        fn write(self: *@This(), rings: []const []u8, scratch: []const u8, index: usize) void {
+            var position: usize = index * scratch.len;
+            while (!self.stop.load(.acquire)) {
+                for (rings) |ring| {
+                    if (position + scratch.len > ring.len) position = 0;
+                    @memcpy(ring[position..][0..scratch.len], scratch);
+                    _ = self.written.fetchAdd(scratch.len, .monotonic);
+                }
+                position += scratch.len;
+            }
+        }
+    };
+    // One slot's callback chain. The event whose callback is running is
+    // never destroyed inside it: `submit` destroys the one before.
+    const Chain = struct {
+        shared: *Shared,
+        slot: Slot,
+        current: ?*zml.pjrt.Event = null,
+        previous: ?*zml.pjrt.Event = null,
+
+        fn submit(self: *@This()) void {
+            const shared = self.shared;
+            if (self.previous) |event| event.deinit(shared.api);
+            self.previous = self.current;
+            self.current = null;
+            if (shared.stop.load(.acquire)) {
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+                return;
+            }
+            const submit_started = std.Io.Timestamp.now(shared.io, .awake);
+            const event = self.slot.manager.transferData(shared.api, 0, self.slot.data, 0, false) catch |err| {
+                shared.recordError(err);
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+                return;
+            };
+            _ = shared.submit_ns.fetchAdd(@intCast(@max(submit_started.untilNow(shared.io, .awake).nanoseconds, 0)), .monotonic);
+            self.current = event;
+            event.onReady(shared.api, @This(), onReady, self) catch |err| {
+                event.awaitRaw(shared.api) catch {};
+                shared.recordError(err);
+                _ = shared.chains_active.fetchSub(1, .acq_rel);
+            };
+        }
+
+        fn onReady(err: ?*zml.pjrt.Error, self: *@This()) void {
+            const shared = self.shared;
+            if (err) |pjrt_error| {
+                pjrt_error.deinit(shared.api);
+                shared.recordError(error.TransferFailed);
+            }
+            _ = shared.bytes[self.slot.device_index].fetchAdd(self.slot.data.len, .monotonic);
+            _ = shared.transfers[self.slot.device_index].fetchAdd(1, .monotonic);
+            self.submit();
+        }
+    };
+
+    // The CPU plugin has no `dmaMap`; its transfers read plain pages.
+    var dma_map: zml.mem.dma.MapAllocator = if (platform.target == .cpu)
+        .initPageable(std.heap.page_allocator)
+    else
+        .init(std.heap.page_allocator, platform);
+    const pinned = dma_map.allocator();
+    const bytes = try allocator.alloc(std.atomic.Value(u64), device_count);
+    defer allocator.free(bytes);
+    const transfers = try allocator.alloc(std.atomic.Value(u64), device_count);
+    defer allocator.free(transfers);
+    for (bytes, transfers) |*b, *t| {
+        b.* = .init(0);
+        t.* = .init(0);
+    }
+    var dims = [_]i64{@intCast(opts.block_size)};
+    const shape_spec: zml.pjrt.ShapeSpec = .init(&dims, .u8);
+    const memories = try allocator.alloc(*const zml.pjrt.Memory, device_count);
+    defer allocator.free(memories);
+    for (platform.devices, memories) |*device, *memory| {
+        memory.* = (device.memory(.default) orelse return error.DmaDeviceMismatch).pjrt_memory;
+    }
+    const prebuilt = try allocator.alloc([]Managed, device_count);
+    defer allocator.free(prebuilt);
+    @memset(prebuilt, &.{});
+    const prebuilt_next = try allocator.alloc(std.atomic.Value(usize), device_count);
+    defer allocator.free(prebuilt_next);
+    @memset(prebuilt_next, .init(0));
+    defer for (prebuilt) |managed| {
+        for (managed) |item| {
+            item.manager.deinit(api);
+            item.buffer.deinit(api);
+        }
+        allocator.free(managed);
+    };
+    if (opts.buffers == .prebuilt) {
+        for (prebuilt, memories) |*managed, memory| {
+            managed.* = try allocator.alloc(Managed, opts.prebuilt_per_device);
+            var built: usize = 0;
+            errdefer managed.* = managed.*[0..built];
+            for (managed.*) |*item| {
+                item.manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                    .shape_specs = &.{shape_spec},
+                    .memory = memory,
+                });
+                item.buffer = try item.manager.retrieveBuffer(api, 0);
+                built += 1;
+            }
+        }
+    }
+    var submit_mutex: std.Io.Mutex = .init;
+    var shared: Shared = .{
+        .api = api,
+        .io = io,
+        .submit_mutex = if (opts.serial_submit) &submit_mutex else null,
+        .bytes = bytes,
+        .transfers = transfers,
+        .allocator = allocator,
+        .client = platform.pjrt_client,
+        .buffers = opts.buffers,
+        .shape_spec = &shape_spec,
+        .memories = memories,
+        .prebuilt = prebuilt,
+        .prebuilt_next = prebuilt_next,
+        .small_piece = opts.small_piece,
+        .misalign = opts.misalign,
+    };
+
+    var slots: std.ArrayListUnmanaged(Slot) = .empty;
+    defer slots.deinit(allocator);
+    var sources: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (slots.items) |*slot| {
+            const event = slot.manager.transferData(api, 0, slot.data, 0, true) catch null;
+            if (event) |done| {
+                done.await(api, io) catch {};
+                done.deinit(api);
+            }
+            slot.manager.deinit(api);
+            slot.buffer.deinit(api);
+            for (slot.kept.items) |buffer| buffer.deinit(api);
+            slot.kept.deinit(allocator);
+        }
+        for (sources.items) |source| pinned.free(source);
+        sources.deinit(allocator);
+    }
+
+    const source_len = @max(opts.block_size * opts.depth, opts.source_bytes) + std.heap.page_size_min;
+    for (memories, 0..) |memory, device_index| {
+        const source = if (opts.shared_source and sources.items.len != 0) sources.items[0] else blk: {
+            const fresh = try pinned.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), source_len);
+            @memset(fresh, 0);
+            try sources.append(allocator, fresh);
+            break :blk fresh;
+        };
+        for (0..opts.depth) |slot_index| {
+            const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                .shape_specs = &.{shape_spec},
+                .memory = memory,
+            });
+            const buffer = try manager.retrieveBuffer(api, 0);
+            try slots.append(allocator, .{
+                .manager = manager,
+                .buffer = buffer,
+                .data = source[slot_index * opts.block_size ..][0..opts.block_size],
+                .device_index = device_index,
+                .source = source,
+                .offset = slot_index * opts.block_size,
+                .stride = opts.block_size * opts.depth,
+            });
+        }
+    }
+    // Warm every slot the way the calibration does: the first transfer on a
+    // buffer pays for its allocation.
+    for (slots.items) |*slot| {
+        shared.transfer(slot, false);
+        shared.transfer(slot, false);
+    }
+    if (shared.first_error.load(.acquire) != 0) return @errorFromInt(@as(u16, @intCast(shared.first_error.load(.acquire))));
+
+    const scratch = try allocator.alloc(u8, 16 * 1024 * 1024);
+    defer allocator.free(scratch);
+    @memset(scratch, 1);
+    var writer_group: std.Io.Group = .init;
+    defer {
+        shared.stop.store(true, .release);
+        writer_group.await(io) catch {};
+    }
+    for (0..opts.writers) |index| {
+        try writer_group.concurrent(io, Shared.write, .{ &shared, sources.items, scratch, index });
+    }
+    var elapsed_ns: u64 = 1;
+    if (opts.callback_submit) {
+        const chains = try allocator.alloc(Chain, slots.items.len);
+        defer allocator.free(chains);
+        for (chains, slots.items) |*chain, *slot| chain.* = .{ .shared = &shared, .slot = slot.* };
+        shared.chains_active.store(chains.len, .release);
+        const started = std.Io.Timestamp.now(io, .awake);
+        for (chains) |*chain| chain.submit();
+        try io.sleep(.fromMilliseconds(@intCast(opts.window_ms)), .awake);
+        shared.stop.store(true, .release);
+        while (shared.chains_active.load(.acquire) != 0) try io.sleep(.fromMilliseconds(1), .awake);
+        elapsed_ns = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 1));
+        // The last callback of each chain may still be unwinding when its
+        // counter drops; give it a moment before its events go.
+        try io.sleep(.fromMilliseconds(50), .awake);
+        for (chains) |*chain| {
+            if (chain.previous) |event| event.deinit(api);
+            if (chain.current) |event| event.deinit(api);
+        }
+    } else {
+        var group: std.Io.Group = .init;
+        for (slots.items) |*slot| {
+            group.concurrent(io, Shared.run, .{ &shared, slot }) catch |err| {
+                shared.stop.store(true, .release);
+                shared.start.set(io);
+                group.await(io) catch {};
+                return err;
+            };
+        }
+        while (shared.ready.load(.acquire) != slots.items.len) try io.sleep(.fromMilliseconds(1), .awake);
+        const started = std.Io.Timestamp.now(io, .awake);
+        shared.start.set(io);
+        try io.sleep(.fromMilliseconds(@intCast(opts.window_ms)), .awake);
+        shared.stop.store(true, .release);
+        try group.await(io);
+        elapsed_ns = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 1));
+    }
+    if (shared.first_error.load(.acquire) != 0) return @errorFromInt(@as(u16, @intCast(shared.first_error.load(.acquire))));
+
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    var total_bytes: u64 = 0;
+    var total_transfers: u64 = 0;
+    for (bytes, transfers, 0..) |*b, *t, device_index| {
+        const device_bytes = b.load(.acquire);
+        const device_transfers = t.load(.acquire);
+        total_bytes += device_bytes;
+        total_transfers += device_transfers;
+        try writer.print("dma_conc device={d} gib_s={d:.2} submissions_s={d:.0}\n", .{
+            device_index,
+            @as(f64, @floatFromInt(device_bytes)) / seconds / (1024 * 1024 * 1024),
+            @as(f64, @floatFromInt(device_transfers)) / seconds,
+        });
+    }
+    try writer.print("dma_conc total devices={d} block_bytes={d} depth={d} serial_submit={} callback_submit={} buffers={s} shared_source={} small_piece={d} source_mib={d} misalign={d} writers={d} cpu_write_gib_s={d:.1} elapsed_ms={d:.1} gib_s={d:.2} submissions_s={d:.0} submit_us={d:.1}\n", .{
+        device_count,
+        opts.block_size,
+        opts.depth,
+        opts.serial_submit,
+        opts.callback_submit,
+        @tagName(opts.buffers),
+        opts.shared_source,
+        opts.small_piece,
+        source_len / (1024 * 1024),
+        opts.misalign,
+        opts.writers,
+        @as(f64, @floatFromInt(shared.written.load(.acquire))) / seconds / (1024 * 1024 * 1024),
+        seconds * 1000,
+        @as(f64, @floatFromInt(total_bytes)) / seconds / (1024 * 1024 * 1024),
+        @as(f64, @floatFromInt(total_transfers)) / seconds,
+        @as(f64, @floatFromInt(shared.submit_ns.load(.acquire))) / 1000 / @as(f64, @floatFromInt(@max(total_transfers, 1))),
+    });
+}
+
+/// `ZML_DMA_BENCH_NUMA`: unset interleaves over the host's memory nodes,
+/// `off` applies no policy, `1` binds to node 1, `0,1` interleaves over those.
+fn dmaBenchmarkNumaPlacement(environ_map: *const std.process.Environ.Map) !zml.mem.dma.NumaPlacement {
+    const raw = environ_map.get("ZML_DMA_BENCH_NUMA") orelse return .memory_nodes;
+    if (std.mem.eql(u8, raw, "off")) return .none;
+    var mask: u64 = 0;
+    var it = std.mem.splitScalar(u8, raw, ',');
+    while (it.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " ");
+        if (trimmed.len == 0) continue;
+        mask |= @as(u64, 1) << try std.fmt.parseInt(u6, trimmed, 10);
+    }
+    if (mask == 0) return error.InvalidArgument;
+    return .{ .nodes = mask };
+}
+
+const PackOptions = struct {
+    /// Number of pack submissions (0 disables the instrument).
+    packs: usize,
+    /// Sources per pack.
+    width: usize,
+    /// Submissions in flight; logged only until the loader exposes handles.
+    window: usize,
+    /// Pair two packs per submission; logged only until the loader supports it.
+    pairs: usize,
+    /// Read sample packs back and compare with the source bytes.
+    check: bool,
+    /// Largest pack output in elements. The oneAPI PJRT plugin launches
+    /// kernels with int32 ranges, so stacking more than 2^31-1 elements aborts.
+    max_elements: usize,
+};
+
+const Pack = struct {
+    tensor: zml.Tensor,
+    exe_index: usize,
+    bytes: usize,
+};
+
+const PackPlan = struct {
+    packs: []const Pack,
+    /// One stack executable per distinct source shape.
+    exes: []zml.Exe,
+    /// Indexed like the registry: true for keys owned by a pack.
+    packed_mask: []const bool,
+    packed_count: usize,
+    bytes: usize,
+};
+
+/// Walks the registry in file order (file URI, then offset) and groups rank-2
+/// tensors of identical shape and dtype, `width` at a time, into replicated
+/// pack bindings. Adjacent tensors in a checkpoint rarely share a shape, so
+/// grouping is per shape class; each pack still lists its sources in file
+/// order. Stops after `options.packs` packs.
+fn planPacks(
+    arena: std.mem.Allocator,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    registry: *const zml.safetensors.TensorRegistry,
+    store: *zml.io.TensorStore,
+    sharding: zml.Sharding,
+    options: PackOptions,
+) !PackPlan {
+    const keys = registry.tensors.keys();
+    const entries = registry.tensors.values();
+    const packed_mask = try arena.alloc(bool, entries.len);
+    @memset(packed_mask, false);
+
+    var exes: std.ArrayListUnmanaged(zml.Exe) = .empty;
+    errdefer for (exes.items) |*exe| exe.deinit();
+    var packs: std.ArrayListUnmanaged(Pack) = .empty;
+    var packed_count: usize = 0;
+    var bytes: usize = 0;
+
+    if (options.packs > 0) {
+        const order = try arena.alloc(usize, entries.len);
+        for (order, 0..) |*slot, index| slot.* = index;
+        const FileOrder = struct {
+            entries: []const zml.safetensors.Tensor,
+
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                const lhs = ctx.entries[a];
+                const rhs = ctx.entries[b];
+                return switch (std.mem.order(u8, lhs.file_uri, rhs.file_uri)) {
+                    .lt => true,
+                    .gt => false,
+                    .eq => lhs.offset < rhs.offset,
+                };
+            }
+        };
+        std.mem.sort(usize, order, FileOrder{ .entries = entries }, FileOrder.lessThan);
+
+        const Class = struct {
+            shape: zml.Shape,
+            skipped: bool,
+            members: std.ArrayListUnmanaged(usize) = .empty,
+            exe_index: ?usize = null,
+        };
+        var classes: std.ArrayListUnmanaged(Class) = .empty;
+
+        for (order) |index| {
+            const entry = entries[index];
+            if (entry.shape.rank() != 2) continue;
+            const class = for (classes.items) |*class| {
+                if (class.shape.eql(entry.shape)) break class;
+            } else blk: {
+                const elements = try std.math.mul(usize, entry.shape.count(), options.width);
+                const skipped = elements > options.max_elements;
+                if (skipped) {
+                    log.warn("pack plan: skipping shape {f}: width={d} would stack {d} elements, above ZML_LOAD_PACK_MAX_ELEMENTS={d}", .{
+                        entry.shape,
+                        options.width,
+                        elements,
+                        options.max_elements,
+                    });
+                }
+                try classes.append(arena, .{ .shape = entry.shape, .skipped = skipped });
+                break :blk &classes.items[classes.items.len - 1];
+            };
+            if (class.skipped) continue;
+            try class.members.append(arena, index);
+            if (class.members.items.len < options.width) continue;
+
+            const source_keys = try arena.alloc([]const u8, options.width);
+            for (source_keys, class.members.items) |*key, member| {
+                key.* = keys[member];
+                packed_mask[member] = true;
+            }
+            class.members.clearRetainingCapacity();
+            packed_count += options.width;
+
+            const shape = packShape(entry.shape, options.width);
+            const tensor = store.view().maybeCreateBinding(source_keys, shape) orelse return error.MissingPackSource;
+            if (class.exe_index == null) {
+                const inputs = try allocator.alloc(zml.Tensor, options.width);
+                defer allocator.free(inputs);
+                for (inputs) |*input| input.* = .fromShape(entry.shape);
+                try exes.append(arena, try platform.compileFn(allocator, io, stackPack, .{inputs}, .{
+                    .shardings = &.{sharding},
+                    .program_name = "playground_pack",
+                }));
+                class.exe_index = exes.items.len - 1;
+            }
+            try packs.append(arena, .{ .tensor = tensor, .exe_index = class.exe_index.?, .bytes = shape.byteSize() });
+            bytes += shape.byteSize();
+            if (packs.items.len == options.packs) break;
+        }
+    }
+
+    return .{
+        .packs = packs.items,
+        .exes = exes.items,
+        .packed_mask = packed_mask,
+        .packed_count = packed_count,
+        .bytes = bytes,
+    };
+}
+
+/// Pack output shape: a leading `expert` axis, fully replicated so that the
+/// loader's expected output placement equals the executable's.
+fn packShape(source: zml.Shape, width: usize) zml.Shape {
+    return source
+        .insert(0, .{ .expert = width })
+        .withTags(.{ .expert, .rows, .cols })
+        .withReplicatedPartitioning();
+}
+
+fn stackPack(inputs: []const zml.Tensor) zml.Tensor {
+    return zml.Tensor.stack(inputs, 0, .expert)
+        .withTags(.{ .expert, .rows, .cols })
+        .withPartitioning(.{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
+}
+
+/// Reads the first, middle and last pack back to host and compares each
+/// expert slice with the bytes of its source tensor.
+fn checkPacks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: *const zml.io.TensorStore,
+    packs: []const Pack,
+    outputs: []const zml.Buffer,
+) !void {
+    const samples = [_]usize{ 0, packs.len / 2, packs.len - 1 };
+    var checked: usize = 0;
+    for (samples, 0..) |sample, i| {
+        if (std.mem.indexOfScalar(usize, samples[0..i], sample) != null) continue;
+        const sources = (store.getSourcesById(packs[sample].tensor.id) orelse return error.NotFound).tensors;
+        const slice = try outputs[sample].toSliceAlloc(allocator, io);
+        defer slice.free(allocator);
+        const packed_bytes = slice.constData();
+        const source_bytes: usize = @intCast(sources[0].byteSize());
+        if (packed_bytes.len != source_bytes * sources.len) return error.PackContentMismatch;
+        const expected = try allocator.alloc(u8, source_bytes);
+        defer allocator.free(expected);
+        for (sources, 0..) |source, expert| {
+            var reader = try source.reader(io, &.{}, .{});
+            defer reader.deinit();
+            try reader.readPositionalAll(expected, 0);
+            const actual = packed_bytes[expert * source_bytes ..][0..source_bytes];
+            if (!std.mem.eql(u8, expected, actual)) {
+                log.err("pack check: mismatch pack={d} expert={d} source={s}", .{ sample, expert, source.name });
+                return error.PackContentMismatch;
+            }
+        }
+        checked += 1;
+    }
+    log.info("pack check: ok packs_checked={d} of {d}", .{ checked, packs.len });
+}
+
+/// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest
+/// eligible one back to host and compares the bytes with the source, so a
+/// buffer that reported ready before every piece landed is caught. A fully
+/// replicated buffer is compared on every replica; a partitioned one is
+/// assembled with `toSliceAlloc`, which keeps the last replica of a region
+/// that several devices hold. Each source file is opened once (an
+/// `hf://` open is a HEAD plus a redirect). Skipped: tensors with several
+/// sources, and sub-byte tensors partitioned over several devices
+/// (`toSliceAlloc` places their shards by element stride).
+fn checkLoaded(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: *const zml.io.TensorStore,
+    tensors: []const zml.Tensor,
+    buffers: []const zml.Buffer,
+    stride: usize,
+) !void {
+    std.debug.assert(tensors.len == buffers.len);
+    const Eligibility = struct {
+        fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*zml.safetensors.Tensor {
+            const sources = (store_.getSourcesById(tensor.id) orelse return null).tensors;
+            if (sources.len != 1) return null;
+            const partitioned = buffer.byteSize() / buffer.numShards() != tensor.byteSize();
+            if (partitioned and tensor.dtype().bitSizeOf() < 8) return null;
+            return sources[0];
+        }
+    };
+    var largest: ?usize = null;
+    for (tensors, buffers, 0..) |tensor, buffer, i| {
+        if (Eligibility.source(store, tensor, buffer) == null) continue;
+        if (largest == null or tensor.byteSize() > tensors[largest.?].byteSize()) largest = i;
+    }
+    var files: std.StringHashMapUnmanaged(std.Io.File) = .empty;
+    defer {
+        var it = files.valueIterator();
+        while (it.next()) |file| file.close(io);
+        files.deinit(allocator);
+    }
+    var expected: []u8 = &.{};
+    defer allocator.free(expected);
+    var replica: []u8 = &.{};
+    defer allocator.free(replica);
+    const started: std.Io.Timestamp = .now(io, .awake);
+    var checked: usize = 0;
+    var skipped: usize = 0;
+    var checked_bytes: usize = 0;
+    for (tensors, buffers, 0..) |tensor, buffer, i| {
+        if (i % stride != 0 and i != largest) continue;
+        const source = Eligibility.source(store, tensor, buffer) orelse {
+            skipped += 1;
+            continue;
+        };
+        const file = files.get(source.file_uri) orelse blk: {
+            const opened = try std.Io.Dir.openFile(.cwd(), io, source.file_uri, .{ .mode = .read_only });
+            errdefer opened.close(io);
+            try files.put(allocator, source.file_uri, opened);
+            break :blk opened;
+        };
+        const source_bytes: usize = @intCast(source.byteSize());
+        if (expected.len < source_bytes) {
+            allocator.free(expected);
+            expected = &.{};
+            expected = try allocator.alloc(u8, source_bytes);
+        }
+        var reader = zml.safetensors.TensorReader.initBorrowedPositional(io, source.*, file);
+        defer reader.deinit();
+        try reader.readPositionalAll(expected[0..source_bytes], 0);
+
+        if (buffer.byteSize() / buffer.numShards() == source_bytes) {
+            // Every shard holds the whole tensor: compare each replica.
+            if (replica.len < source_bytes) {
+                allocator.free(replica);
+                replica = &.{};
+                replica = try allocator.alloc(u8, source_bytes);
+            }
+            var shards = buffer.shards();
+            var shard_index: usize = 0;
+            while (shards.next()) |shard| : (shard_index += 1) {
+                try shard.toHost(io, replica[0..source_bytes]);
+                try expectSameBytes(source.name, shard_index, expected[0..source_bytes], replica[0..source_bytes]);
+                checked_bytes += source_bytes;
+            }
+        } else {
+            const slice = try buffer.toSliceAlloc(allocator, io);
+            defer slice.free(allocator);
+            try expectSameBytes(source.name, null, expected[0..source_bytes], slice.constData());
+            checked_bytes += source_bytes;
+        }
+        checked += 1;
+    }
+    log.info("load check: ok tensors_checked={d} of {d} skipped={d} bytes={Bi:.2} elapsed={f}", .{
+        checked,
+        tensors.len,
+        skipped,
+        checked_bytes,
+        started.untilNow(io, .awake),
+    });
+}
+
+fn expectSameBytes(name: []const u8, replica: ?usize, expected: []const u8, actual: []const u8) !void {
+    if (actual.len == expected.len and std.mem.eql(u8, expected, actual)) return;
+    const first_bad = std.mem.indexOfDiff(u8, expected, actual) orelse @min(expected.len, actual.len);
+    log.err("load check: mismatch tensor={s} replica={?d} expected_bytes={d} actual_bytes={d} first_difference={d}", .{
+        name,
+        replica,
+        expected.len,
+        actual.len,
+        first_bad,
+    });
+    return error.LoadContentMismatch;
+}
+
+/// `ZML_LOAD_EVENT_RETIRE_CHECK=1`: the loader's event retirement against
+/// the plugin, without the loader. Every device receives a stream of async
+/// host-to-device transfers out of pinned blocks, at most `in_flight` per
+/// device; each event's `onReady` callback hands the event to a retire
+/// task, which destroys it on its own thread right away while the transfers
+/// keep flowing. Events are destroyed before their manager, as the loader
+/// does. A plugin objection shows up here as an error or an abort rather
+/// than inside a load.
+const EventRetireCheck = struct {
+    const Slot = struct {
+        check: *EventRetireCheck,
+        device: usize,
+        block: []u8,
+        event: ?*zml.pjrt.Event = null,
+        err: ?*zml.pjrt.Error = null,
+    };
+
+    io: std.Io,
+    api: *const zml.pjrt.Api,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    /// Callback to retire task: slots whose event fired.
+    fired: std.ArrayListUnmanaged(*Slot),
+    /// Retire task to submitter: slots whose event was destroyed, per device.
+    free: []std.ArrayListUnmanaged(*Slot),
+    fired_count: usize = 0,
+    destroyed: usize = 0,
+    errors: usize = 0,
+    done: bool = false,
+
+    fn onReady(err: ?*zml.pjrt.Error, slot: *Slot) void {
+        const self = slot.check;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        slot.err = err;
+        self.fired.appendAssumeCapacity(slot);
+        self.fired_count += 1;
+        self.condition.broadcast(self.io);
+    }
+
+    fn retire(self: *EventRetireCheck) void {
+        const io = self.io;
+        while (true) {
+            self.mutex.lockUncancelable(io);
+            while (self.fired.items.len == 0 and !self.done) {
+                self.condition.waitUncancelable(io, &self.mutex);
+            }
+            const slot = self.fired.pop() orelse {
+                self.mutex.unlock(io);
+                return;
+            };
+            self.mutex.unlock(io);
+            // Another thread, right after the callback: the pattern under test.
+            const event = slot.event.?;
+            slot.event = null;
+            event.deinit(self.api);
+            const errored = slot.err != null;
+            if (slot.err) |err| err.deinit(self.api);
+            slot.err = null;
+            self.mutex.lockUncancelable(io);
+            self.destroyed += 1;
+            if (errored) self.errors += 1;
+            self.free[slot.device].appendAssumeCapacity(slot);
+            self.condition.broadcast(io);
+            self.mutex.unlock(io);
+        }
+    }
+
+    /// A slot of `device` whose previous event was destroyed.
+    fn takeFree(self: *EventRetireCheck, device: usize) *Slot {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.free[device].items.len == 0) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+        return self.free[device].pop().?;
+    }
+
+    /// Every event of `device` destroyed.
+    fn waitIdle(self: *EventRetireCheck, device: usize, in_flight: usize) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.free[device].items.len != in_flight) {
+            self.condition.waitUncancelable(self.io, &self.mutex);
+        }
+    }
+
+    fn run(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        environ_map: *const std.process.Environ.Map,
+    ) !void {
+        const rounds = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_ROUNDS", 64);
+        const transfer_bytes = try envMib(environ_map, "ZML_LOAD_EVENT_RETIRE_TRANSFER_MIB", 8);
+        const in_flight = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_IN_FLIGHT", 8);
+        const transfers_per_buffer = try envUsize(environ_map, "ZML_LOAD_EVENT_RETIRE_TRANSFERS", 32);
+        if (transfer_bytes == 0 or in_flight == 0 or transfers_per_buffer == 0) return error.InvalidArgument;
+        const buffer_bytes = transfer_bytes * transfers_per_buffer;
+        const device_count = platform.devices.len;
+        const api = platform.pjrt_api;
+
+        const free = try allocator.alloc(std.ArrayListUnmanaged(*Slot), device_count);
+        defer allocator.free(free);
+        @memset(free, .empty);
+        defer for (free) |*list| list.deinit(allocator);
+        for (free) |*list| try list.ensureTotalCapacity(allocator, in_flight);
+        var check: EventRetireCheck = .{
+            .io = io,
+            .api = api,
+            .fired = try .initCapacity(allocator, device_count * in_flight),
+            .free = free,
+        };
+        defer check.fired.deinit(allocator);
+
+        var dma: zml.mem.dma.Allocator = .init(allocator, &platform.devices[0]);
+        const pinned = dma.allocator();
+        const slots = try allocator.alloc(Slot, device_count * in_flight);
+        defer allocator.free(slots);
+        var pinned_count: usize = 0;
+        defer for (slots[0..pinned_count]) |slot| pinned.free(slot.block);
+        for (slots, 0..) |*slot, index| {
+            slot.* = .{
+                .check = &check,
+                .device = index / in_flight,
+                .block = try pinned.alloc(u8, transfer_bytes),
+            };
+            pinned_count += 1;
+            free[slot.device].appendAssumeCapacity(slot);
+        }
+
+        var group: std.Io.Group = .init;
+        try group.concurrent(io, EventRetireCheck.retire, .{&check});
+        defer {
+            check.mutex.lockUncancelable(io);
+            check.done = true;
+            check.condition.broadcast(io);
+            check.mutex.unlock(io);
+            group.await(io) catch {};
+        }
+
+        const shape_spec: zml.pjrt.ShapeSpec = .init(&.{@intCast(buffer_bytes)}, zml.pjrtx.bufferTypeFromDtype(.u8));
+        const managers = try allocator.alloc(*zml.pjrt.AsyncHostToDeviceTransferManager, device_count);
+        defer allocator.free(managers);
+        const buffers = try allocator.alloc(*zml.pjrt.Buffer, device_count);
+        defer allocator.free(buffers);
+        var transfers: usize = 0;
+        const started: std.Io.Timestamp = .now(io, .awake);
+        for (0..rounds) |_| {
+            for (managers, buffers, platform.devices) |*manager, *buffer, *device| {
+                const memory = device.memory(.default).?;
+                manager.* = try platform.pjrt_client.createBuffersForAsyncHostToDevice(api, .{
+                    .shape_specs = &.{shape_spec},
+                    .memory = memory.pjrt_memory,
+                });
+                buffer.* = try manager.*.retrieveBuffer(api, 0);
+            }
+            for (0..transfers_per_buffer) |chunk| {
+                for (managers, 0..) |manager, device_index| {
+                    const slot = check.takeFree(device_index);
+                    const event = try manager.transferData(
+                        api,
+                        0,
+                        slot.block,
+                        @intCast(chunk * transfer_bytes),
+                        chunk + 1 == transfers_per_buffer,
+                    );
+                    slot.event = event;
+                    slot.err = null;
+                    try event.onReady(api, Slot, onReady, slot);
+                    transfers += 1;
+                }
+            }
+            for (managers, buffers, 0..) |manager, buffer, device_index| {
+                const ready = buffer.readyEvent(api);
+                defer ready.deinit(api);
+                try ready.await(api, io);
+                check.waitIdle(device_index, in_flight);
+                buffer.deinit(api);
+                manager.deinit(api);
+            }
+        }
+        const took = started.untilNow(io, .awake);
+        const bytes = transfers * transfer_bytes;
+        check.mutex.lockUncancelable(io);
+        const fired_count = check.fired_count;
+        const destroyed = check.destroyed;
+        const errors = check.errors;
+        check.mutex.unlock(io);
+        log.info("event retire check: devices={d} rounds={d} transfer={Bi:.2} in_flight={d} transfers={d} bytes={Bi:.2} elapsed={f} GiB/s={d:.2} fired={d} destroyed={d} errors={d}", .{
+            device_count,
+            rounds,
+            transfer_bytes,
+            in_flight,
+            transfers,
+            bytes,
+            took,
+            gibPerSecond(bytes, took),
+            fired_count,
+            destroyed,
+            errors,
+        });
+        if (errors != 0 or fired_count != transfers or destroyed != transfers) return error.EventRetireCheckFailed;
+    }
+};
+
+fn gibPerSecond(bytes: usize, took: anytype) f64 {
+    const seconds = @as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s;
+    if (seconds <= 0) return 0;
+    return @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(zml.GiB)) / seconds;
+}
+
+fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    const value = environ_map.get(name) orelse return default;
+    return std.fmt.parseInt(usize, value, 10);
+}
+
+fn envF64(environ_map: *const std.process.Environ.Map, name: []const u8, default: f64) !f64 {
+    const value = environ_map.get(name) orelse return default;
+    return std.fmt.parseFloat(f64, value);
+}
+
+fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = environ_map.get(name) orelse return null;
+    return try std.fmt.parseInt(usize, value, 10);
+}
+
+fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    return std.math.mul(usize, try envUsize(environ_map, name, default), zml.MiB);
+}
+
+fn envMibList(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    name: []const u8,
+    default_bytes: []const usize,
+) ![]const usize {
+    const value = environ_map.get(name) orelse return allocator.dupe(usize, default_bytes);
+    var result: std.ArrayListUnmanaged(usize) = .empty;
+    var values = std.mem.tokenizeScalar(u8, value, ',');
+    while (values.next()) |item| {
+        const mib = try std.fmt.parseInt(usize, item, 10);
+        try result.append(allocator, try std.math.mul(usize, mib, zml.MiB));
+    }
+    if (result.items.len == 0) return error.InvalidArgument;
+    return result.toOwnedSlice(allocator);
 }
 
 const TreeCounts = struct {

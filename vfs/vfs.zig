@@ -7,7 +7,16 @@ pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
-pub const VFSBase = @import("base.zig").VFSBase;
+const base_module = @import("base.zig");
+pub const Backend = base_module.Backend;
+pub const ReadHints = base_module.ReadHints;
+pub const ReadStats = base_module.ReadStats;
+pub const ReadStatsProvider = base_module.ReadStatsProvider;
+pub const VFSBase = base_module.VFSBase;
+
+test {
+    _ = @import("http_acceptance_test.zig");
+}
 
 const log = std.log.scoped(.@"zml/vfs");
 
@@ -16,10 +25,36 @@ const CWD_HANDLE: u32 = 0;
 const VFS = @This();
 const Handle = struct { handle: u32, backend_idx: ?usize, flags: std.Io.File.Flags = .{ .nonblocking = false } };
 
+pub const LoadProfile = struct {
+    /// Generic fallback used by callers that do not prepare a profile from a
+    /// VFS path. This value is borrowed and does not require deinitialization.
+    pub const default: LoadProfile = .{
+        .name = "default",
+        .read_chunk_size = 16 * 1024 * 1024,
+        .high_latency = false,
+        .stats = null,
+    };
+
+    /// Fallback for bare paths when no `file` backend is registered.
+    pub const local: LoadProfile = .{
+        .name = "local",
+        .read_chunk_size = 8 * 1024 * 1024,
+        .high_latency = false,
+        .stats = null,
+    };
+
+    name: []const u8,
+    /// Minimum source request size. The loader may increase it to match the
+    /// independently calibrated DMA block size.
+    read_chunk_size: usize,
+    high_latency: bool,
+    stats: ?ReadStatsProvider,
+};
+
 allocator: std.mem.Allocator,
 mutex: std.Io.Mutex = .init,
 
-backends: std.StringArrayHashMapUnmanaged(std.Io) = .empty,
+backends: std.StringArrayHashMapUnmanaged(Backend) = .empty,
 handles: stdx.SegmentedList(Handle, 128) = .{},
 closed_handles: std.ArrayList(u32) = .empty,
 
@@ -47,7 +82,7 @@ pub fn deinit(self: *VFS) void {
     self.backends.deinit(self.allocator);
 }
 
-pub fn register(self: *VFS, scheme: []const u8, backend: std.Io) std.mem.Allocator.Error!void {
+pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem.Allocator.Error!void {
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
 
@@ -64,29 +99,53 @@ pub fn unregister(self: *VFS, scheme: []const u8) bool {
 pub fn io(self: *VFS) std.Io {
     return .{
         .userdata = &self.base,
-        .vtable = &comptime VFSBase.vtable(.{
-            .operate = operate,
-            .dirOpenDir = dirOpenDir,
-            .dirStat = dirStat,
-            .dirStatFile = dirStatFile,
-            .dirAccess = dirAccess,
-            .dirCreateFile = dirCreateFile,
-            .dirOpenFile = dirOpenFile,
-            .dirClose = dirClose,
-            .dirRead = dirRead,
-            .dirRealPath = dirRealPath,
-            .dirRealPathFile = dirRealPathFile,
-            .fileStat = fileStat,
-            .fileLength = fileLength,
-            .fileClose = fileClose,
-            .fileWritePositional = fileWritePositional,
-            .fileWriteFileStreaming = fileWriteFileStreaming,
-            .fileWriteFilePositional = fileWriteFilePositional,
-            .fileReadPositional = fileReadPositional,
-            .fileSeekBy = fileSeekBy,
-            .fileSeekTo = fileSeekTo,
-            .fileRealPath = fileRealPath,
-        }),
+        .vtable = ioVTable(),
+    };
+}
+
+fn ioVTable() *const std.Io.VTable {
+    return &comptime VFSBase.vtable(.{
+        .operate = operate,
+        .dirOpenDir = dirOpenDir,
+        .dirStat = dirStat,
+        .dirStatFile = dirStatFile,
+        .dirAccess = dirAccess,
+        .dirCreateFile = dirCreateFile,
+        .dirOpenFile = dirOpenFile,
+        .dirClose = dirClose,
+        .dirRead = dirRead,
+        .dirRealPath = dirRealPath,
+        .dirRealPathFile = dirRealPathFile,
+        .fileStat = fileStat,
+        .fileLength = fileLength,
+        .fileClose = fileClose,
+        .fileWritePositional = fileWritePositional,
+        .fileWriteFileStreaming = fileWriteFileStreaming,
+        .fileWriteFilePositional = fileWriteFilePositional,
+        .fileReadPositional = fileReadPositional,
+        .fileSeekBy = fileSeekBy,
+        .fileSeekTo = fileSeekTo,
+        .fileRealPath = fileRealPath,
+    });
+}
+
+/// Prepares the source tuning and feedback provider for one model load. A
+/// bare path resolves through the `file` backend when one is registered and
+/// falls back to `LoadProfile.local` otherwise.
+/// Returned strings and providers borrow backend state, so this VFS and its
+/// registered backend must outlive the load.
+pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
+    const bare = std.mem.indexOf(u8, path, "://") == null;
+    const scheme = if (bare) "file" else (std.Uri.parse(path) catch return error.VFSNotRegistered).scheme;
+    self.mutex.lockUncancelable(self.base.inner);
+    defer self.mutex.unlock(self.base.inner);
+    const index = self.backends.getIndex(scheme) orelse return if (bare) .local else error.VFSNotRegistered;
+    const backend = self.backends.entries.items(.value)[index];
+    return .{
+        .name = self.backends.entries.items(.key)[index],
+        .read_chunk_size = backend.read_hints.read_chunk_size,
+        .high_latency = backend.read_hints.high_latency,
+        .stats = backend.read_stats,
     };
 }
 
@@ -130,7 +189,7 @@ fn getScheme(self: *VFS, backend_idx: ?usize) ?[]const u8 {
 }
 
 fn getBackend(self: *VFS, backend_idx: ?usize) std.Io {
-    if (backend_idx) |idx| return self.backends.entries.items(.value)[idx] else return self.base.inner;
+    if (backend_idx) |idx| return self.backends.entries.items(.value)[idx].io else return self.base.inner;
 }
 
 fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usize, std.Io.Dir, std.Io } {
@@ -405,5 +464,82 @@ fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.
         return prefix.len + path_len;
     } else {
         return try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer);
+    }
+}
+
+test "VFS prepares load profiles for local and registered paths" {
+    var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
+    defer filesystem.deinit();
+    try filesystem.registerBackend("test", .{
+        .io = std.testing.io,
+        .read_hints = .{
+            .read_chunk_size = 32 * 1024 * 1024,
+            .high_latency = true,
+        },
+    });
+
+    const profile = try filesystem.loadProfile("test://bucket/object");
+    try std.testing.expectEqualStrings("test", profile.name);
+    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.read_chunk_size);
+    try std.testing.expect(profile.high_latency);
+
+    const absolute = try filesystem.loadProfile("/tmp/model.safetensors");
+    try std.testing.expectEqualDeep(LoadProfile.local, absolute);
+    const relative = try filesystem.loadProfile("models/model.safetensors");
+    try std.testing.expectEqualDeep(LoadProfile.local, relative);
+    try std.testing.expectError(
+        error.VFSNotRegistered,
+        filesystem.loadProfile("missing://bucket/object"),
+    );
+}
+
+test "VFS reports the configured load profile for every bundled backend" {
+    var client: std.http.Client = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+    defer client.deinit();
+
+    var file: File = .init(std.testing.allocator, std.testing.io, .{});
+    defer file.deinit();
+    var http = try HTTP.init(std.testing.allocator, std.testing.io, &client, .https);
+    defer http.deinit();
+    var s3 = try S3.init(std.testing.allocator, std.testing.io, &client, .{
+        .endpoint_url = "https://s3.amazonaws.com",
+        .region = "us-east-1",
+    }, .{});
+    defer s3.deinit();
+    var gcs = try GCS.init(std.testing.allocator, std.testing.io, &client, .{});
+    defer gcs.deinit();
+    var hf = try HF.init(std.testing.allocator, std.testing.io, &client, null, .{});
+    defer hf.deinit();
+
+    var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
+    defer filesystem.deinit();
+    try filesystem.registerBackend("file", file.backend());
+    try filesystem.registerBackend("https", http.backend());
+    try filesystem.registerBackend("s3", s3.backend());
+    try filesystem.registerBackend("gs", gcs.backend());
+    try filesystem.registerBackend("hf", hf.backend());
+
+    const Case = struct {
+        path: []const u8,
+        name: []const u8,
+        read_chunk_size: usize,
+        high_latency: bool,
+    };
+    const cases = [_]Case{
+        .{ .path = "file:///tmp/model", .name = "file", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
+        .{ .path = "/var/models/model", .name = "file", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
+        .{ .path = "https://example.com/model", .name = "https", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "s3://bucket/model", .name = "s3", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "gs://bucket/model", .name = "gs", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
+        .{ .path = "hf://owner/model", .name = "hf", .read_chunk_size = 32 * 1024 * 1024, .high_latency = true },
+    };
+    for (cases) |case| {
+        const profile = try filesystem.loadProfile(case.path);
+        try std.testing.expectEqualStrings(case.name, profile.name);
+        try std.testing.expectEqual(case.read_chunk_size, profile.read_chunk_size);
+        try std.testing.expectEqual(case.high_latency, profile.high_latency);
     }
 }

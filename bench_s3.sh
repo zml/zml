@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+latency_ms=${LATENCY_MS:-1000}
+speed_mib=${SPEED_MIB:-100}
+aws_endpoint=http://127.0.0.1:7878
+java_bin=${JAVA_BIN:-java}
+s3proxy_jar=${S3PROXY_JAR:-/home/brabier/s3proxy/s3proxy}
+s3proxy_data_dir=${S3PROXY_DATA_DIR:-/home/brabier/s3proxy/data}
+model_uri=${ZML_BENCH_MODEL_URI:-s3://lfm}
+
+if [[ ! "${latency_ms}" =~ ^[0-9]+$ ]] || [[ ! "${speed_mib}" =~ ^[0-9]+$ ]]; then
+    echo "LATENCY_MS and SPEED_MIB must be non-negative integers" >&2
+    exit 2
+fi
+
+speed_bytes_per_ms=$((speed_mib * 1024 * 1024 / 1000))
+
+proxy_pid=
+
+cleanup() {
+    local status=$?
+
+    trap - EXIT
+    if [[ -n "${proxy_pid}" ]] && kill -0 "${proxy_pid}" 2>/dev/null; then
+        kill "${proxy_pid}" 2>/dev/null || true
+        wait "${proxy_pid}" 2>/dev/null || true
+    fi
+
+    exit "${status}"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+"${java_bin}" \
+    -Ds3proxy.authorization='none' \
+    "-Ds3proxy.endpoint=${aws_endpoint}" \
+    "-Ds3proxy.latency-blobstore.*.latency=${latency_ms}" \
+    "-Ds3proxy.latency-blobstore.*.speed=${speed_bytes_per_ms}" \
+    -Djclouds.provider='filesystem' \
+    "-Djclouds.filesystem.basedir=${s3proxy_data_dir}" \
+    -jar "${s3proxy_jar}" \
+    --properties /dev/null &
+proxy_pid=$!
+
+# Do not race the benchmark against the proxy startup. Also fail promptly if the
+# proxy exits before becoming ready.
+for _ in {1..100}; do
+    if ! kill -0 "${proxy_pid}" 2>/dev/null; then
+        wait "${proxy_pid}"
+        echo "s3proxy exited before becoming ready" >&2
+        exit 1
+    fi
+
+    if curl --silent --fail --output /dev/null "${aws_endpoint}/"; then
+        break
+    fi
+
+    sleep 0.1
+done
+
+if ! curl --silent --fail --output /dev/null "${aws_endpoint}/"; then
+    echo "timed out waiting for s3proxy" >&2
+    exit 1
+fi
+
+device_selector=${ONEAPI_DEVICE_SELECTOR:-level_zero:0}
+read_initial_parallelism=${ZML_LOAD_READ_INITIAL_PARALLELISM:-12}
+read_parallelism=${ZML_LOAD_READ_PARALLELISM:-128}
+sharding=${ZML_LOAD_SHARDING:-sharded}
+
+load_env=(
+    "ONEAPI_DEVICE_SELECTOR=${device_selector}"
+    "AWS_ENDPOINT_URL=${aws_endpoint}"
+    "ZML_LOAD_READ_INITIAL_PARALLELISM=${read_initial_parallelism}"
+    "ZML_LOAD_READ_PARALLELISM=${read_parallelism}"
+)
+
+for name in ZML_LOAD_FIXED_READ_PARALLELISM; do
+    if [[ -v "${name}" ]]; then
+        load_env+=("${name}=${!name}")
+    fi
+done
+
+env "${load_env[@]}" \
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load "${model_uri}" "${sharding}"

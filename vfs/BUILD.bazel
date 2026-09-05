@@ -1,19 +1,31 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+VFS_SRCS = [
+    "base.zig",
+    "file.zig",
+    "gcs.zig",
+    "hf.zig",
+    "http.zig",
+    "http_acceptance_test.zig",
+    "range_read.zig",
+    "s3.zig",
+]
 
 zig_library(
     name = "vfs",
     main = "vfs.zig",
-    srcs = [
-        "base.zig",
-        "file.zig",
-        "gcs.zig",
-        "hf.zig",
-        "http.zig",
-        "parallel_read.zig",
-        "s3.zig",
-    ],
+    srcs = VFS_SRCS,
     tags = ["manual"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    srcs = VFS_SRCS,
+    main = "vfs.zig",
     deps = [
         "//stdx",
     ],

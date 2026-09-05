@@ -23,18 +23,18 @@ pub const Dir = struct {
 };
 
 pub const LimitedGroup = struct {
-    limit: usize,
+    limit: std.atomic.Value(usize),
     in_flight: std.atomic.Value(usize) = .init(0),
     group: std.Io.Group = .init,
     cond: std.Io.Condition = .init,
     mutex: std.Io.Mutex = .init,
 
-    fn Wrapper(comptime function: anytype) type {
+    fn Wrapper(comptime function: anytype, comptime cancelable_admission: bool) type {
         return struct {
             fn wrapper(self: *LimitedGroup, io: std.Io, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
                 while (true) {
                     var in_flight = self.in_flight.load(.acquire);
-                    while (in_flight < self.limit) {
+                    while (in_flight < self.limit.load(.acquire)) {
                         if (self.in_flight.cmpxchgWeak(in_flight, in_flight + 1, .release, .acquire)) |actual| {
                             in_flight = actual;
                             continue;
@@ -49,10 +49,18 @@ pub const LimitedGroup = struct {
                         return @call(.auto, function, args);
                     }
 
-                    try self.mutex.lock(io);
+                    if (cancelable_admission) {
+                        try self.mutex.lock(io);
+                    } else {
+                        self.mutex.lockUncancelable(io);
+                    }
                     defer self.mutex.unlock(io);
-                    while (self.in_flight.load(.acquire) >= self.limit) {
-                        try self.cond.wait(io, &self.mutex);
+                    while (self.in_flight.load(.acquire) >= self.limit.load(.acquire)) {
+                        if (cancelable_admission) {
+                            try self.cond.wait(io, &self.mutex);
+                        } else {
+                            self.cond.waitUncancelable(io, &self.mutex);
+                        }
                     }
                 }
             }
@@ -60,15 +68,51 @@ pub const LimitedGroup = struct {
     }
 
     pub fn init(limit: usize) LimitedGroup {
-        return .{ .limit = limit };
+        std.debug.assert(limit > 0);
+        return .{ .limit = .init(limit) };
+    }
+
+    pub fn currentLimit(self: *const LimitedGroup) usize {
+        return self.limit.load(.acquire);
+    }
+
+    pub fn inFlight(self: *const LimitedGroup) usize {
+        return self.in_flight.load(.acquire);
+    }
+
+    pub fn setLimit(self: *LimitedGroup, io: std.Io, new_limit: usize) void {
+        std.debug.assert(new_limit > 0);
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const old_limit = self.limit.swap(new_limit, .acq_rel);
+        if (new_limit > old_limit) {
+            for (old_limit..new_limit) |_| {
+                self.cond.signal(io);
+            }
+        }
     }
 
     pub fn async(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) void {
-        self.group.async(io, Wrapper(function).wrapper, .{ self, io, args });
+        self.group.async(io, Wrapper(function, true).wrapper, .{ self, io, args });
     }
 
     pub fn concurrent(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.ConcurrentError!void {
-        try self.group.concurrent(io, Wrapper(function).wrapper, .{ self, io, args });
+        try self.group.concurrent(io, Wrapper(function, true).wrapper, .{ self, io, args });
+    }
+
+    /// Keeps queued tasks alive through group cancellation so each task can
+    /// run its own cleanup after it acquires an admission slot.
+    pub fn concurrentUncancelableAdmission(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.ConcurrentError!void {
+        try self.group.concurrent(io, Wrapper(function, false).wrapper, .{ self, io, args });
+    }
+
+    /// Runs work on the calling task while sharing this group's admission
+    /// limit. This avoids a task handoff when the caller is already an
+    /// appropriate worker, without allowing more work than `limit`.
+    pub fn callUncancelableAdmission(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
+        try Wrapper(function, false).wrapper(self, io, args);
     }
 
     pub fn await(self: *LimitedGroup, io: std.Io) std.Io.Cancelable!void {
@@ -79,6 +123,120 @@ pub const LimitedGroup = struct {
         self.group.cancel(io);
     }
 };
+
+test "LimitedGroup increases its runtime limit" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+    var release: std.Io.Event = .unset;
+    var started: std.atomic.Value(usize) = .init(0);
+
+    const Worker = struct {
+        fn run(started_: *std.atomic.Value(usize), release_: *std.Io.Event, io_: std.Io) std.Io.Cancelable!void {
+            _ = started_.fetchAdd(1, .release);
+            try release_.wait(io_);
+        }
+    };
+
+    try group.concurrent(io, Worker.run, .{ &started, &release, io });
+    try group.concurrent(io, Worker.run, .{ &started, &release, io });
+
+    while (started.load(.acquire) < 1) try io.sleep(.fromMilliseconds(1), .awake);
+    try std.testing.expectEqual(1, started.load(.acquire));
+
+    group.setLimit(io, 2);
+    while (started.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+    try std.testing.expectEqual(2, group.currentLimit());
+
+    release.set(io);
+    try group.await(io);
+}
+
+test "LimitedGroup decreases without cancelling in-flight work" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(2);
+    var releases: [3]std.Io.Event = @splat(.unset);
+    var started: std.atomic.Value(usize) = .init(0);
+
+    const Worker = struct {
+        fn run(id: usize, started_: *std.atomic.Value(usize), releases_: *[3]std.Io.Event, io_: std.Io) std.Io.Cancelable!void {
+            _ = started_.fetchAdd(1, .release);
+            try releases_[id].wait(io_);
+        }
+    };
+
+    try group.concurrent(io, Worker.run, .{ 0, &started, &releases, io });
+    try group.concurrent(io, Worker.run, .{ 1, &started, &releases, io });
+    while (started.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+
+    group.setLimit(io, 1);
+    try group.concurrent(io, Worker.run, .{ 2, &started, &releases, io });
+    releases[0].set(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(2, started.load(.acquire));
+
+    releases[1].set(io);
+    while (started.load(.acquire) < 3) try io.sleep(.fromMilliseconds(1), .awake);
+    releases[2].set(io);
+    try group.await(io);
+}
+
+test "LimitedGroup cancellation runs cleanup for queued uncancelable admissions" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+    var entered: [2]std.Io.Event = @splat(.unset);
+    var cleaned: [2]std.Io.Event = @splat(.unset);
+    var release: std.Io.Event = .unset;
+
+    const Worker = struct {
+        fn run(id: usize, entered_: *[2]std.Io.Event, cleaned_: *[2]std.Io.Event, release_: *std.Io.Event, io_: std.Io) std.Io.Cancelable!void {
+            entered_[id].set(io_);
+            defer cleaned_[id].set(io_);
+            if (id == 0) try release_.wait(io_);
+        }
+    };
+
+    try group.concurrentUncancelableAdmission(io, Worker.run, .{ 0, &entered, &cleaned, &release, io });
+    try entered[0].wait(io);
+    try group.concurrentUncancelableAdmission(io, Worker.run, .{ 1, &entered, &cleaned, &release, io });
+
+    group.cancel(io);
+    try std.testing.expect(entered[1].isSet());
+    try std.testing.expect(cleaned[0].isSet());
+    try std.testing.expect(cleaned[1].isSet());
+}
+
+test "LimitedGroup can admit work on the calling task" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+    var observed_in_flight: usize = 0;
+
+    const Worker = struct {
+        fn run(group_: *LimitedGroup, observed: *usize) void {
+            observed.* = group_.inFlight();
+        }
+    };
+
+    try group.callUncancelableAdmission(io, Worker.run, .{ &group, &observed_in_flight });
+    try std.testing.expectEqual(1, observed_in_flight);
+    try std.testing.expectEqual(0, group.inFlight());
+}
+
+test "LimitedGroup calling task propagates work cancellation" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+
+    const Worker = struct {
+        fn run() std.Io.Cancelable!void {
+            return error.Canceled;
+        }
+    };
+
+    try std.testing.expectError(
+        error.Canceled,
+        group.callUncancelableAdmission(io, Worker.run, .{}),
+    );
+    try std.testing.expectEqual(0, group.inFlight());
+}
 
 pub const AllocatingLimitedConcurrentGroup = struct {
     allocator: std.mem.Allocator,

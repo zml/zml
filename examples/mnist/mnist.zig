@@ -46,11 +46,12 @@ const Mnist = struct {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
         errdefer unloadBuffers(&buffers);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .default);
-        errdefer loader.deinit();
-
-        try loader.load(io, Mnist, self, &buffers, store, &.{}, .{});
-        try loader.await(io);
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{
+            .read_parallelism = .{ .fixed = 1 },
+        });
+        defer loader.deinit();
+        const weights_handle = try loader.load(Mnist, self, &buffers, store, &.{});
+        try weights_handle.await();
 
         return buffers;
     }
@@ -95,7 +96,6 @@ pub fn main(init: std.process.Init) !void {
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
     var exe = blk: {
