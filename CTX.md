@@ -17,6 +17,39 @@ The tenth-pass review below updates the module/API map and ownership fixes.
 Earlier snapshots and measurements retain their historical names. The current
 reader-facing design is in `docs/learn/loader.md`.
 
+## Loader-owned initialization follow-up (2026-09-05)
+
+The workspace is no longer public API. `mem/dma.zig` exposes only allocation
+adapters and NUMA placement; workspace, arenas, and block pool now live in
+`io/host_memory.zig`. The user's in-progress workspace validation changes were
+preserved when moving that implementation.
+
+`Loader.backendFor(target)` selects direct versus buffered loading explicitly;
+`Workspace.isSupported` and `io.dma.isSupported` are removed. CPU uses the direct
+transfer-manager path with ordinary pages, without implying DMA capability.
+
+Every direct `Loader.init` owns a workspace, calibrates into it, then prepares
+the load's block pool. It frees all of this in `deinit`; workspace borrowing,
+external reuse, and the ownership flag are gone. CPU returns default sizing;
+buffered backends skip calibration. `Loader.Options.dma` configures measurement,
+`.max_host_bytes` and `.numa` configure host memory, and `Loader.calibration()`
+reports the selected sizing. `.dma_workspace`, `.dma_calibration`, and the
+public `io.dma.benchmark` entry point are removed.
+
+LLM calibration no longer runs in a caller-managed future alongside model
+compilation: it happens during loader initialization after compilation. The
+IO diagnostic's dma-bench command initializes a loader with an empty store and
+reports its selected calibration. Repeated loader instances calibrate and own
+separate arena sets; arenas remain reusable across submissions of one loader.
+Earlier sections below describe historical public-workspace APIs.
+
+Verified on macOS arm64 with
+`bazel test //zml:test //examples/io //examples/llm --test_output=errors`:
+core tests passed (259 passed, three skipped) and both examples built.
+Coverage includes backend selection independent of DMA, CPU/default versus
+buffered/absent calibration, and workspace cleanup on initialization failure.
+Zig formatting, Buildifier, and `git diff --check` passed.
+
 ## Current design
 
 ### Scope and API
@@ -2211,9 +2244,6 @@ boundaries and ownership in the code's structure.
 - Calibration reserved manager-list capacity after retrieving an owned PJRT
   buffer; append failure leaked it. Capacity is reserved before creating PJRT
   objects, making publication infallible.
-- A borrowed workspace was never checked against the supplied platform.
-  `Workspace.validateFor` rejects a different platform before loading or
-  calibration can submit memory registered by another client.
 - Recalibration consulted only the newest arena. A smaller arena added during
   loading could cause another calibration-ring allocation despite an older
   sufficient arena. `findArena` searches retained arenas before growing;

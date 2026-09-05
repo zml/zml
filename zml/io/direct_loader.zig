@@ -10,7 +10,7 @@ const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const dma = @import("../mem.zig").dma;
+const host_memory = @import("host_memory.zig");
 const dma_calibration = @import("dma_calibration.zig");
 const dispatch = @import("dispatch_spans.zig");
 const load_limits = @import("limits.zig");
@@ -39,7 +39,7 @@ const load_log = std.log.scoped(.@"zml/io/load");
 /// batch retires.
 const retire_events_early = true;
 
-/// The widest source rung pre-grown when a loader borrows the DMA workspace.
+/// The widest source rung pre-grown during loader initialization.
 const preallocated_source_width = 32;
 
 const max_dma_pieces_per_device: usize = 64;
@@ -52,10 +52,9 @@ pub const Loader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
-    dma_workspace: *dma.Workspace,
-    owns_dma_workspace: bool,
+    workspace: *host_memory.Workspace,
     calibration: dma_calibration.Calibration,
-    pool: dma.BlockPool,
+    pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
     read_gate: RequestGate,
@@ -82,30 +81,14 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: Options,
     ) !*Loader {
-        if (platform.devices.len == 0 or platform.devices.len > 64)
-            return error.DmaDeviceMismatch;
-        var owned_workspace: ?*dma.Workspace = null;
-        const workspace = opts.dma_workspace orelse workspace: {
-            const owned = try allocator.create(dma.Workspace);
-            errdefer allocator.destroy(owned);
-            owned.* = try dma.Workspace.init(allocator, io, platform, .{});
-            owned_workspace = owned;
-            break :workspace owned;
-        };
-        errdefer if (owned_workspace) |owned| {
-            owned.deinit();
-            allocator.destroy(owned);
-        };
-        try workspace.validateFor(platform);
-        try workspace.acquire();
-        errdefer workspace.release();
-        const calibration = opts.dma_calibration orelse dma_calibration.Calibration.default;
-        if (calibration.block_size == 0 or
-            calibration.block_size > load_limits.max_read_request_size or
-            calibration.max_in_flight_per_device == 0 or
-            calibration.max_in_flight_per_device > load_limits.max_dma_parallelism or
-            workspace.maxMappedBytes() < load_limits.max_read_request_size)
-            return error.InvalidDmaLoadConfig;
+        const workspace = try allocator.create(host_memory.Workspace);
+        errdefer allocator.destroy(workspace);
+        workspace.* = try host_memory.Workspace.init(allocator, io, platform, .{
+            .max_mapped_bytes = opts.max_host_bytes,
+            .numa = opts.numa,
+        });
+        errdefer workspace.deinit();
+        const calibration = try dma_calibration.calibrate(workspace, platform, opts.dma);
 
         const request_size = try load_limits.effectiveSourceRequestSize(
             opts.load_profile.read_chunk_size,
@@ -116,15 +99,11 @@ pub const Loader = struct {
             calibration.block_size,
         );
         // The DMA stage of every device, kept mapped as the pool's growth floor.
-        const dma_reserve = try std.math.mul(
-            usize,
-            calibration.max_in_flight_per_device,
-            platform.devices.len,
-        );
+        const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
         // Grow the DMA stage reserve and source working set before reads begin;
-        // the mapped arenas remain in the workspace for later loaders.
+        // calibration arenas become the load's initial capacity.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-        const retained_before = workspace.retainedMappedBytes();
+        const retained_before = workspace.mapped_bytes.load(.acquire);
         try ensureLoadBlockReserve(workspace, calibration.block_size, dma_reserve);
         try ensureSourceWorkingSet(
             workspace,
@@ -133,13 +112,13 @@ pub const Loader = struct {
             preallocated_source_width,
             dma_reserve,
         );
-        const pregrown_bytes = workspace.retainedMappedBytes() - retained_before;
+        const pregrown_bytes = workspace.mapped_bytes.load(.acquire) - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        var pool = try dma.BlockPool.init(
+        var pool = try host_memory.BlockPool.init(
             allocator,
             workspace,
             calibration.block_size,
-            workspace.maxMappedBytes(),
+            workspace.max_mapped_bytes,
             dma_reserve,
         );
         var pool_moved = false;
@@ -177,8 +156,7 @@ pub const Loader = struct {
             .platform = platform,
             .load_profile = opts.load_profile,
             .progress = opts.progress,
-            .dma_workspace = workspace,
-            .owns_dma_workspace = owned_workspace != null,
+            .workspace = workspace,
             .calibration = calibration,
             .pool = pool,
             .scheduler = scheduler,
@@ -251,7 +229,7 @@ pub const Loader = struct {
             self.worker_pool.maximum,
             feasible_width,
             source_concurrency.widths[self.controller_runtime.controller.max_index],
-            self.pool.mappedBytes(),
+            self.pool.mapped_bytes,
             pregrown_bytes,
             @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
         });
@@ -347,10 +325,6 @@ pub const Loader = struct {
         _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
     }
 
-    pub fn bytesLoaded(self: *const Loader) usize {
-        return self.bytes_loaded.load(.acquire);
-    }
-
     /// The front end awaited every batch before this; nothing is queued or
     /// in flight, so stopping the workers is a plain shutdown.
     pub fn destroy(self: *Loader) void {
@@ -365,11 +339,9 @@ pub const Loader = struct {
         self.pipeline.deinit();
         self.scheduler.deinit();
         self.pool.deinit();
-        self.dma_workspace.release();
-        if (self.owns_dma_workspace) {
-            self.dma_workspace.deinit();
-            self.allocator.destroy(self.dma_workspace);
-        }
+
+        self.workspace.deinit();
+        self.allocator.destroy(self.workspace);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -390,7 +362,7 @@ pub const Loader = struct {
             if (spec.source.byteSize() == 0) return error.EmptyTensor;
             item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output);
             initialized += 1;
-            logical_bytes.* = try std.math.add(usize, logical_bytes.*, spec.source.shape.byteSize());
+            logical_bytes.* += spec.source.shape.byteSize();
         }
         return items;
     }
@@ -567,7 +539,7 @@ pub const Loader = struct {
         load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
             self.batch_count,
             !self.pipeline.failed(),
-            self.bytesLoaded(),
+            self.bytes_loaded.load(.acquire),
             secondsBetween(self.created_at, .now(self.io, .awake)),
             reads,
             self.metrics.source_calls.load(.acquire),
@@ -576,8 +548,8 @@ pub const Loader = struct {
             self.controller_runtime.reported_width,
             self.controller_runtime.gate_closed_ticks,
             self.source_request_size,
-            self.pool.highWaterBytes(),
-            self.pool.mappedBytes(),
+            self.pool.high_water * self.pool.block_size,
+            self.pool.mapped_bytes,
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
@@ -945,7 +917,10 @@ const TensorTransfer = struct {
 
         output.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
         const progress = if (progress_parent) |parent|
-            parent.start(source.name, std.math.divCeil(usize, shape.byteSize(), 1024) catch unreachable)
+            parent.start(
+                source.name,
+                shape.byteSize() / 1024 + @intFromBool(shape.byteSize() % 1024 != 0),
+            )
         else
             null;
 
@@ -966,7 +941,7 @@ const TensorTransfer = struct {
     fn recordReadProgress(self: *TensorTransfer, bytes: usize) void {
         const completed = self.completed_read_bytes.fetchAdd(bytes, .acq_rel) + bytes;
         if (self.progress) |*progress| {
-            progress.setCompletedItems(std.math.divCeil(usize, completed, 1024) catch unreachable);
+            progress.setCompletedItems(completed / 1024 + @intFromBool(completed % 1024 != 0));
         }
     }
 };
@@ -1035,11 +1010,7 @@ const Planner = struct {
         block_size: usize,
         request_size: usize,
     ) !*Batch.Plan {
-        const scatter_limit = std.math.mul(
-            usize,
-            block_size,
-            load_limits.max_positional_iovecs,
-        ) catch std.math.maxInt(usize);
+        const scatter_limit = block_size * load_limits.max_positional_iovecs;
         const maximum_job_len = @min(request_size, scatter_limit);
         if (maximum_job_len == 0) return error.InvalidLoaderJob;
         const TensorPlan = struct {
@@ -1128,11 +1099,9 @@ const Planner = struct {
             var candidate_start = run_cursor;
             var boundary_cursor: usize = 0;
             const run_len = run_end - first_offset;
-            var jobs_remaining: usize = @intCast(std.math.divCeil(
-                u64,
-                run_len,
-                @intCast(maximum_job_len),
-            ) catch unreachable);
+            const maximum_job_len_u64: u64 = @intCast(maximum_job_len);
+            var jobs_remaining: usize = @intCast(run_len / maximum_job_len_u64 +
+                @intFromBool(run_len % maximum_job_len_u64 != 0));
             while (jobs_remaining != 0) {
                 const hard_end = @min(
                     run_end,
@@ -1202,7 +1171,7 @@ const Planner = struct {
                     );
                 }
                 std.debug.assert(transfers_list.items.len > transfer_start);
-                const block_len = std.math.divCeil(usize, job_len, block_size) catch unreachable;
+                const block_len = job_len / block_size + @intFromBool(job_len % block_size != 0);
                 try jobs_list.append(allocator, .{
                     .source_slot = items[first_index].source_slot,
                     .file_offset = job_start,
@@ -1310,12 +1279,12 @@ const Planner = struct {
         device_indices: []const usize,
         physical_bytes: []usize,
     ) !void {
-        const piece_end = try std.math.add(usize, tensor_offset, len);
+        const piece_end = tensor_offset + len;
         var cursor = tensor_offset;
         var span_index = spans.spanIndexAt(cursor) orelse return error.InvalidLoaderJob;
         while (cursor < piece_end) {
             const span = spans.spans[span_index];
-            const absolute = try std.math.add(u64, item.source.offset, @as(u64, @intCast(cursor)));
+            const absolute = item.source.offset + @as(u64, @intCast(cursor));
             if (absolute < job_file_offset) return error.InvalidLoaderJob;
             const source_relative = std.math.cast(usize, absolute - job_file_offset) orelse
                 return error.InvalidLoaderJob;
@@ -1353,11 +1322,7 @@ const Planner = struct {
                 mask &= mask - 1;
                 if (writer_index >= device_indices.len) return error.InvalidLoaderJob;
                 const device_index = device_indices[writer_index];
-                physical_bytes[device_index] = try std.math.add(
-                    usize,
-                    physical_bytes[device_index],
-                    take,
-                );
+                physical_bytes[device_index] += take;
             }
             cursor += take;
             if (cursor == span.end) span_index += 1;
@@ -1664,7 +1629,7 @@ const WorkerPool = struct {
 const ReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
-        leased: []dma.BlockPool.Block,
+        leased: []host_memory.BlockPool.Block,
         references: []usize,
         iovecs: [][]u8,
         queue_counts: []usize,
@@ -1674,7 +1639,7 @@ const ReadRequest = struct {
             maximum_blocks: usize,
             device_count: usize,
         ) !Scratch {
-            const leased = try allocator.alloc(dma.BlockPool.Block, maximum_blocks);
+            const leased = try allocator.alloc(host_memory.BlockPool.Block, maximum_blocks);
             errdefer allocator.free(leased);
             const references = try allocator.alloc(usize, maximum_blocks);
             errdefer allocator.free(references);
@@ -1761,7 +1726,8 @@ const ReadRequest = struct {
             pipeline.recordError(err);
             return;
         };
-        const block_count = std.math.divCeil(usize, request_len, pipeline.block_size) catch unreachable;
+        const block_count = request_len / pipeline.block_size +
+            @intFromBool(request_len % pipeline.block_size != 0);
         if (block_count == 0) {
             request.markReadFinished();
             return;
@@ -1955,7 +1921,7 @@ const Pipeline = struct {
     const BlockContext = struct {
         pipeline: *Pipeline,
         request: *RequestContext,
-        lease: dma.BlockPool.Lease,
+        lease: host_memory.BlockPool.Lease,
 
         fn complete(self: *BlockContext) void {
             if (self.lease.complete()) self.request.completeBlock();
@@ -2053,7 +2019,7 @@ const Pipeline = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    pool: *dma.BlockPool,
+    pool: *host_memory.BlockPool,
     read_gate: *RequestGate,
     request_gate: *RequestGate,
     block_size: usize,
@@ -2072,7 +2038,7 @@ const Pipeline = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        pool: *dma.BlockPool,
+        pool: *host_memory.BlockPool,
         read_gate: *RequestGate,
         request_gate: *RequestGate,
         block_size: usize,
@@ -2178,7 +2144,7 @@ const Pipeline = struct {
             for (plan.requests) |*request| {
                 std.debug.assert(request.completed.load(.acquire));
                 for (request.blocks[0..request.blocks_registered]) |*block| {
-                    std.debug.assert(block.lease.isComplete());
+                    std.debug.assert(block.lease.remaining.load(.acquire) == 0);
                 }
             }
         }
@@ -2212,7 +2178,7 @@ const Pipeline = struct {
     fn registerBlock(
         self: *Pipeline,
         request: *RequestContext,
-        dma_block: dma.BlockPool.Block,
+        dma_block: host_memory.BlockPool.Block,
         references: usize,
     ) *BlockContext {
         const block = &request.blocks[request.blocks_registered];
@@ -3038,7 +3004,7 @@ fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anye
 /// Ensures the workspace can feed every calibrated device and hold one
 /// complete fixed-size source request; retained arenas are reused first.
 fn ensureLoadBlockReserve(
-    self: *dma.Workspace,
+    self: *host_memory.Workspace,
     block_size: usize,
     calibrated_reserve: usize,
 ) !void {
@@ -3052,26 +3018,24 @@ fn ensureLoadBlockReserve(
 
 /// Pre-grows `width + 1` source requests beside the DMA reserve.
 fn ensureSourceWorkingSet(
-    self: *dma.Workspace,
+    self: *host_memory.Workspace,
     block_size: usize,
     request_blocks: usize,
     width: usize,
     feed_reserve: usize,
 ) !void {
     if (block_size == 0 or request_blocks == 0) return error.InvalidDmaLoadConfig;
-    const usable = try self.usableBlocks(block_size);
+    const usable = self.usableBlocks(block_size);
     // Reserve first; when not even one request fits beside it the reserve
     // stays non-materialized and the source set alone is fitted.
     var with_reserve = true;
     var fitted_width = width;
     var target: usize = 0;
     while (true) : (fitted_width -= 1) {
-        const source_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
-            return error.DmaMappedBudgetExceeded;
-        target = std.math.add(usize, source_blocks, if (with_reserve) feed_reserve else 0) catch
-            return error.DmaMappedBudgetExceeded;
+        const source_blocks = (fitted_width + 1) * request_blocks;
+        target = source_blocks + if (with_reserve) feed_reserve else 0;
         const growth_bytes = (target -| usable) * block_size;
-        if (self.retainedMappedBytes() +| growth_bytes <= self.maxMappedBytes()) break;
+        if (self.mapped_bytes.load(.acquire) + growth_bytes <= self.max_mapped_bytes) break;
         if (fitted_width == 0) {
             if (!with_reserve) return; // Leave growth to the load.
             with_reserve = false;
@@ -3094,8 +3058,8 @@ fn ensureSourceWorkingSet(
 /// the lifecycle credits bound what the stage holds beyond it.
 fn dmaStageRequests(per_device: usize, devices: usize, block_size: usize, request_size: usize) usize {
     std.debug.assert(request_size > 0);
-    const bytes = per_device *| devices *| block_size;
-    return @max(@as(usize, 1), std.math.divCeil(usize, bytes, request_size) catch 1);
+    const bytes = per_device * devices * block_size;
+    return @max(@as(usize, 1), bytes / request_size + @intFromBool(bytes % request_size != 0));
 }
 
 /// Blind growth is warranted while a high-latency source has not answered
@@ -4313,7 +4277,7 @@ const TestPipeline = struct {
     fn init(
         self: *TestPipeline,
         gate_limit: usize,
-        pool: ?*dma.BlockPool,
+        pool: ?*host_memory.BlockPool,
         scheduler: *Scheduler,
     ) void {
         self.* = .{ .gate = .init(gate_limit), .pipeline = undefined };
@@ -4352,12 +4316,11 @@ const TestPipeline = struct {
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var workspace = try dma.Workspace.initForTesting(allocator, io, 64);
+    var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
     defer workspace.deinit();
-    try workspace.acquire();
-    defer workspace.release();
+
     _ = try workspace.allocate(64);
-    var pool = try dma.BlockPool.init(allocator, &workspace, 64, 64, 0);
+    var pool = try host_memory.BlockPool.init(allocator, &workspace, 64, 64, 0);
     defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
@@ -4370,7 +4333,7 @@ test "late vectored callback failure drains and signals completion" {
     // callback is about to free.
     const batch = try publishTestBatch(&scheduler, 1);
     const request = try fixture.claimRequest(&scheduler);
-    var leased: [1]dma.BlockPool.Block = undefined;
+    var leased: [1]host_memory.BlockPool.Block = undefined;
     try pool.acquireMany(io, &leased);
     const block = pipeline.registerBlock(request, leased[0], 1);
     try std.testing.expect(block == &batch.plans.items[0].blocks[0]);
@@ -4393,7 +4356,7 @@ test "late vectored callback failure drains and signals completion" {
     pipeline.eventCompleted(0, 64);
     try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_events);
     try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].ready_entries);
-    try std.testing.expect(block.lease.isComplete());
+    try std.testing.expect(block.lease.remaining.load(.acquire) == 0);
     try std.testing.expect(request.completed.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
     try std.testing.expect(batch.done.isSet());
@@ -4689,7 +4652,7 @@ const DispatchTest = struct {
         defer allocator.free(written_bytes);
         @memset(written_bytes, 0);
 
-        const request_count = std.math.divCeil(usize, source.len, request_size) catch unreachable;
+        const request_count = source.len / request_size + @intFromBool(source.len % request_size != 0);
         var reverse_index = request_count;
         while (reverse_index > 0) {
             reverse_index -= 1;

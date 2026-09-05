@@ -21,7 +21,12 @@ const Tensor = @import("tensor.zig").Tensor;
 const load_log = std.log.scoped(.@"zml/io/load");
 
 pub const VFS = @import("vfs");
-pub const dma = @import("io/dma_calibration.zig");
+pub const dma = struct {
+    const calibration = @import("io/dma_calibration.zig");
+    pub const Calibration = calibration.Calibration;
+    pub const Options = calibration.Options;
+    pub const default_block_sizes = calibration.default_block_sizes;
+};
 
 pub const limits = @import("io/limits.zig");
 
@@ -72,16 +77,34 @@ pub const Loader = struct {
             .platform = platform,
             .store = store,
             .opts = opts,
-            .backend = if (dma.isSupported(platform))
-                .{ .direct = try DirectLoader.create(allocator, io, platform, opts) }
-            else
-                .{ .buffered = try BufferedLoader.create(
+            .backend = switch (backendFor(platform.target)) {
+                .direct => .{ .direct = try DirectLoader.create(allocator, io, platform, opts) },
+                .buffered => .{ .buffered = try BufferedLoader.create(
                     allocator,
                     io,
                     platform,
                     opts.read_parallelism,
                     opts.load_profile,
                 ) },
+            },
+        };
+    }
+
+    pub const BackendKind = enum { direct, buffered };
+
+    /// Selects the validated transfer path, independently of host pinning.
+    pub fn backendFor(target: platform_mod.Target) BackendKind {
+        return switch (target) {
+            .cuda, .rocm, .oneapi, .cpu => .direct,
+            .tpu, .neuron, .metal => .buffered,
+        };
+    }
+
+    /// Sizing selected during initialization; absent for buffered loading.
+    pub fn calibration(self: *const Loader) ?dma.Calibration {
+        return switch (self.backend) {
+            .direct => |direct| direct.calibration,
+            .buffered => null,
         };
     }
 
@@ -169,8 +192,8 @@ pub const Loader = struct {
     /// Logical bytes of every submission awaited successfully so far.
     pub fn bytesLoaded(self: *const Loader) usize {
         return switch (self.backend) {
-            .direct => |direct| direct.bytesLoaded(),
-            .buffered => |buffered| buffered.bytesLoaded(),
+            .direct => |direct| direct.bytes_loaded.load(.acquire),
+            .buffered => |buffered| buffered.bytes_loaded.load(.acquire),
         };
     }
 
@@ -747,6 +770,11 @@ test "loader handles complete out of order and count bytes once each" {
     for (LoaderTestFixture.backends) |kind| {
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
+        if (kind == .direct) {
+            try std.testing.expectEqual(dma.Calibration.default, loader.calibration().?);
+        } else {
+            try std.testing.expect(loader.calibration() == null);
+        }
 
         const Model = struct { value: Tensor };
         const model: Model = .{ .value = fixture.value };
@@ -893,4 +921,27 @@ test "loader read failure fails every pending handle and later submissions" {
         try std.testing.expectError(error.FileNotFound, loader.awaitAll());
         try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
     }
+}
+
+test "loader selects the transfer path independently of DMA allocation" {
+    for ([_]platform_mod.Target{ .cuda, .rocm, .oneapi, .cpu }) |target|
+        try std.testing.expectEqual(Loader.BackendKind.direct, Loader.backendFor(target));
+    for ([_]platform_mod.Target{ .tpu, .neuron, .metal }) |target|
+        try std.testing.expectEqual(Loader.BackendKind.buffered, Loader.backendFor(target));
+}
+
+test "loader initialization releases its workspace on invalid host budget" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit(allocator, io);
+    const result: anyerror!void = if (Loader.init(allocator, io, fixture.platform, &fixture.store, .{
+        .max_host_bytes = 0,
+    })) |value| unexpected: {
+        var loader = value;
+        loader.deinit();
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.InvalidDmaLoadConfig, result);
 }

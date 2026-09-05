@@ -172,26 +172,26 @@ pub fn main(init: std.process.Init) !void {
                 &zml.io.dma.default_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            var workspace = try zml.mem.dma.Workspace.init(allocator, io, platform, .{
-                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
+            var registry = zml.safetensors.TensorRegistry.init(allocator);
+            defer registry.deinit();
+            var store = zml.io.TensorStore.fromRegistry(allocator, &registry);
+            defer store.deinit();
+            var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
+                .max_host_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
                 .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
-            });
-            defer workspace.deinit();
-            const calibration = try zml.io.dma.benchmark(&workspace, platform, .{
-                .block_sizes = block_sizes,
-                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
-                .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
-                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
-            });
-            try stdout_writer.interface.print(
-                "dma_benchmark block_bytes={d} parallelism={d} max_mapped_bytes={d} retained_mapped_bytes={d}\n",
-                .{
-                    calibration.block_size,
-                    calibration.max_in_flight_per_device,
-                    workspace.maxMappedBytes(),
-                    workspace.retainedMappedBytes(),
+                .dma = .{
+                    .block_sizes = block_sizes,
+                    .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                    .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
+                    .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
+                    .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
                 },
+            });
+            defer loader.deinit();
+            const calibration = loader.calibration() orelse return error.DmaBenchmarkUnsupported;
+            try stdout_writer.interface.print(
+                "dma_benchmark block_bytes={d} parallelism={d}\n",
+                .{ calibration.block_size, calibration.max_in_flight_per_device },
             );
             try stdout_writer.flush();
         },
@@ -232,21 +232,6 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_BLOCK_MIB",
                 &zml.io.dma.default_block_sizes,
             );
-            var dma_workspace: ?zml.mem.dma.Workspace = if (zml.io.dma.isSupported(platform))
-                try .init(allocator, io, platform, .{
-                    .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
-                })
-            else
-                null;
-            defer if (dma_workspace) |*workspace| workspace.deinit();
-            const dma_calibration = if (dma_workspace) |*workspace|
-                try zml.io.dma.benchmark(workspace, platform, .{
-                    .block_sizes = load_dma_block_sizes,
-                    .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                })
-            else
-                null;
-
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
@@ -348,8 +333,11 @@ pub fn main(init: std.process.Init) !void {
                 var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
                 errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
                 var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, &store, .{
-                    .dma_workspace = if (dma_workspace) |*workspace| workspace else null,
-                    .dma_calibration = dma_calibration,
+                    .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
+                    .dma = .{
+                        .block_sizes = load_dma_block_sizes,
+                        .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                    },
                     .shardings = &.{sharded_sharding},
                     .read_parallelism = load_read_parallelism,
                     .load_profile = load_profile,

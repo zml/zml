@@ -51,7 +51,8 @@ everything and reports the first error; `Window.deinit` drains and drops errors.
 | `zml/io/dispatch_spans.zig` | Pure expansion of sharding into source ranges and destination offsets |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
-| `zml/mem/dma.zig` | Host arenas, block leases, placement and allocation adapters |
+| `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
+| `zml/mem/dma.zig` | Host allocation adapters for individual transfers |
 
 The shared front end resolves sources and shardings once. Each `LoadSpec`
 contains a source, target shape, resolved sharding, and caller-owned output.
@@ -77,25 +78,28 @@ uses separate read permits and a byte budget for host staging. CPU, CUDA,
 ROCm and oneAPI use the direct backend; TPU, neuron and metal use the buffered
 backend. CPU's direct arenas are ordinary pages.
 
-## Reusing DMA memory
+## Initialization and host memory
 
-`zml.mem.dma.Workspace` retains host arenas across calibration and loads.
-It belongs to one platform and may be borrowed by only one loader or benchmark
-at a time. A loader creates its own workspace unless `Loader.Options` supplies
-`.dma_workspace`. The supplied workspace must outlive the loader and be
-deinitialized before its platform.
+`Loader.init` selects the transfer path with `Loader.backendFor(target)`.
+That decision describes validated loading behavior, independently of whether
+host memory is pinned or transfers use DMA.
 
-Each direct load builds a `dma.BlockPool` view over the workspace's arenas.
-The workspace owns storage; the pool owns the free list and block leases.
-This permits a later load to use another block size without remapping retained
-memory. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned
-host buffers from PJRT; CPU uses unregistered pages.
+The direct backend owns its workspace for its entire lifetime. Initialization
+allocates that workspace, calibrates transfer sizing, and prepares the block
+pool before returning. Calibration arenas become the load's initial capacity;
+all arenas are released by `Loader.deinit`. Workspace and block-pool types
+are internal to `io/host_memory.zig`.
 
-`zml.io.dma.benchmark` borrows a workspace and returns an immutable
-`dma.Calibration`. Its block size and per-device transfer depth are independent
-of source concurrency. Calibration reuses a retained arena that fits its ring;
-CPU returns defaults without measuring. Callers can omit `.dma_calibration`
-to use the defaults on any supported direct backend.
+Callers configure calibration through `Loader.Options.dma`, host memory limits
+through `.max_host_bytes`, and NUMA placement through `.numa`. They never
+supply a workspace or calibration result. `Loader.calibration()` reports the
+sizing selected during initialization, or null for buffered loading. There is
+no separate public benchmark or recalibration operation.
+
+CPU uses default transfer sizing without measurement. Buffered backends skip
+calibration. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned
+host buffers from PJRT; CPU uses unregistered pages. The arena allocation
+strategy and the loader's transfer path are separate decisions.
 
 The source profile supplies a minimum read size. The effective request size
 is the larger of that minimum and the selected DMA block, within the supported

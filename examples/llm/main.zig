@@ -13,16 +13,6 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.llm);
 
-fn benchmarkDmaIfPresent(
-    workspace: ?*zml.mem.dma.Workspace,
-    platform: *const zml.Platform,
-) !?zml.io.dma.Calibration {
-    return if (workspace) |available|
-        try zml.io.dma.benchmark(available, platform, .{})
-    else
-        null;
-}
-
 const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -97,17 +87,6 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var dma_workspace: ?zml.mem.dma.Workspace = if (zml.io.dma.isSupported(platform))
-        try .init(allocator, io, platform, .{})
-    else
-        null;
-    defer if (dma_workspace) |*workspace| workspace.deinit();
-    var dma_benchmark_fut = try io.concurrent(
-        benchmarkDmaIfPresent,
-        .{ if (dma_workspace) |*workspace| workspace else null, platform },
-    );
-    defer _ = dma_benchmark_fut.cancel(io) catch {};
-
     const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
         try zml.attention.attnd.register(allocator, io, platform, .{
             .destination = try .parseLiteral(attnd_ip),
@@ -141,6 +120,19 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
+    // Defines how the model's tensors are sharded across the available devices.
+    const shardings: models.Shardings = try .init(platform);
+
+    // Load buffers after compilation to leave enough device memory for autotuning.
+    const load_profile = try vfs.loadProfile(args.model);
+    const all_shardings = shardings.all();
+    var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
+        .progress = &progress,
+        .shardings = &all_shardings,
+        .load_profile = load_profile,
+    });
+    defer loader.deinit();
+
     const generation: models.GenerationOptions = .{
         .sampling_strategy = .{
             .topk = args.topk,
@@ -150,9 +142,6 @@ pub fn main(init: std.process.Init) !void {
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
     defer model.deinit(allocator);
 
-    // Defines how the model's tensors are sharded across the available devices.
-    const shardings: models.Shardings = try .init(platform);
-
     //
     // Load the model and compile it
     //
@@ -161,19 +150,7 @@ pub fn main(init: std.process.Init) !void {
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    // Load buffers after compilation to leave enough device memory for autotuning.
-    const load_profile = try vfs.loadProfile(args.model);
-    const dma_calibration = try dma_benchmark_fut.await(io);
     progress.increaseEstimatedTotalItems(store.view().count());
-    const all_shardings = shardings.all();
-    var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
-        .dma_workspace = if (dma_workspace) |*workspace| workspace else null,
-        .dma_calibration = dma_calibration,
-        .progress = &progress,
-        .shardings = &all_shardings,
-        .load_profile = load_profile,
-    });
-    defer loader.deinit();
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, &loader);
     defer model.unloadBuffers(&model_buffers, allocator);
 

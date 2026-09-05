@@ -99,6 +99,7 @@ zig_library(
         "io/direct_loader.zig",
         "io/dispatch_spans.zig",
         "io/dma_calibration.zig",
+        "io/host_memory.zig",
         "io/limits.zig",
         "io/loader_types.zig",
         "io/source_concurrency.zig",

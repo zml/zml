@@ -96,10 +96,6 @@ pub const Loader = struct {
         _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
     }
 
-    pub fn bytesLoaded(self: *const Loader) usize {
-        return self.bytes_loaded.load(.acquire);
-    }
-
     /// Every batch was awaited, so the group is idle.
     pub fn destroy(self: *Loader) void {
         self.group.await(self.io) catch {};
@@ -166,7 +162,8 @@ pub const Loader = struct {
         // most workers this tensor can use.
         const useful_workers = @min(
             self.tensor_workers,
-            std.math.divCeil(usize, destination.len, self.read_chunk_size) catch 1,
+            destination.len / self.read_chunk_size +
+                @intFromBool(destination.len % self.read_chunk_size != 0),
         );
 
         self.permits.acquire(self.io);
@@ -244,7 +241,7 @@ const StagingAdmission = struct {
     /// Raises the budget to `slots` of `largest`. Submissions only ever widen
     /// it, so a later, bigger tensor cannot shrink what is already running.
     fn widen(self: *StagingAdmission, io: std.Io, largest: usize, slots: usize) void {
-        const wanted = std.math.mul(usize, largest, @max(1, slots)) catch std.math.maxInt(usize);
+        const wanted = largest *| @max(1, slots);
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (wanted <= self.budget) return;
@@ -352,8 +349,8 @@ const ChunkedRead = struct {
         var start = self.next.load(.monotonic);
         while (start < self.destination.len) {
             const workers = @max(1, self.workers.load(.monotonic));
-            const share = std.math.divCeil(usize, self.destination.len, workers) catch
-                self.destination.len;
+            const share = self.destination.len / workers +
+                @intFromBool(self.destination.len % workers != 0);
             const len = @min(@max(self.chunk_size, share), self.destination.len - start);
             if (self.next.cmpxchgWeak(start, start + len, .monotonic, .monotonic)) |actual| {
                 start = actual;

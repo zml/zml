@@ -2,8 +2,9 @@ const std = @import("std");
 
 const pjrt = @import("pjrt");
 
-const mem = @import("../mem.zig");
+const host_memory = @import("host_memory.zig");
 const platform_mod = @import("../platform.zig");
+const Platform = platform_mod.Platform;
 const limits = @import("limits.zig");
 
 const log = std.log.scoped(.@"zml/io");
@@ -44,31 +45,22 @@ pub const Options = struct {
     block_selection_tolerance: f64 = 0.08,
 };
 
-/// Measures one representative device using the supplied reusable mapped
-/// workspace and returns the selected immutable calibration. On CPU it
-/// returns the defaults without measuring.
-pub fn benchmark(
-    workspace: *mem.dma.Workspace,
+/// Called only during direct-loader initialization. Measures one representative
+/// device into the loader-owned workspace; CPU returns defaults without measuring.
+pub fn calibrate(
+    workspace: *host_memory.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !Calibration {
-    if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
-    try workspace.validateFor(platform);
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread and a load takes the same time at every block
     // size, so the defaults stand and the loader grows its own arenas.
     if (platform.target == .cpu) return .default;
-    try mem.dma.Workspace.validatePlatform(platform);
-    try workspace.acquire();
-    defer workspace.release();
-    try validateOptions(opts, workspace.maxMappedBytes());
+
+    try validateOptions(opts, workspace.max_mapped_bytes);
     const result = try measureTransfer(workspace, platform, opts);
     logReport(platform, &result);
     return result.calibration;
-}
-
-pub fn isSupported(platform: *const platform_mod.Platform) bool {
-    return mem.dma.Workspace.isSupported(platform);
 }
 
 const sample_count = 3;
@@ -90,7 +82,7 @@ const Report = struct {
 /// Every addressable device allocator is still warmed; benchmark allocations
 /// remain mapped in the supplied workspace for later use.
 fn measureTransfer(
-    workspace: *mem.dma.Workspace,
+    workspace: *host_memory.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !Report {
@@ -126,7 +118,7 @@ fn measureTransfer(
     };
     return .{
         .calibration = calibration,
-        .retained_mapped_bytes = workspace.retainedMappedBytes(),
+        .retained_mapped_bytes = workspace.mapped_bytes.load(.acquire),
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
@@ -140,12 +132,12 @@ fn measureTransfer(
 fn selectBlockSize(
     session: *Session,
     opts: Options,
-    workspace: *mem.dma.Workspace,
+    workspace: *host_memory.Workspace,
 ) !Selection {
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!fitsWorkspace(workspace.maxMappedBytes(), block_size, opts.block_parallelism))
+        if (!fitsWorkspace(workspace.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
@@ -159,7 +151,7 @@ fn selectBlockSize(
     defer session.allocator.free(block_candidates);
     var block_index: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!fitsWorkspace(workspace.maxMappedBytes(), block_size, opts.block_parallelism))
+        if (!fitsWorkspace(workspace.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_candidates[block_index] = .{
             .block_size = block_size,
@@ -172,8 +164,7 @@ fn selectBlockSize(
 }
 
 fn fitsWorkspace(max_mapped_bytes: usize, block_size: usize, parallelism: usize) bool {
-    const bytes = std.math.mul(usize, block_size, parallelism) catch return false;
-    return bytes <= max_mapped_bytes;
+    return parallelism != 0 and block_size <= max_mapped_bytes / parallelism;
 }
 
 fn measureCandidates(
@@ -481,7 +472,7 @@ const Selection = struct {
 const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const platform_mod.Platform,
+    platform: *const Platform,
     cohorts: std.ArrayListUnmanaged(*Cohort) = .empty,
 
     fn createCohort(
@@ -502,7 +493,7 @@ const Session = struct {
         return cohort;
     }
 
-    fn deinit(self: *Session, workspace: *const mem.dma.Workspace) void {
+    fn deinit(self: *Session, workspace: *const host_memory.Workspace) void {
         for (self.cohorts.items) |cohort| {
             cohort.deinit(workspace.findArena(cohort.block_size) orelse unreachable);
             self.allocator.destroy(cohort);
@@ -573,7 +564,7 @@ const Cohort = struct {
     }
 
     fn ensureReady(self: *Cohort, source: []const u8, parallelism: usize) !void {
-        const required_bytes = std.math.mul(usize, self.block_size, parallelism) catch return error.OutOfMemory;
+        const required_bytes = self.block_size * parallelism;
         if (required_bytes > source.len) return error.DmaBenchmarkPinnedBudgetExceeded;
         var dims = [_]i64{@intCast(self.block_size)};
         const shape_spec: pjrt.ShapeSpec = .init(&dims, .u8);
@@ -681,29 +672,11 @@ fn testPlatform(target: platform_mod.Target) platform_mod.Platform {
 
 test "DMA benchmark on CPU returns the defaults without mapping" {
     const platform = testPlatform(.cpu);
-    var workspace = try mem.dma.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
-    workspace.platform = &platform;
+    var workspace = try host_memory.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
+    workspace.backend = .{ .pageable = .{ .platform = &platform } };
     defer workspace.deinit();
-    try std.testing.expectEqual(Calibration.default, try benchmark(&workspace, &platform, .{}));
-    try std.testing.expectEqual(0, workspace.retainedMappedBytes());
-}
-
-test "DMA benchmark supports the DMA targets and CPU and reports the buffered platforms as unsupported" {
-    var platform = testPlatform(.cpu);
-    const cases = [_]struct { target: platform_mod.Target, supported: bool }{
-        .{ .target = .cuda, .supported = true },
-        .{ .target = .rocm, .supported = true },
-        .{ .target = .oneapi, .supported = true },
-        .{ .target = .cpu, .supported = true },
-        .{ .target = .tpu, .supported = false },
-        .{ .target = .neuron, .supported = false },
-        .{ .target = .metal, .supported = false },
-    };
-    for (cases) |case| {
-        platform.target = case.target;
-        platform.state = .init(case.target);
-        try std.testing.expectEqual(case.supported, isSupported(&platform));
-    }
+    try std.testing.expectEqual(Calibration.default, try calibrate(&workspace, &platform, .{}));
+    try std.testing.expectEqual(0, workspace.mapped_bytes.load(.acquire));
 }
 
 test "DMA benchmark validates options" {

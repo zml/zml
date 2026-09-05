@@ -21,11 +21,12 @@ pub const Options = struct {
     /// Model-wide source tuning prepared from the VFS path. The default is
     /// generic for callers that do not have an explicit VFS profile.
     load_profile: VFS.LoadProfile = .default,
-    /// Reuses existing mapped DMA source memory. A supplied workspace must outlive
-    /// the loader and may be used by only one benchmark or loader at a time.
-    dma_workspace: ?*mem.dma.Workspace = null,
-    /// DMA transfer sizing. The loader uses `Calibration.default` when absent.
-    dma_calibration: ?dma.Calibration = null,
+    /// Calibrate transfer sizing during initialization. Ignored by buffered
+    /// backends; CPU uses the default sizing without measurement.
+    dma: dma.Options = .{},
+    /// Upper bound for the direct backend's host arenas, not a growth target.
+    max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
+    numa: mem.dma.NumaPlacement = .memory_nodes,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
 };
