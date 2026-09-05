@@ -5,7 +5,7 @@
 //!   3. time embed every σ → AdaLN tables (4 unique time slots)
 //!   4. scatter text + noisy audio + noisy video into one sequence
 //!   5. 50 AdaLN blocks (one compiled layer, one runner per block)
-//!   6. project video/audio rows → velocity v; Euler both
+//!   6. AdaLN the packed sequence, fp32 video/audio heads, gather rows, Euler both
 //!   7. Euler (η=0): x0 = x + σ v;  x' = (σ'/σ) x + (1 − σ'/σ) x0
 //!
 //! Block:
@@ -464,7 +464,10 @@ const PatchEmbed = struct {
     }
 };
 
-/// Gather video and audio rows, AdaLN, project to velocity tokens.
+/// Final RMS/AdaLN on the packed sequence, then the two fp32 velocity heads.
+///
+/// AdaLN stays at block precision; both heads run on the fp32 sequence, then
+/// video/audio rows are gathered. `proj_out` / `audio_proj_out` are float32.
 const FinishCore = struct {
     norm: zml.nn.RmsNorm,
     video_out: zml.nn.Linear,
@@ -480,24 +483,18 @@ const FinishCore = struct {
     };
     pub const Output = struct { video: zml.Tensor, audio: zml.Tensor };
 
-    fn modulateRows(norm: zml.nn.RmsNorm, hidden: zml.Tensor, mods: zml.Tensor, timestep_indices: zml.Tensor) zml.Tensor {
-        const n = norm.forward(hidden.withPartitioning(.{ .d = .replicated }));
-        const selected = mods.gather(.{ .n = timestep_indices }, .{});
-        const shift, const scale = selected.chunkExact(.k, 2);
-        return shiftScale(n, shift, scale);
-    }
-
     pub fn forward(input: Input) Output {
         const mods = input.table.gather(.{ .t = input.step }, .{});
-        const video_h = input.hidden.gather(.{ .s = input.video_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
-        const audio_h = input.hidden.gather(.{ .s = input.audio_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
-        const video_t = input.timestep_indices.gather(.{ .s = input.video_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
-        const audio_t = input.timestep_indices.gather(.{ .s = input.audio_indices.withTags(.{.idx}) }, .{}).rename(.{ .idx = .s });
-        const video_m = modulateRows(input.model.norm, video_h, mods, video_t);
-        const audio_m = modulateRows(input.model.norm, audio_h, mods, audio_t);
+        const n = input.model.norm.forward(input.hidden.withPartitioning(.{ .d = .replicated }));
+        const selected = mods.gather(.{ .n = input.timestep_indices }, .{});
+        const shift, const scale = selected.chunkExact(.k, 2);
+        const head_dt = input.model.video_out.weight.dtype();
+        const h = shiftScale(n, shift, scale).convert(head_dt);
+        const video_idx = input.video_indices.withTags(.{.idx});
+        const audio_idx = input.audio_indices.withTags(.{.idx});
         return .{
-            .video = input.model.video_out.forward(video_m.convert(input.model.video_out.weight.dtype())),
-            .audio = input.model.audio_out.forward(audio_m.convert(input.model.audio_out.weight.dtype())),
+            .video = input.model.video_out.forward(h).gather(.{ .s = video_idx }, .{}).rename(.{ .idx = .s, .dout = .d }),
+            .audio = input.model.audio_out.forward(h).gather(.{ .s = audio_idx }, .{}).rename(.{ .idx = .s, .dout = .d }),
         };
     }
 };
@@ -894,12 +891,7 @@ fn denoiseDit(
             .outputs = .{ .hidden = &hidden },
             .opts = .{ .wait = true },
         });
-        var held: std.ArrayList(zml.Buffer) = .empty;
-        defer {
-            for (held.items) |*buf| buf.deinit();
-            held.deinit(allocator);
-        }
-        try held.append(allocator, hidden);
+        defer hidden.deinit();
 
         for (block_runners, tables) |*block_runner, table| {
             var next: zml.Buffer = undefined;
@@ -915,8 +907,8 @@ fn denoiseDit(
                 .outputs = .{ .hidden = &next },
                 .opts = .{ .wait = true },
             });
+            hidden.deinit();
             hidden = next;
-            try held.append(allocator, next);
         }
 
         var video_out: zml.Buffer = undefined;

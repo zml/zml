@@ -24,7 +24,7 @@ pub const timestep_slot_count: u32 = 4;
 /// One packed sequence: text rows, then audio rows, then video-patch rows.
 ///
 /// `positions` is `[seq, 3]` (t, h, w). Text uses `(token_index, 0, 0)`.
-/// Audio uses `(text_len + t, 0, w_low|w_high)`. Video RoPE `t` continues after audio.
+/// Audio uses `(text_len + t, 0, w_low|w_high)`. Video RoPE `t` shares that origin.
 pub const Layout = struct {
     positions: []f32,
     token_tags: []u8,
@@ -217,7 +217,6 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
             a += 1;
         }
     }
-    cursor += @as(f64, @floatFromInt(geo.audio_t));
 
     var v: u32 = 0;
     for (0..geo.latent_t) |ti| {

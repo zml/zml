@@ -154,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     defer tokenizer.deinit();
     var tok_enc = try tokenizer.encoder();
     defer tok_enc.deinit();
-    const tokens = try tok_enc.encodeAlloc(allocator, args.prompt);
+    const tokens = try tok_enc.encodeAlloc(allocator, std.mem.trimEnd(u8, args.prompt, "\r\n"));
     defer allocator.free(tokens);
     log.info("prompt tokens={d}", .{tokens.len});
 
