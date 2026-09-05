@@ -2070,9 +2070,12 @@ backend, byte for byte, until their transfer path can be measured.
   one through `Loader.init`, the buffered one built directly, since nothing
   else in the tree constructs it any more.
 - Nothing in `direct_loader.zig` changed. The pipeline, the width
-  controller, the pumps and the calibration run on CPU as they are; on CPU
-  the calibration measures a memcpy (2 MiB at 102 GiB/s, 607 ms, four CPU
-  devices) and `transferData` is the plugin's copy.
+  controller and the pumps run on CPU as they are, and `transferData` is
+  the plugin's copy. `dma.benchmark` returns `Calibration.default` on CPU
+  without measuring (2026-09-05): the first CPU pass measured a memcpy
+  (2 MiB at 102 GiB/s in 607 ms for four CPU devices) and the load took the
+  same 1.55 to 1.60 s at 2, 8 and 16 MiB blocks, so there was nothing to
+  select. The loader pre-grows its arenas itself.
 
 ### Why: the buffered read model, not its budget, was the problem
 

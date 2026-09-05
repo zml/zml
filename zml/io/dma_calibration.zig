@@ -60,13 +60,18 @@ const BenchmarkReport = struct {
 };
 
 /// Measures one representative device using the supplied reusable mapped
-/// workspace and returns the selected immutable calibration.
+/// workspace and returns the selected immutable calibration. On CPU it
+/// returns the defaults without measuring.
 pub fn benchmark(
     source_pools: *mem.DmaWorkspace,
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !Calibration {
     if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
+    // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
+    // the submitting thread and a load takes the same time at every block
+    // size, so the defaults stand and the loader grows its own arenas.
+    if (platform.target == .cpu) return .default;
     try mem.DmaWorkspace.validatePlatform(platform);
     try source_pools.acquire();
     defer source_pools.release();
@@ -687,19 +692,32 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "DMA benchmark supports the DMA targets and CPU and reports the buffered platforms as unsupported" {
-    var platform: platform_mod.Platform = .{
+/// A platform with only the fields the calibration decisions read.
+fn testPlatform(target: platform_mod.Target) platform_mod.Platform {
+    return .{
         .arena = undefined,
-        .target = .cpu,
+        .target = target,
         .pjrt_api = undefined,
         .pjrt_client = undefined,
-        .state = .init(.cpu),
+        .state = .init(target),
         .devices = &.{},
         .memories = &.{},
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,
     };
+}
+
+test "DMA benchmark on CPU returns the defaults without mapping" {
+    const platform = testPlatform(.cpu);
+    var workspace = try mem.DmaWorkspace.initForTesting(std.testing.allocator, std.testing.io, 64);
+    defer workspace.deinit();
+    try std.testing.expectEqual(Calibration.default, try benchmark(&workspace, &platform, .{}));
+    try std.testing.expectEqual(0, workspace.retainedMappedBytes());
+}
+
+test "DMA benchmark supports the DMA targets and CPU and reports the buffered platforms as unsupported" {
+    var platform = testPlatform(.cpu);
     const cases = [_]struct { target: platform_mod.Target, supported: bool }{
         .{ .target = .cuda, .supported = true },
         .{ .target = .rocm, .supported = true },

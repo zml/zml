@@ -196,17 +196,18 @@ const Mnist = struct {
 ```
 
 Direct CUDA, ROCm, oneAPI and CPU loaders (CPU arenas are plain pages) use
-platform-owned 4 MiB/eight-transfer per-device defaults. A DMA setup failure does not change the selected platform;
-the model-wide loader reports `DmaResourcesRequired` until settings are
-available. Applications may optionally warm the device allocators and calibrate
-synthetic transfers once before loading:
+platform-owned 4 MiB/eight-transfer per-device defaults. Applications may
+optionally calibrate synthetic transfers once before loading and hand the
+result to the loader:
 
 ```zig
-try platform.warmupDeviceAllocators();
-try platform.benchTransfer(allocator, io, .{});
+var pools = try zml.mem.DmaWorkspace.init(allocator, io, platform, .{});
+const calibration = try zml.io.dma.benchmark(&pools, platform, .{});
 ```
 
-`benchTransfer` is a no-op when the selected platform is CPU.
+`benchmark` warms every device allocator first. On CPU it returns the
+defaults without measuring: the plugin's transfer is a memcpy, and a load
+takes the same time at every block size.
 
 For a full walkthrough, see:
 
