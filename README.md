@@ -195,8 +195,8 @@ const Mnist = struct {
 };
 ```
 
-Direct CUDA, ROCm, and oneAPI loaders use platform-owned 4 MiB/eight-transfer
-per-device defaults. A DMA setup failure does not change the selected platform;
+Direct CUDA, ROCm, oneAPI and CPU loaders (CPU arenas are plain pages) use
+platform-owned 4 MiB/eight-transfer per-device defaults. A DMA setup failure does not change the selected platform;
 the model-wide loader reports `DmaResourcesRequired` until settings are
 available. Applications may optionally warm the device allocators and calibrate
 synthetic transfers once before loading:

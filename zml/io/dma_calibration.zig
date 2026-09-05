@@ -687,7 +687,7 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "DMA benchmark reports buffered platforms as unsupported" {
+test "DMA benchmark supports the DMA targets and CPU and reports the buffered platforms as unsupported" {
     var platform: platform_mod.Platform = .{
         .arena = undefined,
         .target = .cpu,
@@ -700,8 +700,20 @@ test "DMA benchmark reports buffered platforms as unsupported" {
         .replicated_sharding = undefined,
         .shardings = .empty,
     };
-
-    try std.testing.expect(!isSupported(&platform));
+    const cases = [_]struct { target: platform_mod.Target, supported: bool }{
+        .{ .target = .cuda, .supported = true },
+        .{ .target = .rocm, .supported = true },
+        .{ .target = .oneapi, .supported = true },
+        .{ .target = .cpu, .supported = true },
+        .{ .target = .tpu, .supported = false },
+        .{ .target = .neuron, .supported = false },
+        .{ .target = .metal, .supported = false },
+    };
+    for (cases) |case| {
+        platform.target = case.target;
+        platform.state = .init(case.target);
+        try std.testing.expectEqual(case.supported, isSupported(&platform));
+    }
 }
 
 test "DMA benchmark validates options" {

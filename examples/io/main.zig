@@ -659,7 +659,11 @@ fn dmaConcurrent(
         }
     };
 
-    var dma_map: zml.mem.DmaMapAllocator = .init(std.heap.page_allocator, platform);
+    // The CPU plugin has no `dmaMap`; its transfers read plain pages.
+    var dma_map: zml.mem.DmaMapAllocator = if (platform.target == .cpu)
+        .initPageable(std.heap.page_allocator)
+    else
+        .init(std.heap.page_allocator, platform);
     const pinned = dma_map.allocator();
     const bytes = try allocator.alloc(std.atomic.Value(u64), device_count);
     defer allocator.free(bytes);

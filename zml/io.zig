@@ -364,6 +364,11 @@ pub const Loader = struct {
     /// the open ones and frees them all; a `Handle` is invalid afterwards.
     handles: std.ArrayListUnmanaged(*HandleState) = .empty,
 
+    /// `direct` reads into host arenas the platform's async transfer
+    /// manager copies from piecewise: the DMA targets with pinned arenas,
+    /// and CPU with plain pages. `buffered` stages whole tensors for
+    /// `Buffer.from`: TPU, neuron and metal, whose transfer path has not
+    /// been measured.
     const Backend = union(enum) {
         direct: *DirectLoader,
         buffered: *BufferedLoader,
@@ -1391,10 +1396,30 @@ const LoaderTestFixture = struct {
         self.tmp.cleanup();
     }
 
-    fn loader(self: *LoaderTestFixture, allocator: std.mem.Allocator, io: std.Io) !Loader {
-        return Loader.init(allocator, io, self.platform, &self.store, .{
-            .read_parallelism = .{ .fixed = 2 },
-        });
+    const BackendKind = enum { direct, buffered };
+    /// The platform picks the backend; the tests run both on the CPU
+    /// platform, since nothing else in the tree constructs the buffered one.
+    const backends = [_]BackendKind{ .direct, .buffered };
+
+    fn loader(self: *LoaderTestFixture, allocator: std.mem.Allocator, io: std.Io, kind: BackendKind) !Loader {
+        const opts: Loader.Opts = .{ .read_parallelism = .{ .fixed = 2 } };
+        return switch (kind) {
+            .direct => try Loader.init(allocator, io, self.platform, &self.store, opts),
+            .buffered => .{
+                .allocator = allocator,
+                .io = io,
+                .platform = self.platform,
+                .store = &self.store,
+                .opts = opts,
+                .backend = .{ .buffered = try BufferedLoader.create(
+                    allocator,
+                    io,
+                    self.platform,
+                    opts.read_parallelism,
+                    opts.load_profile,
+                ) },
+            },
+        };
     }
 
     fn binding(self: *const LoaderTestFixture, tensor: Tensor, output: *Buffer) Loader.Binding {
@@ -1503,42 +1528,44 @@ test "loader handles complete out of order and count bytes once each" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
-    var loader = try fixture.loader(allocator, io);
-    defer loader.deinit();
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
 
-    const Model = struct { value: Tensor };
-    const model: Model = .{ .value = fixture.value };
-    var buffers = try mem.bufferize(allocator, Model, &model);
-    defer mem.deinitBufferized(allocator, Model, &buffers);
+        const Model = struct { value: Tensor };
+        const model: Model = .{ .value = fixture.value };
+        var buffers = try mem.bufferize(allocator, Model, &model);
+        defer mem.deinitBufferized(allocator, Model, &buffers);
 
-    var first: Buffer = undefined;
-    const a = try loader.loadExecute(&.{fixture.binding(fixture.value, &first)});
-    var second: Buffer = undefined;
-    const b = try loader.loadExecute(&.{fixture.binding(fixture.second, &second)});
-    const c = try loader.load(Model, &model, &buffers);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len, a.logicalBytes());
+        var first: Buffer = undefined;
+        const a = try loader.loadExecute(&.{fixture.binding(fixture.value, &first)});
+        var second: Buffer = undefined;
+        const b = try loader.loadExecute(&.{fixture.binding(fixture.second, &second)});
+        const c = try loader.load(Model, &model, &buffers);
+        try std.testing.expectEqual(LoaderTestFixture.contents.len, a.logicalBytes());
 
-    try b.await();
-    defer second.deinit();
-    try LoaderTestFixture.expectContents(allocator, io, &second, &LoaderTestFixture.second_contents);
-    try a.await();
-    defer first.deinit();
-    try LoaderTestFixture.expectContents(allocator, io, &first, &LoaderTestFixture.contents);
-    try c.await();
-    try LoaderTestFixture.expectContents(allocator, io, &buffers.value, &LoaderTestFixture.contents);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
+        try b.await();
+        defer second.deinit();
+        try LoaderTestFixture.expectContents(allocator, io, &second, &LoaderTestFixture.second_contents);
+        try a.await();
+        defer first.deinit();
+        try LoaderTestFixture.expectContents(allocator, io, &first, &LoaderTestFixture.contents);
+        try c.await();
+        try LoaderTestFixture.expectContents(allocator, io, &buffers.value, &LoaderTestFixture.contents);
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
 
-    // Idempotent: a second await neither reruns nor recounts.
-    try std.testing.expect(a.isDone());
-    try a.await();
-    try loader.awaitAll();
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
+        // Idempotent: a second await neither reruns nor recounts.
+        try std.testing.expect(a.isDone());
+        try a.await();
+        try loader.awaitAll();
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
 
-    const Empty = struct { empty: Tensor };
-    const empty_model: Empty = .{ .empty = fixture.empty };
-    var empty_buffers = try mem.bufferize(allocator, Empty, &empty_model);
-    defer mem.deinitBufferized(allocator, Empty, &empty_buffers);
-    try std.testing.expectError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers));
+        const Empty = struct { empty: Tensor };
+        const empty_model: Empty = .{ .empty = fixture.empty };
+        var empty_buffers = try mem.bufferize(allocator, Empty, &empty_model);
+        defer mem.deinitBufferized(allocator, Empty, &empty_buffers);
+        try std.testing.expectError(error.EmptyTensor, loader.load(Empty, &empty_model, &empty_buffers));
+    }
 }
 
 test "loader runs every binding of one submission" {
@@ -1547,20 +1574,22 @@ test "loader runs every binding of one submission" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
-    var loader = try fixture.loader(allocator, io);
-    defer loader.deinit();
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
 
-    var outputs: [2]Buffer = undefined;
-    const handle = try loader.loadExecute(&.{
-        fixture.binding(fixture.value, &outputs[0]),
-        fixture.binding(fixture.second, &outputs[1]),
-    });
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, handle.logicalBytes());
-    try handle.await();
-    defer for (&outputs) |*output| output.deinit();
-    try LoaderTestFixture.expectContents(allocator, io, &outputs[0], &LoaderTestFixture.contents);
-    try LoaderTestFixture.expectContents(allocator, io, &outputs[1], &LoaderTestFixture.second_contents);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, loader.bytesLoaded());
+        var outputs: [2]Buffer = undefined;
+        const handle = try loader.loadExecute(&.{
+            fixture.binding(fixture.value, &outputs[0]),
+            fixture.binding(fixture.second, &outputs[1]),
+        });
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, handle.logicalBytes());
+        try handle.await();
+        defer for (&outputs) |*output| output.deinit();
+        try LoaderTestFixture.expectContents(allocator, io, &outputs[0], &LoaderTestFixture.contents);
+        try LoaderTestFixture.expectContents(allocator, io, &outputs[1], &LoaderTestFixture.second_contents);
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, loader.bytesLoaded());
+    }
 }
 
 test "loader deinit awaits open handles without running their executables" {
@@ -1569,17 +1598,19 @@ test "loader deinit awaits open handles without running their executables" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
-    var loader = try fixture.loader(allocator, io);
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
 
-    const Model = struct { value: Tensor };
-    const model: Model = .{ .value = fixture.value };
-    var buffers = try mem.bufferize(allocator, Model, &model);
-    defer mem.deinitBufferized(allocator, Model, &buffers);
-    var never_written: Buffer = undefined;
-    _ = try loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)});
-    const bulk = try loader.load(Model, &model, &buffers);
-    loader.deinit();
-    _ = bulk;
+        const Model = struct { value: Tensor };
+        const model: Model = .{ .value = fixture.value };
+        var buffers = try mem.bufferize(allocator, Model, &model);
+        defer mem.deinitBufferized(allocator, Model, &buffers);
+        var never_written: Buffer = undefined;
+        _ = try loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)});
+        const bulk = try loader.load(Model, &model, &buffers);
+        loader.deinit();
+        _ = bulk;
+    }
 }
 
 test "loader window awaits the oldest handle before exceeding its budget" {
@@ -1588,30 +1619,32 @@ test "loader window awaits the oldest handle before exceeding its budget" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
-    var loader = try fixture.loader(allocator, io);
-    defer loader.deinit();
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
 
-    const input_bytes = try loader.executeInputBytesPerDevice(&fixture.exe);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len, input_bytes);
-    var window: Window = .init(allocator, input_bytes, 4);
-    defer window.deinit();
+        const input_bytes = try loader.executeInputBytesPerDevice(&fixture.exe);
+        try std.testing.expectEqual(LoaderTestFixture.contents.len, input_bytes);
+        var window: Window = .init(allocator, input_bytes, 4);
+        defer window.deinit();
 
-    var first: Buffer = undefined;
-    try window.submit(&loader, &.{fixture.binding(fixture.value, &first)});
-    try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
-    var second: Buffer = undefined;
-    // The budget holds one submission: the first is awaited before the second
-    // is submitted.
-    try window.submit(&loader, &.{fixture.binding(fixture.second, &second)});
-    defer first.deinit();
-    try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len, loader.bytesLoaded());
-    try LoaderTestFixture.expectContents(allocator, io, &first, &LoaderTestFixture.contents);
-    try window.drain();
-    defer second.deinit();
-    try std.testing.expectEqual(@as(usize, 0), window.pending.items.len);
-    try std.testing.expectEqual(@as(usize, 0), window.pending_bytes);
-    try LoaderTestFixture.expectContents(allocator, io, &second, &LoaderTestFixture.second_contents);
+        var first: Buffer = undefined;
+        try window.submit(&loader, &.{fixture.binding(fixture.value, &first)});
+        try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
+        var second: Buffer = undefined;
+        // The budget holds one submission: the first is awaited before the second
+        // is submitted.
+        try window.submit(&loader, &.{fixture.binding(fixture.second, &second)});
+        defer first.deinit();
+        try std.testing.expectEqual(@as(usize, 1), window.pending.items.len);
+        try std.testing.expectEqual(LoaderTestFixture.contents.len, loader.bytesLoaded());
+        try LoaderTestFixture.expectContents(allocator, io, &first, &LoaderTestFixture.contents);
+        try window.drain();
+        defer second.deinit();
+        try std.testing.expectEqual(@as(usize, 0), window.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 0), window.pending_bytes);
+        try LoaderTestFixture.expectContents(allocator, io, &second, &LoaderTestFixture.second_contents);
+    }
 }
 
 test "loader read failure fails every pending handle and later submissions" {
@@ -1620,26 +1653,28 @@ test "loader read failure fails every pending handle and later submissions" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
-    var loader = try fixture.loader(allocator, io);
-    defer loader.deinit();
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
 
-    const Model = struct { value: Tensor };
-    const model: Model = .{ .value = fixture.value };
-    var buffers = try mem.bufferize(allocator, Model, &model);
-    defer mem.deinitBufferized(allocator, Model, &buffers);
-    const Broken = struct { missing: Tensor };
-    const broken_model: Broken = .{ .missing = fixture.missing };
-    var broken_buffers = try mem.bufferize(allocator, Broken, &broken_model);
-    defer mem.deinitBufferized(allocator, Broken, &broken_buffers);
+        const Model = struct { value: Tensor };
+        const model: Model = .{ .value = fixture.value };
+        var buffers = try mem.bufferize(allocator, Model, &model);
+        defer mem.deinitBufferized(allocator, Model, &buffers);
+        const Broken = struct { missing: Tensor };
+        const broken_model: Broken = .{ .missing = fixture.missing };
+        var broken_buffers = try mem.bufferize(allocator, Broken, &broken_model);
+        defer mem.deinitBufferized(allocator, Broken, &broken_buffers);
 
-    var never_written: Buffer = undefined;
-    const good = try loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)});
-    const broken = try loader.load(Broken, &broken_model, &broken_buffers);
-    try std.testing.expectError(error.FileNotFound, broken.await());
-    try std.testing.expectError(error.FileNotFound, good.await());
-    try std.testing.expectError(error.FileNotFound, good.await());
-    try std.testing.expectError(error.FileNotFound, loader.load(Model, &model, &buffers));
-    try std.testing.expectError(error.FileNotFound, loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)}));
-    try std.testing.expectError(error.FileNotFound, loader.awaitAll());
-    try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
+        var never_written: Buffer = undefined;
+        const good = try loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)});
+        const broken = try loader.load(Broken, &broken_model, &broken_buffers);
+        try std.testing.expectError(error.FileNotFound, broken.await());
+        try std.testing.expectError(error.FileNotFound, good.await());
+        try std.testing.expectError(error.FileNotFound, good.await());
+        try std.testing.expectError(error.FileNotFound, loader.load(Model, &model, &buffers));
+        try std.testing.expectError(error.FileNotFound, loader.loadExecute(&.{fixture.binding(fixture.value, &never_written)}));
+        try std.testing.expectError(error.FileNotFound, loader.awaitAll());
+        try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
+    }
 }

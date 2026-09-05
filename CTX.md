@@ -17,8 +17,9 @@ ref is still current.
 
 ### Scope and API
 
-- `zml.io.Loader` selects the direct path for CUDA, ROCm, and oneAPI and the
-  buffered path otherwise. A loader owns its store, sharding/profile options,
+- `zml.io.Loader` selects the direct path for CUDA, ROCm, oneAPI and CPU
+  (`mem.DmaWorkspace.isSupported`; CPU arenas are plain pages, see "Ninth
+  pass") and the buffered path for TPU, neuron and metal. A loader owns its store, sharding/profile options,
   worker pool, and every handle it created. Every submission returns a
   `Handle`: `load(Model, model, buffers)` submits all single-source tensors of
   a model; `loadExecute(bindings)` submits the sources of one or more
@@ -2014,6 +2015,132 @@ unit tests that exercised matching (replica balancing, strict-first
 planning, invalid affinities) went with the matcher, the width and growth
 tests were rewritten for one pool, and `parseNodeList` has its own.
 
+## Ninth pass: the CPU platform takes the direct pipeline (2026-09-05)
+
+The buffered backend got two passes on 2026-09-04 (host staging pool,
+`579a00de`; load-profile driven reads, `28961ff5`). A design review of what
+to do with it next produced the evidence below, and the decision: CPU joins
+the direct pipeline with plain pages; TPU, neuron and metal keep the buffered
+backend, byte for byte, until their transfer path can be measured.
+
+### Two independent axes, conflated by one predicate
+
+- How bytes reach the device: the PJRT async transfer manager
+  (`createBuffersForAsyncHostToDevice` then `transferData` into a byte range
+  of a pre-allocated device buffer, from any host address, in any order) or
+  `bufferFromHostBuffer` with a whole contiguous host tensor. Only the second
+  forces whole-tensor host staging. This axis has nothing to do with
+  pinning: the CPU plugin (`libpjrt_cpu.so`) exports the transfer manager
+  and copies from ordinary pages; its `DmaMap` is the base-class
+  Unimplemented.
+- What the host arena is: our pages registered with the plugin (CUDA,
+  oneAPI: `DmaMapAllocator`), the plugin's pinned host memory borrowed
+  through a PJRT buffer (ROCm: `PjrtPinnedHostAllocation`; TPU:
+  `UninitializedBufferAllocator` in `DmaAllocator`), or plain pages (CPU,
+  neuron, metal). This only changes transfer speed.
+- `DmaWorkspace.isSupported` decided both. It is now an exhaustive switch:
+  CUDA, ROCm, oneAPI and CPU take the direct pipeline; TPU, neuron and metal
+  the buffered one. A new target forces a decision.
+- libtpu `0.0.42.dev20260613` (the wheel pinned in `platforms/tpu/tpu.bzl`)
+  carries `xla::TpuClient` overrides of both `CreateBuffersForAsyncHostToDevice`
+  and `DmaMap`, and the same `CommonAsyncHostToDeviceTransferManager` with
+  `TransferRawDataToSubBuffer` the fifth pass validated against. A symbol is
+  not proof the override is more than a stub: TPU moves to the direct path
+  after a runtime check on a TPU host, not before.
+
+### What the change is
+
+- `DmaArenaAllocation.pageable`: our pages, never registered. The arena
+  kind is decided once, `DmaWorkspace.arenaKind(target)`: `dma_map` for
+  CUDA and oneAPI, `pjrt_host` for ROCm, `pageable` for CPU (NUMA-placed and
+  huge-page advised like the mapped arenas, through
+  `DmaMapAllocator.initPageable`, whose null platform skips
+  `dmaMap`/`dmaUnmap`) and for the `platform == null` test path; null is
+  the buffered backend, and `isSupported` is that null check.
+- Found by the review of this change and fixed: `numa_mask` was read and
+  written outside `arena_mutex` while `growToBlocks` maps up to four arenas
+  concurrently, so a refused automatic placement could be undone by a
+  worker that had read the mask earlier. The mask's only transition is
+  nonzero to zero (`leaveUnplaced`), taken under the mutex. The arena log
+  line is now `DMA arena kind={dma_map,pageable,pjrt_host} placement=...
+  map_ms=...`. Huge-page alignment and advice apply only to allocations of
+  at least one huge page, so tiny test arenas are plain.
+- The five end-to-end `loader ...` tests in `zml/io.zig` run on both
+  backends on the CPU platform (`LoaderTestFixture.backends`): the direct
+  one through `Loader.init`, the buffered one built directly, since nothing
+  else in the tree constructs it any more.
+- Nothing in `direct_loader.zig` changed. The pipeline, the width
+  controller, the pumps and the calibration run on CPU as they are; on CPU
+  the calibration measures a memcpy (2 MiB at 102 GiB/s, 607 ms, four CPU
+  devices) and `transferData` is the plugin's copy.
+
+### Why: the buffered read model, not its budget, was the problem
+
+- Interleaved on the B70 (oneAPI `level_zero:1`, `hf://Qwen/Qwen3.5-4B`,
+  same minutes): direct 10.9 s and 16.3 s (278 coalesced 32 MiB reads for
+  738 tensors, width 32, ~1.5 GiB pinned) against 48.3 s and 47.6 s for the
+  buffered build of `28961ff5`. The same buffered binary had done 22.4 s the
+  day before: `hf://` varies 2x day to day, so only interleaved pairs count.
+- The checkpoint is 738 tensors, 604 of them under 32 MiB. Tensor-shaped
+  reads cost ~900 requests; the planner's coalescing costs 278. The direct
+  loader also blind-grows to width 32 before the first response.
+- Staging bounds from the safetensors headers, K = 12: Llama-3.1-8B
+  11.7 GiB (K x largest, the buffered budget) against 3.05 GiB (sum of the
+  top K); Qwen3.5-4B 14.2 against 1.67; Qwen3.6-27B 28.4 against 6.4. The
+  direct pipeline needs ~300 MiB locally and 1.06 GiB on `hf://` for any of
+  them, because it never holds a whole tensor on the host.
+- Buffered backend on the CPU platform, fixed read width 1/2/4/8/12/24/48,
+  page-cached Llama: 2.93/2.33/1.84/1.41/1.38/1.43/1.48 s. The plateau is at
+  8, so a transfer concurrency cap is not a lever there.
+- A sorted biggest-first order with a sum-of-top-K budget was considered and
+  rejected: it forfeits coalescing (the 604 small tensors become 604 round
+  trips at the tail), the trivial-reuse property it buys needs buffers that
+  shrink, which PJRT-allocated pinned memory cannot do, and the checkpoints
+  have only 5 to 23 distinct tensor sizes so the best-fit pool already had
+  the reuse. Uniform blocks give the same invariant by construction.
+- `examples/io/main.zig` hands `init.arena.allocator()` to `Loader.init`.
+  `ArenaAllocator.free` frees only the most recent allocation, so the
+  buffered backend's staging drops under that arena are leaks until the
+  arena dies. The direct pipeline's workspace allocates through the page
+  allocator and is unaffected; any staging design must own its allocator.
+
+### Results (B70 host, four CPU devices, warm page cache, adaptive default)
+
+| fixture | buffered (before) | direct (after) |
+|---|---|---|
+| Llama-3.1-8B replicated | 1.36, 1.36, 1.50 s | 1.55, 1.55, 1.58 s |
+| Llama-3.1-8B sharded | not measured | 1.55, 1.56, 1.57 s |
+| Qwen3.5-4B | 0.92, 0.92, 1.23 s | 0.88, 0.91, 1.10 s |
+| Qwen3.5-9B | 2.91, 2.99, 3.87 s | 2.01, 2.04, 2.27 s |
+| `hf://Qwen/Qwen3.5-4B` | (48 s on oneAPI, same hour) | 10.4 s, 278 reads, width 32 |
+
+Host staging high water 292 to 298 MiB locally, 1.06 GiB on HF. Read-back
+(`ZML_LOAD_CHECK=1`): 291/291 sharded and replicated on Llama, 259/775 on
+Qwen3.5-9B sharded. Width held at 12 to 24.
+
+Llama replicated pays 10%, and the pump metrics say why: on the CPU plugin
+`dma_submit_us_per_piece` equals `dma_piece_latency_ms` (695 us for 2 MiB,
+2.0 ms for 8, 2.9 ms for 16), so `transferData` is a synchronous copy on the
+submitting thread and the one pump per device is the transfer's only thread
+(`dma_stage_ms_per_read` 30 against `read_ms_per_read` 2.3). The buffered
+path spread that copy over twelve workers. Block size does not move it
+(1.55 to 1.60 s at 2, 8 and 16 MiB). One pump per device is a correctness
+requirement (eighth pass), and CPU is not a performance target, so this is
+recorded rather than fixed.
+
+### If a platform ever needs `bufferFromHostBuffer` under the same pipeline
+
+Keep everything through the read (planner, scheduler, workers, gate,
+controller, credits) and swap the sink: a tensor is opened by the first job
+that touches it with a contiguous span from the arena (a ring: tensors open
+in plan order and complete roughly in order, so the tail is the oldest live
+span); jobs scatter into `(span, offset)`; the per-tensor byte counter that
+already flags the last transfer submits `Buffer.from` with `wait = false`
+into the device pump, which awaits ready events and releases the span. Its
+cost against the block sink is an arena floor of the largest tensor plus the
+read working set and no overlap inside a tensor, which is why the transfer
+manager is preferred wherever it exists.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
@@ -2050,7 +2177,12 @@ Third-pass items left open; `PLAN.md` holds the checklist.
   definition_events_[buffer_index]` after a transfer error at width 128
   against the throttled proxy) was seen once and not reproduced.
 - Backpressure is process-global and load-untagged (CTX assumption); real
-  AWS runs need credentials this machine lacks. They removed remaining
+  AWS runs need credentials this machine lacks.
+- Ninth pass: check `TpuClient::CreateBuffersForAsyncHostToDevice` at
+  runtime on a TPU host and move TPU to the direct path with pinned arenas
+  (`DmaMap` on our pages, or PJRT `pinned_host` buffers as ROCm does; the
+  workspace has both branches). Neuron and metal plugins are unchecked. The
+  buffered backend stays as it is until then. They removed remaining
 planning/runtime genericity, consolidated epoch completion, specialized
 representative-device calibration, narrowed the DMA pool, shared loader-front-
 end preparation, and split the former monolithic IO module by responsibility.
