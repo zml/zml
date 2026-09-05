@@ -174,8 +174,7 @@ pub fn main(init: std.process.Init) !void {
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
             var source_pools = try zml.mem.DmaWorkspace.init(allocator, io, platform, .{
                 .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
-                .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
-                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
+                .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
             });
             defer source_pools.deinit();
             const calibration = try zml.io.dma.benchmark(&source_pools, platform, .{
@@ -186,13 +185,12 @@ pub fn main(init: std.process.Init) !void {
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
             });
             try stdout_writer.interface.print(
-                "dma_benchmark block_bytes={d} parallelism={d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
+                "dma_benchmark block_bytes={d} parallelism={d} max_mapped_bytes={d} retained_mapped_bytes={d}\n",
                 .{
                     calibration.block_size,
                     calibration.max_in_flight_per_device,
                     source_pools.maxMappedBytes(),
                     source_pools.retainedMappedBytes(),
-                    source_pools.numaPoolCount(),
                 },
             );
             try stdout_writer.flush();
@@ -236,8 +234,7 @@ pub fn main(init: std.process.Init) !void {
             );
             var dma_source_pools: ?zml.mem.DmaWorkspace = if (zml.io.dma.isSupported(platform))
                 try .init(allocator, io, platform, .{
-                    .device_numa_nodes = try dmaBenchmarkNumaNodes(init.arena.allocator(), init.environ_map),
-                    .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
+                    .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
                 })
             else
                 null;
@@ -861,19 +858,20 @@ fn dmaConcurrent(
     });
 }
 
-fn dmaBenchmarkNumaNodes(
-    allocator: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
-) ![]const usize {
-    if (environ_map.get("ZML_DMA_BENCH_NUMA_NODES") != null) {
-        return envUsizeList(
-            allocator,
-            environ_map,
-            "ZML_DMA_BENCH_NUMA_NODES",
-            &.{},
-        );
+/// `ZML_DMA_BENCH_NUMA`: unset interleaves over the host's memory nodes,
+/// `off` applies no policy, `1` binds to node 1, `0,1` interleaves over those.
+fn dmaBenchmarkNumaPlacement(environ_map: *const std.process.Environ.Map) !zml.mem.NumaPlacement {
+    const raw = environ_map.get("ZML_DMA_BENCH_NUMA") orelse return .memory_nodes;
+    if (std.mem.eql(u8, raw, "off")) return .none;
+    var mask: u64 = 0;
+    var it = std.mem.splitScalar(u8, raw, ',');
+    while (it.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " ");
+        if (trimmed.len == 0) continue;
+        mask |= @as(u64, 1) << try std.fmt.parseInt(u6, trimmed, 10);
     }
-    return &.{};
+    if (mask == 0) return error.InvalidArgument;
+    return .{ .nodes = mask };
 }
 
 const PackOptions = struct {
@@ -1410,20 +1408,6 @@ fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u
 
 fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     return std.math.mul(usize, try envUsize(environ_map, name, default), zml.MiB);
-}
-
-fn envUsizeList(
-    allocator: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
-    name: []const u8,
-    defaults: []const usize,
-) ![]const usize {
-    const value = environ_map.get(name) orelse return allocator.dupe(usize, defaults);
-    var result: std.ArrayListUnmanaged(usize) = .empty;
-    var values = std.mem.tokenizeScalar(u8, value, ',');
-    while (values.next()) |item| try result.append(allocator, try std.fmt.parseInt(usize, item, 10));
-    if (result.items.len == 0) return error.InvalidArgument;
-    return result.toOwnedSlice(allocator);
 }
 
 fn envMibList(

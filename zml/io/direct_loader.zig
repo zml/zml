@@ -42,73 +42,57 @@ const effectiveSourceRequestSize = load_limits.effectiveSourceRequestSize;
 /// The widest source rung pre-grown when a loader borrows the DMA workspace.
 const preallocated_source_width = 32;
 
-/// Ensures every NUMA pool can feed its calibrated devices and hold one
-/// complete fixed-size source request. Independent nodes register their
-/// missing slabs concurrently; existing retained arenas are reused first.
-fn ensureLoadBlockReserves(
+/// Ensures the workspace can feed every calibrated device and hold one
+/// complete fixed-size source request; retained arenas are reused first.
+fn ensureLoadBlockReserve(
     self: *mem.DmaWorkspace,
     block_size: usize,
-    calibrated_reserves: []const usize,
+    calibrated_reserve: usize,
 ) !void {
-    if (block_size == 0 or calibrated_reserves.len != self.numaPoolCount())
-        return error.InvalidDmaLoadConfig;
+    if (block_size == 0) return error.InvalidDmaLoadConfig;
     const request_blocks = try load_limits.maximumCoalescedJobBlocks(
         load_limits.max_read_request_size,
         block_size,
     );
-    const targets = try self.allocator.alloc(usize, self.numaPoolCount());
-    defer self.allocator.free(targets);
-    for (calibrated_reserves, targets) |reserve, *target|
-        target.* = @max(reserve, request_blocks);
-    return self.growToBlockTargets(block_size, targets);
+    return self.growToBlocks(block_size, @max(calibrated_reserve, request_blocks));
 }
 
-/// Every pool gets the same source target because a strict-affinity load
-/// draws a device's blocks from its own node, plus its own DMA reserve.
+/// Pre-grows `width + 1` source requests beside the DMA reserve.
 fn ensureSourceWorkingSet(
     self: *mem.DmaWorkspace,
     block_size: usize,
     request_blocks: usize,
     width: usize,
-    feed_reserves: []const usize,
+    feed_reserve: usize,
 ) !void {
-    if (block_size == 0 or request_blocks == 0 or feed_reserves.len != self.numaPoolCount())
-        return error.InvalidDmaLoadConfig;
-    const targets = try self.allocator.alloc(usize, self.numaPoolCount());
-    defer self.allocator.free(targets);
-    // Reserves first; when not even one request fits beside them the
-    // reserves stay non-materialized and the source set alone is fitted.
-    var with_reserves = true;
+    if (block_size == 0 or request_blocks == 0) return error.InvalidDmaLoadConfig;
+    const usable = try self.usableBlocks(block_size);
+    // Reserve first; when not even one request fits beside it the reserve
+    // stays non-materialized and the source set alone is fitted.
+    var with_reserve = true;
     var fitted_width = width;
+    var target: usize = 0;
     while (true) : (fitted_width -= 1) {
         const source_blocks = std.math.mul(usize, fitted_width + 1, request_blocks) catch
             return error.DmaMappedBudgetExceeded;
-        var growth_bytes: usize = 0;
-        for (feed_reserves, targets, 0..) |reserve, *target, pool_index| {
-            const usable = try self.usableBlocks(pool_index, block_size);
-            target.* = std.math.add(usize, source_blocks, if (with_reserves) reserve else 0) catch
-                return error.DmaMappedBudgetExceeded;
-            growth_bytes = std.math.add(
-                usize,
-                growth_bytes,
-                (target.* -| usable) * block_size,
-            ) catch return error.DmaMappedBudgetExceeded;
-        }
+        target = std.math.add(usize, source_blocks, if (with_reserve) feed_reserve else 0) catch
+            return error.DmaMappedBudgetExceeded;
+        const growth_bytes = (target -| usable) * block_size;
         if (self.retainedMappedBytes() +| growth_bytes <= self.maxMappedBytes()) break;
         if (fitted_width == 0) {
-            if (!with_reserves) return; // Leave growth to the load.
-            with_reserves = false;
+            if (!with_reserve) return; // Leave growth to the load.
+            with_reserve = false;
             fitted_width = width + 1;
         }
     }
-    if (fitted_width < width or !with_reserves) {
-        load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}, reserves_materialized={}", .{
+    if (fitted_width < width or !with_reserve) {
+        load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}, reserve_materialized={}", .{
             fitted_width,
             width,
-            with_reserves,
+            with_reserve,
         });
     }
-    return self.growToBlockTargets(block_size, targets);
+    return self.growToBlocks(block_size, target);
 }
 
 pub const LoadSpec = struct {
@@ -967,8 +951,6 @@ const VectoredLoadPipeline = struct {
     read_gate: *AdaptiveRequestGate,
     request_gate: *AdaptiveRequestGate,
     block_size: usize,
-    device_pool_indices: []const usize,
-    numa_explicit: bool,
     metrics: *VectoredLoadMetrics,
     scheduler: *FairVectoredReadScheduler,
     next_read_admission: std.atomic.Value(u64) = .init(1),
@@ -988,8 +970,6 @@ const VectoredLoadPipeline = struct {
         read_gate: *AdaptiveRequestGate,
         request_gate: *AdaptiveRequestGate,
         block_size: usize,
-        device_pool_indices: []const usize,
-        numa_explicit: bool,
         metrics: *VectoredLoadMetrics,
         scheduler: *FairVectoredReadScheduler,
         dma_budget_bytes: usize,
@@ -1007,8 +987,6 @@ const VectoredLoadPipeline = struct {
             .read_gate = read_gate,
             .request_gate = request_gate,
             .block_size = block_size,
-            .device_pool_indices = device_pool_indices,
-            .numa_explicit = numa_explicit,
             .metrics = metrics,
             .scheduler = scheduler,
             .pumps = pumps,
@@ -1362,46 +1340,35 @@ const VectoredReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
         leased: []mem.DmaBlockPool.Block,
-        affinities: []mem.DmaBlockPool.Affinity,
         references: []usize,
         iovecs: [][]u8,
         queue_counts: []usize,
-        pool: mem.DmaBlockPool.AcquireScratch,
 
         fn init(
             allocator: std.mem.Allocator,
-            pool: *const mem.DmaBlockPool,
             maximum_blocks: usize,
             device_count: usize,
         ) !Scratch {
             const leased = try allocator.alloc(mem.DmaBlockPool.Block, maximum_blocks);
             errdefer allocator.free(leased);
-            const affinities = try allocator.alloc(mem.DmaBlockPool.Affinity, maximum_blocks);
-            errdefer allocator.free(affinities);
             const references = try allocator.alloc(usize, maximum_blocks);
             errdefer allocator.free(references);
             const iovecs = try allocator.alloc([]u8, maximum_blocks);
             errdefer allocator.free(iovecs);
             const queue_counts = try allocator.alloc(usize, device_count);
-            errdefer allocator.free(queue_counts);
-            const pool_scratch = try pool.acquireScratch(allocator, maximum_blocks);
             return .{
                 .allocator = allocator,
                 .leased = leased,
-                .affinities = affinities,
                 .references = references,
                 .iovecs = iovecs,
                 .queue_counts = queue_counts,
-                .pool = pool_scratch,
             };
         }
 
         fn deinit(self: *Scratch) void {
-            self.pool.deinit();
             self.allocator.free(self.queue_counts);
             self.allocator.free(self.iovecs);
             self.allocator.free(self.references);
-            self.allocator.free(self.affinities);
             self.allocator.free(self.leased);
             self.* = undefined;
         }
@@ -1478,13 +1445,11 @@ const VectoredReadRequest = struct {
         std.debug.assert(block_count <= scratch.leased.len);
         std.debug.assert(block_count == request.blocks.len);
         const leased = scratch.leased[0..block_count];
-        @memset(leased, .{ .data = &.{}, .node_index = 0 });
+        @memset(leased, &.{});
         defer for (leased) |block| {
-            if (block.data.len != 0) pipeline.pool.release(pipeline.io, block);
+            if (block.len != 0) pipeline.pool.release(pipeline.io, block);
         };
 
-        const affinities = scratch.affinities[0..block_count];
-        @memset(affinities, .{});
         const references = scratch.references[0..block_count];
         @memset(references, 0);
 
@@ -1516,10 +1481,6 @@ const VectoredReadRequest = struct {
                 }
                 const target = &tensor.targets[writer_index];
                 queue_counts[target.device_index] += 1;
-                if (pipeline.numa_explicit) {
-                    const node_index = pipeline.device_pool_indices[target.device_index];
-                    affinities[transfer.block_index].eligible_nodes |= @as(u64, 1) << @intCast(node_index);
-                }
             }
         }
 
@@ -1532,7 +1493,7 @@ const VectoredReadRequest = struct {
             }
         }
         const block_wait_started = awakeNs(pipeline.io);
-        pipeline.pool.acquireMany(pipeline.io, leased, affinities, &scratch.pool) catch |err| {
+        pipeline.pool.acquireMany(pipeline.io, leased) catch |err| {
             pipeline.recordError(err);
             return;
         };
@@ -1543,7 +1504,7 @@ const VectoredReadRequest = struct {
         for (iovecs, leased, 0..) |*iovec, block, block_index| {
             const consumed = block_index * pipeline.block_size;
             const len = @min(pipeline.block_size, request_len - consumed);
-            iovec.* = block.data[0..len];
+            iovec.* = block[0..len];
         }
 
         if (!beginRead(request, pipeline)) return;
@@ -1578,7 +1539,7 @@ const VectoredReadRequest = struct {
         const blocks = request.blocks;
         for (leased, references) |*lease, refs| {
             _ = pipeline.registerBlock(request, lease.*, refs);
-            lease.data = &.{};
+            lease.* = &.{};
         }
         request.enqueued_ns = awakeNs(pipeline.io);
         pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
@@ -3489,7 +3450,7 @@ test "source read controller steps down on transient backpressure and climbs aga
 }
 
 test "source read controller stops climbing at the growth-free width" {
-    // gb300-2: a node holding 49 blocks against its own 16-block DMA stage
+    // gb300-2: a pool holding 49 blocks against a 16-block DMA stage
     // leaves 33 growth-free requests, so the climb stops at 32. Above it the
     // lifecycle limit maps a new pinned slab inside a scored window: one such
     // window measured 20.8 GiB/s at 48 against 48.8 sustained at 32.
@@ -3511,8 +3472,8 @@ test "source read controller stops climbing at the growth-free width" {
 }
 
 test "source read controller starts at the configured rung without headroom" {
-    // A pool whose nodes are fully covered by their own DMA stage reports a
-    // growth-free width of 0. Clipping the ceiling to 1 there made every
+    // A pool fully covered by the DMA stage reports a growth-free width of
+    // 0. Clipping the ceiling to 1 there made every
     // adaptive load on eight MI300X read one request at a time (5.34 s
     // against 1.42 s); starting where the caller asked and accepting some
     // mid-load growth is strictly better.
@@ -4091,8 +4052,6 @@ pub const DirectLoader = struct {
         try source_pools.acquire();
         errdefer source_pools.release();
         const calibration = opts.dma_calibration orelse dma.Calibration.default;
-        if (source_pools.device_pool_indices.len != platform.devices.len)
-            return error.DmaDeviceMismatch;
         if (calibration.block_size == 0 or
             calibration.block_size > max_load_read_request_size or
             calibration.max_in_flight_per_device == 0 or
@@ -4108,53 +4067,40 @@ pub const DirectLoader = struct {
             request_size,
             calibration.block_size,
         );
-        const node_reserves = try allocator.alloc(usize, source_pools.numaPoolCount());
-        defer allocator.free(node_reserves);
-        @memset(node_reserves, 0);
-        for (platform.devices, 0..) |_, device_index| {
-            const node_index = source_pools.device_pool_indices[device_index];
-            node_reserves[node_index] = try std.math.add(
-                usize,
-                node_reserves[node_index],
-                calibration.max_in_flight_per_device,
-            );
-        }
-        // Grow the DMA stage reserves and source working set before reads begin;
-        // the mapped arenas remain in the source pools for later loaders.
+        // The DMA stage of every device, kept mapped as the pool's growth floor.
+        const dma_reserve = try std.math.mul(
+            usize,
+            calibration.max_in_flight_per_device,
+            platform.devices.len,
+        );
+        // Grow the DMA stage reserve and source working set before reads begin;
+        // the mapped arenas remain in the workspace for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = source_pools.retainedMappedBytes();
-        try ensureLoadBlockReserves(source_pools, calibration.block_size, node_reserves);
+        try ensureLoadBlockReserve(source_pools, calibration.block_size, dma_reserve);
         try ensureSourceWorkingSet(
             source_pools,
             calibration.block_size,
             maximum_blocks_per_job,
             preallocated_source_width,
-            node_reserves,
+            dma_reserve,
         );
         const pregrown_bytes = source_pools.retainedMappedBytes() - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        // The pool keeps the DMA stage reserves as the growth floor of each
-        // node for devices that join a later submission.
         var pool = try mem.DmaBlockPool.init(
             allocator,
             source_pools,
             calibration.block_size,
             source_pools.maxMappedBytes(),
-            node_reserves,
+            dma_reserve,
         );
         var pool_moved = false;
         errdefer if (!pool_moved) pool.deinit();
-        const aggregate_width = try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
-        const strict_width = try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
-        const strict_affinity = source_pools.hasStrictAffinity();
-        const feasible_width = if (strict_affinity)
-            @min(aggregate_width, strict_width)
-        else
-            aggregate_width;
+        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
         if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
 
         const source_parallelism = opts.read_parallelism;
-        const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job, strict_affinity);
+        const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job);
         const dma_stage_requests = dmaStageRequests(
             calibration.max_in_flight_per_device,
             platform.devices.len,
@@ -4164,7 +4110,7 @@ pub const DirectLoader = struct {
         const controller = SourceReadWidthController.init(
             source_parallelism,
             feasible_width,
-            try pool.growthFreeRequestWidth(maximum_blocks_per_job, strict_affinity),
+            try pool.growthFreeRequestWidth(maximum_blocks_per_job),
         );
         const limits: RequestGateLimits = .init(controller.width(), feasible_width, retained_credits, dma_stage_requests);
         const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
@@ -4214,8 +4160,6 @@ pub const DirectLoader = struct {
             &self.read_gate,
             &self.request_gate,
             calibration.block_size,
-            source_pools.device_pool_indices,
-            strict_affinity,
             &self.metrics,
             &self.scheduler,
             calibration.max_in_flight_per_device * calibration.block_size,
@@ -4278,7 +4222,6 @@ pub const DirectLoader = struct {
     fn workerMain(self: *DirectLoader, index: usize) void {
         var scratch = VectoredReadRequest.Scratch.init(
             self.allocator,
-            &self.pool,
             self.maximum_blocks_per_job,
             self.platform.devices.len,
         ) catch |err| {
@@ -5005,8 +4948,6 @@ const TestPipeline = struct {
             .read_gate = undefined,
             .request_gate = &self.gate,
             .block_size = 64,
-            .device_pool_indices = &.{0},
-            .numa_explicit = false,
             .metrics = &self.metrics,
             .scheduler = scheduler,
             .pumps = &self.pumps,
@@ -5034,12 +4975,12 @@ const TestPipeline = struct {
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var workspace = try mem.DmaWorkspace.initForTesting(allocator, io, 1, 64);
+    var workspace = try mem.DmaWorkspace.initForTesting(allocator, io, 64);
     defer workspace.deinit();
     try workspace.acquire();
     defer workspace.release();
-    _ = try workspace.allocate(0, 64);
-    var pool = try mem.DmaBlockPool.init(allocator, &workspace, 64, 64, &.{0});
+    _ = try workspace.allocate(64);
+    var pool = try mem.DmaBlockPool.init(allocator, &workspace, 64, 64, 0);
     defer pool.deinit();
     var scheduler: FairVectoredReadScheduler = .init(allocator);
     defer scheduler.deinit();
@@ -5053,9 +4994,7 @@ test "late vectored callback failure drains and signals completion" {
     const batch = try publishTestBatch(&scheduler, 1);
     const request = try fixture.claimRequest(&scheduler);
     var leased: [1]mem.DmaBlockPool.Block = undefined;
-    var scratch = try pool.acquireScratch(allocator, 1);
-    defer scratch.deinit();
-    try pool.acquireMany(io, &leased, &.{.{}}, &scratch);
+    try pool.acquireMany(io, &leased);
     const block = pipeline.registerBlock(request, leased[0], 1);
     try std.testing.expectEqual(&batch.plans.items[0].blocks[0], block);
     var target: VectoredTensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };

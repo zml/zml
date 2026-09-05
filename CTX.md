@@ -1636,6 +1636,71 @@ it and a first depth sweep measured nothing (`dma_budget_per_device` stayed
 128 MiB at every depth). It is wired now. Check that line before trusting a
 depth result.
 
+### What `off` really is, and an interleaved pool (2026-09-05)
+
+`ZML_DMA_BENCH_NUMA_OFF=1` is not "unplaced". The CUDA driver applies a
+`prefer` policy for the calling thread's node when it registers the arena,
+and the main thread ran on node 1 in every run, so `off` was `node1` by
+luck. A probe cannot fix that: it observes an arbitrary state, and on a
+cold cache the loader's own readers create the state it would observe.
+
+The knowledge-free alternative is one pool interleaved page by page over a
+node mask (`DmaWorkspace.Options.interleave_numa_nodes`,
+`ZML_DMA_BENCH_NUMA_INTERLEAVE=0,1`, `MPOL_INTERLEAVE` in `NumaAllocator`;
+`numa_maps` shows each arena split half per node). DeepSeek replicated on
+four GB300, per-device pumps, depth 8, 16 MiB blocks, three interleaved
+reps:
+
+| arm | mean | runs |
+| --- | --- | --- |
+| node1 | 4.20 s | 4.31 4.25 4.04 |
+| off (driver prefer, node 1) | 4.26 s | 4.57 4.19 4.02 |
+| interleave 0,1 | 4.35 s | 4.37 4.48 4.21 |
+| local (per-node pools, the default) | 4.92 s | 5.24 4.62 4.90 |
+| node0 | 5.50 s | 5.77 5.47 5.27 |
+
+Interleave is within 2-3% of the best single node without knowing which
+node holds the page cache, and cannot land on the worst. It also puts half
+the pinned pages on node 0 exactly like `local` does and is 12% faster, so
+part of `local`'s loss is the split into per-node pools itself (half the
+retained capacity per node, strict affinity on every lease), not placement.
+
+Does the mask need more than one device per node to help? The bottleneck
+is the page-cache-to-pinned copy plus the DMA read on the node holding the
+file, so it should not. Measured on the same host with one device (GPU 0,
+node 0) and with two devices on node 0, same fixture, three reps each;
+`off` here is the default (per-node pools), which for devices on one node
+is the same placement as `node0`, so those six runs are pooled:
+
+| devices | node0 (= local default), 6 runs | node1 | interleave 0,1 |
+| --- | --- | --- | --- |
+| 1 (node 0) | 3.38 s (3.71 3.32 3.35 3.35 3.31 3.26) | **2.98 s** (2.81 3.14 2.98) | 3.22 s (3.07 3.36 3.22) |
+| 2 (both node 0) | 3.82 s (3.81 3.73 3.86 3.77 3.99 3.78) | 3.94 s (4.01 3.90 3.92) | 3.86 s (3.70 3.76 4.13) |
+
+One device: placing the pinned pool on the *other* node is 12% faster than
+local, and the readers show why (`read_ms_per_read` 2.3-2.6 ms against
+3.0-4.9): the page-cache read and the pinned write then use two memory
+systems. Interleave takes a third of that (-5%) without knowing the
+page-cache node. Two devices on one node invert `node1`: both links cross
+sockets and `dma_stage_ms_per_read` goes 10-11 -> 16 ms, so the remote
+link starts to cost and `node1` is the worst arm, while interleave is at
+parity with local. Across the three configurations interleave was never
+the worst and always within 3-8% of the best; every single-node choice was
+the worst in at least one.
+
+On a host with a single memory node, `MPOL_INTERLEAVE` over a one-node
+mask degenerates to that node (the kernel round-robins over the mask; one
+entry means every page lands there, a soft bind). Nothing changes, and
+nothing can: the copy is intra-node by construction and the channels
+inside a node are already hardware-interleaved. The knob only has a
+meaning with two or more memory nodes, and then it should cover every node
+that has memory, not only the nodes the devices sit on.
+
+Recommendation, refined: drop the per-node pools and strict affinity, keep
+one pool with a single policy knob -- interleave over the host's memory
+nodes by default, or one explicit node when the client knows better -- and
+never derive placement from where the first thread happened to run.
+
 ### What the policy costs
 
 Strict affinity takes the smallest node's capacity rather than the sum
@@ -1848,6 +1913,106 @@ them where they buy nothing:
   parity on eight MI300X instead of a 3.7x regression.
 - On MI300X the aggregate pool is strictly better: same throughput, 25% less
   pinned memory, twice the feasible width.
+
+## Eighth pass: one pool, one placement knob (2026-09-05)
+
+The seventh pass showed that placement is a host-memory question (the node
+holding the page cache saturates), that per-node pools cost on their own
+(`local` split the retained capacity and forced strict affinity on every
+lease), and that interleaving over the memory nodes was never the worst
+placement on 1, 2 or 4 devices while every single node was. The per-node
+structure is gone:
+
+- `DmaWorkspace` owns one arena list. Removed: `resolveNumaNodes`,
+  `KnownPoolTopology`, `device_pool_indices`, `numaPoolCount`,
+  `hasStrictAffinity`, the concurrent `growToBlockTargets` (one arena grows
+  at a time now, `growToBlocks`), `arenaForDevice` (`arenaAtLeast`). The
+  PJRT `numa_node` attribute (`Device.numaNode`) no longer decides `dmaMap`
+  placement; its one remaining use is balancing ROCm's PJRT-pinned arenas
+  (below).
+- `DmaBlockPool` is one free list. Removed: `Affinity`, `AcquireScratch`,
+  the augmenting-path matcher (`planAssignments`/`assignJob`), per-node
+  growth selection, `NodeStats`, `minimumStrictAffinityRequestWidth`, the
+  `strict_affinity` parameter of every width query. `Block` is a `[]u8`;
+  `acquireMany(io, output)` allocates nothing once its arenas are attached.
+  The reserve is one number: the DMA stage of every device.
+- Placement is `DmaWorkspace.Options.numa: NumaPlacement`:
+  `.memory_nodes` (default) interleaves over the bits of
+  `/sys/devices/system/node/has_memory`; `.nodes = mask` binds (one bit) or
+  interleaves (several); `.none` applies no policy. A single memory node, or
+  an unreadable list, applies no policy -- interleaving over one node is that
+  node. An automatic placement the kernel refuses (a cpuset that excludes a
+  node, `EINVAL`) logs a warning once and continues unplaced; an explicit
+  one fails the arena. The example exposes it as `ZML_DMA_BENCH_NUMA`
+  (unset, `off`, `1`, `0,1`); `ZML_DMA_BENCH_NUMA_NODES`, `_NUMA_OFF` and
+  `_NUMA_INTERLEAVE` are gone.
+- The placement allocator is built per `allocate` call around
+  `DmaMapAllocator` because the workspace is a value that moves; the arena
+  log line now reads `placement=interleave nodes=0x3`.
+- Growth stays concurrent: `growToBlocks` maps the missing blocks as up to
+  four arenas registered at once (`arena_mutex` guards the list). Serial
+  growth was measured first: 1.02 GiB took 317 ms in one arena against 280
+  ms for 1.53 GiB in two per-node arenas; four parts take 94 ms. Pinned
+  registration scales with threads on GB300.
+- ROCm arenas are PJRT-pinned (`hipHostMalloc` through a device's host
+  memory space), where `mbind` has no say, and there the per-node pools
+  were doing real work: each pool allocated through a device on its node,
+  so the pinned set was split 50/50. With one pool everything came from
+  device 0's space and eight MI300X lost the fast mode (loader elapsed
+  1.27-1.45 s in every placement arm, DMA stage 112-127 ms per read,
+  against 0.82-1.0 s and 60-74 ms before). Rotating arenas over the
+  devices' spaces gave a 61/39 split and 0.98-1.33 s: monotone in the
+  imbalance. Registering `mmap`ed arenas through `dmaMap` on ROCm instead
+  would put `mbind` back in charge, but costs ~4.5 s/GiB there (6.5-7.2 s
+  of pre-growth for 1.52 GiB against 1.1-2.3 s PJRT-pinned), so it is
+  rejected. The workspace now keeps one `HostNode` per node the devices
+  report (`Device.numaNode`, the only remaining use of the attribute) and
+  allocates each arena through a device on the node with the fewest arena
+  bytes so far; unknown nodes degrade to one entry per device.
+
+### Verification
+
+gb300-2, four GB300, 16 MiB blocks, before = the committed per-node pools,
+after = one interleaved pool with concurrent growth. `Loaded weights` in
+`//examples/io` now includes the loader's arena pre-growth (the calibration
+used to retain the pre-grown set before the timer started), so the
+loader's own `elapsed` is reported next to it:
+
+| fixture | arm | wall | loader elapsed | pre-growth | pinned mapped |
+| --- | --- | --- | --- | --- | --- |
+| DeepSeek replicated (3 pairs) | before | 4.86 4.88 4.87 s | 4.45 4.46 4.46 s | 280 ms | 1.53 GiB |
+| | after | **4.51 4.56 4.56 s** (-7%) | **4.28 4.33 4.34 s** (-3%) | 94 ms | 1.02 GiB |
+| Llama replicated (4 pairs) | before | 602-609 ms | 319-321 ms | 280 ms | 1.53 GiB |
+| | after | **413-423 ms** (-31%) | 314-325 ms | 94 ms | 1.02 GiB |
+
+The first after-run, with serial growth, had the same loader elapsed
+(DeepSeek 4.14-4.33 s over five pairs, -6%; Llama 313-317 ms) but a 317 ms
+pre-growth, which is where the concurrent `growToBlocks` came from. Llama
+placement arms on the single pool (two reps, loader elapsed): `off` 304-305
+ms, `node1` 299-304, interleave 315-317, `node0` 410-412 -- interleave 4%
+off the best and 23% from the worst, as on DeepSeek.
+
+mi300, eight MI300X, Llama replicated, six interleaved pairs, host load
+2-36 (both arms saw it), before = HEAD's per-node pools, after = one pool
+with node-balanced PJRT-pinned arenas (four through device 0 on node 0,
+five through device 4 on node 1):
+
+| arm | wall | loader elapsed | pre-growth | pinned mapped |
+| --- | --- | --- | --- | --- |
+| before | 3.07 2.93 2.59 2.40 2.35 2.48 s | 1.18 1.09 0.97 0.96 0.85 0.93 s | 1.4-1.9 s | 2.03 GiB |
+| after | 2.55 4.19 2.05 2.02 2.08 1.94 s | **1.05 0.95 0.91 0.90 0.92 0.84 s** | 1.1-1.5 s (one 3.2 s spike) | 1.52 GiB |
+
+Parity to slightly better on the loader (five of six pairs), less pinned
+memory, and a shorter pre-growth: PJRT-pinned allocation there costs
+0.7-0.9 s/GiB, so the third of the working set the per-node pools mapped
+twice was expensive. The two rejected single-pool variants on this host
+are in the bullet above (all arenas through device 0: 1.27-1.45 s; device
+rotation: 0.98-1.33 s).
+
+`zml/mem.zig` went from 2102 to 1391 lines and the loader lost ~150; the
+unit tests that exercised matching (replica balancing, strict-first
+planning, invalid affinities) went with the matcher, the width and growth
+tests were rewritten for one pool, and `parseNodeList` has its own.
 
 ## Open work
 

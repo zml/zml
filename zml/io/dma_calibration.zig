@@ -71,8 +71,6 @@ pub fn benchmark(
     try source_pools.acquire();
     defer source_pools.release();
     try validateOptions(opts, source_pools.maxMappedBytes());
-    if (source_pools.device_pool_indices.len != platform.devices.len)
-        return error.DmaDeviceMismatch;
     const result = try benchmarkSyntheticTransfer(source_pools, platform, opts);
     logBenchmarkReport(platform, &result);
     return result.calibration;
@@ -152,10 +150,9 @@ fn tuneDevice(
     }
     // One calibration ring, sized for the largest candidate tuple, is mapped
     // once and reused by every candidate cohort.
-    const pool_index = source_pools.device_pool_indices[device_index];
-    if (source_pools.latestArena(pool_index).len < block_source_bytes)
-        _ = try source_pools.allocate(pool_index, block_source_bytes);
-    const calibration_source = source_pools.latestArena(pool_index);
+    if (source_pools.latestArena().len < block_source_bytes)
+        _ = try source_pools.allocate(block_source_bytes);
+    const calibration_source = source_pools.latestArena();
 
     const block_candidates = try session.allocator.alloc(BenchmarkCandidate, block_count);
     defer session.allocator.free(block_candidates);
@@ -454,7 +451,7 @@ fn benchmarkWindowComplete(
 /// One line per calibration: what was selected, at what rate, and what it
 /// cost. Per-arena mapping is logged where each arena is mapped.
 fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const BenchmarkReport) void {
-    log.info("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d} numa_pools={d}", .{
+    log.info("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d}", .{
         @tagName(platform.target),
         platform.devices.len,
         platform.devices[0].kind(),
@@ -465,7 +462,6 @@ fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const Ben
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
         result.source_pools.retainedMappedBytes(),
-        result.source_pools.numaPoolCount(),
     });
 }
 
@@ -529,10 +525,7 @@ const BenchmarkSession = struct {
 
     fn deinit(self: *BenchmarkSession, source_pools: *const mem.DmaWorkspace) void {
         for (self.cohorts.items) |cohort| {
-            cohort.deinit(source_pools.arenaForDevice(
-                cohort.device_index,
-                cohort.block_size,
-            ));
+            cohort.deinit(source_pools.arenaAtLeast(cohort.block_size));
             self.allocator.destroy(cohort);
         }
         self.cohorts.deinit(self.allocator);
