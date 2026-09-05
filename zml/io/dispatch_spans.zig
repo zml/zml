@@ -8,24 +8,21 @@ pub const DispatchSpans = struct {
         start: usize,
         end: usize,
         writer_offset: usize,
-        primary_writer: usize,
-        mirror_writer_start: usize,
-        mirror_writer_len: usize,
+        writer_mask: u64,
     };
 
     const PlacementSpan = struct {
         writer_index: usize,
         start: usize,
         len: usize,
-        order: usize,
     };
 
     spans: []DispatchSpan,
-    mirror_writers: []usize,
 
     pub fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !DispatchSpans {
         const placement = try sharding.placement(shape);
         const ordered_devices = sharding.devicesInCanonicalOrder();
+        std.debug.assert(ordered_devices.len <= 64);
 
         var placement_span_count: usize = 0;
         for (ordered_devices) |device| {
@@ -46,54 +43,16 @@ pub const DispatchSpans = struct {
         var spans: std.ArrayList(DispatchSpan) = try .initCapacity(allocator, placement_spans.items.len);
         errdefer spans.deinit(allocator);
 
-        var mirror_writers: std.ArrayList(usize) = try .initCapacity(allocator, placement_spans.items.len);
-        errdefer mirror_writers.deinit(allocator);
-
-        try deduplicateByRange(allocator, placement_spans.items, shape.byteSize(), &spans, &mirror_writers);
-
-        // Record the final packed offset once, while spans are still in global
-        // file order. Positional request tasks can then finish out of order
-        // without mutating a writer cursor.
         const writer_offsets = try allocator.alloc(usize, ordered_devices.len);
         defer allocator.free(writer_offsets);
         @memset(writer_offsets, 0);
-        for (spans.items) |*span| {
-            span.writer_offset = writer_offsets[span.primary_writer];
-            writer_offsets[span.primary_writer] += span.end - span.start;
-            const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
-            for (mirror_writers.items[span.mirror_writer_start..mirror_end]) |writer_index| {
-                // `deduplicateByRange` groups only spans with identical
-                // start/len, so every writer of a group has consumed the
-                // same bytes so far.
-                std.debug.assert(writer_offsets[writer_index] == span.writer_offset);
-                writer_offsets[writer_index] += span.end - span.start;
-            }
-        }
+        try deduplicateByRange(allocator, placement_spans.items, shape.byteSize(), &spans, writer_offsets);
 
-        const spans_ = try spans.toOwnedSlice(allocator);
-        errdefer allocator.free(spans_);
-
-        const mirror_writers_ = try mirror_writers.toOwnedSlice(allocator);
-        errdefer allocator.free(mirror_writers_);
-
-        return .{
-            .spans = spans_,
-            .mirror_writers = mirror_writers_,
-        };
+        return .{ .spans = try spans.toOwnedSlice(allocator) };
     }
 
     pub fn deinit(self: DispatchSpans, allocator: std.mem.Allocator) void {
         allocator.free(self.spans);
-        allocator.free(self.mirror_writers);
-    }
-
-    pub fn writerMask(self: DispatchSpans, span: DispatchSpan) u64 {
-        var mask = @as(u64, 1) << @intCast(span.primary_writer);
-        const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
-        for (self.mirror_writers[span.mirror_writer_start..mirror_end]) |writer_index| {
-            mask |= @as(u64, 1) << @intCast(writer_index);
-        }
-        return mask;
     }
 
     pub fn spanIndexAt(self: DispatchSpans, offset: usize) ?usize {
@@ -118,13 +77,13 @@ pub const DispatchSpans = struct {
         placement_spans: []PlacementSpan,
         total_bytes: usize,
         spans: *std.ArrayList(DispatchSpan),
-        mirror_writers: *std.ArrayList(usize),
+        writer_offsets: []usize,
     ) !void {
         const SortContext = struct {
             fn lessThan(_: void, lhs: PlacementSpan, rhs: PlacementSpan) bool {
                 if (lhs.start != rhs.start) return lhs.start < rhs.start;
                 if (lhs.len != rhs.len) return lhs.len < rhs.len;
-                return lhs.order < rhs.order;
+                return lhs.writer_index < rhs.writer_index;
             }
         };
 
@@ -136,21 +95,24 @@ pub const DispatchSpans = struct {
             const span = placement_spans[i];
             if (span.start != cursor) return error.NonContiguousShardPlacement;
 
-            const mirror_writer_start = mirror_writers.items.len;
-            var j = i + 1;
+            // Record packed offsets in file order so request tasks can finish
+            // out of order without mutating writer cursors.
+            const writer_offset = writer_offsets[span.writer_index];
+            var writer_mask: u64 = 0;
+            var j = i;
             while (j < placement_spans.len) : (j += 1) {
-                const mirror = placement_spans[j];
-                if (mirror.start != span.start or mirror.len != span.len) break;
-                try mirror_writers.append(allocator, mirror.writer_index);
+                const member = placement_spans[j];
+                if (member.start != span.start or member.len != span.len) break;
+                std.debug.assert(writer_offsets[member.writer_index] == writer_offset);
+                writer_offsets[member.writer_index] += span.len;
+                writer_mask |= @as(u64, 1) << @intCast(member.writer_index);
             }
 
             try spans.append(allocator, .{
                 .start = span.start,
                 .end = span.start + span.len,
-                .writer_offset = 0,
-                .primary_writer = span.writer_index,
-                .mirror_writer_start = mirror_writer_start,
-                .mirror_writer_len = j - i - 1,
+                .writer_offset = writer_offset,
+                .writer_mask = writer_mask,
             });
             cursor += span.len;
             i = j;
@@ -164,7 +126,6 @@ pub const DispatchSpans = struct {
             .writer_index = writer_index,
             .start = start,
             .len = len,
-            .order = placement_spans.items.len,
         });
     }
 
@@ -230,3 +191,54 @@ pub const DispatchSpans = struct {
         return axis;
     }
 };
+
+test "dispatch spans preserve mirrored ranges and packed writer offsets" {
+    const allocator = std.testing.allocator;
+    var placements = [_]DispatchSpans.PlacementSpan{
+        .{ .writer_index = 63, .start = 8, .len = 4 },
+        .{ .writer_index = 2, .start = 12, .len = 4 },
+        .{ .writer_index = 0, .start = 0, .len = 4 },
+        .{ .writer_index = 1, .start = 4, .len = 4 },
+        .{ .writer_index = 63, .start = 0, .len = 4 },
+        .{ .writer_index = 0, .start = 8, .len = 4 },
+        .{ .writer_index = 2, .start = 4, .len = 4 },
+        .{ .writer_index = 1, .start = 12, .len = 4 },
+    };
+    var spans: std.ArrayList(DispatchSpans.DispatchSpan) = .empty;
+    defer spans.deinit(allocator);
+    var offsets: [64]usize = @splat(0);
+    try DispatchSpans.deduplicateByRange(allocator, &placements, 16, &spans, &offsets);
+    const expected = [_]DispatchSpans.DispatchSpan{
+        .{ .start = 0, .end = 4, .writer_offset = 0, .writer_mask = 0x8000000000000001 },
+        .{ .start = 4, .end = 8, .writer_offset = 0, .writer_mask = 0b110 },
+        .{ .start = 8, .end = 12, .writer_offset = 4, .writer_mask = 0x8000000000000001 },
+        .{ .start = 12, .end = 16, .writer_offset = 4, .writer_mask = 0b110 },
+    };
+    try std.testing.expectEqualDeep(expected[0..], spans.items);
+    for ([_]usize{ 0, 1, 2, 63 }) |writer| try std.testing.expectEqual(8, offsets[writer]);
+    for (offsets[3..63]) |offset| try std.testing.expectEqual(0, offset);
+
+    const dispatch: DispatchSpans = .{ .spans = spans.items };
+    for (0..16) |offset| try std.testing.expectEqual(@as(?usize, offset / 4), dispatch.spanIndexAt(offset));
+    try std.testing.expectEqual(@as(?usize, null), dispatch.spanIndexAt(16));
+}
+
+test "dispatch spans reject gaps overlaps and incomplete coverage" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 3, 5, 4 }) |second_start| {
+        var placements = [_]DispatchSpans.PlacementSpan{
+            .{ .writer_index = 0, .start = 0, .len = 4 },
+            .{ .writer_index = 1, .start = second_start, .len = 4 },
+        };
+        var spans: std.ArrayList(DispatchSpans.DispatchSpan) = .empty;
+        defer spans.deinit(allocator);
+        var offsets: [2]usize = @splat(0);
+        try std.testing.expectError(error.NonContiguousShardPlacement, DispatchSpans.deduplicateByRange(
+            allocator,
+            &placements,
+            9,
+            &spans,
+            &offsets,
+        ));
+    }
+}

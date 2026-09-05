@@ -1704,7 +1704,7 @@ const FairVectoredReadScheduler = struct {
                 @min(piece_end - cursor, span.end - cursor),
                 block_size - block_offset,
             );
-            const writer_mask = dispatch.writerMask(span);
+            const writer_mask = span.writer_mask;
             std.debug.assert(writer_mask != 0);
             const destination_offset = span.writer_offset + cursor - span.start;
             var merged = false;
@@ -5277,7 +5277,7 @@ const DispatchSpansTest = struct {
         defer allocator.free(expected);
         @memset(expected, 0);
         for (dispatch_spans.spans) |span| {
-            var mask = dispatch_spans.writerMask(span);
+            var mask = span.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
