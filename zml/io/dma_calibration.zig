@@ -24,6 +24,11 @@ const max_devices = 64;
 pub const Calibration = struct {
     block_size: usize,
     max_in_flight_per_device: usize,
+
+    pub const default: Calibration = .{
+        .block_size = 4 * 1024 * 1024,
+        .max_in_flight_per_device = 8,
+    };
 };
 
 pub const Options = struct {
@@ -41,25 +46,12 @@ pub const Options = struct {
     /// Prefer a smaller transaction once it supplies enough headroom over the
     /// source pipeline instead of maximizing isolated copy-engine throughput.
     block_selection_tolerance: f64 = 0.08,
-    /// Safety guard on total pinned host memory, not a target: the pool only
-    /// grows to the pre-grown working set plus each node's DMA stage. Set high
-    /// so it cannot silently clip that working set (it did on eight MI300X,
-    /// where 2 GiB trimmed the per-node reserve from 65 blocks to 64).
-    max_mapped_bytes: usize = 16 * 1024 * 1024 * 1024,
-    /// Optional device-index to NUMA-node override. When absent, complete PJRT
-    /// `numa_node` attributes select local pools; incomplete or unsupported
-    /// topology falls back to one shared DmaMapped pool.
-    device_numa_nodes: []const usize = &.{},
-    /// Forces the shared unbound pool even when the topology is known, which
-    /// is what a single-node host already gets. It exists to measure what
-    /// node-local placement is worth before keeping the policy.
-    disable_numa_pools: bool = false,
 };
 
-/// What one benchmark reports: the workspace and calibration it produced, the
-/// selected tuple, and the three phase times of the single summary line.
+/// What one benchmark reports internally for the summary log.
 const BenchmarkReport = struct {
-    resources: BenchmarkResult,
+    calibration: Calibration,
+    source_pools: *const BenchmarkSourcePools,
     measured_bytes_per_second: f64,
     /// Whole `benchmarkSyntheticTransfer` call, including arena mapping.
     elapsed_ns: u64,
@@ -69,53 +61,36 @@ const BenchmarkReport = struct {
     device_allocator_warmup_ns: u64,
 };
 
-/// Returns a benchmark result for direct-transfer platforms and `null` for
-/// platforms that use the buffered loader.
-pub fn benchmarkIfSupported(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const platform_mod.Platform,
-    opts: Options,
-) !?BenchmarkResult {
-    if (!isSupported(platform)) return null;
-    return try benchmark(allocator, io, platform, opts);
-}
-
-/// Measures one representative device and returns an owned, reusable DMA
-/// workspace configured for every addressable device.
+/// Measures one representative device using the supplied reusable mapped
+/// workspace and returns the selected immutable calibration.
 pub fn benchmark(
-    allocator: std.mem.Allocator,
-    io: std.Io,
+    source_pools: *BenchmarkSourcePools,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !BenchmarkResult {
+) !Calibration {
     if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
     try validatePlatform(platform);
-    try validateOptions(opts, platform.devices.len);
-    var result = try benchmarkSyntheticTransfer(allocator, io, platform, opts);
-    errdefer result.resources.deinit();
+    try source_pools.acquire();
+    defer source_pools.release();
+    try validateOptions(opts, source_pools.max_mapped_bytes);
+    if (source_pools.device_pool_indices.len != platform.devices.len)
+        return error.DmaDeviceMismatch;
+    const result = try benchmarkSyntheticTransfer(source_pools, platform, opts);
     logBenchmarkReport(platform, &result);
-    return result.resources;
+    return result.calibration;
 }
 
 /// Benchmarks synthetic DmaMapped PJRT transfers on one representative device.
-/// Every addressable device allocator is still warmed and retained workspace is
-/// prepared for the complete platform.
+/// Every addressable device allocator is still warmed; benchmark allocations
+/// remain mapped in the supplied workspace for later use.
 fn benchmarkSyntheticTransfer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
+    source_pools: *BenchmarkSourcePools,
     platform: *const platform_mod.Platform,
     opts: Options,
 ) !BenchmarkReport {
+    const allocator = source_pools.allocator;
+    const io = source_pools.io;
     const benchmark_started: std.Io.Timestamp = .now(io, .awake);
-    const resolved_numa_nodes = try resolveNumaNodes(
-        allocator,
-        platform,
-        opts.device_numa_nodes,
-        opts.disable_numa_pools,
-    );
-    defer allocator.free(resolved_numa_nodes);
-
     const device_warmup_started: std.Io.Timestamp = .now(io, .awake);
     try platform.warmupDeviceAllocators(io);
     const calibration_started: std.Io.Timestamp = .now(io, .awake);
@@ -123,81 +98,36 @@ fn benchmarkSyntheticTransfer(
         device_warmup_started,
         calibration_started,
     );
-    var source_pools: BenchmarkSourcePools = try .init(
-        allocator,
-        io,
-        platform,
-        resolved_numa_nodes,
-        opts.max_mapped_bytes,
-    );
-    var source_pools_active = true;
-    defer if (source_pools_active) source_pools.deinit();
-
     var session: BenchmarkSession = .{
         .allocator = allocator,
         .io = io,
         .platform = platform,
     };
     var session_active = true;
-    defer if (session_active) session.deinit(&source_pools);
+    defer if (session_active) session.deinit(source_pools);
 
     const representative = try tuneDevice(
         &session,
         opts,
-        &source_pools,
+        source_pools,
         0,
     );
-    // The candidate cohorts are done; release their device buffers before the
-    // retained working set is mapped.
-    session.deinit(&source_pools);
+    // The candidate cohorts are done; release their device buffers while
+    // retaining the mapped host calibration ring.
+    session.deinit(source_pools);
     session_active = false;
     const calibration_ns = elapsedNanoseconds(
         calibration_started,
         .now(io, .awake),
     );
 
-    const uniform_block_size = representative.value;
-    const uniform_parallelism = opts.block_parallelism;
-    const calibrated_node_reserves = try allocator.alloc(usize, source_pools.pools.len);
-    defer allocator.free(calibrated_node_reserves);
-    @memset(calibrated_node_reserves, 0);
-    for (platform.devices, 0..) |_, device_index| {
-        const pool_index = source_pools.device_pool_indices[device_index];
-        calibrated_node_reserves[pool_index] = try std.math.add(
-            usize,
-            calibrated_node_reserves[pool_index],
-            uniform_parallelism,
-        );
-    }
-
-    try source_pools.ensureLoadBlockReserves(
-        uniform_block_size,
-        calibrated_node_reserves,
-    );
-    // Map the source working set here, before any load starts: pinned
-    // allocation is slow (about 200 ms for 272 MiB of hipHostMalloc on
-    // MI300X) and must not sit inside a measured load. A loader whose
-    // request size exceeds `preallocated_request_size` grows the remainder
-    // when it is created.
-    try source_pools.ensureSourceWorkingSet(
-        uniform_block_size,
-        try limits.maximumCoalescedJobBlocks(
-            @max(uniform_block_size, BenchmarkResult.preallocated_request_size),
-            uniform_block_size,
-        ),
-        BenchmarkResult.preallocated_source_width,
-        calibrated_node_reserves,
-    );
-    const resources = BenchmarkResult.adopt(
-        .{
-            .block_size = uniform_block_size,
-            .max_in_flight_per_device = uniform_parallelism,
-        },
-        source_pools,
-    );
-    source_pools_active = false;
+    const calibration: Calibration = .{
+        .block_size = representative.value,
+        .max_in_flight_per_device = opts.block_parallelism,
+    };
     return .{
-        .resources = resources,
+        .calibration = calibration,
+        .source_pools = source_pools,
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
@@ -246,7 +176,7 @@ fn tuneDevice(
     var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!benchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
+        if (!benchmarkTupleFeasible(source_pools.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
@@ -262,7 +192,7 @@ fn tuneDevice(
     defer session.allocator.free(block_candidates);
     var block_index: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!benchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
+        if (!benchmarkTupleFeasible(source_pools.max_mapped_bytes, block_size, opts.block_parallelism))
             continue;
         block_candidates[block_index] = .{
             .value = block_size,
@@ -559,14 +489,14 @@ fn logBenchmarkReport(platform: *const platform_mod.Platform, result: *const Ben
         @tagName(platform.target),
         platform.devices.len,
         platform.devices[0].kind(),
-        result.resources.calibration.block_size,
-        result.resources.calibration.max_in_flight_per_device,
+        result.calibration.block_size,
+        result.calibration.max_in_flight_per_device,
         result.measured_bytes_per_second / (1024 * 1024 * 1024),
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
-        result.resources.retainedMappedBytes(),
-        result.resources.numaPoolCount(),
+        result.source_pools.retainedMappedBytes(),
+        result.source_pools.numaPoolCount(),
     });
 }
 
@@ -773,117 +703,6 @@ pub fn isSupported(platform: *const platform_mod.Platform) bool {
         platform.target == .oneapi;
 }
 
-/// Owned, reusable host-DMA workspace. A workspace may be borrowed by only one
-/// load at a time, must be deinitialized before its platform, and keeps all
-/// registered arenas mapped until `deinit`.
-pub const BenchmarkResult = struct {
-    const Status = enum(u8) {
-        idle,
-        loading,
-        destroying,
-    };
-
-    calibration: Calibration,
-
-    workspace: BenchmarkSourcePools,
-    status: std.atomic.Value(Status) = .init(.idle),
-
-    fn adopt(
-        calibration: Calibration,
-        workspace: BenchmarkSourcePools,
-    ) BenchmarkResult {
-        return .{
-            .calibration = calibration,
-            .workspace = workspace,
-        };
-    }
-
-    pub fn acquire(self: *BenchmarkResult) !void {
-        if (self.status.cmpxchgStrong(
-            .idle,
-            .loading,
-            .acq_rel,
-            .acquire,
-        ) != null) return error.DmaWorkspaceBusy;
-    }
-
-    pub fn release(self: *BenchmarkResult) void {
-        const previous = self.status.swap(.idle, .release);
-        std.debug.assert(previous == .loading);
-    }
-
-    pub fn retainedMappedBytes(self: *const BenchmarkResult) usize {
-        return self.workspace.allocatedBytes();
-    }
-
-    pub fn maxMappedBytes(self: *const BenchmarkResult) usize {
-        return self.workspace.max_mapped_bytes;
-    }
-
-    /// The widest source rung whose working set is mapped before a load
-    /// starts. The adaptive controller climbs from 12 through 16 and 24 to
-    /// 32 on every local backend measured so far and holds at or below 24
-    /// on all of them, so every NUMA pool that feeds a device is grown at
-    /// loader creation to serve 32 concurrent requests plus the lifecycle
-    /// spare: a pinned slab mapped mid-load (146 ms for the first 64 MiB
-    /// hipHostMalloc slab on MI300X) would otherwise land inside a scored
-    /// window. A high-latency bootstrap above 32 still grows on demand.
-    pub const preallocated_source_width = 32;
-
-    /// Request size assumed when calibration maps the source working set:
-    /// the default profile chunk and the HTTP/S3/GCS minimum. Local 8 MiB
-    /// profiles need less; a 32 MiB HF profile grows the rest at loader
-    /// creation.
-    pub const preallocated_request_size: usize = 16 * 1024 * 1024;
-
-    /// Grows the retained arenas so that `width + 1` requests of
-    /// `request_blocks` blocks plus each pool's `feed_reserves` (the DMA
-    /// stage's blocks: the calibrated depth per device) can be leased from
-    /// each pool without mapping a slab during the load, clipped to the
-    /// largest width that fits the mapped ceiling. The arenas stay owned by
-    /// this benchmark result and are reused by every later loader.
-    pub fn ensureSourceWorkingSet(
-        self: *BenchmarkResult,
-        request_blocks: usize,
-        width: usize,
-        feed_reserves: []const usize,
-    ) !void {
-        return self.workspace.ensureSourceWorkingSet(
-            self.calibration.block_size,
-            request_blocks,
-            width,
-            feed_reserves,
-        );
-    }
-
-    pub fn numaPoolCount(self: *const BenchmarkResult) usize {
-        return self.workspace.pools.len;
-    }
-
-    pub fn hasStrictAffinity(self: *const BenchmarkResult) bool {
-        return self.workspace.pools[0].numa_allocator.node != null;
-    }
-
-    pub fn deinit(self: *BenchmarkResult) void {
-        if (self.status.cmpxchgStrong(
-            .idle,
-            .destroying,
-            .acq_rel,
-            .acquire,
-        ) != null) @panic("BenchmarkResult.deinit called while borrowed");
-        const io = self.workspace.io;
-        const mapped_bytes = self.workspace.allocatedBytes();
-        const started: std.Io.Timestamp = .now(io, .awake);
-        self.workspace.deinit();
-        const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
-        log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
-            mapped_bytes,
-            @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
-        });
-        self.* = undefined;
-    }
-};
-
 fn validatePlatform(platform: *const platform_mod.Platform) !void {
     if (platform.devices.len == 0 or platform.devices.len > 64)
         return error.DmaDeviceMismatch;
@@ -894,7 +713,7 @@ fn validatePlatform(platform: *const platform_mod.Platform) !void {
     }
 }
 
-fn validateOptions(opts: Options, device_count: usize) !void {
+fn validateOptions(opts: Options, max_mapped_bytes: usize) !void {
     if (opts.block_sizes.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
     if (opts.duration_ns == 0 or opts.confirmation_duration_ns == 0)
         return error.InvalidDmaBenchmarkOptions;
@@ -903,22 +722,11 @@ fn validateOptions(opts: Options, device_count: usize) !void {
     if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
         !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
         return error.InvalidDmaBenchmarkOptions;
-    if (opts.device_numa_nodes.len != 0) {
-        if (opts.disable_numa_pools) return error.InvalidDmaBenchmarkOptions;
-        if (opts.device_numa_nodes.len != device_count)
-            return error.InvalidDmaBenchmarkOptions;
-        if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
-        for (opts.device_numa_nodes) |node| {
-            if (node >= NumaAllocator.max_nodes)
-                return error.InvalidDmaBenchmarkOptions;
-        }
-    }
-
     var has_feasible_block = false;
     for (opts.block_sizes) |block_size| {
         if (block_size == 0 or block_size > limits.max_read_request_size)
             return error.InvalidDmaBenchmarkOptions;
-        if (benchmarkTupleFeasible(opts.max_mapped_bytes, block_size, opts.block_parallelism))
+        if (benchmarkTupleFeasible(max_mapped_bytes, block_size, opts.block_parallelism))
             has_feasible_block = true;
     }
     if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
@@ -950,15 +758,72 @@ const KnownPoolTopology = struct {
     }
 };
 
+/// Owned, reusable host-DMA workspace. It retains mapped arenas across
+/// benchmarks and loaders, and may be borrowed by only one of them at a time.
+/// Deinitialize it before its platform.
 pub const BenchmarkSourcePools = struct {
+    const Status = enum(u8) {
+        idle,
+        in_use,
+        destroying,
+    };
+
+    pub const Options = struct {
+        /// Safety guard on total pinned host memory, not an allocation target.
+        max_mapped_bytes: usize = 16 * 1024 * 1024 * 1024,
+        /// Optional device-index to NUMA-node override. When absent, complete
+        /// PJRT topology selects local pools; otherwise one shared pool is used.
+        device_numa_nodes: []const usize = &.{},
+        /// Forces one shared unbound pool even when topology is known.
+        disable_numa_pools: bool = false,
+    };
+
+    /// The widest source rung pre-grown when a loader borrows this workspace.
+    pub const preallocated_source_width = 32;
+
     allocator: std.mem.Allocator,
     io: std.Io,
     pools: []BenchmarkSourcePool,
     device_pool_indices: []usize,
     max_mapped_bytes: usize,
     allocated_bytes: std.atomic.Value(usize) = .init(0),
+    status: std.atomic.Value(Status) = .init(.idle),
 
-    fn init(
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const platform_mod.Platform,
+        opts: BenchmarkSourcePools.Options,
+    ) !BenchmarkSourcePools {
+        if (!isSupported(platform)) return error.DmaBenchmarkUnsupported;
+        try validatePlatform(platform);
+        if (opts.max_mapped_bytes < limits.max_read_request_size)
+            return error.InvalidDmaLoadConfig;
+        if (opts.device_numa_nodes.len != 0) {
+            if (opts.disable_numa_pools or opts.device_numa_nodes.len != platform.devices.len)
+                return error.InvalidDmaLoadConfig;
+            if (comptime builtin.os.tag != .linux) return error.DmaBenchmarkNumaUnsupported;
+            for (opts.device_numa_nodes) |node| {
+                if (node >= NumaAllocator.max_nodes) return error.InvalidDmaLoadConfig;
+            }
+        }
+        const resolved_numa_nodes = try resolveNumaNodes(
+            allocator,
+            platform,
+            opts.device_numa_nodes,
+            opts.disable_numa_pools,
+        );
+        defer allocator.free(resolved_numa_nodes);
+        return initResolved(
+            allocator,
+            io,
+            platform,
+            resolved_numa_nodes,
+            opts.max_mapped_bytes,
+        );
+    }
+
+    fn initResolved(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const platform_mod.Platform,
@@ -1023,7 +888,46 @@ pub const BenchmarkSourcePools = struct {
         };
     }
 
-    fn deinit(self: *BenchmarkSourcePools) void {
+    pub fn acquire(self: *BenchmarkSourcePools) !void {
+        if (self.status.cmpxchgStrong(
+            .idle,
+            .in_use,
+            .acq_rel,
+            .acquire,
+        ) != null) return error.DmaWorkspaceBusy;
+    }
+
+    pub fn release(self: *BenchmarkSourcePools) void {
+        const previous = self.status.swap(.idle, .release);
+        std.debug.assert(previous == .in_use);
+    }
+
+    pub fn retainedMappedBytes(self: *const BenchmarkSourcePools) usize {
+        return self.allocatedBytes();
+    }
+
+    pub fn maxMappedBytes(self: *const BenchmarkSourcePools) usize {
+        return self.max_mapped_bytes;
+    }
+
+    pub fn numaPoolCount(self: *const BenchmarkSourcePools) usize {
+        return self.pools.len;
+    }
+
+    pub fn hasStrictAffinity(self: *const BenchmarkSourcePools) bool {
+        return self.pools[0].numa_allocator.node != null;
+    }
+
+    pub fn deinit(self: *BenchmarkSourcePools) void {
+        if (self.status.cmpxchgStrong(
+            .idle,
+            .destroying,
+            .acq_rel,
+            .acquire,
+        ) != null) @panic("BenchmarkSourcePools.deinit called while borrowed");
+        const io = self.io;
+        const mapped_bytes = self.allocatedBytes();
+        const started: std.Io.Timestamp = .now(io, .awake);
         for (self.pools) |*pool| {
             for (pool.allocations.items) |allocation| {
                 allocation.deinit(pool.dma_map_allocator.allocator());
@@ -1032,6 +936,11 @@ pub const BenchmarkSourcePools = struct {
         }
         self.allocator.free(self.device_pool_indices);
         self.allocator.free(self.pools);
+        const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
+        log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
+            mapped_bytes,
+            @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
+        });
         self.* = undefined;
     }
 
@@ -1110,7 +1019,7 @@ pub const BenchmarkSourcePools = struct {
     /// Ensures every NUMA pool can feed its calibrated devices and hold one
     /// complete fixed-size source request. Independent nodes register their
     /// missing slabs concurrently; existing retained arenas are reused first.
-    fn ensureLoadBlockReserves(
+    pub fn ensureLoadBlockReserves(
         self: *BenchmarkSourcePools,
         block_size: usize,
         calibrated_reserves: []const usize,
@@ -1137,10 +1046,9 @@ pub const BenchmarkSourcePools = struct {
         return usable;
     }
 
-    /// See `BenchmarkResult.ensureSourceWorkingSet`. Every pool gets the
-    /// same source target because a strict-affinity load draws a device's
-    /// blocks from its own node, plus its own DMA reserve.
-    fn ensureSourceWorkingSet(
+    /// Every pool gets the same source target because a strict-affinity load
+    /// draws a device's blocks from its own node, plus its own DMA reserve.
+    pub fn ensureSourceWorkingSet(
         self: *BenchmarkSourcePools,
         block_size: usize,
         request_blocks: usize,
@@ -1427,7 +1335,7 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "DMA benchmark is optional on buffered platforms" {
+test "DMA benchmark reports buffered platforms as unsupported" {
     var platform: platform_mod.Platform = .{
         .arena = undefined,
         .target = .cpu,
@@ -1441,16 +1349,15 @@ test "DMA benchmark is optional on buffered platforms" {
         .shardings = .empty,
     };
 
-    try std.testing.expect(
-        try benchmarkIfSupported(std.testing.allocator, std.testing.io, &platform, .{}) == null,
-    );
+    try std.testing.expect(!isSupported(&platform));
 }
 
 test "DMA benchmark validates options" {
-    try validateOptions(.{}, 8);
+    const max_mapped_bytes = 16 * 1024 * 1024 * 1024;
+    try validateOptions(.{}, max_mapped_bytes);
     try std.testing.expectError(
         error.InvalidDmaBenchmarkOptions,
-        validateOptions(.{ .block_parallelism = 0 }, 8),
+        validateOptions(.{ .block_parallelism = 0 }, max_mapped_bytes),
     );
 }
 

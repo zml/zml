@@ -13,6 +13,14 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.llm);
 
+fn benchmarkDmaIfPresent(
+    source_pools: ?*zml.io.dma.BenchmarkSourcePools,
+    platform: *const zml.Platform,
+) !?zml.io.dma.Calibration {
+    const pools = source_pools orelse return null;
+    return try zml.io.dma.benchmark(pools, platform, .{});
+}
+
 const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -87,16 +95,16 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
+    var dma_source_pools: ?zml.io.dma.BenchmarkSourcePools = if (zml.io.dma.isSupported(platform))
+        try .init(allocator, io, platform, .{})
+    else
+        null;
+    defer if (dma_source_pools) |*pools| pools.deinit();
     var dma_benchmark_fut = try io.concurrent(
-        zml.io.dma.benchmarkIfSupported,
-        .{ allocator, io, platform, .{} },
+        benchmarkDmaIfPresent,
+        .{ if (dma_source_pools) |*pools| pools else null, platform },
     );
-    defer if (dma_benchmark_fut.cancel(io)) |maybe_result| {
-        if (maybe_result) |result| {
-            var benchmark_result = result;
-            benchmark_result.deinit();
-        }
-    } else |_| {};
+    defer _ = dma_benchmark_fut.cancel(io) catch {};
 
     const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
         try zml.attention.attnd.register(allocator, io, platform, .{
@@ -153,11 +161,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers after compilation to leave enough device memory for autotuning.
     const load_profile = try vfs.loadProfile(args.model);
-    var dma_benchmark = try dma_benchmark_fut.await(io);
+    const dma_calibration = try dma_benchmark_fut.await(io);
     progress.increaseEstimatedTotalItems(store.view().count());
     const all_shardings = shardings.all();
     var loader = try zml.io.Loader.init(allocator, io, platform, &store, .{
-        .dma = &dma_benchmark,
+        .dma_pool = if (dma_source_pools) |*pools| pools else null,
+        .dma_calibration = dma_calibration,
         .progress = &progress,
         .shardings = &all_shardings,
         .load_profile = load_profile,

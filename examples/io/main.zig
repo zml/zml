@@ -172,25 +172,27 @@ pub fn main(init: std.process.Init) !void {
                 &zml.io.dma.default_benchmark_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            var benchmark_result = try zml.io.dma.benchmark(allocator, io, platform, .{
+            var source_pools = try zml.io.dma.BenchmarkSourcePools.init(allocator, io, platform, .{
+                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
+                .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
+                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
+            });
+            defer source_pools.deinit();
+            const calibration = try zml.io.dma.benchmark(&source_pools, platform, .{
                 .block_sizes = block_sizes,
                 .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
                 .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
                 .minimum_transfers_per_device = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
-                .max_mapped_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
-                .device_numa_nodes = try dmaBenchmarkNumaNodes(option_allocator, init.environ_map),
-                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
             });
-            defer benchmark_result.deinit();
             try stdout_writer.interface.print(
                 "dma_benchmark block_bytes={d} parallelism={d} max_mapped_bytes={d} retained_mapped_bytes={d} numa_pools={d}\n",
                 .{
-                    benchmark_result.calibration.block_size,
-                    benchmark_result.calibration.max_in_flight_per_device,
-                    benchmark_result.maxMappedBytes(),
-                    benchmark_result.retainedMappedBytes(),
-                    benchmark_result.numaPoolCount(),
+                    calibration.block_size,
+                    calibration.max_in_flight_per_device,
+                    source_pools.maxMappedBytes(),
+                    source_pools.retainedMappedBytes(),
+                    source_pools.numaPoolCount(),
                 },
             );
             try stdout_writer.flush();
@@ -232,13 +234,21 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_BLOCK_MIB",
                 &zml.io.dma.default_benchmark_block_sizes,
             );
-            var dma_benchmark = try zml.io.dma.benchmarkIfSupported(allocator, io, platform, .{
-                .block_sizes = load_dma_block_sizes,
-                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                .device_numa_nodes = try dmaBenchmarkNumaNodes(init.arena.allocator(), init.environ_map),
-                .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
-            });
-            defer if (dma_benchmark) |*result| result.deinit();
+            var dma_source_pools: ?zml.io.dma.BenchmarkSourcePools = if (zml.io.dma.isSupported(platform))
+                try .init(allocator, io, platform, .{
+                    .device_numa_nodes = try dmaBenchmarkNumaNodes(init.arena.allocator(), init.environ_map),
+                    .disable_numa_pools = try envUsize(init.environ_map, "ZML_DMA_BENCH_NUMA_OFF", 0) != 0,
+                })
+            else
+                null;
+            defer if (dma_source_pools) |*pools| pools.deinit();
+            const dma_calibration = if (dma_source_pools) |*pools|
+                try zml.io.dma.benchmark(pools, platform, .{
+                    .block_sizes = load_dma_block_sizes,
+                    .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                })
+            else
+                null;
 
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
@@ -341,7 +351,8 @@ pub fn main(init: std.process.Init) !void {
                 var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
                 errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
                 var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, &store, .{
-                    .dma = &dma_benchmark,
+                    .dma_pool = if (dma_source_pools) |*pools| pools else null,
+                    .dma_calibration = dma_calibration,
                     .shardings = &.{sharded_sharding},
                     .read_parallelism = load_read_parallelism,
                     .load_profile = load_profile,

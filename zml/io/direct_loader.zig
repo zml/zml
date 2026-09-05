@@ -3971,8 +3971,9 @@ pub const DirectLoader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     progress: ?*std.Progress.Node,
-    dma_resources: *dma.BenchmarkResult,
-    owns_dma_resources: bool,
+    dma_source_pools: *dma.BenchmarkSourcePools,
+    owns_dma_source_pools: bool,
+    calibration: dma.Calibration,
     pool: mem.DmaBlockPool,
     scheduler: FairVectoredReadScheduler,
     metrics: VectoredLoadMetrics = .{},
@@ -3995,11 +3996,6 @@ pub const DirectLoader = struct {
     controller_started: bool = false,
     cleaned: bool = false,
 
-    fn providedDmaBenchmark(opts: LoaderOptions) ?*dma.BenchmarkResult {
-        const optional = opts.dma orelse return null;
-        return if (optional.*) |*result| result else null;
-    }
-
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -4008,25 +4004,28 @@ pub const DirectLoader = struct {
     ) !*DirectLoader {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
-        var owned_resources: ?*dma.BenchmarkResult = null;
-        const resources = providedDmaBenchmark(opts) orelse resources: {
-            const owned = try allocator.create(dma.BenchmarkResult);
+        var owned_source_pools: ?*dma.BenchmarkSourcePools = null;
+        const source_pools = opts.dma_pool orelse source_pools: {
+            const owned = try allocator.create(dma.BenchmarkSourcePools);
             errdefer allocator.destroy(owned);
-            owned.* = try dma.benchmark(allocator, io, platform, .{});
-            owned_resources = owned;
-            break :resources owned;
+            owned.* = try dma.BenchmarkSourcePools.init(allocator, io, platform, .{});
+            owned_source_pools = owned;
+            break :source_pools owned;
         };
-        errdefer if (owned_resources) |owned| {
+        errdefer if (owned_source_pools) |owned| {
             owned.deinit();
             allocator.destroy(owned);
         };
-        try resources.acquire();
-        errdefer resources.release();
-        const calibration = resources.calibration;
-        if (resources.workspace.device_pool_indices.len != platform.devices.len)
+        try source_pools.acquire();
+        errdefer source_pools.release();
+        const calibration = opts.dma_calibration orelse dma.Calibration.default;
+        if (source_pools.device_pool_indices.len != platform.devices.len)
             return error.DmaDeviceMismatch;
-        if (calibration.block_size > max_load_read_request_size or
-            resources.maxMappedBytes() < max_load_read_request_size)
+        if (calibration.block_size == 0 or
+            calibration.block_size > max_load_read_request_size or
+            calibration.max_in_flight_per_device == 0 or
+            calibration.max_in_flight_per_device > load_limits.max_dma_parallelism or
+            source_pools.maxMappedBytes() < max_load_read_request_size)
             return error.InvalidDmaLoadConfig;
 
         const request_size = try effectiveSourceRequestSize(
@@ -4037,45 +4036,44 @@ pub const DirectLoader = struct {
             request_size,
             calibration.block_size,
         );
-        const node_reserves = try allocator.alloc(usize, resources.workspace.pools.len);
+        const node_reserves = try allocator.alloc(usize, source_pools.pools.len);
         defer allocator.free(node_reserves);
         @memset(node_reserves, 0);
         for (platform.devices, 0..) |_, device_index| {
-            const node_index = resources.workspace.device_pool_indices[device_index];
+            const node_index = source_pools.device_pool_indices[device_index];
             node_reserves[node_index] = try std.math.add(
                 usize,
                 node_reserves[node_index],
                 calibration.max_in_flight_per_device,
             );
         }
-        // Calibration already mapped the working set for a 16 MiB request;
-        // this grows the remainder for larger request sizes (HF profiles)
-        // so no pinned slab grows inside a scored window. The arenas stay
-        // with the benchmark result for later loaders.
+        // Grow the DMA stage reserves and source working set before reads begin;
+        // the mapped arenas remain in the source pools for later loaders.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-        const retained_before = resources.retainedMappedBytes();
-        try resources.ensureSourceWorkingSet(
+        const retained_before = source_pools.retainedMappedBytes();
+        try source_pools.ensureLoadBlockReserves(calibration.block_size, node_reserves);
+        try source_pools.ensureSourceWorkingSet(
+            calibration.block_size,
             maximum_blocks_per_job,
-            dma.BenchmarkResult.preallocated_source_width,
+            dma.BenchmarkSourcePools.preallocated_source_width,
             node_reserves,
         );
-        const pregrown_bytes = resources.retainedMappedBytes() - retained_before;
+        const pregrown_bytes = source_pools.retainedMappedBytes() - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        // The per-node reserves were materialized by calibration (the DMA
-        // stage's blocks); the pool keeps them as the growth floor of each
+        // The pool keeps the DMA stage reserves as the growth floor of each
         // node for devices that join a later submission.
         var pool = try mem.DmaBlockPool.initFromProvider(
             allocator,
-            resources.workspace.blockPoolArenaProvider(),
+            source_pools.blockPoolArenaProvider(),
             calibration.block_size,
-            resources.maxMappedBytes(),
+            source_pools.maxMappedBytes(),
             node_reserves,
         );
         var pool_moved = false;
         errdefer if (!pool_moved) pool.deinit();
         const aggregate_width = try pool.aggregatePotentialRequestWidth(maximum_blocks_per_job);
         const strict_width = try pool.minimumStrictAffinityRequestWidth(maximum_blocks_per_job);
-        const strict_affinity = resources.hasStrictAffinity();
+        const strict_affinity = source_pools.hasStrictAffinity();
         const feasible_width = if (strict_affinity)
             @min(aggregate_width, strict_width)
         else
@@ -4112,8 +4110,9 @@ pub const DirectLoader = struct {
             .platform = platform,
             .load_profile = opts.load_profile,
             .progress = opts.progress,
-            .dma_resources = resources,
-            .owns_dma_resources = owned_resources != null,
+            .dma_source_pools = source_pools,
+            .owns_dma_source_pools = owned_source_pools != null,
+            .calibration = calibration,
             .pool = pool,
             .scheduler = scheduler,
             .read_gate = .init(limits.read),
@@ -4142,7 +4141,7 @@ pub const DirectLoader = struct {
             &self.read_gate,
             &self.request_gate,
             calibration.block_size,
-            resources.workspace.device_pool_indices,
+            source_pools.device_pool_indices,
             strict_affinity,
             &self.metrics,
             &self.scheduler,
@@ -4333,7 +4332,7 @@ pub const DirectLoader = struct {
             batch,
             self.platform.devices.len,
             batch.items,
-            self.dma_resources.calibration.block_size,
+            self.calibration.block_size,
             self.source_request_size,
         ) catch |err| {
             if (batch.diagnostics.plans == 0) return err;
@@ -4517,10 +4516,10 @@ pub const DirectLoader = struct {
             self.pipeline.deinit();
             self.scheduler.deinit();
             self.pool.deinit();
-            self.dma_resources.release();
-            if (self.owns_dma_resources) {
-                self.dma_resources.deinit();
-                self.allocator.destroy(self.dma_resources);
+            self.dma_source_pools.release();
+            if (self.owns_dma_source_pools) {
+                self.dma_source_pools.deinit();
+                self.allocator.destroy(self.dma_source_pools);
             }
             self.cleaned = true;
         }
