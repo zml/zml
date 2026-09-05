@@ -1,0 +1,27 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "voxtral_tts",
+    srcs = [
+        "audio_io.zig",
+        "codec.zig",
+        "layers.zig",
+        "model.zig",
+        "tokenizer.zig",
+    ],
+    main = "main.zig",
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "audio_io.zig",
+        "codec.zig",
+        "layers.zig",
+        "model.zig",
+        "tokenizer.zig",
+    ],
+    main = "test.zig",
+    deps = ["//zml"],
+)
