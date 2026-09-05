@@ -1,0 +1,948 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+const memory_mod = @import("../core/memory.zig");
+const policy_mod = @import("../core/policy.zig");
+const config = @import("../core/config.zig");
+const packing = @import("../model/packing.zig");
+const pipeline = @import("../runtime/pipeline.zig");
+const repo = @import("../runtime/repository.zig");
+const request_mod = @import("../core/request.zig");
+const sharding_mod = @import("../core/sharding.zig");
+const vae = @import("../vae/geometry.zig");
+
+pub fn run(allocator: std.mem.Allocator) !void {
+    try testConfig();
+    try testCli();
+    try testSharding(allocator);
+    try testSplitComma(allocator);
+    try testFrameGeometry();
+    try testCanvasPresets();
+    try testCanvasRules(allocator);
+    try testRequest(allocator);
+    try testCheckpoint();
+    try testMemoryPlan(allocator);
+    try testOfficialCanvasPlan(allocator);
+    try testOfficialPin();
+    try testTokenizerRelpaths();
+    try testWeightEntrypoints();
+    try testGroupRefs(allocator);
+    try testAttentionPolicy();
+    try testMemoryPlanExact(allocator);
+}
+
+fn testConfig() !void {
+    const cfg = config.Config.official();
+    try std.testing.expectEqual(@as(i64, 5376), cfg.hidden_size);
+    try std.testing.expectEqual(@as(i64, 50), cfg.num_layers);
+    try std.testing.expectEqual(@as(i64, 56), cfg.num_attention_heads);
+    try std.testing.expectEqual(@as(i64, 128), cfg.attention_head_dim);
+    try std.testing.expectEqual(@as(i64, 7168), cfg.innerDim());
+    try std.testing.expectEqual(@as(i64, 96), cfg.rotaryDim());
+    try std.testing.expectEqual(@as(i64, 24 * 1 * 2 * 2), cfg.videoPatchDim());
+    try std.testing.expectEqual(@as(i64, 96768), cfg.adalnOutFeatures());
+    try std.testing.expectEqual(@as(i64, 10752), cfg.finalAdalnOutFeatures());
+
+    try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.t2va.taskFamily());
+    try std.testing.expectEqual(config.TaskFamily.fl2va, config.Variant.fl2va.taskFamily());
+    try std.testing.expectEqual(config.TaskFamily.ref2va, config.Variant.ref2va.taskFamily());
+    try std.testing.expectEqualStrings("FL2VA", config.Variant.t2va.dirName());
+    try std.testing.expectEqualStrings("FL2VA", config.Variant.fl2va.dirName());
+    try std.testing.expectEqualStrings("Ref2VA", config.Variant.ref2va.dirName());
+    try std.testing.expectEqualStrings(config.taskDirName(.fl2va), config.official_task_dirs[0]);
+    try std.testing.expectEqualStrings(config.taskDirName(.ref2va), config.official_task_dirs[1]);
+
+    const enc = config.EncoderConfig.official();
+    try std.testing.expectEqual(@as(i64, 5120), enc.hidden_size);
+    try std.testing.expectEqual(@as(i64, 50), enc.used_hidden_layers);
+    try std.testing.expectEqual(@as(i64, 151936), enc.vocab_size);
+    const from_file = (config.EncoderFileConfig{}).resolve();
+    try std.testing.expectEqual(enc.hidden_size, from_file.hidden_size);
+    try std.testing.expectEqual(enc.num_hidden_layers, from_file.num_hidden_layers);
+    try std.testing.expectEqual(enc.vocab_size, from_file.vocab_size);
+}
+fn testCli() !void {
+    try config.checkDuration(5);
+    try config.checkDuration(15);
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(4.99));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(4));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(3));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(15.01));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(16));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(std.math.inf(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.checkDuration(-std.math.inf(f32)));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(std.math.nan(f32), 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(std.math.inf(f32), 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(-std.math.inf(f32), 0));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(std.math.nan(f32)));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(std.math.inf(f32)));
+    try std.testing.expectEqual(@as(u32, 0), config.frameCount(-std.math.inf(f32)));
+}
+fn testSharding(allocator: std.mem.Allocator) !void {
+    try std.testing.expectEqual(@as(usize, 0), sharding_mod.tensorParallelDegree(0));
+    try std.testing.expectEqual(@as(usize, 1), sharding_mod.tensorParallelDegree(1));
+    try std.testing.expectEqual(@as(usize, 2), sharding_mod.tensorParallelDegree(2));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(4));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(8));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(16));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(32));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(64));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(5));
+    try std.testing.expectEqual(@as(usize, 2), sharding_mod.tensorParallelDegree(3));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(6));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegree(7));
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelMax(56, 64, 8));
+    try std.testing.expectEqual(@as(usize, 6), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 6));
+    try std.testing.expectEqual(@as(usize, 4), sharding_mod.tensorParallelDegreeFor(6, 48, 48, 8));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelMax(64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(16, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(32, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 16), sharding_mod.tensorParallelDegreeFor(20, 64, 64, 16));
+    try std.testing.expectEqual(@as(usize, 1), sharding_mod.tensorParallelMax(0, 64, 8));
+    sharding_mod.preparePhysicalMesh(.{ .dit = 64, .enc = 64, .kv = 16 });
+    try std.testing.expectEqual(@as(usize, 8), sharding_mod.tensorParallelDegree(16));
+    sharding_mod.preparePhysicalMesh(sharding_mod.officialHeadCounts());
+    try std.testing.expect(sharding_mod.officialHeadsOk(1));
+    try std.testing.expect(sharding_mod.officialHeadsOk(2));
+    try std.testing.expect(sharding_mod.officialHeadsOk(4));
+    try std.testing.expect(sharding_mod.officialHeadsOk(8));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(16));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(7));
+    try std.testing.expect(!sharding_mod.officialHeadsOk(0));
+    try std.testing.expect(!sharding_mod.tensorParallelHeadsOk(8, 56, 64, 7));
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    inline for (std.meta.tags(zml.Target)) |target| {
+        const primary = sharding_mod.tensorParallelPrimaryAxis(target);
+        var mesh = try testMesh(arena, target, &.{primary}, &.{2});
+        const axes = sharding_mod.presentShardableAxes(&mesh);
+        try std.testing.expectEqual(primary, axes.get(0));
+        const strategy = try sharding_mod.tensorParallelStrategy(&mesh);
+        try std.testing.expectEqual(@as(usize, 1), strategy.bindings.len);
+        try std.testing.expectEqual(primary, strategy.bindings.get(0).physical.get(0));
+        try std.testing.expectEqual(@as(usize, 0), strategy.folding.len);
+        const data = try zml.Sharding.Data.init("model", &mesh, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 2), data.numPartitionsForLogicalAxis(.model));
+        try std.testing.expect(sharding_mod.officialHeadsOk(data.numPartitionsForLogicalAxis(.model)));
+    }
+
+    {
+        var tpu = try testMesh(arena, .tpu, &.{ .link_x, .link_y }, &.{ 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&tpu);
+        try std.testing.expectEqual(@as(usize, 1), strategy.folding.len);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link_x, .link_y },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &tpu, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 4), data.numPartitionsForLogicalAxis(.model));
+    }
+
+    {
+        var tpu = try testMesh(arena, .tpu, &.{ .link_x, .link_y, .link_z }, &.{ 2, 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&tpu);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link_x, .link_y, .link_z },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &tpu, .mesh(.{ .model = .high_bandwidth }), strategy);
+        const degree = data.numPartitionsForLogicalAxis(.model);
+        try std.testing.expectEqual(@as(i64, 8), degree);
+        const mesh_shard: zml.Sharding = .{ .data = &data };
+        const q = zml.Shape.init(.{ .dout = 7168, .d = 5376 }, .bf16).withPartitioning(.{ .dout = .model, .d = .replicated });
+        const q_pl = try mesh_shard.placement(q);
+        try std.testing.expectEqual(@as(i64, 896), q_pl.shape.dim(.dout));
+        const heads = zml.Shape.init(.{ .h = 56, .hd = 128 }, .bf16).withPartitioning(.{ .h = .model });
+        const h_pl = try mesh_shard.placement(heads);
+        try std.testing.expectEqual(@as(i64, 7), h_pl.shape.dim(.h));
+        const kv = zml.Shape.init(.{ .h = 8, .hd = 128 }, .bf16).withPartitioning(.{ .h = .model });
+        const kv_pl = try mesh_shard.placement(kv);
+        try std.testing.expectEqual(@as(i64, 1), kv_pl.shape.dim(.h));
+    }
+
+    {
+        var neuron = try testMesh(arena, .neuron, &.{ .link, .link_x, .link_y, .link_z }, &.{ 2, 2, 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&neuron);
+        try std.testing.expectEqual(sharding_mod.tensorParallelPrimaryAxis(.neuron), strategy.bindings.get(0).physical.get(0));
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link, .link_x, .link_y },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &neuron, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 8), data.numPartitionsForLogicalAxis(.model));
+        try std.testing.expect(sharding_mod.officialHeadsOk(8));
+    }
+
+    {
+        var oneapi = try testMesh(arena, .oneapi, &.{ .link, .bus }, &.{ 2, 2 });
+        const strategy = try sharding_mod.tensorParallelStrategy(&oneapi);
+        try std.testing.expectEqualSlices(
+            zml.Sharding.PhysicalAxisTag,
+            &.{ .link, .bus },
+            strategy.folding.get(0).sources.constSlice(),
+        );
+        const data = try zml.Sharding.Data.init("model", &oneapi, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 4), data.numPartitionsForLogicalAxis(.model));
+    }
+
+    {
+        var cuda16 = try testMesh(arena, .cuda, &.{.link}, &.{16});
+        try std.testing.expectError(error.IncompatibleSharding, sharding_mod.tensorParallelStrategy(&cuda16));
+        try std.testing.expectError(
+            error.IncompatibleSharding,
+            sharding_mod.tensorParallelStrategyFor(&cuda16, 56, 64, 8),
+        );
+    }
+
+    {
+        var cuda16 = try testMesh(arena, .cuda, &.{.link}, &.{16});
+        const strategy = try sharding_mod.tensorParallelStrategyFor(&cuda16, 64, 64, 16);
+        const data = try zml.Sharding.Data.init("wide", &cuda16, .mesh(.{ .model = .high_bandwidth }), strategy);
+        try std.testing.expectEqual(@as(i64, 16), data.numPartitionsForLogicalAxis(.model));
+        const mesh_shard: zml.Sharding = .{ .data = &data };
+        const heads = zml.Shape.init(.{ .h = 64 }, .bf16).withPartitioning(.{ .h = .model });
+        const h_pl = try mesh_shard.placement(heads);
+        try std.testing.expectEqual(@as(i64, 4), h_pl.shape.dim(.h));
+    }
+}
+fn testMesh(
+    allocator: std.mem.Allocator,
+    target: zml.Target,
+    tags: []const zml.Sharding.PhysicalAxisTag,
+    sizes: []const usize,
+) !zml.Sharding.PhysicalMesh {
+    var next_id: u32 = 0;
+    const root = try testMeshNode(allocator, tags, sizes, 0, &next_id);
+    return zml.Sharding.PhysicalMesh.fromTree(allocator, target, root);
+}
+fn testMeshNode(
+    allocator: std.mem.Allocator,
+    tags: []const zml.Sharding.PhysicalAxisTag,
+    sizes: []const usize,
+    depth: usize,
+    next_id: *u32,
+) !zml.Sharding.PhysicalNode {
+    if (depth == tags.len) {
+        const id = next_id.*;
+        next_id.* += 1;
+        return .{ .leaf = .{ .id = id, .coords = @splat(0xff) } };
+    }
+    const children = try allocator.alloc(zml.Sharding.PhysicalNode, sizes[depth]);
+    for (children) |*child| {
+        child.* = try testMeshNode(allocator, tags, sizes, depth + 1, next_id);
+    }
+    return .{
+        .branch = .{
+            .tag = tags[depth],
+            .geometry = switch (targetGeometry(tags[depth])) {
+                .torus => .{ .mesh = .torus },
+                .p2p => .point_to_point,
+                .tree => .tree,
+            },
+            .children = children,
+        },
+    };
+}
+fn targetGeometry(tag: zml.Sharding.PhysicalAxisTag) enum { torus, p2p, tree } {
+    return switch (tag) {
+        .link_x, .link_y, .link_z => .torus,
+        .link => .p2p,
+        .bus => .tree,
+    };
+}
+fn testSplitComma(allocator: std.mem.Allocator) !void {
+    const empty = try request_mod.splitComma(allocator, "");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+
+    const parts = try request_mod.splitComma(allocator, "a.png, b.mp4,,bed.wav");
+    defer allocator.free(parts);
+    try std.testing.expectEqual(@as(usize, 3), parts.len);
+    try std.testing.expectEqualStrings("a.png", parts[0]);
+    try std.testing.expectEqualStrings("b.mp4", parts[1]);
+    try std.testing.expectEqualStrings("bed.wav", parts[2]);
+
+    const blanks = try request_mod.splitComma(allocator, ",, ,");
+    defer allocator.free(blanks);
+    try std.testing.expectEqual(@as(usize, 0), blanks.len);
+}
+fn testFrameGeometry() !void {
+    try std.testing.expectEqual(@as(u32, 120), config.frameCount(5.0));
+    try std.testing.expectEqual(@as(u32, 5), config.alignFrameCount(1));
+    try std.testing.expectEqual(@as(u32, 5), config.alignFrameCount(5));
+    try std.testing.expectEqual(@as(u32, 22), config.alignFrameCount(17));
+    try std.testing.expectEqual(@as(u32, 124), config.alignFrameCount(120));
+    try std.testing.expectEqual(@as(u32, 37), config.videoLatentFrames(124));
+    try std.testing.expectEqual(@as(u32, 207), config.audioLatentFromFrames(124));
+    const five = try config.resolveFrames(5.0, 0);
+    try std.testing.expectEqual(@as(u32, 120), five.raw);
+    try std.testing.expectEqual(@as(u32, 124), five.aligned);
+    try std.testing.expectApproxEqAbs(@as(f32, 124.0 / 24.0), five.seconds(), 1e-6);
+    const fifteen = try config.resolveFrames(15.0, 0);
+    try std.testing.expectEqual(@as(u32, 360), fifteen.raw);
+    try std.testing.expectEqual(@as(u32, 362), fifteen.aligned);
+    try std.testing.expect(fifteen.seconds() > 15.0);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(4.99, 0));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(15.01, 0));
+    const five_frames = try config.resolveFrames(0, 120);
+    try std.testing.expectEqual(@as(u32, 120), five_frames.raw);
+    try std.testing.expectEqual(@as(u32, 124), five_frames.aligned);
+    const fifteen_frames = try config.resolveFrames(0, 360);
+    try std.testing.expectEqual(@as(u32, 360), fifteen_frames.raw);
+    try std.testing.expectEqual(@as(u32, 362), fifteen_frames.aligned);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(0, 119));
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(0, 361));
+    const exact = try config.resolveFrames(5.0, 124);
+    try std.testing.expectEqual(@as(u32, 124), exact.raw);
+    try std.testing.expectEqual(@as(u32, 124), exact.aligned);
+    try std.testing.expectError(error.InvalidDuration, config.resolveFrames(5.0, 5));
+}
+fn testCanvasPresets() !void {
+    const official_raw = try config.parseWxH("1344x768");
+    const official = try config.snapSizeBudget(official_raw.w, official_raw.h, config.canvas_max_pixels);
+    try std.testing.expectEqual(@as(u32, 1344), official.w);
+    try std.testing.expectEqual(@as(u32, 768), official.h);
+    const snapped_raw = try config.parseWxH("1340x770");
+    const snapped = try config.snapSizeBudget(snapped_raw.w, snapped_raw.h, config.canvas_max_pixels);
+    try std.testing.expectEqual(@as(u32, 1344), snapped.w);
+    try std.testing.expectEqual(@as(u32, 768), snapped.h);
+    const capped = try config.resolveCanvas(1, 1, 2000, config.canvas_max_pixels);
+    try std.testing.expect(@as(u64, capped.w) * capped.h <= @as(u64, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(std.math.nan(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(std.math.inf(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(-std.math.inf(f32), 1, 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, std.math.nan(f32), 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, std.math.inf(f32), 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, -std.math.inf(f32), 768, config.canvas_max_pixels));
+    try std.testing.expectError(error.InvalidSize, config.parseWxH("1344"));
+    const bad = try config.parseWxH("100x10");
+    try std.testing.expectError(error.InvalidAspect, config.snapSizeBudget(bad.w, bad.h, config.canvas_max_pixels));
+    const large = try config.parseWxH("1920x1080");
+    try std.testing.expectError(error.SizeTooLarge, config.snapSizeBudget(large.w, large.h, config.canvas_max_pixels));
+
+    try std.testing.expectEqual(.default, (try config.parseRatio("")).kind);
+    try std.testing.expectEqual(.adaptive, (try config.parseRatio("adaptive")).kind);
+    const r169 = try config.parseRatio("16:9");
+    try std.testing.expectEqual(.ratio, r169.kind);
+    try std.testing.expectEqual(@as(f32, 16), r169.ratio_w);
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("official"));
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("800x1200"));
+    try std.testing.expectError(error.InvalidCanvas, config.parseRatio("nope"));
+
+    const t2va = try config.resolveCanvasSpec(.{ .kind = .default }, .t2va, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 1344), t2va.w);
+    try std.testing.expectEqual(@as(u32, 768), t2va.h);
+    const ref = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 720, 1264, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), ref.w);
+    try std.testing.expectEqual(@as(u32, 1344), ref.h);
+    const rocket = try config.resolveCanvasSpec(.{ .kind = .default }, .fl2va, 1024, 1536, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), rocket.w);
+    try std.testing.expectEqual(@as(u32, 1152), rocket.h);
+    const portrait = try config.resolveCanvasSpec(.{ .kind = .ratio, .ratio_w = 9, .ratio_h = 16 }, .t2va, 0, 0, 0, 0);
+    try std.testing.expectEqual(@as(u32, 768), portrait.w);
+    try std.testing.expectEqual(@as(u32, 1344), portrait.h);
+    try std.testing.expectError(error.T2vaRejectsAdaptive, config.resolveCanvasSpec(.{ .kind = .adaptive }, .t2va, 0, 0, 0, 0));
+    try std.testing.expectError(error.AdaptiveNeedsVisual, config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 0, 0, 0, 0));
+    try std.testing.expectEqual(.default, (try config.pickCanvas("", "")).kind);
+    try std.testing.expectEqual(.ratio, (try config.pickCanvas("", "16:9")).kind);
+    const sized = try config.pickCanvas("800x600", "");
+    try std.testing.expectEqual(.pixels, sized.kind);
+    try std.testing.expectError(error.ConflictingCanvas, config.pickCanvas("800x600", "16:9"));
+    try config.parseResolution("768P");
+    try config.parseResolution("768p");
+    try std.testing.expectError(error.OpenWeightsAre768P, config.parseResolution("2K"));
+    try std.testing.expectError(error.InvalidResolution, config.parseResolution("4K"));
+    try std.testing.expectEqualStrings("text-to-video", config.modeLabel(.t2va, "", ""));
+    try std.testing.expectEqualStrings("image-to-video", config.modeLabel(.fl2va, "a.png", ""));
+    try std.testing.expectEqualStrings("last-frame", config.modeLabel(.fl2va, "", "b.png"));
+    try std.testing.expectEqualStrings("first-and-last-frame", config.modeLabel(.fl2va, "a.png", "b.png"));
+    try std.testing.expectEqualStrings("reference-to-video", config.modeLabel(.ref2va, "", ""));
+    try std.testing.expectEqualStrings("a.png", request_mod.canvasAnchor("a.png", "b.png", &.{}));
+    try std.testing.expectEqualStrings("b.png", request_mod.canvasAnchor("", "b.png", &.{}));
+    try config.checkSteps(30);
+    try std.testing.expectError(error.TooFewSteps, config.checkSteps(1));
+}
+
+fn expectAreaAtMost(size: config.Size, max_pixels: u32) !void {
+    try std.testing.expect(@as(u64, size.w) * size.h <= @as(u64, max_pixels));
+}
+
+fn testCanvasRules(allocator: std.mem.Allocator) !void {
+    const cap = config.canvas_max_pixels;
+    const tight: u32 = 200_000;
+    const cases = [_]struct { w: f32, h: f32, short: u32, max: u32 }{
+        .{ .w = 16, .h = 9, .short = 768, .max = cap },
+        .{ .w = 9, .h = 16, .short = 768, .max = cap },
+        .{ .w = 1, .h = 1, .short = 768, .max = cap },
+        .{ .w = 21, .h = 9, .short = 768, .max = cap },
+        .{ .w = 4, .h = 1, .short = 768, .max = cap },
+        .{ .w = 1, .h = 4, .short = 768, .max = cap },
+        .{ .w = 16, .h = 9, .short = 2000, .max = tight },
+        .{ .w = 9, .h = 16, .short = 2000, .max = tight },
+        .{ .w = 21, .h = 9, .short = 1024, .max = 300_000 },
+    };
+    for (cases) |c| {
+        const got = try config.resolveCanvas(c.w, c.h, c.short, c.max);
+        try expectAreaAtMost(got, if (c.max == 0) cap else c.max);
+        try std.testing.expectEqual(@as(u32, 0), got.w % config.canvas_multiple);
+        try std.testing.expectEqual(@as(u32, 0), got.h % config.canvas_multiple);
+    }
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(1, 5, 768, cap));
+    try std.testing.expectError(error.InvalidAspect, config.resolveCanvas(5, 1, 768, cap));
+
+    const sized = try config.resolveCanvasSpec(.{ .kind = .pixels, .pixels = .{ .w = 800, .h = 600 } }, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 800), sized.w);
+    try std.testing.expectEqual(@as(u32, 608), sized.h);
+    try expectAreaAtMost(sized, cap);
+    const explicit = try config.pickCanvas("1344x768", "");
+    const exact = try config.resolveCanvasSpec(explicit, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 1344), exact.w);
+    try std.testing.expectEqual(@as(u32, 768), exact.h);
+
+    const ratio = try config.pickCanvas("", "9:16");
+    const portrait = try config.resolveCanvasSpec(ratio, .t2va, 0, 0, 0, cap);
+    try std.testing.expectEqual(@as(u32, 768), portrait.w);
+    try std.testing.expectEqual(@as(u32, 1344), portrait.h);
+
+    const first = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 720, 1280, 0, 0);
+    const reversed = try config.resolveCanvasSpec(.{ .kind = .default }, .ref2va, 1280, 720, 0, 0);
+    try std.testing.expect(first.w != reversed.w or first.h != reversed.h);
+    try std.testing.expectEqual(@as(u32, 768), first.w);
+    try std.testing.expectEqual(@as(u32, 1344), first.h);
+    try std.testing.expectEqual(@as(u32, 1344), reversed.w);
+    try std.testing.expectEqual(@as(u32, 768), reversed.h);
+
+    const refs_ab = try request_mod.refsFromComma(allocator, "portrait.png,landscape.png");
+    defer request_mod.freeRefs(allocator, refs_ab);
+    const refs_ba = try request_mod.refsFromComma(allocator, "landscape.png,portrait.png");
+    defer request_mod.freeRefs(allocator, refs_ba);
+    try std.testing.expectEqualStrings("portrait.png", request_mod.canvasAnchor("", "", refs_ab));
+    try std.testing.expectEqualStrings("landscape.png", request_mod.canvasAnchor("", "", refs_ba));
+
+    const oversize = try config.parseWxH("1920x1080");
+    try std.testing.expectError(error.SizeTooLarge, config.snapSizeBudget(oversize.w, oversize.h, cap));
+
+    const gib: u64 = 1024 * 1024 * 1024;
+    try std.testing.expect(config.usesFullCanvasEnvelope(1344, 768));
+    try std.testing.expect(config.usesFullCanvasEnvelope(768, 768));
+    try std.testing.expect(!config.usesFullCanvasEnvelope(640, 512));
+    try std.testing.expect(!config.usesFullCanvasEnvelope(640, 352));
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(1344, 768, 64 * gib));
+    try std.testing.expect(config.belowTestedFullCanvasEnvelope(768, 768, 64 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, 80 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(640, 352, 24 * gib));
+    try std.testing.expect(!config.belowTestedFullCanvasEnvelope(1344, 768, 0));
+}
+fn testRequest(allocator: std.mem.Allocator) !void {
+    const refs = try request_mod.refsFromComma(allocator, "a.png, clip.mp4, bed.wav");
+    defer request_mod.freeRefs(allocator, refs);
+    try std.testing.expectEqual(@as(usize, 3), refs.len);
+    try request_mod.validateResolvedAudioCount(@as(usize, config.max_ref_audios));
+    try std.testing.expectError(error.TooManyRefAudios, request_mod.validateResolvedAudioCount(@as(usize, config.max_ref_audios) + 1));
+    try std.testing.expectEqual(packing.ReferenceKind.image, refs[0].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.video, refs[1].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.audio, refs[2].kind);
+    try std.testing.expectEqualStrings("clip.mp4", refs[1].path);
+    try std.testing.expectEqualStrings("bed.wav", refs[2].path);
+
+    try request_mod.validate(.{ .prompt = "hi", .variant = .t2va });
+    try std.testing.expectError(error.IntentEmpty, request_mod.validate(.{ .prompt = "   ", .variant = .t2va }));
+    try std.testing.expectError(error.T2vaRejectsMedia, request_mod.validate(.{
+        .prompt = "hi",
+        .variant = .t2va,
+        .refs = refs,
+    }));
+    try std.testing.expectError(error.Fl2vaNeedsImage, request_mod.validate(.{
+        .prompt = "hi",
+        .variant = .fl2va,
+    }));
+    const audio_only = try request_mod.refsFromComma(allocator, "a.wav");
+    defer request_mod.freeRefs(allocator, audio_only);
+    try std.testing.expectError(error.AudioRefNeedsVisual, request_mod.validateRefs(audio_only));
+    const too_many = try request_mod.refsFromComma(allocator, "a.png,b.png,c.png,d.png,e.png,f.png,g.png,h.png,i.png,j.png");
+    defer request_mod.freeRefs(allocator, too_many);
+    try std.testing.expectError(error.TooManyRefImages, request_mod.validateRefs(too_many));
+    try std.testing.expectEqual(config.Variant.t2va, try request_mod.inferVariant("", "", &.{}));
+    try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "", &.{}));
+    try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("", "a.png", &.{}));
+    try std.testing.expectEqual(config.Variant.fl2va, try request_mod.inferVariant("a.png", "b.png", &.{}));
+    try std.testing.expectEqual(config.Variant.ref2va, try request_mod.inferVariant("", "", refs));
+    try std.testing.expectError(error.Ref2vaRejectsKeyframes, request_mod.inferVariant("a.png", "", refs));
+}
+fn testCheckpoint() !void {
+    const official = [_][]const u8{
+        "proj_in.weight",
+        "time_embedder.linear_1.weight",
+        "transformer_blocks.0.adaln_proj.linear.weight",
+    };
+    try std.testing.expect(repo.inspect(&official).has_adaln_proj);
+    try std.testing.expect(repo.inspect(&official).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&official)) == null);
+
+    const table_only = [_][]const u8{ "adaln_t_table", "proj_in.weight" };
+    try std.testing.expect(!repo.inspect(&table_only).has_adaln_proj);
+    try std.testing.expect(!repo.inspect(&table_only).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&table_only)) != null);
+
+    const no_time = [_][]const u8{"transformer_blocks.0.adaln_proj.linear.weight"};
+    try std.testing.expect(repo.inspect(&no_time).has_adaln_proj);
+    try std.testing.expect(!repo.inspect(&no_time).has_time);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&no_time)) != null);
+    try std.testing.expect(repo.refuseReason(repo.inspect(&.{})) != null);
+}
+fn testMemoryPlan(allocator: std.mem.Allocator) !void {
+    const geo: pipeline.Geometry = .{
+        .pixel_w = 224,
+        .pixel_h = 128,
+        .frames = 5,
+        .latent_t = 2,
+        .latent_h = 8,
+        .latent_w = 14,
+        .audio_t = 8,
+        .video_tokens = 16,
+        .audio_tokens = 16,
+        .target_video_tokens = 16,
+        .target_audio_tokens = 16,
+        .video_patch_dim = 96,
+        .audio_dim = 32,
+    };
+    var layout = try packing.build(allocator, .{
+        .text_len = 4,
+        .latent_t = 2,
+        .latent_h = 8,
+        .latent_w = 14,
+        .audio_t = 8,
+        .video_t = 0,
+        .audio_t_noise = 0,
+    });
+    defer layout.deinit(allocator);
+    const tiny = memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = 256,
+        .steps = 4,
+        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .tp = 2,
+    });
+    try std.testing.expect(tiny.safe);
+    const huge_geo = blk: {
+        var g = geo;
+        g.pixel_w = 1344;
+        g.pixel_h = 768;
+        break :blk g;
+    };
+    const full = memory_mod.plan(.{
+        .geo = .init(huge_geo),
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 30,
+        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .tp = 2,
+    });
+    try expectPlannerDecides(full, 24 * 1024 * 1024 * 1024);
+    const mid_geo = blk: {
+        var g = geo;
+        g.pixel_w = 640;
+        g.pixel_h = 512;
+        break :blk g;
+    };
+    const mid = memory_mod.plan(.{
+        .geo = .init(mid_geo),
+        .layout = layout,
+        .hidden = 256,
+        .steps = 4,
+        .device_bytes = 24 * 1024 * 1024 * 1024,
+        .tp = 2,
+    });
+    try expectPlannerDecides(mid, 24 * 1024 * 1024 * 1024);
+    try std.testing.expect(mid.safe);
+}
+
+fn peaksOverBudget(p: memory_mod.Plan, device_bytes: u64) bool {
+    if (device_bytes == 0) return false;
+    const budget = device_bytes * policy_mod.safety_numer / policy_mod.safety_denom;
+    return p.denoise_peak_bytes > budget or
+        p.encoder_peak_bytes > budget or
+        p.vae_peak_bytes > budget or
+        p.audio_vae_peak_bytes > budget;
+}
+
+fn expectPlannerDecides(p: memory_mod.Plan, device_bytes: u64) !void {
+    try std.testing.expectEqual(!peaksOverBudget(p, device_bytes), p.safe);
+    if (p.safe) {
+        try std.testing.expectEqualStrings("ok", p.reason);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, p.reason, "exceeds 85% of device memory") != null);
+    }
+}
+
+fn planOfficialCanvas(
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    device_bytes: u64,
+    encoder_weight_bytes: u64,
+) !memory_mod.Plan {
+    const dit_cfg = config.Config.official();
+    const geo = pipeline.Geometry.init(.{
+        .width = width,
+        .height = height,
+        .frames = 124,
+        .steps = 30,
+    }, dit_cfg);
+    var layout = try packing.build(allocator, .{
+        .text_len = 64,
+        .latent_t = geo.latent_t,
+        .latent_h = geo.latent_h,
+        .latent_w = geo.latent_w,
+        .audio_t = geo.audio_t,
+        .video_t = 0,
+        .audio_t_noise = 0,
+    });
+    defer layout.deinit(allocator);
+    return memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = dit_cfg.hidden_size,
+        .steps = 30,
+        .device_bytes = device_bytes,
+        .tp = 1,
+        .target = .cuda,
+        .heads = dit_cfg.num_attention_heads,
+        .head_dim = dit_cfg.attention_head_dim,
+        .layers = @intCast(dit_cfg.num_layers),
+        .encoder_weight_bytes = encoder_weight_bytes,
+    });
+}
+
+fn testOfficialCanvasPlan(allocator: std.mem.Allocator) !void {
+    const gib: u64 = 1024 * 1024 * 1024;
+    const square_64 = try planOfficialCanvas(allocator, 768, 768, 64 * gib, 0);
+    try expectPlannerDecides(square_64, 64 * gib);
+
+    const wide_64 = try planOfficialCanvas(allocator, 1344, 768, 64 * gib, 0);
+    try expectPlannerDecides(wide_64, 64 * gib);
+
+    const wide_80 = try planOfficialCanvas(allocator, 1344, 768, config.full_canvas_min_device_bytes, 0);
+    try expectPlannerDecides(wide_80, config.full_canvas_min_device_bytes);
+
+    const preview = try planOfficialCanvas(allocator, 640, 352, 24 * gib, 0);
+    try expectPlannerDecides(preview, 24 * gib);
+
+    const unknown = try planOfficialCanvas(allocator, 1344, 768, 0, 0);
+    try expectPlannerDecides(unknown, 0);
+    try std.testing.expect(unknown.safe);
+
+    const over = try planOfficialCanvas(allocator, 768, 768, 64 * gib, 64 * gib);
+    try std.testing.expect(!over.safe);
+    try std.testing.expectEqualStrings("estimated text-encoder peak exceeds 85% of device memory", over.reason);
+    try expectPlannerDecides(over, 64 * gib);
+}
+fn testOfficialPin() !void {
+    try std.testing.expectEqualStrings("MiniMaxAI/MiniMax-H3", config.official_repo);
+    try std.testing.expectEqualStrings("42ed227ee7df40d41602854ae760620d6eb651fe", config.official_revision);
+    var buf: [256]u8 = undefined;
+    const uri = try config.officialTokenizerUri(&buf);
+    try std.testing.expectEqualStrings(
+        "hf://MiniMaxAI/MiniMax-H3@42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA/tokenizer/tokenizer.json",
+        uri,
+    );
+}
+fn testTokenizerRelpaths() !void {
+    try std.testing.expectEqual(@as(usize, 2), repo.tokenizer_relpaths.len);
+    try std.testing.expectEqualStrings("tokenizer/tokenizer.json", repo.tokenizer_relpaths[0]);
+    try std.testing.expectEqualStrings("tokenizer.json", repo.tokenizer_relpaths[1]);
+}
+fn testWeightEntrypoints() !void {
+    try std.testing.expectEqual(@as(usize, 4), repo.weight_entrypoints.len);
+    try std.testing.expectEqualStrings("model.safetensors.index.json", repo.weight_entrypoints[0]);
+    try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors.index.json", repo.weight_entrypoints[2]);
+    try std.testing.expectEqualStrings("diffusion_pytorch_model.safetensors", repo.weight_entrypoints[3]);
+}
+fn testGroupRefs(allocator: std.mem.Allocator) !void {
+    const src = try request_mod.refsFromComma(allocator, "a.wav, b.png, c.mp4");
+    defer request_mod.freeRefs(allocator, src);
+    try std.testing.expectEqual(packing.ReferenceKind.audio, src[0].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.image, src[1].kind);
+    try std.testing.expectEqual(packing.ReferenceKind.video, src[2].kind);
+}
+fn testAttentionPolicy() !void {
+    const short = policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 64,
+        .causal = false,
+        .tp = 2,
+    });
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, short);
+
+    const long = policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+    });
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, long);
+
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .vanilla,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .cuda_fa2,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+        .flash = .cuda_fa3,
+    }));
+
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cpu,
+        .dtype = .bf16,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .f32,
+        .head_dim = 128,
+        .heads = 56,
+        .seq = 7440,
+        .causal = false,
+        .tp = 2,
+    }));
+
+    for ([_]u32{ 1, 2, 4, 8 }) |tp| {
+        try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 7440,
+            .causal = false,
+            .tp = tp,
+        }));
+        try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 64,
+            .causal = false,
+            .tp = tp,
+        }));
+        try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 256,
+            .causal = false,
+            .tp = tp,
+        }));
+        try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, policy_mod.selectAttention(.{
+            .target = .cuda,
+            .dtype = .bf16,
+            .head_dim = 128,
+            .heads = 56,
+            .seq = 7440,
+            .causal = false,
+            .tp = tp,
+            .flash = .cuda_fa3,
+        }));
+    }
+    try std.testing.expect(policy_mod.isFlash(.cuda_fa2));
+    try std.testing.expect(policy_mod.isFlash(.cuda_fa3));
+    try std.testing.expect(!policy_mod.isFlash(.vanilla));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 72,
+        .heads = 16,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+        .flash = .cuda_fa3,
+    }));
+    try std.testing.expectEqual(zml.attention.Backend.vanilla, policy_mod.selectAttention(.{
+        .target = .cuda,
+        .dtype = .bf16,
+        .head_dim = 72,
+        .heads = 16,
+        .seq = 7440,
+        .causal = false,
+        .tp = 1,
+        .flash = .cuda_fa2,
+    }));
+}
+fn testMemoryPlanExact(allocator: std.mem.Allocator) !void {
+    const geo: pipeline.Geometry = .{
+        .pixel_w = 640,
+        .pixel_h = 352,
+        .frames = 107,
+        .latent_t = 8,
+        .latent_h = 22,
+        .latent_w = 40,
+        .audio_t = 200,
+        .video_tokens = 7040,
+        .audio_tokens = 400,
+        .target_video_tokens = 7040,
+        .target_audio_tokens = 400,
+        .video_patch_dim = 96,
+        .audio_dim = 32,
+    };
+    var layout = try packing.build(allocator, .{
+        .text_len = 8,
+        .latent_t = 8,
+        .latent_h = 22,
+        .latent_w = 40,
+        .audio_t = 200,
+        .video_t = 0,
+        .audio_t_noise = 0,
+    });
+    defer layout.deinit(allocator);
+    const seq = layout.seqLen();
+    try std.testing.expect(policy_mod.sdpaScoreBytes(7440, 56, 1) > 10 * 1024 * 1024 * 1024);
+    try std.testing.expect(policy_mod.fa2ScratchBytes(seq, 56, 128, 2) > 0);
+    try std.testing.expect(policy_mod.fa2ScratchBytes(seq, 56, 128, 2) < policy_mod.sdpaScoreBytes(seq, 56, 2));
+    try std.testing.expect(policy_mod.adalnTableBytes(9, 5376, 50, 2) > 0);
+
+    const fa2 = memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 9,
+        .device_bytes = 48 * 1024 * 1024 * 1024,
+        .tp = 2,
+        .target = .cuda,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+    });
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa2, fa2.attention);
+    const fa3 = memory_mod.plan(.{
+        .geo = .init(geo),
+        .layout = layout,
+        .hidden = 5376,
+        .steps = 9,
+        .device_bytes = 48 * 1024 * 1024 * 1024,
+        .tp = 2,
+        .target = .cuda,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .flash = .cuda_fa3,
+    });
+    try std.testing.expectEqual(zml.attention.Backend.cuda_fa3, fa3.attention);
+    try std.testing.expect(policy_mod.groupSize(0) == 1);
+    try std.testing.expect(policy_mod.groupSize(2) == 2);
+    try std.testing.expect(policy_mod.groupSize(8) == 8);
+    try std.testing.expect(policy_mod.groupSize(16) == 8);
+    try std.testing.expect(policy_mod.groupSize(50) == 8);
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.enc_prefetch);
+    try std.testing.expectEqual(@as(u32, 8), policy_mod.vae_load_window);
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.encPrefetch(1));
+    try std.testing.expectEqual(@as(u32, 2), policy_mod.encPrefetch(2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.encPrefetch(50));
+    try std.testing.expectEqual(@as(u32, 3), policy_mod.vaeLoadWindow(3));
+    try std.testing.expectEqual(@as(u32, 8), policy_mod.vaeLoadWindow(32));
+    try std.testing.expectEqual(@as(u32, 46), policy_mod.ditKeepBlocks(46, 50));
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(50, 50));
+    try std.testing.expectEqual(@as(u32, 40), policy_mod.ditKeepBlocks(40, 50));
+    try std.testing.expectEqual(@as(u32, 0), policy_mod.ditKeepBlocks(0, 50));
+    try std.testing.expectEqual(@as(u32, 2), policy_mod.ditKeepBlocks(2, 3));
+    const gib: u64 = 1024 * 1024 * 1024;
+    const gb300 = policy_mod.decide(.{
+        .target = .cuda,
+        .seq = 8632,
+        .hidden = 5376,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .steps = 9,
+        .dtype = .bf16,
+        .device_bytes = 284 * gib,
+        .tp = 4,
+        .block_core_bytes = 1300 * 1024 * 1024,
+        .dtype_bytes = 2,
+    });
+    try std.testing.expectEqual(@as(u32, 50), gb300.resident_blocks);
+    try std.testing.expectEqual(@as(u32, 50), policy_mod.ditKeepBlocks(gb300.resident_blocks, 50));
+    try std.testing.expectEqual(
+        gb300.fixed_bytes + gb300.resident_core_bytes + gb300.transient_core_bytes,
+        gb300.denoise_live_bytes,
+    );
+    try std.testing.expectEqual(policy_mod.allocatorPeak(gb300.denoise_live_bytes), gb300.denoise_peak_bytes);
+    try std.testing.expect(gb300.denoise_peak_bytes <= gb300.budget_bytes);
+    const unreported = policy_mod.decide(.{
+        .target = .cuda,
+        .seq = 8632,
+        .hidden = 5376,
+        .heads = 56,
+        .head_dim = 128,
+        .layers = 50,
+        .steps = 9,
+        .dtype = .bf16,
+        .device_bytes = 0,
+        .tp = 4,
+        .block_core_bytes = 1300 * 1024 * 1024,
+        .dtype_bytes = 2,
+    });
+    try std.testing.expectEqual(@as(u32, 0), unreported.resident_blocks);
+    try std.testing.expectEqual(@as(u64, 2 * 1300 * 1024 * 1024), unreported.transient_core_bytes);
+    try std.testing.expect(!policy_mod.canPrefetchVae(0, std.math.maxInt(u64), 1, 1));
+    const boundary_budget: u64 = 1_000;
+    const fixed_peak: u64 = 400;
+    const block_bytes: u64 = 100;
+    const seven_resident_live = fixed_peak + 7 * block_bytes + policy_mod.transientCoreBytes(7, 10, block_bytes);
+    const eight_resident_live = fixed_peak + 8 * block_bytes + policy_mod.transientCoreBytes(8, 10, block_bytes);
+    try std.testing.expect(policy_mod.canPrefetchVae(2_000, boundary_budget * 2 + 100, seven_resident_live, 100));
+    try std.testing.expect(!policy_mod.canPrefetchVae(2_000, boundary_budget * 2 + 100, eight_resident_live, 100));
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(0, 1, 100, 2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(4, 1, 100, 1));
+    try std.testing.expectEqual(@as(u32, 1), policy_mod.tileBatch(3, 100, 50, 2));
+    try std.testing.expectEqual(@as(u32, 4), policy_mod.tileBatch(5, 1, 100, 2));
+    try std.testing.expectEqual(@as(u32, 3), policy_mod.tileBatch(5, 1, 100, 3));
+    try std.testing.expect(fa2.tile_batch >= 1);
+    try std.testing.expect(pipeline.partitionsVaeBatch(6, 2));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(6, 1));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(5, 2));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(1, 2));
+    try std.testing.expect(pipeline.partitionsVaeBatch(28, 2));
+    try std.testing.expect(pipeline.partitionsVaeBatch(28, 4));
+    try std.testing.expect(!pipeline.partitionsVaeBatch(28, 8));
+}

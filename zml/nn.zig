@@ -240,6 +240,10 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
 pub const TokenEmbedding = struct {
     weight: Tensor,
 
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
+        zml.Buffer.deinitAll(TokenEmbedding, self);
+    }
+
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
@@ -284,6 +288,10 @@ pub const LayerNorm = struct {
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
+    pub fn unloadBuffers(self: *zml.Bufferized(LayerNorm)) void {
+        zml.Buffer.deinitAll(LayerNorm, self);
+    }
+
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
         const ax = x.axis(-1);
@@ -301,6 +309,49 @@ pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
     const variance = x.powByConst(2).mean(ax);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
     return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
+}
+
+pub const RmsNorm = struct {
+    weight: Tensor,
+    eps: f32 = 1e-6,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        zml.Buffer.deinitAll(RmsNorm, self);
+    }
+
+    pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+        const axis = self.weight.shape().tag(0);
+        return rmsNorm(x, axis, self.eps).mul(self.weight.convert(x.dtype()).broad(x.shape()));
+    }
+};
+
+test "RmsNorm" {
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .d = 2 }, .f32);
+    const weight: Tensor = .init(.{ .d = 2 }, .f32);
+    const layer: RmsNorm = .{ .weight = weight, .eps = 1e-6 };
+    const Local = struct {
+        fn fwd(n: RmsNorm, t: Tensor) Tensor {
+            return n.forward(t);
+        }
+    };
+
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ layer, x }, .{});
+    defer exe.deinit();
+
+    var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 3, 4 }));
+    defer x_buf.deinit();
+    var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 1 }));
+    defer w_buf.deinit();
+
+    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ .{ .weight = w_buf }, x_buf });
+    defer res.deinit();
+    var actual: [2]f32 = undefined;
+    try res.toSlice(std.testing.io, .init(x.shape(), std.mem.sliceAsBytes(&actual)));
+
+    const rsqrt = 1.0 / @sqrt(12.5 + 1e-6);
+    try std.testing.expectApproxEqRel(3.0 * rsqrt, actual[0], 1e-5);
+    try std.testing.expectApproxEqRel(4.0 * rsqrt, actual[1], 1e-5);
 }
 
 /// Center and scale by the variance.
@@ -524,6 +575,45 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
     return zml.nn.mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
+}
+
+/// HuggingFace `rotate_half` rotary: `x * cos + rotate_half(x) * sin`.
+/// `cos`/`sin` last dim is the rotary dim; remaining last-dim of `x` passes through.
+/// Last-axis tags on the tables are aligned to `x` before broadcast.
+pub fn applyRotary(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
+    const rotary_dim = cos.dim(-1);
+    const x_rot = x.slice(-1, .{ .start = 0, .end = rotary_dim });
+    const half = @divExact(rotary_dim, 2);
+    const x1 = x_rot.slice(-1, .{ .start = 0, .end = half });
+    const x2 = x_rot.slice(-1, .{ .start = half, .end = rotary_dim });
+    const rotated = Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+    const rot_tag = x_rot.shape().tag(-1);
+    const y = x_rot.mul(cos.renameTag(-1, rot_tag).broad(x_rot.shape()))
+        .add(rotated.mul(sin.renameTag(-1, rot_tag).broad(x_rot.shape())));
+    if (rotary_dim == x.dim(-1)) return y;
+    return Tensor.concatenate(&.{ y, x.slice(-1, .{ .start = rotary_dim, .end = x.dim(-1) }) }, -1);
+}
+
+test applyRotary {
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    const cos_t: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    const sin_t: Tensor = .init(.{ .s = 1, .hd = 4 }, .f32);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, applyRotary, .{ x, cos_t, sin_t }, .{});
+    defer exe.deinit();
+
+    var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 2, 3, 4 }));
+    defer x_buf.deinit();
+    var cos_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, cos_t.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1, 0, 1, 0 }));
+    defer cos_buf.deinit();
+    var sin_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, sin_t.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 0, 1 }));
+    defer sin_buf.deinit();
+
+    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, applyRotary, .{ x_buf, cos_buf, sin_buf });
+    defer res.deinit();
+    var actual: [4]f32 = undefined;
+    try res.toSlice(std.testing.io, .init(x.shape(), std.mem.sliceAsBytes(&actual)));
+    try std.testing.expectEqualSlices(f32, &.{ 1, -4, 3, 2 }, &actual);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {

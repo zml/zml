@@ -57,6 +57,23 @@ pub const Backend = enum {
             },
         };
     }
+
+    pub fn supportsHeadDim(backend: Backend, head_dim: i64) bool {
+        return switch (backend) {
+            .vanilla, .attnd, .nki, .metal_fa => head_dim > 0,
+            .cuda_fa2 => head_dim >= 8 and head_dim <= 256 and @rem(head_dim, 8) == 0,
+            .cuda_fa3 => head_dim == 64 or head_dim == 96 or head_dim == 128 or head_dim == 192 or head_dim == 256,
+        };
+    }
+
+    /// Dense FA workspace needs head dim multiple of 32. `supportsHeadDim` is the broader ABI.
+    pub fn supportsDenseHeadDim(backend: Backend, head_dim: i64) bool {
+        return switch (backend) {
+            .cuda_fa2 => head_dim >= 32 and head_dim <= 256 and @rem(head_dim, 32) == 0,
+            .cuda_fa3 => backend.supportsHeadDim(head_dim),
+            else => backend.supportsHeadDim(head_dim),
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {
@@ -190,6 +207,58 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     };
 }
 
+pub const DenseOpts = struct {
+    is_causal: bool = false,
+};
+
+/// Dense attention (causal or bidirectional).
+/// CUDA FA2 / FA3 when available and legal; otherwise `zml.nn.sdpa`.
+pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
+    if (denseCanUseFlash(q, k, v, backend)) {
+        return switch (backend) {
+            .cuda_fa2 => flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+            .cuda_fa3 => flashattn.fa3.dense(q, k, v, .{ .is_causal = opts.is_causal }),
+            else => unreachable,
+        };
+    }
+    const mask = if (opts.is_causal)
+        zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null)
+    else
+        null;
+    return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+}
+
+fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend) bool {
+    switch (backend) {
+        .cuda_fa2, .cuda_fa3 => {},
+        else => return false,
+    }
+    if (!q.shape().hasTags(.{ .q, .h, .hd })) return false;
+    if (!k.shape().hasTags(.{ .k, .h, .hd })) return false;
+    if (!v.shape().hasTags(.{ .k, .h, .hd })) return false;
+
+    const q_b = q.shape().hasTag(.b) != null;
+    const k_b = k.shape().hasTag(.b) != null;
+    const v_b = v.shape().hasTag(.b) != null;
+    if (q_b != k_b or q_b != v_b) return false;
+    if (q_b and (q.dim(.b) != k.dim(.b) or q.dim(.b) != v.dim(.b) or q.dim(.b) <= 0)) return false;
+
+    if (q.dim(.q) <= 0 or k.dim(.k) <= 0 or v.dim(.k) != k.dim(.k)) return false;
+    // Dense FA2 varlen is only numerically validated for Q==K. Unequal
+    // lengths disagree with SDPA on CUDA; use vanilla until that path is fixed.
+    if (q.dim(.q) != k.dim(.k)) return false;
+    if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
+    if (@rem(q.dim(.h), k.dim(.h)) != 0) return false;
+    if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
+    if (!backend.supportsDenseHeadDim(q.dim(.hd))) return false;
+
+    if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
+    if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
+
+    const compiler = zml.Compiler.currentOrNull() orelse return false;
+    return backend.isAvailable(compiler.platform);
+}
+
 test "attention: q=1,qh=64,kh=8" {
     try testAttention(
         .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
@@ -239,6 +308,220 @@ test "attention: q=8,qh=64,kh=8" {
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
         &.{56},
     );
+}
+
+test "dense attention: non-causal hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+}
+
+test "dense attention: causal hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: short and long buckets" {
+    try testDense(
+        .init(.{ .q = 8, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 8, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .q = 64, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 128 }, .bf16),
+        false,
+    );
+}
+
+test "dense attention: f16 hd=128" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 128 }, .f16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 128 }, .f16),
+        false,
+    );
+}
+
+test "dense attention: supported head dimensions" {
+    inline for (.{ 64, 96, 128, 256 }) |head_dim| {
+        try testDense(
+            .init(.{ .b = 1, .q = 16, .h = 8, .hd = head_dim }, .bf16),
+            .init(.{ .b = 1, .k = 16, .h = 8, .hd = head_dim }, .bf16),
+            false,
+        );
+    }
+}
+
+test "dense attention: hd=70 falls back to sdpa" {
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 70));
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 70 }, .bf16),
+        .init(.{ .b = 1, .k = 16, .h = 8, .hd = 70 }, .bf16),
+        false,
+    );
+}
+
+test "dense attention: batch size > 1" {
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 8, .h = 4, .hd = 64 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 8, .h = 4, .hd = 64 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: f32 falls back to sdpa" {
+    try testDense(
+        .init(.{ .b = 1, .q = 8, .h = 4, .hd = 64 }, .f32),
+        .init(.{ .b = 1, .k = 8, .h = 4, .hd = 64 }, .f32),
+        false,
+    );
+}
+
+test "dense attention: rounded FA2 head dims fall back to sdpa" {
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 48));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 80));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 144));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 48));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 80));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 144));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 48));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 80));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 144));
+    inline for (.{ 48, 80, 144 }) |head_dim| {
+        try testDense(
+            .init(.{ .b = 1, .q = 8, .h = 4, .hd = head_dim }, .bf16),
+            .init(.{ .b = 1, .k = 8, .h = 4, .hd = head_dim }, .bf16),
+            false,
+        );
+    }
+}
+
+test "Backend.supportsHeadDim matches FA C ABI" {
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 8));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 24));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa2, 72));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 7));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 70));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa2, 264));
+    try std.testing.expect(Backend.supportsHeadDim(.cuda_fa3, 64));
+    try std.testing.expect(!Backend.supportsHeadDim(.cuda_fa3, 48));
+}
+
+test "dense attention: gqa causal hd=128" {
+    try testDense(
+        .init(.{ .q = 16, .h = 16, .hd = 128 }, .bf16),
+        .init(.{ .k = 16, .h = 4, .hd = 128 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: Q != K" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 64 }, .bf16),
+        .init(.{ .b = 1, .k = 32, .h = 8, .hd = 64 }, .bf16),
+        false,
+    );
+    try testDense(
+        .init(.{ .b = 2, .q = 8, .h = 16, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 16, .h = 4, .hd = 64 }, .bf16),
+        true,
+    );
+}
+
+test "dense attention: f16 causal gqa" {
+    try testDense(
+        .init(.{ .b = 1, .q = 16, .h = 8, .hd = 64 }, .f16),
+        .init(.{ .b = 1, .k = 16, .h = 4, .hd = 64 }, .f16),
+        true,
+    );
+}
+
+pub fn testDense(q_shape: zml.Shape, k_shape: zml.Shape, is_causal: bool) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const platform = zml.testing.env();
+
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor } = .{
+        .q = .fromShape(q_shape),
+        .k = .fromShape(k_shape),
+        .v = .fromShape(k_shape),
+    };
+
+    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_q.deinit();
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_k.deinit();
+
+    var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+    defer q.deinit();
+    var k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer k.deinit();
+    var v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer v.deinit();
+
+    const shardings = platform.shardings.values();
+    const vanilla_exe = try platform.compileFn(
+        allocator,
+        io,
+        dense,
+        .{ tensors.q, tensors.k, tensors.v, .vanilla, DenseOpts{ .is_causal = is_causal } },
+        .{
+            .program_name = "dense_attention_vanilla",
+            .shardings = shardings,
+        },
+    );
+    defer vanilla_exe.deinit();
+
+    var vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, dense, .{ q, k, v });
+    defer vanilla_d.deinit();
+    try vanilla_d.await(io);
+    const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
+    defer vanilla_h.free(allocator);
+
+    const backends = [_]Backend{ .cuda_fa2, .cuda_fa3 };
+    for (backends) |backend| {
+        const exe = try platform.compileFn(
+            allocator,
+            io,
+            dense,
+            .{ tensors.q, tensors.k, tensors.v, backend, DenseOpts{ .is_causal = is_causal } },
+            .{
+                .program_name = try std.fmt.allocPrint(arena, "dense_attention_{t}", .{backend}),
+                .shardings = shardings,
+            },
+        );
+        defer exe.deinit();
+
+        var output_d = try zml.testing.autoCall(allocator, io, &exe, dense, .{ q, k, v });
+        defer output_d.deinit();
+        try output_d.await(io);
+        const output_h = try output_d.toSliceAlloc(allocator, io);
+        defer output_h.free(allocator);
+
+        try zml.testing.expectClose(io, vanilla_h, output_h, .{
+            .absolute_tolerance = 5e-3,
+            .relative_tolerance = 1e-2,
+            .epsilon_relative = 1e-3,
+            .minimum_close_fraction = 0.99,
+        });
+    }
 }
 
 pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
@@ -298,7 +581,19 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
+        const metadata: Metadata = .init(switch (backend) {
+            .cuda_fa2 => .{ .cuda_fa2 = .{
+                .seqlen = tensors.k.dim(.k),
+                .num_heads = tensors.q.dim(.h),
+                .head_dim = tensors.q.dim(.hd),
+            } },
+            .cuda_fa3 => .{ .cuda_fa3 = .{
+                .seqlen = tensors.k.dim(.k),
+                .num_heads = tensors.q.dim(.h),
+                .head_dim = tensors.q.dim(.hd),
+            } },
+            else => .fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)),
+        });
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,

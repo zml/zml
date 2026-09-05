@@ -373,6 +373,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => {
+            for (0..model.len) |i| {
+                try bufferizeInner(allocator, model[i], &bufferized_[i]);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -384,4 +389,12 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "Bufferized maps fixed-size arrays" {
+    const Layer = struct { weight: Tensor };
+    const Model = struct { layers: [2]Layer };
+    const layers_info = @typeInfo(@FieldType(Bufferized(Model), "layers")).array;
+    try std.testing.expectEqual(2, layers_info.len);
+    try std.testing.expectEqual(Buffer, @FieldType(layers_info.child, "weight"));
 }

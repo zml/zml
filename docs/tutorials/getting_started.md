@@ -91,6 +91,16 @@ bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.2-1
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
+### MiniMax-H3
+
+MiniMax-H3 generates video and audio. It runs on CUDA.
+
+```
+bazel run --config=release //examples/minimax_h3 --@zml//platforms:cuda=true -- --model=hf://MiniMaxAI/MiniMax-H3
+```
+
+See [`examples/minimax_h3/README.md`](../../examples/minimax_h3/README.md) for image-to-video, reference-to-video, and canvas options.
+
 
 ## Run Tests
 
