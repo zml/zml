@@ -69,6 +69,11 @@ pub const Loader = struct {
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
     source_request_size: usize,
+    /// See `Config.direct_io`.
+    direct_io: VFS.DirectIo,
+    /// Every read of a file read directly starts and ends at a multiple of
+    /// this (the profile's alignment); 0 reads exact tensor ranges.
+    source_alignment: usize,
     maximum_blocks_per_job: usize,
     effective_pinned_feasible_width: usize,
     workers_started: bool = false,
@@ -97,6 +102,9 @@ pub const Loader = struct {
             request_size,
             calibration.block_size,
         );
+        const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
+        _ = Planner.maximumJobLen(request_size, calibration.block_size, source_alignment) catch
+            return error.InvalidLoadProfile;
         // The DMA stage of every device, kept mapped as the pool's growth floor.
         const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
         // Grow the DMA stage reserve and source working set before reads begin;
@@ -165,6 +173,8 @@ pub const Loader = struct {
             .worker_pool = undefined,
             .created_at = .now(io, .awake),
             .source_request_size = request_size,
+            .direct_io = opts.direct_io,
+            .source_alignment = source_alignment,
             .maximum_blocks_per_job = maximum_blocks_per_job,
             .effective_pinned_feasible_width = feasible_width,
         };
@@ -216,10 +226,12 @@ pub const Loader = struct {
         self.workers_started = true;
         self.controller_runtime.start(io);
         try self.startController();
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             request_size,
+            opts.direct_io,
+            source_alignment,
             calibration.block_size,
             self.pipeline.dma_budget_bytes,
             limits.lifecycle,
@@ -258,6 +270,8 @@ pub const Loader = struct {
             batch.items,
             self.calibration.block_size,
             self.source_request_size,
+            self.source_alignment,
+            self.direct_io,
         ) catch |err| {
             if (batch.diagnostics.plans == 0) return err;
             return self.failPublished(batch, err);
@@ -449,6 +463,7 @@ pub const Loader = struct {
                 &self.pipeline,
                 claim.job.file_offset,
                 claim.job.len,
+                claim.job.minimum_len,
                 claim.job.transfers,
                 self,
                 &scratch,
@@ -585,8 +600,12 @@ pub const Batch = struct {
         /// contexts the plan preallocated for it.
         const Job = struct {
             source_slot: *SourceSlot,
+            /// The read: `len` bytes from `file_offset`, of which the first
+            /// `minimum_len` hold tensor data and must exist. The rest is
+            /// alignment padding the end of the file may cut.
             file_offset: u64,
             len: usize,
+            minimum_len: usize,
             transfers: []const Batch.Plan.Transfer,
             request: *Pipeline.RequestContext,
             blocks: []Pipeline.BlockContext,
@@ -955,6 +974,7 @@ const Planner = struct {
         source_slot: *SourceSlot,
         file_offset: u64,
         len: usize,
+        minimum_len: usize,
         transfer_start: usize,
         transfer_len: usize,
         block_start: usize,
@@ -963,7 +983,12 @@ const Planner = struct {
 
     /// Plans `items` one file at a time and publishes each plan as soon as
     /// it exists, so workers claim the first file while the rest is planned.
-    /// Stops at the first error; the caller seals or fails the batch.
+    /// Stops at the first error; the caller seals or fails the batch. With
+    /// an `alignment`, a file is planned with widened reads only when the
+    /// VFS the files are opened through reads it directly under `policy`: a
+    /// widened read served from the page cache costs the DMA sources their
+    /// block alignment for nothing, and an `io` that is no VFS never reads
+    /// directly.
     fn publishFiles(
         scheduler: *Scheduler,
         io: std.Io,
@@ -972,13 +997,20 @@ const Planner = struct {
         items: []const *Item,
         block_size: usize,
         request_size: usize,
+        alignment: usize,
+        policy: VFS.DirectIo,
     ) !void {
         const order = try sortedItemOrder(scheduler.allocator, items);
         defer scheduler.allocator.free(order);
+        const vfs = if (alignment != 0) VFS.fromIo(io) else null;
         var file_start: usize = 0;
         while (file_start < order.len) {
             const file_end = fileGroupEnd(items, order, file_start);
             const planning_started: std.Io.Timestamp = .now(io, .awake);
+            const file_alignment = if (vfs) |v| file_alignment: {
+                const file = try items[order[file_start]].source_slot.ensure(io);
+                break :file_alignment if (v.useDirectIo(file, policy)) alignment else 0;
+            } else 0;
             const plan = try preparePlan(
                 scheduler.allocator,
                 device_count,
@@ -986,6 +1018,7 @@ const Planner = struct {
                 order[file_start..file_end],
                 block_size,
                 request_size,
+                file_alignment,
             );
             const planning_ns: u64 = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
             scheduler.publish(io, batch, plan, planning_ns) catch |err| {
@@ -1003,7 +1036,10 @@ const Planner = struct {
     /// device); no job depends on another, since every DMA piece is
     /// submitted as soon as its block is read. The plan also carries the
     /// contexts its jobs need: one request per job, one block per job block,
-    /// one event per DMA submission (a transfer's writer count).
+    /// one event per DMA submission (a transfer's writer count). With an
+    /// `alignment`, a job's read is widened to aligned bounds around its
+    /// tensor range (`maximumJobLen` leaves room for it); the transfers
+    /// address the widened read.
     fn preparePlan(
         allocator: std.mem.Allocator,
         device_count: usize,
@@ -1011,10 +1047,9 @@ const Planner = struct {
         order: []const usize,
         block_size: usize,
         request_size: usize,
+        alignment: usize,
     ) !*Batch.Plan {
-        const scatter_limit = block_size * load_limits.max_positional_iovecs;
-        const maximum_job_len = @min(request_size, scatter_limit);
-        if (maximum_job_len == 0) return error.InvalidLoaderJob;
+        const maximum_job_len = try maximumJobLen(request_size, block_size, alignment);
         const TensorPlan = struct {
             dispatch_spans: DispatchSpans,
             device_indices: []usize,
@@ -1139,6 +1174,13 @@ const Planner = struct {
                     break :boundary selected orelse maximum_end;
                 };
                 const job_len: usize = @intCast(job_end - job_start);
+                const read_start = if (alignment == 0) job_start else std.mem.alignBackward(u64, job_start, alignment);
+                const read_end = if (alignment == 0) job_end else std.mem.alignBackward(
+                    u64,
+                    std.math.add(u64, job_end, alignment - 1) catch return error.InvalidLoaderJob,
+                    alignment,
+                );
+                const read_len: usize = @intCast(read_end - read_start);
                 const job_index = jobs_list.items.len;
                 const transfer_start = transfers_list.items.len;
                 try physical_list.appendNTimes(allocator, 0, device_count);
@@ -1165,7 +1207,7 @@ const Planner = struct {
                         item,
                         @intCast(intersection_start - item.source.offset),
                         @intCast(intersection_end - intersection_start),
-                        job_start,
+                        read_start,
                         block_size,
                         tensor_plans[position].dispatch_spans,
                         tensor_plans[position].device_indices,
@@ -1173,11 +1215,12 @@ const Planner = struct {
                     );
                 }
                 std.debug.assert(transfers_list.items.len > transfer_start);
-                const block_len = job_len / block_size + @intFromBool(job_len % block_size != 0);
+                const block_len = read_len / block_size + @intFromBool(read_len % block_size != 0);
                 try jobs_list.append(allocator, .{
                     .source_slot = items[first_index].source_slot,
-                    .file_offset = job_start,
-                    .len = job_len,
+                    .file_offset = read_start,
+                    .len = read_len,
+                    .minimum_len = @intCast(job_end - read_start),
                     .transfer_start = transfer_start,
                     .transfer_len = transfers_list.items.len - transfer_start,
                     .block_start = block_total,
@@ -1233,6 +1276,18 @@ const Planner = struct {
             }
         }
         return plan;
+    }
+
+    /// The longest tensor range one job may cover: the request size within
+    /// the scatter limit, less the two alignment units its widened read
+    /// can add, so a widened job still fits `maximumCoalescedJobBlocks`.
+    fn maximumJobLen(request_size: usize, block_size: usize, alignment: usize) !usize {
+        const scatter_limit = block_size *| load_limits.max_positional_iovecs;
+        const unpadded = @min(request_size, scatter_limit);
+        if (unpadded == 0) return error.InvalidLoaderJob;
+        if (alignment == 0) return unpadded;
+        if (!std.math.isPowerOfTwo(alignment) or 2 * alignment >= unpadded) return error.InvalidLoaderJob;
+        return unpadded - 2 * alignment;
     }
 
     /// Item indices sorted by file URI, offset, size and index: the planner's
@@ -1392,6 +1447,7 @@ const Planner = struct {
             .source_slot = planned.source_slot,
             .file_offset = planned.file_offset,
             .len = planned.len,
+            .minimum_len = planned.minimum_len,
             .transfers = plan.transfers[planned.transfer_start..][0..planned.transfer_len],
             .request = &plan.requests[index],
             .blocks = plan.blocks[planned.block_start..][0..planned.block_len],
@@ -1671,13 +1727,15 @@ const ReadRequest = struct {
         file: std.Io.File,
         buffers: []const []u8,
         file_offset: u64,
+        minimum: usize,
         metrics: *Metrics,
-    ) !void {
+    ) !u64 {
         return safetensors.readFilePositionalAllV(
             io,
             file,
             buffers,
             file_offset,
+            minimum,
             &metrics.source_calls,
         );
     }
@@ -1717,6 +1775,7 @@ const ReadRequest = struct {
         pipeline: *Pipeline,
         file_offset: u64,
         request_len: usize,
+        minimum_len: usize,
         transfers: []const Batch.Plan.Transfer,
         direct: *Loader,
         scratch: *Scratch,
@@ -1808,10 +1867,11 @@ const ReadRequest = struct {
             file,
             iovecs,
             file_offset,
+            minimum_len,
             pipeline.metrics,
         );
         _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(pipeline.io) -| read_started, .monotonic);
-        read_result catch |err| {
+        const bytes_read = read_result catch |err| {
             endRead(request, pipeline);
             pipeline.recordError(err);
             return;
@@ -1823,7 +1883,7 @@ const ReadRequest = struct {
             request_len,
         );
         _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
+        _ = pipeline.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
         for (transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
         request.markReadFinished();
         endRead(request, pipeline);
@@ -3129,6 +3189,7 @@ fn testFairOrder(
             .source_slot = undefined,
             .file_offset = job_index,
             .len = 1,
+            .minimum_len = 1,
             .transfer_start = 0,
             .transfer_len = 0,
             .block_start = 0,
@@ -3168,6 +3229,7 @@ fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
         .source_slot = undefined,
         .file_offset = index,
         .len = 1,
+        .minimum_len = 1,
         .transfers = &.{},
         .request = request,
         .blocks = blocks[index..][0..1],
@@ -3270,7 +3332,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
-    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 8);
+    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 8, 0, .off);
 
     // One plan per file. a:[10,18) merges adjacency and the duplicate,
     // a:[20,24) remains exact, and b:[3,15) is split at the request-size
@@ -3337,6 +3399,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         &.{0},
         1,
         load_limits.max_positional_iovecs + 1,
+        0,
     );
     defer iov_plan.destroy();
     try std.testing.expectEqual(@as(usize, 2), iov_plan.jobs.len);
@@ -3369,6 +3432,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         &.{ 0, 1, 2 },
         4,
         8,
+        0,
     );
     defer aligned_plan.destroy();
     try std.testing.expectEqual(@as(usize, 3), aligned_plan.jobs.len);
@@ -3376,6 +3440,48 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].len);
+
+    // Widened for direct I/O: the same three jobs (16 - 2 * 4 = 8 still cuts
+    // at the tensor-safe boundaries 7 and 15), each read at 4-byte bounds,
+    // its transfers relative to the widened start; the last read runs past
+    // the tensor data, of which every byte is required.
+    const widened_plan = try Planner.preparePlan(
+        allocator,
+        device_count,
+        &aligned_item_ptrs,
+        &.{ 0, 1, 2 },
+        4,
+        16,
+        4,
+    );
+    defer widened_plan.destroy();
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs.len);
+    try std.testing.expectEqual(@as(u64, 0), widened_plan.jobs[0].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[0].len);
+    try std.testing.expectEqual(@as(usize, 7), widened_plan.jobs[0].minimum_len);
+    try std.testing.expectEqual(@as(u64, 4), widened_plan.jobs[1].file_offset);
+    try std.testing.expectEqual(@as(usize, 12), widened_plan.jobs[1].len);
+    try std.testing.expectEqual(@as(usize, 11), widened_plan.jobs[1].minimum_len);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), widened_plan.jobs[1].transfers[0].block_index);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].transfers[0].block_offset);
+    try std.testing.expectEqual(@as(u64, 12), widened_plan.jobs[2].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].len);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].minimum_len);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[2].transfers[0].block_offset);
+    try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
+
+    // No room for the widening: two alignment units must fit in a request.
+    try std.testing.expectError(error.InvalidLoaderJob, Planner.preparePlan(
+        allocator,
+        device_count,
+        &aligned_item_ptrs,
+        &.{ 0, 1, 2 },
+        4,
+        8,
+        4,
+    ));
+    try std.testing.expectError(error.InvalidLoaderJob, Planner.maximumJobLen(16, 4, 3));
 }
 
 test "scheduler publishes a submission one file at a time and claims the files in order" {
@@ -3416,7 +3522,7 @@ test "scheduler publishes a submission one file at a time and claims the files i
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
-    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 4);
+    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 4, 0, .off);
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items.len);
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items[0].jobs.len);
     try std.testing.expectEqual(@as(usize, 1), batch.plans.items[1].jobs.len);
@@ -3485,6 +3591,7 @@ test "fair order validates jobs and cleans up allocation failures" {
         .source_slot = undefined,
         .file_offset = 0,
         .len = 1,
+        .minimum_len = 1,
         .transfer_start = 0,
         .transfer_len = 0,
         .block_start = 0,

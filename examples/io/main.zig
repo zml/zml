@@ -9,6 +9,7 @@ pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &.{
         .{ .scope = .@"zml/io/load", .level = .debug },
+        .{ .scope = .@"zml/vfs", .level = .debug },
     },
 };
 
@@ -35,9 +36,6 @@ pub fn main(init: std.process.Init) !void {
     try http_client.initDefaultProxies(allocator, init.environ_map);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    defer vfs_file.deinit();
-
     var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
     defer vfs_https.deinit();
 
@@ -53,7 +51,6 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.registerBackend("file", vfs_file.backend());
     try vfs.registerBackend("https", vfs_https.backend());
     try vfs.registerBackend("hf", hf_vfs.backend());
     try vfs.registerBackend("s3", s3_vfs.backend());
@@ -337,6 +334,10 @@ pub fn main(init: std.process.Init) !void {
                     },
                     .read_parallelism = load_read_parallelism,
                     .load_profile = load_profile,
+                    .direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
+                        log.err("ZML_DIRECT_IO must be off, on or auto", .{});
+                        return error.InvalidArgument;
+                    },
                 });
                 defer loader.deinit();
 

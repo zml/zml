@@ -624,8 +624,8 @@ do not restore a universal 32 MiB policy.
   5--10 GiB/s single-threaded. Do not duplicate replicated data through a CPU
   cross-node copy merely to make subsequent DMA local.
 - Direct I/O avoids `_copy_to_iter` but trades warm-cache behavior for storage
-  throughput and imposes alignment constraints. It was not established as a
-  universal win; unaligned safetensor ranges may still select buffered I/O.
+  throughput and imposes alignment constraints. The eleventh pass made it a
+  loader option with per-file residency detection; see "Eleventh pass".
 
 ### ROCm pinned allocation and required XLA behavior
 
@@ -2347,6 +2347,394 @@ On macOS arm64, using the repository's devenv toolchain and Xcode SDK:
   instantiated a CUDA-only module. Loader tests now compare pointer identity
   directly and check fallible creation as a void outcome; assertion semantics
   are retained and no CUDA module is needed for their error formatting.
+
+## Eleventh pass: direct I/O as a loader option (2026-09-05)
+
+The question was whether direct I/O can be a loader option that works
+reliably with the current design. It can; three things stood in the way,
+none of them the pipeline.
+
+### What the storage does without the loader
+
+A python probe (`preadv` into page-aligned anonymous memory, 16 MiB chunks,
+`posix_fadvise(DONTNEED)` for the cold arms; `mincore` and `cachestat` both
+refuse files this user cannot write, so residency was read from `Cached` in
+`/proc/meminfo`):
+
+| host | cold buffered | direct | warm buffered |
+|---|---|---|---|
+| gb300-2 (ext4 on a 4-NVMe raid0, 64 KiB pages) | 52.8 GiB/s | 53.2 (8 to 64 threads alike) | 120.9 |
+| mi300 (ext4 on LVM over a 4-NVMe raid0 plus the boot NVMe) | 4.7 to 4.9 | 25.1 | 70.1 (32 threads), 43 (12) |
+
+So direct I/O is the disk's ceiling on both hosts; cold buffered reaches it
+on gb300-2 and gets a fifth of it on mi300 (readahead-bound through md and
+LVM); warm buffered is 2.3 to 2.8 times the disk. Also found here: gb300-2
+held only 16 GB of page cache at the start of this session, hours after
+149 GB loads (the container has no memory limit; within a session the cache
+retains the model, so whoever or whatever dropped it is unknown), which
+means an earlier DeepSeek number there is warm or cold depending on what
+ran before it (the two differ by about 10%: 4.1 against 4.5 s); and Llama
+on mi300 lives on the volume's slow extent (its cold reads run at 3.3 GiB/s
+buffered or direct, against 25 for DeepSeek on the same filesystem), which
+makes it the wrong cold fixture there.
+
+### Three defects, one of them old
+
+1. **Bare paths never reached the file backend.** `VFS.lookupDir` sent an
+   absolute path (and a relative one that is not a URI) to the inner `Io`,
+   while `VFS.loadProfile` attributed the same path to the registered
+   `file` backend. Every loader read of `/var/models/...` bypassed
+   `vfs.File`, so its `direct_io: bool = true` had never applied to a load.
+   Bare paths now go to the `file` backend when one is registered
+   (`bareBackend`; a test opens a temp file by absolute path and checks the
+   handle's backend).
+2. **The old `vfs.File` failed the open when the filesystem refused
+   `O_DIRECT`** (`fcntl` error -> `error.Unexpected`), and served streaming
+   reads from the direct descriptor's own file position. It also depended
+   on the reader lining up by luck: a direct read needs the offset, every
+   buffer and the total aligned, and safetensors packs tensors at 16-byte
+   boundaries (DeepSeek: 1566 of 1576 tensors in a file at exactly 16, the
+   data section itself at 3096 mod 4096), so a read that starts at a
+   tensor never qualifies.
+3. **Zig's threaded `Io` treats `EINVAL`/`EFAULT` from `preadv` as a
+   programmer error** (panic in debug, `error.Unexpected` in release).
+   Those are exactly what a filesystem that accepts the flag but not the
+   read, or a mapping the block layer cannot pin, answer to a direct read.
+
+### The change
+
+- `vfs.File.Config.direct_io` is a policy: `off`, `on` (every aligned read
+  of a qualifying file), `auto` (default: `on` for a file that is mostly out
+  of the page cache when opened). Residency comes from `cachestat`, or when
+  the kernel refuses it (before 6.5, or a file this process may not write:
+  both bench hosts) from 32 `RWF_NOWAIT` reads spread over the file, which
+  answer `EAGAIN` for an uncached page and need no permission. Unknown
+  counts as cached. A file is cold at or below `direct_io_cold_fraction`
+  (0.5).
+- The backend opens the direct descriptor itself and never fails the open
+  over it; streaming reads use the buffered descriptor; a direct positional
+  read is issued with raw `preadv` and its errno decoded: `EINVAL`, `EFAULT`
+  and `EOPNOTSUPP` mark the file refused (one warning) and the read is
+  answered by the buffered descriptor; a short read at the end of the file
+  is returned as such.
+- The backend publishes `ReadHints.direct_io_alignment` and a
+  `DirectIoProbe` (`Backend.direct_io`); `VFS.loadProfile` forwards both
+  (`LoadProfile.direct_io_alignment`, `LoadProfile.direct_io`, the probe
+  translated to VFS handles).
+- `Loader.Options.direct_io: bool = true` (`Config.source_alignment`): the
+  planner widens each job's read to aligned bounds (`alignBackward` of the
+  first tensor byte, `alignForward` of the last), transfers address the
+  widened read, `maximumJobLen` leaves two alignment units of room so a
+  widened job still fits `maximumCoalescedJobBlocks`, and
+  `Batch.Plan.Job.minimum_len` tells the read how much must exist:
+  `safetensors.readFilePositionalAllV` accepts the end of the file only past
+  it. Neighbouring widened reads share up to one alignment unit; their
+  transfers do not overlap. A file is widened only when the probe says its
+  reads go direct (see the warm results below for why).
+- The example exposes `ZML_DIRECT_IO=0|1` (loader) and
+  `ZML_VFS_DIRECT_IO=off|on|auto` (backend); the `zml/vfs/file` scope logs
+  at debug: the residency decision, the descriptor, the first unaligned
+  read of a direct file.
+
+### Results
+
+`examples/io load <model> replicated`, 16 MiB blocks, adaptive width; arms
+are `exact` (today's reads), `direct` (loader on, backend `on`), `auto`
+(loader on, backend `auto`), `widened` (loader on, backend `off`: aligned
+reads served buffered). Cold arms evict the model first. Loader `elapsed`,
+then the read and DMA-stage milliseconds per 16 MiB request.
+
+gb300-2, four GB300, three reps (two for DeepSeek):
+
+| model, state | exact | direct | auto | widened |
+|---|---|---|---|---|
+| Llama-8B cold | 0.359 / 0.358 / 0.358 s (rd 6.4, dma 1.1) | 0.300 / 0.295 / 0.294 (rd 2.2, dma 15) | 0.300 / 0.299 / 0.295 | 0.357 / 0.358 / 0.358 |
+| Llama-8B warm | 0.320 / 0.319 / 0.324 (rd 2.4, dma 17) | 0.299 / 0.297 / 0.298 (rd 2.2, dma 15) | 0.334 / 0.344 / 0.327 (dma 19 to 20) | 0.339 / 0.332 / 0.340 |
+| DeepSeek cold | 4.48 / 4.59 (rd 5.0, dma 12) | 3.76 / 3.76 (rd 3.4, dma 22) | 3.74 / 3.46 | -- |
+| DeepSeek warm | 3.83 (rd 2.7, dma 23) | 3.74 / 3.63 (rd 3.1, dma 21) | 4.29 / 4.36 (dma 24 to 26) | 4.06 / 3.95 |
+
+Direct reads make the cold loads 12 to 16% shorter and leave the page
+cache untouched (`Cached` stays at 174 GB where an `exact` load adds the
+model). They also beat the warm buffered load by 5 to 6%: the loader is
+not read-bound at 33 to 37 GiB/s, and the page-cache copy (`_copy_to_iter`,
+1.3 cores of reader sys time) competes with the DMA engines for the same
+host memory, which the DMA-stage time shows (17 -> 15 ms warm, and the
+per-piece pump measurements of the sixth pass). `widened` costs 3 to 6% on
+a warm load: with an exact read the first tensor of every job lands at
+block offset 0, with a widened one at its file offset modulo 4 KiB, and a
+DMA source that is not block-aligned is slower (the -13% of the pump
+measurements). That is why `auto` widens only the files it will read
+directly.
+
+mi300, eight MI300X, host load 9 to 30 (other users; DeepSeek replicated
+on ROCm is DMA-bound at 115 to 140 ms per request, a separate condition):
+
+| model, state | exact | direct | auto | widened |
+|---|---|---|---|---|
+| Llama-8B warm | 1.12 / 1.10 s (rd 9.3, dma 72 to 74) | 4.57 / 4.53 (rd 58) | 1.11 / 1.07 | 0.96 / 0.94 |
+| Llama-8B cold (slow extent) | 4.73 / 4.75 / 4.72 (rd 62) | 4.52 / 4.52 / 4.54 (rd 59) | 4.52 / 4.54 / 4.55 | -- |
+| DeepSeek cold | 35.1 (rd 44, width 12) | 12.5 (rd 5.6, dma 117) | 13.0 (rd 5.7) | -- |
+
+Direct I/O into ROCm's PJRT-pinned arenas (`hipHostMalloc`) works: no
+refusal, verified loads (`ZML_LOAD_CHECK=16` on Llama, 256 on DeepSeek, on
+both hosts). DeepSeek cold is 2.8 times faster and then DMA-bound. Forcing
+direct on a warm Llama costs 4x here because its files sit on the volume's
+slow extent, and `auto` chose buffered for it (probe: 100% cached) and
+direct for the cold DeepSeek (0%).
+
+With the probe (a file is widened only when its reads go direct), the
+same arms again; each row's cache state was checked from `Cached`, the
+label notwithstanding (`exact` r1 of each warm block was in fact the run
+that warmed the cache, after the previous block's eviction):
+
+| host, model, state | exact | auto | direct |
+|---|---|---|---|
+| gb300-2 Llama warm | 0.318 / 0.321 s | 0.328 / 0.333 / 0.314 | 0.300 / 0.298 / 0.296 |
+| gb300-2 DeepSeek warm | 4.10 | 4.69 / 3.95 | 3.79 / 3.77 |
+| gb300-2 DeepSeek cold | 4.58 | 3.73 | -- |
+| mi300 Llama warm | 1.10 | 0.97 / 1.01 | -- |
+| mi300 DeepSeek cold | 34.9 | 12.8 | -- |
+
+`auto` on a warm Llama is now at parity with `exact` on both hosts (it was
+4 to 7% behind on gb300-2 without the probe); DeepSeek warm on gb300-2 is
+too noisy in this session (3.9 to 4.7 s for the same arm) to resolve a few
+percent either way. Cold loads keep the direct gain.
+
+### Recommendation and defaults
+
+Loader `direct_io = true` and backend `auto` are the defaults. On a host
+whose disk is as fast as its cold buffered path (gb300-2) a user who knows
+the model is on that disk gains another 5% on warm loads with backend
+`on`; on a host with a slow extent or a slow disk `on` is a 4x loss, so it
+stays opt-in. Residency detection is a measurement, not a guess:
+`cachestat` where permitted, `RWF_NOWAIT` sampling otherwise, buffered when
+unknown. Nothing in the pipeline changed: widening is a planner concern,
+the read helper learned that padding may end early, and the file backend
+owns the descriptor and every failure mode.
+
+## Twelfth pass: direct I/O as the VFS's own local case (2026-09-06)
+
+A review of the eleventh pass asked three questions: whether the pair of
+descriptors behind every `vfs.File` handle earns its keep when the loader
+uses one or the other; why `DirectIoProbe` needs opaque data and function
+pointers; and whether `vfs.File` has a purpose without the direct logic.
+The answers led to a smaller design with the same read path.
+
+### What the eleventh-pass shape was paying for
+
+- **The pair.** From the loader's side a file was already one or the
+  other: the policy and the residency measurement decided at open, the
+  planner asked once per file and widened the whole file, and every loader
+  read of a direct file was aligned by construction. The buffered twin
+  served the readers whose reads never align, the safetensors header parser
+  (streaming), `TensorReader` and the buffered loader (exact offsets), plus
+  the refusal fallback. The pair was the cheapest way to give those readers
+  a working handle, because `O_DIRECT` is a property of the open file
+  description (a `dup` shares it, hence the second `open`), and a single
+  descriptor would have had to bounce every unaligned read.
+- **The probe.** `Backend` is a type-erased registry entry (an `std.Io`,
+  itself userdata plus vtable, and side channels); the VFS stores
+  heterogeneous backends by scheme and the loader takes a `LoadProfile`
+  that must serve `hf`, `s3` and a null probe alike, so nothing on that
+  path could name `vfs.File`; `ReadStatsProvider` set the precedent. The
+  answer is per file and exists only after the open (residency at open,
+  refusal at the first read), and `std.Io.File` carries only a handle and a
+  `nonblocking` bit, so there was no return channel. The loader holds VFS
+  handles and the backend its own, hence the two probe layers.
+- **The file backend.** Created 2025-12-11 (#362) and given direct I/O a
+  week later (#367): the two were never apart. Its read hints equal
+  `LoadProfile.local`, every operation forwards to the inner `Io`, and its
+  handle table mirrored the VFS's own entry for every open file (a second
+  index translation under a second mutex on every read). Until the
+  eleventh pass bare paths bypassed it, so it only ever served `file://`.
+  Under `auto` it also opened a direct descriptor and measured residency at
+  every read-only open of a qualifying file, including the registry
+  parser's, which only ever read the header and closed.
+- **Rejected on the way:** moving the mechanism into the loader with a
+  `local_io: ?std.Io` in the profile so the loader could open local files
+  outside the VFS. The VFS hides exactly one thing, the descriptor, and the
+  mechanism is four descriptor operations (`fcntl` for the flag,
+  `cachestat` or `preadv2(RWF_NOWAIT)` for residency, a raw `preadv` whose
+  errno is decoded, `fcntl` again on refusal). It has to live where the
+  descriptor is visible, and bypassing the VFS was the price of moving it,
+  not a need. Once the VFS keeps it, the loader never needs a descriptor.
+
+### The change
+
+- `vfs/file.zig` is deleted. A bare path or a `file://` URI is the VFS's
+  own local case: `lookupDir` resolves the `file` scheme and bare paths to
+  the inner `Io` (`schemeRoot`, `localRoot`; registering a `file` backend
+  is asserted against). `loadProfile` returns the local profile for them:
+  8 MiB requests, `direct_io_alignment = 4096` on Linux, `vfs = self`.
+  `LoadProfile.default` and `.local` (no VFS) keep a null alignment, so a
+  loader without a VFS reads exact ranges as before.
+- One descriptor per local handle, with a state on the VFS's existing
+  handle entry: `undecided`, `buffered`, `direct`. `VFS.useDirectIo(file,
+  policy)` is the planner's one call per file: it applies the policy,
+  checks read-only (recorded at open), regular and at least one alignment
+  unit long, samples residency on that descriptor under `auto`, sets the
+  flag with `fcntl`, and returns whether the file is direct. The first
+  decision under `on` or `auto` stands for the handle's life: the flag
+  belongs to the open file description, which the loader's `SourceSlot`
+  keeps for its life, and a caller answered buffered plans exact reads
+  that a direct descriptor would reject. The transitions that touch the
+  flag (`enterDirect`, `leaveDirect`) run under the VFS mutex so the flag
+  and the state change together; reads only load the state.
+  `vfs/direct_io.zig` holds the descriptor operations.
+- The planner finds the VFS through the `Io` it opened the file with
+  (`VFS.fromIo`, vtable identity), not through a pointer in the profile:
+  a profile prepared by one VFS and a loader reading through another `Io`
+  would otherwise index the wrong handle table. A loader without a VFS
+  never widens.
+- Reads of a direct handle go through the raw `preadv` in the VFS. A
+  rejected read (`EINVAL`, `EFAULT`, `EOPNOTSUPP`) takes the file back to
+  buffered: the flag comes off before the inner `Io` sees the descriptor
+  again, one log line names the file, offset, buffer and total, and the
+  read is answered buffered. An aligned rejection is the filesystem
+  refusing direct I/O it accepted the flag for (a warning); a misaligned
+  one is the reader's, its plan or a continuation after a short read,
+  which a FUSE or NFS store may answer mid-file (an error). Demotion
+  rather than failure, because that continuation is legitimate and a
+  single descriptor can only finish it buffered. A streaming read, or a
+  file copy reading the handle, demotes it the same way first, so the
+  inner `Io` never sees the flag (it treats that errno as a programmer
+  error). There is no per-read alignment routing any more: a handle is in
+  one mode at a time.
+- Residency is sampled only (32 `RWF_NOWAIT` reads spread over the file).
+  The eleventh pass preferred `cachestat`, but a whole-file `cachestat`
+  walks every cached folio and costs about 7 ms per cached GiB on a 4 KiB
+  page kernel, unbounded in file size and exposed on the planner thread,
+  and neither bench host ever exercised it (both refuse it for files the
+  user cannot write). The sample resolves a 0.5 threshold and costs the
+  same for any size.
+- The policy is the loader's. `Loader.Options.direct_io: VFS.DirectIo`
+  (`off`, `on`, `auto`; default `auto`) replaces the loader's `bool` and
+  the backend's `Config.direct_io`; `backend.Config.direct_io` replaces
+  `source_alignment`, which the direct loader now derives from the policy
+  and the profile; `publishFiles` takes the policy instead of a probe.
+  `ZML_DIRECT_IO=off|on|auto` replaces `ZML_DIRECT_IO=0|1` plus
+  `ZML_VFS_DIRECT_IO` (an old value is an error that names the accepted
+  ones); both examples stop registering a file backend. Removed:
+  `DirectIoProbe`, `Backend.direct_io`, `ReadHints.direct_io_alignment`,
+  `LoadProfile.direct_io`. `registerBackend("file", ...)` returns
+  `error.ReservedScheme` in every build mode.
+- `safetensors.readFilePositionalAllV` returns after a short read once
+  `minimum` is in: only padding no caller addresses is left, and the call
+  that would fetch it starts at an unaligned offset, which a direct file
+  rejects (the pair used to absorb it on the buffered twin). For an
+  unwidened read `minimum` is the whole read, so nothing changes for remote
+  backends or `TensorReader`.
+- Local `realPath` results are bare again (the eleventh pass routed bare
+  paths through the `file` backend, which prefixed them with `file://`, so
+  `Tensor.file_uri` carried the scheme for one commit). Nothing in the tree
+  keys on the prefix.
+- Downstream: llmd registers `zml.io.VFS.File`
+  (`monorepo/llmd/main.zig:236`) and drops those two lines when it picks
+  this up.
+- Known limits, recorded rather than fixed: a long-lived loader that found
+  a file cached at its first submit reads it buffered at every later
+  submit, even after the cache was dropped, because the decision is per
+  description and `SourceSlot` keeps one per file (a fresh open per submit
+  would let `auto` re-measure); the alignment is a 4 KiB constant rather
+  than `statx(STATX_DIOALIGN)`, so a filesystem with a larger logical
+  block gets one rejected read per file and then buffered reads; the VFS's
+  streaming-write operation still forwards the VFS handle untranslated
+  and its seeded stdio entries map index 1 to stdin, a pre-existing pair
+  of defects that only cancel out for stdout and stderr.
+
+Eight review angles (line scan, removed behaviour, cross-file trace,
+reuse, simplification, efficiency, altitude, conventions) ran over the
+diff before the second round of changes above. They found the flag race
+that the mutex now closes, the unchecked `LoadProfile.vfs` that `fromIo`
+replaces, the `cachestat` cost, the assert on `registerBackend`, the test
+assertions that encoded ext4's rejection of unaligned direct reads (tmpfs
+serves them), and the cleanups folded in: `innerFile()` at every
+forwarding site, the `refused` state that no reader distinguished from
+`buffered`, one demotion helper instead of two, `loadProfile` classifying
+paths through `lookupDir` and deriving the local profile from
+`LoadProfile.local`, `schemeRoot` using the map lookup.
+
+### What `auto` does to the page cache
+
+A direct read never fills the page cache. Under `auto` a cold file is read
+directly and is therefore still cold at the next load: a fixed point.
+Whether that costs anything is a property of the host, not of the file:
+
+| host, model | cold buffered, then the next load warm | direct, every load |
+|---|---|---|
+| gb300-2 Llama | 0.359 s, then 0.320 | 0.297 |
+| gb300-2 DeepSeek | 4.5, then 3.8 | 3.7 |
+| mi300 Llama | 4.73, then 1.10 | 4.52 |
+
+(eleventh-pass numbers). On gb300-2 direct beats the warm buffered path,
+so never warming the cache costs nothing. On mi300 `auto` trades a 4% gain
+on the first Llama load for losing the 1.10 s warm load on every load after
+it. No residency measurement can see that, because the question is whether
+this host's disk beats its warm buffered path for this loader, which the
+user knows and the file does not. The default stays `auto` (a first load
+never slower than cold buffered, the cache left as found); a user who
+reloads the same model on a host whose warm buffered reads beat its disk
+should set `off`. The option's doc comment says so.
+
+### Verification
+
+- `bazel test //vfs:test //zml:test` and `bazel build //examples/io
+  //examples/llm` pass. The VFS test opens a temp file on the local ext4
+  under every policy: `on` goes direct (the unaligned read of the test is
+  rejected by the kernel, answered buffered and logged once), `auto` reads
+  the just-written and therefore cached file buffered, `off` never asks,
+  a streaming read demotes a direct file deterministically.
+- gb300-2 (2026-09-06, tree before the review round, in a detached
+  worktree `~/github/zml/zml-directio` at the host's `b59c41b7` plus the
+  57 changed files; kernel 6.8 64 KiB pages; four GB300, host idle):
+  `ZML_LOAD_CHECK=16` under `on` warm and cold, and `ZML_LOAD_CHECK=256`
+  on cold DeepSeek under `auto` twice, all `load check: ok`; no refused
+  read, no `O_DIRECT refused`, no panic in 15 runs. `bulk phase` elapsed:
+
+  | arm | this tree | eleventh pass |
+  |---|---|---|
+  | Llama warm `on` (3) | 0.301 / 0.301 / 0.301 s | 0.297 |
+  | Llama warm `off` (3) | 0.337 / 0.334 / 0.343 | 0.320 |
+  | Llama warm `auto` (3) | 0.341 / 0.334 / 0.336 | 0.328 / 0.333 / 0.314 |
+  | Llama cold `auto` | 0.303 | 0.30 |
+  | Llama cold `off` | 0.360 | 0.36 |
+  | DeepSeek cold `auto` (2) | 3.99 / 3.89 | 3.73 |
+
+  `auto` decided buffered for the warm files (`100% cached`, all four
+  shards) and direct for the cold ones (`0% cached` on Llama, whose files
+  the user owns so `cachestat` answered; `3% cached` on DeepSeek, which
+  is the one header page out of 32 samples). Direct and cold arms are at
+  parity. The two warm buffered arms are 5% above yesterday's numbers on
+  the same host although their code path lost a handle table and a mutex;
+  the cold buffered arm is at parity, so the difference is in the warm
+  page-cache copy, whose speed depends on which node holds the cache
+  (seventh pass). The DeepSeek pair calibrated to 8 MiB and 16 MiB blocks
+  respectively (175 vs 181 GiB/s), which is calibration noise, not the
+  read path.
+- gb300-2 closing A/B (2026-09-06, the final tree after the review round
+  in the same worktree, against the eleventh-pass tree in a second
+  detached worktree `~/github/zml/zml-eleventh`; both built from
+  `b59c41b7` plus their overlays; Llama replicated on four GB300, warm,
+  four interleaved rounds of baseline exact, final `off`, baseline auto,
+  final `auto`). `bulk phase` medians:
+
+  | arm | eleventh pass | final tree |
+  |---|---|---|
+  | warm exact / `off` | 338.8 ms (334.9 to 341.6) | 335.8 (334.3 to 339.0) |
+  | warm `auto` (buffered) | 339.6 (332.4 to 357.7) | 336.8 (334.2 to 341.3) |
+  | cold `auto` (direct) | 295.4 | 301.6 |
+  | warm `on` + check | -- | 302.1 |
+
+  Per-read metrics are identical within noise (read 2.30 to 2.36 ms,
+  DMA stage 18.3 to 18.6 ms). The warm buffered path is not slower: the
+  final tree is 3 ms ahead on both pairs, inside the round-to-round
+  spread, so the 5% against yesterday's numbers is the host's day, not
+  the change. The baseline's slowest warm run (357.7 ms) had calibrated
+  to 8 MiB blocks. Both `ZML_LOAD_CHECK=16` runs under `on` (warm and
+  cold) passed; no refused or misaligned read in 20 runs. The cold `auto`
+  run showed why the residency sample now sits mid-window: the sample at
+  offset 0 was the header page the registry parser had just read, so a
+  cold file reported 3% cached (the decision was unaffected).
 
 ## Open work
 

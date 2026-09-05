@@ -22,20 +22,26 @@ pub const ExactPositionalError = std.Io.File.ReadPositionalError || error{
 /// Completes an exact absolute positional scatter read, resuming short reads
 /// and respecting the platform iovec limit. `call_count` is optional
 /// diagnostic accounting for physical file calls.
+/// Scatters `[file_offset, file_offset + total)` into `buffers`, where
+/// `total` is their combined length. The file may end early only past
+/// `minimum` bytes: the bytes after it are padding a caller added to align
+/// the read, and the end of the file cuts them. Returns the bytes read.
 pub fn readFilePositionalAllV(
     io: std.Io,
     file: std.Io.File,
     buffers: []const []u8,
     file_offset: u64,
+    minimum: u64,
     call_count: ?*std.atomic.Value(u64),
-) ExactPositionalError!void {
+) ExactPositionalError!u64 {
     var read_size: u64 = 0;
     for (buffers) |buffer| {
         const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
         read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
     }
     _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
-    if (read_size == 0) return;
+    if (minimum > read_size) return error.OutOfBounds;
+    if (read_size == 0) return 0;
 
     var batch: [max_positional_iovecs][]u8 = undefined;
     var buffer_index: usize = 0;
@@ -43,6 +49,7 @@ pub fn readFilePositionalAllV(
     var completed: u64 = 0;
     while (completed < read_size) {
         var batch_len: usize = 0;
+        var batch_size: u64 = 0;
         var scan_index = buffer_index;
         var scan_offset = buffer_offset;
         while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
@@ -52,6 +59,7 @@ pub fn readFilePositionalAllV(
                 continue;
             }
             batch[batch_len] = buffer[scan_offset..];
+            batch_size += batch[batch_len].len;
             batch_len += 1;
             scan_offset = 0;
         }
@@ -60,11 +68,20 @@ pub fn readFilePositionalAllV(
         if (call_count) |count| _ = count.fetchAdd(1, .monotonic);
         const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
         const bytes_read = try file.readPositional(io, batch[0..batch_len], absolute_offset);
-        if (bytes_read == 0) return error.UnexpectedEndOfFile;
+        if (bytes_read == 0) {
+            if (completed >= minimum) return completed;
+            return error.UnexpectedEndOfFile;
+        }
         completed += @intCast(bytes_read);
+        // A short read past `minimum` leaves only padding unread, which no
+        // caller addresses; the call that would fetch it (or confirm the
+        // end of the file) starts at an unaligned offset, which a file read
+        // directly rejects.
+        if (bytes_read < batch_size and completed >= minimum) return completed;
 
         try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
     }
+    return completed;
 }
 
 fn advanceScatter(
@@ -270,11 +287,12 @@ pub const TensorReader = struct {
         };
         _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
 
-        return readFilePositionalAllV(
+        _ = try readFilePositionalAllV(
             self.io,
             self.file,
             buffers,
             file_offset,
+            read_size,
             null,
         );
     }

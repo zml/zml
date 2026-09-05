@@ -55,9 +55,6 @@ pub fn main(init: std.process.Init) !void {
     //
     // Virtual File Systems
     //
-    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    defer vfs_file.deinit();
-
     var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
     defer http_client.deinit();
 
@@ -73,7 +70,6 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.registerBackend("file", vfs_file.backend());
     try vfs.registerBackend("gs", gcs_vfs.backend());
     try vfs.registerBackend("hf", hf_vfs.backend());
     try vfs.registerBackend("s3", s3_vfs.backend());
