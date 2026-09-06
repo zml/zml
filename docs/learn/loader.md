@@ -106,11 +106,13 @@ pool before returning. Calibration arenas become the load's initial capacity;
 all arenas are released by `Loader.deinit`. Workspace and block-pool types
 are internal to `io/host_memory.zig`.
 
-Callers configure calibration through `Loader.Options.dma`, host memory limits
-through `.max_host_bytes`, and NUMA placement through `.numa`. They never
-supply a workspace or calibration result. `Loader.calibration()` reports the
-sizing selected during initialization, or null for buffered loading. There is
-no separate public benchmark or recalibration operation.
+Callers configure calibration through `Loader.Options.dma` and host memory
+limits through `.max_host_bytes`. They never supply a workspace, NUMA policy,
+or calibration result. Page-backed arenas automatically interleave across the
+host's memory-bearing NUMA nodes when more than one is discoverable.
+`Loader.calibration()` reports the sizing selected during initialization, or
+null for buffered loading. There is no separate public benchmark or
+recalibration operation.
 
 CPU uses default transfer sizing without measurement. Buffered backends skip
 calibration. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned

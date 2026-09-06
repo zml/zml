@@ -6,18 +6,6 @@ const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
 const Tensor = @import("tensor.zig").Tensor;
 
-/// Placement of page-backed host arenas used for device transfers.
-pub const NumaPlacement = union(enum) {
-    /// Interleave page by page over every host node that has memory
-    /// (`/sys/devices/system/node/has_memory`). A single node, or no
-    /// readable list, applies no policy.
-    memory_nodes,
-    /// One bit per node: a single bit binds, several interleave.
-    nodes: u64,
-    /// No policy: wherever the kernel and the driver put the pages.
-    none,
-};
-
 /// Return a clone of a type with Tensors replaced by Buffer.
 /// Non-Tensor metadata is stripped out of the resulting struct.
 /// Recursively descends into the type.

@@ -9,11 +9,291 @@ const pjrt = @import("pjrt");
 const Device = @import("../platform.zig").Device;
 const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
-const Target = @import("../platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/mem");
 
-const NumaPlacement = @import("../mem.zig").NumaPlacement;
+// The largest supported calibration block must fit.
+const minimum_mapped_bytes = 32 * 1024 * 1024;
+
+/// Concurrent arena registrations used by `growToBlocks`.
+const growth_parallelism = 4;
+
+/// One ROCm host-memory allocation path and its bytes allocated so far.
+const HostNode = struct {
+    any_device_index: usize,
+    total_allocated_bytes: usize = 0,
+};
+
+/// Each allocation strategy keeps only the state it uses. Arena retention
+/// and ROCm node balancing use `arena_mutex`; NUMA fallback is atomic.
+const Backend = union(enum) {
+    pjrt_host: PjrtHost,
+    dma_map: Pages,
+    pageable: Pages,
+
+    const PjrtHost = struct {
+        platform: *const Platform,
+        host_nodes: []HostNode,
+        allocations: std.ArrayListUnmanaged(PinnedHostAllocation) = .empty,
+    };
+
+    const Pages = struct {
+        allocator: HugePageAllocator,
+        allocations: std.ArrayListUnmanaged([]align(std.heap.page_size_min) u8) = .empty,
+    };
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+    ) !Backend {
+        // Interleaving over one node is that node; leave it to the kernel.
+        const numa_mask = interleaveMask(memoryNodeMask(allocator, io));
+        return switch (platform.target) {
+            .cuda, .oneapi => .{ .dma_map = .{
+                .allocator = .init(allocator, platform, numa_mask),
+            } },
+            .cpu => .{ .pageable = .{
+                .allocator = .initPageable(allocator, numa_mask),
+            } },
+            .rocm => {
+                var discovered_nodes: std.ArrayListUnmanaged(struct {
+                    device_index: usize,
+                    node: usize,
+                }) = .empty;
+                defer discovered_nodes.deinit(allocator);
+                devices: for (platform.devices, 0..) |device, device_index| {
+                    if (device.memory(.host_pinned) == null) return error.PinnedHostMemoryUnavailable;
+                    const node = device.numaNode() orelse continue;
+                    for (discovered_nodes.items) |existing| {
+                        if (existing.node == node) continue :devices;
+                    }
+                    try discovered_nodes.append(allocator, .{ .device_index = device_index, .node = node });
+                }
+                const host_nodes = try allocator.alloc(HostNode, @max(discovered_nodes.items.len, 1));
+                errdefer allocator.free(host_nodes);
+                if (discovered_nodes.items.len == 0) {
+                    host_nodes[0] = .{ .any_device_index = 0 };
+                } else {
+                    for (host_nodes, discovered_nodes.items) |*host_node, discovered| {
+                        host_node.* = .{ .any_device_index = discovered.device_index };
+                    }
+                }
+                return .{ .pjrt_host = .{
+                    .platform = platform,
+                    .host_nodes = host_nodes,
+                } };
+            },
+            .tpu, .neuron, .metal => error.DmaBenchmarkUnsupported,
+        };
+    }
+
+    fn deinit(self: *Backend, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .pjrt_host => |*host| {
+                for (host.allocations.items) |allocation| allocation.deinit();
+                host.allocations.deinit(allocator);
+                allocator.free(host.host_nodes);
+            },
+            .dma_map, .pageable => |*pages| {
+                for (pages.allocations.items) |allocation| pages.allocator.free(allocation);
+                pages.allocations.deinit(allocator);
+            },
+        }
+    }
+
+    fn arenaCount(self: *const Backend) usize {
+        return switch (self.*) {
+            .pjrt_host => |host| host.allocations.items.len,
+            .dma_map, .pageable => |pages| pages.allocations.items.len,
+        };
+    }
+
+    fn arenaAt(self: *const Backend, index: usize) []u8 {
+        return switch (self.*) {
+            .pjrt_host => |host| host.allocations.items[index].data,
+            .dma_map, .pageable => |pages| pages.allocations.items[index],
+        };
+    }
+
+    fn allocate(
+        self: *Backend,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        arena_mutex: *std.Io.Mutex,
+        bytes: usize,
+    ) ![]u8 {
+        switch (self.*) {
+            .pjrt_host => |*host| {
+                const started: std.Io.Timestamp = .now(io, .awake);
+                const host_node_index = index: {
+                    arena_mutex.lockUncancelable(io);
+                    defer arena_mutex.unlock(io);
+                    var emptiest_index: usize = 0;
+                    for (host.host_nodes[1..], 1..) |host_node, index| {
+                        if (host_node.total_allocated_bytes < host.host_nodes[emptiest_index].total_allocated_bytes)
+                            emptiest_index = index;
+                    }
+                    host.host_nodes[emptiest_index].total_allocated_bytes += bytes;
+                    break :index emptiest_index;
+                };
+                errdefer {
+                    arena_mutex.lockUncancelable(io);
+                    defer arena_mutex.unlock(io);
+                    host.host_nodes[host_node_index].total_allocated_bytes -= bytes;
+                }
+                const any_device_index = host.host_nodes[host_node_index].any_device_index;
+                const memory = host.platform.devices[any_device_index].memory(.host_pinned) orelse
+                    return error.PinnedHostMemoryUnavailable;
+                const allocation: PinnedHostAllocation = try .init(memory, any_device_index, bytes);
+                errdefer allocation.deinit();
+                {
+                    arena_mutex.lockUncancelable(io);
+                    defer arena_mutex.unlock(io);
+                    try host.allocations.append(allocator, allocation);
+                }
+                const elapsed_ms = @as(f64, @floatFromInt(elapsedNanoseconds(started, .now(io, .awake)))) / std.time.ns_per_ms;
+                log.info("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
+                    any_device_index,
+                    @intFromPtr(allocation.data.ptr),
+                    allocation.data.len,
+                    elapsed_ms,
+                });
+                return allocation.data;
+            },
+            .dma_map, .pageable => |*pages| {
+                const started: std.Io.Timestamp = .now(io, .awake);
+                const allocation = try pages.allocator.alloc(bytes);
+                const mapped_at: std.Io.Timestamp = .now(io, .awake);
+                errdefer pages.allocator.free(allocation);
+                {
+                    arena_mutex.lockUncancelable(io);
+                    defer arena_mutex.unlock(io);
+                    try pages.allocations.append(allocator, allocation);
+                }
+                const finished_at: std.Io.Timestamp = .now(io, .awake);
+                const numa_mask = pages.allocator.numa_mask.load(.acquire);
+                const placement = if (numa_mask == 0) "unplaced" else "interleave";
+                log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3} map_ms={d:.3}", .{
+                    @tagName(self.*),
+                    placement,
+                    numa_mask,
+                    @intFromPtr(allocation.ptr),
+                    allocation.len,
+                    @as(f64, @floatFromInt(elapsedNanoseconds(started, finished_at))) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(elapsedNanoseconds(started, mapped_at))) / std.time.ns_per_ms,
+                });
+                return allocation;
+            },
+        }
+    }
+
+    /// Private owner of page-backed arena allocation policy. It applies
+    /// huge-page alignment/advice and optionally registers the pages with
+    /// the selected backend's PJRT client.
+    const HugePageAllocator = struct {
+        const transparent_huge_page_size = 2 * 1024 * 1024;
+        const mpol_interleave = 3;
+
+        parent: std.mem.Allocator,
+        /// Null leaves the pages pageable for CPU transfers.
+        platform: ?*const Platform,
+        /// Zero leaves placement to the kernel. Automatic placement can
+        /// fall back to zero if the kernel refuses it.
+        numa_mask: std.atomic.Value(u64),
+
+        fn init(parent: std.mem.Allocator, platform: *const Platform, numa_mask: u64) HugePageAllocator {
+            return .{
+                .parent = parent,
+                .platform = platform,
+                .numa_mask = .init(numa_mask),
+            };
+        }
+
+        fn initPageable(parent: std.mem.Allocator, numa_mask: u64) HugePageAllocator {
+            return .{
+                .parent = parent,
+                .platform = null,
+                .numa_mask = .init(numa_mask),
+            };
+        }
+
+        fn alloc(self: *HugePageAllocator, len: usize) ![]align(std.heap.page_size_min) u8 {
+            const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
+            const effective_alignment = effectiveAlignment(alignment, len);
+            const ptr = self.parent.rawAlloc(len, effective_alignment, @returnAddress()) orelse
+                return error.OutOfMemory;
+            const data: []align(std.heap.page_size_min) u8 = @alignCast(ptr[0..len]);
+            self.place(data);
+            adviseHugePages(data);
+            if (self.platform) |platform| {
+                platform.pjrt_client.dmaMap(platform.pjrt_api, @ptrCast(data)) catch {
+                    self.parent.rawFree(data, effective_alignment, @returnAddress());
+                    return error.OutOfMemory;
+                };
+            }
+            return data;
+        }
+
+        fn place(self: *HugePageAllocator, data: []u8) void {
+            const mask = self.numa_mask.load(.acquire);
+            if (mask == 0) return;
+            if (comptime builtin.os.tag != .linux) return;
+
+            const node_mask: [1]u64 = .{mask};
+            const highest_node: usize = 63 - @clz(mask);
+            const rc = std.os.linux.syscall6(
+                .mbind,
+                @intFromPtr(data.ptr),
+                data.len,
+                mpol_interleave,
+                @intFromPtr(&node_mask),
+                // Linux get_nodes() decrements maxnode before copying the mask;
+                // raw callers include the same extra sentinel bit as libnuma.
+                highest_node + 2,
+                0,
+            );
+            if (std.os.linux.errno(rc) == .SUCCESS) return;
+            log.warn("NUMA placement of DMA arenas over nodes 0x{x} refused ({s}); leaving them unplaced", .{
+                mask,
+                @tagName(std.os.linux.errno(rc)),
+            });
+            self.leaveUnplaced(mask);
+        }
+
+        fn leaveUnplaced(self: *HugePageAllocator, attempted_mask: u64) void {
+            _ = self.numa_mask.cmpxchgStrong(attempted_mask, 0, .acq_rel, .acquire);
+        }
+
+        fn free(self: *const HugePageAllocator, buf: []align(std.heap.page_size_min) u8) void {
+            if (self.platform) |platform| {
+                platform.pjrt_client.dmaUnmap(platform.pjrt_api, @ptrCast(buf)) catch unreachable;
+            }
+            const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
+            self.parent.rawFree(buf, effectiveAlignment(alignment, buf.len), @returnAddress());
+        }
+
+        fn effectiveAlignment(alignment: Alignment, len: usize) Alignment {
+            if (comptime builtin.os.tag != .linux) return alignment;
+            if (len < transparent_huge_page_size) return alignment;
+            return alignment.max(.fromByteUnits(transparent_huge_page_size));
+        }
+
+        fn adviseHugePages(data: []u8) void {
+            if (comptime builtin.os.tag != .linux) return;
+            if (data.len < transparent_huge_page_size) return;
+
+            const ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(data.ptr);
+            std.posix.madvise(ptr, data.len, std.posix.MADV.HUGEPAGE) catch |err| {
+                log.warn("MADV_HUGEPAGE failed for DMA buffer at 0x{x} ({Bi:.2}): {s}", .{
+                    @intFromPtr(data.ptr),
+                    data.len,
+                    @errorName(err),
+                });
+            };
+        }
+    };
+};
 
 /// Host arenas owned by one direct loader. Calibration fills the initial
 /// arena set during initialization; loading reuses and grows it. Deinitialize
@@ -23,193 +303,16 @@ pub const Workspace = struct {
         /// Safety guard on the arenas' total host memory (pinned on the DMA
         /// targets), not an allocation target.
         max_mapped_bytes: usize = 16 * 1024 * 1024 * 1024,
-        numa: NumaPlacement = .memory_nodes,
     };
 
     allocator: std.mem.Allocator,
     io: std.Io,
     backend: Backend,
-    /// Owned by `arena_mutex` while `growToBlocks` maps arenas concurrently.
-    allocations: std.ArrayListUnmanaged(ArenaAllocation) = .empty,
+    /// Protects backend retention and ROCm node balancing while
+    /// `growToBlocks` creates arenas concurrently.
     arena_mutex: std.Io.Mutex = .init,
     max_mapped_bytes: usize,
     mapped_bytes: std.atomic.Value(usize) = .init(0),
-
-    /// Each allocation strategy keeps only the state it uses. Mutable NUMA
-    /// state is protected by `arena_mutex` during concurrent growth.
-    const Backend = union(enum) {
-        pjrt_host: PjrtHost,
-        dma_map: Pages,
-        pageable: Pages,
-        testing,
-
-        const PjrtHost = struct {
-            platform: *const Platform,
-            host_nodes: std.ArrayListUnmanaged(HostNode),
-        };
-
-        const Pages = struct {
-            platform: *const Platform,
-            /// Zero leaves placement to the kernel. Automatic placement can
-            /// fall back to zero; explicit placement fails if refused.
-            numa_mask: u64 = 0,
-            numa_explicit: bool = false,
-        };
-
-        const Strategy = enum {
-            dma_map,
-            pjrt_host,
-            pageable,
-            unsupported,
-        };
-
-        fn strategy(target: Target) Strategy {
-            return switch (target) {
-                .cuda, .oneapi => .dma_map,
-                .rocm => .pjrt_host,
-                .cpu => .pageable,
-                .tpu, .neuron, .metal => .unsupported,
-            };
-        }
-
-        fn init(
-            allocator: std.mem.Allocator,
-            io: std.Io,
-            platform: *const Platform,
-            numa: NumaPlacement,
-        ) !Backend {
-            const selected_strategy = strategy(platform.target);
-            return switch (selected_strategy) {
-                .dma_map, .pageable => {
-                    const mask: u64, const explicit = switch (numa) {
-                        .memory_nodes => .{ memoryNodeMask(allocator, io), false },
-                        .nodes => |value| .{ value, true },
-                        .none => .{ 0, false },
-                    };
-                    const pages: Pages = .{
-                        .platform = platform,
-                        // Interleaving over one node is that node; leave it to the kernel.
-                        .numa_mask = if (explicit or @popCount(mask) > 1) mask else 0,
-                        .numa_explicit = explicit,
-                    };
-                    return switch (selected_strategy) {
-                        .dma_map => .{ .dma_map = pages },
-                        .pageable => .{ .pageable = pages },
-                        .pjrt_host, .unsupported => unreachable,
-                    };
-                },
-                .pjrt_host => {
-                    var host_nodes: std.ArrayListUnmanaged(HostNode) = .empty;
-                    errdefer host_nodes.deinit(allocator);
-                    var known = true;
-                    devices: for (platform.devices, 0..) |device, device_index| {
-                        if (device.memory(.host_pinned) == null) return error.PinnedHostMemoryUnavailable;
-                        const node = device.numaNode();
-                        known = known and node != null;
-                        if (node != null) for (host_nodes.items) |existing| {
-                            if (existing.node == node) continue :devices;
-                        };
-                        try host_nodes.append(allocator, .{ .device_index = device_index, .node = node });
-                    }
-                    if (!known) {
-                        host_nodes.clearRetainingCapacity();
-                        for (platform.devices, 0..) |_, device_index| {
-                            try host_nodes.append(allocator, .{ .device_index = device_index, .node = null });
-                        }
-                    }
-                    return .{ .pjrt_host = .{
-                        .platform = platform,
-                        .host_nodes = host_nodes,
-                    } };
-                },
-                .unsupported => error.DmaBenchmarkUnsupported,
-            };
-        }
-
-        /// Allocator adapter private to page-backed workspace arenas. It
-        /// applies huge-page alignment/advice and optionally registers the
-        /// pages with the selected backend's PJRT client.
-        const MapAllocator = struct {
-            const transparent_huge_page_size = 2 * 1024 * 1024;
-
-            parent: std.mem.Allocator,
-            /// Null leaves the pages pageable for CPU transfers.
-            platform: ?*const Platform,
-
-            fn init(parent: std.mem.Allocator, platform: *const Platform) MapAllocator {
-                return .{ .parent = parent, .platform = platform };
-            }
-
-            fn initPageable(parent: std.mem.Allocator) MapAllocator {
-                return .{ .parent = parent, .platform = null };
-            }
-
-            fn allocator(self: *const MapAllocator) std.mem.Allocator {
-                return .{
-                    .ptr = @constCast(self),
-                    .vtable = &.{
-                        .alloc = alloc,
-                        .resize = resize,
-                        .remap = remap,
-                        .free = free,
-                    },
-                };
-            }
-
-            fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
-                const self: *const MapAllocator = @ptrCast(@alignCast(ctx));
-                const effective_alignment = effectiveAlignment(alignment, len);
-                const allocation = self.parent.rawAlloc(len, effective_alignment, ret_addr);
-                if (allocation) |loc| {
-                    const data = loc[0..len];
-                    adviseHugePages(data);
-                    if (self.platform) |platform| {
-                        platform.pjrt_client.dmaMap(platform.pjrt_api, @ptrCast(data)) catch {
-                            self.parent.rawFree(data, effective_alignment, ret_addr);
-                            return null;
-                        };
-                    }
-                }
-                return allocation;
-            }
-
-            fn resize(_: *anyopaque, _: []u8, _: Alignment, _: usize, _: usize) bool {
-                return false;
-            }
-
-            fn remap(_: *anyopaque, _: []u8, _: Alignment, _: usize, _: usize) ?[*]u8 {
-                return null;
-            }
-
-            fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
-                const self: *const MapAllocator = @ptrCast(@alignCast(ctx));
-                if (self.platform) |platform| {
-                    platform.pjrt_client.dmaUnmap(platform.pjrt_api, @ptrCast(buf)) catch unreachable;
-                }
-                self.parent.rawFree(buf, effectiveAlignment(alignment, buf.len), ret_addr);
-            }
-
-            fn effectiveAlignment(alignment: Alignment, len: usize) Alignment {
-                if (comptime builtin.os.tag != .linux) return alignment;
-                if (len < transparent_huge_page_size) return alignment;
-                return alignment.max(.fromByteUnits(transparent_huge_page_size));
-            }
-
-            fn adviseHugePages(data: []u8) void {
-                if (comptime builtin.os.tag != .linux) return;
-                if (data.len < transparent_huge_page_size) return;
-
-                const ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(data.ptr);
-                std.posix.madvise(ptr, data.len, std.posix.MADV.HUGEPAGE) catch |err| {
-                    log.warn("MADV_HUGEPAGE failed for DMA buffer at 0x{x} ({Bi:.2}): {s}", .{
-                        @intFromPtr(data.ptr),
-                        data.len,
-                        @errorName(err),
-                    });
-                };
-            }
-        };
-    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -227,16 +330,10 @@ pub const Workspace = struct {
 
         if (opts.max_mapped_bytes < minimum_mapped_bytes)
             return error.InvalidDmaLoadConfig;
-        switch (opts.numa) {
-            .nodes => if (comptime builtin.os.tag != .linux)
-                return error.DmaBenchmarkNumaUnsupported,
-            .memory_nodes, .none => {},
-        }
-
         return .{
             .allocator = allocator,
             .io = io,
-            .backend = try .init(allocator, io, platform, opts.numa),
+            .backend = try .init(allocator, io, platform),
             .max_mapped_bytes = opts.max_mapped_bytes,
         };
     }
@@ -245,12 +342,7 @@ pub const Workspace = struct {
         const io = self.io;
         const mapped_bytes = self.mapped_bytes.load(.acquire);
         const started: std.Io.Timestamp = .now(io, .awake);
-        for (self.allocations.items) |allocation| self.unmapArena(allocation);
-        self.allocations.deinit(self.allocator);
-        switch (self.backend) {
-            .pjrt_host => |*host| host.host_nodes.deinit(self.allocator),
-            .dma_map, .pageable, .testing => {},
-        }
+        self.backend.deinit(self.allocator);
         const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
         log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
             mapped_bytes,
@@ -261,10 +353,10 @@ pub const Workspace = struct {
 
     /// Borrows the newest retained arena that fits, when no arena growth is running.
     pub fn findArena(self: *const Workspace, minimum_len: usize) ?[]u8 {
-        var index = self.allocations.items.len;
+        var index = self.backend.arenaCount();
         while (index != 0) {
             index -= 1;
-            const arena = self.allocations.items[index].data();
+            const arena = self.backend.arenaAt(index);
             if (arena.len >= minimum_len) return arena;
         }
         return null;
@@ -277,47 +369,20 @@ pub const Workspace = struct {
         const mapped_bytes = self.mapped_bytes.load(.acquire);
         if (bytes > self.max_mapped_bytes - mapped_bytes)
             return error.DmaMappedBudgetExceeded;
-        const started: std.Io.Timestamp = .now(self.io, .awake);
-        const allocation = try self.mapArena(bytes);
-        errdefer self.unmapArena(allocation);
-        const mapped_at: std.Io.Timestamp = .now(self.io, .awake);
-        const replacement = allocation.data();
-        const placement_mask = mask: {
-            self.arena_mutex.lockUncancelable(self.io);
-            defer self.arena_mutex.unlock(self.io);
-            try self.allocations.append(self.allocator, allocation);
-            _ = self.mapped_bytes.fetchAdd(replacement.len, .release);
-            break :mask switch (self.backend) {
-                .dma_map, .pageable => |pages| pages.numa_mask,
-                .pjrt_host, .testing => 0,
-            };
-        };
-        const finished_at: std.Io.Timestamp = .now(self.io, .awake);
-        const elapsed_ms = @as(f64, @floatFromInt(elapsedNanoseconds(started, finished_at))) / std.time.ns_per_ms;
-        switch (allocation) {
-            .pjrt_host => |pinned| log.info("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
-                pinned.device_index,
-                @intFromPtr(replacement.ptr),
-                replacement.len,
-                elapsed_ms,
-            }),
-            .dma_map, .pageable => log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3} map_ms={d:.3}", .{
-                @tagName(allocation),
-                placementName(placement_mask),
-                placement_mask,
-                @intFromPtr(replacement.ptr),
-                replacement.len,
-                elapsed_ms,
-                @as(f64, @floatFromInt(elapsedNanoseconds(started, mapped_at))) / std.time.ns_per_ms,
-            }),
-        }
-        return replacement;
+        const allocation = try self.backend.allocate(
+            self.allocator,
+            self.io,
+            &self.arena_mutex,
+            bytes,
+        );
+        _ = self.mapped_bytes.fetchAdd(allocation.len, .release);
+        return allocation;
     }
 
     /// Counts complete blocks across retained arenas; block_size must be nonzero.
     pub fn usableBlocks(self: *const Workspace, block_size: usize) usize {
         var usable: usize = 0;
-        for (self.allocations.items) |arena| usable += arena.data().len / block_size;
+        for (0..self.backend.arenaCount()) |index| usable += self.backend.arenaAt(index).len / block_size;
         return usable;
     }
 
@@ -380,113 +445,11 @@ pub const Workspace = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .backend = .testing,
+            .backend = .{ .pageable = .{
+                .allocator = .initPageable(allocator, 0),
+            } },
             .max_mapped_bytes = max_mapped_bytes,
         };
-    }
-
-    // The largest supported calibration block must fit.
-    const minimum_mapped_bytes = 32 * 1024 * 1024;
-
-    /// Concurrent arena registrations used by `growToBlocks`.
-    const growth_parallelism = 4;
-
-    /// One NUMA node the ROCm devices report, with a device to allocate
-    /// through and the bytes allocated so far; unknown nodes degrade to one
-    /// entry per device.
-    const HostNode = struct {
-        device_index: usize,
-        node: ?usize,
-        bytes: usize = 0,
-    };
-
-    fn mapArena(self: *Workspace, bytes: usize) !ArenaAllocation {
-        switch (self.backend) {
-            .pjrt_host => |*host| {
-                const device_index = index: {
-                    self.arena_mutex.lockUncancelable(self.io);
-                    defer self.arena_mutex.unlock(self.io);
-                    var emptiest = &host.host_nodes.items[0];
-                    for (host.host_nodes.items[1..]) |*host_node| {
-                        if (host_node.bytes < emptiest.bytes) emptiest = host_node;
-                    }
-                    emptiest.bytes += bytes;
-                    break :index emptiest.device_index;
-                };
-                const memory = host.platform.devices[device_index].memory(.host_pinned) orelse
-                    return error.PinnedHostMemoryUnavailable;
-                return .{ .pjrt_host = try .init(memory, device_index, bytes) };
-            },
-            .dma_map, .pageable, .testing => {
-                const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
-                // The placement allocator sits between the page allocation
-                // and the registration; both are built per call because the
-                // workspace moves. A pageable arena is placed and huge-page
-                // advised like a mapped one, never registered.
-                var numa: NumaAllocator = .{
-                    .parent = self.allocator,
-                    .mask = self.placementMask(),
-                    .explicit = switch (self.backend) {
-                        .dma_map, .pageable => |pages| pages.numa_explicit,
-                        .testing => false,
-                        .pjrt_host => unreachable,
-                    },
-                };
-                const pages: Backend.MapAllocator = switch (self.backend) {
-                    .dma_map => |mapped| .init(numa.allocator(), mapped.platform),
-                    .pageable, .testing => .initPageable(numa.allocator()),
-                    .pjrt_host => unreachable,
-                };
-                const arena = try pages.allocator().alignedAlloc(u8, alignment, bytes);
-                if (numa.mask == 0) self.leaveUnplaced();
-                return if (self.backend == .dma_map) .{ .dma_map = arena } else .{ .pageable = arena };
-            },
-        }
-    }
-
-    /// Frees through the allocator that made the arena; the placement
-    /// allocator adds nothing to a free.
-    fn unmapArena(self: *Workspace, allocation: ArenaAllocation) void {
-        switch (allocation) {
-            .pjrt_host => |pinned| pinned.deinit(),
-            .dma_map => |arena| {
-                const dma_map: Backend.MapAllocator = .init(self.allocator, self.backend.dma_map.platform);
-                dma_map.allocator().free(arena);
-            },
-            .pageable => |arena| {
-                const pageable: Backend.MapAllocator = .initPageable(self.allocator);
-                pageable.allocator().free(arena);
-            },
-        }
-    }
-
-    fn placementName(mask: u64) []const u8 {
-        return switch (@popCount(mask)) {
-            0 => "unplaced",
-            1 => "bind",
-            else => "interleave",
-        };
-    }
-
-    fn placementMask(self: *Workspace) u64 {
-        self.arena_mutex.lockUncancelable(self.io);
-        defer self.arena_mutex.unlock(self.io);
-        return switch (self.backend) {
-            .dma_map, .pageable => |pages| pages.numa_mask,
-            .pjrt_host, .testing => 0,
-        };
-    }
-
-    /// The kernel refused the automatic placement: later arenas stay
-    /// unplaced. The only transition the mask ever makes, so concurrent
-    /// growth workers cannot undo it.
-    fn leaveUnplaced(self: *Workspace) void {
-        self.arena_mutex.lockUncancelable(self.io);
-        defer self.arena_mutex.unlock(self.io);
-        switch (self.backend) {
-            .dma_map, .pageable => |*pages| pages.numa_mask = 0,
-            .pjrt_host, .testing => {},
-        }
     }
 };
 
@@ -565,8 +528,8 @@ pub const BlockPool = struct {
         };
         errdefer self.deinit();
         var enumerated_bytes: usize = 0;
-        for (workspace.allocations.items) |*allocation| {
-            const arena = allocation.data();
+        for (0..workspace.backend.arenaCount()) |index| {
+            const arena = workspace.backend.arenaAt(index);
             enumerated_bytes += arena.len;
             try self.attachArena(arena);
         }
@@ -701,23 +664,6 @@ pub const BlockPool = struct {
     }
 };
 
-const ArenaAllocation = union(enum) {
-    /// Our pages, registered with the plugin through `dmaMap`.
-    dma_map: []align(std.heap.page_size_min) u8,
-    /// Our pages, never registered: the CPU plugin's arenas, and every
-    /// arena in tests without a platform.
-    pageable: []align(std.heap.page_size_min) u8,
-    /// The plugin's pinned host memory, borrowed through a PJRT buffer.
-    pjrt_host: PinnedHostAllocation,
-
-    fn data(self: *const ArenaAllocation) []u8 {
-        return switch (self.*) {
-            .dma_map, .pageable => |bytes| bytes,
-            .pjrt_host => |allocation| allocation.data,
-        };
-    }
-};
-
 const PinnedHostAllocation = struct {
     buffer: *pjrt.Buffer,
     api: *const pjrt.Api,
@@ -760,84 +706,6 @@ const PinnedHostAllocation = struct {
     }
 };
 
-/// Applies a NUMA policy to each allocation of its parent, before the
-/// caller maps it for DMA.
-const NumaAllocator = struct {
-    const mpol_bind = 2;
-    const mpol_interleave = 3;
-
-    parent: std.mem.Allocator,
-    /// One bit binds, several interleave, zero applies nothing. Cleared
-    /// when the kernel refuses an automatic placement.
-    mask: u64,
-    explicit: bool,
-
-    fn allocator(self: *NumaAllocator) std.mem.Allocator {
-        return .{
-            .ptr = self,
-            .vtable = &.{
-                .alloc = alloc,
-                .resize = resize,
-                .remap = remap,
-                .free = free,
-            },
-        };
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *NumaAllocator = @ptrCast(@alignCast(ctx));
-        const allocation = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
-        if (self.mask == 0) return allocation;
-        if (comptime builtin.os.tag != .linux) {
-            self.parent.rawFree(allocation[0..len], alignment, ret_addr);
-            return null;
-        }
-
-        const node_mask: [1]u64 = .{self.mask};
-        const highest_node: usize = 63 - @clz(self.mask);
-        const rc = std.os.linux.syscall6(
-            .mbind,
-            @intFromPtr(allocation),
-            len,
-            if (@popCount(self.mask) == 1) mpol_bind else mpol_interleave,
-            @intFromPtr(&node_mask),
-            // Linux get_nodes() decrements maxnode before copying the mask;
-            // raw callers include the same extra sentinel bit as libnuma.
-            highest_node + 2,
-            0,
-        );
-        if (std.os.linux.errno(rc) == .SUCCESS) return allocation;
-        if (self.explicit) {
-            log.err("unable to place DMA arena ({Bi:.2}) on NUMA nodes 0x{x}: {s}", .{
-                len,
-                self.mask,
-                @tagName(std.os.linux.errno(rc)),
-            });
-            self.parent.rawFree(allocation[0..len], alignment, ret_addr);
-            return null;
-        }
-        log.warn("NUMA placement of DMA arenas over nodes 0x{x} refused ({s}); leaving them unplaced", .{
-            self.mask,
-            @tagName(std.os.linux.errno(rc)),
-        });
-        self.mask = 0;
-        return allocation;
-    }
-
-    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
-        return false;
-    }
-
-    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
-        return null;
-    }
-
-    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const self: *NumaAllocator = @ptrCast(@alignCast(ctx));
-        self.parent.rawFree(buf, alignment, ret_addr);
-    }
-};
-
 /// Bits of `/sys/devices/system/node/has_memory`, or zero when unreadable.
 /// Nodes 64 and above cannot be represented and are dropped.
 fn memoryNodeMask(allocator: std.mem.Allocator, io: std.Io) u64 {
@@ -850,6 +718,11 @@ fn memoryNodeMask(allocator: std.mem.Allocator, io: std.Io) u64 {
     ) catch return 0;
     defer allocator.free(contents);
     return parseNodeList(contents);
+}
+
+/// Interleaving is useful only when the host exposes several memory nodes.
+fn interleaveMask(memory_node_mask: u64) u64 {
+    return if (@popCount(memory_node_mask) > 1) memory_node_mask else 0;
 }
 
 /// Parses a kernel node list ("0-1", "0,2-3") into a mask; zero on any error.
@@ -876,14 +749,17 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "Workspace backend strategy is exhaustive" {
-    try std.testing.expectEqual(Workspace.Backend.Strategy.dma_map, Workspace.Backend.strategy(.cuda));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.dma_map, Workspace.Backend.strategy(.oneapi));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.pjrt_host, Workspace.Backend.strategy(.rocm));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.pageable, Workspace.Backend.strategy(.cpu));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.tpu));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.neuron));
-    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.metal));
+test "HugePageAllocator retains automatic NUMA fallback state" {
+    var allocator: Workspace.Backend.HugePageAllocator = .initPageable(std.testing.allocator, 0b11);
+    allocator.leaveUnplaced(0b11);
+    try std.testing.expectEqual(@as(u64, 0), allocator.numa_mask.load(.acquire));
+}
+
+test "automatic NUMA placement interleaves only multiple memory nodes" {
+    try std.testing.expectEqual(@as(u64, 0), interleaveMask(0));
+    try std.testing.expectEqual(@as(u64, 0), interleaveMask(0b1));
+    try std.testing.expectEqual(@as(u64, 0), interleaveMask(0b1000));
+    try std.testing.expectEqual(@as(u64, 0b1001), interleaveMask(0b1001));
 }
 
 test "parseNodeList accepts kernel node lists" {
@@ -942,12 +818,12 @@ test "Workspace growth maps missing blocks as concurrent arenas" {
     try workspace.growToBlocks(64, 13);
     try std.testing.expectEqual(@as(usize, 13), workspace.usableBlocks(64));
     // Ten missing blocks over four parts: 3, 3, 3, 1.
-    try std.testing.expectEqual(@as(usize, 5), workspace.allocations.items.len);
+    try std.testing.expectEqual(@as(usize, 5), workspace.backend.arenaCount());
     var total: usize = 0;
-    for (workspace.allocations.items[1..]) |arena| total += arena.data().len;
+    for (1..workspace.backend.arenaCount()) |index| total += workspace.backend.arenaAt(index).len;
     try std.testing.expectEqual(@as(usize, 10 * 64), total);
     try workspace.growToBlocks(64, 14);
-    try std.testing.expectEqual(@as(usize, 6), workspace.allocations.items.len);
+    try std.testing.expectEqual(@as(usize, 6), workspace.backend.arenaCount());
 }
 
 test "BlockPool acquires request blocks atomically" {
@@ -1104,7 +980,7 @@ test "BlockPool reblocks retained arenas and grows on demand" {
 
     var blocks: [5]BlockPool.Block = undefined;
     try pool.acquireMany(io, &blocks);
-    try std.testing.expectEqual(@as(usize, 4), workspace.allocations.items.len);
+    try std.testing.expectEqual(@as(usize, 4), workspace.backend.arenaCount());
     try std.testing.expectEqual(@as(usize, 349), pool.mapped_bytes);
     try std.testing.expectEqual(@as(usize, 64), pool.newly_mapped_bytes);
     try std.testing.expectEqual(@as(usize, 29), pool.unused_tail_bytes);

@@ -23,8 +23,16 @@ Platform-specific host allocation now has one owner in
 `io/host_memory.zig`: `Workspace.Backend` selects DmaMap-backed pages for
 CUDA and oneAPI, PJRT-owned `pinned_host` buffers for ROCm, and pageable
 pages for CPU. ROCm cannot reach DmaMap through a generic allocator.
-`NumaPlacement` now lives directly in `mem.zig`; `mem/dma.zig` and its former
-`Allocator`, `MapAllocator`, and `BufferAllocator` adapters are removed.
+`NumaPlacement`, `mem/dma.zig`, and its former `Allocator`, `MapAllocator`,
+and `BufferAllocator` adapters are removed. Page-backed arenas automatically
+interleave over every discoverable memory-bearing NUMA node; a single node,
+unreadable topology, or refused automatic placement falls back to the kernel.
+Each backend retains its concrete arena type directly. Page-backed backends
+reuse one private, purpose-built `HugePageAllocator` value for NUMA fallback
+state, huge-page advice, and optional DmaMap registration. It does not expose a
+generic allocator interface. ROCm instead retains PJRT buffers and balances
+whole arenas by allocated bytes across device-associated host nodes.
+There is no separate arena-ownership union or public NUMA placement knob.
 
 The playground's historical concurrent-DMA and early-event-retirement probes,
 and the temporary `io/dma_diagnostics.zig` module, are removed.
@@ -72,9 +80,11 @@ Every direct `Loader.init` owns a workspace, calibrates into it, then prepares
 the load's block pool. It frees all of this in `deinit`; workspace borrowing,
 external reuse, and the ownership flag are gone. CPU returns default sizing;
 buffered backends skip calibration. `Loader.Options.dma` configures measurement,
-`.max_host_bytes` and `.numa` configure host memory, and `Loader.calibration()`
-reports the selected sizing. `.dma_workspace`, `.dma_calibration`, and the
-public `io.dma.benchmark` entry point are removed.
+`.max_host_bytes` bounds host memory, and `Loader.calibration()` reports the
+selected sizing. Page-backed arena placement is automatic; the former `.numa`
+option and `ZML_DMA_BENCH_NUMA` diagnostic override are removed.
+`.dma_workspace`, `.dma_calibration`, and the public `io.dma.benchmark` entry
+point are also removed.
 
 LLM calibration no longer runs in a caller-managed future alongside model
 compilation: it happens during loader initialization after compilation. The
@@ -2046,7 +2056,8 @@ structure is gone:
   rejected. The workspace now keeps one `HostNode` per node the devices
   report (`Device.numaNode`, the only remaining use of the attribute) and
   allocates each arena through a device on the node with the fewest arena
-  bytes so far; unknown nodes degrade to one entry per device.
+  bytes so far. Devices with unknown nodes are ignored when any topology is
+  available; if every node is unknown, allocation falls back to device 0.
 
 ### Verification
 

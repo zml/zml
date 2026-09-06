@@ -171,7 +171,6 @@ pub fn main(init: std.process.Init) !void {
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
             var loader = try zml.io.Loader.init(allocator, io, platform, .{
                 .max_host_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
-                .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
                 .dma = .{
                     .block_sizes = block_sizes,
                     .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
@@ -304,7 +303,6 @@ pub fn main(init: std.process.Init) !void {
                 var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
                 errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
                 var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, .{
-                    .numa = try dmaBenchmarkNumaPlacement(init.environ_map),
                     .dma = .{
                         .block_sizes = load_dma_block_sizes,
                         .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
@@ -396,21 +394,6 @@ pub fn main(init: std.process.Init) !void {
             }
         },
     }
-}
-
-/// `off` applies no policy, `1` binds to node 1, `0,1` interleaves over those.
-fn dmaBenchmarkNumaPlacement(environ_map: *const std.process.Environ.Map) !zml.mem.NumaPlacement {
-    const raw = environ_map.get("ZML_DMA_BENCH_NUMA") orelse return .memory_nodes;
-    if (std.mem.eql(u8, raw, "off")) return .none;
-    var mask: u64 = 0;
-    var it = std.mem.splitScalar(u8, raw, ',');
-    while (it.next()) |item| {
-        const trimmed = std.mem.trim(u8, item, " ");
-        if (trimmed.len == 0) continue;
-        mask |= @as(u64, 1) << try std.fmt.parseInt(u6, trimmed, 10);
-    }
-    if (mask == 0) return error.InvalidArgument;
-    return .{ .nodes = mask };
 }
 
 const PackOptions = struct {
