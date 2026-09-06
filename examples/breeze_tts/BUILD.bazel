@@ -1,0 +1,35 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+SRCS = [
+    "audio.zig",
+    "codec.zig",
+    "config.zig",
+    "layers.zig",
+    "main.zig",
+    "model.zig",
+    "sampling.zig",
+]
+
+zig_binary(
+    name = "text_to_speech",
+    srcs = SRCS,
+    extra_srcs = ["supported_config.json"],
+    main = "tts.zig",
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "voice_cloning",
+    srcs = SRCS,
+    extra_srcs = ["supported_config.json"],
+    main = "voice_clone.zig",
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "test",
+    srcs = SRCS,
+    extra_srcs = ["supported_config.json"],
+    main = "test.zig",
+    deps = ["//zml"],
+)
