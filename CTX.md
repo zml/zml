@@ -38,6 +38,17 @@ retained immediately, with ROCm node totals and workspace mapped-byte
 accounting updated only after allocation retention succeeds. `growToBlocks`
 allocates all missing blocks in one arena.
 
+Loader initialization owns a local workspace during calibration and pregrowth,
+then transfers it by value into `BlockPool`. Pool initialization consumes the
+workspace only on success; failure leaves it owned by the caller. The loader
+uses `initCalibratedBlockPool` to contain this lifetime: an ordinary `errdefer`
+cleans up failed initialization, and success returns the owning pool together
+with calibration and sizing results, without a workspace-moved flag. The loader
+retains only the pool, whose teardown also frees the workspace. Pool budgets
+and mapped-byte totals come directly from its owned workspace. Growth reserves
+free-list metadata before allocating an arena, so metadata failure cannot leave
+retained memory unattached to the pool.
+
 The playground's historical concurrent-DMA and early-event-retirement probes,
 and the temporary `io/dma_diagnostics.zig` module, are removed.
 

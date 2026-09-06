@@ -49,7 +49,6 @@ pub const Loader = struct {
     io: std.Io,
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
-    workspace: *host_memory.Workspace,
     calibration: dma_calibration.Result,
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
@@ -83,48 +82,14 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: Config,
     ) !*Loader {
-        const workspace = try allocator.create(host_memory.Workspace);
-        errdefer allocator.destroy(workspace);
-        workspace.* = try host_memory.Workspace.init(allocator, io, platform, .{
-            .max_mapped_bytes = opts.max_host_bytes,
-        });
-        errdefer workspace.deinit();
-        const calibration = try dma_calibration.calibrate(workspace, platform, opts.dma);
-
-        const request_size = try load_limits.effectiveSourceRequestSize(
-            opts.load_profile.read_chunk_size,
-            calibration.block_size,
-        );
-        const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
-            request_size,
-            calibration.block_size,
-        );
+        const calibrated = try initCalibratedBlockPool(allocator, io, platform, opts);
+        const calibration = calibrated.calibration;
+        const request_size = calibrated.request_size;
+        const maximum_blocks_per_job = calibrated.maximum_blocks_per_job;
+        var pool = calibrated.pool;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
         _ = Planner.maximumJobLen(request_size, calibration.block_size, source_alignment) catch
             return error.InvalidLoadProfile;
-        // The DMA stage of every device, kept mapped as the pool's growth floor.
-        const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
-        // Grow the DMA stage reserve and source working set before reads begin;
-        // calibration arenas become the load's initial capacity.
-        const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-        const retained_before = workspace.mapped_bytes;
-        try ensureLoadBlockReserve(workspace, calibration.block_size, dma_reserve);
-        try ensureSourceWorkingSet(
-            workspace,
-            calibration.block_size,
-            maximum_blocks_per_job,
-            preallocated_source_width,
-            dma_reserve,
-        );
-        const pregrown_bytes = workspace.mapped_bytes - retained_before;
-        const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        var pool = try host_memory.BlockPool.init(
-            allocator,
-            workspace,
-            calibration.block_size,
-            workspace.max_mapped_bytes,
-            dma_reserve,
-        );
         var pool_moved = false;
         errdefer if (!pool_moved) pool.deinit();
         const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
@@ -159,7 +124,6 @@ pub const Loader = struct {
             .io = io,
             .platform = platform,
             .load_profile = opts.load_profile,
-            .workspace = workspace,
             .calibration = calibration,
             .pool = pool,
             .scheduler = scheduler,
@@ -236,11 +200,66 @@ pub const Loader = struct {
             self.worker_pool.maximum,
             feasible_width,
             source_concurrency.widths[self.controller_runtime.controller.max_index],
-            self.pool.mapped_bytes,
-            pregrown_bytes,
-            @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
+            self.pool.workspace.mapped_bytes,
+            calibrated.pregrown_bytes,
+            @as(f64, @floatFromInt(calibrated.pregrowth_ns)) / std.time.ns_per_ms,
         });
         return self;
+    }
+
+    const CalibratedBlockPool = struct {
+        pool: host_memory.BlockPool,
+        calibration: dma_calibration.Result,
+        request_size: usize,
+        maximum_blocks_per_job: usize,
+        pregrown_bytes: usize,
+        pregrowth_ns: u64,
+    };
+
+    fn initCalibratedBlockPool(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        opts: Config,
+    ) !CalibratedBlockPool {
+        var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
+            .max_mapped_bytes = opts.max_host_bytes,
+        });
+        errdefer workspace.deinit();
+        const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
+
+        const request_size = try load_limits.effectiveSourceRequestSize(
+            opts.load_profile.read_chunk_size,
+            calibration.block_size,
+        );
+        const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
+            request_size,
+            calibration.block_size,
+        );
+        // The DMA stage of every device, kept mapped as the pool's growth floor.
+        const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
+        // Grow the DMA stage reserve and source working set before reads begin;
+        // calibration arenas become the load's initial capacity.
+        const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
+        const retained_before = workspace.mapped_bytes;
+        try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
+        try ensureSourceWorkingSet(
+            &workspace,
+            calibration.block_size,
+            maximum_blocks_per_job,
+            preallocated_source_width,
+            dma_reserve,
+        );
+        const pregrown_bytes = workspace.mapped_bytes - retained_before;
+        const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
+        return .{
+            .calibration = calibration,
+            .request_size = request_size,
+            .maximum_blocks_per_job = maximum_blocks_per_job,
+            .pregrown_bytes = pregrown_bytes,
+            .pregrowth_ns = pregrowth_ns,
+            .pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve),
+        };
     }
 
     /// Plans `specs` one source file at a time, publishes each file's plan
@@ -349,8 +368,6 @@ pub const Loader = struct {
         self.scheduler.deinit();
         self.pool.deinit();
 
-        self.workspace.deinit();
-        self.allocator.destroy(self.workspace);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -562,7 +579,7 @@ pub const Loader = struct {
             self.controller_runtime.gate_closed_ticks,
             self.source_request_size,
             self.pool.high_water * self.pool.block_size,
-            self.pool.mapped_bytes,
+            self.pool.workspace.mapped_bytes,
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
@@ -4422,11 +4439,13 @@ const TestPipeline = struct {
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
-    defer workspace.deinit();
+    var pool = pool_init: {
+        var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
+        errdefer workspace.deinit();
 
-    _ = try workspace.allocate(64);
-    var pool = try host_memory.BlockPool.init(allocator, &workspace, 64, 64, 0);
+        _ = try workspace.allocate(64);
+        break :pool_init try host_memory.BlockPool.init(allocator, &workspace, 64, 0);
+    };
     defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
