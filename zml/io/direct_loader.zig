@@ -107,7 +107,7 @@ pub const Loader = struct {
         // Grow the DMA stage reserve and source working set before reads begin;
         // calibration arenas become the load's initial capacity.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-        const retained_before = workspace.mapped_bytes.load(.acquire);
+        const retained_before = workspace.mapped_bytes;
         try ensureLoadBlockReserve(workspace, calibration.block_size, dma_reserve);
         try ensureSourceWorkingSet(
             workspace,
@@ -116,7 +116,7 @@ pub const Loader = struct {
             preallocated_source_width,
             dma_reserve,
         );
-        const pregrown_bytes = workspace.mapped_bytes.load(.acquire) - retained_before;
+        const pregrown_bytes = workspace.mapped_bytes - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
         var pool = try host_memory.BlockPool.init(
             allocator,
@@ -3094,7 +3094,7 @@ fn ensureSourceWorkingSet(
         const source_blocks = (fitted_width + 1) * request_blocks;
         target = source_blocks + if (with_reserve) feed_reserve else 0;
         const growth_bytes = (target -| usable) * block_size;
-        if (self.mapped_bytes.load(.acquire) + growth_bytes <= self.max_mapped_bytes) break;
+        if (self.mapped_bytes + growth_bytes <= self.max_mapped_bytes) break;
         if (fitted_width == 0) {
             if (!with_reserve) return; // Leave growth to the load.
             with_reserve = false;

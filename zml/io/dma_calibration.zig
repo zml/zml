@@ -118,7 +118,7 @@ fn measureTransfer(
     };
     return .{
         .calibration = calibration,
-        .retained_mapped_bytes = workspace.mapped_bytes.load(.acquire),
+        .retained_mapped_bytes = workspace.mapped_bytes,
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
         .elapsed_ns = elapsedNanoseconds(
             benchmark_started,
@@ -676,7 +676,7 @@ test "DMA benchmark on CPU returns the defaults without mapping" {
     workspace.backend = .{ .pageable = .{ .platform = &platform } };
     defer workspace.deinit();
     try std.testing.expectEqual(Result.default, try calibrate(&workspace, &platform, .{}));
-    try std.testing.expectEqual(0, workspace.mapped_bytes.load(.acquire));
+    try std.testing.expectEqual(0, workspace.mapped_bytes);
 }
 
 test "DMA benchmark validates options" {

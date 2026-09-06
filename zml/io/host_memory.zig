@@ -15,17 +15,13 @@ const log = std.log.scoped(.@"zml/mem");
 // The largest supported calibration block must fit.
 const minimum_mapped_bytes = 32 * 1024 * 1024;
 
-/// Concurrent arena registrations used by `growToBlocks`.
-const growth_parallelism = 4;
-
 /// One ROCm host-memory allocation path and its bytes allocated so far.
 const HostNode = struct {
     any_device_index: usize,
     total_allocated_bytes: usize = 0,
 };
 
-/// Each allocation strategy keeps only the state it uses. Arena retention
-/// and ROCm node balancing use `arena_mutex`; NUMA fallback is atomic.
+/// Each allocation strategy keeps only the state it uses.
 const Backend = union(enum) {
     pjrt_host: PjrtHost,
     dma_map: Pages,
@@ -120,44 +116,28 @@ const Backend = union(enum) {
         self: *Backend,
         allocator: std.mem.Allocator,
         io: std.Io,
-        arena_mutex: *std.Io.Mutex,
         bytes: usize,
     ) ![]u8 {
         switch (self.*) {
             .pjrt_host => |*host| {
                 const started: std.Io.Timestamp = .now(io, .awake);
-                const host_node_index = index: {
-                    arena_mutex.lockUncancelable(io);
-                    defer arena_mutex.unlock(io);
-                    var emptiest_index: usize = 0;
-                    for (host.host_nodes[1..], 1..) |host_node, index| {
-                        if (host_node.total_allocated_bytes < host.host_nodes[emptiest_index].total_allocated_bytes)
-                            emptiest_index = index;
-                    }
-                    host.host_nodes[emptiest_index].total_allocated_bytes += bytes;
-                    break :index emptiest_index;
-                };
-                errdefer {
-                    arena_mutex.lockUncancelable(io);
-                    defer arena_mutex.unlock(io);
-                    host.host_nodes[host_node_index].total_allocated_bytes -= bytes;
+                var host_node_index: usize = 0;
+                for (host.host_nodes[1..], 1..) |host_node, index| {
+                    if (host_node.total_allocated_bytes < host.host_nodes[host_node_index].total_allocated_bytes)
+                        host_node_index = index;
                 }
                 const any_device_index = host.host_nodes[host_node_index].any_device_index;
                 const memory = host.platform.devices[any_device_index].memory(.host_pinned) orelse
                     return error.PinnedHostMemoryUnavailable;
                 const allocation: PinnedHostAllocation = try .init(memory, any_device_index, bytes);
                 errdefer allocation.deinit();
-                {
-                    arena_mutex.lockUncancelable(io);
-                    defer arena_mutex.unlock(io);
-                    try host.allocations.append(allocator, allocation);
-                }
-                const elapsed_ms = @as(f64, @floatFromInt(elapsedNanoseconds(started, .now(io, .awake)))) / std.time.ns_per_ms;
+                try host.allocations.append(allocator, allocation);
+                host.host_nodes[host_node_index].total_allocated_bytes += allocation.data.len;
                 log.info("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     any_device_index,
                     @intFromPtr(allocation.data.ptr),
                     allocation.data.len,
-                    elapsed_ms,
+                    @as(f64, @floatFromInt(elapsedNanoseconds(started, .now(io, .awake)))) / std.time.ns_per_ms,
                 });
                 return allocation.data;
             },
@@ -166,13 +146,9 @@ const Backend = union(enum) {
                 const allocation = try pages.allocator.alloc(bytes);
                 const mapped_at: std.Io.Timestamp = .now(io, .awake);
                 errdefer pages.allocator.free(allocation);
-                {
-                    arena_mutex.lockUncancelable(io);
-                    defer arena_mutex.unlock(io);
-                    try pages.allocations.append(allocator, allocation);
-                }
-                const finished_at: std.Io.Timestamp = .now(io, .awake);
-                const numa_mask = pages.allocator.numa_mask.load(.acquire);
+                try pages.allocations.append(allocator, allocation);
+                const finished: std.Io.Timestamp = .now(io, .awake);
+                const numa_mask = pages.allocator.numa_mask;
                 const placement = if (numa_mask == 0) "unplaced" else "interleave";
                 log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3} map_ms={d:.3}", .{
                     @tagName(self.*),
@@ -180,7 +156,7 @@ const Backend = union(enum) {
                     numa_mask,
                     @intFromPtr(allocation.ptr),
                     allocation.len,
-                    @as(f64, @floatFromInt(elapsedNanoseconds(started, finished_at))) / std.time.ns_per_ms,
+                    @as(f64, @floatFromInt(elapsedNanoseconds(started, finished))) / std.time.ns_per_ms,
                     @as(f64, @floatFromInt(elapsedNanoseconds(started, mapped_at))) / std.time.ns_per_ms,
                 });
                 return allocation;
@@ -200,13 +176,13 @@ const Backend = union(enum) {
         platform: ?*const Platform,
         /// Zero leaves placement to the kernel. Automatic placement can
         /// fall back to zero if the kernel refuses it.
-        numa_mask: std.atomic.Value(u64),
+        numa_mask: u64,
 
         fn init(parent: std.mem.Allocator, platform: *const Platform, numa_mask: u64) HugePageAllocator {
             return .{
                 .parent = parent,
                 .platform = platform,
-                .numa_mask = .init(numa_mask),
+                .numa_mask = numa_mask,
             };
         }
 
@@ -214,7 +190,7 @@ const Backend = union(enum) {
             return .{
                 .parent = parent,
                 .platform = null,
-                .numa_mask = .init(numa_mask),
+                .numa_mask = numa_mask,
             };
         }
 
@@ -236,7 +212,7 @@ const Backend = union(enum) {
         }
 
         fn place(self: *HugePageAllocator, data: []u8) void {
-            const mask = self.numa_mask.load(.acquire);
+            const mask = self.numa_mask;
             if (mask == 0) return;
             if (comptime builtin.os.tag != .linux) return;
 
@@ -262,7 +238,7 @@ const Backend = union(enum) {
         }
 
         fn leaveUnplaced(self: *HugePageAllocator, attempted_mask: u64) void {
-            _ = self.numa_mask.cmpxchgStrong(attempted_mask, 0, .acq_rel, .acquire);
+            if (self.numa_mask == attempted_mask) self.numa_mask = 0;
         }
 
         fn free(self: *const HugePageAllocator, buf: []align(std.heap.page_size_min) u8) void {
@@ -308,11 +284,8 @@ pub const Workspace = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     backend: Backend,
-    /// Protects backend retention and ROCm node balancing while
-    /// `growToBlocks` creates arenas concurrently.
-    arena_mutex: std.Io.Mutex = .init,
     max_mapped_bytes: usize,
-    mapped_bytes: std.atomic.Value(usize) = .init(0),
+    mapped_bytes: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -340,7 +313,7 @@ pub const Workspace = struct {
 
     pub fn deinit(self: *Workspace) void {
         const io = self.io;
-        const mapped_bytes = self.mapped_bytes.load(.acquire);
+        const mapped_bytes = self.mapped_bytes;
         const started: std.Io.Timestamp = .now(io, .awake);
         self.backend.deinit(self.allocator);
         const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
@@ -362,20 +335,12 @@ pub const Workspace = struct {
         return null;
     }
 
-    /// Retains a new arena within the mapped-byte ceiling. The workspace
-    /// has one owner; callers serialize growth except for the parts
-    /// budgeted together by `growToBlocks`.
+    /// Retains one new arena within the mapped-byte ceiling.
     pub fn allocate(self: *Workspace, bytes: usize) ![]u8 {
-        const mapped_bytes = self.mapped_bytes.load(.acquire);
-        if (bytes > self.max_mapped_bytes - mapped_bytes)
+        if (bytes > self.max_mapped_bytes - self.mapped_bytes)
             return error.DmaMappedBudgetExceeded;
-        const allocation = try self.backend.allocate(
-            self.allocator,
-            self.io,
-            &self.arena_mutex,
-            bytes,
-        );
-        _ = self.mapped_bytes.fetchAdd(allocation.len, .release);
+        const allocation = try self.backend.allocate(self.allocator, self.io, bytes);
+        self.mapped_bytes += allocation.len;
         return allocation;
     }
 
@@ -386,53 +351,16 @@ pub const Workspace = struct {
         return usable;
     }
 
-    /// Maps the blocks missing below `target_blocks` as up to
-    /// `growth_parallelism` arenas registered concurrently. The aggregate
-    /// check keeps a partial growth from crossing the ceiling. Requires a
-    /// workspace with no other growth in progress and a nonzero block_size.
+    /// Maps the blocks missing below `target_blocks` as one arena. Requires a
+    /// nonzero block_size; the workspace has one coordinating owner.
     pub fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) !void {
         const usable_blocks = self.usableBlocks(block_size);
         const missing_blocks = target_blocks -| usable_blocks;
         if (missing_blocks == 0) return;
-        const mapped_bytes = self.mapped_bytes.load(.acquire);
-        if (missing_blocks > (self.max_mapped_bytes - mapped_bytes) / block_size)
+        if (missing_blocks > (self.max_mapped_bytes - self.mapped_bytes) / block_size)
             return error.DmaMappedBudgetExceeded;
 
-        const Worker = struct {
-            workspace: *Workspace,
-            bytes: usize,
-            first_error: *std.atomic.Value(u16),
-
-            fn run(worker: @This()) void {
-                _ = worker.workspace.allocate(worker.bytes) catch |err| {
-                    _ = worker.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-                };
-            }
-        };
-        const parts = @min(growth_parallelism, missing_blocks);
-        const blocks_per_part = missing_blocks / parts + @intFromBool(missing_blocks % parts != 0);
-        var first_error: std.atomic.Value(u16) = .init(0);
-        var group: std.Io.Group = .init;
-        var group_error: ?anyerror = null;
-        var remaining_blocks = missing_blocks;
-        while (remaining_blocks != 0) {
-            const part_blocks = @min(blocks_per_part, remaining_blocks);
-            remaining_blocks -= part_blocks;
-            group.concurrent(self.io, Worker.run, .{Worker{
-                .workspace = self,
-                .bytes = part_blocks * block_size,
-                .first_error = &first_error,
-            }}) catch |err| {
-                group_error = err;
-                break;
-            };
-        }
-        group.await(self.io) catch |err| if (group_error == null) {
-            group_error = err;
-        };
-        if (group_error) |err| return err;
-        const error_code = first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
+        _ = try self.allocate(missing_blocks * block_size);
     }
 
     /// Creates ordinary allocator-backed arenas for tests without a PJRT platform.
@@ -514,7 +442,7 @@ pub const BlockPool = struct {
         max_mapped_bytes: usize,
         reserve: usize,
     ) !BlockPool {
-        const mapped_bytes = workspace.mapped_bytes.load(.acquire);
+        const mapped_bytes = workspace.mapped_bytes;
         if (block_size == 0 or mapped_bytes > max_mapped_bytes)
             return error.RequestExceedsCapacity;
         var self: BlockPool = .{
@@ -637,10 +565,10 @@ pub const BlockPool = struct {
 
     fn allocateSlab(self: *BlockPool, block_count: usize) !void {
         const slab_len = block_count * self.block_size;
-        const mapped_before = self.workspace.mapped_bytes.load(.acquire);
+        const mapped_before = self.workspace.mapped_bytes;
         if (mapped_before != self.mapped_bytes) return error.InvalidDmaWorkspace;
         const slab = try self.workspace.allocate(slab_len);
-        const mapped_after = self.workspace.mapped_bytes.load(.acquire);
+        const mapped_after = self.workspace.mapped_bytes;
         if (slab.len != slab_len or mapped_after < mapped_before or
             mapped_after - mapped_before != slab.len or mapped_after > self.max_mapped_bytes)
             return error.InvalidDmaWorkspace;
@@ -752,7 +680,7 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
 test "HugePageAllocator retains automatic NUMA fallback state" {
     var allocator: Workspace.Backend.HugePageAllocator = .initPageable(std.testing.allocator, 0b11);
     allocator.leaveUnplaced(0b11);
-    try std.testing.expectEqual(@as(u64, 0), allocator.numa_mask.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), allocator.numa_mask);
 }
 
 test "automatic NUMA placement interleaves only multiple memory nodes" {
@@ -782,7 +710,7 @@ test "Workspace finds retained arenas behind newer smaller allocations" {
     try std.testing.expectEqual(@intFromPtr(large.ptr), @intFromPtr(workspace.findArena(100).?.ptr));
     try std.testing.expectEqual(@intFromPtr(small.ptr), @intFromPtr(workspace.findArena(32).?.ptr));
     try std.testing.expect(workspace.findArena(129) == null);
-    try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
 }
 
 test "Workspace arena ownership cleans up allocation failures" {
@@ -793,23 +721,23 @@ test "Workspace arena ownership cleans up allocation failures" {
 
             _ = try workspace.allocate(64);
             _ = try workspace.allocate(128);
-            try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
             try std.testing.expectError(error.DmaMappedBudgetExceeded, workspace.allocate(128));
-            try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
             try std.testing.expectEqual(@as(usize, 128), workspace.findArena(100).?.len);
             try std.testing.expectEqual(@as(usize, 3), workspace.usableBlocks(64));
             try workspace.growToBlocks(64, 4);
-            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
             try workspace.growToBlocks(64, 4);
-            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
             try std.testing.expectError(error.DmaMappedBudgetExceeded, workspace.growToBlocks(64, 5));
-            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
 }
 
-test "Workspace growth maps missing blocks as concurrent arenas" {
+test "Workspace growth maps missing blocks as one arena" {
     const allocator = std.testing.allocator;
     var workspace = try Workspace.initForTesting(allocator, std.testing.io, 64 * 64);
     defer workspace.deinit();
@@ -817,13 +745,10 @@ test "Workspace growth maps missing blocks as concurrent arenas" {
     _ = try workspace.allocate(3 * 64);
     try workspace.growToBlocks(64, 13);
     try std.testing.expectEqual(@as(usize, 13), workspace.usableBlocks(64));
-    // Ten missing blocks over four parts: 3, 3, 3, 1.
-    try std.testing.expectEqual(@as(usize, 5), workspace.backend.arenaCount());
-    var total: usize = 0;
-    for (1..workspace.backend.arenaCount()) |index| total += workspace.backend.arenaAt(index).len;
-    try std.testing.expectEqual(@as(usize, 10 * 64), total);
+    try std.testing.expectEqual(@as(usize, 2), workspace.backend.arenaCount());
+    try std.testing.expectEqual(@as(usize, 10 * 64), workspace.backend.arenaAt(1).len);
     try workspace.growToBlocks(64, 14);
-    try std.testing.expectEqual(@as(usize, 6), workspace.backend.arenaCount());
+    try std.testing.expectEqual(@as(usize, 3), workspace.backend.arenaCount());
 }
 
 test "BlockPool acquires request blocks atomically" {

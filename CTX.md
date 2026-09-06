@@ -33,6 +33,10 @@ state, huge-page advice, and optional DmaMap registration. It does not expose a
 generic allocator interface. ROCm instead retains PJRT buffers and balances
 whole arenas by allocated bytes across device-associated host nodes.
 There is no separate arena-ownership union or public NUMA placement knob.
+`Workspace` is single-owner and grows sequentially. Each backend allocation is
+retained immediately, with ROCm node totals and workspace mapped-byte
+accounting updated only after allocation retention succeeds. `growToBlocks`
+allocates all missing blocks in one arena.
 
 The playground's historical concurrent-DMA and early-event-retirement probes,
 and the temporary `io/dma_diagnostics.zig` module, are removed.
