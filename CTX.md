@@ -17,6 +17,18 @@ The tenth-pass review below updates the module/API map and ownership fixes.
 Earlier snapshots and measurements retain their historical names. The current
 reader-facing design is in `docs/learn/loader.md`.
 
+## Workspace-owned DMA allocation follow-up (2026-09-06)
+
+Platform-specific host allocation now has one owner in
+`io/host_memory.zig`: `Workspace.Backend` selects DmaMap-backed pages for
+CUDA and oneAPI, PJRT-owned `pinned_host` buffers for ROCm, and pageable
+pages for CPU. ROCm cannot reach DmaMap through a generic allocator.
+`NumaPlacement` now lives directly in `mem.zig`; `mem/dma.zig` and its former
+`Allocator`, `MapAllocator`, and `BufferAllocator` adapters are removed.
+
+The playground's historical concurrent-DMA and early-event-retirement probes,
+and the temporary `io/dma_diagnostics.zig` module, are removed.
+
 ## Per-submission progress follow-up (2026-09-05)
 
 Progress is the final optional argument to `load`, `loadBuffer`, `loadExecute`,
@@ -47,10 +59,10 @@ an independent loader-wide output placement check. Calibration remains in init.
 
 ## Loader-owned initialization follow-up (2026-09-05)
 
-The workspace is no longer public API. `mem/dma.zig` exposes only allocation
-adapters and NUMA placement; workspace, arenas, and block pool now live in
-`io/host_memory.zig`. The user's in-progress workspace validation changes were
-preserved when moving that implementation.
+The workspace is no longer public API. `mem.zig` exposes the NUMA placement
+policy; workspace, arenas, and block pool now live in `io/host_memory.zig`.
+The user's in-progress workspace validation changes were preserved when moving
+that implementation.
 
 `Loader.backendFor(target)` selects direct versus buffered loading explicitly;
 `Workspace.isSupported` and `io.dma.isSupported` are removed. CPU uses the direct

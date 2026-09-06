@@ -108,7 +108,6 @@ zig_library(
         "kernel.zig",
         "logo.zig",
         "mem.zig",
-        "mem/dma.zig",
         "meta.zig",
         "mlirx.zig",
         "moe/cutlass_flashinfer.zig",

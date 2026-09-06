@@ -18,7 +18,6 @@ pub const Config = struct {
     load_profile: VFS.LoadProfile,
     dma: dma_calibration.Options,
     max_host_bytes: usize,
-    numa: mem.dma.NumaPlacement,
     /// Direct I/O for local source files. The direct backend widens the
     /// reads of a file its VFS reads directly to the profile's alignment;
     /// buffered backends ignore it.

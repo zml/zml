@@ -61,7 +61,6 @@ pub const Loader = struct {
         dma: dma_calibration.Options = .{},
         /// Upper bound for the direct backend's host arenas, not a growth target.
         max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
-        numa: mem.dma.NumaPlacement = .memory_nodes,
         /// Direct I/O for local source files, decided per file by the
         /// profile's VFS: `auto` reads a file past the page cache when it is
         /// mostly not cached at load time, `on` whenever the filesystem
@@ -100,7 +99,6 @@ pub const Loader = struct {
                 .load_profile = opts.load_profile,
                 .dma = opts.dma,
                 .max_host_bytes = opts.max_host_bytes,
-                .numa = opts.numa,
                 .direct_io = opts.direct_io,
             }),
         };

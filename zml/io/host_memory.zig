@@ -9,12 +9,11 @@ const pjrt = @import("pjrt");
 const Device = @import("../platform.zig").Device;
 const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
+const Target = @import("../platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/mem");
 
-const dma = @import("../mem/dma.zig");
-const MapAllocator = dma.MapAllocator;
-const NumaPlacement = dma.NumaPlacement;
+const NumaPlacement = @import("../mem.zig").NumaPlacement;
 
 /// Host arenas owned by one direct loader. Calibration fills the initial
 /// arena set during initialization; loading reuses and grows it. Deinitialize
@@ -57,14 +56,31 @@ pub const Workspace = struct {
             numa_explicit: bool = false,
         };
 
+        const Strategy = enum {
+            dma_map,
+            pjrt_host,
+            pageable,
+            unsupported,
+        };
+
+        fn strategy(target: Target) Strategy {
+            return switch (target) {
+                .cuda, .oneapi => .dma_map,
+                .rocm => .pjrt_host,
+                .cpu => .pageable,
+                .tpu, .neuron, .metal => .unsupported,
+            };
+        }
+
         fn init(
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
             numa: NumaPlacement,
         ) !Backend {
-            return switch (platform.target) {
-                .cuda, .oneapi, .cpu => {
+            const selected_strategy = strategy(platform.target);
+            return switch (selected_strategy) {
+                .dma_map, .pageable => {
                     const mask: u64, const explicit = switch (numa) {
                         .memory_nodes => .{ memoryNodeMask(allocator, io), false },
                         .nodes => |value| .{ value, true },
@@ -76,13 +92,13 @@ pub const Workspace = struct {
                         .numa_mask = if (explicit or @popCount(mask) > 1) mask else 0,
                         .numa_explicit = explicit,
                     };
-                    return switch (platform.target) {
-                        .cpu => .{ .pageable = pages },
-                        .cuda, .oneapi => .{ .dma_map = pages },
-                        else => unreachable,
+                    return switch (selected_strategy) {
+                        .dma_map => .{ .dma_map = pages },
+                        .pageable => .{ .pageable = pages },
+                        .pjrt_host, .unsupported => unreachable,
                     };
                 },
-                .rocm => {
+                .pjrt_host => {
                     var host_nodes: std.ArrayListUnmanaged(HostNode) = .empty;
                     errdefer host_nodes.deinit(allocator);
                     var known = true;
@@ -106,9 +122,93 @@ pub const Workspace = struct {
                         .host_nodes = host_nodes,
                     } };
                 },
-                .tpu, .neuron, .metal => error.DmaBenchmarkUnsupported,
+                .unsupported => error.DmaBenchmarkUnsupported,
             };
         }
+
+        /// Allocator adapter private to page-backed workspace arenas. It
+        /// applies huge-page alignment/advice and optionally registers the
+        /// pages with the selected backend's PJRT client.
+        const MapAllocator = struct {
+            const transparent_huge_page_size = 2 * 1024 * 1024;
+
+            parent: std.mem.Allocator,
+            /// Null leaves the pages pageable for CPU transfers.
+            platform: ?*const Platform,
+
+            fn init(parent: std.mem.Allocator, platform: *const Platform) MapAllocator {
+                return .{ .parent = parent, .platform = platform };
+            }
+
+            fn initPageable(parent: std.mem.Allocator) MapAllocator {
+                return .{ .parent = parent, .platform = null };
+            }
+
+            fn allocator(self: *const MapAllocator) std.mem.Allocator {
+                return .{
+                    .ptr = @constCast(self),
+                    .vtable = &.{
+                        .alloc = alloc,
+                        .resize = resize,
+                        .remap = remap,
+                        .free = free,
+                    },
+                };
+            }
+
+            fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
+                const self: *const MapAllocator = @ptrCast(@alignCast(ctx));
+                const effective_alignment = effectiveAlignment(alignment, len);
+                const allocation = self.parent.rawAlloc(len, effective_alignment, ret_addr);
+                if (allocation) |loc| {
+                    const data = loc[0..len];
+                    adviseHugePages(data);
+                    if (self.platform) |platform| {
+                        platform.pjrt_client.dmaMap(platform.pjrt_api, @ptrCast(data)) catch {
+                            self.parent.rawFree(data, effective_alignment, ret_addr);
+                            return null;
+                        };
+                    }
+                }
+                return allocation;
+            }
+
+            fn resize(_: *anyopaque, _: []u8, _: Alignment, _: usize, _: usize) bool {
+                return false;
+            }
+
+            fn remap(_: *anyopaque, _: []u8, _: Alignment, _: usize, _: usize) ?[*]u8 {
+                return null;
+            }
+
+            fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
+                const self: *const MapAllocator = @ptrCast(@alignCast(ctx));
+                if (self.platform) |platform| {
+                    platform.pjrt_client.dmaUnmap(platform.pjrt_api, @ptrCast(buf)) catch unreachable;
+                }
+                self.parent.rawFree(buf, effectiveAlignment(alignment, buf.len), ret_addr);
+            }
+
+            fn effectiveAlignment(alignment: Alignment, len: usize) Alignment {
+                if (comptime builtin.os.tag != .linux) return alignment;
+                if (len < transparent_huge_page_size) return alignment;
+                return alignment.max(.fromByteUnits(transparent_huge_page_size));
+            }
+
+            fn adviseHugePages(data: []u8) void {
+                if (comptime builtin.os.tag != .linux) return;
+                if (data.len < transparent_huge_page_size) return;
+
+                const ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(data.ptr);
+                std.posix.madvise(ptr, data.len, std.posix.MADV.HUGEPAGE) catch |err| {
+                    log.warn("MADV_HUGEPAGE failed for DMA buffer at 0x{x} ({Bi:.2}): {s}", .{
+                        @intFromPtr(data.ptr),
+                        data.len,
+                        @errorName(err),
+                    });
+                };
+            }
+        };
     };
 
     pub fn init(
@@ -332,7 +432,7 @@ pub const Workspace = struct {
                         .pjrt_host => unreachable,
                     },
                 };
-                const pages: MapAllocator = switch (self.backend) {
+                const pages: Backend.MapAllocator = switch (self.backend) {
                     .dma_map => |mapped| .init(numa.allocator(), mapped.platform),
                     .pageable, .testing => .initPageable(numa.allocator()),
                     .pjrt_host => unreachable,
@@ -350,11 +450,11 @@ pub const Workspace = struct {
         switch (allocation) {
             .pjrt_host => |pinned| pinned.deinit(),
             .dma_map => |arena| {
-                const dma_map: MapAllocator = .init(self.allocator, self.backend.dma_map.platform);
+                const dma_map: Backend.MapAllocator = .init(self.allocator, self.backend.dma_map.platform);
                 dma_map.allocator().free(arena);
             },
             .pageable => |arena| {
-                const pageable: MapAllocator = .initPageable(self.allocator);
+                const pageable: Backend.MapAllocator = .initPageable(self.allocator);
                 pageable.allocator().free(arena);
             },
         }
@@ -774,6 +874,16 @@ fn parseNodeList(text: []const u8) u64 {
 
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
+}
+
+test "Workspace backend strategy is exhaustive" {
+    try std.testing.expectEqual(Workspace.Backend.Strategy.dma_map, Workspace.Backend.strategy(.cuda));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.dma_map, Workspace.Backend.strategy(.oneapi));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.pjrt_host, Workspace.Backend.strategy(.rocm));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.pageable, Workspace.Backend.strategy(.cpu));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.tpu));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.neuron));
+    try std.testing.expectEqual(Workspace.Backend.Strategy.unsupported, Workspace.Backend.strategy(.metal));
 }
 
 test "parseNodeList accepts kernel node lists" {

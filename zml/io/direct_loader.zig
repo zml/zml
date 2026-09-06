@@ -33,10 +33,8 @@ const load_log = std.log.scoped(.@"zml/io/load");
 /// Destroy a DMA event as soon as its ready callback has run, from the next
 /// pump (never inside the callback), instead of at its batch's retirement:
 /// live PJRT events are then bounded by the DMA width plus one pump batch
-/// rather than by a submission's transfer count. Checked against the oneAPI
-/// plugin under sustained load with the playground's
-/// `ZML_LOAD_EVENT_RETIRE_CHECK`; set to false to keep every event until its
-/// batch retires.
+/// rather than by a submission's transfer count. Set to false to keep every
+/// event until its batch retires.
 const retire_events_early = true;
 
 /// The widest source rung pre-grown during loader initialization.
@@ -89,7 +87,6 @@ pub const Loader = struct {
         errdefer allocator.destroy(workspace);
         workspace.* = try host_memory.Workspace.init(allocator, io, platform, .{
             .max_mapped_bytes = opts.max_host_bytes,
-            .numa = opts.numa,
         });
         errdefer workspace.deinit();
         const calibration = try dma_calibration.calibrate(workspace, platform, opts.dma);

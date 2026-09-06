@@ -68,7 +68,7 @@ everything and reports the first error; `Window.deinit` drains and drops errors.
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
 | `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
-| `zml/mem/dma.zig` | Host allocation adapters for individual transfers |
+| `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
 
 The shared front end resolves sources and shardings once. Each `LoadSpec`
 contains a source, target shape, resolved sharding, and caller-owned output.
