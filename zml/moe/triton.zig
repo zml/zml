@@ -111,10 +111,15 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
 }
 
-fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
+fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice(.out, .{ .end = mid });
-    const up = x.slice(.out, .{ .start = mid });
+    var gate = x.slice(.out, .{ .end = mid });
+    var up = x.slice(.out, .{ .start = mid });
+    if (activation_threshold) |limit_| {
+        const limit = Tensor.scalar(limit_, x.dtype());
+        gate = gate.minimum(limit);
+        up = up.maximum(limit.negate()).minimum(limit);
+    }
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
@@ -266,7 +271,7 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated = applyActivation(first_out, options.activation);
+    const activated = applyActivation(first_out, options.activation, options.activation_threshold);
     var activated_quant = activated;
     var a2_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
     if (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz) {
