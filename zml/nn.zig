@@ -44,30 +44,34 @@ pub const Linear = struct {
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 
+    /// Apply this layer to reusable quantized activation values and scales.
+    /// The output is BF16; global scales and bias follow the ordinary forward path.
+    pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput) Tensor {
+        stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
+        const y = self.forwardQuantizedWeight(input);
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+
     fn forwardWeight(self: Linear, x: Tensor) Tensor {
         const q = self.quantization orelse return x.dot(self.weight, self.tag);
-
-        const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
-
-        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
-            q.scales.bitCast(.f8e8m0)
-        else
-            q.scales;
-
-        var lhs = x.convert(.bf16);
-        var lhs_scale: ?Tensor = null;
-        var undo_input_scale: ?Tensor = null;
-
-        const platform = zml.Compiler.current().platform;
-        if (quantization.quantizeInput(q, lhs, self.tag, platform)) |quantized_input| {
-            lhs = quantized_input.values;
-            lhs_scale = quantized_input.scales;
-            undo_input_scale = quantized_input.global_scale;
+        const lhs = x.convert(.bf16);
+        if (quantization.quantizeInput(q, lhs, self.tag, zml.Compiler.current().platform)) |input| {
+            return self.forwardQuantizedWeight(input).convert(x.dtype());
         }
+        return self.forwardScaledWeight(lhs, null, null).convert(x.dtype());
+    }
 
+    fn forwardQuantizedWeight(self: Linear, input: quantization.QuantizedInput) Tensor {
+        return self.forwardScaledWeight(input.values, input.scales, input.global_scale).convert(.bf16);
+    }
+
+    fn forwardScaledWeight(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor) Tensor {
+        const q = self.quantization.?;
+        const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
-        return applyGlobalScale(acc, undo_input_scale, weight_global_scale).convert(x.dtype());
+        return applyGlobalScale(acc, input_global_scale, weight_global_scale);
     }
 };
 
@@ -84,6 +88,20 @@ pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tenso
     return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ source_tag, .bitcast } })
         .renameTag(.kb, result_tag);
+}
+
+/// Backend routing must also recognize a one-tile block grid. Classification
+/// intentionally treats that ambiguous shape as per-tensor FP8 instead.
+fn isBlock128ScaleGrid(weight: Shape, scale: Shape) bool {
+    if ((weight.dtype() != .f8e4m3fn and weight.dtype() != .f8e4m3fnuz) or weight.rank() != 2 or
+        @mod(weight.dim(1), 128) != 0 or
+        (scale.dtype() != .bf16 and scale.dtype() != .f32) or scale.rank() != 2)
+    {
+        return false;
+    }
+
+    return scale.dim(0) == std.math.divCeil(i64, weight.dim(0), 128) catch unreachable and
+        scale.dim(1) == std.math.divCeil(i64, weight.dim(1), 128) catch unreachable;
 }
 
 test "unpackFp4 expands the requested axis" {
@@ -106,12 +124,13 @@ test "unpackFp4 expands the requested axis" {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN values on CUDA, E4M3FNUZ on ROCm, F32 128x128 scales
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
 /// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// 2. XLA's block-128 W8A8 arm on CUDA and ROCm
+/// 3. Unsupported non-block-FP8 combos fall back to dequant + Dot
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -138,6 +157,7 @@ pub fn scaledDot(
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
         res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -159,6 +179,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -168,6 +189,43 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_shape._partitioning.set(res_shape.rank() - 1, rhs.shape().partition(r));
+    }
+
+    if (isBlock128ScaleGrid(rhs.shape(), rhs_scale.shape())) {
+        switch (zml.Compiler.current().platform.target) {
+            // ScaledDot has a native Shardy rule. Keep it outside a manual
+            // computation so XLA partitions the value and scale operands together
+            // and only reduces a result whose contracting dimension is sharded.
+            .cuda, .rocm => {
+                stdx.debug.assert(
+                    dot_axes.contracting.len == 1 and dot_axes.batching.len == 0 and
+                        lhs.axis(-1) == dot_axes.contracting.get(0)[0] and rhs.axis(-1) == dot_axes.contracting.get(0)[1],
+                    "native block FP8 dot only supports a single trailing contraction without batching; got {f} and {f}",
+                    .{ lhs.shape(), rhs.shape() },
+                );
+                stdx.debug.assert(@mod(rhs.dim(0), 128) == 0, "block FP8 dot requires N divisible by 128, got {f}", .{rhs.shape()});
+                stdx.debug.assert(rhs_scale.dtype() == .f32, "block FP8 dot requires F32 weight scales, got {f}", .{rhs_scale.shape()});
+                const input: quantization.QuantizedInput = if (lhs_scale) |scale|
+                    .{ .values = lhs, .scales = scale }
+                else input: {
+                    stdx.debug.assert(lhs.dtype() == .bf16, "block FP8 dot expects BF16 input or prequantized values/scales, got {f}", .{lhs.shape()});
+                    break :input quantization.quantizeBlockFp8(lhs, -1, rhs.dtype());
+                };
+                stdx.debug.assert(input.values.dtype() == rhs.dtype() and input.scales.dtype() == .f32, "block FP8 dot requires matching FP8 values and F32 activation scales", .{});
+                stdx.debug.assert(input.scales.rank() == lhs.rank(), "block FP8 activation scales must have the input rank", .{});
+                for (0..lhs.rank()) |axis| {
+                    const expected = if (axis == lhs.rank() - 1) @divExact(lhs.dim(axis), 128) else lhs.dim(axis);
+                    stdx.debug.assert(input.scales.dim(axis) == expected, "block FP8 activation scale grid mismatch: {f} and {f}", .{ lhs.shape(), input.scales.shape() });
+                }
+                const k = rhs.dim(1);
+                const m: i64 = @intCast(lhs.shape().count() / @as(usize, @intCast(k)));
+                const a = input.values.reshape(.{ .fp8_m = m, .fp8_k = k });
+                const a_scale = input.scales.reshape(.{ .fp8_m = m, .fp8_ks = @divExact(k, 128) });
+                return scaledDotComposite(a, rhs, a_scale, rhs_scale, .{ .contracting = .init(&.{.{ 1, 1 }}), .batching = .empty }, Shape.init(.{ .fp8_m = m, .fp8_n = rhs.dim(0) }, .bf16)).reshape(res_shape);
+            },
+            else => {},
+        }
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
@@ -179,25 +237,36 @@ pub fn scaledDot(
     else
         rhs_scale;
 
+    return scaledDotComposite(lhs, rhs, lhs_scale_operand, rhs_scale_operand, dot_axes, res_shape);
+}
+
+fn scaledDotComposite(lhs: Tensor, rhs: Tensor, lhs_scale: Tensor, rhs_scale: Tensor, dot_axes: Tensor.DotAxes, res_shape: Shape) Tensor {
+    var lhs_contracting: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var rhs_contracting: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var lhs_batching: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var rhs_batching: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    for (dot_axes.contracting.constSlice()) |axes| {
+        lhs_contracting.appendAssumeCapacity(axes[0]);
+        rhs_contracting.appendAssumeCapacity(axes[1]);
+    }
+    for (dot_axes.batching.constSlice()) |axes| {
+        lhs_batching.appendAssumeCapacity(axes[0]);
+        rhs_batching.appendAssumeCapacity(axes[1]);
+    }
     const mlir_ctx = zml.Compiler.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
         .array(mlir_ctx, &.{
-            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
-            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, lhs_contracting.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting.constSlice()),
         }),
         .array(mlir_ctx, &.{
-            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
-            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, lhs_batching.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching.constSlice()),
         }),
     });
-
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
-
-    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+    return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale, rhs_scale }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
-    });
-
-    return outs[0];
+    })[0];
 }
 
 /// `shape` with every dimension collapsed to 1
@@ -285,28 +354,44 @@ pub const LayerNorm = struct {
     eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
-        const normed = normalizeVariance(x, self.eps);
+        const normed = normalizeVarianceF32(x, self.eps);
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
-        if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
+        var out = normed.mul(self.weight.convert(.f32).broadcast(x.shape(), &.{ax}));
+        if (self.bias) |bias| out = out.add(bias.convert(.f32).broadcast(x.shape(), &.{ax}));
 
-        return out;
+        return out.convert(x.dtype());
     }
 };
 
 pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
+    return rmsNormF32(x_, axis, eps).convert(x_.dtype());
+}
+
+/// RMS normalization followed by an affine weight multiplication. The normalization and
+/// multiplication are performed in f32 before converting once to the input dtype.
+pub fn rmsNormWithWeight(x_: Tensor, weight: Tensor, axis: anytype, eps: f32) Tensor {
+    const ax = x_.axis(axis);
+    const normed = rmsNormF32(x_, ax, eps);
+    return normed.mul(weight.convert(.f32).broadcast(x_.shape(), &.{ax})).convert(x_.dtype());
+}
+
+fn rmsNormF32(x_: Tensor, axis: anytype, eps: f32) Tensor {
     const ax = x_.axis(axis);
     // upcast to improve precision
-    var x = x_.convert(.f32);
+    const x = x_.convert(.f32);
     const variance = x.powByConst(2).mean(ax);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
-    return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
+    return x.mul(rsqrt.broad(x.shape()));
 }
 
 /// Center and scale by the variance.
 /// normalize(x, eps) = (x - mean(x)) / sqrt(var(x) + eps)
 /// Work on the last axis.
 pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
+    return normalizeVarianceF32(x, eps).convert(x.dtype());
+}
+
+fn normalizeVarianceF32(x: Tensor, eps: f32) Tensor {
     const N: f32 = @floatFromInt(x.dim(-1));
 
     // Upcast to improve precision
@@ -316,7 +401,95 @@ pub fn normalizeVariance(x: Tensor, eps: f32) Tensor {
     const variance = mean_dev.mul(mean_dev).sum(-1).divByConst(N);
     const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
 
-    return mean_dev.mul(rsqrt).convert(x.dtype());
+    return mean_dev.mul(rsqrt);
+}
+
+test "normalization keeps affine operations in f32" {
+    const platform = zml.testing.env();
+    const bf16 = zml.floats.BFloat16;
+
+    const input: Tensor = .init(.{ .b = 1, .d = 8 }, .bf16);
+    const weight: Tensor = .init(.{ .d = 8 }, .bf16);
+    const bias: Tensor = .init(.{ .d = 8 }, .bf16);
+
+    const Local = struct {
+        fn layerNorm(x: Tensor, w: Tensor, b: Tensor) Tensor {
+            return (LayerNorm{ .weight = w, .bias = b, .eps = 0 }).forward(x);
+        }
+
+        fn rmsNorm(x: Tensor, w: Tensor) Tensor {
+            return rmsNormWithWeight(x, w, .d, 0);
+        }
+    };
+
+    var layer_norm_exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.layerNorm, .{ input, weight, bias }, .{});
+    defer layer_norm_exe.deinit();
+    var rms_norm_exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.rmsNorm, .{ input, weight }, .{});
+    defer rms_norm_exe.deinit();
+
+    const layer_norm_input_h = [_]bf16{
+        bf16.fromF32(-6),
+        bf16.fromF32(-4),
+        bf16.fromF32(0),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+    };
+    const rms_norm_input_h = [_]bf16{
+        bf16.fromF32(1),
+        bf16.fromF32(1),
+        bf16.fromF32(1),
+        bf16.fromF32(2),
+        bf16.fromF32(2),
+        bf16.fromF32(3),
+        bf16.fromF32(4),
+        bf16.fromF32(6),
+    };
+    const weight_h: [8]bf16 = @splat(bf16.fromF32(10));
+    // These inputs have an exactly representable variance of 9. The affine values
+    // straddle separate BF16 rounding boundaries before and after the bias addition.
+    const bias_h: [8]bf16 = @splat(bf16.fromF32(-1.9921875));
+
+    var layer_norm_input = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&layer_norm_input_h));
+    defer layer_norm_input.deinit();
+    var rms_norm_input = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&rms_norm_input_h));
+    defer rms_norm_input.deinit();
+    var weight_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(&weight_h));
+    defer weight_buffer.deinit();
+    var bias_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, bias.shape(), .replicated, std.mem.sliceAsBytes(&bias_h));
+    defer bias_buffer.deinit();
+
+    var layer_norm_result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &layer_norm_exe, Local.layerNorm, .{ layer_norm_input, weight_buffer, bias_buffer });
+    defer layer_norm_result.deinit();
+    const expected_layer_norm_h = [_]bf16{
+        bf16.fromF32(-22),
+        bf16.fromF32(-15.3125),
+        bf16.fromF32(-1.9921875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+        bf16.fromF32(4.6875),
+    };
+    const expected_layer_norm: Slice = .init(input.shape(), std.mem.sliceAsBytes(&expected_layer_norm_h));
+    try zml.testing.expectClose(std.testing.io, expected_layer_norm, layer_norm_result, .exact_match);
+
+    var rms_norm_result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &rms_norm_exe, Local.rmsNorm, .{ rms_norm_input, weight_buffer });
+    defer rms_norm_result.deinit();
+    const expected_rms_norm_h = [_]bf16{
+        bf16.fromF32(3.328125),
+        bf16.fromF32(3.328125),
+        bf16.fromF32(3.328125),
+        bf16.fromF32(6.65625),
+        bf16.fromF32(6.65625),
+        bf16.fromF32(10),
+        bf16.fromF32(13.3125),
+        bf16.fromF32(20),
+    };
+    const expected_rms_norm: Slice = .init(input.shape(), std.mem.sliceAsBytes(&expected_rms_norm_h));
+    try zml.testing.expectClose(std.testing.io, expected_rms_norm, rms_norm_result, .exact_match);
 }
 
 // ref: https://pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html

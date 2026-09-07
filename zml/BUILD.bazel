@@ -76,6 +76,7 @@ zig_library(
 zig_library(
     name = "zml",
     srcs = [
+        "Compiler.zig",
         "Sharding.zig",
         "attention.zig",
         "attention/attnd.zig",
@@ -99,7 +100,6 @@ zig_library(
         "mem.zig",
         "meta.zig",
         "mlirx.zig",
-        "Compiler.zig",
         "moe/cutlass_flashinfer.zig",
         "moe/metal.zig",
         "moe/moe.zig",
@@ -189,5 +189,12 @@ zig_library(
 
 zig_test(
     name = "test",
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "sparse_mla_test",
+    main = "sparse_mla_test.zig",
+    tags = ["no_ci"],
     deps = ["//zml"],
 )

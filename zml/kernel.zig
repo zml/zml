@@ -79,6 +79,7 @@ pub const triton = struct {
             .f32 => .f32,
             .f64 => .f64,
             .f8e4m3fn => .f8e4m3fn,
+            .f8e4m3fnuz => .f8e4m3fnuz,
             .f8e5m2 => .f8e5m2,
             else => std.debug.panic("zml.kernel.triton.from: dtype {s} has no Triton equivalent", .{@tagName(dt)}),
         };

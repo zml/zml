@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_binary");
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 
 zig_binary(
     name = "compat_probe",
@@ -20,8 +20,8 @@ zig_shared_library(
 
 cc_library(
     name = "empty",
-    tags = ["manual"],
     defines = ["ZML_RUNTIME_CUDA_DISABLED"],
+    tags = ["manual"],
 )
 
 cc_library(
@@ -43,18 +43,18 @@ cc_library(
 
 cc_library(
     name = "libpjrt_cuda",
-    tags = ["manual"],
     hdrs = ["libpjrt_cuda.h"],
     defines = ["ZML_RUNTIME_CUDA"],
+    tags = ["manual"],
     deps = [":libpjrt_cuda_repo"],
 )
 
 zig_library(
     name = "cuda",
-    tags = ["manual"],
     srcs = ["compat_probe.zig"],
     import_name = "platforms/cuda",
     main = "cuda.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",

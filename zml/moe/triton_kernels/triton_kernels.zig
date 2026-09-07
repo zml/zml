@@ -118,6 +118,87 @@ pub const PerTokenGroupQuantFp8 = struct {
     }
 };
 
+/// GLM's first expert projection is immediately followed by SwiGLU and a
+/// block-128 FP8 quantization for the down projection. Combining those two
+/// elementwise passes avoids materializing and rereading the BF16 activated
+/// tensor during decode.
+pub const SiluAndQuantizePerTokenGroupFp8 = struct {
+    pub const Cfg = struct {
+        input_dtype: DType,
+        output_dtype: DType,
+        scale_dtype: DType,
+        input_columns: usize,
+        output_columns: usize,
+        block: usize,
+        fp8_min: f32,
+        fp8_max: f32,
+        eps: f32,
+        activation_threshold: ?f32,
+        has_contiguous_expert_partition: bool,
+        local_num_experts: usize,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "silu_and_quantize_per_token_group_fp8",
+        .inputs = &.{ "x", "route_ids", "expert_partition" },
+        .outputs = &.{ "q", "scale" },
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{
+            .x_ptr = .{ .ptr = cfg.input_dtype },
+            .route_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
+            .q_ptr = .{ .ptr = cfg.output_dtype },
+            .scale_ptr = .{ .ptr = cfg.scale_dtype },
+        });
+
+        const block: i64 = @intCast(cfg.block);
+        const input_columns: i64 = @intCast(cfg.input_columns);
+        const output_columns: i64 = @intCast(cfg.output_columns);
+        const groups_per_row: i64 = @divExact(output_columns, block);
+        const pid = b.programId(.x).to(.i64);
+        const row = pid.div(groups_per_row);
+        const group = pid.rem(groups_per_row);
+        const cols = b.arange(0, block, .i64);
+        const gate_offset = row.mul(input_columns).add(group.mul(block));
+        const up_offset = gate_offset.add(output_columns);
+        const route_valid = if (cfg.has_contiguous_expert_partition) valid: {
+            const local_num_experts: i32 = @intCast(cfg.local_num_experts);
+            const expert_start = b.load(a.expert_partition_ptr).mul(local_num_experts);
+            const local_expert = b.load(a.route_ids_ptr.addPtr(row)).sub(expert_start);
+            break :valid local_expert.ge(0).bitAnd(local_expert.lt(local_num_experts));
+        } else b.liftAs(1, .i1);
+        const load_mask = route_valid.splatTo(&.{block});
+
+        var gate = b.loadOpts(a.x_ptr.addPtr(gate_offset.add(cols)), .{
+            .mask = load_mask,
+            .other = b.zeros(&.{block}, cfg.input_dtype),
+        }).to(.f32);
+        var up = b.loadOpts(a.x_ptr.addPtr(up_offset.add(cols)), .{
+            .mask = load_mask,
+            .other = b.zeros(&.{block}, cfg.input_dtype),
+        }).to(.f32);
+        if (cfg.activation_threshold) |limit| {
+            gate = gate.minimum(limit);
+            up = up.maximum(-limit).minimum(limit);
+        }
+        const sigmoid = b.ones(&.{block}, .f32).add(b.exp(b.negf(gate)));
+        const activated = gate.div(sigmoid).mul(up);
+        const absmax = b.max(b.absf(activated)).maximum(cfg.eps);
+        const scale = absmax.mul(1.0 / cfg.fp8_max);
+        const quantized = b.clampf(
+            activated.div(scale),
+            b.splat(cfg.fp8_min, &.{block}),
+            b.splat(cfg.fp8_max, &.{block}),
+        ).to(cfg.output_dtype);
+
+        const output_offset = row.mul(output_columns).add(group.mul(block));
+        b.store(a.q_ptr.addPtr(output_offset.add(cols)), quantized);
+        b.store(a.scale_ptr.addPtr(pid), scale.to(cfg.scale_dtype));
+    }
+};
+
 // =============================================================================
 // write_zeros_to_output — helper called by FusedMoe
 // =============================================================================
@@ -162,11 +243,133 @@ fn writeZerosToOutput(
 }
 
 // =============================================================================
+// reduce_expert_routes_top8
+// =============================================================================
+
+/// Applies FP32 router weights to materialized BF16 expert outputs, reducing
+/// the eight routes in source order and narrowing only the final result.
+/// Invalid and non-local routes are skipped before their output or weight is
+/// loaded, matching vLLM's DeepGemm gather semantics.
+pub const ReduceExpertRoutesTop8 = struct {
+    pub const Cfg = struct {
+        num_tokens: usize,
+        hidden_size: usize,
+        global_num_experts: usize,
+        local_num_experts: usize,
+        block_d: usize,
+        has_expert_map: bool,
+        has_contiguous_expert_partition: bool,
+        routed_scaling_factor: f32,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "reduce_expert_routes_top8",
+        .inputs = &.{ "routes", "weights", "topk_ids", "expert_map", "expert_partition" },
+        .outputs = &.{"output"},
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        if (cfg.num_tokens == 0 or
+            cfg.hidden_size == 0 or
+            cfg.global_num_experts == 0 or
+            cfg.local_num_experts == 0 or
+            cfg.block_d == 0 or
+            !std.math.isPowerOfTwo(cfg.block_d) or
+            @mod(cfg.hidden_size, cfg.block_d) != 0)
+        {
+            log.err("reduce_expert_routes_top8: invalid config", .{});
+            return error.InvalidMlir;
+        }
+
+        const a = try b.declareArgs(.{
+            .routes_ptr = .{ .ptr = .bf16 },
+            .weights_ptr = .{ .ptr = .f32 },
+            .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_map_ptr = .{ .ptr = .i32 },
+            // StableHLO partition_id is U32. Triton models both signed and
+            // unsigned 32-bit integers with the same pointer representation.
+            .expert_partition_ptr = .{ .ptr = .i32 },
+            .output_ptr = .{ .ptr = .bf16 },
+        });
+
+        const top_k: i64 = 8;
+        const num_tokens: i64 = @intCast(cfg.num_tokens);
+        const hidden_size: i64 = @intCast(cfg.hidden_size);
+        const global_num_experts: i32 = @intCast(cfg.global_num_experts);
+        const local_num_experts: i32 = @intCast(cfg.local_num_experts);
+        const block_d: i64 = @intCast(cfg.block_d);
+        const expert_start = if (cfg.has_contiguous_expert_partition)
+            b.load(a.expert_partition_ptr).mul(local_num_experts)
+        else
+            b.liftAs(0, .i32);
+
+        const feature_block = b.programId(.x).to(.i64);
+        const token_start = b.programId(.y).to(.i64);
+        const token_stride = b.numPrograms(.y).to(.i64);
+        const offsets_d = feature_block.mul(block_d).add(b.arange(0, block_d, .i64));
+
+        var token_loop = b.openFor(token_start, num_tokens, token_stride, .{});
+        {
+            const token = token_loop.iv;
+            const route_row = token.mul(top_k);
+            var accumulator = b.zeros(&.{block_d}, .f32);
+
+            // Keep this unrolled: each result is the sole input accumulator
+            // of the following route, fixing the eight FP32 additions in
+            // source order without depending on a loop-unroll pass.
+            inline for (0..8) |topk_index| {
+                const route_index = route_row.add(topk_index);
+                const global_expert_id = b.load(a.topk_ids_ptr.addPtr(route_index));
+                const global_valid = global_expert_id
+                    .ge(0)
+                    .bitAnd(global_expert_id.lt(global_num_experts));
+                const local_expert_id = if (cfg.has_contiguous_expert_partition)
+                    global_expert_id.sub(expert_start)
+                else if (cfg.has_expert_map) mapped: {
+                    // Guard the map lookup itself so negative and out-of-range
+                    // global ids cannot form an invalid memory access.
+                    var map_if = b.openIfElse(global_valid, .{b.scalarTy(.i32)});
+                    {
+                        map_if.yieldThen(.{b.load(a.expert_map_ptr.addPtr(global_expert_id))});
+                    }
+                    {
+                        map_if.yieldElse(.{b.liftAs(-1, .i32)});
+                    }
+                    break :mapped map_if.results[0];
+                } else global_expert_id;
+                const route_valid = global_valid
+                    .bitAnd(local_expert_id.ge(0))
+                    .bitAnd(local_expert_id.lt(local_num_experts));
+
+                // Keep the loads and multiply inside the branch. In particular,
+                // an invalid route with a NaN/Inf weight must leave the FP32
+                // accumulator unchanged rather than evaluating zero * weight.
+                var route_if = b.openIfElse(route_valid, .{b.tensorTy(&.{block_d}, .f32)});
+                {
+                    const route_offset = route_index.mul(hidden_size).add(offsets_d);
+                    const route = b.load(a.routes_ptr.addPtr(route_offset)).to(.f32);
+                    const weight = b.load(a.weights_ptr.addPtr(route_index));
+                    route_if.yieldThen(.{accumulator.add(route.mul(weight))});
+                }
+                {
+                    route_if.yieldElse(.{accumulator});
+                }
+                accumulator = route_if.results[0];
+            }
+
+            const output_offset = token.mul(hidden_size).add(offsets_d);
+            b.store(a.output_ptr.addPtr(output_offset), accumulator.mul(cfg.routed_scaling_factor).to(.bf16));
+            token_loop.yield(.{});
+        }
+    }
+};
+
+// =============================================================================
 // fused_moe_kernel
 // =============================================================================
 
-/// Direct port of Python `fused_moe_kernel`. Bf16 / no-quant / no-bias path
-/// only — errors out for the feature flags that aren't implemented yet.
+/// Direct port of Python `fused_moe_kernel`, including the 1x128 activation /
+/// 128x128 weight block-scaled FP8 path used by DeepSeek and GLM checkpoints.
 pub const FusedMoe = struct {
     pub const Cfg = struct {
         a_dtype: DType,
@@ -184,9 +387,7 @@ pub const FusedMoe = struct {
         naive_block_assignment: bool,
         mul_routed_weight: bool,
         compute_type: DType,
-        // Validation flags — the kernel rejects configs that set any of
-        // these to true (the body only implements the bf16 / no-quant /
-        // no-bias path).
+        // Validation flags.
         use_fp8_w8a8: bool,
         use_int8_w8a8: bool,
         use_int8_w8a16: bool,
@@ -206,8 +407,12 @@ pub const FusedMoe = struct {
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
-        if (cfg.use_fp8_w8a8 or cfg.use_int8_w8a8 or cfg.use_int8_w8a16 or cfg.has_bias or cfg.per_channel_quant) {
-            log.err("fused_moe_kernel: unsupported config (fp8/int8/bias/per_channel)", .{});
+        if (cfg.use_int8_w8a8 or cfg.use_int8_w8a16 or cfg.has_bias or cfg.per_channel_quant) {
+            log.err("fused_moe_kernel: unsupported config (int8/bias/per_channel)", .{});
+            return error.InvalidMlir;
+        }
+        if (cfg.use_fp8_w8a8 and cfg.block_size_k != 128) {
+            log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K=128", .{});
             return error.InvalidMlir;
         }
 
@@ -360,17 +565,30 @@ pub const FusedMoe = struct {
         const bn_term = b.broadcastTo(bn_row, &.{ block_size_k, block_size_n });
         const b_ptrs_init = b_ptr_shifted.addPtr(bk_term.add(bn_term));
 
+        // Block-scale pointers. Activation scales are [token, K/128] and
+        // weight scales are [expert, N/128, K/128].
+        const stride_asm = b.load(a.stride_asm_ptr);
+        const stride_ask = b.load(a.stride_ask_ptr);
+        const stride_bse = b.load(a.stride_bse_ptr);
+        const stride_bsk = b.load(a.stride_bsk_ptr);
+        const stride_bsn = b.load(a.stride_bsn_ptr);
+        const a_scale_ptrs_init = a.a_scale_ptr.addPtr(offs_token.div(top_k).mul(stride_asm));
+        const b_scale_expert = a.b_scale_ptr.addPtr(off_experts.mul(stride_bse));
+        const b_scale_ptrs_init = b_scale_expert.addPtr(offs_bn.div(128).mul(stride_bsn));
+
         const acc_init = b.zeros(&.{ block_size_m, block_size_n }, .f32);
 
         // Loop bounds stay i64 because `k_block` is i64. iter_args order
-        // matches Python's TTIR (a_ptrs, b_ptrs, accumulator).
+        // matches Python's TTIR (a_ptrs, b_ptrs, scale pointers, accumulator).
         const num_k_iters = k_block.cdiv(block_size_k);
-        var loop = b.openFor(@as(i64, 0), num_k_iters, @as(i64, 1), .{ a_ptrs_init, b_ptrs_init, acc_init });
+        var loop = b.openFor(@as(i64, 0), num_k_iters, @as(i64, 1), .{ a_ptrs_init, b_ptrs_init, a_scale_ptrs_init, b_scale_ptrs_init, acc_init });
         {
             const k_iter = loop.iv;
             const a_ptrs = loop.carried[0];
             const b_ptrs = loop.carried[1];
-            const acc = loop.carried[2];
+            const a_scale_ptrs = loop.carried[2];
+            const b_scale_ptrs = loop.carried[3];
+            const acc = loop.carried[4];
 
             const k_remaining = k_block.sub(k_iter.mul(block_size_k));
 
@@ -397,7 +615,21 @@ pub const FusedMoe = struct {
                 .other = b.zeros(&.{ block_size_k, block_size_n }, cfg.b_dtype),
             });
 
-            const new_acc = b.dotOpts(a_val, b_val, acc, .{
+            const new_acc = if (cfg.use_fp8_w8a8) scaled: {
+                const dot = b.dotOpts(a_val, b_val, b.zeros(&.{ block_size_m, block_size_n }, .f32), .{
+                    .input_precision = .tf32,
+                    .max_num_imprecise_acc = 0,
+                });
+                const a_s = b.loadOpts(a_scale_ptrs, .{
+                    .mask = token_mask,
+                    .other = b.zeros(&.{block_size_m}, cfg.a_scale_dtype orelse .f32),
+                }).to(.f32);
+                const b_s = b.loadOpts(b_scale_ptrs, .{
+                    .mask = offs_bn.lt(n_block),
+                    .other = b.zeros(&.{block_size_n}, cfg.b_scale_dtype orelse .f32),
+                }).to(.f32);
+                break :scaled acc.add(dot.mul(a_s.expandDims(1)).mul(b_s.expandDims(0)));
+            } else b.dotOpts(a_val, b_val, acc, .{
                 .input_precision = .tf32,
                 .max_num_imprecise_acc = 0,
             });
@@ -407,9 +639,15 @@ pub const FusedMoe = struct {
             const new_a_ptrs = a_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_m, block_size_k }));
             const new_b_ptrs = b_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_k, block_size_n }));
 
-            loop.yield(.{ new_a_ptrs, new_b_ptrs, new_acc });
+            loop.yield(.{
+                new_a_ptrs,
+                new_b_ptrs,
+                a_scale_ptrs.addPtr(stride_ask),
+                b_scale_ptrs.addPtr(stride_bsk),
+                new_acc,
+            });
         }
-        var accumulator = loop.results[2];
+        var accumulator = loop.results[4];
 
         if (cfg.mul_routed_weight) {
             const tw_dtype = cfg.topk_weights_dtype orelse .f32;
@@ -456,16 +694,18 @@ pub const MoeAlignBlockSize = struct {
         max_num_m_blocks: usize,
         block_size_m: usize,
         hist_block: usize,
+        localize_contiguous_experts: bool,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "moe_align_block_size_kernel",
-        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "expert_ids_ptr", "num_tokens_post_pad_ptr", "cumsum_ptr" },
+        .inputs = &.{ "topk_ids_ptr", "expert_partition_ptr", "sorted_token_ids_ptr", "expert_ids_ptr", "num_tokens_post_pad_ptr", "cumsum_ptr" },
         .outputs = &.{ "sorted_token_ids", "expert_ids", "num_tokens_post_pad", "cumsum" },
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .expert_ids_ptr = .{ .ptr = .i32 },
             .num_tokens_post_pad_ptr = .{ .ptr = .i32 },
@@ -483,6 +723,10 @@ pub const MoeAlignBlockSize = struct {
         const max_num_tokens_padded: i32 = @intCast(cfg.max_num_tokens_padded);
         const max_num_m_blocks: i64 = @intCast(cfg.max_num_m_blocks);
         const hist_block: i64 = @intCast(cfg.hist_block);
+        const expert_start = if (cfg.localize_contiguous_experts)
+            b.load(a.expert_partition_ptr).mul(num_experts)
+        else
+            b.liftAs(0, .i32);
 
         const pid = b.programId(.x);
         const fill_offs = b.arange(0, hist_block, .i32);
@@ -515,11 +759,12 @@ pub const MoeAlignBlockSize = struct {
         {
             const offs = hist_loop.iv.add(token_offs);
             const mask = offs.lt(numel);
-            const expert_vals = b.loadOpts(a.topk_ids_ptr.addPtr(offs), .{
+            const global_expert_vals = b.loadOpts(a.topk_ids_ptr.addPtr(offs), .{
                 .mask = mask,
-                .other = b.splat(num_experts, &.{hist_block}),
+                .other = expert_start.add(num_experts).splatTo(&.{hist_block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            const expert_vals = global_expert_vals.sub(expert_start);
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
             const h = b.histogramOpts(expert_vals, padded_num_experts, .{ .mask = valid });
             hist_loop.yield(.{hist_loop.carried[0].add(h)});
         }
@@ -581,16 +826,18 @@ pub const CountAndSortExpertTokens = struct {
         numel: usize,
         num_experts: usize,
         sort_block_size: usize,
+        localize_contiguous_experts: bool,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "count_and_sort_expert_tokens_kernel",
-        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "cumsum_ptr" },
+        .inputs = &.{ "topk_ids_ptr", "expert_partition_ptr", "sorted_token_ids_ptr", "cumsum_ptr" },
         .outputs = &.{ "sorted_token_ids", "cumsum" },
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .cumsum_ptr = .{ .ptr = .i32 },
             .out0_ptr = .{ .ptr = .i32 },
@@ -601,6 +848,10 @@ pub const CountAndSortExpertTokens = struct {
         const numel: i32 = @intCast(cfg.numel);
         const num_experts: i32 = @intCast(cfg.num_experts);
         const block_i32: i32 = @intCast(block);
+        const expert_start = if (cfg.localize_contiguous_experts)
+            b.load(a.expert_partition_ptr).mul(num_experts)
+        else
+            b.liftAs(0, .i32);
 
         const pid = b.programId(.x);
         const num_progs = b.numPrograms(.x);
@@ -623,11 +874,12 @@ pub const CountAndSortExpertTokens = struct {
 
             // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
             const topk_ptrs = a.topk_ids_ptr.addPtr(offs);
-            const expert_vals = b.loadOpts(topk_ptrs, .{
+            const global_expert_vals = b.loadOpts(topk_ptrs, .{
                 .mask = mask,
-                .other = b.splat(num_experts, &.{block}),
+                .other = expert_start.add(num_experts).splatTo(&.{block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            const expert_vals = global_expert_vals.sub(expert_start);
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
 
             // rank = atomic_add(cumsum + expert_vals, 1, mask=valid, sem="relaxed")
             const cumsum_ptrs = a.cumsum_ptr.addPtr(expert_vals);
