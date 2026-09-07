@@ -751,6 +751,59 @@ test "if" {
     }
 }
 
+test "if captures tagged quantized linear" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    const IfMod = struct {
+        input: Tensor,
+        linear: zml.nn.Linear,
+
+        pub fn forward(pred: Tensor, input: Tensor, weight: Tensor, scales: Tensor) Tensor {
+            const linear: zml.nn.Linear = .{
+                .weight = weight,
+                .tag = Shape.toTag(.in),
+                .quantization = .{ .scheme = .fp8_block128, .scales = scales },
+            };
+            return @"if"(@This(), .{ .input = input, .linear = linear }, pred.convert(.bool));
+        }
+
+        pub fn onTrue(ctx: @This()) Tensor {
+            return ctx.input.dot(ctx.linear.weight, ctx.linear.tag).addConstant(1);
+        }
+
+        pub fn onFalse(ctx: @This()) Tensor {
+            return ctx.input.dot(ctx.linear.weight, ctx.linear.tag).subConstant(1);
+        }
+    };
+
+    const pred: Tensor = .init(.{}, .i32);
+    const input: Tensor = .init(.{ .b = 1, .in = 2 }, .f32);
+    const weight: Tensor = .init(.{ .out = 2, .in = 2 }, .f32);
+    const scales: Tensor = .init(.{ .out_block = 1, .in_block = 1 }, .f32);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, IfMod.forward, .{ pred, input, weight, scales }, .{});
+    defer exe.deinit();
+
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[2]f32{ 2, 3 }));
+    defer input_buffer.deinit();
+    var weight_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(&[4]f32{ 1, 0, 0, 1 }));
+    defer weight_buffer.deinit();
+    var scales_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scales.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{1}));
+    defer scales_buffer.deinit();
+
+    inline for (.{ .{ 1, [2]f32{ 3, 4 } }, .{ 0, [2]f32{ 1, 2 } } }) |case| {
+        var pred_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, pred.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{case[0]}));
+        defer pred_buffer.deinit();
+        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, IfMod.forward, .{ pred_buffer, input_buffer, weight_buffer, scales_buffer });
+        defer result.deinit();
+        var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer host.free(std.testing.allocator);
+        inline for (case[1], 0..) |expected, i| {
+            try std.testing.expectEqual(expected, host.items(f32)[i]);
+        }
+    }
+}
+
 /// Simpler variant of `zml.ops.if` that assumes code-motion is supported by the backend.
 /// The two branches are evaluated before the condition, then the condition chose which branches to keep.
 pub fn if2(

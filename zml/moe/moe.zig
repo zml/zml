@@ -33,6 +33,7 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
+                .f8e4m3fn, .f8e4m3fnuz => .triton,
                 .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
                     .flashinfer_cutlass
                 else
@@ -40,7 +41,11 @@ pub const Backend = enum {
                 .f8e8m0, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
-            .rocm, .oneapi => switch (weights_dtype) {
+            .rocm => switch (weights_dtype) {
+                .bf16, .f16, .f32, .f8e4m3fn, .f8e4m3fnuz => .triton,
+                else => error.UnsupportedDataType,
+            },
+            .oneapi => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
