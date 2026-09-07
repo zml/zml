@@ -86,6 +86,20 @@ pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tenso
         .renameTag(.kb, result_tag);
 }
 
+/// Backend routing must also recognize a one-tile block grid. Classification
+/// intentionally treats that ambiguous shape as per-tensor FP8 instead.
+fn isBlock128ScaleGrid(weight: Shape, scale: Shape) bool {
+    if ((weight.dtype() != .f8e4m3fn and weight.dtype() != .f8e4m3fnuz) or weight.rank() != 2 or
+        @mod(weight.dim(1), 128) != 0 or
+        (scale.dtype() != .bf16 and scale.dtype() != .f32) or scale.rank() != 2)
+    {
+        return false;
+    }
+
+    return scale.dim(0) == std.math.divCeil(i64, weight.dim(0), 128) catch unreachable and
+        scale.dim(1) == std.math.divCeil(i64, weight.dim(1), 128) catch unreachable;
+}
+
 test "unpackFp4 expands the requested axis" {
     const platform = zml.testing.env();
     const packed_weight: Tensor = .init(.{ .out = 2, .stored = 4 }, .u8);
@@ -106,12 +120,13 @@ test "unpackFp4 expands the requested axis" {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN values on CUDA, E4M3FNUZ on ROCm, F32 128x128 scales
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
 /// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// 2. XLA's block-128 W8A8 arm on CUDA and ROCm
+/// 3. Unsupported non-block-FP8 combos fall back to dequant + Dot
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -138,6 +153,7 @@ pub fn scaledDot(
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
         res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -159,6 +175,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -168,6 +185,43 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_shape._partitioning.set(res_shape.rank() - 1, rhs.shape().partition(r));
+    }
+
+    if (isBlock128ScaleGrid(rhs.shape(), rhs_scale.shape())) {
+        switch (zml.Compiler.current().platform.target) {
+            // ScaledDot has a native Shardy rule. Keep it outside a manual
+            // computation so XLA partitions the value and scale operands together
+            // and only reduces a result whose contracting dimension is sharded.
+            .cuda, .rocm => {
+                stdx.debug.assert(
+                    dot_axes.contracting.len == 1 and dot_axes.batching.len == 0 and
+                        lhs.axis(-1) == dot_axes.contracting.get(0)[0] and rhs.axis(-1) == dot_axes.contracting.get(0)[1],
+                    "native block FP8 dot only supports a single trailing contraction without batching; got {f} and {f}",
+                    .{ lhs.shape(), rhs.shape() },
+                );
+                stdx.debug.assert(@mod(rhs.dim(0), 128) == 0, "block FP8 dot requires N divisible by 128, got {f}", .{rhs.shape()});
+                stdx.debug.assert(rhs_scale.dtype() == .f32, "block FP8 dot requires F32 weight scales, got {f}", .{rhs_scale.shape()});
+                const input: quantization.QuantizedInput = if (lhs_scale) |scale|
+                    .{ .values = lhs, .scales = scale }
+                else input: {
+                    stdx.debug.assert(lhs.dtype() == .bf16, "block FP8 dot expects BF16 input or prequantized values/scales, got {f}", .{lhs.shape()});
+                    break :input quantization.quantizeBlockFp8(lhs, -1, rhs.dtype());
+                };
+                stdx.debug.assert(input.values.dtype() == rhs.dtype() and input.scales.dtype() == .f32, "block FP8 dot requires matching FP8 values and F32 activation scales", .{});
+                stdx.debug.assert(input.scales.rank() == lhs.rank(), "block FP8 activation scales must have the input rank", .{});
+                for (0..lhs.rank()) |axis| {
+                    const expected = if (axis == lhs.rank() - 1) @divExact(lhs.dim(axis), 128) else lhs.dim(axis);
+                    stdx.debug.assert(input.scales.dim(axis) == expected, "block FP8 activation scale grid mismatch: {f} and {f}", .{ lhs.shape(), input.scales.shape() });
+                }
+                const k = rhs.dim(1);
+                const m: i64 = @intCast(lhs.shape().count() / @as(usize, @intCast(k)));
+                const a = input.values.reshape(.{ .fp8_m = m, .fp8_k = k });
+                const a_scale = input.scales.reshape(.{ .fp8_m = m, .fp8_ks = @divExact(k, 128) });
+                return scaledDotComposite(a, rhs, a_scale, rhs_scale, .{ .contracting = .init(&.{.{ 1, 1 }}), .batching = .empty }, Shape.init(.{ .fp8_m = m, .fp8_n = rhs.dim(0) }, .bf16)).reshape(res_shape);
+            },
+            else => {},
+        }
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
@@ -179,25 +233,36 @@ pub fn scaledDot(
     else
         rhs_scale;
 
+    return scaledDotComposite(lhs, rhs, lhs_scale_operand, rhs_scale_operand, dot_axes, res_shape);
+}
+
+fn scaledDotComposite(lhs: Tensor, rhs: Tensor, lhs_scale: Tensor, rhs_scale: Tensor, dot_axes: Tensor.DotAxes, res_shape: Shape) Tensor {
+    var lhs_contracting: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var rhs_contracting: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var lhs_batching: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    var rhs_batching: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+    for (dot_axes.contracting.constSlice()) |axes| {
+        lhs_contracting.appendAssumeCapacity(axes[0]);
+        rhs_contracting.appendAssumeCapacity(axes[1]);
+    }
+    for (dot_axes.batching.constSlice()) |axes| {
+        lhs_batching.appendAssumeCapacity(axes[0]);
+        rhs_batching.appendAssumeCapacity(axes[1]);
+    }
     const mlir_ctx = zml.Compiler.current().mlir_ctx;
     const dnums = mlir.Attribute.array(mlir_ctx, &.{
         .array(mlir_ctx, &.{
-            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
-            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, lhs_contracting.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting.constSlice()),
         }),
         .array(mlir_ctx, &.{
-            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
-            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, lhs_batching.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching.constSlice()),
         }),
     });
-
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
-
-    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+    return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale, rhs_scale }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
-    });
-
-    return outs[0];
+    })[0];
 }
 
 /// `shape` with every dimension collapsed to 1
