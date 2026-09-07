@@ -749,6 +749,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // This is what AMD recommendeds in the meantime.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
+            .metal => {
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
+            },
             .oneapi => {
                 // More efficient for the allgather/broadcast implementation of the collective permute.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_collective_permute_connected_components", true, upb_arena);
