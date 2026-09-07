@@ -37,10 +37,6 @@ pub const Layout = struct {
         allocator.free(self.audio_indices);
         allocator.free(self.video_indices);
     }
-
-    pub fn seqLen(self: Layout) u32 {
-        return @intCast(self.token_tags.len);
-    }
 };
 
 fn padUnique(out: []f32, unique: []const f32) void {
@@ -99,7 +95,7 @@ pub fn writeRowPlan(
     timestep_indices: []u32,
     unique_out: []f32,
 ) void {
-    std.debug.assert(row_ts.len == layout.seqLen());
+    std.debug.assert(row_ts.len == layout.token_tags.len);
     @memset(row_ts, video_t);
     for (layout.audio_indices) |idx| row_ts[idx] = audio_t;
     var unique: [config.timestep_slot_count]f32 = undefined;
@@ -144,10 +140,6 @@ pub const Schedule = struct {
 
     pub fn deinit(self: Schedule, allocator: std.mem.Allocator) void {
         allocator.free(self.sigmas);
-    }
-
-    pub fn stepCount(self: Schedule) usize {
-        return self.sigmas.len - 1;
     }
 
     /// Flow time `1 − σ` at step `i`.

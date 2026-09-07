@@ -17,7 +17,7 @@ pub const Run = struct {
     io: std.Io,
     platform: *const zml.Platform,
     shardings: config.Shardings,
-    mesh_buf: [1]zml.Sharding,
+    mesh: [1]zml.Sharding,
     progress: *std.Progress.Node,
 
     pub fn init(
@@ -32,13 +32,9 @@ pub const Run = struct {
             .io = io,
             .platform = platform,
             .shardings = shardings,
-            .mesh_buf = shardings.all(),
+            .mesh = .{shardings.model},
             .progress = progress,
         };
-    }
-
-    pub fn mesh(self: *const Run) []const zml.Sharding {
-        return &self.mesh_buf;
     }
 };
 
@@ -79,13 +75,13 @@ pub fn load(
 ) !zml.Bufferized(T) {
     var buffers = try zml.mem.bufferize(run.allocator, T, m);
     if (loader) |shared| {
-        try shared.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
+        try shared.load(run.io, T, m, &buffers, store, &run.mesh, .{ .progress = run.progress });
         try shared.await(run.io);
         return buffers;
     }
     var owned: zml.io.Loader = try .init(run.allocator, run.platform, loader_opts);
     defer owned.deinit();
-    try owned.load(run.io, T, m, &buffers, store, run.mesh(), .{ .progress = run.progress });
+    try owned.load(run.io, T, m, &buffers, store, &run.mesh, .{ .progress = run.progress });
     try owned.await(run.io);
     return buffers;
 }

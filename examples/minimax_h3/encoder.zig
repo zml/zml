@@ -222,7 +222,7 @@ pub const Encoder = struct {
         defer node.end();
         const dt = self.embed_tokens.weight.dtype();
         const embed = try zml.FnExe(EmbedTokens.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_encoder_embed",
         }, .{.{
             .embedding = .{ .embed_tokens = self.embed_tokens },
@@ -230,7 +230,7 @@ pub const Encoder = struct {
         }});
         errdefer embed.deinit();
         const layer = try zml.FnExe(TransformerLayer.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_encoder_layer",
         }, .{.{
             .layer = self.layers[0],

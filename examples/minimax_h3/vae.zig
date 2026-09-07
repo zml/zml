@@ -186,13 +186,9 @@ const NchwStitcher = struct {
         allocator.free(self.work);
     }
 
-    fn tileN(self: NchwStitcher) usize {
-        return @as(usize, self.channels) * self.t * self.tile_h * self.tile_w;
-    }
-
     /// Blend this tile with its top/left neighbors and copy the unique region into `acc`.
     pub fn push(self: *NchwStitcher, yi: u32, xi: u32, tile: []const f32) void {
-        const n = self.tileN();
+        const n = @as(usize, self.channels) * self.t * self.tile_h * self.tile_w;
         @memcpy(self.curr_row[xi * n ..][0..n], tile[0..n]);
         @memcpy(self.work[0..n], tile[0..n]);
         if (yi > 0) blend(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1], true);
@@ -214,10 +210,6 @@ const NchwStitcher = struct {
 fn vitCoords(dim: u32, out: []f32) void {
     const d: f32 = @floatFromInt(dim);
     for (0..dim) |i| out[i] = 2.0 * ((@as(f32, @floatFromInt(i)) + 0.5) / d) - 1.0;
-}
-
-fn withModelBatch(like: zml.Tensor, t: zml.Tensor) zml.Tensor {
-    return if (like.shape().partition(.b).eql(.init(.model))) t.withPartitioning(.{ .b = .model }) else t;
 }
 
 fn vaeTokens() u32 {
@@ -343,7 +335,7 @@ const VitAttn = struct {
         const v = applyLinear(self.v, x).splitAxis(.dout, heads);
         q = zml.nn.applyRotary(zml.nn.rmsNorm(q, .hd, self.eps), cos, sin);
         k = zml.nn.applyRotary(zml.nn.rmsNorm(k, .hd, self.eps), cos, sin);
-        // Eager SDPA (not DiT `attention.dense`). Head dim 64 would be legal for FA2.
+        // Portable SDPA (CPU / CUDA / …). DiT uses `attention.dense` for the long packed seq.
         return applyLinear(self.out, zml.nn.sdpa(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
@@ -402,12 +394,12 @@ const EmbedModel = struct {
             .forward(x.convert(post_w.dtype()))
             .convert(x.dtype())
             .rename(.{ .dout = .d });
-        const tokens = withModelBatch(x, applyLinear(self.proj, quantized).rename(.{ .dout = .d }));
-        const hidden = withModelBatch(x, zml.Tensor.concatenate(&.{
+        const tokens = applyLinear(self.proj, quantized).rename(.{ .dout = .d });
+        const hidden = zml.Tensor.concatenate(&.{
             tokens,
             self.register_tokens.convert(tokens.dtype()).broad(tokens.shape().setDim(.s, self.register_tokens.dim(.s))),
             zml.Tensor.zeroes(tokens.shape().setDim(.s, 1)),
-        }, .s));
+        }, .s);
         const rotary_dim = self.cfg.rotaryDim();
         const inv = zml.Tensor.scalar(self.cfg.decoder_rope_theta, .f32)
             .pow(zml.Tensor.arange(.{ .end = @divExact(rotary_dim, 6) }, .f32).withTags(.{.f}).scale(-@as(f32, 6) / @as(f32, @floatFromInt(rotary_dim))));
@@ -443,7 +435,6 @@ pub const Vae = struct {
         block: zml.FnExe(VitBlock.forward),
         finish: zml.FnExe(FinishModel.forward),
         tile_batch: u32,
-        partition_b: bool,
 
         fn deinit(self: *Compiled) void {
             self.embed.deinit();
@@ -484,39 +475,36 @@ pub const Vae = struct {
     pub fn compile(self: *Vae, run: *const Run) !void {
         const batch: u32 = config.vae_tile_batch;
         const seq_len = vaeSeq(@intCast(self.cfg.decoder_num_register_tokens));
-        const tp: u32 = @intCast(run.shardings.model.numPartitionsForLogicalAxis(.model));
-        // `.b = .model` only when the official 28-tile batch divides TP (2/4 GPUs, not 8).
-        const partition_b = batch > 1 and tp > 1 and batch % tp == 0;
         var node = run.progress.start("Compiling MiniMax-H3 VAE", 3);
         defer node.end();
         const vae_dt = self.embed.proj.weight.dtype();
         const embed_exe = try zml.FnExe(EmbedModel.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_vae_embed",
         }, .{.{
             .model = self.embed,
-            .latents = vaeBatchShape(.{ .b = batch, .s = vaeTokens(), .d = self.cfg.latent_channels }, .f32, partition_b),
+            .latents = .init(.{ .b = batch, .s = vaeTokens(), .d = self.cfg.latent_channels }, .f32),
             .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
         }});
         errdefer embed_exe.deinit();
         const block_exe = try zml.FnExe(VitBlock.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_vae_block",
         }, .{.{
             .layer = self.blocks[0],
-            .hidden = vaeBatchShape(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt, partition_b),
+            .hidden = .init(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt),
             .cos = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, vae_dt),
             .sin = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, vae_dt),
         }});
         errdefer block_exe.deinit();
         const finish_exe = try zml.FnExe(FinishModel.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_vae_finish",
         }, .{.{
             .model = self.finish,
-            .hidden = vaeBatchShape(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt, partition_b),
+            .hidden = .init(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt),
         }});
-        self.compiled = .{ .embed = embed_exe, .block = block_exe, .finish = finish_exe, .tile_batch = batch, .partition_b = partition_b };
+        self.compiled = .{ .embed = embed_exe, .block = block_exe, .finish = finish_exe, .tile_batch = batch };
     }
 
     /// THWC latents → NCHW RGB in `[0, 1]`, tiled and temporally chunked.
@@ -714,12 +702,6 @@ fn unpackPatches(allocator: std.mem.Allocator, patches: []const f32, patch_t: u3
 // Compile / run
 // =============================================================================
 
-fn vaeBatchShape(tags: anytype, dt: zml.DataType, partition_b: bool) zml.Tensor {
-    const t = zml.Tensor.init(tags, dt);
-    return if (partition_b) t.withPartitioning(.{ .b = .model }) else t;
-}
-
-
 /// Copy a 7×16×16 latent window at `(t0,h0,w0)` into `dst` (zero-padded at edges).
 fn copyLatentTile(src: []const f32, src_t: u32, src_h: u32, src_w: u32, channels: u32, t0: u32, h0: u32, w0: u32, dst: []f32) void {
     @memset(dst, 0);
@@ -786,12 +768,8 @@ fn runVaeBatch(
 ) ![]f32 {
     const compiled = if (loaded.compiled) |*c| c else return error.NotCompiled;
     const batch = compiled.tile_batch;
-    var latent_shape: zml.Shape = .init(.{ .b = batch, .s = vaeTokens(), .d = loaded.cfg.latent_channels }, .f32);
-    const latent_sharding: zml.Sharding = if (compiled.partition_b) blk: {
-        latent_shape = latent_shape.withPartitioning(.{ .b = .model });
-        break :blk run.mesh()[0];
-    } else .replicated;
-    var latent_buf = try zml.Buffer.fromBytes(run.io, run.platform, latent_shape, latent_sharding, std.mem.sliceAsBytes(packed_latents));
+    const latent_shape: zml.Shape = .init(.{ .b = batch, .s = vaeTokens(), .d = loaded.cfg.latent_channels }, .f32);
+    var latent_buf = try zml.Buffer.fromBytes(run.io, run.platform, latent_shape, .replicated, std.mem.sliceAsBytes(packed_latents));
     defer latent_buf.deinit();
     var hidden: zml.Buffer = undefined;
     var cos: zml.Buffer = undefined;

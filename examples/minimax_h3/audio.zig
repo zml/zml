@@ -429,7 +429,7 @@ pub const AudioVae = struct {
         var node = run.progress.start("Compiling MiniMax-H3 audio VAE", 1);
         defer node.end();
         self.compiled = try zml.FnExe(decode).compile(run.allocator, run.io, run.platform, .{
-            .shardings = run.mesh(),
+            .shardings = &run.mesh,
             .program_name = "minimax_h3_audio_decode",
         }, .{.{
             .model = self.inner,

@@ -43,8 +43,7 @@ pub const vae_frame_overlap: u32 = 5;
 pub const vae_latent_t: u32 = 7;
 pub const vae_latent_h: u32 = 16;
 pub const vae_latent_w: u32 = 16;
-/// Tile batch compiled for the ViT decoder. `.b = .model` only when this divides TP
-/// (2/4 GPUs). On 8 GPUs `28 % 8 != 0`, so the batch is replicated.
+/// Tile batch compiled for the ViT decoder. Replicated on every device count.
 pub const vae_tile_batch: u32 = 28;
 
 /// Snake-beta upsample / downsample in the audio decoder.
@@ -155,23 +154,19 @@ fn audioLatentFromFrames(frames: u32) u32 {
 }
 
 /// Head-wise tensor-parallel mesh on `.model`.
-/// DiT and the text encoder shard `.h = .model`; the VAE is replicated (optional
-/// `.b = .model` when the 28-tile batch divides TP). `tpCount` still requires the
-/// VAE head count to divide so a later head-TP VAE would fit the same mesh.
+/// DiT and the text encoder shard `.h = .model`; the VAE and audio decoder stay replicated.
 pub const Shardings = struct {
     model: zml.Sharding,
 
     fn tpCount(available: usize) usize {
         const dit: Config = .{};
         const enc: EncoderConfig = .{};
-        const vae: VisualConfig = .{};
         var n = available;
         while (n > 1) : (n -= 1) {
             const d: i64 = @intCast(n);
             if (@mod(dit.num_attention_heads, d) == 0 and
                 @mod(enc.num_attention_heads, d) == 0 and
-                @mod(enc.num_key_value_heads, d) == 0 and
-                @mod(vae.decoder_num_attention_heads, d) == 0)
+                @mod(enc.num_key_value_heads, d) == 0)
                 return n;
         }
         return 1;
@@ -191,10 +186,6 @@ pub const Shardings = struct {
         return .{
             .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
         };
-    }
-
-    pub fn all(self: Shardings) [1]zml.Sharding {
-        return .{self.model};
     }
 };
 
