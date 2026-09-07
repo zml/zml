@@ -44,30 +44,34 @@ pub const Linear = struct {
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 
+    /// Apply this layer to reusable quantized activation values and scales.
+    /// The output is BF16; global scales and bias follow the ordinary forward path.
+    pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput) Tensor {
+        stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
+        const y = self.forwardQuantizedWeight(input);
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+
     fn forwardWeight(self: Linear, x: Tensor) Tensor {
         const q = self.quantization orelse return x.dot(self.weight, self.tag);
-
-        const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
-
-        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
-            q.scales.bitCast(.f8e8m0)
-        else
-            q.scales;
-
-        var lhs = x.convert(.bf16);
-        var lhs_scale: ?Tensor = null;
-        var undo_input_scale: ?Tensor = null;
-
-        const platform = zml.Compiler.current().platform;
-        if (quantization.quantizeInput(q, lhs, self.tag, platform)) |quantized_input| {
-            lhs = quantized_input.values;
-            lhs_scale = quantized_input.scales;
-            undo_input_scale = quantized_input.global_scale;
+        const lhs = x.convert(.bf16);
+        if (quantization.quantizeInput(q, lhs, self.tag, zml.Compiler.current().platform)) |input| {
+            return self.forwardQuantizedWeight(input).convert(x.dtype());
         }
+        return self.forwardScaledWeight(lhs, null, null).convert(x.dtype());
+    }
 
+    fn forwardQuantizedWeight(self: Linear, input: quantization.QuantizedInput) Tensor {
+        return self.forwardScaledWeight(input.values, input.scales, input.global_scale).convert(.bf16);
+    }
+
+    fn forwardScaledWeight(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor) Tensor {
+        const q = self.quantization.?;
+        const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
-        return applyGlobalScale(acc, undo_input_scale, weight_global_scale).convert(x.dtype());
+        return applyGlobalScale(acc, input_global_scale, weight_global_scale);
     }
 };
 
