@@ -201,6 +201,14 @@ pub fn fusedExpertsImpl(
     const block_fp8 = hasBlock128Scale(w1, opts.w1_scale) and hasBlock128Scale(w2, opts.w2_scale);
     if (block_fp8) options.block_size_k = 128;
     const rocm_block_fp8 = block_fp8 and zml.Compiler.current().platform.target == .rocm;
+    if (rocm_block_fp8 and num_tokens <= 16) {
+        options.block_size_m = 16;
+        options.block_size_n = 64;
+        options.block_size_k = 128;
+        options.group_size_m = 1;
+        options.num_warps = 4;
+        options.num_stages = 3;
+    }
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up_fn = w1.withTags(.{ .expert, .out, .in });
