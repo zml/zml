@@ -777,7 +777,7 @@ pub const Moe = struct {
             routing_scores,
             self.gate_up_proj,
             self.down_proj,
-            .{},
+            .{ .quantize_input = false },
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
