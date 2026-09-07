@@ -195,6 +195,121 @@ pub const Metadata = union(Backend) {
 
 pub const Options = struct {
     activation_threshold: ?f32 = null,
+    quant_scheme: ?zml.Quantization.Scheme = null,
+};
+
+pub const TritonMoe = struct {
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    weights_gate_up: zml.Tensor,
+    weights_down: zml.Tensor,
+    gate_up_scale: ?zml.Tensor,
+    down_scale: ?zml.Tensor,
+    activation: triton.Parameters.ActivationMode,
+    global_num_experts: i64,
+    quant_scheme: ?zml.Quantization.Scheme,
+    activation_threshold: ?f32,
+
+    /// Validate global expert-parallel tensors before entering manualComputation.
+    /// The resulting tensors must be localized together with the caller's inputs.
+    pub fn initExpertParallel(
+        input: zml.Tensor,
+        topk_ids: zml.Tensor,
+        topk_weights: zml.Tensor,
+        gate_up: zml.nn.Linear,
+        down: zml.nn.Linear,
+        opts: Options,
+        activation: triton.Parameters.ActivationMode,
+    ) !TritonMoe {
+        if (!gate_up.weight.shape().partition(.expert).eql(.init(.experts)) or
+            !down.weight.shape().partition(.expert).eql(.init(.experts)))
+        {
+            return error.ExpectedExpertParallelSharding;
+        }
+        if (gate_up.weight.shape().remove(.expert).hasAtLeastOnePartitionedAxis() or
+            down.weight.shape().remove(.expert).hasAtLeastOnePartitionedAxis())
+        {
+            return error.UnsupportedTensorParallelSharding;
+        }
+        const gate_up_quant = gate_up.quantization orelse return error.MissingWeightScale;
+        const gate_up_scale = gate_up_quant.scales;
+        const down_quant = down.quantization orelse return error.MissingWeightScale;
+        const down_scale = down_quant.scales;
+        if (!gate_up_scale.shape().partition(.expert).eql(.init(.experts)) or
+            !down_scale.shape().partition(.expert).eql(.init(.experts)))
+        {
+            return error.InconsistentExpertSharding;
+        }
+        if (gate_up_scale.shape().remove(.expert).hasAtLeastOnePartitionedAxis() or
+            down_scale.shape().remove(.expert).hasAtLeastOnePartitionedAxis())
+        {
+            return error.UnsupportedTensorParallelSharding;
+        }
+        if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
+        if (gate_up_quant.global_scale != null or down_quant.global_scale != null) return error.UnsupportedQuantization;
+        if (gate_up_quant.scheme != .fp8_block128 or down_quant.scheme != .fp8_block128 or
+            (opts.quant_scheme != null and opts.quant_scheme != .fp8_block128)) return error.UnsupportedQuantization;
+
+        return .{
+            .input = input,
+            .topk_ids = topk_ids,
+            .topk_weights = topk_weights,
+            .weights_gate_up = gate_up.weight,
+            .weights_down = down.weight,
+            .gate_up_scale = gate_up_scale,
+            .down_scale = down_scale,
+            .activation = activation,
+            .global_num_experts = gate_up.weight.dim(.expert),
+            .quant_scheme = gate_up_quant.scheme,
+            .activation_threshold = opts.activation_threshold,
+        };
+    }
+
+    /// Compute the local expert contribution inside manualComputation.
+    /// The caller is responsible for summing contributions across partitions.
+    pub fn forwardLocal(self: TritonMoe, prepared: ?zml.quantization.QuantizedInput) zml.Tensor {
+        return self.forward(self.expertMap(), prepared);
+    }
+
+    fn expertMap(self: TritonMoe) zml.Tensor {
+        const local_num_experts = self.weights_gate_up.dim(.expert);
+        const expert_start = zml.ops.partitionId().convert(.i32).scale(local_num_experts).convert(.i32);
+        const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+        const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+            .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+        return local_expert_mask.select(global_expert_ids.sub(expert_start), zml.Tensor.scalar(-1, .i32));
+    }
+
+    fn forward(self: TritonMoe, expert_map: ?zml.Tensor, prepared_a1: ?zml.quantization.QuantizedInput) zml.Tensor {
+        const output = triton.fusedExpertsImpl(
+            self.input,
+            self.weights_gate_up,
+            self.weights_down,
+            self.topk_weights,
+            self.topk_ids,
+            .{},
+            .{
+                .activation = self.activation,
+                .global_num_experts = self.global_num_experts,
+                .expert_map = expert_map,
+                .w1_scale = self.gate_up_scale,
+                .w2_scale = self.down_scale,
+                .quant_scheme = self.quant_scheme,
+                .activation_threshold = self.activation_threshold,
+                .prepared_a1 = prepared_a1,
+            },
+        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+        return output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
+    }
+
+    fn expertParallel(self: TritonMoe, _: zml.Shape) zml.Tensor {
+        return zml.ops.allReduce(self.forwardLocal(null), zml.Tensor.add);
+    }
+
+    fn tensorParallel(self: TritonMoe, _: zml.Shape) zml.Tensor {
+        return zml.ops.allReduce(self.forward(null, null), zml.Tensor.add);
+    }
 };
 
 pub fn forwardMoe(
@@ -434,6 +549,36 @@ pub fn forwardMoe(
 
             const global_num_experts = gate_up.weight.dim(.expert);
             const expert_partition = gate_up.weight.shape().partition(.expert);
+            const model_partition = zml.Shape.PartitionSpec.init(.model);
+            const gate_up_tensor_parallel = gate_up.weight.shape().partition(1).eql(model_partition);
+            const down_tensor_parallel = down.weight.shape().partition(2).eql(model_partition);
+
+            if (gate_up_tensor_parallel != down_tensor_parallel) {
+                return error.InconsistentTensorParallelSharding;
+            }
+
+            if (gate_up_tensor_parallel) {
+                if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
+                if ((gate_up_scales == null) != (down_scales == null)) return error.MissingWeightScale;
+
+                break :b zml.ops.manualComputation(
+                    TritonMoe.tensorParallel,
+                    .{
+                        .input = input,
+                        .topk_ids = topk_ids,
+                        .topk_weights = topk_weights,
+                        .weights_gate_up = gate_up.weight,
+                        .weights_down = down.weight,
+                        .gate_up_scale = gate_up_scales,
+                        .down_scale = down_scales,
+                        .activation = parameters.triton.activation,
+                        .global_num_experts = global_num_experts,
+                        .quant_scheme = quant_scheme,
+                        .activation_threshold = opts.activation_threshold,
+                    },
+                    input.shape(),
+                );
+            }
 
             if (!expert_partition.eql(.init(.experts))) {
                 break :b try triton.fusedExpertsImpl(
@@ -456,74 +601,21 @@ pub fn forwardMoe(
                 );
             }
 
+            if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
             break :b zml.ops.manualComputation(
-                (struct {
-                    input: zml.Tensor,
-                    topk_ids: zml.Tensor,
-                    topk_weights: zml.Tensor,
-                    weights_gate_up: zml.Tensor,
-                    weights_down: zml.Tensor,
-                    activation: triton.Parameters.ActivationMode,
-                    global_num_experts: i64,
-                    bias_gate_up: ?zml.Tensor,
-                    bias_down: ?zml.Tensor,
-                    quant_scheme: ?zml.Quantization.Scheme,
-                    activation_threshold: ?f32,
-                    scales_gate_up: ?zml.Tensor,
-                    scales_down: ?zml.Tensor,
-
-                    fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                        const local_num_experts = self.weights_gate_up.dim(.expert);
-                        const partition_id = zml.ops.partitionId().convert(.i32);
-                        const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                        // List of global expert ids
-                        const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                        // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
-                        const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                            .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                        const expert_map = local_expert_mask.select(
-                            global_expert_ids.sub(expert_start),
-                            zml.Tensor.scalar(-1, .i32),
-                        );
-
-                        const local_output = triton.fusedExpertsImpl(
-                            self.input,
-                            self.weights_gate_up,
-                            self.weights_down,
-                            self.topk_weights,
-                            self.topk_ids,
-                            .{},
-                            .{
-                                .activation = self.activation,
-                                .global_num_experts = self.global_num_experts,
-                                .expert_map = expert_map,
-                                .w1_scale = self.scales_gate_up,
-                                .w2_scale = self.scales_down,
-                                .w1_bias = self.bias_gate_up,
-                                .w2_bias = self.bias_down,
-                                .quant_scheme = self.quant_scheme,
-                                .activation_threshold = self.activation_threshold,
-                            },
-                        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                        const local_reshaped = local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
-                        return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
-                    }
-                }).call,
+                TritonMoe.expertParallel,
                 .{
                     .input = input,
                     .topk_ids = topk_ids,
                     .topk_weights = topk_weights,
                     .weights_gate_up = gate_up.weight,
                     .weights_down = down.weight,
+                    .gate_up_scale = gate_up_scales,
+                    .down_scale = down_scales,
                     .activation = parameters.triton.activation,
                     .global_num_experts = global_num_experts,
-                    .bias_gate_up = gate_up.bias,
-                    .bias_down = down.bias,
                     .quant_scheme = quant_scheme,
                     .activation_threshold = opts.activation_threshold,
-                    .scales_gate_up = gate_up_scales,
-                    .scales_down = down_scales,
                 },
                 input.shape(),
             );

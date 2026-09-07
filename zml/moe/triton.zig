@@ -38,6 +38,7 @@ pub const Options = struct {
     w2_zp: ?Tensor = null,
     a1_scale: ?Tensor = null,
     a2_scale: ?Tensor = null,
+    prepared_a1: ?zml.quantization.QuantizedInput = null,
     block_shape: ?[]const i64 = null,
     w1_bias: ?Tensor = null,
     w2_bias: ?Tensor = null,
@@ -265,8 +266,17 @@ pub fn fusedExpertsImpl(
     } else routing_id_valid.select(routing.expert_ids, Tensor.scalar(-1, .i32));
 
     const hidden_quant, const a_scale = switch (quantization_mode) {
-        .bf16 => .{ hidden, Tensor.scalar(1.0, .f32) },
-        .block128_fp8 => quantizePerTokenGroupFp8(hidden, 128, gate_up.dtype()),
+        .bf16 => blk: {
+            if (opts.prepared_a1 != null) return error.UnsupportedQuantization;
+            break :blk .{ hidden, Tensor.scalar(1.0, .f32) };
+        },
+        .block128_fp8 => blk: {
+            if (opts.prepared_a1) |prepared| {
+                try validatePreparedBlock128Activation(prepared, hidden, gate_up);
+                break :blk .{ prepared.values, prepared.scales };
+            }
+            break :blk quantizePerTokenGroupFp8(hidden, 128, gate_up.dtype());
+        },
     };
 
     const b_bias_1 =
@@ -653,6 +663,19 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, output_dtype: DataType) 
     return .{ outs.y_q, outs.y_s };
 }
 
+/// Quantize one BF16 activation matrix with the same block-128 producer used
+/// by routed FP8 MoE GEMM1. The explicit pair can be passed back through
+/// `Options.prepared_a1` and reused by another native block-scaled dot.
+pub fn prepareBlock128Fp8Activation(x: Tensor, output_dtype: DataType) zml.quantization.QuantizedInput {
+    stdx.debug.assert(x.dtype() == .bf16, "block FP8 activation preparation expects BF16, got {f}", .{x.shape()});
+    const q, const scale = quantizePerTokenGroupFp8(x, 128, output_dtype);
+    return .{
+        .values = q.reshape(x.shape().withDtype(q.dtype())),
+        .scales = scale.reshape(x.shape().setDim(1, @divExact(x.dim(1), 128)).withDtype(.f32)),
+        .global_scale = null,
+    };
+}
+
 // =============================================================================
 // Config / validation helpers
 // =============================================================================
@@ -896,6 +919,22 @@ fn validateOptions(opts: Options) !void {
     if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;
+}
+
+fn validatePreparedBlock128Activation(
+    prepared: zml.quantization.QuantizedInput,
+    hidden: Tensor,
+    gate_up: Tensor,
+) !void {
+    if (prepared.global_scale != null) return error.UnsupportedQuantization;
+    if (prepared.values.dtype() != gate_up.dtype() or prepared.scales.dtype() != .f32) return error.UnsupportedType;
+    if (prepared.values.rank() != 2 or prepared.scales.rank() != 2) return error.InvalidShape;
+    if (prepared.values.dim(0) != hidden.dim(0) or prepared.values.dim(1) != hidden.dim(1)) return error.InvalidShape;
+    if (prepared.scales.dim(0) != hidden.dim(0) or
+        prepared.scales.dim(1) != @divExact(hidden.dim(1), 128))
+    {
+        return error.InvalidShape;
+    }
 }
 
 fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {
