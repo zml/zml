@@ -47,7 +47,7 @@ pub const Quantization = struct {
         /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
         /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
         fp8_per_channel,
-        /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+        /// f8e4m3fn values, one bf16 or f32 scale per 128x128 tile. The DeepSeek-style FP8 that model
         /// vendors publish themselves, under `weight_scale_inv`.
         fp8_block128,
         /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
@@ -59,6 +59,8 @@ pub const Quantization = struct {
 
             const n = weight.dim(0);
             const k = if (isPackedFp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+            const n_blocks = std.math.divCeil(i64, n, 128) catch unreachable;
+            const k_blocks = std.math.divCeil(i64, k, 128) catch unreachable;
 
             return switch (self) {
                 .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
@@ -74,10 +76,10 @@ pub const Quantization = struct {
                     (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
                     scale.dim(0) == n and scale.dim(1) == 1,
-                .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+                .fp8_block128 => weight.dtype() == .f8e4m3fn and
+                    (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
-                    @rem(n, 128) == 0 and @rem(k, 128) == 0 and
-                    scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+                    scale.dim(0) == n_blocks and scale.dim(1) == k_blocks,
             };
         }
 
@@ -196,6 +198,16 @@ test "Quantization.Scheme.classify" {
     try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
         .init(.{ .dout = 5120, .d = 6144 }, .f8e4m3fn),
         .init(.{ .dout = 40, .sc = 48 }, .bf16),
+    ));
+
+    // GLM uses f32 scales and permits a partial final 128-row tile.
+    try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
+        .init(.{ .dout = 2048, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 16, .sc = 48 }, .f32),
+    ));
+    try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
+        .init(.{ .dout = 576, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 5, .sc = 48 }, .f32),
     ));
 
     // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].

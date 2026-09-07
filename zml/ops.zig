@@ -1943,6 +1943,33 @@ pub fn manualComputation(
     return manualComputationSliceToReturn(ReturnT, sharded_outputs);
 }
 
+/// Compatibility adapter for manual computations that keep non-tensor context
+/// separate from their flat tensor operand list.
+pub fn manualComputationWithContext(
+    inputs: anytype,
+    output: Shape,
+    context: anytype,
+    comptime body_fn: anytype,
+) stdx.meta.FnReturn(body_fn) {
+    const Adapter = struct {
+        inputs: @TypeOf(inputs),
+        context: @TypeOf(context),
+
+        fn body(self: @This(), local_output: Shape) stdx.meta.FnReturn(body_fn) {
+            const allocator = std.heap.page_allocator;
+            const local_inputs = meta.collectAlloc((struct {
+                fn identity(tensor: Tensor) Tensor {
+                    return tensor;
+                }
+            }).identity, {}, allocator, &self.inputs) catch @panic("OOM");
+            defer allocator.free(local_inputs);
+            return @call(.auto, body_fn, .{ self.context, allocator, local_inputs, local_output });
+        }
+    };
+
+    return manualComputation(Adapter.body, .{ .inputs = inputs, .context = context }, output);
+}
+
 fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype, local_tensors: []const Tensor) !@TypeOf(inputs) {
     const Context = struct {
         local_tensors: []const Tensor,

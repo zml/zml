@@ -1,0 +1,308 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+fn normalizeOcpEncoding(weight: zml.Tensor) zml.Tensor {
+    return zml.fp8.normalizeOcpEncodingForFnuz(weight);
+}
+
+test "OCP FP8 exceptional encodings are safe to bitcast to FNUZ" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const weight: zml.Tensor = .init(.{ .n = 6 }, .f8e4m3fn);
+    var exe = try platform.compileFn(allocator, io, normalizeOcpEncoding, .{weight}, .{});
+    defer exe.deinit();
+
+    const input_bytes = [_]u8{ 0x00, 0x80, 0x7f, 0xff, 0x38, 0xb8 };
+    const expected_bytes = [_]u8{ 0x00, 0x00, 0x80, 0x80, 0x38, 0xb8 };
+    var input: zml.Buffer = try .fromBytes(io, platform, weight.shape(), .replicated, &input_bytes);
+    defer input.deinit();
+    var output = try zml.testing.autoCall(allocator, io, &exe, normalizeOcpEncoding, .{input});
+    defer output.deinit();
+    var output_host = try output.toSliceAlloc(allocator, io);
+    defer output_host.free(allocator);
+    try std.testing.expectEqualSlices(u8, &expected_bytes, output_host.constData());
+}
+
+fn blockDot(x: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
+    const output_shape = zml.Shape.init(.{ .m = x.dim(0), .n = weight.dim(0) }, .bf16);
+    return zml.fp8.nativeBlockScaledDot(x, weight, weight_scale, output_shape);
+}
+
+fn blockDotError(x: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
+    const actual = zml.nn.scaledDot(x, weight, null, weight_scale, .k);
+    const expanded_scale = weight_scale
+        .stutter(&.{ 128, 128 })
+        .slice(0, .{ .end = weight.dim(0) })
+        .slice(1, .{ .end = weight.dim(1) })
+        .withTags(.{ .n, .k });
+    const reference_weight = weight.convert(.bf16).mul(expanded_scale.convert(.bf16));
+    const reference = x.dot(reference_weight, .k).convert(.bf16);
+    return actual.sub(reference);
+}
+
+fn testCudaBlockDotCase(m: i64, n: i64, k: i64) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+
+    const x: zml.Tensor = .init(.{ .m = m, .k = k }, .bf16);
+    const weight: zml.Tensor = .init(.{ .n = n, .k = k }, .f8e4m3fn);
+    const weight_scale: zml.Tensor = .init(.{
+        .nb = std.math.divCeil(i64, n, 128) catch unreachable,
+        .kb = std.math.divCeil(i64, k, 128) catch unreachable,
+    }, .f32);
+
+    var exe = try platform.compileFn(allocator, io, blockDotError, .{ x, weight, weight_scale }, .{});
+    defer exe.deinit();
+
+    const x_host = try allocator.alloc(zml.floats.BFloat16, x.shape().count());
+    defer allocator.free(x_host);
+    for (x_host, 0..) |*value, i| {
+        const v: f32 = if ((i % @as(usize, @intCast(k))) % 128 < 64) 0.25 else 1.0;
+        value.* = zml.floats.BFloat16.fromF32(v);
+    }
+
+    const weight_host = try allocator.alloc(zml.floats.Float8E4M3FN, weight.shape().count());
+    defer allocator.free(weight_host);
+    for (weight_host, 0..) |*value, i| {
+        const v: f32 = if ((i / @as(usize, @intCast(k))) % 2 == 0) 1.0 else -0.5;
+        value.* = zml.floats.Float8E4M3FN.fromF32(v);
+    }
+
+    const scale_host = try allocator.alloc(f32, weight_scale.shape().count());
+    defer allocator.free(scale_host);
+    const scale_values = [_]f32{ 0.25, 0.5, 1.0, 2.0 };
+    for (scale_host, 0..) |*value, i| value.* = scale_values[i % scale_values.len];
+
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(x_host));
+    defer x_buffer.deinit();
+    var weight_buffer: zml.Buffer = try .fromBytes(io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(weight_host));
+    defer weight_buffer.deinit();
+    var scale_buffer: zml.Buffer = try .fromBytes(io, platform, weight_scale.shape(), .replicated, std.mem.sliceAsBytes(scale_host));
+    defer scale_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, blockDotError, .{ x_buffer, weight_buffer, scale_buffer });
+    defer output.deinit();
+
+    const expected_host = try allocator.alloc(zml.floats.BFloat16, output.shape().count());
+    defer allocator.free(expected_host);
+    @memset(expected_host, zml.floats.BFloat16.fromF32(0.0));
+    const expected: zml.Slice = .init(output.shape(), std.mem.sliceAsBytes(expected_host));
+    try zml.testing.expectClose(io, expected, output, .{ .absolute_tolerance = 4.0, .relative_tolerance = 0.01 });
+}
+
+test "CUDA XLA block-scaled E4M3FN GEMM decode and prefill" {
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // XLA's block-128 W8A8 arm requires complete N and K tiles. Cover its
+    // decode, batched-decode, prefill and long-contraction geometries.
+    try testCudaBlockDotCase(1, 128, 128);
+    try testCudaBlockDotCase(1, 256, 256);
+    try testCudaBlockDotCase(16, 256, 256);
+    try testCudaBlockDotCase(65, 256, 256);
+    try testCudaBlockDotCase(1, 256, 2048);
+    try testCudaBlockDotCase(64, 256, 2048);
+}
+
+const ShardedBlockDotOutputs = struct {
+    column: zml.Tensor,
+    row: zml.Tensor,
+};
+
+fn blockDotsSharded(
+    x: zml.Tensor,
+    column_weight: zml.Tensor,
+    column_scale: zml.Tensor,
+    row_weight: zml.Tensor,
+    row_scale: zml.Tensor,
+) ShardedBlockDotOutputs {
+    return .{
+        .column = zml.nn.scaledDot(
+            x.withPartitioning(.{ .m = .replicated, .k = .replicated }),
+            column_weight.withPartitioning(.{ .n = .model, .k = .replicated }),
+            null,
+            column_scale.withPartitioning(.{ .nb = .model, .kb = .replicated }),
+            .k,
+        ),
+        .row = zml.nn.scaledDot(
+            x.withPartitioning(.{ .m = .replicated, .k = .model }),
+            row_weight.withPartitioning(.{ .n = .replicated, .k = .model }),
+            null,
+            row_scale.withPartitioning(.{ .nb = .replicated, .kb = .model }),
+            .k,
+        ),
+    };
+}
+
+test "CUDA XLA block-scaled FP8 compiles with model sharding" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const width: i64 = @intCast(128 * platform.devices.len);
+    const blocks = @divExact(width, 128);
+    const x: zml.Tensor = .init(.{ .m = 16, .k = width }, .bf16);
+    const column_weight: zml.Tensor = .init(.{ .n = width, .k = width }, .f8e4m3fn);
+    const column_scale: zml.Tensor = .init(.{ .nb = blocks, .kb = blocks }, .f32);
+    const row_weight: zml.Tensor = .init(.{ .n = width, .k = width }, .f8e4m3fn);
+    const row_scale: zml.Tensor = .init(.{ .nb = blocks, .kb = blocks }, .f32);
+
+    const model_sharding = try @constCast(platform).registerSharding("fp8_test_model", .mesh(.{ .model = .high_bandwidth }));
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        blockDotsSharded,
+        .{ x, column_weight, column_scale, row_weight, row_scale },
+        .{ .shardings = &.{model_sharding} },
+    );
+    defer exe.deinit();
+}
+
+test "ROCm Triton block-scaled FP8 GEMM" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const m = 1;
+    // This shape exercises the small-M split-K path as well as the final
+    // FP32 partial reduction.
+    const n = 128;
+    const k = 2048;
+    const x: zml.Tensor = .init(.{ .m = m, .k = k }, .bf16);
+    const weight: zml.Tensor = .init(.{ .n = n, .k = k }, .f8e4m3fn);
+    const weight_scale: zml.Tensor = .init(.{ .nb = n / 128, .kb = k / 128 }, .f32);
+
+    var exe = try platform.compileFn(allocator, io, blockDot, .{ x, weight, weight_scale }, .{});
+    defer exe.deinit();
+
+    const one_bf16 = zml.floats.BFloat16.fromF32(1.0);
+    const one_fp8 = zml.floats.Float8E4M3FN.fromF32(1.0);
+    const x_host: [m][k]zml.floats.BFloat16 = @splat(@splat(one_bf16));
+    const weight_host: [n][k]zml.floats.Float8E4M3FN = @splat(@splat(one_fp8));
+    // llmd performs this FN -> FNUZ scale conversion once while loading.
+    const scale_host: [n / 128][k / 128]f32 = @splat(@splat(2.0));
+
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&x_host));
+    defer x_buffer.deinit();
+    var weight_buffer: zml.Buffer = try .fromBytes(io, platform, weight.shape(), .replicated, std.mem.asBytes(&weight_host));
+    defer weight_buffer.deinit();
+    var scale_buffer: zml.Buffer = try .fromBytes(io, platform, weight_scale.shape(), .replicated, std.mem.asBytes(&scale_host));
+    defer scale_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, blockDot, .{ x_buffer, weight_buffer, scale_buffer });
+    defer output.deinit();
+
+    const expected_host: [m][n]zml.floats.BFloat16 = @splat(@splat(zml.floats.BFloat16.fromF32(k)));
+    const expected: zml.Slice = .init(zml.Shape.init(.{ .m = m, .n = n }, .bf16), std.mem.asBytes(&expected_host));
+    try zml.testing.expectClose(io, expected, output, .{ .absolute_tolerance = 1.0, .relative_tolerance = 0.01 });
+}
+
+fn absorbedDots(q: zml.Tensor, latent: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
+    const key_dim: usize = @intCast(q.dim(2));
+    const value_dim: usize = 128;
+    const key_shape = q.shape().setDim(2, latent.dim(2)).setTag(2, .latent).withDtype(.bf16);
+    const value_shape = latent.shape().setDim(2, @intCast(value_dim)).setTag(2, .value).withDtype(.bf16);
+    const key = zml.fp8.rocmAbsorbedKeyDot(q, weight, weight_scale, key_dim, value_dim, key_shape);
+    const value = zml.fp8.rocmAbsorbedValueDot(latent, weight, weight_scale, key_dim, value_dim, value_shape);
+    return key.slice(.latent, .{ .end = @intCast(value_dim) }).rename(.{ .latent = .value }).add(value);
+}
+
+fn absorbedDotsSharded(q: zml.Tensor, latent: zml.Tensor, weight: zml.Tensor, weight_scale: zml.Tensor) zml.Tensor {
+    return absorbedDots(
+        q.withPartitioning(.{ .m = .replicated, .h = .model, .key = .replicated }),
+        latent.withPartitioning(.{ .m = .replicated, .h = .model, .latent = .replicated }),
+        weight.withPartitioning(.{ .n = .model, .k = .replicated }),
+        weight_scale.withPartitioning(.{ .nb = .model, .kb = .replicated }),
+    );
+}
+
+test "ROCm GLM absorbed block-scaled FP8 projections compile with model sharding" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const heads = 64;
+    const key_dim = 192;
+    const value_dim = 128;
+    const latent_dim = 512;
+    const q: zml.Tensor = .init(.{ .m = 1, .h = heads, .key = key_dim }, .bf16);
+    const latent: zml.Tensor = .init(.{ .m = 1, .h = heads, .latent = latent_dim }, .bf16);
+    const weight: zml.Tensor = .init(.{ .n = heads * (key_dim + value_dim), .k = latent_dim }, .f8e4m3fn);
+    const weight_scale: zml.Tensor = .init(.{ .nb = (heads * (key_dim + value_dim)) / 128, .kb = latent_dim / 128 }, .f32);
+
+    const model_sharding = try @constCast(platform).registerSharding("fp8_test_model", .mesh(.{ .model = .high_bandwidth }));
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        absorbedDotsSharded,
+        .{ q, latent, weight, weight_scale },
+        .{ .shardings = &.{model_sharding} },
+    );
+    defer exe.deinit();
+}
+
+test "ROCm GLM absorbed block-scaled FP8 projections" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const m = 1;
+    const heads = 2;
+    const key_dim = 192;
+    const value_dim = 128;
+    const latent_dim = 512;
+    const q: zml.Tensor = .init(.{ .m = m, .h = heads, .key = key_dim }, .bf16);
+    const latent: zml.Tensor = .init(.{ .m = m, .h = heads, .latent = latent_dim }, .bf16);
+    const weight: zml.Tensor = .init(.{ .n = heads * (key_dim + value_dim), .k = latent_dim }, .f8e4m3fn);
+    const weight_scale: zml.Tensor = .init(.{ .nb = (heads * (key_dim + value_dim)) / 128, .kb = latent_dim / 128 }, .f32);
+
+    var exe = try platform.compileFn(allocator, io, absorbedDots, .{ q, latent, weight, weight_scale }, .{});
+    defer exe.deinit();
+
+    const one_bf16 = zml.floats.BFloat16.fromF32(1.0);
+    const one_fp8 = zml.floats.Float8E4M3FN.fromF32(1.0);
+    const q_host = try allocator.alloc(zml.floats.BFloat16, q.shape().count());
+    defer allocator.free(q_host);
+    @memset(q_host, one_bf16);
+    const latent_host = try allocator.alloc(zml.floats.BFloat16, latent.shape().count());
+    defer allocator.free(latent_host);
+    @memset(latent_host, one_bf16);
+    const weight_host = try allocator.alloc(zml.floats.Float8E4M3FN, weight.shape().count());
+    defer allocator.free(weight_host);
+    @memset(weight_host, one_fp8);
+    const scale_host = try allocator.alloc(f32, weight_scale.shape().count());
+    defer allocator.free(scale_host);
+    @memset(scale_host, 2.0);
+
+    var q_buffer: zml.Buffer = try .fromBytes(io, platform, q.shape(), .replicated, std.mem.sliceAsBytes(q_host));
+    defer q_buffer.deinit();
+    var latent_buffer: zml.Buffer = try .fromBytes(io, platform, latent.shape(), .replicated, std.mem.sliceAsBytes(latent_host));
+    defer latent_buffer.deinit();
+    var weight_buffer: zml.Buffer = try .fromBytes(io, platform, weight.shape(), .replicated, std.mem.sliceAsBytes(weight_host));
+    defer weight_buffer.deinit();
+    var scale_buffer: zml.Buffer = try .fromBytes(io, platform, weight_scale.shape(), .replicated, std.mem.sliceAsBytes(scale_host));
+    defer scale_buffer.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, absorbedDots, .{ q_buffer, latent_buffer, weight_buffer, scale_buffer });
+    defer output.deinit();
+
+    const expected_value = @as(f32, key_dim + latent_dim);
+    const expected_host = try allocator.alloc(zml.floats.BFloat16, output.shape().count());
+    defer allocator.free(expected_host);
+    @memset(expected_host, zml.floats.BFloat16.fromF32(expected_value));
+    try zml.testing.expectClose(
+        io,
+        zml.Slice.init(output.shape(), std.mem.sliceAsBytes(expected_host)),
+        output,
+        .{ .absolute_tolerance = 8.0, .relative_tolerance = 0.02 },
+    );
+}

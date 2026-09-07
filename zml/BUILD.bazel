@@ -93,6 +93,7 @@ zig_library(
         "dtype.zig",
         "exe.zig",
         "floats.zig",
+        "fp8.zig",
         "io.zig",
         "kernel.zig",
         "logo.zig",
@@ -189,5 +190,12 @@ zig_library(
 
 zig_test(
     name = "test",
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "fp8_test",
+    main = "fp8_test.zig",
+    tags = ["no_ci"],
     deps = ["//zml"],
 )

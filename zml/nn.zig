@@ -4,6 +4,7 @@ const std = @import("std");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+const block_fp8 = @import("fp8.zig");
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
@@ -86,6 +87,25 @@ pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tenso
         .renameTag(.kb, result_tag);
 }
 
+/// Backend routing must also recognize a one-tile block grid. Classification
+/// intentionally treats that ambiguous shape as per-tensor FP8 instead.
+fn isBlock128ScaleGrid(weight: Shape, scale: Shape) bool {
+    if (weight.dtype() != .f8e4m3fn or weight.rank() != 2 or
+        @mod(weight.dim(1), 128) != 0 or
+        (scale.dtype() != .bf16 and scale.dtype() != .f32) or scale.rank() != 2)
+    {
+        return false;
+    }
+
+    return scale.dim(0) == std.math.divCeil(i64, weight.dim(0), 128) catch unreachable and
+        scale.dim(1) == std.math.divCeil(i64, weight.dim(1), 128) catch unreachable;
+}
+
+fn useNativeBlock128(target: zml.Target, weight: Shape, scale: Shape) bool {
+    return isBlock128ScaleGrid(weight, scale) and
+        (target != .cuda or (scale.dtype() == .f32 and @mod(weight.dim(0), 128) == 0));
+}
+
 test "unpackFp4 expands the requested axis" {
     const platform = zml.testing.env();
     const packed_weight: Tensor = .init(.{ .out = 2, .stored = 4 }, .u8);
@@ -106,12 +126,13 @@ test "unpackFp4 expands the requested axis" {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN values, F32 128x128 scales on CUDA; BF16/F32 scales on ROCm
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
 /// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// 2. XLA's block-128 W8A8 arm on CUDA; Triton otherwise, including ROCm block FP8
+/// 3. Unsupported non-block-FP8 combos fall back to dequant + Dot
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -138,6 +159,7 @@ pub fn scaledDot(
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
         res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -159,6 +181,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_shape._partitioning.set(res_shape.rank() - 1, lhs.shape().partition(l));
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -168,6 +191,30 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_shape._partitioning.set(res_shape.rank() - 1, rhs.shape().partition(r));
+    }
+
+    const platform = zml.Compiler.current().platform;
+    if (platform.target == .cuda and rhs_scale.dtype() == .f32 and isBlock128ScaleGrid(rhs.shape(), rhs_scale.shape())) {
+        stdx.debug.assert(@mod(rhs.dim(0), 128) == 0, "XLA block-128 FP8 dot requires N divisible by 128, got {d}", .{rhs.dim(0)});
+    }
+    const block128 = useNativeBlock128(platform.target, rhs.shape(), rhs_scale.shape());
+    if ((platform.target == .cuda or platform.target == .rocm) and block128) {
+        stdx.debug.assert(lhs_scale == null, "native block FP8 dot quantizes its BF16 lhs internally and does not accept a precomputed lhs scale", .{});
+        stdx.debug.assert(lhs.dtype() == .bf16, "native block FP8 dot expects a BF16 lhs, got {f}", .{lhs.shape()});
+        stdx.debug.assert(
+            rhs_scale.dtype() == .f32 or (platform.target == .rocm and rhs_scale.dtype() == .bf16),
+            "native block FP8 dot expects F32 scales on CUDA and BF16 or F32 scales on ROCm, got {f}",
+            .{rhs_scale.shape()},
+        );
+        stdx.debug.assert(@mod(rhs.dim(1), 128) == 0, "native block FP8 dot requires K divisible by 128, got {d}", .{rhs.dim(1)});
+        stdx.debug.assert(
+            dot_axes.contracting.len == 1 and dot_axes.batching.len == 0 and
+                lhs.axis(-1) == dot_axes.contracting.get(0)[0] and rhs.axis(-1) == dot_axes.contracting.get(0)[1],
+            "native block FP8 dot only supports a single trailing contraction without batching; got {f} and {f}",
+            .{ lhs.shape(), rhs.shape() },
+        );
+        return block_fp8.nativeBlockScaledDot(lhs, rhs, rhs_scale, res_shape);
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
