@@ -834,6 +834,73 @@ pub const cuda = struct {
     }
 };
 
+pub const rocm = struct {
+    pub const ComputeCapability = enum {
+        /// CDNA1: MI100.
+        gfx908,
+        /// CDNA2: MI200 series.
+        gfx90a,
+        /// CDNA3: MI300 series.
+        gfx942,
+        /// CDNA4: MI350 series.
+        gfx950,
+        /// RDNA2: RX 6000 series.
+        gfx1030,
+        /// RDNA3 (Navi 31): RX 7900 series.
+        gfx1100,
+        /// RDNA3 (Navi 32): RX 7800 and RX 7700 series.
+        gfx1101,
+        /// RDNA3 (Navi 33): RX 7600 series.
+        gfx1102,
+        /// RDNA3 APU: Phoenix.
+        gfx1103,
+        /// RDNA3.5: newer Ryzen AI APUs.
+        gfx1150,
+        /// RDNA4 (Navi 44): RX 9060 family.
+        gfx1200,
+        /// RDNA4 (Navi 48): RX 9070 family.
+        gfx1201,
+
+        pub const Architecture = enum {
+            cdna1,
+            cdna2,
+            cdna3,
+            cdna4,
+            rdna2,
+            rdna3,
+            rdna3_5,
+            rdna4,
+        };
+
+        pub fn architecture(self: ComputeCapability) Architecture {
+            return switch (self) {
+                .gfx908 => .cdna1,
+                .gfx90a => .cdna2,
+                .gfx942 => .cdna3,
+                .gfx950 => .cdna4,
+                .gfx1030 => .rdna2,
+                .gfx1100, .gfx1101, .gfx1102, .gfx1103 => .rdna3,
+                .gfx1150 => .rdna3_5,
+                .gfx1200, .gfx1201 => .rdna4,
+            };
+        }
+    };
+
+    /// Assumes homogeneous devices.
+    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+        stdx.debug.assert(platform.target == .rocm, "computeCapability expects .rocm platform, got {}", .{platform.target});
+        const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+        const description = device.getDescription(platform.pjrt_api);
+
+        const attributes = description.attributes(platform.pjrt_api);
+        return for (attributes) |attr| {
+            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
+                break std.meta.stringToEnum(ComputeCapability, std.mem.sliceTo(attr.value().string, ':'));
+            }
+        } else null;
+    }
+};
+
 fn dataTypeFromFfiDataType(ffi_dt: pjrt.ffi.DataType) zml.DataType {
     return switch (ffi_dt) {
         .bool => .bool,

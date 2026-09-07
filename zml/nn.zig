@@ -106,12 +106,16 @@ test "unpackFp4 expands the requested axis" {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN / E4M3FNUZ / E8M0 values, BF16 or F32 128x128 scales
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
-/// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// XLA selects specialized GPU kernels (TileIR, Triton, or block-128 W8A8),
+/// with dequant + Dot as the fallback.
+///
+/// Axes follow `Tensor.dot`; XLA currently accepts one contracting axis and at
+/// most one batch axis. Scales preserve operand axis order, and each scale
+/// dimension must divide its corresponding value dimension.
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -126,7 +130,7 @@ pub fn scaledDot(
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
     const result_dtype: DataType = switch (lhs.dtype()) {
-        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz => .bf16,
+        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0 => .bf16,
         else => lhs.dtype(),
     };
     var res_shape: Shape = .{ ._dtype = result_dtype };
@@ -190,14 +194,94 @@ pub fn scaledDot(
             .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
         }),
     });
-
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
-
-    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+    return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
-    });
+    })[0];
+}
 
-    return outs[0];
+test "block128 scaled dot layouts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    // FIXME: Add rocm when we have a PJRT plugin with native fp8 dot support (by the end of Sept 2026)
+    if (platform.target != .cuda) return error.SkipZigTest;
+    const dtype: DataType = if (platform.target == .rocm and @import("platform.zig").rocm.computeCapability(platform) == .gfx942) .f8e4m3fnuz else .f8e4m3fn;
+    const Local = struct {
+        const Outputs = struct { actual: Tensor, expected: Tensor, linear: Tensor, linear_expected: Tensor };
+
+        fn dequantize(values: Tensor, scales: Tensor) Tensor {
+            var expanded = scales.convert(.bf16);
+            for (0..values.rank()) |axis| {
+                const factor = @divExact(values.dim(axis), scales.dim(axis));
+                const shape = expanded.shape().insert(axis + 1, .{factor});
+                const axes = Shape.range(shape.rank(), .i64).remove(axis + 1);
+                expanded = expanded.broadcast(shape, axes.dims()).reshape(expanded.shape().setDim(axis, values.dim(axis)));
+            }
+            return values.convert(.bf16).mul(expanded);
+        }
+
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, fp8: DataType, prequantized: bool) Outputs {
+            const weight = w.convert(fp8);
+            const input = quantization.quantizeBlockFp8(x, .k, fp8);
+            const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
+            return .{
+                .linear = linear.forward(x),
+                .linear_expected = dequantize(input.values, input.scales).dot(dequantize(weight, scales), .k),
+                .actual = if (prequantized)
+                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .k)
+                else
+                    scaledDot(x, weight, null, scales, .k),
+                .expected = (if (prequantized) dequantize(input.values, input.scales.convert(scales.dtype())) else x)
+                    .dot(dequantize(weight, scales), .k),
+            };
+        }
+    };
+    inline for (.{
+        .{ .{ .m = 16, .k = 256 }, .{ .n = 256, .k = 256 } },
+        .{ .{ .b = 2, .m = 16, .k = 256 }, .{ .b = 2, .n = 256, .k = 256 } },
+        .{ .{ .k = 256, .b = 2, .m = 3 }, .{ .n = 256, .k = 256, .b = 2 } },
+        .{ .{ .b = 2, .k = 256, .s = 2, .m = 3 }, .{ .n = 128, .b = 2, .k = 256 } },
+        .{ .{ .b = 2, .m = 3, .k = 256 }, .{ .k = 256, .n = 128 } },
+        .{ .{ .k = 128 }, .{ .n = 128, .k = 128 } },
+        .{ .{ .m = 3, .k = 256 }, .{ .p = 2, .k = 256, .n = 128 } },
+        .{ .{ .m = 3, .k = 128 }, .{ .n = 64, .k = 128 } },
+    }) |layout| {
+        inline for (.{ DataType.f32, DataType.bf16 }) |scale_dtype| {
+            inline for (.{ false, true }) |prequantized| {
+                const x: Tensor = .init(layout[0], .bf16);
+                const w: Tensor = .init(layout[1], .bf16);
+                const scales: Tensor = .init(w.shape().setDim(.n, std.math.divCeil(i64, w.dim(.n), 128) catch unreachable).setDim(.k, @divExact(w.dim(.k), 128)).withDtype(scale_dtype), scale_dtype);
+                var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, dtype, prequantized }, .{});
+                defer exe.deinit();
+                try zml.testing.expectEqualShapes(exe.output_shapes[1], exe.output_shapes[0]);
+                var buffers: [3]zml.Buffer = undefined;
+                var initialized: usize = 0;
+                defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
+                for ([_]Shape{ x.shape(), w.shape(), scales.shape() }, 0..) |shape, i| {
+                    const slice = try Slice.alloc(allocator, shape);
+                    defer slice.free(allocator);
+                    for (0..shape.count()) |j| {
+                        const value: f32 = if (i == 2) @as(f32, @floatFromInt(1 + (j * 3 + j / 4) % 7)) / 16 else @as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / 256) % 13)) - 6)) / 4;
+                        if (shape.dtype() == .f32) {
+                            slice.items(f32)[j] = value;
+                        } else {
+                            slice.items(zml.floats.BFloat16)[j] = .fromF32(value);
+                        }
+                    }
+                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
+                    initialized += 1;
+                }
+                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ buffers[0], buffers[1], buffers[2] });
+                defer zml.Buffer.deinitAll(Local.Outputs, &output);
+                var expected = try output.expected.toSliceAlloc(allocator, io);
+                defer expected.free(allocator);
+                try zml.testing.expectClose(io, expected, output.actual, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
+                var linear_expected = try output.linear_expected.toSliceAlloc(allocator, io);
+                defer linear_expected.free(allocator);
+                try zml.testing.expectClose(io, linear_expected, output.linear, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
+            }
+        }
+    }
 }
 
 /// `shape` with every dimension collapsed to 1
