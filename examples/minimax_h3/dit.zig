@@ -123,10 +123,9 @@ const TimeEmbedder = struct {
     pub const Output = struct { temb: zml.Tensor };
 
     pub fn init(store: zml.io.TensorStore.View) TimeEmbedder {
-        const p = store.withPrefix("time_embedder");
         return .{
-            .proj_in = linear(p, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
-            .proj_out = linear(p, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
+            .proj_in = linear(store, "linear_1.weight", "linear_1.bias", .replicated, .replicated),
+            .proj_out = linear(store, "linear_2.weight", "linear_2.bias", .replicated, .replicated),
         };
     }
 
@@ -346,7 +345,7 @@ pub const Dit = struct {
             .video_proj = linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
             .audio_proj = linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated),
             .condition_proj = linear(store, "context_embedder.weight", "context_embedder.bias", .replicated, .replicated),
-            .time_embedder = .init(store),
+            .time_embedder = .init(store.withPrefix("time_embedder")),
             .refiner_blocks = refiner_blocks,
             .refiner_norm = rms(refiner.withPrefix("final_norm"), .{.d}, cfg.final_norm_eps),
             .blocks = blocks,
