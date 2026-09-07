@@ -43,7 +43,9 @@ then transfers it by value into `BlockPool`. Pool initialization consumes the
 workspace only on success; failure leaves it owned by the caller. The loader
 uses `initCalibratedBlockPool` to contain this lifetime: an ordinary `errdefer`
 cleans up failed initialization, and success returns the owning pool together
-with calibration and sizing results, without a workspace-moved flag. The loader
+with calibration, without a workspace-moved flag. Request sizing is derived
+from the calibration by the caller, while pregrowth bytes and duration are
+logged immediately rather than carried in the return value. The loader
 retains only the pool, whose teardown also frees the workspace. Pool budgets
 and mapped-byte totals come directly from its owned workspace. Growth reserves
 free-list metadata before allocating an arena, so metadata failure cannot leave
@@ -478,8 +480,8 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   hipHostMalloc on MI300X, which at first sat inside the measured load when
   the growth ran at loader creation). `DirectLoader.create` only grows the
   remainder for larger requests (a 32 MiB HF profile with 8 MiB blocks adds
-  528 MiB in about 90 ms on B70). The ready line logs `retained`, `pregrown`
-  and `pregrowth_ms`.
+  528 MiB in about 90 ms on B70). A dedicated pregrowth line logs `retained`,
+  `pregrown` and `pregrowth_ms` immediately after the growth completes.
 - Worker tasks are spawned on demand (`WorkerPool`): the decision that opens
   the gates spawns `min(lifecycle, width + 1)` workers (a worker hands its
   request to the DMA stage and claims the next, so credits beyond the read

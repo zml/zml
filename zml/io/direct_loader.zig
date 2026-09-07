@@ -82,33 +82,27 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: Config,
     ) !*Loader {
-        const calibrated = try initCalibratedBlockPool(allocator, io, platform, opts);
-        const calibration = calibrated.calibration;
-        const request_size = calibrated.request_size;
-        const maximum_blocks_per_job = calibrated.maximum_blocks_per_job;
-        var pool = calibrated.pool;
+        const block_pool = try initCalibratedBlockPool(allocator, io, platform, opts);
+        const calibration = block_pool.calibration;
+        var pool = block_pool.pool;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
-        _ = Planner.maximumJobLen(request_size, calibration.block_size, source_alignment) catch
+        _ = Planner.maximumJobLen(block_pool.request_size, calibration.block_size, source_alignment) catch
             return error.InvalidLoadProfile;
         var pool_moved = false;
         errdefer if (!pool_moved) pool.deinit();
-        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
-        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
 
         const source_parallelism = opts.read_parallelism;
-        const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job);
-        const dma_stage_requests = dmaStageRequests(
-            calibration.max_in_flight_per_device,
-            platform.devices.len,
-            calibration.block_size,
-            request_size,
-        );
         const controller = source_concurrency.Controller.init(
             source_parallelism,
-            feasible_width,
-            try pool.growthFreeRequestWidth(maximum_blocks_per_job),
+            block_pool.feasible_width,
+            block_pool.growth_free_width,
         );
-        const limits: RequestGateLimits = .init(controller.width(), feasible_width, retained_credits, dma_stage_requests);
+        const limits: RequestGateLimits = .init(
+            controller.width(),
+            block_pool.feasible_width,
+            block_pool.retained_credits,
+            block_pool.dma_stage_requests,
+        );
         const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
             const initial = provider.snapshot();
             break :cursor .{ .provider = provider, .previous = initial };
@@ -133,11 +127,11 @@ pub const Loader = struct {
             .controller_runtime = undefined,
             .worker_pool = undefined,
             .created_at = .now(io, .awake),
-            .source_request_size = request_size,
+            .source_request_size = block_pool.request_size,
             .direct_io = opts.direct_io,
             .source_alignment = source_alignment,
-            .maximum_blocks_per_job = maximum_blocks_per_job,
-            .effective_pinned_feasible_width = feasible_width,
+            .maximum_blocks_per_job = block_pool.maximum_blocks_per_job,
+            .effective_pinned_feasible_width = block_pool.feasible_width,
         };
         // Ownership moved into the stable heap object.
         pool_moved = true;
@@ -163,7 +157,12 @@ pub const Loader = struct {
 
         self.worker_pool = .{
             .loader = self,
-            .maximum = RequestGateLimits.init(source_parallelism.maximum(), feasible_width, retained_credits, dma_stage_requests).workers(),
+            .maximum = RequestGateLimits.init(
+                source_parallelism.maximum(),
+                block_pool.feasible_width,
+                block_pool.retained_credits,
+                block_pool.dma_stage_requests,
+            ).workers(),
         };
         self.controller_runtime = .{
             .controller = controller,
@@ -173,11 +172,11 @@ pub const Loader = struct {
             .next_read_admission = &self.pipeline.next_read_admission,
             .workers = &self.worker_pool,
             .scheduler = &self.scheduler,
-            .pinned_feasible_width = feasible_width,
+            .pinned_feasible_width = block_pool.feasible_width,
             .read_stats = read_stats,
             .source_bootstrap_enabled = opts.load_profile.high_latency,
-            .retained_credits = retained_credits,
-            .dma_stage_requests = dma_stage_requests,
+            .retained_credits = block_pool.retained_credits,
+            .dma_stage_requests = block_pool.dma_stage_requests,
             .reported_width = controller.width(),
         };
         // Born busy: both gates are open at the controller's width, the
@@ -187,10 +186,10 @@ pub const Loader = struct {
         self.workers_started = true;
         self.controller_runtime.start(io);
         try self.startController();
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,
-            request_size,
+            block_pool.request_size,
             opts.direct_io,
             source_alignment,
             calibration.block_size,
@@ -198,22 +197,22 @@ pub const Loader = struct {
             limits.lifecycle,
             self.worker_pool.spawned,
             self.worker_pool.maximum,
-            feasible_width,
+            block_pool.feasible_width,
             source_concurrency.widths[self.controller_runtime.controller.max_index],
             self.pool.workspace.mapped_bytes,
-            calibrated.pregrown_bytes,
-            @as(f64, @floatFromInt(calibrated.pregrowth_ns)) / std.time.ns_per_ms,
         });
         return self;
     }
 
     const CalibratedBlockPool = struct {
-        pool: host_memory.BlockPool,
         calibration: dma_calibration.Result,
+        pool: host_memory.BlockPool,
         request_size: usize,
         maximum_blocks_per_job: usize,
-        pregrown_bytes: usize,
-        pregrowth_ns: u64,
+        feasible_width: usize,
+        retained_credits: usize,
+        growth_free_width: usize,
+        dma_stage_requests: usize,
     };
 
     fn initCalibratedBlockPool(
@@ -225,7 +224,8 @@ pub const Loader = struct {
         var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
             .max_mapped_bytes = opts.max_host_bytes,
         });
-        errdefer workspace.deinit();
+        var workspace_moved = false;
+        errdefer if (!workspace_moved) workspace.deinit();
         const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
 
         const request_size = try load_limits.effectiveSourceRequestSize(
@@ -252,13 +252,31 @@ pub const Loader = struct {
         );
         const pregrown_bytes = workspace.mapped_bytes - retained_before;
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
+        load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+            workspace.mapped_bytes,
+            pregrown_bytes,
+            @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
+        });
+        var pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
+        workspace_moved = true;
+        errdefer pool.deinit();
+        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
+        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
+
         return .{
             .calibration = calibration,
+            .pool = pool,
             .request_size = request_size,
             .maximum_blocks_per_job = maximum_blocks_per_job,
-            .pregrown_bytes = pregrown_bytes,
-            .pregrowth_ns = pregrowth_ns,
-            .pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve),
+            .feasible_width = feasible_width,
+            .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
+            .growth_free_width = try pool.growthFreeRequestWidth(maximum_blocks_per_job),
+            .dma_stage_requests = dmaStageRequests(
+                calibration.max_in_flight_per_device,
+                platform.devices.len,
+                calibration.block_size,
+                request_size,
+            ),
         };
     }
 
