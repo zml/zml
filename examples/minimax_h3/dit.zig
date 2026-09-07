@@ -360,17 +360,146 @@ pub const Dit = struct {
         allocator.free(self.blocks);
     }
 
-    /// Compile the DiT kernels. Shapes come from `packed_run`.
+    /// Ten kernels: text, RoPE, patch scatter, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
+    /// Shapes come from `packed_run`.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
-        return compileDit(
-            self,
-            run,
-            geo,
-            text_len,
-            packed_run.layout.seqLen(),
-            @intCast(packed_run.video.stepCount()),
-            text_dt,
-        );
+        var model = self.*;
+        const attn = zml.attention.Backend.auto(run.platform);
+        model.blocks[0].core.attn.attn_backend = attn;
+        const seq_len = packed_run.layout.seqLen();
+        const steps: u32 = @intCast(packed_run.video.stepCount());
+        const slots = pack.timestep_slot_count;
+        const n_flat: i64 = @intCast(steps * slots);
+        log.info("dit attn={s} seq={d} audio_tokens={d} devices={d}", .{
+            @tagName(attn),
+            seq_len,
+            geo.audio_tokens,
+            run.platform.devices.len,
+        });
+        var node = run.progress.start("Compiling MiniMax-H3 DiT", 10);
+        defer node.end();
+        const dt = model.blocks[0].core.norm1.weight.dtype();
+        var patch_part = model.patchEmbed();
+        patch_part.seq = seq_len;
+
+        const prepare_text = try zml.FnExe(TextPrep.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_prepare_text",
+        }, .{.{
+            .model = model.textPrep(),
+            .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.text_dim }, text_dt),
+        }});
+        errdefer prepare_text.deinit();
+        const prepare_rope = try zml.FnExe(Rope.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_prepare_rope",
+        }, .{.{
+            .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
+            .rope_freq_dim = model.cfg.rope_freq_dim,
+            .rope_theta = model.cfg.rope_theta,
+            .out_dtype = dt,
+        }});
+        errdefer prepare_rope.deinit();
+        const embed_patches = try zml.FnExe(PatchEmbed.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_embed_patches",
+        }, .{.{
+            .model = patch_part,
+            .video = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
+            .audio = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
+            .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.hidden_size }, dt),
+            .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
+            .audio_indices = .init(.{ .s = geo.audio_tokens }, .u32),
+            .text_indices = .init(.{ .s = text_len }, .u32),
+        }});
+        errdefer embed_patches.deinit();
+        const prepare_temb = try zml.FnExe(TimeEmbedder.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_prepare_temb",
+        }, .{.{
+            .model = model.time_embedder,
+            .timestep = .init(.{ .n = n_flat }, .f32),
+            .freq_dim = model.cfg.freq_dim,
+        }});
+        errdefer prepare_temb.deinit();
+        const prepare_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_prepare_adaln",
+        }, .{.{
+            .adaln = model.blocks[0].adaln,
+            .temb = .init(.{ .n = n_flat, .d = model.time_embedder.outDim() }, .f32),
+            .steps = steps,
+            .slots = slots,
+        }});
+        errdefer prepare_adaln.deinit();
+        const prepare_final_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_prepare_final_adaln",
+        }, .{.{
+            .adaln = model.final_layer.adaln,
+            .temb = .init(.{ .n = n_flat, .d = model.time_embedder.outDim() }, .f32),
+            .steps = steps,
+            .slots = slots,
+        }});
+        errdefer prepare_final_adaln.deinit();
+
+        const block_exe = try zml.FnExe(BlockCore.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_block",
+        }, .{.{
+            .layer = model.blocks[0].core,
+            .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
+            .table = zml.Tensor.init(.{ .t = steps, .n = slots, .mod = config.modality_count, .k = 6, .d = model.cfg.hidden_size }, dt),
+            .step = zml.Tensor.init(.{}, .u32),
+            .adaln_indices = zml.Tensor.init(.{ .s = seq_len }, .u32),
+            .cos = zml.Tensor.init(.{ .s = seq_len, .f = model.cfg.rotaryDim() }, dt),
+            .sin = zml.Tensor.init(.{ .s = seq_len, .f = model.cfg.rotaryDim() }, dt),
+        }});
+        errdefer block_exe.deinit();
+        const finish_exe = try zml.FnExe(FinishCore.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_finish",
+        }, .{.{
+            .model = model.finishCore(),
+            .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
+            .table = zml.Tensor.init(.{ .t = steps, .n = slots, .k = 2, .d = model.cfg.hidden_size }, dt),
+            .step = zml.Tensor.init(.{}, .u32),
+            .timestep_indices = .init(.{ .s = seq_len }, .u32),
+            .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
+            .audio_indices = .init(.{ .s = geo.audio_tokens }, .u32),
+        }});
+        errdefer finish_exe.deinit();
+        const apply_video = try zml.FnExe(Euler.apply).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_apply_video",
+        }, .{.{
+            .sample = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
+            .velocity = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
+            .sigma = .init(.{}, .f32),
+            .sigma_next = .init(.{}, .f32),
+        }});
+        errdefer apply_video.deinit();
+        const apply_audio = try zml.FnExe(Euler.apply).compile(run.allocator, run.io, run.platform, .{
+            .shardings = run.mesh(),
+            .program_name = "minimax_h3_apply_audio",
+        }, .{.{
+            .sample = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
+            .velocity = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
+            .sigma = .init(.{}, .f32),
+            .sigma_next = .init(.{}, .f32),
+        }});
+        self.compiled = .{
+            .prepare_text = prepare_text,
+            .prepare_rope = prepare_rope,
+            .embed_patches = embed_patches,
+            .prepare_temb = prepare_temb,
+            .prepare_adaln = prepare_adaln,
+            .prepare_final_adaln = prepare_final_adaln,
+            .block = block_exe,
+            .finish = finish_exe,
+            .apply_video = apply_video,
+            .apply_audio = apply_audio,
+        };
     }
 
     /// Encoder hidden + packed layout → denoised video and audio tokens.
@@ -531,157 +660,6 @@ const Euler = struct {
         };
     }
 };
-
-// =============================================================================
-// Compile
-// =============================================================================
-
-/// Ten kernels: text, RoPE, patch scatter, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
-fn compileDit(
-    self: *Dit,
-    run: *const Run,
-    geo: config.Geometry,
-    text_len: u32,
-    seq_len: u32,
-    steps: u32,
-    text_dt: zml.DataType,
-) !void {
-    var model = self.*;
-    const attn = zml.attention.Backend.auto(run.platform);
-    model.blocks[0].core.attn.attn_backend = attn;
-    const slots = pack.timestep_slot_count;
-    const n_flat: i64 = @intCast(steps * slots);
-    log.info("dit attn={s} seq={d} audio_tokens={d} devices={d}", .{
-        @tagName(attn),
-        seq_len,
-        geo.audio_tokens,
-        run.platform.devices.len,
-    });
-    var node = run.progress.start("Compiling MiniMax-H3 DiT", 10);
-    defer node.end();
-    const dt = model.blocks[0].core.norm1.weight.dtype();
-    var patch_part = model.patchEmbed();
-    patch_part.seq = seq_len;
-
-    const prepare_text = try zml.FnExe(TextPrep.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_prepare_text",
-    }, .{.{
-        .model = model.textPrep(),
-        .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.text_dim }, text_dt),
-    }});
-    errdefer prepare_text.deinit();
-    const prepare_rope = try zml.FnExe(Rope.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_prepare_rope",
-    }, .{.{
-        .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
-        .rope_freq_dim = model.cfg.rope_freq_dim,
-        .rope_theta = model.cfg.rope_theta,
-        .out_dtype = dt,
-    }});
-    errdefer prepare_rope.deinit();
-    const embed_patches = try zml.FnExe(PatchEmbed.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_embed_patches",
-    }, .{.{
-        .model = patch_part,
-        .video = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
-        .audio = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
-        .text = .init(.{ .b = 1, .s = text_len, .d = model.cfg.hidden_size }, dt),
-        .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
-        .audio_indices = .init(.{ .s = geo.audio_tokens }, .u32),
-        .text_indices = .init(.{ .s = text_len }, .u32),
-    }});
-    errdefer embed_patches.deinit();
-    const prepare_temb = try zml.FnExe(TimeEmbedder.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_prepare_temb",
-    }, .{.{
-        .model = model.time_embedder,
-        .timestep = .init(.{ .n = n_flat }, .f32),
-        .freq_dim = model.cfg.freq_dim,
-    }});
-    errdefer prepare_temb.deinit();
-    const prepare_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_prepare_adaln",
-    }, .{.{
-        .adaln = model.blocks[0].adaln,
-        .temb = .init(.{ .n = n_flat, .d = model.time_embedder.outDim() }, .f32),
-        .steps = steps,
-        .slots = slots,
-    }});
-    errdefer prepare_adaln.deinit();
-    const prepare_final_adaln = try zml.FnExe(AdaLn.prepare).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_prepare_final_adaln",
-    }, .{.{
-        .adaln = model.final_layer.adaln,
-        .temb = .init(.{ .n = n_flat, .d = model.time_embedder.outDim() }, .f32),
-        .steps = steps,
-        .slots = slots,
-    }});
-    errdefer prepare_final_adaln.deinit();
-
-    const block_exe = try zml.FnExe(BlockCore.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_block",
-    }, .{.{
-        .layer = model.blocks[0].core,
-        .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
-        .table = zml.Tensor.init(.{ .t = steps, .n = slots, .mod = config.modality_count, .k = 6, .d = model.cfg.hidden_size }, dt),
-        .step = zml.Tensor.init(.{}, .u32),
-        .adaln_indices = zml.Tensor.init(.{ .s = seq_len }, .u32),
-        .cos = zml.Tensor.init(.{ .s = seq_len, .f = model.cfg.rotaryDim() }, dt),
-        .sin = zml.Tensor.init(.{ .s = seq_len, .f = model.cfg.rotaryDim() }, dt),
-    }});
-    errdefer block_exe.deinit();
-    const finish_exe = try zml.FnExe(FinishCore.forward).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_finish",
-    }, .{.{
-        .model = model.finishCore(),
-        .hidden = zml.Tensor.init(.{ .b = 1, .s = seq_len, .d = model.cfg.hidden_size }, dt),
-        .table = zml.Tensor.init(.{ .t = steps, .n = slots, .k = 2, .d = model.cfg.hidden_size }, dt),
-        .step = zml.Tensor.init(.{}, .u32),
-        .timestep_indices = .init(.{ .s = seq_len }, .u32),
-        .video_indices = .init(.{ .s = geo.video_tokens }, .u32),
-        .audio_indices = .init(.{ .s = geo.audio_tokens }, .u32),
-    }});
-    errdefer finish_exe.deinit();
-    const apply_video = try zml.FnExe(Euler.apply).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_apply_video",
-    }, .{.{
-        .sample = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
-        .velocity = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
-        .sigma = .init(.{}, .f32),
-        .sigma_next = .init(.{}, .f32),
-    }});
-    errdefer apply_video.deinit();
-    const apply_audio = try zml.FnExe(Euler.apply).compile(run.allocator, run.io, run.platform, .{
-        .shardings = run.mesh(),
-        .program_name = "minimax_h3_apply_audio",
-    }, .{.{
-        .sample = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
-        .velocity = .init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32),
-        .sigma = .init(.{}, .f32),
-        .sigma_next = .init(.{}, .f32),
-    }});
-    self.compiled = .{
-        .prepare_text = prepare_text,
-        .prepare_rope = prepare_rope,
-        .embed_patches = embed_patches,
-        .prepare_temb = prepare_temb,
-        .prepare_adaln = prepare_adaln,
-        .prepare_final_adaln = prepare_final_adaln,
-        .block = block_exe,
-        .finish = finish_exe,
-        .apply_video = apply_video,
-        .apply_audio = apply_audio,
-    };
-}
 
 // =============================================================================
 // Denoise
