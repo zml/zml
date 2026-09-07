@@ -33,6 +33,7 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
+                .f8e4m3fn => .triton,
                 .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
                     .flashinfer_cutlass
                 else
@@ -77,6 +78,13 @@ pub const Backend = enum {
         };
     }
 };
+
+test "Backend.auto selects Triton for CUDA E4M3FN experts" {
+    var platform: zml.Platform = undefined;
+    platform.target = .cuda;
+
+    try std.testing.expectEqual(Backend.triton, try Backend.auto(&platform, .f8e4m3fn));
+}
 
 pub const Parameters = union(Backend) {
     flashinfer_cutlass: cutlass_flashinfer.Parameters,
