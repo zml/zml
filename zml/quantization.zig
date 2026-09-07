@@ -47,7 +47,7 @@ pub const Quantization = struct {
         /// f8e4m3fn values, one bf16 or f32 scale per output channel, constant along the contraction.
         /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
         fp8_per_channel,
-        /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+        /// f8e4m3fn values, one bf16 or f32 scale per 128x128 tile. The DeepSeek-style FP8 that model
         /// vendors publish themselves, under `weight_scale_inv`.
         fp8_block128,
         /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
@@ -59,6 +59,8 @@ pub const Quantization = struct {
 
             const n = weight.dim(0);
             const k = if (isPackedFp4(self, weight.dtype())) 2 * weight.dim(1) else weight.dim(1);
+            const n_blocks = std.math.divCeil(i64, n, 128) catch unreachable;
+            const k_blocks = std.math.divCeil(i64, k, 128) catch unreachable;
 
             return switch (self) {
                 .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
@@ -74,10 +76,10 @@ pub const Quantization = struct {
                     (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
                     scale.dim(0) == n and scale.dim(1) == 1,
-                .fp8_block128 => weight.dtype() == .f8e4m3fn and scale.dtype() == .bf16 and
+                .fp8_block128 => (weight.dtype() == .f8e4m3fn or weight.dtype() == .f8e4m3fnuz) and
+                    (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
-                    @rem(n, 128) == 0 and @rem(k, 128) == 0 and
-                    scale.dim(0) == @divExact(n, 128) and scale.dim(1) == @divExact(k, 128),
+                    scale.dim(0) == n_blocks and scale.dim(1) == k_blocks,
             };
         }
 
@@ -98,14 +100,39 @@ pub const Quantization = struct {
 pub const QuantizedInput = struct {
     values: Tensor,
     scales: Tensor,
-    global_scale: ?Tensor,
+    global_scale: ?Tensor = null,
 };
 
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input, global_scale, axis) else null,
-        .mxfp8, .mxfp4, .fp8_per_channel, .fp8_block128, .fp8_per_tensor => null,
+        .fp8_block128 => switch (platform.target) {
+            .cuda, .rocm => quantizeBlockFp8(input, axis, if (platform.target == .rocm) .f8e4m3fnuz else .f8e4m3fn),
+            else => null,
+        },
+        .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
+    };
+}
+
+/// Quantize each 128-value activation block, preserving the input's axes.
+/// Scales have the same shape with the contracting dimension divided by 128.
+pub fn quantizeBlockFp8(x: Tensor, axis: anytype, dtype: DataType) QuantizedInput {
+    stdx.debug.assert(dtype == .f8e4m3fn or dtype == .f8e4m3fnuz, "expected E4M3 FP8 dtype, got {s}", .{@tagName(dtype)});
+    stdx.debug.assert(@mod(x.dim(axis), 128) == 0, "block FP8 activation width must be divisible by 128, got {f}", .{x.shape()});
+    // Match the routed-MoE quantizer's FNUZ range.
+    const fp8_max: f32 = if (dtype == .f8e4m3fnuz) 224.0 else 448.0;
+    const grouped = x.convert(.f32).splitAxis(axis, .{ .fp8_ks = -1, .fp8_block = 128 });
+    const scales = grouped.abs().max(.fp8_block)
+        .maximum(.scalar(1e-10, .f32))
+        .scale(1.0 / fp8_max);
+    const values = grouped.div(scales.broad(grouped.shape()))
+        .clamp(.scalar(-fp8_max, .f32), .scalar(fp8_max, .f32))
+        .convert(dtype)
+        .reshape(x.shape().withDtype(dtype));
+    return .{
+        .values = values,
+        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), 128)).withDtype(.f32)),
     };
 }
 
@@ -198,6 +225,16 @@ test "Quantization.Scheme.classify" {
         .init(.{ .dout = 40, .sc = 48 }, .bf16),
     ));
 
+    // GLM uses f32 scales and permits a partial final 128-row tile.
+    try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
+        .init(.{ .dout = 2048, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 16, .sc = 48 }, .f32),
+    ));
+    try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
+        .init(.{ .dout = 576, .d = 6144 }, .f8e4m3fn),
+        .init(.{ .dout = 5, .sc = 48 }, .f32),
+    ));
+
     // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
     try expect(@as(?Quantization.Scheme, .fp8_per_tensor), Quantization.Scheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
     try expect(@as(?Quantization.Scheme, .fp8_per_tensor), Quantization.Scheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
@@ -279,4 +316,47 @@ test "Quantization.Scheme.classify" {
         .init(.{ .dout = 128, .d = 128 }, .f8e4m3fn),
         .init(.{ .dout = 1, .sc = 1 }, .bf16),
     ));
+}
+
+test "block FP8 quantization preserves axes and reconstructs constant blocks in FN and FNUZ" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    inline for (.{ DataType.f8e4m3fn, DataType.f8e4m3fnuz }) |dtype| {
+        const Local = struct {
+            const Outputs = struct { values: Tensor, scales: Tensor };
+            fn forward(x: Tensor) Outputs {
+                const input = quantizeBlockFp8(x, .k, dtype);
+                return .{ .values = input.values.convert(.f32), .scales = input.scales };
+            }
+        };
+        const x: Tensor = .init(.{ .b = 2, .k = 256, .s = 3 }, .bf16);
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
+        defer exe.deinit();
+        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.output_shapes[0]);
+        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 2).withDtype(.f32), exe.output_shapes[1]);
+        var host: [2 * 256 * 3]zml.floats.BFloat16 = undefined;
+        for (&host, 0..) |*value, i| {
+            const magnitude: f32 = if ((i / 3) % 256 < 128) 1.0 else 2.0;
+            value.* = .fromF32(switch (i % 3) {
+                0 => 0.0,
+                1 => magnitude,
+                else => -magnitude,
+            });
+        }
+        var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
+        defer buffer.deinit();
+        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{buffer});
+        defer zml.Buffer.deinitAll(Local.Outputs, &output);
+        var values = try output.values.toSliceAlloc(allocator, io);
+        defer values.free(allocator);
+        var scales = try output.scales.toSliceAlloc(allocator, io);
+        defer scales.free(allocator);
+        for (scales.constItems(f32)) |scale| try std.testing.expect(std.math.isFinite(scale) and scale > 0);
+        for (values.constItems(f32), 0..) |value, i| {
+            const scale_index = (i / (256 * 3)) * 6 + ((i / 3) % 256) / 128 * 3 + i % 3;
+            try std.testing.expectApproxEqAbs(host[i].toF32(), value * scales.constItems(f32)[scale_index], 1e-6);
+        }
+    }
 }
