@@ -694,16 +694,18 @@ pub const MoeAlignBlockSize = struct {
         max_num_m_blocks: usize,
         block_size_m: usize,
         hist_block: usize,
+        localize_contiguous_experts: bool,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "moe_align_block_size_kernel",
-        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "expert_ids_ptr", "num_tokens_post_pad_ptr", "cumsum_ptr" },
+        .inputs = &.{ "topk_ids_ptr", "expert_partition_ptr", "sorted_token_ids_ptr", "expert_ids_ptr", "num_tokens_post_pad_ptr", "cumsum_ptr" },
         .outputs = &.{ "sorted_token_ids", "expert_ids", "num_tokens_post_pad", "cumsum" },
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .expert_ids_ptr = .{ .ptr = .i32 },
             .num_tokens_post_pad_ptr = .{ .ptr = .i32 },
@@ -721,6 +723,10 @@ pub const MoeAlignBlockSize = struct {
         const max_num_tokens_padded: i32 = @intCast(cfg.max_num_tokens_padded);
         const max_num_m_blocks: i64 = @intCast(cfg.max_num_m_blocks);
         const hist_block: i64 = @intCast(cfg.hist_block);
+        const expert_start = if (cfg.localize_contiguous_experts)
+            b.load(a.expert_partition_ptr).mul(num_experts)
+        else
+            b.liftAs(0, .i32);
 
         const pid = b.programId(.x);
         const fill_offs = b.arange(0, hist_block, .i32);
@@ -753,11 +759,12 @@ pub const MoeAlignBlockSize = struct {
         {
             const offs = hist_loop.iv.add(token_offs);
             const mask = offs.lt(numel);
-            const expert_vals = b.loadOpts(a.topk_ids_ptr.addPtr(offs), .{
+            const global_expert_vals = b.loadOpts(a.topk_ids_ptr.addPtr(offs), .{
                 .mask = mask,
-                .other = b.splat(num_experts, &.{hist_block}),
+                .other = expert_start.add(num_experts).splatTo(&.{hist_block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            const expert_vals = global_expert_vals.sub(expert_start);
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
             const h = b.histogramOpts(expert_vals, padded_num_experts, .{ .mask = valid });
             hist_loop.yield(.{hist_loop.carried[0].add(h)});
         }
@@ -819,16 +826,18 @@ pub const CountAndSortExpertTokens = struct {
         numel: usize,
         num_experts: usize,
         sort_block_size: usize,
+        localize_contiguous_experts: bool,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "count_and_sort_expert_tokens_kernel",
-        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "cumsum_ptr" },
+        .inputs = &.{ "topk_ids_ptr", "expert_partition_ptr", "sorted_token_ids_ptr", "cumsum_ptr" },
         .outputs = &.{ "sorted_token_ids", "cumsum" },
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .cumsum_ptr = .{ .ptr = .i32 },
             .out0_ptr = .{ .ptr = .i32 },
@@ -839,6 +848,10 @@ pub const CountAndSortExpertTokens = struct {
         const numel: i32 = @intCast(cfg.numel);
         const num_experts: i32 = @intCast(cfg.num_experts);
         const block_i32: i32 = @intCast(block);
+        const expert_start = if (cfg.localize_contiguous_experts)
+            b.load(a.expert_partition_ptr).mul(num_experts)
+        else
+            b.liftAs(0, .i32);
 
         const pid = b.programId(.x);
         const num_progs = b.numPrograms(.x);
@@ -861,11 +874,12 @@ pub const CountAndSortExpertTokens = struct {
 
             // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
             const topk_ptrs = a.topk_ids_ptr.addPtr(offs);
-            const expert_vals = b.loadOpts(topk_ptrs, .{
+            const global_expert_vals = b.loadOpts(topk_ptrs, .{
                 .mask = mask,
-                .other = b.splat(num_experts, &.{block}),
+                .other = expert_start.add(num_experts).splatTo(&.{block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            const expert_vals = global_expert_vals.sub(expert_start);
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
 
             // rank = atomic_add(cumsum + expert_vals, 1, mask=valid, sem="relaxed")
             const cumsum_ptrs = a.cumsum_ptr.addPtr(expert_vals);

@@ -32,6 +32,10 @@ pub const Options = struct {
     quant_scheme: ?zml.Quantization.Scheme = null,
     global_num_experts: i64 = -1,
     expert_map: ?Tensor = null,
+    /// Rank-local contiguous expert shard. When present, routing kernels
+    /// localize global IDs as `id - partition * local_num_experts` internally.
+    expert_partition: ?Tensor = null,
+    routed_scaling_factor: f32 = 1.0,
     w1_scale: ?Tensor = null,
     w2_scale: ?Tensor = null,
     w1_zp: ?Tensor = null,
@@ -225,13 +229,34 @@ pub fn fusedExpertsImpl(
     if (opts.expert_map) |expert_map| {
         if (expert_map.dtype() != .i32) return error.UnsupportedType;
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
+    } else if (opts.expert_partition != null) {
+        const local_num_experts = gate_up.dim(.expert);
+        if (local_num_experts <= 0 or num_experts < local_num_experts or
+            @rem(num_experts, local_num_experts) != 0)
+        {
+            return error.InvalidShape;
+        }
+    } else if (num_experts != gate_up.dim(.expert)) {
+        return error.InvalidShape;
     }
-    const routing = prepareRouting(ids, num_experts, block_size_m);
+    const routing_num_experts = if (opts.expert_partition != null) gate_up.dim(.expert) else num_experts;
+    const routing = prepareRouting(ids, routing_num_experts, block_size_m, opts.expert_partition);
 
-    const expert_ids = if (opts.expert_map) |expert_map|
-        expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
-    else
-        routing.expert_ids;
+    const routing_id_valid = routing.expert_ids.cmp(.GE, Tensor.scalar(0, .i32))
+        .logical(.AND, routing.expert_ids.cmp(.LT, Tensor.scalar(routing_num_experts, .i32)));
+    const safe_routing_ids = routing_id_valid.select(
+        routing.expert_ids,
+        Tensor.zeroes(routing.expert_ids.shape()),
+    );
+    const expert_ids = if (opts.expert_partition != null)
+        routing_id_valid.select(routing.expert_ids, Tensor.scalar(-1, .i32))
+    else if (opts.expert_map) |expert_map| mapped: {
+        const local_ids = expert_map.gather(.{ .expert = safe_routing_ids }, .{}).withTags(.{.g});
+        const local_id_valid = routing_id_valid
+            .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+            .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+        break :mapped local_id_valid.select(local_ids, Tensor.scalar(-1, .i32));
+    } else routing_id_valid.select(routing.expert_ids, Tensor.scalar(-1, .i32));
 
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
@@ -297,8 +322,8 @@ pub fn fusedExpertsImpl(
             128,
             down.dtype() == .f8e4m3fnuz,
             options.activation_threshold,
-            null,
-            null,
+            if (opts.expert_partition != null) ids else null,
+            opts.expert_partition,
             gate_up.dim(.expert),
         )
     else blk: {
@@ -329,7 +354,7 @@ pub fn fusedExpertsImpl(
         options,
         routing.naive_block_assignment,
         1,
-        true,
+        false,
         false,
         .bf16,
     );
@@ -351,9 +376,177 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     );
 
-    const output = second_out.sum(.topk).squeeze(.topk);
+    // Match vLLM's unpermute/reduce precision: materialize each expert's down
+    // projection as BF16, then apply the router weights and accumulate all
+    // routes in FP32. The CUDA top-8 path also preserves vLLM's source-order
+    // association and skips invalid/non-local routes before loading them.
+    const ordered_top8 = zml.Compiler.current().platform.target == .cuda and
+        ids.dim(.topk) == 8 and weights.dtype() == .f32;
+    const output = if (ordered_top8)
+        reduceExpertRoutesTop8WithPartition(
+            second_out,
+            weights,
+            ids,
+            opts.expert_map,
+            opts.expert_partition,
+            num_experts,
+            gate_up.dim(.expert),
+            opts.routed_scaling_factor,
+        )
+    else fallback: {
+        // Negative, out-of-range, and non-local routes can leave output slots
+        // unwritten. Mask both operands so invalid NaN/Inf weights cannot
+        // propagate through a zero route.
+        const route_global_valid = ids.cmp(.GE, Tensor.scalar(0, .i32))
+            .logical(.AND, ids.cmp(.LT, Tensor.scalar(num_experts, .i32)));
+        const route_is_valid = if (opts.expert_partition) |expert_partition| local: {
+            const expert_start = expert_partition.convert(.i32).scale(gate_up.dim(.expert));
+            const local_ids = ids.sub(expert_start);
+            break :local route_global_valid
+                .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+                .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+        } else if (opts.expert_map) |expert_map| local: {
+            const safe_ids = route_global_valid.select(ids, Tensor.scalar(0, .i32));
+            const local_ids = expert_map
+                .gather(.{ .expert = safe_ids }, .{})
+                .withTags(ids.shape().tags());
+            break :local route_global_valid
+                .logical(.AND, local_ids.cmp(.GE, Tensor.scalar(0, .i32)))
+                .logical(.AND, local_ids.cmp(.LT, Tensor.scalar(gate_up.dim(.expert), .i32)));
+        } else route_global_valid;
+        const active_second_out = route_is_valid
+            .broad(second_out.shape().withDtype(.bool))
+            .select(second_out, Tensor.zeroes(second_out.shape()));
+        const active_weights = route_is_valid.select(weights, Tensor.zeroes(weights.shape()));
+        break :fallback reduceExpertRoutes(active_second_out, active_weights)
+            .scale(opts.routed_scaling_factor);
+    };
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
+}
+
+/// Applies router weights to materialized BF16 expert outputs, accumulates the
+/// route dimension in FP32, and narrows only the final per-token result.
+pub fn reduceExpertRoutes(routes: Tensor, weights: Tensor) Tensor {
+    stdx.debug.assert(routes.dtype() == .bf16, "expected BF16 expert routes, got {}", .{routes.dtype()});
+    stdx.debug.assert(weights.dtype() == .f32 or weights.dtype() == .bf16, "expected FP32 or BF16 router weights, got {}", .{weights.dtype()});
+    stdx.debug.assert(routes.dim(.token) == weights.dim(.token), "route and weight token counts differ", .{});
+    stdx.debug.assert(routes.dim(.topk) == weights.dim(.topk), "route and weight top-k counts differ", .{});
+
+    const weighted_routes = routes
+        .convert(.f32)
+        .mul(weights.convert(.f32).broad(routes.shape().withDtype(.f32)));
+    return weighted_routes.sum(.topk).squeeze(.topk).convert(.bf16);
+}
+
+/// CUDA implementation of vLLM's ordered DeepGemm route gather for the
+/// GLM-compatible BF16-route, FP32-weight, top-8 case.
+pub fn reduceExpertRoutesTop8(
+    routes: Tensor,
+    weights: Tensor,
+    ids: Tensor,
+    expert_map: ?Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+) Tensor {
+    return reduceExpertRoutesTop8WithPartition(
+        routes,
+        weights,
+        ids,
+        expert_map,
+        null,
+        global_num_experts,
+        local_num_experts,
+        1.0,
+    );
+}
+
+/// Ordered top-8 reduction for a contiguous expert-parallel shard. Global
+/// route IDs are localized inside the reduction kernel, avoiding a materialized
+/// expert-map gather while preserving FP32 source-order accumulation.
+pub fn reduceExpertRoutesTop8ContiguousEp(
+    routes: Tensor,
+    weights: Tensor,
+    ids: Tensor,
+    expert_partition: Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+    routed_scaling_factor: f32,
+) Tensor {
+    return reduceExpertRoutesTop8WithPartition(
+        routes,
+        weights,
+        ids,
+        null,
+        expert_partition,
+        global_num_experts,
+        local_num_experts,
+        routed_scaling_factor,
+    );
+}
+
+fn reduceExpertRoutesTop8WithPartition(
+    routes: Tensor,
+    weights: Tensor,
+    ids: Tensor,
+    expert_map: ?Tensor,
+    expert_partition: ?Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+    routed_scaling_factor: f32,
+) Tensor {
+    stdx.debug.assert(routes.dtype() == .bf16, "expected BF16 expert routes, got {}", .{routes.dtype()});
+    stdx.debug.assert(weights.dtype() == .f32, "expected FP32 router weights, got {}", .{weights.dtype()});
+    stdx.debug.assert(ids.dtype() == .i32, "expected I32 expert ids, got {}", .{ids.dtype()});
+    stdx.debug.assert(routes.rank() == 3 and weights.rank() == 2 and ids.rank() == 2, "expected [token,topk,out] routes and [token,topk] weights/ids", .{});
+    stdx.debug.assert(routes.dim(.topk) == 8 and weights.dim(.topk) == 8 and ids.dim(.topk) == 8, "ordered route reduction requires top-k 8", .{});
+    stdx.debug.assert(routes.dim(.token) == weights.dim(.token) and routes.dim(.token) == ids.dim(.token), "route, weight, and id token counts differ", .{});
+    stdx.debug.assert(global_num_experts > 0 and local_num_experts > 0, "expert counts must be positive", .{});
+    stdx.debug.assert(expert_map == null or expert_partition == null, "expert map and contiguous partition are mutually exclusive", .{});
+    if (expert_partition) |partition| {
+        stdx.debug.assert(partition.dtype() == .u32 and partition.rank() == 0, "invalid contiguous expert partition", .{});
+        stdx.debug.assert(global_num_experts >= local_num_experts and @rem(global_num_experts, local_num_experts) == 0, "invalid contiguous expert shard", .{});
+    } else if (expert_map) |map| {
+        stdx.debug.assert(map.dtype() == .i32 and map.rank() == 1 and map.dim(.expert) == global_num_experts, "invalid expert map", .{});
+    } else {
+        stdx.debug.assert(global_num_experts == local_num_experts, "an expert map is required when global and local expert counts differ", .{});
+    }
+
+    stdx.debug.assert(routes.dim(.token) > 0 and routes.dim(.out) > 0, "token and output dimensions must be positive", .{});
+    const num_tokens: usize = @intCast(routes.dim(.token));
+    const hidden_size: usize = @intCast(routes.dim(.out));
+    const block_d: usize = @intCast(std.math.gcd(@as(u64, @intCast(hidden_size)), 1024));
+    const map_operand = expert_map orelse ids;
+    const partition_operand = expert_partition orelse Tensor.scalar(0, .u32);
+    return kernels.ReduceExpertRoutesTop8.Kernel.call(
+        .{
+            .routes = routes,
+            .weights = weights,
+            .topk_ids = ids,
+            .expert_map = map_operand,
+            .expert_partition = partition_operand,
+        },
+        .{ .output = routes.shape().remove(.topk).withDtype(.bf16) },
+        .{
+            .cfg = .{
+                .num_tokens = num_tokens,
+                .hidden_size = hidden_size,
+                .global_num_experts = @intCast(global_num_experts),
+                .local_num_experts = @intCast(local_num_experts),
+                .block_d = block_d,
+                .has_expert_map = expert_map != null,
+                .has_contiguous_expert_partition = expert_partition != null,
+                .routed_scaling_factor = routed_scaling_factor,
+            },
+            .grid = .{
+                @intCast(@divExact(hidden_size, block_d)),
+                @intCast(@min(num_tokens, 1024)),
+                1,
+            },
+            .num_warps = 2,
+            .num_stages = 1,
+        },
+    ).output;
 }
 
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
@@ -439,11 +632,14 @@ const Routing = struct {
     naive_block_assignment: bool,
 };
 
-fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
+fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64, expert_partition: ?Tensor) Routing {
     const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_assignments = ids.dim(.token) * ids.dim(.topk);
     const sparsity_factor: i64 = 4;
-    const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
+    // Naive assignment stores expert IDs directly in the block map. Contiguous
+    // EP needs those global IDs localized, so use the aligned kernels which
+    // fold localization into their existing reads.
+    const naive_block_assignment = expert_partition == null and num_assignments * sparsity_factor <= num_experts;
     const max_num_tokens_padded = if (naive_block_assignment)
         num_assignments * block_size_m
     else if (num_assignments < num_experts)
@@ -458,7 +654,7 @@ fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing
             ids.reshape(.{ .g = num_assignments }),
             Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1}),
         };
-    } else alignBlockSize(ids, num_experts, block_size_m);
+    } else alignBlockSize(ids, num_experts, block_size_m, expert_partition);
 
     return .{
         .sorted_token_ids = sorted_token_ids,
@@ -470,7 +666,7 @@ fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing
     };
 }
 
-fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
+fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64, expert_partition: ?Tensor) struct { Tensor, Tensor, Tensor } {
     log.debug("Using triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
     const topk_ids_ = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_tokens = topk_ids_.dim(.token);
@@ -481,12 +677,14 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     else
         num_assignments + num_experts * (block_size_m - 1);
     const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
-    const warp_size: i64 = 32;
-    const padded_num_experts = (std.math.divCeil(i64, num_experts, warp_size) catch unreachable) * warp_size;
+    // Triton ranges and the histogram built over them require a power-of-two
+    // width. A warp multiple is insufficient for GLM's 288 experts.
+    const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(num_experts)));
     const sort_block_size: i64 = 256;
     const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 
     const flat_experts = topk_ids_.reshape(.{ .g = num_assignments });
+    const partition_operand = expert_partition orelse Tensor.scalar(0, .u32);
     var cumsums = Tensor.zeroes(Shape.init(.{ .g = num_experts + 1 }, .i32));
     var expert_ids = Tensor.zeroes(Shape.init(.{ .g = max_num_m_blocks }, .i32));
     var sorted_token_ids = Tensor.zeroes(Shape.init(.{ .g = max_num_tokens_padded }, .i32));
@@ -496,6 +694,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
         const align_outs = kernels.MoeAlignBlockSize.Kernel.call(
             .{
                 .topk_ids_ptr = flat_experts,
+                .expert_partition_ptr = partition_operand,
                 .sorted_token_ids_ptr = sorted_token_ids,
                 .expert_ids_ptr = expert_ids,
                 .num_tokens_post_pad_ptr = num_tokens_post_padded,
@@ -516,6 +715,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                     .max_num_m_blocks = @intCast(max_num_m_blocks),
                     .block_size_m = @intCast(block_size_m),
                     .hist_block = 256,
+                    .localize_contiguous_experts = expert_partition != null,
                 },
                 .grid = .{ 2, 1, 1 },
                 .num_stages = 1,
@@ -538,6 +738,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
         const sort_outs = kernels.CountAndSortExpertTokens.Kernel.call(
             .{
                 .topk_ids_ptr = flat_experts,
+                .expert_partition_ptr = partition_operand,
                 .sorted_token_ids_ptr = sorted_token_ids,
                 .cumsum_ptr = cumsums,
             },
@@ -550,6 +751,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                     .numel = @intCast(num_assignments),
                     .num_experts = @intCast(num_experts),
                     .sort_block_size = @intCast(sort_block_size),
+                    .localize_contiguous_experts = expert_partition != null,
                 },
                 .grid = .{ @intCast(sort_grid_x), 1, 1 },
                 .num_stages = 1,
@@ -904,6 +1106,11 @@ fn validateOptions(opts: Options) !void {
         else => return error.UnsupportedQuantization,
     };
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
+    if (opts.expert_partition) |partition| {
+        if (opts.expert_map != null or opts.global_num_experts <= 0) return error.InvalidShape;
+        if (partition.dtype() != .u32 or partition.rank() != 0) return error.UnsupportedType;
+    }
+    if (!std.math.isFinite(opts.routed_scaling_factor)) return error.InvalidShape;
     if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
     if (opts.prepared_a1 != null and opts.quant_scheme != .fp8_block128) return error.UnsupportedQuantization;
@@ -972,7 +1179,7 @@ pub fn fusedExpertsImpl_fp4(
         @intCast(weights_gate_up.dim(.expert)),
     );
     const num_experts = weights_gate_up.dim(.expert);
-    const aligned_routing = prepareRouting(flat_topk_ids, num_experts, @intCast(kernel_cfg.block_m));
+    const aligned_routing = prepareRouting(flat_topk_ids, num_experts, @intCast(kernel_cfg.block_m), null);
     const routing = prepareFp4Routing(
         aligned_routing,
         flat_topk_ids,
