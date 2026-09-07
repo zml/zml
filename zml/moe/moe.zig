@@ -37,10 +37,14 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     return error.UnsupportedDataType,
-                .f8e8m0, .f16, .f32 => .triton,
+                .f8e4m3fn, .f8e4m3fnuz, .f8e8m0, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
-            .rocm, .oneapi => switch (weights_dtype) {
+            .rocm => switch (weights_dtype) {
+                .bf16, .f16, .f32, .f8e4m3fn, .f8e4m3fnuz, .f8e8m0 => .triton,
+                else => error.UnsupportedDataType,
+            },
+            .oneapi => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
@@ -140,6 +144,8 @@ pub const Parameters = union(Backend) {
 
 pub const Options = struct {
     activation_threshold: ?f32 = null,
+    /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
+    quantize_input: bool,
 };
 
 pub fn forwardMoe(
@@ -379,6 +385,7 @@ pub fn forwardMoe(
                 .topk_ids = topk_ids,
                 .activation = parameters.triton.activation,
                 .activation_threshold = opts.activation_threshold,
+                .quantize_input = opts.quantize_input,
             };
             const expert_partition = gate_up.weight.shape().partition(.expert);
 

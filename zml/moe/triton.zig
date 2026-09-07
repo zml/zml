@@ -7,7 +7,6 @@ const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const tri = zml.kernel.triton;
-const DType = tri.DType;
 const toDType = tri.from;
 const a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
 const kernels = @import("triton_kernels/triton_kernels.zig");
@@ -50,38 +49,54 @@ pub const FusedExpertsArgs = struct {
     activation: Parameters.ActivationMode = .silu,
     expert_map: ?Tensor = null,
     activation_threshold: ?f32 = null,
+    /// Use FP8 activations for FP8 weights; false keeps BF16 activations.
+    quantize_input: bool,
 };
 
 pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
     const hidden_states = opts.hidden_states;
     const topk_weights = opts.topk_weights;
     const topk_ids = opts.topk_ids;
-
-    if (opts.gate_up.quantizationScheme() != null and opts.gate_up.quantizationScheme().? == .mxfp4) {
-        const local_topk_ids, const local_topk_weights = if (opts.expert_map) |expert_map| blk: {
-            const local_num_experts = opts.gate_up.weight.dim(.expert);
-            const mapped_ids = expert_map
-                .gather(.{ .expert = topk_ids.convert(.i32) }, .{})
-                .withTags(topk_ids.shape().tags());
-            const in_range = mapped_ids.cmp(.GE, Tensor.scalar(0, .i32))
-                .logical(.AND, mapped_ids.cmp(.LT, Tensor.scalar(local_num_experts, .i32)));
-
-            break :blk .{
-                in_range.select(mapped_ids, Tensor.scalar(local_num_experts, .i32)),
-                in_range.select(topk_weights, Tensor.scalar(0, topk_weights.dtype())),
-            };
-        } else .{ topk_ids, topk_weights };
-
-        var local_args = opts;
-        local_args.topk_ids = local_topk_ids;
-        local_args.topk_weights = local_topk_weights;
-        return fusedExpertsImpl_fp4(local_args);
-    }
-
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const num_tokens = b * s;
-    const launch_config = launchConfigForTokens(num_tokens);
+    var launch_config = launchConfigForTokens(num_tokens);
+
+    const gate_up_scheme = opts.gate_up.quantizationScheme();
+    const down_scheme = opts.down.quantizationScheme();
+    if (gate_up_scheme) |scheme| switch (scheme) {
+        .mxfp4 => {
+            if (down_scheme != .mxfp4) return error.UnsupportedQuantization;
+            const local_topk_ids, const local_topk_weights = if (opts.expert_map) |expert_map| blk: {
+                const local_num_experts = opts.gate_up.weight.dim(.expert);
+                const mapped_ids = expert_map
+                    .gather(.{ .expert = topk_ids.convert(.i32) }, .{})
+                    .withTags(topk_ids.shape().tags());
+                const in_range = mapped_ids.cmp(.GE, Tensor.scalar(0, .i32))
+                    .logical(.AND, mapped_ids.cmp(.LT, Tensor.scalar(local_num_experts, .i32)));
+
+                break :blk .{
+                    in_range.select(mapped_ids, Tensor.scalar(local_num_experts, .i32)),
+                    in_range.select(topk_weights, Tensor.scalar(0, topk_weights.dtype())),
+                };
+            } else .{ topk_ids, topk_weights };
+
+            var local_args = opts;
+            local_args.topk_ids = local_topk_ids;
+            local_args.topk_weights = local_topk_weights;
+            return fusedExpertsImpl_fp4(local_args);
+        },
+        .nvfp4 => return error.UnsupportedQuantization,
+        .fp8_block128 => launch_config.block_size_k = 128,
+        .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
+    };
+
+    var down_launch_config = launchConfigForTokens(num_tokens);
+    if (down_scheme) |scheme| switch (scheme) {
+        .fp8_block128 => down_launch_config.block_size_k = 128,
+        .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
+        .mxfp4, .nvfp4 => return error.UnsupportedQuantization,
+    };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
@@ -90,13 +105,14 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
     const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "expected BF16 hidden states, got {}", .{hidden.dtype()});
-    stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn, "expected BF16 or FP8 E4M3FN gate/up weights, got {}", .{gate_up.dtype()});
-    stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn, "expected BF16 or FP8 E4M3FN down weights, got {}", .{down.dtype()});
+    stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "expected BF16 or FP8 E4M3FN/FNUZ gate/up weights, got {}", .{gate_up.dtype()});
+    stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "expected BF16 or FP8 E4M3FN/FNUZ down weights, got {}", .{down.dtype()});
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "expected FP32 or BF16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "expected I32 expert ids, got {}", .{ids.dtype()});
     stdx.debug.assert(hidden.dim(.in) == gate_up.dim(.in), "hidden width {} must match gate/up input width {}", .{ hidden.dim(.in), gate_up.dim(.in) });
-    stdx.debug.assert(@rem(gate_up.dim(.out), 2) == 0, "gate/up output width must be even, got {}", .{gate_up.dim(.out)});
-    stdx.debug.assert(down.dim(.mid) == @divFloor(gate_up.dim(.out), 2), "down input width {} must equal half the gate/up output width {}", .{ down.dim(.mid), gate_up.dim(.out) });
+    const activation_reduction: i64 = if (opts.activation == .relu) 1 else 2;
+    stdx.debug.assert(@rem(gate_up.dim(.out), activation_reduction) == 0, "gate/up output width {} must be divisible by {}", .{ gate_up.dim(.out), activation_reduction });
+    stdx.debug.assert(down.dim(.mid) == @divFloor(gate_up.dim(.out), activation_reduction), "down input width {} must match activated width {}", .{ down.dim(.mid), @divFloor(gate_up.dim(.out), activation_reduction) });
     stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "routing ids and weights must match hidden token count {}, got {} and {}", .{ hidden.dim(.token), ids.dim(.token), routing_weights.dim(.token) });
     stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "routing ids and weights must have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
     stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "gate/up and down expert counts must match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
@@ -114,8 +130,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
     var hidden_quant = hidden;
     var input_scale: ?Tensor = null;
 
-    if (gate_up.dtype() == .f8e4m3fn) {
-        hidden_quant, input_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden));
+    if (opts.quantize_input) {
+        if (gate_up_scheme) |scheme| hidden_quant, input_scale = quantizeFp8Input(hidden, scheme, gate_up.dtype());
     }
 
     const gate_up_out = callFusedMoe(.{
@@ -127,15 +143,16 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
         .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = launch_config,
+        .quant_scheme = gate_up_scheme,
         .top_k = @intCast(ids.dim(.topk)),
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    const activated = applyActivation(gate_up_out, opts.activation, opts.activation_threshold);
-    var activated_quant = activated;
+    const activated = applyExpertActivation(gate_up_out, opts.activation, opts.activation_threshold);
+    var activated_quant = activated.convert(.bf16);
     input_scale = null;
-    if (down.dtype() == .f8e4m3fn) {
-        activated_quant, input_scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated));
+    if (opts.quantize_input) {
+        if (down_scheme) |scheme| activated_quant, input_scale = quantizeFp8Input(activated, scheme, down.dtype());
     }
 
     const down_out = callFusedMoe(.{
@@ -147,17 +164,24 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
         .routing_weights = routing_weights,
         .routing = routing,
         .expert_ids = expert_ids,
-        .launch_config = launch_config,
+        .launch_config = down_launch_config,
+        .quant_scheme = down_scheme,
         .top_k = 1,
         .output_shape = Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = down_out.sum(.topk).squeeze(.topk);
+    const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }
 
-fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
+fn applyExpertActivation(input: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
+    const x = input.convert(.f32);
+    if (mode == .relu) {
+        const clipped = if (activation_threshold) |limit| x.minimum(Tensor.scalar(limit, x.dtype())) else x;
+        return clipped.relu().powByConst(2);
+    }
+
     const mid = @divFloor(x.dim(.out), 2);
     var gate = x.slice(.out, .{ .end = mid });
     var up = x.slice(.out, .{ .start = mid });
@@ -168,9 +192,70 @@ fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_thresh
     }
     return switch (mode) {
         .silu => gate.silu().mul(up),
-        .relu => x.relu().powByConst(2),
+        .relu => unreachable,
         .gelu => gate.gelu().mul(up),
     };
+}
+
+test "SwiGLU uses FP32 math for BF16 inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const Local = struct {
+        fn forward(x: Tensor, threshold: ?f32) Tensor {
+            return applyExpertActivation(x, .silu, threshold);
+        }
+    };
+    const x: Tensor = .init(.{ .token = 1, .out = 6 }, .bf16);
+    const gates = [_]f32{ 0.75, -1.25, 3.5 };
+    const ups = [_]f32{ 0.875, -2.25, 4.5 };
+    var values: [6]zml.floats.BFloat16 = undefined;
+    for (gates, ups, 0..) |gate, up, i| {
+        values[i] = .fromF32(gate);
+        values[i + 3] = .fromF32(up);
+    }
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
+    defer input.deinit();
+    for ([_]?f32{ null, 2 }) |threshold| {
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, threshold }, .{});
+        defer exe.deinit();
+        try zml.testing.expectEqualShapes(Shape.init(.{ .token = 1, .out = 3 }, .f32), exe.output_shapes[0]);
+        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{input});
+        defer output.deinit();
+        var actual = try output.toSliceAlloc(allocator, io);
+        defer actual.free(allocator);
+        for (gates, ups, actual.constItems(f32)) |gate, up, value| {
+            const g = if (threshold) |limit| @min(gate, limit) else gate;
+            const u = if (threshold) |limit| std.math.clamp(up, -limit, limit) else up;
+            try std.testing.expectApproxEqAbs(g / (1 + @exp(-g)) * u, value, 1e-6);
+        }
+    }
+}
+
+test "ReLU squared activation preserves width and applies threshold before squaring" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const Local = struct {
+        fn forward(x: Tensor, threshold: ?f32) Tensor {
+            return applyExpertActivation(x, .relu, threshold);
+        }
+    };
+    const x: Tensor = .init(.{ .token = 1, .out = 5 }, .f32);
+    const values = [_]f32{ -3, 0, 1, 2, 4 };
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
+    defer input.deinit();
+    for ([_]?f32{ null, 2 }) |threshold| {
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, threshold }, .{});
+        defer exe.deinit();
+        try zml.testing.expectEqualShapes(x.shape(), exe.output_shapes[0]);
+        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{input});
+        defer output.deinit();
+        var actual = try output.toSliceAlloc(allocator, io);
+        defer actual.free(allocator);
+        const expected = [_]f32{ 0, 0, 1, 4, if (threshold != null) 4 else 16 };
+        try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
+    }
 }
 
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
@@ -184,9 +269,14 @@ fn callFusedMoe(opts: struct {
     routing: Routing,
     expert_ids: Tensor,
     launch_config: LaunchConfig,
+    quant_scheme: ?zml.Quantization.Scheme = null,
     top_k: usize,
     output_shape: Shape,
 }) Tensor {
+    stdx.debug.assert(opts.quant_scheme != null or (opts.input_scale == null and opts.weight_scale == null), "scales require a quantization scheme", .{});
+    for ([_]i64{ opts.weight.dim(1), opts.weight.dim(2), opts.input.dim(1), opts.weight.dim(1) * opts.weight.dim(2), opts.output_shape.dim(-1) }) |dim_or_stride| {
+        stdx.debug.assert(dim_or_stride > 0 and @mod(dim_or_stride, 16) == 0, "FusedMoe dimensions and matrix strides must be positive multiples of 16, got {}", .{dim_or_stride});
+    }
     const block_size_m: i64 = @intCast(opts.launch_config.block_size_m);
     const block_size_n: i64 = @intCast(opts.launch_config.block_size_n);
     const m_tokens = opts.input.dim(0);
@@ -194,15 +284,31 @@ fn callFusedMoe(opts: struct {
         @min(opts.routing.max_num_tokens_padded, opts.routing.num_assignments * block_size_m)
     else
         opts.routing.max_num_tokens_padded;
+    stdx.debug.assert(@mod(em_effective, block_size_m) == 0, "routing capacity {} must be a multiple of block size {}", .{ em_effective, block_size_m });
     const grid_x =
-        (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
+        @divExact(em_effective, block_size_m) *
         (std.math.divCeil(i64, opts.weight.dim(1), block_size_n) catch unreachable);
+
+    const weight_scale: ?Tensor = if (opts.weight_scale) |scale| blk: {
+        const scheme = opts.quant_scheme orelse break :blk scale;
+        break :blk switch (scheme) {
+            // dot_scaled takes E8M0 encodings as bytes, including native E8M0 tensors.
+            .mxfp8 => scale.bitCast(.u8),
+            .fp8_per_channel => scale.reshape(.{ opts.weight.dim(0), opts.weight.dim(1), 1 }),
+            .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ opts.weight.dim(0), 1, 1 }),
+            .fp8_block128, .mxfp4, .nvfp4 => scale,
+        };
+    } else null;
 
     const stride_asm: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
     const stride_ask: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
-    const stride_bse: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) scale.dim(1) * scale.dim(2) else 0) else 0;
-    const stride_bsk: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) 1 else 0) else 0;
-    const stride_bsn: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) scale.dim(2) else 0) else 0;
+    const has_weight_scale_expert_stride = if (weight_scale) |scale|
+        !(opts.quant_scheme == .fp8_per_tensor and scale.count() == 1)
+    else
+        false;
+    const stride_bse: i64 = if (weight_scale) |scale| (if (scale.rank() == 3 and has_weight_scale_expert_stride) scale.dim(1) * scale.dim(2) else 0) else 0;
+    const stride_bsk: i64 = if (weight_scale) |scale| (if (scale.rank() == 3) 1 else 0) else 0;
+    const stride_bsn: i64 = if (weight_scale) |scale| (if (scale.rank() == 3) scale.dim(2) else 0) else 0;
 
     return kernels.FusedMoe.Kernel.call(
         .{
@@ -210,7 +316,7 @@ fn callFusedMoe(opts: struct {
             .b_ptr = opts.weight,
             .b_bias_ptr = opts.bias orelse Tensor.scalar(0, .f32),
             .a_scale_ptr = opts.input_scale orelse Tensor.scalar(1.0, .f32),
-            .b_scale_ptr = opts.weight_scale orelse Tensor.scalar(1.0, .f32),
+            .b_scale_ptr = weight_scale orelse Tensor.scalar(1.0, .f32),
             .routing_weights_ptr = opts.routing_weights orelse Tensor.scalar(1.0, .f32),
             .sorted_token_ids_ptr = opts.routing.sorted_token_ids,
             .expert_ids_ptr = opts.expert_ids,
@@ -228,8 +334,8 @@ fn callFusedMoe(opts: struct {
             .stride_bse_ptr = Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
             .stride_bsk_ptr = Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
             .stride_bsn_ptr = Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
-            .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
-            .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+            .stride_bbe_ptr = Tensor.constant(.{ .i64 = if (opts.bias) |bias| (if (bias.rank() == 2 and bias.dim(0) > 1) bias.dim(1) else 0) else 0 }).reshape(.{1}),
+            .stride_bbn_ptr = Tensor.constant(.{ .i64 = if (opts.bias) |bias| (if (bias.rank() > 0 and bias.dim(-1) > 1) 1 else 0) else 0 }).reshape(.{1}),
         },
         .{ .c = opts.output_shape },
         .{
@@ -238,7 +344,7 @@ fn callFusedMoe(opts: struct {
                 .b_dtype = toDType(opts.weight.dtype()),
                 .c_dtype = toDType(opts.output_shape.dtype()),
                 .a_scale_dtype = if (opts.input_scale) |scale| toDType(scale.dtype()) else null,
-                .b_scale_dtype = if (opts.weight_scale) |scale| toDType(scale.dtype()) else null,
+                .b_scale_dtype = if (weight_scale) |scale| toDType(scale.dtype()) else null,
                 .b_bias_dtype = if (opts.bias) |bias| toDType(bias.dtype()) else null,
                 .routing_weights_dtype = if (opts.routing_weights) |weights| toDType(weights.dtype()) else null,
                 .block_size_m = opts.launch_config.block_size_m,
@@ -248,12 +354,138 @@ fn callFusedMoe(opts: struct {
                 .top_k = opts.top_k,
                 .naive_block_assignment = opts.routing.naive_block_assignment,
                 .compute_type = .bf16,
+                .quant_scheme = opts.quant_scheme,
             },
             .grid = .{ @intCast(grid_x), 1, 1 },
             .num_warps = opts.launch_config.num_warps,
             .num_stages = opts.launch_config.num_stages,
         },
     ).c;
+}
+
+test "FP8 routed GEMM with bias matches dequantized weights" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    const Local = struct {
+        const Outputs = struct { actual: Tensor, expected: Tensor };
+
+        fn expandScales(scales: Tensor, shape: Shape) Tensor {
+            var expanded = scales.convert(.f32);
+            for (0..shape.rank()) |axis| {
+                const factor = @divExact(shape.dim(axis), expanded.dim(axis));
+                const broad_shape = expanded.shape().insert(axis + 1, .{factor});
+                const axes = Shape.range(broad_shape.rank(), .i64).remove(axis + 1);
+                expanded = expanded.broadcast(broad_shape, axes.dims())
+                    .reshape(expanded.shape().setDim(axis, shape.dim(axis)));
+            }
+            return expanded.withTags(shape.tags());
+        }
+
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, weights: Tensor, bias: Tensor, scheme: zml.Quantization.Scheme, mx_native: bool, quantize_input: bool) Outputs {
+            const weight = w.convert(.f8e4m3fn);
+            var input = x;
+            var input_scale: ?Tensor = null;
+            var reference_input = x.convert(.f32);
+            if (quantize_input) {
+                input, input_scale = quantizeFp8Input(x, scheme, .f8e4m3fn);
+                const scale = if (scheme == .mxfp8) input_scale.?.bitCast(.f8e8m0) else input_scale.?;
+                reference_input = input.convert(.f32).withTags(x.shape().tags())
+                    .mul(expandScales(scale.convert(.f32), x.shape()));
+            }
+            const weight_scale = if (scheme == .mxfp8) blk: {
+                const native = scales.convert(.f8e8m0);
+                break :blk if (mx_native) native else native.bitCast(.u8);
+            } else scales;
+            const config = launchConfigForTokens(8);
+            const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
+            const actual = callFusedMoe(.{
+                .input = input,
+                .weight = weight,
+                .bias = bias,
+                .input_scale = input_scale,
+                .weight_scale = weight_scale,
+                .routing_weights = weights,
+                .routing = routing,
+                .expert_ids = routing.expert_ids,
+                .launch_config = config,
+                .quant_scheme = scheme,
+                .top_k = 1,
+                .output_shape = Shape.init(.{ .token = x.dim(.token), .topk = 1, .out = w.dim(.out) }, .bf16),
+            }).squeeze(.topk);
+            const expanded_weight = weight.convert(.f32).mul(expandScales(scales, weight.shape()));
+            const selected_weight = expanded_weight.gather(.{ .expert = ids.squeeze(.topk) }, .{});
+            const dot = reference_input.dot(selected_weight, .in);
+            const selected_bias = if (bias.rank() == 2)
+                bias.gather(.{ .expert = ids.squeeze(.topk) }, .{})
+            else
+                bias;
+            const unweighted = dot.add(selected_bias.convert(.f32).broad(dot.shape()));
+            const expected = unweighted.mul(weights.squeeze(.topk).convert(.f32).broad(unweighted.shape())).convert(.bf16);
+            return .{ .actual = actual, .expected = expected };
+        }
+    };
+
+    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
+        for ([_]bool{ false, true }) |quantize_input| {
+            for ([_]i64{ 1, 17 }) |tokens| {
+                const n: i64 = if (scheme == .fp8_block128) 256 else 48;
+                const scale_dims: [3]i64 = switch (scheme) {
+                    .mxfp8 => .{ 8, n, 8 },
+                    .fp8_per_tensor => if (tokens == 1) .{ 1, 1, 1 } else .{ 8, 1, 1 },
+                    .fp8_per_channel => .{ 8, n, 1 },
+                    .fp8_block128 => .{ 8, 2, 2 },
+                    else => unreachable,
+                };
+                const x: Tensor = .init(.{ .token = tokens, .in = 256 }, .bf16);
+                const w: Tensor = .init(.{ .expert = 8, .out = n, .in = 256 }, .bf16);
+                const scales: Tensor = .init(.{ scale_dims[0], scale_dims[1], scale_dims[2] }, .f32);
+                const ids: Tensor = .init(.{ .token = tokens, .topk = 1 }, .i32);
+                const weights: Tensor = .init(.{ .token = tokens, .topk = 1 }, .bf16);
+                const bias: Tensor = if (tokens == 1)
+                    .init(.{ .out = n }, .bf16)
+                else
+                    .init(.{ .expert = 8, .out = n }, .f32);
+                var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, ids, weights, bias, scheme, tokens == 1, quantize_input }, .{});
+                defer exe.deinit();
+                var buffers: [6]zml.Buffer = undefined;
+                var initialized: usize = 0;
+                defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
+                for ([_]Shape{ x.shape(), w.shape(), scales.shape(), ids.shape(), weights.shape(), bias.shape() }, 0..) |shape, i| {
+                    const slice = try zml.Slice.alloc(allocator, shape);
+                    defer slice.free(allocator);
+                    for (0..shape.count()) |j| {
+                        switch (i) {
+                            2 => slice.items(f32)[j] = @as(f32, @floatFromInt(@as(u32, 1) << @as(u5, @intCast(j % 4)))) / 16,
+                            3 => slice.items(i32)[j] = @intCast((j * 3 + 5) % 8),
+                            5 => {
+                                const value = @as(f32, @floatFromInt(@as(i32, @intCast(j % 17)) - 8)) / 2;
+                                if (shape.dtype() == .f32) {
+                                    slice.items(f32)[j] = value;
+                                } else {
+                                    slice.items(zml.floats.BFloat16)[j] = .fromF32(value);
+                                }
+                            },
+                            else => slice.items(zml.floats.BFloat16)[j] = .fromF32(if (i == 4)
+                                @as(f32, @floatFromInt(1 + j % 3)) / 4
+                            else
+                                @as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / 256) % 13)) - 6)) / 4),
+                        }
+                    }
+                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
+                    initialized += 1;
+                }
+                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] });
+                defer zml.Buffer.deinitAll(Local.Outputs, &output);
+                zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.03125, .relative_tolerance = 0.01 }) catch |err| {
+                    log.warn("FP8 routed GEMM failed for scheme={s}, quantize_input={}, tokens={}", .{ @tagName(scheme), quantize_input, tokens });
+                    return err;
+                };
+            }
+        }
+    }
 }
 
 const Routing = struct {
@@ -266,6 +498,7 @@ const Routing = struct {
 };
 
 fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
+    stdx.debug.assert(block_size_m > 0 and @mod(block_size_m, 16) == 0, "routing block size must be a positive multiple of 16, got {}", .{block_size_m});
     const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_assignments = ids.dim(.token) * ids.dim(.topk);
     const sparsity_factor: i64 = 4;
@@ -275,7 +508,7 @@ fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing
     else if (num_assignments < num_experts)
         num_assignments * block_size_m
     else
-        num_assignments + num_experts * (block_size_m - 1);
+        (std.math.divCeil(i64, num_assignments + num_experts * (block_size_m - 1), block_size_m) catch unreachable) * block_size_m;
 
     const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
         log.debug("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
@@ -305,8 +538,8 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     const max_num_tokens_padded = if (num_assignments < num_experts)
         num_assignments * block_size_m
     else
-        num_assignments + num_experts * (block_size_m - 1);
-    const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
+        (std.math.divCeil(i64, num_assignments + num_experts * (block_size_m - 1), block_size_m) catch unreachable) * block_size_m;
+    const max_num_m_blocks = @divExact(max_num_tokens_padded, block_size_m);
     const warp_size: i64 = 32;
     const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(num_experts, warp_size))));
     const sort_block_size: i64 = 256;
@@ -393,13 +626,19 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
 }
 
-fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor } {
+fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: DataType) struct { Tensor, Tensor } {
+    const group_size: i64, const scale_dtype: DataType, const absmax_epsilon: f32 = switch (scheme) {
+        .mxfp8 => .{ 32, .u8, 1e-10 },
+        .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
+        .fp8_block128 => .{ 128, .f32, 1e-10 },
+        .mxfp4, .nvfp4 => unreachable,
+    };
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
     stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
 
     const groups_per_row = @divExact(x.dim(1), group_size);
-    const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, .f8e4m3fn));
-    const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, .bf16));
+    const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, output_dtype));
+    const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype));
 
     const outs = kernels.PerTokenGroupQuantFp8.Kernel.call(
         .{
@@ -407,18 +646,16 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
             .group_size_ptr = Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
             .y_num_columns_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            .eps_ptr = Tensor.scalar(1e-6, .f32),
+            .eps_ptr = Tensor.scalar(absmax_epsilon, .f32),
         },
         .{ .y_q = quantized.shape(), .y_s = scales.shape() },
         .{
             .cfg = .{
                 .input_dtype = toDType(x.dtype()),
-                .output_dtype = .f8e4m3fn,
-                .scale_dtype = .bf16,
-                .block = @intCast(group_size),
-                .fp8_min = -448.0,
-                .fp8_max = 448.0,
-                .use_ue8m0 = false,
+                .output_dtype = toDType(output_dtype),
+                .scale_dtype = toDType(scale_dtype),
+                .block = std.math.ceilPowerOfTwoAssert(usize, @intCast(group_size)),
+                .quant_scheme = scheme,
             },
             .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
             .num_stages = 1,
@@ -481,12 +718,6 @@ test "MoE launch config selects the nearest token bucket" {
     try std.testing.expectEqualDeep(launchConfigForTokens(4096), launchConfigForTokens(8192));
     try std.testing.expectEqual(@as(usize, 64), launchConfigForTokens(16).group_size_m);
     try std.testing.expectEqual(@as(i32, 5), launchConfigForTokens(16).num_stages);
-}
-
-fn fp8ActivationGroupSize(x: Tensor) i64 {
-    const group_size: i64 = 128;
-    stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "FP8 activation width must be divisible by {d}, got {d}", .{ group_size, x.dim(1) });
-    return group_size;
 }
 
 // =====

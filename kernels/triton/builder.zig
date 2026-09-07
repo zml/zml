@@ -1318,11 +1318,16 @@ pub const Builder = struct {
         if (cur_is_float and tgt_is_float) {
             const cur_bw = dtypeBitwidth(cur_dtype);
             const tgt_bw = dtypeBitwidth(dtype);
-            if (tgt_bw > cur_bw) return self.extf(src, dtype);
             const fp8_involved = (cur_dtype == .f8e4m3fn or cur_dtype == .f8e4m3fnuz or cur_dtype == .f8e5m2 or
                 dtype == .f8e4m3fn or dtype == .f8e4m3fnuz or dtype == .f8e5m2);
+            if (fp8_involved) {
+                return self.fpToFpOpts(src, dtype, .{
+                    .rounding = if (tgt_bw < cur_bw) opts.fp_downcast_rounding orelse .rtne else null,
+                });
+            }
+            if (tgt_bw > cur_bw) return self.extf(src, dtype);
             const custom_rounding = opts.fp_downcast_rounding != null and opts.fp_downcast_rounding.? != .rtne;
-            if (fp8_involved or custom_rounding) {
+            if (custom_rounding) {
                 return self.fpToFpOpts(src, dtype, .{ .rounding = opts.fp_downcast_rounding orelse .rtne });
             }
             return self.truncf(src, dtype);
