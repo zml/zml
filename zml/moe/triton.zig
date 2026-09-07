@@ -271,12 +271,31 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated = applyActivation(first_out, options.activation, options.activation_threshold);
-    var activated_quant = activated;
-    var a2_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
-    if (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz) {
-        activated_quant, a2_scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated), down.dtype() == .f8e4m3fnuz, block_fp8);
-    }
+    const fused_swiglu_fp8 = block_fp8 and switch (zml.Compiler.current().platform.target) {
+        .cuda, .rocm => true,
+        else => false,
+    };
+    const activated_quant, const a2_scale = if (fused_swiglu_fp8 and
+        options.activation == .silu and
+        (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz))
+        siluAndQuantizePerTokenGroupFp8(
+            first_out,
+            128,
+            down.dtype() == .f8e4m3fnuz,
+            options.activation_threshold,
+            null,
+            null,
+            gate_up.dim(.expert),
+        )
+    else blk: {
+        const activated = applyActivation(first_out, options.activation, options.activation_threshold);
+        var quantized = activated;
+        var scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
+        if (down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz) {
+            quantized, scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated), down.dtype() == .f8e4m3fnuz, block_fp8);
+        }
+        break :blk .{ quantized, scale };
+    };
 
     const b_bias_2 =
         opts.w2_bias orelse
@@ -571,6 +590,56 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64, fnuz: bool, block_fp8: b
     );
 
     return .{ outs.y_q, outs.y_s };
+}
+
+fn siluAndQuantizePerTokenGroupFp8(
+    x: Tensor,
+    group_size: i64,
+    fnuz: bool,
+    activation_threshold: ?f32,
+    route_ids: ?Tensor,
+    expert_partition: ?Tensor,
+    local_num_experts: i64,
+) struct { Tensor, Tensor } {
+    stdx.debug.assert(x.rank() == 2, "expected a rank-2 SwiGLU input, got {f}", .{x.shape()});
+    const output_columns = @divExact(x.dim(1), 2);
+    stdx.debug.assert(@mod(output_columns, group_size) == 0, "SwiGLU output width must be divisible by group size {d}, got {d}", .{ group_size, output_columns });
+
+    const groups_per_row = @divExact(output_columns, group_size);
+    const output_dtype: DataType = if (fnuz) .f8e4m3fnuz else .f8e4m3fn;
+    const scale_dtype: DataType = .f32;
+    const fp8_max: f32 = if (fnuz) 224.0 else 448.0;
+    const outs = kernels.SiluAndQuantizePerTokenGroupFp8.Kernel.call(
+        .{
+            .x = x,
+            .route_ids = route_ids orelse Tensor.zeroes(Shape.init(.{ .route = x.dim(0) }, .i32)),
+            .expert_partition = expert_partition orelse Tensor.scalar(0, .u32),
+        },
+        .{
+            .q = Shape.init(.{ .token = x.dim(0), .feature = output_columns }, output_dtype),
+            .scale = Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype),
+        },
+        .{
+            .cfg = .{
+                .input_dtype = toDType(x.dtype()),
+                .output_dtype = toDType(output_dtype),
+                .scale_dtype = toDType(scale_dtype),
+                .input_columns = @intCast(x.dim(1)),
+                .output_columns = @intCast(output_columns),
+                .block = @intCast(group_size),
+                .fp8_min = -fp8_max,
+                .fp8_max = fp8_max,
+                .eps = rawScaleEpsilon,
+                .activation_threshold = activation_threshold,
+                .has_contiguous_expert_partition = expert_partition != null,
+                .local_num_experts = @intCast(local_num_experts),
+            },
+            .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
+            .num_stages = 1,
+            .num_warps = 1,
+        },
+    );
+    return .{ outs.q, outs.scale };
 }
 
 // =============================================================================

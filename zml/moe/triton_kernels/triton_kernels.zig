@@ -118,6 +118,87 @@ pub const PerTokenGroupQuantFp8 = struct {
     }
 };
 
+/// GLM's first expert projection is immediately followed by SwiGLU and a
+/// block-128 FP8 quantization for the down projection. Combining those two
+/// elementwise passes avoids materializing and rereading the BF16 activated
+/// tensor during decode.
+pub const SiluAndQuantizePerTokenGroupFp8 = struct {
+    pub const Cfg = struct {
+        input_dtype: DType,
+        output_dtype: DType,
+        scale_dtype: DType,
+        input_columns: usize,
+        output_columns: usize,
+        block: usize,
+        fp8_min: f32,
+        fp8_max: f32,
+        eps: f32,
+        activation_threshold: ?f32,
+        has_contiguous_expert_partition: bool,
+        local_num_experts: usize,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "silu_and_quantize_per_token_group_fp8",
+        .inputs = &.{ "x", "route_ids", "expert_partition" },
+        .outputs = &.{ "q", "scale" },
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{
+            .x_ptr = .{ .ptr = cfg.input_dtype },
+            .route_ids_ptr = .{ .ptr = .i32 },
+            .expert_partition_ptr = .{ .ptr = .i32 },
+            .q_ptr = .{ .ptr = cfg.output_dtype },
+            .scale_ptr = .{ .ptr = cfg.scale_dtype },
+        });
+
+        const block: i64 = @intCast(cfg.block);
+        const input_columns: i64 = @intCast(cfg.input_columns);
+        const output_columns: i64 = @intCast(cfg.output_columns);
+        const groups_per_row: i64 = @divExact(output_columns, block);
+        const pid = b.programId(.x).to(.i64);
+        const row = pid.div(groups_per_row);
+        const group = pid.rem(groups_per_row);
+        const cols = b.arange(0, block, .i64);
+        const gate_offset = row.mul(input_columns).add(group.mul(block));
+        const up_offset = gate_offset.add(output_columns);
+        const route_valid = if (cfg.has_contiguous_expert_partition) valid: {
+            const local_num_experts: i32 = @intCast(cfg.local_num_experts);
+            const expert_start = b.load(a.expert_partition_ptr).mul(local_num_experts);
+            const local_expert = b.load(a.route_ids_ptr.addPtr(row)).sub(expert_start);
+            break :valid local_expert.ge(0).bitAnd(local_expert.lt(local_num_experts));
+        } else b.liftAs(1, .i1);
+        const load_mask = route_valid.splatTo(&.{block});
+
+        var gate = b.loadOpts(a.x_ptr.addPtr(gate_offset.add(cols)), .{
+            .mask = load_mask,
+            .other = b.zeros(&.{block}, cfg.input_dtype),
+        }).to(.f32);
+        var up = b.loadOpts(a.x_ptr.addPtr(up_offset.add(cols)), .{
+            .mask = load_mask,
+            .other = b.zeros(&.{block}, cfg.input_dtype),
+        }).to(.f32);
+        if (cfg.activation_threshold) |limit| {
+            gate = gate.minimum(limit);
+            up = up.maximum(-limit).minimum(limit);
+        }
+        const sigmoid = b.ones(&.{block}, .f32).add(b.exp(b.negf(gate)));
+        const activated = gate.div(sigmoid).mul(up);
+        const absmax = b.max(b.absf(activated)).maximum(cfg.eps);
+        const scale = absmax.mul(1.0 / cfg.fp8_max);
+        const quantized = b.clampf(
+            activated.div(scale),
+            b.splat(cfg.fp8_min, &.{block}),
+            b.splat(cfg.fp8_max, &.{block}),
+        ).to(cfg.output_dtype);
+
+        const output_offset = row.mul(output_columns).add(group.mul(block));
+        b.store(a.q_ptr.addPtr(output_offset.add(cols)), quantized);
+        b.store(a.scale_ptr.addPtr(pid), scale.to(cfg.scale_dtype));
+    }
+};
+
 // =============================================================================
 // write_zeros_to_output — helper called by FusedMoe
 // =============================================================================
