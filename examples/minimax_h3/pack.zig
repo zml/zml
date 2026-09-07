@@ -1,9 +1,9 @@
-//! Packed sequence, rectified-flow schedule, noise, and 1×2×2 patchify.
+//! Packed sequence, rectified-flow schedule, noise, and 1×2×2 unpatchify.
 //!
 //!   1. Layout — text, then audio, then the video patch grid; RoPE (t,h,w) per row
 //!   2. Schedule — σ from t ∈ [1→0] (video shift 12, audio shift 3)
 //!   3. Noise — N(0,1) video tokens then audio tokens
-//!   4. Patchify — THWC latents ↔ DiT tokens of width 96
+//!   4. Unpatchify — DiT video tokens `{s, 96}` → THWC latents for the VAE
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -13,13 +13,11 @@ const tag_video: u8 = 0;
 const tag_text: u8 = 1;
 const tag_audio: u8 = 2;
 
-/// Temporal span pattern along latent frames for video RoPE `t`.
+/// Temporal span pattern along latent frames for video RoPE `t` (official 24 fps
+/// schedule: 1 then repeating 4s, scaled by 5/3 onto the RoPE time axis).
 const video_spans = [_]u32{ 1, 4, 4, 4, 4 };
 /// Maps 24 fps latent frames onto the RoPE time axis (5/3).
 const frame_rescale: f64 = 5.0 / 3.0;
-
-/// AdaLN / time-embed table capacity (at most 4 distinct row times).
-pub const timestep_slot_count: u32 = 4;
 
 /// One packed sequence: text rows, then audio rows, then video-patch rows.
 ///
@@ -64,8 +62,8 @@ fn sortAscending(values: []f32) void {
     }
 }
 
-/// Distinct row times, sorted, at most 4.
-fn uniqueSorted(values: []const f32, out: *[timestep_slot_count]f32) u32 {
+/// Distinct row times, sorted, at most `config.timestep_slot_count`.
+fn uniqueSorted(values: []const f32, out: *[config.timestep_slot_count]f32) u32 {
     var n: u32 = 0;
     for (values) |v| {
         var seen = false;
@@ -76,7 +74,7 @@ fn uniqueSorted(values: []const f32, out: *[timestep_slot_count]f32) u32 {
             }
         }
         if (seen) continue;
-        if (n >= timestep_slot_count) std.debug.panic("too many unique timesteps", .{});
+        if (n >= config.timestep_slot_count) std.debug.panic("too many unique timesteps", .{});
         out[n] = v;
         n += 1;
     }
@@ -91,8 +89,8 @@ fn indexOfEqual(values: []const f32, needle: f32) u32 {
     std.debug.panic("timestep missing from unique set", .{});
 }
 
-/// Per-row times: video/text at `video_t`, audio at `audio_t`. Then unique-sort
-/// into 4 AdaLN slots.
+/// Per-row times: video/text at `video_t`, audio at `audio_t`. Unique-sort
+/// and pad to `config.timestep_slot_count` (checkpoint table width, usually 2 uniques).
 pub fn writeRowPlan(
     layout: Layout,
     video_t: f32,
@@ -104,7 +102,7 @@ pub fn writeRowPlan(
     std.debug.assert(row_ts.len == layout.seqLen());
     @memset(row_ts, video_t);
     for (layout.audio_indices) |idx| row_ts[idx] = audio_t;
-    var unique: [timestep_slot_count]f32 = undefined;
+    var unique: [config.timestep_slot_count]f32 = undefined;
     const n = uniqueSorted(row_ts, &unique);
     padUnique(unique_out, unique[0..n]);
     for (timestep_indices, row_ts) |*idx, t| idx.* = indexOfEqual(unique[0..n], t);
@@ -192,6 +190,8 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     const sqrt_area = @sqrt(@as(f64, @floatFromInt(geo.latent_h * geo.latent_w)));
     var h_buf: [256]f32 = undefined;
     var w_buf: [256]f32 = undefined;
+    std.debug.assert(geo.latent_h / 2 <= h_buf.len);
+    std.debug.assert(geo.latent_w / 2 <= w_buf.len);
     const h_axis = spatialAxis(geo.latent_h, sqrt_area, &h_buf);
     const w_axis = spatialAxis(geo.latent_w, sqrt_area, &w_buf);
 

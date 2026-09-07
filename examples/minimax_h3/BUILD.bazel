@@ -2,7 +2,16 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "minimax_h3",
-    srcs = glob(["**/*.zig"]),
+    srcs = [
+        "audio.zig",
+        "config.zig",
+        "dit.zig",
+        "encoder.zig",
+        "main.zig",
+        "ops.zig",
+        "pack.zig",
+        "vae.zig",
+    ],
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],

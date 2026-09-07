@@ -7,13 +7,14 @@ const zml = @import("zml");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
 
-const EncCfg = config.EncoderConfig;
+const EncoderConfig = config.EncoderConfig;
 const linear = ops.linear;
 const rms = ops.rms;
 const load = ops.load;
 const Run = ops.Run;
 
 /// Qwen3 eager: `(q @ k.T) * scale` then fp32 softmax. Scale-on-K (`zml.nn.sdpa`) drifts in bf16.
+/// DiT uses `zml.attention.dense` (FA2); this path stays local because of that scale.
 fn qwenSdpa(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
     var q = q_.splitAxis(.h, .{ .h = k_.dim(.h), .hq = .auto });
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
@@ -63,7 +64,7 @@ const SelfAttn = struct {
     num_kv_heads: i64,
     head_dim: i64,
 
-    pub fn init(store: zml.io.TensorStore.View, cfg: EncCfg) SelfAttn {
+    pub fn init(store: zml.io.TensorStore.View, cfg: EncoderConfig) SelfAttn {
         return .{
             .q_proj = linear(store, "q_proj.weight", null, .{ .dout = .model }, .replicated),
             .k_proj = linear(store, "k_proj.weight", null, .{ .dout = .model }, .replicated),
@@ -106,7 +107,7 @@ const TransformerLayer = struct {
     pub const Input = struct { layer: TransformerLayer, hidden: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor };
     pub const Output = struct { hidden: zml.Tensor };
 
-    pub fn init(store: zml.io.TensorStore.View, cfg: EncCfg) TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, cfg: EncoderConfig) TransformerLayer {
         return .{
             .input_layernorm = rms(store.withPrefix("input_layernorm"), .{.d}, cfg.rms_norm_eps),
             .self_attn = .init(store.withPrefix("self_attn"), cfg),
@@ -156,10 +157,10 @@ fn uploadF32(run: *const Run, shape: zml.Shape, values: []const f32) !zml.Buffer
 }
 
 /// Qwen interleaved RoPE: each frequency is written into both halves of the head.
-fn fillInterleavedRope(theta: f32, seq: u32, head_dim: u32, cos: []f32, sin: []f32) void {
+fn fillInterleavedRope(theta: f32, seq_len: u32, head_dim: u32, cos: []f32, sin: []f32) void {
     const half = head_dim / 2;
     var pos: u32 = 0;
-    while (pos < seq) : (pos += 1) {
+    while (pos < seq_len) : (pos += 1) {
         var f: u32 = 0;
         while (f < half) : (f += 1) {
             const ang = @as(f32, @floatFromInt(pos)) / std.math.pow(
@@ -184,7 +185,7 @@ fn fillInterleavedRope(theta: f32, seq: u32, head_dim: u32, cos: []f32, sin: []f
 pub const Encoder = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
-    cfg: EncCfg,
+    cfg: EncoderConfig,
     compiled: ?Compiled = null,
 
     const Compiled = struct {
@@ -198,7 +199,7 @@ pub const Encoder = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Encoder {
-        const cfg: EncCfg = .{};
+        const cfg: EncoderConfig = .{};
         const lm = store.withPrefix("model.language_model");
         const layers = try allocator.alloc(TransformerLayer, @intCast(cfg.used_hidden_layers));
         errdefer allocator.free(layers);
@@ -248,7 +249,7 @@ pub const Encoder = struct {
         tokens: []const u32,
     ) !zml.Buffer {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
-        const seq: u32 = @intCast(tokens.len);
+        const seq_len: u32 = @intCast(tokens.len);
         const head_dim: u32 = @intCast(self.cfg.head_dim);
         var token_buf = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .b = 1, .s = tokens.len }, .u32), .replicated, std.mem.sliceAsBytes(tokens));
         defer token_buf.deinit();
@@ -262,14 +263,14 @@ pub const Encoder = struct {
         embed_runner.run(run.io, .{ .inputs = .{ .tokens = token_buf }, .outputs = .{ .hidden = &hidden }, .opts = .{ .wait = true } });
         errdefer hidden.deinit();
 
-        const cos = try run.allocator.alloc(f32, seq * head_dim);
+        const cos = try run.allocator.alloc(f32, seq_len * head_dim);
         defer run.allocator.free(cos);
-        const sin = try run.allocator.alloc(f32, seq * head_dim);
+        const sin = try run.allocator.alloc(f32, seq_len * head_dim);
         defer run.allocator.free(sin);
-        fillInterleavedRope(self.cfg.rope_theta, seq, head_dim, cos, sin);
-        var cos_buf = try uploadF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), cos);
+        fillInterleavedRope(self.cfg.rope_theta, seq_len, head_dim, cos, sin);
+        var cos_buf = try uploadF32(run, .init(.{ .s = seq_len, .hd = head_dim }, self.embed_tokens.weight.dtype()), cos);
         defer cos_buf.deinit();
-        var sin_buf = try uploadF32(run, .init(.{ .s = seq, .hd = head_dim }, self.embed_tokens.weight.dtype()), sin);
+        var sin_buf = try uploadF32(run, .init(.{ .s = seq_len, .hd = head_dim }, self.embed_tokens.weight.dtype()), sin);
         defer sin_buf.deinit();
 
         var loader: zml.io.Loader = try .init(run.allocator, run.platform, ops.loader_opts);
@@ -281,6 +282,7 @@ pub const Encoder = struct {
             var layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
             defer layer_runner.deinit(run.allocator);
             var next: zml.Buffer = undefined;
+            // Host sync per layer (same as DiT blocks; VAE queues then waits on finish).
             layer_runner.run(run.io, .{
                 .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf },
                 .outputs = .{ .hidden = &next },

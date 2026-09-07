@@ -195,6 +195,8 @@ pub const DenseOpts = struct {
     is_causal: bool = false,
 };
 
+/// Dense (non-paged) attention. There is no FA3 dense kernel: `.cuda_fa2` and
+/// `.cuda_fa3` both call `flashattn.fa2.dense`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
     switch (backend) {
         .cuda_fa2, .cuda_fa3 => return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),

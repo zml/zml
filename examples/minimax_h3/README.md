@@ -22,12 +22,12 @@ ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 1344x768 -r 24 -i out/video.rgb \
 | --- | --- |
 | `main.zig` | tokenize → encode → pack → denoise → unpatchify → visual VAE + audio VAE |
 | `encoder.zig` | Qwen text tower (50 of 64 layers) |
-| `pack.zig` | sequence layout (text/audio/video), σ schedules, noise, patchify |
+| `pack.zig` | sequence layout (text/audio/video), σ schedules, noise, unpatchify |
+| `config.zig` | canvas flags, geometry, pinned layer sizes (snapshot of repo JSON) |
 | `dit.zig` | AdaLN DiT + Euler |
 | `vae.zig` | tiled ViT decoder |
 | `audio.zig` | audio VAE decoder |
 | `ops.zig` | `Run`, load, Linear/RMS constructors |
-| `config.zig` | canvas flags, geometry, head-TP mesh |
 
 ## Equations
 

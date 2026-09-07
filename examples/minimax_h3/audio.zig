@@ -10,15 +10,18 @@ const zml = @import("zml");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
 
-const Cfg = config.AudioConfig;
+const AudioConfig = config.AudioConfig;
 const load = ops.load;
 const applyLatentNorm = ops.applyLatentNorm;
 const Run = ops.Run;
 
 fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
     var buffer: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch return 2;
-    return if (store.store.getShape(key)) |shape| shape.rank() else 2;
+    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch
+        std.debug.panic("tensor key too long: {s}{s}", .{ store.prefix() orelse "", name });
+    const shape = store.store.getShape(key) orelse
+        std.debug.panic("checkpoint has no tensor {s}", .{key});
+    return shape.rank();
 }
 
 fn pickChannel(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
@@ -208,8 +211,6 @@ const Activation1d = struct {
     }
 
     pub fn forward(self: Activation1d, x: zml.Tensor) zml.Tensor {
-        const ratio: i64 = 2;
-        const kernel: i64 = 12;
         const xt = x.withPartialTags(.{ .b, .c, .t });
         const channels = xt.dim(.c);
         const up = self.up_filter.convert(.f32).broad(zml.Shape.init(.{
@@ -222,23 +223,23 @@ const Activation1d = struct {
             .ci = 1,
             .k = self.down_filter.dim(-1),
         }, .f32));
-        const pad = @divFloor(kernel, ratio) - 1;
-        const crop_left = pad * ratio + @divFloor(kernel - ratio, 2);
-        const crop_right = pad * ratio + @divFloor(kernel - ratio + 1, 2);
+        const pad = @divFloor(config.audio_activation_kernel, config.audio_activation_ratio) - 1;
+        const crop_left = pad * config.audio_activation_ratio + @divFloor(config.audio_activation_kernel - config.audio_activation_ratio, 2);
+        const crop_right = pad * config.audio_activation_ratio + @divFloor(config.audio_activation_kernel - config.audio_activation_ratio + 1, 2);
         var y = padRepeatT(xt.convert(.f32), pad, pad);
         y = y.conv1d(up, .{
             .window_strides = 1,
-            .lhs_dilation = ratio,
+            .lhs_dilation = config.audio_activation_ratio,
             .feature_group_count = channels,
-            .padding = &.{ kernel - 1, kernel - 1 },
-        }).scale(@as(f32, @floatFromInt(ratio)));
+            .padding = &.{ config.audio_activation_kernel - 1, config.audio_activation_kernel - 1 },
+        }).scale(@as(f32, @floatFromInt(config.audio_activation_ratio)));
         y = y.slice(.t, .{ .start = crop_left, .end = y.dim(.t) - crop_right });
         y = self.act.forward(y.convert(x.dtype())).convert(.f32);
-        const pad_left = @divFloor(kernel, 2) - 1;
-        const pad_right = @divFloor(kernel, 2);
+        const pad_left = @divFloor(config.audio_activation_kernel, 2) - 1;
+        const pad_right = @divFloor(config.audio_activation_kernel, 2);
         y = padRepeatT(y, pad_left, pad_right);
         return y.conv1d(down, .{
-            .window_strides = ratio,
+            .window_strides = config.audio_activation_ratio,
             .feature_group_count = channels,
             .padding = &.{ 0, 0 },
         }).convert(x.dtype());
@@ -299,10 +300,10 @@ const Model = struct {
     resblocks: []AMPBlock,
     activation_post: Activation1d,
     conv_post: WNConv1d,
-    cfg: Cfg,
+    cfg: AudioConfig,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Model {
-        const cfg: Cfg = .{};
+        const cfg: AudioConfig = .{};
         const dec = store.withPrefix("decoder");
         const ups = try allocator.alloc(TransposeConv, cfg.upsample_rates.len);
         errdefer allocator.free(ups);
@@ -337,6 +338,7 @@ const Model = struct {
         allocator.free(self.resblocks);
     }
 
+    /// Nested slices (`ups`, `resblocks`) are not freed by `Buffer.deinitAll`.
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
         self.dec_in_proj.weight.deinit();
         if (self.dec_in_proj.bias) |*bias| bias.deinit();

@@ -1,4 +1,4 @@
-//! MiniMax-H3 geometry and layer sizes from `config.json`.
+//! MiniMax-H3 geometry and pinned layer sizes (snapshot of repo `config.json`, not loaded at runtime).
 //!
 //! Canvas flags `--width` / `--height` / `--duration` feed `Geometry.init`:
 //!   pixels  W×H, multiple of 32, area ≤ 768×1344
@@ -30,8 +30,28 @@ pub const video_shift: f32 = 12.0;
 pub const audio_shift: f32 = 3.0;
 /// Packed-sequence modalities: video, text, audio.
 pub const modality_count: i64 = 3;
+/// AdaLN / time-embed table width (checkpoint). A packed row usually has 2 unique
+/// times (video/text vs audio); `pack.writeRowPlan` unique-sorts and pads to 4.
+pub const timestep_slot_count: u32 = 4;
 
-/// DiT (`transformer/config.json`).
+/// Visual VAE decode tiling (official recipe). Default 1344×768 is 4×7 = 28 tiles.
+pub const vae_tile_px: u32 = 256;
+pub const vae_tile_overlap_px: u32 = 64;
+pub const vae_token_drop: u32 = 3;
+pub const vae_frame_pre: u32 = 3;
+pub const vae_frame_overlap: u32 = 5;
+pub const vae_latent_t: u32 = 7;
+pub const vae_latent_h: u32 = 16;
+pub const vae_latent_w: u32 = 16;
+/// Tile batch compiled for the ViT decoder. `.b = .model` only when this divides TP
+/// (2/4 GPUs). On 8 GPUs `28 % 8 != 0`, so the batch is replicated.
+pub const vae_tile_batch: u32 = 28;
+
+/// Snake-beta upsample / downsample in the audio decoder.
+pub const audio_activation_ratio: i64 = 2;
+pub const audio_activation_kernel: i64 = 12;
+
+/// DiT (`transformer/config.json` snapshot).
 pub const Config = struct {
     hidden_size: i64 = 5376,
     num_layers: i64 = 50,
@@ -134,8 +154,10 @@ fn audioLatentFromFrames(frames: u32) u32 {
     return @intFromFloat(@round(@as(f32, @floatFromInt(frames)) / video_fps * audio_hz));
 }
 
-/// Head-wise tensor-parallel mesh on `.model`. GPU count must divide every
-/// sharded head dimension (DiT 56, encoder 64/8, VAE 32).
+/// Head-wise tensor-parallel mesh on `.model`.
+/// DiT and the text encoder shard `.h = .model`; the VAE is replicated (optional
+/// `.b = .model` when the 28-tile batch divides TP). `tpCount` still requires the
+/// VAE head count to divide so a later head-TP VAE would fit the same mesh.
 pub const Shardings = struct {
     model: zml.Sharding,
 
@@ -176,7 +198,7 @@ pub const Shardings = struct {
     }
 };
 
-/// Channel-wise latent moments from `vae/config.json`. Applied before decode.
+/// Channel-wise latent moments (`vae/config.json` snapshot). Applied before decode.
 const visual_latents_mean = [24]f32{
     0.858090341091156,    -0.9606591463088989, 1.0661640167236328,   -0.5090325474739075,
     -0.2727581858634949,  -1.3675414323806763, -0.2553254961967468,  -0.26907554268836975,
@@ -194,7 +216,7 @@ const visual_latents_std = [24]f32{
     3.276226282119751,  3.1627357006073,     2.28168129920959475, 2.6127843856811525,
 };
 
-/// VAE decoder (`vae/config.json`).
+/// VAE decoder (`vae/config.json` snapshot).
 pub const VisualConfig = struct {
     latent_channels: i64 = 24,
     out_channels: i64 = 3,
@@ -217,7 +239,7 @@ pub const VisualConfig = struct {
     }
 };
 
-/// Channel-wise latent moments from `audio_vae/config.json`. Applied before decode.
+/// Channel-wise latent moments (`audio_vae/config.json` snapshot). Applied before decode.
 const audio_latents_mean = [32]f32{
     -0.020211687488382354, 0.3876466479950502,   -0.04398279799186767, -0.28591514936373,
     0.08179686214561671,   -0.35782641352446604, 0.040623809960919084, -0.01552534501956604,
@@ -239,7 +261,7 @@ const audio_latents_std = [32]f32{
     1.718045989838149,  1.6307219190837705, 1.8661226051202384, 1.5613768203168363,
 };
 
-/// Audio VAE decoder (`audio_vae/config.json`). Stereo, 32 kHz, hop 800.
+/// Audio VAE decoder (`audio_vae/config.json` snapshot). Stereo, 32 kHz, hop 800.
 pub const AudioConfig = struct {
     latent_channels: i64 = 32,
     hop: u32 = 800,
