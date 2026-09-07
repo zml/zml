@@ -231,6 +231,10 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                 }
                 to.* = items;
             },
+            .many => if (FromStruct == [*:0]const u8 and ToStruct == FromStruct and From != u8) {
+                // Tensor axis tags are borrowed immutable strings.
+                to.* = from;
+            } else stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
             else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
         .optional => if (from) |f| {
@@ -260,6 +264,7 @@ test mapAlloc {
         array: [2]A,
         slice: []const A,
         other: u8,
+        tag: [*:0]const u8,
         // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
         comptime static_val: u8 = 8,
         comptime static_slice: [2]A = .{ .{ .a = 11 }, .{ .a = 12 } },
@@ -270,6 +275,7 @@ test mapAlloc {
         array: [2]B,
         slice: []const B,
         other: u8,
+        tag: [*:0]const u8,
         static_val: u8,
         static_slice: []B,
         field_with_empty: struct { B, Empty },
@@ -279,6 +285,7 @@ test mapAlloc {
         .field = .{ .a = 4 },
         .array = .{ .{ .a = 5 }, .{ .a = 6 } },
         .other = 7,
+        .tag = "feature",
         .slice = &.{ .{ .a = 9 }, .{ .a = 10 } },
         .field_with_empty = .{ .{ .a = 9 }, .{} },
     };
@@ -292,6 +299,7 @@ test mapAlloc {
     try testing.expectEqual(5, bb.array[0].b);
     try testing.expectEqual(6, bb.array[1].b);
     try testing.expectEqual(7, bb.other);
+    try testing.expectEqual(aa.tag, bb.tag);
     try testing.expectEqual(8, bb.static_val);
     try testing.expectEqual(9, bb.slice[0].b);
     try testing.expectEqual(10, bb.slice[1].b);
