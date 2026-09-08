@@ -805,7 +805,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
     const backend_config_api_version: ?CustomCallOpts.ApiVersion = if (opts.backend_config) |bc| bc else null;
     if (opts.api_version orelse backend_config_api_version) |v| {
         attrs.appendAssumeCapacity(
-            .named(ctx, "api_version", .int(ctx, .i32, @intFromEnum(v))),
+            .named(ctx, "api_version", .int(ctx, .i32, @backingInt(v))),
         );
     }
     if (opts.backend_config) |backend_config| {
@@ -1463,7 +1463,7 @@ pub fn channelHandle(
     return @ptrCast(c.stablehloChannelHandleGet(
         ctx.ptr(),
         handle,
-        @intFromEnum(channel_type),
+        @backingInt(channel_type),
     ).ptr);
 }
 

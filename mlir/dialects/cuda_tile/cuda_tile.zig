@@ -433,14 +433,14 @@ pub const PtrLoadStoreHint = struct {
 
 fn writeHintFields(w: *std.Io.Writer, hint: anytype) !void {
     var first = true;
-    inline for (@typeInfo(@TypeOf(hint)).@"struct".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "arch")) continue;
-        if (@field(hint, f.name)) |v| {
+    inline for (@typeInfo(@TypeOf(hint)).@"struct".field_names) |f_name| {
+        if (comptime std.mem.eql(u8, f_name, "arch")) continue;
+        if (@field(hint, f_name)) |v| {
             if (!first) try w.writeAll(", ");
             first = false;
             switch (@TypeOf(v)) {
-                bool => try w.print("{s} = {}", .{ f.name, v }),
-                else => try w.print("{s} = {d}", .{ f.name, v }),
+                bool => try w.print("{s} = {}", .{ f_name, v }),
+                else => try w.print("{s} = {d}", .{ f_name, v }),
             }
         }
     }
