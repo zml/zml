@@ -23,9 +23,9 @@ fn canUseDirectIO() bool {
 
 fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
     while (true) {
-        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, 0);
+        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, @as(c_int, 0));
         switch (std.posix.errno(result)) {
-            .SUCCESS => return result,
+            .SUCCESS => return @intCast(result),
             .INTR => continue,
             else => return DirectIoError.UnexpectedFcntlResult,
         }
@@ -34,7 +34,7 @@ fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
 
 fn setStatusFlags(file: std.Io.File, flags: usize) DirectIoError!void {
     while (true) {
-        switch (std.posix.errno(std.posix.system.fcntl(file.handle, std.posix.F.SETFL, flags))) {
+        switch (std.posix.errno(std.posix.system.fcntl(file.handle, std.posix.F.SETFL, @as(c_int, @intCast(flags))))) {
             .SUCCESS => return,
             .INTR => continue,
             else => return DirectIoError.UnexpectedFcntlResult,

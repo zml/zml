@@ -138,14 +138,14 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
     comptime var field_count = 0;
 
     const positional_infos: ?std.lang.Type.Struct = if (@hasField(Flags, "positional"))
-        @typeInfo(@FieldType(Flags, "positional").@"struct")
+        @typeInfo(@FieldType(Flags, "positional")).@"struct"
     else
         null;
 
     comptime for (flags_info.field_names, flags_info.field_types, flags_info.field_attrs) |field_name, FieldType, field_attr| {
         if (std.mem.eql(u8, field_name, "positional")) {
             var optional_tail = false;
-            for (positional_infos.field_types, positional_infos.field_attrs) |PosType, pos_attr| {
+            for (positional_infos.?.field_types, positional_infos.?.field_attrs) |PosType, pos_attr| {
                 const default: ?PosType = pos_attr.defaultValue(PosType);
                 if (default == null) {
                     if (optional_tail) @panic("optional positional arguments must be last");
