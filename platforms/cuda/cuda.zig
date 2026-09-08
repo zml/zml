@@ -68,7 +68,7 @@ fn hasNvidiaDevice(io: std.Io) bool {
 
 fn hasCudaPathInLDPath() bool {
     const ldLibraryPath = std.c.getenv("LD_LIBRARY_PATH") orelse return false;
-    return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
+    return std.ascii.findIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
