@@ -45,7 +45,7 @@ fn setStatusFlags(file: std.Io.File, flags: usize) DirectIoError!void {
 fn useDirectIO(file: std.Io.File) DirectIoError!bool {
     if (comptime canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
+        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
         return (flags & direct_flag) != 0;
     } else {
         return DirectIoError.UnsupportedPlatform;
@@ -55,7 +55,7 @@ fn useDirectIO(file: std.Io.File) DirectIoError!bool {
 fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
     if (comptime canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
+        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
         if ((flags & direct_flag) == 0) return;
 
         try setStatusFlags(file, flags & ~direct_flag);
@@ -67,7 +67,7 @@ fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
 fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
     if (builtin.os.tag == .linux and canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
+        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
         try setStatusFlags(file, flags | direct_flag);
     } else {
         return DirectIoError.UnsupportedPlatform;
