@@ -21,9 +21,9 @@ fn canUseDirectIO() bool {
     return false;
 }
 
-fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
+fn getStatusFlags(file: std.Io.File) DirectIoError!c_int {
     while (true) {
-        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, @as(c_int, 0));
+        const result: c_int = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, @as(c_int, 0));
         switch (std.posix.errno(result)) {
             .SUCCESS => return result,
             .INTR => continue,
@@ -32,7 +32,7 @@ fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
     }
 }
 
-fn setStatusFlags(file: std.Io.File, flags: usize) DirectIoError!void {
+fn setStatusFlags(file: std.Io.File, flags: c_int) DirectIoError!void {
     while (true) {
         switch (std.posix.errno(std.posix.system.fcntl(file.handle, std.posix.F.SETFL, flags))) {
             .SUCCESS => return,
@@ -45,7 +45,7 @@ fn setStatusFlags(file: std.Io.File, flags: usize) DirectIoError!void {
 fn useDirectIO(file: std.Io.File) DirectIoError!bool {
     if (comptime canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
+        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         return (flags & direct_flag) != 0;
     } else {
         return DirectIoError.UnsupportedPlatform;
@@ -55,7 +55,7 @@ fn useDirectIO(file: std.Io.File) DirectIoError!bool {
 fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
     if (comptime canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
+        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         if ((flags & direct_flag) == 0) return;
 
         try setStatusFlags(file, flags & ~direct_flag);
@@ -67,7 +67,7 @@ fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
 fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
     if (builtin.os.tag == .linux and canUseDirectIO()) {
         const flags = try getStatusFlags(file);
-        const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
+        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         try setStatusFlags(file, flags | direct_flag);
     } else {
         return DirectIoError.UnsupportedPlatform;
