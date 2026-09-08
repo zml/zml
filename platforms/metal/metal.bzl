@@ -4,8 +4,8 @@ def _metal_impl(mctx):
     http_archive(
         name = "libpjrt_metal",
         build_file = "libpjrt_metal.BUILD.bazel",
-        sha256 = "f55356328d9d814c5a961b6c38741cff2f98b4043846a7ac3865e2a23549b767",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-06-30T00-16-30Z/pjrt-metal_macos-arm64.tar.zst",
+        sha256 = "45667d5726844c093b319568d1696694a022fb9d58bba7321822c2544f1417ce",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-09-07T15-23-00Z/pjrt-metal_macos-arm64.tar.zst",
     )
 
     return mctx.extension_metadata(
