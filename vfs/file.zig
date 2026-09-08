@@ -23,7 +23,7 @@ fn canUseDirectIO() bool {
 
 fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
     while (true) {
-        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, 0);
+        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, @as(c_int, 0));
         switch (std.posix.errno(result)) {
             .SUCCESS => return result,
             .INTR => continue,
