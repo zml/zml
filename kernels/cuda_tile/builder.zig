@@ -509,13 +509,13 @@ pub const Builder = struct {
 
     pub fn declareArgsOpts(self: *Builder, spec: anytype, opts: Opts) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const field_names = @typeInfo(Spec).@"struct".field_names;
 
-        var arg_specs: [fields.len]ArgSpec = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
+        var arg_specs: [field_names.len]ArgSpec = undefined;
+        inline for (0.., field_names) |i, field_name| {
+            const raw = @field(spec, field_name);
             const kind: ArgSpec.Kind = if (@TypeOf(raw) == ArgSpec.Kind) raw else blk: {
-                const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+                const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
                 const tag = @field(std.meta.Tag(ArgSpec.Kind), variant);
                 const inner = @field(raw, variant);
                 break :blk switch (tag) {
@@ -526,14 +526,14 @@ pub const Builder = struct {
                     } },
                 };
             };
-            arg_specs[i] = .{ .name = f.name, .kind = kind };
+            arg_specs[i] = .{ .name = field_name, .kind = kind };
         }
 
         try self.declareArgsLowOpts(&arg_specs, opts);
 
         var named: dsl.NamedArgs(Spec, Value) = undefined;
-        inline for (fields, 0..) |f, i| {
-            @field(named, f.name) = self.arg(i);
+        inline for (0.., field_names) |i, field_name| {
+            @field(named, field_name) = self.arg(i);
         }
         return named;
     }
