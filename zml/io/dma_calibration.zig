@@ -673,7 +673,6 @@ fn testPlatform(target: platform_mod.Target) platform_mod.Platform {
 test "DMA benchmark on CPU returns the defaults without mapping" {
     const platform = testPlatform(.cpu);
     var workspace = try host_memory.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
-    workspace.backend = .{ .pageable = .{ .platform = &platform } };
     defer workspace.deinit();
     try std.testing.expectEqual(Result.default, try calibrate(&workspace, &platform, .{}));
     try std.testing.expectEqual(0, workspace.mapped_bytes);

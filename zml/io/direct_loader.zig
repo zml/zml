@@ -53,6 +53,7 @@ pub const Loader = struct {
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
+    source_probe: SourceProbe = .{},
     read_gate: RequestGate,
     request_gate: RequestGate,
     pipeline: Pipeline,
@@ -72,7 +73,6 @@ pub const Loader = struct {
     /// this (the profile's alignment); 0 reads exact tensor ranges.
     source_alignment: usize,
     maximum_blocks_per_job: usize,
-    effective_pinned_feasible_width: usize,
     workers_started: bool = false,
     controller_started: bool = false,
 
@@ -82,14 +82,11 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: Config,
     ) !*Loader {
+        const self = try allocator.create(Loader);
+        errdefer allocator.destroy(self);
         const block_pool = try initCalibratedBlockPool(allocator, io, platform, opts);
         const calibration = block_pool.calibration;
-        var pool = block_pool.pool;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
-        _ = Planner.maximumJobLen(block_pool.request_size, calibration.block_size, source_alignment) catch
-            return error.InvalidLoadProfile;
-        var pool_moved = false;
-        errdefer if (!pool_moved) pool.deinit();
 
         const source_parallelism = opts.read_parallelism;
         const controller = source_concurrency.Controller.init(
@@ -107,20 +104,14 @@ pub const Loader = struct {
             const initial = provider.snapshot();
             break :cursor .{ .provider = provider, .previous = initial };
         } else null;
-        var scheduler: Scheduler = .init(allocator);
-        var scheduler_moved = false;
-        errdefer if (!scheduler_moved) scheduler.deinit();
-
-        const self = try allocator.create(Loader);
-        errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .load_profile = opts.load_profile,
             .calibration = calibration,
-            .pool = pool,
-            .scheduler = scheduler,
+            .pool = block_pool.pool,
+            .scheduler = .init(allocator),
             .read_gate = .init(limits.read),
             .request_gate = .init(limits.lifecycle),
             .pipeline = undefined,
@@ -131,15 +122,13 @@ pub const Loader = struct {
             .direct_io = opts.direct_io,
             .source_alignment = source_alignment,
             .maximum_blocks_per_job = block_pool.maximum_blocks_per_job,
-            .effective_pinned_feasible_width = block_pool.feasible_width,
         };
-        // Ownership moved into the stable heap object.
-        pool_moved = true;
-        scheduler_moved = true;
         errdefer {
             self.scheduler.deinit();
             self.pool.deinit();
         }
+        _ = Planner.maximumJobLen(block_pool.request_size, calibration.block_size, source_alignment) catch
+            return error.InvalidLoadProfile;
 
         self.pipeline = try Pipeline.init(
             allocator,
@@ -150,6 +139,7 @@ pub const Loader = struct {
             &self.request_gate,
             calibration.block_size,
             &self.metrics,
+            &self.source_probe,
             &self.scheduler,
             calibration.max_in_flight_per_device * calibration.block_size,
         );
@@ -169,7 +159,7 @@ pub const Loader = struct {
             .read_gate = &self.read_gate,
             .request_gate = &self.request_gate,
             .metrics = &self.metrics,
-            .next_read_admission = &self.pipeline.next_read_admission,
+            .probe = &self.source_probe,
             .workers = &self.worker_pool,
             .scheduler = &self.scheduler,
             .pinned_feasible_width = block_pool.feasible_width,
@@ -204,82 +194,6 @@ pub const Loader = struct {
         return self;
     }
 
-    const CalibratedBlockPool = struct {
-        calibration: dma_calibration.Result,
-        pool: host_memory.BlockPool,
-        request_size: usize,
-        maximum_blocks_per_job: usize,
-        feasible_width: usize,
-        retained_credits: usize,
-        growth_free_width: usize,
-        dma_stage_requests: usize,
-    };
-
-    fn initCalibratedBlockPool(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        opts: Config,
-    ) !CalibratedBlockPool {
-        var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
-            .max_mapped_bytes = opts.max_host_bytes,
-        });
-        var workspace_moved = false;
-        errdefer if (!workspace_moved) workspace.deinit();
-        const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
-
-        const request_size = try load_limits.effectiveSourceRequestSize(
-            opts.load_profile.read_chunk_size,
-            calibration.block_size,
-        );
-        const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
-            request_size,
-            calibration.block_size,
-        );
-        // The DMA stage of every device, kept mapped as the pool's growth floor.
-        const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
-        // Grow the DMA stage reserve and source working set before reads begin;
-        // calibration arenas become the load's initial capacity.
-        const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-        const retained_before = workspace.mapped_bytes;
-        try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
-        try ensureSourceWorkingSet(
-            &workspace,
-            calibration.block_size,
-            maximum_blocks_per_job,
-            preallocated_source_width,
-            dma_reserve,
-        );
-        const pregrown_bytes = workspace.mapped_bytes - retained_before;
-        const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
-            workspace.mapped_bytes,
-            pregrown_bytes,
-            @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
-        });
-        var pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
-        workspace_moved = true;
-        errdefer pool.deinit();
-        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
-        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
-
-        return .{
-            .calibration = calibration,
-            .pool = pool,
-            .request_size = request_size,
-            .maximum_blocks_per_job = maximum_blocks_per_job,
-            .feasible_width = feasible_width,
-            .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
-            .growth_free_width = try pool.growthFreeRequestWidth(maximum_blocks_per_job),
-            .dma_stage_requests = dmaStageRequests(
-                calibration.max_in_flight_per_device,
-                platform.devices.len,
-                calibration.block_size,
-                request_size,
-            ),
-        };
-    }
-
     /// Plans `specs` one source file at a time, publishes each file's plan
     /// as soon as it exists behind every earlier submission, then seals the
     /// batch: work on the first file starts while the rest is planned. The
@@ -289,13 +203,16 @@ pub const Loader = struct {
     /// the batch is awaited here and the caller sees only the error.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) !*Batch {
         try self.checkOpen();
-        const batch = try Batch.create(self.allocator, self.io, .{
-            .sequence = self.batch_count,
-            .source_items = specs.len,
-            .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
-        });
-        errdefer if (batch.diagnostics.plans == 0) batch.destroy();
-        batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes, progress);
+        const batch = batch: {
+            const batch = try Batch.create(self.allocator, self.io, .{
+                .sequence = self.batch_count,
+                .source_items = specs.len,
+                .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
+            });
+            errdefer batch.destroy();
+            batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes, progress);
+            break :batch batch;
+        };
         Planner.publishFiles(
             &self.scheduler,
             self.io,
@@ -307,8 +224,19 @@ pub const Loader = struct {
             self.source_alignment,
             self.direct_io,
         ) catch |err| {
-            if (batch.diagnostics.plans == 0) return err;
-            return self.failPublished(batch, err);
+            if (batch.plans.items.len == 0) {
+                batch.destroy();
+                return err;
+            }
+            // Planning failed after part of the batch was published: fail
+            // the pipeline, seal and await this batch, and return the sticky
+            // error instead of a batch the caller could not complete.
+            self.pipeline.recordError(err);
+            self.scheduler.seal(self.io, batch);
+            self.batch_count += 1;
+            batch.finishJobs(1);
+            self.awaitBatch(batch) catch |sticky| return sticky;
+            return err;
         };
         self.scheduler.seal(self.io, batch);
         self.batch_count += 1;
@@ -346,7 +274,7 @@ pub const Loader = struct {
             for (batch.items) |item| {
                 const state = item.state.readyValue() orelse continue;
                 for (state.targets) |*target| {
-                    if (target.canFail()) {
+                    if (!target.closed) {
                         target.manager.setBufferErrorUnknown(
                             self.platform.pjrt_api,
                             0,
@@ -390,6 +318,83 @@ pub const Loader = struct {
         allocator.destroy(self);
     }
 
+    const CalibratedBlockPool = struct {
+        calibration: dma_calibration.Result,
+        pool: host_memory.BlockPool,
+        request_size: usize,
+        maximum_blocks_per_job: usize,
+        feasible_width: usize,
+        retained_credits: usize,
+        growth_free_width: usize,
+        dma_stage_requests: usize,
+    };
+
+    fn initCalibratedBlockPool(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        opts: Config,
+    ) !CalibratedBlockPool {
+        const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
+            var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
+                .max_mapped_bytes = opts.max_host_bytes,
+            });
+            errdefer workspace.deinit();
+            const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
+
+            const request_size = try load_limits.effectiveSourceRequestSize(
+                opts.load_profile.read_chunk_size,
+                calibration.block_size,
+            );
+            const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
+                request_size,
+                calibration.block_size,
+            );
+            // The DMA stage of every device, kept mapped as the pool's growth floor.
+            const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
+            // Grow the DMA stage reserve and source working set before reads begin;
+            // calibration arenas become the load's initial capacity.
+            const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
+            const retained_before = workspace.mapped_bytes;
+            try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
+            try ensureSourceWorkingSet(
+                &workspace,
+                calibration.block_size,
+                maximum_blocks_per_job,
+                preallocated_source_width,
+                dma_reserve,
+            );
+            const pregrown_bytes = workspace.mapped_bytes - retained_before;
+            const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
+            load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+                workspace.mapped_bytes,
+                pregrown_bytes,
+                @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
+            });
+            const pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
+            break :pool .{ calibration, request_size, maximum_blocks_per_job, pool };
+        };
+        errdefer pool.deinit();
+        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
+        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
+
+        return .{
+            .calibration = calibration,
+            .pool = pool,
+            .request_size = request_size,
+            .maximum_blocks_per_job = maximum_blocks_per_job,
+            .feasible_width = feasible_width,
+            .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
+            .growth_free_width = try pool.growthFreeRequestWidth(maximum_blocks_per_job),
+            .dma_stage_requests = dmaStageRequests(
+                calibration.max_in_flight_per_device,
+                platform.devices.len,
+                calibration.block_size,
+                request_size,
+            ),
+        };
+    }
+
     /// Creates the batch's items; on failure nothing stays allocated.
     fn createItems(
         self: *Loader,
@@ -401,36 +406,25 @@ pub const Loader = struct {
         errdefer self.allocator.free(items);
         var initialized: usize = 0;
         errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
-        for (specs, items) |spec, *item| {
+        for (specs, items) |spec, *item_ptr| {
             // An empty source has no transfer, so its output would never be
             // written; the front ends reject it too.
             if (spec.source.byteSize() == 0) return error.EmptyTensor;
-            item.* = try self.createItem(spec.source, spec.shape, spec.sharding, spec.output, progress);
+            const source_slot = try self.sourceSlot(spec.source.file_uri);
+            const item = try self.allocator.create(Item);
+            item.* = .{
+                .source = spec.source,
+                .source_slot = source_slot,
+                .shape = spec.shape,
+                .sharding = spec.sharding,
+                .output = spec.output,
+                .progress = progress,
+            };
+            item_ptr.* = item;
             initialized += 1;
             logical_bytes.* += spec.source.shape.byteSize();
         }
         return items;
-    }
-
-    fn createItem(
-        self: *Loader,
-        source: *safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
-        progress: ?*std.Progress.Node,
-    ) !*Item {
-        const item = try self.allocator.create(Item);
-        errdefer self.allocator.destroy(item);
-        item.* = .{
-            .source = source,
-            .source_slot = try self.sourceSlot(source.file_uri),
-            .shape = shape,
-            .sharding = sharding,
-            .output = output,
-            .progress = progress,
-        };
-        return item;
     }
 
     fn sourceSlot(self: *Loader, uri: []const u8) !*SourceSlot {
@@ -440,18 +434,6 @@ pub const Loader = struct {
         slot.* = .{ .uri = uri };
         try self.source_slots.putNoClobber(self.allocator, uri, slot);
         return slot;
-    }
-
-    /// Planning failed after part of the batch was published: the pipeline
-    /// fails with that error, the batch is sealed and awaited here, and the
-    /// loader's sticky error goes to the caller instead of a batch.
-    fn failPublished(self: *Loader, batch: *Batch, err: anyerror) anyerror {
-        self.pipeline.recordError(err);
-        self.scheduler.seal(self.io, batch);
-        self.batch_count += 1;
-        batch.finishJobs(1);
-        self.awaitBatch(batch) catch |sticky| return sticky;
-        return err;
     }
 
     fn startController(self: *Loader) !void {
@@ -485,21 +467,11 @@ pub const Loader = struct {
                 continue;
             };
             _ = self.pipeline.metrics.lifecycle_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
-            self.pipeline.reserveSourceJob();
-            const request = self.pipeline.registerRequest(claim);
-            // The request's scheduling sentinel keeps the batch, and with it
-            // `job.transfers`, alive until `runCoalesced` returns.
-            ReadRequest.runCoalesced(
-                request,
-                claim.job.source_slot,
-                &self.pipeline,
-                claim.job.file_offset,
-                claim.job.len,
-                claim.job.minimum_len,
-                claim.job.transfers,
-                self,
-                &scratch,
-            );
+            const request = ReadRequest.init(&self.pipeline, claim);
+            // The scheduling sentinel keeps the batch, and with it
+            // `claim.job.transfers`, alive through `run` and error reporting.
+            defer request.finishScheduling();
+            request.run(self, claim.job, &scratch) catch |err| self.pipeline.recordError(err);
         }
     }
 
@@ -520,19 +492,6 @@ pub const Loader = struct {
 
     fn logBatch(self: *Loader, batch: *const Batch, done_at: std.Io.Timestamp, successful: bool) void {
         const diagnostics = &batch.diagnostics;
-        var source_requests: u64 = 0;
-        var source_bytes: u64 = 0;
-        var source_retries: u64 = 0;
-        var source_throttles: u64 = 0;
-        if (self.load_profile.stats) |provider| {
-            if (diagnostics.source_stats) |previous| {
-                const delta = provider.snapshot().sub(previous);
-                source_requests = delta.physical_requests;
-                source_bytes = delta.physical_bytes;
-                source_retries = delta.retries;
-                source_throttles = delta.throttles;
-            }
-        }
         const published_at = diagnostics.published_at orelse self.created_at;
         const sealed_at = diagnostics.sealed_at orelse published_at;
         const first_claim_at = diagnostics.first_claim_at orelse published_at;
@@ -541,6 +500,20 @@ pub const Loader = struct {
             first_claim_at
         else
             std.Io.Timestamp.fromNanoseconds(@intCast(first_read_ns));
+        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, selected_source_width={d}, request_size={Bi:.2}", .{
+            diagnostics.sequence,
+            successful,
+            diagnostics.logical_bytes,
+            secondsBetween(self.created_at, published_at),
+            secondsBetween(self.created_at, sealed_at),
+            secondsBetween(self.created_at, first_claim_at),
+            secondsBetween(self.created_at, first_read_at),
+            secondsBetween(self.created_at, done_at),
+            secondsBetween(published_at, done_at),
+            self.controller_runtime.reported_width,
+            self.source_request_size,
+        });
+
         var longest_planning_ns: u64 = 0;
         for (batch.plans.items) |plan| longest_planning_ns = @max(longest_planning_ns, plan.planning_ns);
         const average_read_size = if (diagnostics.source_jobs == 0)
@@ -552,20 +525,12 @@ pub const Loader = struct {
         else
             @as(f64, @floatFromInt(diagnostics.source_items)) /
                 @as(f64, @floatFromInt(diagnostics.source_jobs));
-        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, planned_source_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}, selected_source_width={d}, request_size={Bi:.2}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
             diagnostics.sequence,
-            successful,
-            diagnostics.logical_bytes,
-            diagnostics.source_bytes,
-            secondsBetween(self.created_at, published_at),
-            secondsBetween(self.created_at, sealed_at),
-            secondsBetween(self.created_at, first_claim_at),
-            secondsBetween(self.created_at, first_read_at),
-            secondsBetween(self.created_at, done_at),
-            secondsBetween(published_at, done_at),
             diagnostics.plans,
             @as(f64, @floatFromInt(diagnostics.planning_ns)) / std.time.ns_per_s,
             @as(f64, @floatFromInt(longest_planning_ns)) / std.time.ns_per_s,
+            diagnostics.source_bytes,
             diagnostics.source_jobs,
             diagnostics.source_runs,
             diagnostics.source_items,
@@ -573,38 +538,49 @@ pub const Loader = struct {
             diagnostics.planned_dma_submissions,
             coalescing_ratio,
             average_read_size,
-            self.controller_runtime.reported_width,
-            self.source_request_size,
-            source_requests,
-            source_bytes,
-            source_retries,
-            source_throttles,
         });
+        if (self.load_profile.stats) |provider| {
+            if (diagnostics.source_stats) |previous| {
+                const delta = provider.snapshot().sub(previous);
+                load_log.debug("batch source: batch={d}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
+                    diagnostics.sequence,
+                    delta.physical_requests,
+                    delta.physical_bytes,
+                    delta.retries,
+                    delta.throttles,
+                });
+            }
+        }
     }
 
     fn logSummary(self: *Loader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, tensor_transfer_pieces={d}, dma_submissions={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}, credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.bytes_loaded.load(.acquire),
             secondsBetween(self.created_at, .now(self.io, .awake)),
             reads,
             self.metrics.source_calls.load(.acquire),
-            self.metrics.transfer_pieces.load(.acquire),
-            self.metrics.dma_submissions.load(.acquire),
             self.controller_runtime.reported_width,
             self.controller_runtime.gate_closed_ticks,
             self.source_request_size,
             self.pool.high_water * self.pool.block_size,
             self.pool.workspace.mapped_bytes,
+        });
+        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}", .{
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
-            millisecondsPer(self.metrics.dma_submit_ns.load(.acquire), self.metrics.dma_submissions.load(.acquire)) * 1000,
-            millisecondsPer(self.metrics.dma_piece_ns.load(.acquire), self.metrics.dma_submissions.load(.acquire)),
+        });
+        const submissions = self.metrics.dma_submissions.load(.acquire);
+        load_log.debug("loader DMA: tensor_transfer_pieces={d}, dma_submissions={d}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
+            self.metrics.transfer_pieces.load(.acquire),
+            submissions,
+            millisecondsPer(self.metrics.dma_submit_ns.load(.acquire), submissions) * 1000,
+            millisecondsPer(self.metrics.dma_piece_ns.load(.acquire), submissions),
             self.metrics.pump_stops_empty.load(.acquire),
             self.metrics.pump_stops_full.load(.acquire),
         });
@@ -617,8 +593,7 @@ pub const Loader = struct {
 /// units: one per published job plus a publish sentinel held until the
 /// submission is sealed. A job's unit is released exactly once, by whichever
 /// of these happens: its request's last reference drops (final DMA callback
-/// or abandonment), a worker abandons the claimed job before a request
-/// exists, or `Scheduler.fail` retires it unclaimed. The
+/// or abandonment), or `Scheduler.fail` retires it unclaimed. The
 /// batch is done when `remaining` reaches zero; the awaiting task then
 /// retires it, so releasing a unit is the last permitted access to the batch.
 pub const Batch = struct {
@@ -639,7 +614,7 @@ pub const Batch = struct {
             len: usize,
             minimum_len: usize,
             transfers: []const Batch.Plan.Transfer,
-            request: *Pipeline.RequestContext,
+            request: *ReadRequest,
             blocks: []Pipeline.BlockContext,
         };
 
@@ -655,7 +630,7 @@ pub const Batch = struct {
         allocator: std.mem.Allocator,
         jobs: []Job,
         transfers: []Batch.Plan.Transfer,
-        requests: []Pipeline.RequestContext,
+        requests: []ReadRequest,
         blocks: []Pipeline.BlockContext,
         events: []Pipeline.EventContext,
         /// Event slots handed out so far, one `fetchAdd` per submission from
@@ -666,6 +641,41 @@ pub const Batch = struct {
         planning_ns: u64 = 0,
         /// Next job to claim; owned by the scheduler mutex.
         cursor: usize = 0,
+
+        /// Takes ownership of transfers on success. All callback storage is
+        /// allocated here, before publication makes the plan visible to workers.
+        fn create(
+            allocator: std.mem.Allocator,
+            job_count: usize,
+            block_count: usize,
+            transfers: []Transfer,
+            source_bytes: u64,
+            source_runs: usize,
+        ) !*Plan {
+            var dma_submissions: usize = 0;
+            for (transfers) |transfer| dma_submissions += @popCount(transfer.writer_mask);
+            const jobs = try allocator.alloc(Job, job_count);
+            errdefer allocator.free(jobs);
+            const requests = try allocator.alloc(ReadRequest, job_count);
+            errdefer allocator.free(requests);
+            @memset(requests, ReadRequest.idle);
+            const blocks = try allocator.alloc(Pipeline.BlockContext, block_count);
+            errdefer allocator.free(blocks);
+            const events = try allocator.alloc(Pipeline.EventContext, dma_submissions);
+            errdefer allocator.free(events);
+            const self = try allocator.create(Plan);
+            self.* = .{
+                .allocator = allocator,
+                .jobs = jobs,
+                .transfers = transfers,
+                .requests = requests,
+                .blocks = blocks,
+                .events = events,
+                .source_bytes = source_bytes,
+                .source_runs = source_runs,
+            };
+            return self;
+        }
 
         /// Frees the plan; the pipeline retired its contexts first.
         fn destroy(self: *Plan) void {
@@ -896,11 +906,6 @@ const TensorTransfer = struct {
         /// an error and the failure surfaces on the buffer's definition
         /// event when the buffer is first used.
         closed: bool = false,
-
-        /// Whether the loader may still mark the buffer as failed.
-        fn canFail(self: *const Target) bool {
-            return !self.closed;
-        }
 
         /// Whether a submission of `len` bytes closes the buffer.
         fn nextIsLast(self: *const Target, len: usize) bool {
@@ -1273,37 +1278,18 @@ const Planner = struct {
         }
 
         const planning_jobs = jobs_list.items;
-        var dma_submissions: usize = 0;
-        for (transfers_list.items) |transfer| dma_submissions += @popCount(transfer.writer_mask);
-        const transfers = try transfers_list.toOwnedSlice(allocator);
-        errdefer allocator.free(transfers);
-        const jobs = try allocator.alloc(Batch.Plan.Job, planning_jobs.len);
-        errdefer allocator.free(jobs);
-        const requests = try allocator.alloc(Pipeline.RequestContext, planning_jobs.len);
-        errdefer allocator.free(requests);
-        @memset(requests, Pipeline.RequestContext.idle);
-        const blocks = try allocator.alloc(Pipeline.BlockContext, block_total);
-        errdefer allocator.free(blocks);
-        const events = try allocator.alloc(Pipeline.EventContext, dma_submissions);
-        errdefer allocator.free(events);
-        const plan = try allocator.create(Batch.Plan);
-        errdefer allocator.destroy(plan);
-        plan.* = .{
-            .allocator = allocator,
-            .jobs = jobs,
-            .transfers = transfers,
-            .requests = requests,
-            .blocks = blocks,
-            .events = events,
-            .source_bytes = source_bytes,
-            .source_runs = source_runs,
+        const plan = plan: {
+            const transfers = try transfers_list.toOwnedSlice(allocator);
+            errdefer allocator.free(transfers);
+            break :plan try Batch.Plan.create(allocator, planning_jobs.len, block_total, transfers, source_bytes, source_runs);
         };
+        errdefer plan.destroy();
         if (device_count == 1) {
-            for (jobs, planning_jobs, 0..) |*job, planned, index| job.* = finalJob(plan, planned, index);
+            for (plan.jobs, planning_jobs, 0..) |*job, planned, index| job.* = finalJob(plan, planned, index);
         } else {
             const fair_order = try fairOrder(allocator, planning_jobs, physical_list.items, queues);
             defer allocator.free(fair_order);
-            for (jobs, fair_order, 0..) |*job, planning_index, index| {
+            for (plan.jobs, fair_order, 0..) |*job, planning_index, index| {
                 job.* = finalJob(plan, planning_jobs[planning_index], index);
             }
         }
@@ -1716,6 +1702,8 @@ const WorkerPool = struct {
     }
 };
 
+/// A claimed source job and its completion state. The plan owns its storage;
+/// the worker holds a scheduling reference until all blocks have been handed off.
 const ReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
@@ -1754,271 +1742,214 @@ const ReadRequest = struct {
         }
     };
 
-    fn readAbsoluteAllV(
-        io: std.Io,
-        file: std.Io.File,
-        buffers: []const []u8,
-        file_offset: u64,
-        minimum: usize,
-        metrics: *Metrics,
-    ) !u64 {
-        return safetensors.readFilePositionalAllV(
-            io,
-            file,
-            buffers,
-            file_offset,
-            minimum,
-            &metrics.source_calls,
-        );
+    pipeline: *Pipeline,
+    batch: *Batch,
+    plan: *Batch.Plan,
+    /// The job's block contexts; its worker registers them in order.
+    blocks: []Pipeline.BlockContext,
+    blocks_registered: usize = 0,
+    pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
+    completed: std.atomic.Value(bool) = .init(false),
+    source_finished: std.atomic.Value(bool) = .init(false),
+    read_epoch: u64,
+    admission_id: u64 = 0,
+    /// Awake-clock nanoseconds of the enqueue; 0 until then.
+    enqueued_ns: u64 = 0,
+
+    /// The slot of a job that was never claimed: nothing pending, so the
+    /// retirement checks hold.
+    const idle: ReadRequest = .{
+        .pipeline = undefined,
+        .batch = undefined,
+        .plan = undefined,
+        .blocks = &.{},
+        .pending = .init(0),
+        .completed = .init(true),
+        .source_finished = .init(true),
+        .read_epoch = 0,
+    };
+
+    /// Takes the claimed job's request context. The claim holds the batch's
+    /// completion unit; the request's final reference drop releases it.
+    fn init(pipeline: *Pipeline, claim: Scheduler.Claim) *ReadRequest {
+        const self = claim.job.request;
+        self.* = .{
+            .pipeline = pipeline,
+            .batch = claim.batch,
+            .plan = claim.plan,
+            .blocks = claim.job.blocks,
+            .read_epoch = 0,
+        };
+        _ = pipeline.metrics.pending_source_jobs.fetchAdd(1, .acq_rel);
+        return self;
     }
 
-    fn beginRead(
-        request: *Pipeline.RequestContext,
-        pipeline: *Pipeline,
-    ) bool {
-        if (!pipeline.read_gate.acquire(pipeline.io)) return false;
-        // Generation and admission identity belong to the source-call permit,
-        // not to earlier job claim or pinned-block waits.
-        request.read_epoch = pipeline.metrics.config_epoch.load(.acquire);
-        request.admission_id = pipeline.next_read_admission.fetchAdd(1, .monotonic);
-        pipeline.metrics.beginRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-        );
-        return true;
-    }
-
-    fn endRead(
-        request: *Pipeline.RequestContext,
-        pipeline: *Pipeline,
-    ) void {
-        pipeline.metrics.endRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-        );
-        pipeline.read_gate.release(pipeline.io);
-    }
-
-    fn runCoalesced(
-        request: *Pipeline.RequestContext,
-        source_slot: *SourceSlot,
-        pipeline: *Pipeline,
-        file_offset: u64,
-        request_len: usize,
-        minimum_len: usize,
-        transfers: []const Batch.Plan.Transfer,
-        direct: *Loader,
-        scratch: *Scratch,
-    ) void {
-        defer request.finishScheduling();
+    fn run(self: *ReadRequest, loader: *Loader, job: Batch.Plan.Job, scratch: *Scratch) !void {
+        const pipeline = self.pipeline;
+        const io = pipeline.io;
         if (pipeline.failed()) return;
 
-        const file = source_slot.ensure(pipeline.io) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
-        const block_count = request_len / pipeline.block_size +
-            @intFromBool(request_len % pipeline.block_size != 0);
+        const file = try job.source_slot.ensure(io);
+        const block_count = job.len / pipeline.block_size +
+            @intFromBool(job.len % pipeline.block_size != 0);
         if (block_count == 0) {
-            request.markReadFinished();
+            self.finishSourceJob();
             return;
         }
 
         std.debug.assert(block_count <= scratch.leased.len);
-        std.debug.assert(block_count == request.blocks.len);
+        std.debug.assert(block_count == self.blocks.len);
         const leased = scratch.leased[0..block_count];
-        @memset(leased, &.{});
-        defer for (leased) |block| {
-            if (block.len != 0) pipeline.pool.release(pipeline.io, block);
-        };
-
         const references = scratch.references[0..block_count];
         @memset(references, 0);
-
         const queue_counts = scratch.queue_counts;
         @memset(queue_counts, 0);
 
-        for (transfers) |transfer| {
-            const init_started = awakeNs(pipeline.io);
-            const tensor = transfer.item.ensureState(direct) catch |err| {
-                pipeline.recordError(err);
-                return;
-            };
-            _ = pipeline.metrics.tensor_init_ns.fetchAdd(awakeNs(pipeline.io) -| init_started, .monotonic);
+        for (job.transfers) |transfer| {
+            const init_started = awakeNs(io);
+            const tensor = try transfer.item.ensureState(loader);
+            _ = pipeline.metrics.tensor_init_ns.fetchAdd(awakeNs(io) -| init_started, .monotonic);
             if (transfer.block_index >= block_count or
                 transfer.block_offset >= pipeline.block_size or
                 transfer.len > pipeline.block_size - transfer.block_offset)
-            {
-                pipeline.recordError(error.InvalidLoaderJob);
-                return;
-            }
+                return error.InvalidLoaderJob;
             references[transfer.block_index] += @popCount(transfer.writer_mask);
             var mask = transfer.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
-                if (writer_index >= tensor.targets.len) {
-                    pipeline.recordError(error.InvalidLoaderJob);
-                    return;
-                }
-                const target = &tensor.targets[writer_index];
-                queue_counts[target.device_index] += 1;
+                if (writer_index >= tensor.targets.len) return error.InvalidLoaderJob;
+                queue_counts[tensor.targets[writer_index].device_index] += 1;
             }
         }
 
         // Every block of a job is covered by a transfer: a block without a
         // reference would never be released.
         for (references) |refs| {
-            if (refs == 0) {
-                pipeline.recordError(error.InvalidLoaderJob);
-                return;
+            if (refs == 0) return error.InvalidLoaderJob;
+        }
+        {
+            const block_wait_started = awakeNs(io);
+            try pipeline.pool.acquireMany(io, leased);
+            errdefer pipeline.pool.releaseMany(io, leased);
+            _ = pipeline.metrics.block_wait_ns.fetchAdd(awakeNs(io) -| block_wait_started, .monotonic);
+            if (pipeline.errorValue()) |err| return err;
+
+            const iovecs = scratch.iovecs[0..block_count];
+            for (iovecs, leased, 0..) |*iovec, block, block_index| {
+                const consumed = block_index * pipeline.block_size;
+                iovec.* = block[0..@min(pipeline.block_size, job.len - consumed)];
             }
-        }
-        const block_wait_started = awakeNs(pipeline.io);
-        pipeline.pool.acquireMany(pipeline.io, leased) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
-        _ = pipeline.metrics.block_wait_ns.fetchAdd(awakeNs(pipeline.io) -| block_wait_started, .monotonic);
-        if (pipeline.failed()) return;
 
-        const iovecs = scratch.iovecs[0..block_count];
-        for (iovecs, leased, 0..) |*iovec, block, block_index| {
-            const consumed = block_index * pipeline.block_size;
-            const len = @min(pipeline.block_size, request_len - consumed);
-            iovec.* = block[0..len];
-        }
-
-        if (!beginRead(request, pipeline)) return;
-        request.batch.diagnostics.noteRead(pipeline.io);
-        const read_started = awakeNs(pipeline.io);
-        const read_result = readAbsoluteAllV(
-            pipeline.io,
-            file,
-            iovecs,
-            file_offset,
-            minimum_len,
-            pipeline.metrics,
-        );
-        _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(pipeline.io) -| read_started, .monotonic);
-        const bytes_read = read_result catch |err| {
-            endRead(request, pipeline);
-            pipeline.recordError(err);
-            return;
-        };
-        pipeline.metrics.recordProbeRead(
-            pipeline.io,
-            request.read_epoch,
-            request.admission_id,
-            request_len,
-        );
-        _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
-        for (transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
-        request.markReadFinished();
-        endRead(request, pipeline);
-        if (pipeline.failed()) return;
-
-        const blocks = request.blocks;
-        for (leased, references) |*lease, refs| {
-            _ = pipeline.registerBlock(request, lease.*, refs);
-            lease.* = &.{};
-        }
-        request.enqueued_ns = awakeNs(pipeline.io);
-        pipeline.enqueueBlocks(transfers, blocks, queue_counts) catch |err| {
-            request.enqueued_ns = 0;
-            for (transfers) |transfer| {
-                Pipeline.abandonSubmissions(
-                    &blocks[transfer.block_index],
-                    @popCount(transfer.writer_mask),
+            {
+                if (!self.beginRead()) return error.LoaderShuttingDown;
+                defer self.endRead();
+                self.batch.diagnostics.noteRead(io);
+                const read_started = awakeNs(io);
+                const read_result = safetensors.readFilePositionalAllV(
+                    io,
+                    file,
+                    iovecs,
+                    job.file_offset,
+                    job.minimum_len,
+                    &pipeline.metrics.source_calls,
                 );
+                _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(io) -| read_started, .monotonic);
+                const bytes_read = try read_result;
+                pipeline.probe.recordRead(io, self.read_epoch, self.admission_id, job.len);
+                _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
+                _ = pipeline.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
+                for (job.transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
+                self.finishSourceJob();
             }
-            pipeline.recordError(err);
-            return;
+            if (pipeline.errorValue()) |err| return err;
+
+            // From here the request's block contexts release the leases.
+            for (leased, references) |lease, refs| _ = self.registerBlock(lease, refs);
+        }
+        self.enqueued_ns = awakeNs(io);
+        pipeline.enqueueBlocks(job.transfers, self.blocks, queue_counts) catch |err| {
+            self.enqueued_ns = 0;
+            // Nothing was queued. The worker still holds the scheduling reference.
+            for (job.transfers) |transfer| {
+                Pipeline.abandonSubmissions(&self.blocks[transfer.block_index], @popCount(transfer.writer_mask));
+            }
+            return err;
         };
+    }
+
+    fn beginRead(self: *ReadRequest) bool {
+        const pipeline = self.pipeline;
+        if (!pipeline.read_gate.acquire(pipeline.io)) return false;
+        // Generation and admission identity belong to the source-call permit,
+        // not to earlier job claim or pinned-block waits.
+        self.read_epoch = pipeline.probe.config_epoch.load(.acquire);
+        self.admission_id = pipeline.probe.next_admission.fetchAdd(1, .monotonic);
+        pipeline.probe.beginRead(pipeline.io, self.read_epoch, self.admission_id);
+        return true;
+    }
+
+    fn endRead(self: *ReadRequest) void {
+        const pipeline = self.pipeline;
+        pipeline.probe.endRead(pipeline.io, self.read_epoch, self.admission_id);
+        pipeline.read_gate.release(pipeline.io);
+    }
+
+    /// Takes the request's next block context for a leased block. Only the
+    /// request's worker touches its slots, in order.
+    fn registerBlock(self: *ReadRequest, data: host_memory.BlockPool.Block, references: usize) *Pipeline.BlockContext {
+        const block = &self.blocks[self.blocks_registered];
+        block.* = .{
+            .pipeline = self.pipeline,
+            .request = self,
+            .lease = .init(self.pipeline.pool, self.pipeline.io, data, references),
+        };
+        self.blocks_registered += 1;
+        _ = self.pending.fetchAdd(1, .acq_rel);
+        return block;
+    }
+
+    fn finishSourceJob(self: *ReadRequest) void {
+        if (!self.source_finished.swap(true, .acq_rel)) {
+            const previous = self.pipeline.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+        }
+    }
+
+    /// Final worker access, after any error was recorded on the pipeline.
+    fn finishScheduling(self: *ReadRequest) void {
+        self.finishSourceJob();
+        self.release();
+    }
+
+    /// Releases a block or the scheduling reference. The final release may
+    /// let the awaiting task free this request and everything its batch owns.
+    fn release(self: *ReadRequest) void {
+        const previous = self.pending.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        if (previous != 1) return;
+
+        // Locals first: releasing the batch unit may complete the batch
+        // that owns this request, so nothing is touched after it.
+        const pipeline = self.pipeline;
+        const batch = self.batch;
+        if (self.enqueued_ns != 0) {
+            _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
+        }
+        self.completed.store(true, .release);
+        pipeline.request_gate.release(pipeline.io);
+        batch.finishJobs(1);
     }
 };
 
 const Pipeline = struct {
-    const RequestContext = struct {
-        pipeline: *Pipeline,
-        batch: *Batch,
-        plan: *Batch.Plan,
-        /// The job's block contexts; its worker registers them in order.
-        blocks: []BlockContext,
-        blocks_registered: usize = 0,
-        pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
-        completed: std.atomic.Value(bool) = .init(false),
-        source_finished: std.atomic.Value(bool) = .init(false),
-        read_epoch: u64,
-        admission_id: u64 = 0,
-        /// Awake-clock nanoseconds of the enqueue; 0 until then.
-        enqueued_ns: u64 = 0,
-
-        /// The slot of a job that was never claimed: nothing pending, so the
-        /// retirement checks hold.
-        const idle: RequestContext = .{
-            .pipeline = undefined,
-            .batch = undefined,
-            .plan = undefined,
-            .blocks = &.{},
-            .pending = .init(0),
-            .completed = .init(true),
-            .source_finished = .init(true),
-            .read_epoch = 0,
-        };
-
-        fn addBlock(self: *RequestContext) void {
-            _ = self.pending.fetchAdd(1, .acq_rel);
-        }
-
-        fn markReadFinished(self: *RequestContext) void {
-            self.finishSourceJob();
-        }
-
-        fn finishScheduling(self: *RequestContext) void {
-            self.finishSourceJob();
-            self.completeOne();
-        }
-
-        fn finishSourceJob(self: *RequestContext) void {
-            if (!self.source_finished.swap(true, .acq_rel)) {
-                const previous = self.pipeline.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
-                std.debug.assert(previous > 0);
-            }
-        }
-
-        fn completeBlock(self: *RequestContext) void {
-            self.completeOne();
-        }
-
-        fn completeOne(self: *RequestContext) void {
-            const previous = self.pending.fetchSub(1, .acq_rel);
-            std.debug.assert(previous > 0);
-            if (previous != 1) return;
-
-            // Locals first: releasing the batch unit may complete the batch
-            // that owns this request, so nothing is touched after it.
-            const pipeline = self.pipeline;
-            const batch = self.batch;
-            if (self.enqueued_ns != 0) {
-                _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
-            }
-            self.completed.store(true, .release);
-            pipeline.request_gate.release(pipeline.io);
-            batch.finishJobs(1);
-        }
-    };
-
     const BlockContext = struct {
         pipeline: *Pipeline,
-        request: *RequestContext,
+        request: *ReadRequest,
         lease: host_memory.BlockPool.Lease,
 
         fn complete(self: *BlockContext) void {
-            if (self.lease.complete()) self.request.completeBlock();
+            if (self.lease.complete()) self.request.release();
         }
     };
 
@@ -2058,7 +1989,6 @@ const Pipeline = struct {
         active_bytes: usize = 0,
         active_pieces: usize = 0,
         pumping: bool = false,
-        active_events: usize = 0,
         ready_entries: usize = 0,
         /// Contexts whose callback fired, for the next pump to destroy: an
         /// intrusive stack through `EventContext.next_retired`, owned by
@@ -2118,8 +2048,8 @@ const Pipeline = struct {
     request_gate: *RequestGate,
     block_size: usize,
     metrics: *Metrics,
+    probe: *SourceProbe,
     scheduler: *Scheduler,
-    next_read_admission: std.atomic.Value(u64) = .init(1),
     first_error: std.atomic.Value(u16) = .init(0),
     /// One per device. Where several are locked at once (`enqueueBlocks`,
     /// `retireBatch`) they are taken in device order; a pump, a completion
@@ -2137,6 +2067,7 @@ const Pipeline = struct {
         request_gate: *RequestGate,
         block_size: usize,
         metrics: *Metrics,
+        probe: *SourceProbe,
         scheduler: *Scheduler,
         dma_budget_bytes: usize,
     ) !Pipeline {
@@ -2154,6 +2085,7 @@ const Pipeline = struct {
             .request_gate = request_gate,
             .block_size = block_size,
             .metrics = metrics,
+            .probe = probe,
             .scheduler = scheduler,
             .pumps = pumps,
             .dma_budget_bytes = dma_budget_bytes,
@@ -2165,7 +2097,7 @@ const Pipeline = struct {
         // context may outlive its batch.
         std.debug.assert(self.request_gate.inUse(self.io) == 0);
         for (self.pumps) |*device_pump| {
-            std.debug.assert(device_pump.active_events == 0);
+            std.debug.assert(device_pump.active_pieces == 0);
             std.debug.assert(device_pump.ready_entries == 0);
             std.debug.assert(device_pump.retired == null);
             device_pump.queue.deinit(self.allocator);
@@ -2202,23 +2134,6 @@ const Pipeline = struct {
             self.request_gate.close(self.io);
             self.abortReady();
         }
-    }
-
-    /// Takes the claimed job's request context. The claim holds the batch's
-    /// completion unit; the request's final reference drop releases it.
-    fn registerRequest(
-        self: *Pipeline,
-        claim: Scheduler.Claim,
-    ) *RequestContext {
-        const request = claim.job.request;
-        request.* = .{
-            .pipeline = self,
-            .batch = claim.batch,
-            .plan = claim.plan,
-            .blocks = claim.job.blocks,
-            .read_epoch = 0,
-        };
-        return request;
     }
 
     /// Retires the contexts of a done batch: destroys the PJRT events a pump
@@ -2261,29 +2176,6 @@ const Pipeline = struct {
         ctx.next_retired = device_pump.retired;
         device_pump.retired = ctx;
         device_pump.mutex.unlock(self.io);
-    }
-
-    fn reserveSourceJob(self: *Pipeline) void {
-        _ = self.metrics.pending_source_jobs.fetchAdd(1, .acq_rel);
-    }
-
-    /// Takes the request's next block context for a leased block. Only the
-    /// request's worker touches its slots, in order.
-    fn registerBlock(
-        self: *Pipeline,
-        request: *RequestContext,
-        dma_block: host_memory.BlockPool.Block,
-        references: usize,
-    ) *BlockContext {
-        const block = &request.blocks[request.blocks_registered];
-        block.* = .{
-            .pipeline = self,
-            .request = request,
-            .lease = .init(self.pool, self.io, dma_block, references),
-        };
-        request.blocks_registered += 1;
-        request.addBlock();
-        return block;
     }
 
     fn enqueueBlocks(
@@ -2369,7 +2261,6 @@ const Pipeline = struct {
                 } else if (device_pump.queue.popFront()) |transfer| {
                     device_pump.active_bytes += transfer.len;
                     device_pump.active_pieces += 1;
-                    device_pump.active_events += 1;
                     device_pump.ready_entries -= 1;
                     selected = transfer;
                 } else {
@@ -2469,10 +2360,8 @@ const Pipeline = struct {
     fn eventCompleted(self: *Pipeline, device_index: usize, len: usize) void {
         const device_pump = &self.pumps[device_index];
         device_pump.mutex.lockUncancelable(self.io);
-        std.debug.assert(device_pump.active_events > 0);
         std.debug.assert(device_pump.active_bytes >= len);
         std.debug.assert(device_pump.active_pieces > 0);
-        device_pump.active_events -= 1;
         device_pump.active_bytes -= len;
         device_pump.active_pieces -= 1;
         device_pump.mutex.unlock(self.io);
@@ -2512,7 +2401,7 @@ const SourceRuntime = struct {
     read_gate: *RequestGate,
     request_gate: *RequestGate,
     metrics: *Metrics,
-    next_read_admission: *std.atomic.Value(u64),
+    probe: *SourceProbe,
     scheduler: *Scheduler,
     pinned_feasible_width: usize,
     read_stats: ?ReadStatsCursor,
@@ -2572,7 +2461,7 @@ const SourceRuntime = struct {
         if (self.workers) |pool| pool.ensure(io, limits.workers());
         // Advance the diagnostic baseline at the generation boundary.
         _ = self.takeRemoteBackpressure();
-        self.metrics.prepareProbe(io, decision.generation, self.next_read_admission.load(.acquire));
+        self.probe.prepare(io, decision.generation, self.probe.next_admission.load(.acquire));
         self.clock.reset();
         self.window_dma_base_ns = self.metrics.dma_stage_ns.load(.monotonic);
         self.window_read_base_ns = self.metrics.read_ns.load(.monotonic);
@@ -2598,34 +2487,26 @@ const SourceRuntime = struct {
         self.read_gate.setLimit(io, limits.read);
         self.request_gate.setLimit(io, limits.lifecycle);
         if (self.workers) |pool| pool.ensure(io, limits.workers());
-        self.metrics.clearProbe(io);
-        self.metrics.config_epoch.store(decision.generation, .release);
+        self.probe.clear(io);
+        self.probe.config_epoch.store(decision.generation, .release);
         self.measurement = .blind;
     }
 
     fn evidenceFrom(
         self: *const SourceRuntime,
-        probe: Metrics.Snapshot,
+        probe: SourceProbe.Snapshot,
         now_ns: u64,
     ) ?source_concurrency.Controller.Evidence {
-        if (probe.probe_epoch != self.controller.generation) return null;
+        if (probe.epoch != self.controller.generation) return null;
         // No window before the generation's first completion.
-        if (probe.probe_window_start_ns == 0) return null;
+        if (probe.window_start_ns == 0) return null;
         const evidence: source_concurrency.Controller.Evidence = .{
-            .completed_requests = @intCast(probe.probe_read_operations),
-            .elapsed_ns = self.clock.busyNs(probe.probe_window_start_ns, now_ns),
-            .bytes = probe.probe_read_bytes,
-            .exercised_width = probe.probe_peak_reads,
+            .completed_requests = @intCast(probe.read_operations),
+            .elapsed_ns = self.clock.busyNs(probe.window_start_ns, now_ns),
+            .bytes = probe.read_bytes,
+            .exercised_width = probe.peak_reads,
         };
         return if (evidence.scoreable(self.controller.width())) evidence else null;
-    }
-
-    fn currentEvidence(
-        self: *SourceRuntime,
-        io: std.Io,
-        now_ns: u64,
-    ) ?source_concurrency.Controller.Evidence {
-        return self.evidenceFrom(self.metrics.snapshot(io), now_ns);
     }
 
     /// Once per load: the first scoreable window is dropped when the
@@ -2643,7 +2524,7 @@ const SourceRuntime = struct {
     fn finalize(self: *SourceRuntime, io: std.Io) void {
         std.debug.assert(self.read_gate.inUse(io) == 0);
         _ = self.takeRemoteBackpressure();
-        self.metrics.clearProbe(io);
+        self.probe.clear(io);
     }
 
     fn run(self: *SourceRuntime, io: std.Io) std.Io.Cancelable!void {
@@ -2667,7 +2548,7 @@ const SourceRuntime = struct {
             if (backpressure.any()) {
                 // A read admitted under the current generation has begun
                 // once the window fenced at its start saw a read.
-                const fresh_admissions = self.metrics.snapshot(io).probe_peak_reads != 0;
+                const fresh_admissions = self.probe.snapshot(io).peak_reads != 0;
                 const decision = if (backpressure.throttle)
                     self.controller.backoff(fresh_admissions)
                 else
@@ -2725,17 +2606,17 @@ const SourceRuntime = struct {
                 .measuring => {},
             }
 
-            const probe = self.metrics.snapshot(io);
+            const probe = self.probe.snapshot(io);
             const idle = scheduler_snapshot.remaining_jobs == 0 and
                 self.metrics.pending_source_jobs.load(.acquire) == 0 and
                 self.read_gate.inUse(io) == 0;
             // Idle before the window's first admission is not its time.
-            self.clock.tick(now_ns, idle and probe.probe_window_start_ns != 0);
+            self.clock.tick(now_ns, idle and probe.window_start_ns != 0);
             if (idle) continue;
             const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
             if (self.discardWarmup()) {
                 load_log.debug("source width warm-up window discarded: generation={d}, width={d}, rate={Bi:.2}/s", .{
-                    probe.probe_epoch,
+                    probe.epoch,
                     self.controller.width(),
                     @as(u64, @intFromFloat(evidence.bytesPerSecond())),
                 });
@@ -2745,7 +2626,7 @@ const SourceRuntime = struct {
             const scored_index = self.controller.index;
             const decision = self.controller.observe(evidence);
             load_log.debug("source width window: generation={d}, width={d}, rate={Bi:.2}/s, busy_ms={d:.1}, completed={d}, exercised={d}, samples={d}, next_width={d}, state={s}", .{
-                probe.probe_epoch,
+                probe.epoch,
                 source_concurrency.widths[scored_index],
                 @as(u64, @intFromFloat(evidence.bytesPerSecond())),
                 @as(f64, @floatFromInt(evidence.elapsed_ns)) / std.time.ns_per_ms,
@@ -2894,107 +2775,114 @@ const Metrics = struct {
     /// touch a tensor creates its PJRT buffers and transfer managers there,
     /// and the other workers of the same tensor wait for it.
     tensor_init_ns: std.atomic.Value(u64) = .init(0),
+};
+
+/// Source-controller evidence shared by read workers and the controller.
+/// Generations and admission fences attribute reads to the width that admitted
+/// them, even while older reads are still in flight.
+const SourceProbe = struct {
+    next_admission: std.atomic.Value(u64) = .init(1),
     config_epoch: std.atomic.Value(u64) = .init(0),
-    probe_epoch: u64 = std.math.maxInt(u64),
-    probe_admission_start: u64 = std.math.maxInt(u64),
-    probe_window_start_ns: u64 = 0,
-    probe_active_reads: usize = 0,
-    probe_peak_reads: usize = 0,
-    probe_read_operations: u64 = 0,
-    probe_read_bytes: u64 = 0,
-    probe_mutex: std.Io.Mutex = .init,
+    epoch: u64 = std.math.maxInt(u64),
+    admission_start: u64 = std.math.maxInt(u64),
+    window_start_ns: u64 = 0,
+    active_reads: usize = 0,
+    peak_reads: usize = 0,
+    read_operations: u64 = 0,
+    read_bytes: u64 = 0,
+    mutex: std.Io.Mutex = .init,
 
     const Snapshot = struct {
-        probe_epoch: u64,
-        probe_window_start_ns: u64,
-        probe_active_reads: usize,
-        probe_peak_reads: usize,
-        probe_read_operations: u64,
-        probe_read_bytes: u64,
+        epoch: u64,
+        window_start_ns: u64,
+        active_reads: usize,
+        peak_reads: usize,
+        read_operations: u64,
+        read_bytes: u64,
     };
 
-    fn snapshot(self: *Metrics, io: std.Io) Snapshot {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
+    fn snapshot(self: *SourceProbe, io: std.Io) Snapshot {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         return .{
-            .probe_epoch = self.probe_epoch,
-            .probe_window_start_ns = self.probe_window_start_ns,
-            .probe_active_reads = self.probe_active_reads,
-            .probe_peak_reads = self.probe_peak_reads,
-            .probe_read_operations = self.probe_read_operations,
-            .probe_read_bytes = self.probe_read_bytes,
+            .epoch = self.epoch,
+            .window_start_ns = self.window_start_ns,
+            .active_reads = self.active_reads,
+            .peak_reads = self.peak_reads,
+            .read_operations = self.read_operations,
+            .read_bytes = self.read_bytes,
         };
     }
 
-    fn beginRead(self: *Metrics, io: std.Io, epoch: u64, admission_id: u64) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
-        self.probe_active_reads += 1;
-        self.probe_peak_reads = @max(self.probe_peak_reads, self.probe_active_reads);
+    fn beginRead(self: *SourceProbe, io: std.Io, epoch: u64, admission_id: u64) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (epoch != self.epoch or admission_id < self.admission_start) return;
+        self.active_reads += 1;
+        self.peak_reads = @max(self.peak_reads, self.active_reads);
     }
 
-    fn endRead(self: *Metrics, io: std.Io, epoch: u64, admission_id: u64) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
-        std.debug.assert(self.probe_active_reads > 0);
-        self.probe_active_reads -= 1;
+    fn endRead(self: *SourceProbe, io: std.Io, epoch: u64, admission_id: u64) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (epoch != self.epoch or admission_id < self.admission_start) return;
+        std.debug.assert(self.active_reads > 0);
+        self.active_reads -= 1;
     }
 
-    fn recordProbeRead(
-        self: *Metrics,
+    fn recordRead(
+        self: *SourceProbe,
         io: std.Io,
         epoch: u64,
         admission_id: u64,
         bytes: usize,
     ) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch or admission_id < self.probe_admission_start) return;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (epoch != self.epoch or admission_id < self.admission_start) return;
         // The window opens at the generation's first completion, which is
         // not counted: from then on completions arrive at the source's
         // steady rate, whereas a clock started at the first admission would
         // charge a high-latency source its whole round trip and make longer
         // windows at higher rungs look faster than they are.
-        if (self.probe_window_start_ns == 0) {
+        if (self.window_start_ns == 0) {
             const now: std.Io.Timestamp = .now(io, .awake);
-            self.probe_window_start_ns = @intCast(@max(now.nanoseconds, 1));
+            self.window_start_ns = @intCast(@max(now.nanoseconds, 1));
             return;
         }
-        self.probe_read_operations +|= 1;
-        self.probe_read_bytes +|= @intCast(bytes);
+        self.read_operations +|= 1;
+        self.read_bytes +|= @intCast(bytes);
     }
 
-    fn prepareProbe(
-        self: *Metrics,
+    fn prepare(
+        self: *SourceProbe,
         io: std.Io,
         epoch: u64,
         admission_start: u64,
     ) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        self.probe_epoch = std.math.maxInt(u64);
-        self.probe_window_start_ns = 0;
-        self.probe_active_reads = 0;
-        self.probe_peak_reads = 0;
-        self.probe_read_operations = 0;
-        self.probe_read_bytes = 0;
-        self.probe_admission_start = admission_start;
-        self.probe_epoch = epoch;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.epoch = std.math.maxInt(u64);
+        self.window_start_ns = 0;
+        self.active_reads = 0;
+        self.peak_reads = 0;
+        self.read_operations = 0;
+        self.read_bytes = 0;
+        self.admission_start = admission_start;
+        self.epoch = epoch;
         self.config_epoch.store(epoch, .release);
     }
 
-    fn clearProbe(self: *Metrics, io: std.Io) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        self.probe_epoch = std.math.maxInt(u64);
-        self.probe_admission_start = std.math.maxInt(u64);
-        self.probe_window_start_ns = 0;
-        self.probe_active_reads = 0;
-        self.probe_peak_reads = 0;
-        self.probe_read_operations = 0;
-        self.probe_read_bytes = 0;
+    fn clear(self: *SourceProbe, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.epoch = std.math.maxInt(u64);
+        self.admission_start = std.math.maxInt(u64);
+        self.window_start_ns = 0;
+        self.active_reads = 0;
+        self.peak_reads = 0;
+        self.read_operations = 0;
+        self.read_bytes = 0;
     }
 };
 
@@ -3187,6 +3075,152 @@ fn awakeNs(io: std.Io) u64 {
     return @intCast(@max(now.nanoseconds, 1));
 }
 
+test "plan construction releases allocations and takes transfers only on success" {
+    const AllocationTest = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const plan = plan: {
+                const transfers = try allocator.alloc(Batch.Plan.Transfer, 2);
+                errdefer allocator.free(transfers);
+                @memset(transfers, .{
+                    .item = undefined,
+                    .block_index = 0,
+                    .block_offset = 0,
+                    .writer_mask = 1,
+                    .destination_offset = 0,
+                    .len = 64,
+                });
+                transfers[0].writer_mask = 0b11;
+                break :plan try Batch.Plan.create(allocator, 2, 3, transfers, 128, 1);
+            };
+            defer plan.destroy();
+            try std.testing.expectEqual(@as(usize, 2), plan.jobs.len);
+            try std.testing.expectEqual(@as(usize, 2), plan.requests.len);
+            try std.testing.expectEqual(@as(usize, 3), plan.blocks.len);
+            // The replicated piece needs two callbacks; the other needs one.
+            try std.testing.expectEqual(@as(usize, 3), plan.events.len);
+            for (plan.requests) |request| {
+                try std.testing.expect(request.completed.load(.acquire));
+                try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
+}
+
+test "loader releases the calibrated pool when alignment validation fails" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    var profile: VFS.LoadProfile = .local;
+    profile.direct_io_alignment = 3;
+    const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
+        .read_parallelism = .{ .fixed = 2 },
+        .load_profile = profile,
+        .dma = .{},
+        .max_host_bytes = 64 * 1024 * 1024,
+        .direct_io = .on,
+    })) |loader| unexpected: {
+        loader.destroy();
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.InvalidLoadProfile, result);
+}
+
+test "loader failures clean up before publication, after publication and during reading" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents = [_]u8{ 1, 2, 3, 4 };
+    var path_buffer: [1024]u8 = undefined;
+    const path = path: {
+        const file = try tmp.dir.createFile(io, "weights.bin", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, &contents, 0);
+        const len = try file.realPath(io, &path_buffer);
+        break :path path_buffer[0..len];
+    };
+    const later_path = try std.fmt.allocPrint(allocator, "{s}.later", .{path});
+    defer allocator.free(later_path);
+
+    const Failure = enum { before_publication, after_publication, reading };
+    for (std.enums.values(Failure)) |failure| {
+        var sources = [_]safetensors.Tensor{
+            .{ .file_uri = path, .name = "first", .shape = .init(.{4}, .u8), .offset = 0 },
+            .{ .file_uri = later_path, .name = "later", .shape = .init(.{4}, .u8), .offset = 0 },
+        };
+        var outputs: [2]Buffer = @splat(.{
+            ._platform = platform,
+            ._shape = sources[0].shape,
+            ._sharding = platform.replicated_sharding,
+            ._shards = .empty,
+        });
+        defer for (&outputs) |*output| output.deinit();
+        const loader = try Loader.create(allocator, io, platform, .{
+            .read_parallelism = .{ .fixed = 2 },
+            .load_profile = .local,
+            .dma = .{},
+            .max_host_bytes = 64 * 1024 * 1024,
+            .direct_io = .off,
+        });
+        defer loader.destroy();
+        var specs = [_]LoadSpec{
+            .{ .source = &sources[0], .shape = sources[0].shape, .sharding = platform.replicated_sharding, .output = &outputs[0] },
+            .{ .source = &sources[1], .shape = .init(.{8}, .u8), .sharding = platform.replicated_sharding, .output = &outputs[1] },
+        };
+
+        switch (failure) {
+            .before_publication, .after_publication => {
+                // The later file's shape mismatch fails planning. Including the
+                // first file forces that failure past one successful publication.
+                const submitted = if (failure == .before_publication) specs[1..] else &specs;
+                const result: anyerror!void = if (loader.submit(submitted, null)) |batch| unexpected: {
+                    loader.awaitBatch(batch) catch {};
+                    break :unexpected {};
+                } else |err| err;
+                try std.testing.expectError(error.InvalidLoaderJob, result);
+            },
+            .reading => {
+                // Planning succeeds, but the source ends after four of five bytes.
+                sources[0].shape = .init(.{5}, .u8);
+                specs[0].shape = sources[0].shape;
+                const batch = try loader.submit(specs[0..1], null);
+                try std.testing.expectError(error.UnexpectedEndOfFile, loader.awaitBatch(batch));
+                try std.testing.expect(loader.pool.high_water > 0);
+            },
+        }
+        try std.testing.expectEqual(@as(usize, 0), loader.scheduler.snapshot(io).remaining_jobs);
+        try std.testing.expectEqual(@as(usize, 0), loader.request_gate.inUse(io));
+        try std.testing.expectEqual(@as(usize, 0), loader.read_gate.inUse(io));
+        try std.testing.expectEqual(@as(usize, 0), loader.pool.in_use);
+        try std.testing.expectEqual(@as(usize, 0), loader.metrics.pending_source_jobs.load(.acquire));
+
+        if (failure == .before_publication) {
+            try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
+            try loader.checkOpen();
+            const batch = try loader.submit(specs[0..1], null);
+            try loader.awaitBatch(batch);
+            const loaded = try outputs[0].toSliceAlloc(allocator, io);
+            defer loaded.free(allocator);
+            try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), loader.batch_count);
+            const expected = if (failure == .reading) error.UnexpectedEndOfFile else error.InvalidLoaderJob;
+            try std.testing.expectError(expected, loader.checkOpen());
+            const result: anyerror!void = if (loader.submit(specs[0..1], null)) |batch| unexpected: {
+                loader.awaitBatch(batch) catch {};
+                break :unexpected {};
+            } else |err| err;
+            try std.testing.expectError(expected, result);
+        }
+    }
+}
+
 test "DMA stage requests cover the per-device in-flight bytes" {
     const mib = 1024 * 1024;
     try std.testing.expectEqual(@as(usize, 8), dmaStageRequests(8, 1, 16 * mib, 16 * mib));
@@ -3250,9 +3284,9 @@ fn expectFairOrder(
 fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
     const jobs = try allocator.alloc(Batch.Plan.Job, job_count);
     errdefer allocator.free(jobs);
-    const requests = try allocator.alloc(Pipeline.RequestContext, job_count);
+    const requests = try allocator.alloc(ReadRequest, job_count);
     errdefer allocator.free(requests);
-    @memset(requests, Pipeline.RequestContext.idle);
+    @memset(requests, ReadRequest.idle);
     const blocks = try allocator.alloc(Pipeline.BlockContext, job_count);
     errdefer allocator.free(blocks);
     const events = try allocator.alloc(Pipeline.EventContext, job_count);
@@ -3504,7 +3538,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
 
     // No room for the widening: two alignment units must fit in a request.
-    try std.testing.expectError(error.InvalidLoaderJob, Planner.preparePlan(
+    const invalid_plan: anyerror!void = if (Planner.preparePlan(
         allocator,
         device_count,
         &aligned_item_ptrs,
@@ -3512,7 +3546,11 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         4,
         8,
         4,
-    ));
+    )) |plan| unexpected: {
+        plan.destroy();
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.InvalidLoaderJob, invalid_plan);
     try std.testing.expectError(error.InvalidLoaderJob, Planner.maximumJobLen(16, 4, 3));
 }
 
@@ -3989,17 +4027,17 @@ test "source warm-up window is discarded once when the DMA stage held requests a
 
 test "source measurement rejects another controller generation" {
     const io = std.testing.io;
-    var metrics: Metrics = .{};
+    var probe: SourceProbe = .{};
     var runtime: SourceRuntime = undefined;
     runtime.controller = source_concurrency.Controller.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
         64,
     );
-    runtime.metrics = &metrics;
+    runtime.probe = &probe;
     runtime.clock = .{};
-    metrics.prepareProbe(io, runtime.controller.generation + 1, 1);
-    try std.testing.expect(runtime.currentEvidence(io, 1_000) == null);
+    probe.prepare(io, runtime.controller.generation + 1, 1);
+    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), 1_000) == null);
 }
 
 test "busy window clock subtracts idle intervals from a window" {
@@ -4078,65 +4116,65 @@ test "coalesced job block bound is independent of device count" {
 
 test "probe source capacity counts active reads and keeps their peak" {
     const io = std.testing.io;
-    var metrics: Metrics = .{};
-    metrics.prepareProbe(io, 7, 10);
-    for (0..8) |index| metrics.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
+    var probe: SourceProbe = .{};
+    probe.prepare(io, 7, 10);
+    for (0..8) |index| probe.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
 
-    const active = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 8), active.probe_peak_reads);
-    try std.testing.expectEqual(@as(usize, 8), active.probe_active_reads);
+    const active = probe.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 8), active.peak_reads);
+    try std.testing.expectEqual(@as(usize, 8), active.active_reads);
 
-    for (0..4) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    const draining = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 8), draining.probe_peak_reads);
-    try std.testing.expectEqual(@as(usize, 4), draining.probe_active_reads);
-    for (4..8) |index| metrics.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    metrics.clearProbe(io);
+    for (0..4) |index| probe.endRead(io, 7, 10 + @as(u64, @intCast(index)));
+    const draining = probe.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 8), draining.peak_reads);
+    try std.testing.expectEqual(@as(usize, 4), draining.active_reads);
+    for (4..8) |index| probe.endRead(io, 7, 10 + @as(u64, @intCast(index)));
+    probe.clear(io);
 }
 
 test "source probe excludes pre-boundary admissions" {
     const io = std.testing.io;
-    var metrics: Metrics = .{};
-    metrics.beginRead(io, 6, 40);
-    metrics.prepareProbe(io, 7, 41);
-    metrics.beginRead(io, 7, 40);
-    metrics.recordProbeRead(io, 7, 40, load_limits.max_read_request_size);
-    metrics.beginRead(io, 7, 41);
+    var probe: SourceProbe = .{};
+    probe.beginRead(io, 6, 40);
+    probe.prepare(io, 7, 41);
+    probe.beginRead(io, 7, 40);
+    probe.recordRead(io, 7, 40, load_limits.max_read_request_size);
+    probe.beginRead(io, 7, 41);
     // The first in-generation completion opens the window and is not counted.
-    metrics.recordProbeRead(io, 7, 41, load_limits.max_read_request_size);
-    metrics.beginRead(io, 7, 42);
-    metrics.recordProbeRead(io, 7, 42, load_limits.max_read_request_size);
-    const admitted = metrics.snapshot(io);
-    try std.testing.expect(admitted.probe_window_start_ns != 0);
-    try std.testing.expectEqual(@as(usize, 2), admitted.probe_active_reads);
-    try std.testing.expectEqual(@as(u64, 1), admitted.probe_read_operations);
-    try std.testing.expectEqual(@as(u64, load_limits.max_read_request_size), admitted.probe_read_bytes);
-    metrics.endRead(io, 6, 40);
-    metrics.endRead(io, 7, 40);
-    metrics.endRead(io, 7, 41);
-    const draining = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 1), draining.probe_active_reads);
-    metrics.endRead(io, 7, 42);
-    const drained = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 0), drained.probe_active_reads);
-    metrics.clearProbe(io);
+    probe.recordRead(io, 7, 41, load_limits.max_read_request_size);
+    probe.beginRead(io, 7, 42);
+    probe.recordRead(io, 7, 42, load_limits.max_read_request_size);
+    const admitted = probe.snapshot(io);
+    try std.testing.expect(admitted.window_start_ns != 0);
+    try std.testing.expectEqual(@as(usize, 2), admitted.active_reads);
+    try std.testing.expectEqual(@as(u64, 1), admitted.read_operations);
+    try std.testing.expectEqual(@as(u64, load_limits.max_read_request_size), admitted.read_bytes);
+    probe.endRead(io, 6, 40);
+    probe.endRead(io, 7, 40);
+    probe.endRead(io, 7, 41);
+    const draining = probe.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 1), draining.active_reads);
+    probe.endRead(io, 7, 42);
+    const drained = probe.snapshot(io);
+    try std.testing.expectEqual(@as(usize, 0), drained.active_reads);
+    probe.clear(io);
 }
 
 test "partial source jobs contribute adaptive evidence" {
     const io = std.testing.io;
-    var metrics: Metrics = .{};
-    metrics.prepareProbe(io, 3, 1);
+    var probe: SourceProbe = .{};
+    probe.prepare(io, 3, 1);
     // A full read opens the window; the partial tail read that follows
     // contributes its actual byte count.
-    metrics.beginRead(io, 3, 1);
-    metrics.recordProbeRead(io, 3, 1, load_limits.max_read_request_size);
-    metrics.endRead(io, 3, 1);
-    metrics.beginRead(io, 3, 2);
-    metrics.recordProbeRead(io, 3, 2, 256 * 1024);
-    metrics.endRead(io, 3, 2);
-    const snapshot = metrics.snapshot(io);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.probe_read_operations);
-    try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.probe_read_bytes);
+    probe.beginRead(io, 3, 1);
+    probe.recordRead(io, 3, 1, load_limits.max_read_request_size);
+    probe.endRead(io, 3, 1);
+    probe.beginRead(io, 3, 2);
+    probe.recordRead(io, 3, 2, 256 * 1024);
+    probe.endRead(io, 3, 2);
+    const snapshot = probe.snapshot(io);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.read_operations);
+    try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.read_bytes);
 }
 
 test "request lifecycle gate holds the DMA stage beyond the read width" {
@@ -4235,7 +4273,7 @@ test "source read runtime never closes the read gate across decisions" {
     var metrics: Metrics = .{};
     var read_gate: RequestGate = .init(12);
     var request_gate: RequestGate = .init(13);
-    var next_admission: std.atomic.Value(u64) = .init(41);
+    var probe: SourceProbe = .{ .next_admission = .init(41) };
     var runtime: SourceRuntime = .{
         .controller = source_concurrency.Controller.init(
             .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
@@ -4245,7 +4283,7 @@ test "source read runtime never closes the read gate across decisions" {
         .read_gate = &read_gate,
         .request_gate = &request_gate,
         .metrics = &metrics,
-        .next_read_admission = &next_admission,
+        .probe = &probe,
         .scheduler = undefined,
         .pinned_feasible_width = 64,
         .read_stats = null,
@@ -4258,19 +4296,19 @@ test "source read runtime never closes the read gate across decisions" {
     try std.testing.expect(runtime.measurement == .measuring);
     try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
     try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
-    try std.testing.expectEqual(runtime.controller.generation, metrics.snapshot(io).probe_epoch);
-    metrics.beginRead(io, runtime.controller.generation, 40);
-    try std.testing.expectEqual(@as(usize, 0), metrics.snapshot(io).probe_active_reads);
-    metrics.beginRead(io, runtime.controller.generation, 41);
-    try std.testing.expectEqual(@as(usize, 1), metrics.snapshot(io).probe_active_reads);
-    metrics.endRead(io, runtime.controller.generation, 40);
-    metrics.endRead(io, runtime.controller.generation, 41);
+    try std.testing.expectEqual(runtime.controller.generation, probe.snapshot(io).epoch);
+    probe.beginRead(io, runtime.controller.generation, 40);
+    try std.testing.expectEqual(@as(usize, 0), probe.snapshot(io).active_reads);
+    probe.beginRead(io, runtime.controller.generation, 41);
+    try std.testing.expectEqual(@as(usize, 1), probe.snapshot(io).active_reads);
+    probe.endRead(io, runtime.controller.generation, 40);
+    probe.endRead(io, runtime.controller.generation, 41);
 
     // A scored window moves one rung up without touching the gate limit
     // below the new width; a hold at another width does the same.
     var expected_generation = runtime.controller.generation;
     for ([_]f64{ 100, 100, 90, 90 }) |rate| {
-        next_admission.store(next_admission.load(.acquire) + 5, .release);
+        probe.next_admission.store(probe.next_admission.load(.acquire) + 5, .release);
         const decision = runtime.controller.observe(.{
             .completed_requests = @max(@as(usize, 8), runtime.controller.width()),
             .elapsed_ns = std.time.ns_per_s,
@@ -4284,9 +4322,9 @@ test "source read runtime never closes the read gate across decisions" {
         try std.testing.expect(request_gate.currentLimit(io) > read_gate.currentLimit(io));
         try std.testing.expectEqual(decision.width, read_gate.currentLimit(io));
         try std.testing.expectEqual(decision.width, runtime.reported_width);
-        try std.testing.expectEqual(decision.generation, metrics.snapshot(io).probe_epoch);
-        try std.testing.expectEqual(decision.generation, metrics.config_epoch.load(.acquire));
-        try std.testing.expectEqual(next_admission.load(.acquire), metrics.probe_admission_start);
+        try std.testing.expectEqual(decision.generation, probe.snapshot(io).epoch);
+        try std.testing.expectEqual(decision.generation, probe.config_epoch.load(.acquire));
+        try std.testing.expectEqual(probe.next_admission.load(.acquire), probe.admission_start);
         try std.testing.expect((runtime.measurement == .measuring) == (runtime.controller.state == .climbing));
     }
     // 12 -> 16 and 24 (not better) -> the downward probe of 8 (10% below the
@@ -4299,15 +4337,15 @@ test "source read runtime never closes the read gate across decisions" {
 
     // Backoff while holding: one rung down, gate still open, window fenced
     // so a fresh admission can be told from delayed old-width feedback.
-    try std.testing.expectEqual(@as(usize, 0), metrics.snapshot(io).probe_peak_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.snapshot(io).peak_reads);
     const backoff = runtime.controller.backoff(false).?;
     runtime.applyDecision(io, backoff);
     try std.testing.expectEqual(@as(usize, 8), read_gate.currentLimit(io));
     try std.testing.expectEqual(@as(usize, 9), request_gate.currentLimit(io));
     try std.testing.expect(runtime.measurement == .inactive);
     try std.testing.expect(runtime.controller.backoff(false) == null);
-    metrics.beginRead(io, runtime.controller.generation, next_admission.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), metrics.snapshot(io).probe_peak_reads);
+    probe.beginRead(io, runtime.controller.generation, probe.next_admission.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), probe.snapshot(io).peak_reads);
     try std.testing.expectEqual(@as(usize, 4), runtime.controller.backoff(true).?.width);
 }
 
@@ -4316,7 +4354,7 @@ test "source read runtime measures from the reached width after a blind bootstra
     var metrics: Metrics = .{};
     var read_gate: RequestGate = .init(12);
     var request_gate: RequestGate = .init(13);
-    var next_admission: std.atomic.Value(u64) = .init(1);
+    var probe: SourceProbe = .{ .next_admission = .init(1) };
     var runtime: SourceRuntime = .{
         .controller = source_concurrency.Controller.init(
             .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
@@ -4326,7 +4364,7 @@ test "source read runtime measures from the reached width after a blind bootstra
         .read_gate = &read_gate,
         .request_gate = &request_gate,
         .metrics = &metrics,
-        .next_read_admission = &next_admission,
+        .probe = &probe,
         .scheduler = undefined,
         .pinned_feasible_width = 128,
         .read_stats = null,
@@ -4336,44 +4374,44 @@ test "source read runtime measures from the reached width after a blind bootstra
     runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
     try std.testing.expect(runtime.measurement == .blind);
     try std.testing.expectEqual(@as(usize, 24), read_gate.currentLimit(io));
-    try std.testing.expectEqual(std.math.maxInt(u64), metrics.snapshot(io).probe_epoch);
+    try std.testing.expectEqual(std.math.maxInt(u64), probe.snapshot(io).epoch);
     runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
     try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
 
     // The first response opens a measured window at 32 without a drain.
-    next_admission.store(33, .release);
+    probe.next_admission.store(33, .release);
     runtime.applyDecision(io, runtime.controller.newGeneration());
     try std.testing.expect(runtime.measurement == .measuring);
     try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
     try std.testing.expectEqual(@as(usize, 33), request_gate.currentLimit(io));
-    try std.testing.expectEqual(runtime.controller.generation, metrics.snapshot(io).probe_epoch);
-    try std.testing.expectEqual(@as(u64, 33), metrics.probe_admission_start);
+    try std.testing.expectEqual(runtime.controller.generation, probe.snapshot(io).epoch);
+    try std.testing.expectEqual(@as(u64, 33), probe.admission_start);
     try std.testing.expectEqual(@as(usize, 32), source_concurrency.widths[runtime.controller.start_index]);
 }
 
 test "source read runtime scores a window from its first admission on busy time" {
     const io = std.testing.io;
-    var metrics: Metrics = .{};
+    var probe: SourceProbe = .{};
     var runtime: SourceRuntime = undefined;
     runtime.controller = source_concurrency.Controller.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
         64,
         64,
     );
-    runtime.metrics = &metrics;
+    runtime.probe = &probe;
     runtime.clock = .{};
-    metrics.prepareProbe(io, runtime.controller.generation, 1);
+    probe.prepare(io, runtime.controller.generation, 1);
     // No admission yet: nothing to score however long the window has been open.
-    try std.testing.expect(runtime.currentEvidence(io, std.math.maxInt(u64)) == null);
+    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), std.math.maxInt(u64)) == null);
     // Thirteen reads: the first completion opens the window uncounted.
     for (1..14) |admission| {
-        metrics.beginRead(io, runtime.controller.generation, admission);
+        probe.beginRead(io, runtime.controller.generation, admission);
     }
     for (1..14) |admission| {
-        metrics.recordProbeRead(io, runtime.controller.generation, admission, load_limits.max_read_request_size);
-        metrics.endRead(io, runtime.controller.generation, admission);
+        probe.recordRead(io, runtime.controller.generation, admission, load_limits.max_read_request_size);
+        probe.endRead(io, runtime.controller.generation, admission);
     }
-    const first_read_ns = metrics.snapshot(io).probe_window_start_ns;
+    const first_read_ns = probe.snapshot(io).window_start_ns;
     try std.testing.expect(first_read_ns != 0);
     runtime.clock.tick(first_read_ns, false);
     // 40 ms busy, 200 ms idle, 40 ms busy: 80 ms of busy time is too short.
@@ -4381,11 +4419,11 @@ test "source read runtime scores a window from its first admission on busy time"
     runtime.clock.tick(first_read_ns + 240 * std.time.ns_per_ms, true);
     const short_ns = first_read_ns + 280 * std.time.ns_per_ms;
     try std.testing.expectEqual(80 * std.time.ns_per_ms, runtime.clock.busyNs(first_read_ns, short_ns));
-    try std.testing.expect(runtime.currentEvidence(io, short_ns) == null);
+    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), short_ns) == null);
     // Another 20 ms of busy time completes the 100 ms window.
     const scored_ns = short_ns + 20 * std.time.ns_per_ms;
     runtime.clock.tick(scored_ns, false);
-    const evidence = runtime.currentEvidence(io, scored_ns).?;
+    const evidence = runtime.evidenceFrom(probe.snapshot(io), scored_ns).?;
     try std.testing.expectEqual(100 * std.time.ns_per_ms, evidence.elapsed_ns);
     try std.testing.expectEqual(@as(usize, 12), evidence.completed_requests);
     try std.testing.expectEqual(@as(usize, 13), evidence.exercised_width);
@@ -4411,6 +4449,7 @@ test "the submission that completes a target's bytes carries the last flag" {
 /// batch lifecycle tests. Must not move after `init`.
 const TestPipeline = struct {
     metrics: Metrics = .{},
+    probe: SourceProbe = .{},
     gate: RequestGate,
     pumps: [1]Pipeline.DevicePump = .{.{}},
     pipeline: Pipeline,
@@ -4431,6 +4470,7 @@ const TestPipeline = struct {
             .request_gate = &self.gate,
             .block_size = 64,
             .metrics = &self.metrics,
+            .probe = &self.probe,
             .scheduler = scheduler,
             .pumps = &self.pumps,
             .dma_budget_bytes = 64,
@@ -4445,12 +4485,11 @@ const TestPipeline = struct {
     fn claimRequest(
         self: *TestPipeline,
         scheduler: *Scheduler,
-    ) !*Pipeline.RequestContext {
+    ) !*ReadRequest {
         const io = std.testing.io;
         const claim = scheduler.claim(io) orelse return error.NoJob;
         try std.testing.expect(self.gate.acquire(io));
-        self.pipeline.reserveSourceJob();
-        return self.pipeline.registerRequest(claim);
+        return ReadRequest.init(&self.pipeline, claim);
     }
 };
 
@@ -4478,7 +4517,7 @@ test "late vectored callback failure drains and signals completion" {
     const request = try fixture.claimRequest(&scheduler);
     var leased: [1]host_memory.BlockPool.Block = undefined;
     try pool.acquireMany(io, &leased);
-    const block = pipeline.registerBlock(request, leased[0], 1);
+    const block = request.registerBlock(leased[0], 1);
     try std.testing.expect(block == &batch.plans.items[0].blocks[0]);
     var target: TensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
     try fixture.pumps[0].queue.pushBack(allocator, .{
@@ -4489,7 +4528,6 @@ test "late vectored callback failure drains and signals completion" {
         .len = 64,
     });
     fixture.pumps[0].ready_entries = 1;
-    fixture.pumps[0].active_events = 1;
     fixture.pumps[0].active_bytes = 64;
     fixture.pumps[0].active_pieces = 1;
     request.finishScheduling();
@@ -4497,7 +4535,7 @@ test "late vectored callback failure drains and signals completion" {
     pipeline.first_error.store(@intFromError(error.Unknown), .release);
 
     pipeline.eventCompleted(0, 64);
-    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_events);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_pieces);
     try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].ready_entries);
     try std.testing.expect(block.lease.remaining.load(.acquire) == 0);
     try std.testing.expect(request.completed.load(.acquire));
@@ -4518,7 +4556,7 @@ test "batch completes when every claimed request completes" {
 
     const batch = try publishTestBatch(&scheduler, 3);
     try std.testing.expectEqual(@as(usize, 3), batch.remaining.load(.acquire));
-    var requests: [3]*Pipeline.RequestContext = undefined;
+    var requests: [3]*ReadRequest = undefined;
     for (&requests) |*request| request.* = try fixture.claimRequest(&scheduler);
     try std.testing.expect(scheduler.claim(io) == null);
     try std.testing.expectEqual(@as(usize, 3), fixture.gate.inUse(io));
@@ -4578,7 +4616,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     const pipeline = &fixture.pipeline;
 
     const batch = try publishTestBatch(&scheduler, 2);
-    const requests = [_]*Pipeline.RequestContext{
+    const requests = [_]*ReadRequest{
         try fixture.claimRequest(&scheduler),
         try fixture.claimRequest(&scheduler),
     };
@@ -4632,8 +4670,7 @@ test "overlapping batches complete under concurrent claims and retirement" {
                     fixture_.gate.release(io_);
                     continue;
                 };
-                fixture_.pipeline.reserveSourceJob();
-                const request = fixture_.pipeline.registerRequest(claim);
+                const request = ReadRequest.init(&fixture_.pipeline, claim);
                 request.finishScheduling();
             }
         }

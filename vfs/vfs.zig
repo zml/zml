@@ -314,6 +314,7 @@ fn enterDirect(self: *VFS, handle: *Handle) DirectEntry {
 /// `Io` never reads a descriptor with the flag on. True for the call that
 /// did it, which then says why.
 fn leaveDirect(self: *VFS, handle: *Handle) bool {
+    if (comptime !direct_io.supported) return false;
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
     if (handle.direct.load(.acquire) != .direct) return false;

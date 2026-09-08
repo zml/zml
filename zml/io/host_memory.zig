@@ -674,7 +674,7 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
 }
 
 test "HugePageAllocator retains automatic NUMA fallback state" {
-    var allocator: Workspace.Backend.HugePageAllocator = .initPageable(std.testing.allocator, 0b11);
+    var allocator: Backend.HugePageAllocator = .initPageable(std.testing.allocator, 0b11);
     allocator.leaveUnplaced(0b11);
     try std.testing.expectEqual(@as(u64, 0), allocator.numa_mask);
 }

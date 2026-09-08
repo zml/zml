@@ -1,5 +1,7 @@
 //! Checkpoint loading and virtual filesystem integration.
 
+const std = @import("std");
+
 pub const VFS = @import("vfs");
 
 pub const limits = @import("io/limits.zig");
@@ -11,3 +13,7 @@ pub const Parallelism = loader.Parallelism;
 pub const TensorStore = @import("io/TensorStore.zig");
 
 pub const dma_calibration = @import("io/dma_calibration.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
