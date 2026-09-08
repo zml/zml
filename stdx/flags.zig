@@ -138,7 +138,7 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
     comptime var field_count = 0;
 
     const positional_infos: ?std.lang.Type.Struct = if (@hasField(Flags, "positional"))
-        @typeInfo(@FieldType(Flags, "positional").@"struct")
+        @typeInfo(@FieldType(Flags, "positional")).@"struct"
     else
         null;
 
