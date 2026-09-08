@@ -447,6 +447,9 @@ pub const cuda_tile = struct {
             pub const CallOpts = struct {
                 cfg: ConfigT,
                 grid: [3]i32,
+                /// Outputs XLA zeroes before the launch, by position in
+                /// `spec.outputs`, ascending.
+                zeroed_outputs: []const i32 = &.{},
                 output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
             };
 
@@ -481,6 +484,7 @@ pub const cuda_tile = struct {
                     .name = name,
                     .ir = ir,
                     .grid = opts.grid,
+                    .zeroed_outputs = opts.zeroed_outputs,
                     .output_operand_aliases = aliases.constSlice(),
                 });
 

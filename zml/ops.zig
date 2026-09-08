@@ -1093,6 +1093,9 @@ pub const CudaTileOps = struct {
     /// The Tile IR bytecode version XLA serializes at, "MAJOR.MINOR"; XLA's
     /// default is 13.3.
     ir_version: ?[]const u8 = null,
+    /// Result indices XLA zeroes before the launch, ascending. For a kernel
+    /// that accumulates, or writes less than the whole output.
+    zeroed_outputs: []const i32 = &.{},
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
@@ -1112,7 +1115,7 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
         res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
     }
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 8) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 10) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
         .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cuda_tile")),
@@ -1122,6 +1125,11 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
         .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
     });
     if (opts.ir_version) |v| attrs.appendAssumeCapacity(.named(mlir_ctx, "ir_version", .string(mlir_ctx, v)));
+    if (opts.zeroed_outputs.len > 0) {
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+        for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
+    }
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
 
     const op = dialects.stablehlo.custom_call(
@@ -1268,6 +1276,67 @@ test "cuda_tile grid" {
 
     for (host.items(f32), 0..) |v, i| {
         try std.testing.expectEqual(@as(f32, @floatFromInt(i / 128)), v);
+    }
+}
+
+test "cuda_tile zeroed_outputs" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // Writes only the first 64 of 128; `zeroed_outputs` owns the rest.
+    const ir =
+        \\cuda_tile.module @m {
+        \\  entry @half(%in : tile<ptr<f32>>, %out : tile<ptr<f32>>) {
+        \\    %offsets = iota : tile<64xi32>
+        \\    %in_r = reshape %in : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %in_b = broadcast %in_r : tile<1xptr<f32>> -> tile<64xptr<f32>>
+        \\    %in_p = offset %in_b, %offsets : tile<64xptr<f32>>, tile<64xi32> -> tile<64xptr<f32>>
+        \\    %v, %t0 = load_ptr_tko weak %in_p : tile<64xptr<f32>> -> tile<64xf32>, token
+        \\    %one = constant <f32: 1.000000e+00> : tile<f32>
+        \\    %one_r = reshape %one : tile<f32> -> tile<1xf32>
+        \\    %one_b = broadcast %one_r : tile<1xf32> -> tile<64xf32>
+        \\    %sum = addf %v, %one_b rounding<nearest_even> : tile<64xf32>
+        \\    %out_r = reshape %out : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %out_b = broadcast %out_r : tile<1xptr<f32>> -> tile<64xptr<f32>>
+        \\    %out_p = offset %out_b, %offsets : tile<64xptr<f32>>, tile<64xi32> -> tile<64xptr<f32>>
+        \\    %tok = store_ptr_tko weak %out_p, %sum : tile<64xptr<f32>>, tile<64xf32> -> token
+        \\    return
+        \\  }
+        \\}
+    ;
+
+    const Mod = struct {
+        pub fn forward(a: Tensor) Tensor {
+            return cudaTile(.{a}, .{a.shape()}, .{
+                .name = "half",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+                .zeroed_outputs = &.{0},
+            })[0];
+        }
+    };
+
+    const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    defer exe.deinit();
+
+    var input: [128]f32 = undefined;
+    for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer a_buffer.deinit();
+
+    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    defer result.deinit();
+
+    var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer host.free(std.testing.allocator);
+
+    for (host.items(f32), 0..) |v, i| {
+        const want: f32 = if (i < 64) @floatFromInt(i + 1) else 0;
+        try std.testing.expectEqual(want, v);
     }
 }
 
