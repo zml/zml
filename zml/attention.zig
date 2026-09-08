@@ -26,7 +26,7 @@ pub const Backend = enum {
         return switch (platform.target) {
             .cuda => b: {
                 const cc = zml.platform.cuda.computeCapability(platform) orelse break :b .vanilla;
-                break :b if (cc.is(9, 0)) .cuda_fa3 else .cuda_fa2;
+                break :b if (cc.eql(.{ .major = 9, .minor = 0 })) .cuda_fa3 else .cuda_fa2;
             },
             .neuron => .nki,
             .metal => .metal_fa,
@@ -41,7 +41,7 @@ pub const Backend = enum {
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => (zml.platform.cuda.computeCapability(platform) orelse return false).is(9, 0),
+            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
     }
 };

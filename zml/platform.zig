@@ -807,12 +807,12 @@ pub const cuda = struct {
             };
         }
 
-        pub fn is(self: ComputeCapability, major: u8, minor: u8) bool {
-            return self.major == major and self.minor == minor;
+        pub fn eql(self: ComputeCapability, other: ComputeCapability) bool {
+            return self.major == other.major and self.minor == other.minor;
         }
 
-        pub fn atLeast(self: ComputeCapability, major: u8, minor: u8) bool {
-            return self.major > major or (self.major == major and self.minor >= minor);
+        pub fn atLeast(self: ComputeCapability, other: ComputeCapability) bool {
+            return self.major > other.major or (self.major == other.major and self.minor >= other.minor);
         }
 
         pub fn sm(self: ComputeCapability) u16 {

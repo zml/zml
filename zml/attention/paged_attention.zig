@@ -44,7 +44,7 @@ pub const Backend = enum {
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => (zml.platform.cuda.computeCapability(platform) orelse return false).is(9, 0),
+            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
     }
 };
