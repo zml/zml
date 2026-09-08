@@ -1,0 +1,165 @@
+diff --git a/zig/private/common/zig_build.bzl b/zig/private/common/zig_build.bzl
+--- a/zig/private/common/zig_build.bzl
++++ b/zig/private/common/zig_build.bzl
+@@ -2,6 +2,7 @@
+ 
+ load("@bazel_skylib//lib:paths.bzl", "paths")
+ load("@build_bazel_rules_android//:cc_common_link.bzl", "cc_common_link")
++load("@rules_cc//cc:action_names.bzl", "CPP_LINK_DYNAMIC_LIBRARY_ACTION_NAME")
+ load("@rules_cc//cc:find_cc_toolchain.bzl", "use_cc_toolchain")
+ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+ load("@rules_cc//cc/common:cc_helper.bzl", "cc_helper")
+@@ -566,6 +567,76 @@
+                 linking_contexts = [linking_context, root_module.cc_info.linking_context],
+                 user_link_flags = linkopts,
+             )
++
++            # HACK: ZML's development driver asks for this output group to keep
++            # the enormous native graph out of Zig's iterative final link.
++            # The action is registered for all compatible zig_binary targets,
++            # but Bazel only executes it when zig_native_prelink is requested.
++            native_prelink_params = ctx.actions.declare_file(ctx.label.name + ".native-prelink.params")
++            native_linker = cc_common.get_tool_for_action(
++                feature_configuration = feature_configuration,
++                action_name = CPP_LINK_DYNAMIC_LIBRARY_ACTION_NAME,
++            )
++            ctx.actions.run_shell(
++                arguments = [native_linker, static_lib.path, native_prelink_params.path],
++                command = """
++set -euo pipefail
++nm="$(dirname "$1")/llvm-nm"
++"$nm" --undefined-only --format=posix "$2" |
++while read -r symbol kind rest; do
++    if [[ "$kind" == "U" ]]; then
++        printf '%s\\n' "-Wl,--undefined=$symbol"
++        printf '%s\\n' "-Wl,--export-dynamic-symbol=$symbol"
++    fi
++done > "$3"
++""",
++                inputs = [static_lib],
++                mnemonic = "ZmlNativePrelinkSymbols",
++                outputs = [native_prelink_params],
++                tools = cc_toolchain.all_files,
++            )
++
++            native_prelink_shim = ctx.actions.declare_file(ctx.label.name + ".native-prelink-shim.c")
++            ctx.actions.write(
++                native_prelink_shim,
++                """
++typedef void (*zml_atexit_fn)(void);
++extern int __cxa_atexit(void (*)(void *), void *, void *);
++extern void *__dso_handle __attribute__((visibility("hidden")));
++
++__attribute__((visibility("hidden")))
++int atexit(zml_atexit_fn function) {
++    return __cxa_atexit((void (*)(void *))function, 0, __dso_handle);
++}
++""",
++            )
++            _, native_prelink_shim_outputs = cc_common.compile(
++                actions = ctx.actions,
++                cc_toolchain = cc_toolchain,
++                feature_configuration = feature_configuration,
++                name = ctx.label.name + "_native_prelink_shim",
++                srcs = [native_prelink_shim],
++                user_compile_flags = ["-fvisibility=hidden"],
++            )
++
++            native_prelink = ctx.actions.declare_file(ctx.label.name + ".native-prelink.so")
++            cc_common_link(
++                actions = ctx.actions,
++                additional_inputs = [native_prelink_params],
++                compilation_outputs = native_prelink_shim_outputs,
++                feature_configuration = feature_configuration,
++                cc_toolchain = cc_toolchain,
++                name = ctx.label.name + "_native_prelink",
++                output_type = "dynamic_library",
++                main_output = native_prelink,
++                linking_contexts = [root_module.cc_info.linking_context],
++                user_link_flags = [
++                    "@" + native_prelink_params.path,
++                    "-Wl,--allow-shlib-undefined",
++                    "-Wl,-soname," + native_prelink.basename,
++                ],
++            )
++            output_groups["zig_native_prelink"] = depset([native_prelink])
+         else:
+             args.add(bin_output, format = "-femit-bin=%s")
+             ctx.actions.run(
+@@ -655,6 +726,76 @@
+                 linking_contexts = [linking_context, root_module.cc_info.linking_context],
+                 user_link_flags = linkopts,
+             )
++
++            # HACK: ZML's development driver asks for this output group to keep
++            # the enormous native graph out of Zig's iterative final link.
++            # The action is registered for all compatible zig_test targets,
++            # but Bazel only executes it when zig_native_prelink is requested.
++            native_prelink_params = ctx.actions.declare_file(ctx.label.name + ".native-prelink.params")
++            native_linker = cc_common.get_tool_for_action(
++                feature_configuration = feature_configuration,
++                action_name = CPP_LINK_DYNAMIC_LIBRARY_ACTION_NAME,
++            )
++            ctx.actions.run_shell(
++                arguments = [native_linker, static_lib.path, native_prelink_params.path],
++                command = """
++set -euo pipefail
++nm="$(dirname "$1")/llvm-nm"
++"$nm" --undefined-only --format=posix "$2" |
++while read -r symbol kind rest; do
++    if [[ "$kind" == "U" ]]; then
++        printf '%s\\n' "-Wl,--undefined=$symbol"
++        printf '%s\\n' "-Wl,--export-dynamic-symbol=$symbol"
++    fi
++done > "$3"
++""",
++                inputs = [static_lib],
++                mnemonic = "ZmlNativePrelinkSymbols",
++                outputs = [native_prelink_params],
++                tools = cc_toolchain.all_files,
++            )
++
++            native_prelink_shim = ctx.actions.declare_file(ctx.label.name + ".native-prelink-shim.c")
++            ctx.actions.write(
++                native_prelink_shim,
++                """
++typedef void (*zml_atexit_fn)(void);
++extern int __cxa_atexit(void (*)(void *), void *, void *);
++extern void *__dso_handle __attribute__((visibility("hidden")));
++
++__attribute__((visibility("hidden")))
++int atexit(zml_atexit_fn function) {
++    return __cxa_atexit((void (*)(void *))function, 0, __dso_handle);
++}
++""",
++            )
++            _, native_prelink_shim_outputs = cc_common.compile(
++                actions = ctx.actions,
++                cc_toolchain = cc_toolchain,
++                feature_configuration = feature_configuration,
++                name = ctx.label.name + "_native_prelink_shim",
++                srcs = [native_prelink_shim],
++                user_compile_flags = ["-fvisibility=hidden"],
++            )
++
++            native_prelink = ctx.actions.declare_file(ctx.label.name + ".native-prelink.so")
++            cc_common_link(
++                actions = ctx.actions,
++                additional_inputs = [native_prelink_params],
++                compilation_outputs = native_prelink_shim_outputs,
++                feature_configuration = feature_configuration,
++                cc_toolchain = cc_toolchain,
++                name = ctx.label.name + "_native_prelink",
++                output_type = "dynamic_library",
++                main_output = native_prelink,
++                linking_contexts = [root_module.cc_info.linking_context],
++                user_link_flags = [
++                    "@" + native_prelink_params.path,
++                    "-Wl,--allow-shlib-undefined",
++                    "-Wl,-soname," + native_prelink.basename,
++                ],
++            )
++            output_groups["zig_native_prelink"] = depset([native_prelink])
+         else:
+             args.add(bin_output, format = "-femit-bin=%s")
+             ctx.actions.run(
