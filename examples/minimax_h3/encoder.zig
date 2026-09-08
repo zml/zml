@@ -80,13 +80,19 @@ const SelfAttn = struct {
 
     pub fn forward(self: SelfAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
-        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
-        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
-        const v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim }).withPartitioning(.{ .h = .model });
-        q = self.q_norm.forward(q);
-        k = self.k_norm.forward(k);
-        q = zml.nn.applyRotary(q, cos, sin);
-        k = zml.nn.applyRotary(k, cos, sin);
+        const q_heads = .{ .h = self.num_heads, .hd = self.head_dim };
+        const kv_heads = .{ .h = self.num_kv_heads, .hd = self.head_dim };
+        const q = zml.nn.applyRotary(
+            self.q_norm.forward(self.q_proj.forward(x_qkv).splitAxis(.dout, q_heads).withPartitioning(.{ .h = .model })),
+            cos,
+            sin,
+        );
+        const k = zml.nn.applyRotary(
+            self.k_norm.forward(self.k_proj.forward(x_qkv).splitAxis(.dout, kv_heads).withPartitioning(.{ .h = .model })),
+            cos,
+            sin,
+        );
+        const v = self.v_proj.forward(x_qkv).splitAxis(.dout, kv_heads).withPartitioning(.{ .h = .model });
         const attn = qwenSdpa(q.rename(.{ .s = .q }), k.rename(.{ .s = .k }), v.rename(.{ .s = .k }))
             .rename(.{ .q = .s })
             .merge(.{ .d = .{ .h, .hd } });
@@ -158,11 +164,10 @@ fn uploadF32(run: *const Run, shape: zml.Shape, values: []const f32) !zml.Buffer
 
 /// Qwen interleaved RoPE: each frequency is written into both halves of the head.
 fn fillInterleavedRope(theta: f32, seq_len: u32, head_dim: u32, cos: []f32, sin: []f32) void {
-    const half = head_dim / 2;
-    var pos: u32 = 0;
-    while (pos < seq_len) : (pos += 1) {
-        var f: u32 = 0;
-        while (f < half) : (f += 1) {
+    const hd: usize = head_dim;
+    const half = hd / 2;
+    for (0..seq_len) |pos| {
+        for (0..half) |f| {
             const ang = @as(f32, @floatFromInt(pos)) / std.math.pow(
                 f32,
                 theta,
@@ -170,10 +175,10 @@ fn fillInterleavedRope(theta: f32, seq_len: u32, head_dim: u32, cos: []f32, sin:
             );
             const c = @cos(ang);
             const s = @sin(ang);
-            cos[pos * head_dim + f] = c;
-            cos[pos * head_dim + half + f] = c;
-            sin[pos * head_dim + f] = s;
-            sin[pos * head_dim + half + f] = s;
+            cos[pos * hd + f] = c;
+            cos[pos * hd + half + f] = c;
+            sin[pos * hd + f] = s;
+            sin[pos * hd + half + f] = s;
         }
     }
 }

@@ -15,39 +15,7 @@ const load = ops.load;
 const applyLatentNorm = ops.applyLatentNorm;
 const Run = ops.Run;
 
-fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
-    var buffer: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch
-        std.debug.panic("tensor key too long: {s}{s}", .{ store.prefix() orelse "", name });
-    const shape = store.store.getShape(key) orelse
-        std.debug.panic("checkpoint has no tensor {s}", .{key});
-    return shape.rank();
-}
-
-fn pickChannel(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
-    return switch (tensorRank(store, name)) {
-        3 => store.createTensor(name, .{ .unused_a, .c, .unused_b }, .replicated),
-        2 => store.createTensor(name, .{ .unused_a, .c }, .replicated),
-        else => store.createTensor(name, .{.c}, .replicated),
-    };
-}
-
-fn squeezeToTag(t: zml.Tensor, comptime tag: anytype) zml.Tensor {
-    var out = t.convert(.f32);
-    var changed = true;
-    while (changed and out.rank() > 1) {
-        changed = false;
-        var ax: i8 = 0;
-        while (ax < @as(i8, @intCast(out.rank()))) : (ax += 1) {
-            if (out.dim(ax) == 1) {
-                out = out.squeeze(ax);
-                changed = true;
-                break;
-            }
-        }
-    }
-    return out.withTags(.{tag});
-}
+const WnLayout = enum { conv, conv_transpose };
 
 fn padRepeatT(x: zml.Tensor, low: i64, high: i64) zml.Tensor {
     var y = x;
@@ -66,14 +34,24 @@ fn unloadOpt(t: *?zml.Buffer) void {
     if (t.*) |*buf| buf.deinit();
 }
 
-fn loadWn(store: zml.io.TensorStore.View, comptime transpose: bool) struct { v: zml.Tensor, g: zml.Tensor } {
-    return .{
-        .v = if (transpose)
-            store.createTensor("weight_v", .{ .ci, .co, .k }, .replicated)
-        else
-            store.createTensor("weight_v", .{ .co, .ci, .k }, .replicated),
-        .g = store.createTensor("weight_g", .{ .co, .ci, .k }, .replicated),
+fn loadWn(store: zml.io.TensorStore.View, layout: WnLayout) struct { v: zml.Tensor, g: zml.Tensor } {
+    return switch (layout) {
+        .conv => .{
+            .v = store.createTensor("weight_v", .{ .co, .ci, .k }, .replicated),
+            .g = store.createTensor("weight_g", .{ .co, .ci, .k }, .replicated),
+        },
+        .conv_transpose => .{
+            .v = store.createTensor("weight_v", .{ .ci, .co, .k }, .replicated),
+            .g = store.createTensor("weight_g", .{ .ci, .co, .k }, .replicated),
+        },
     };
+}
+
+/// `v * g / ||v||`. ZML `sum` keeps reduced axes at 1, matching `g`.
+fn weightNorm(v: zml.Tensor, g: zml.Tensor, comptime ax0: anytype, comptime ax1: anytype) zml.Tensor {
+    const vf = v.convert(.f32);
+    const sq = vf.mul(vf).sum(ax0).sum(ax1).addConstant(1e-9);
+    return vf.mul(g.convert(.f32).mul(sq.rsqrt()));
 }
 
 const WNConv1d = struct {
@@ -85,7 +63,7 @@ const WNConv1d = struct {
     padding: i64,
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64, dilation: i64, padding: i64) WNConv1d {
-        const wn = loadWn(store, false);
+        const wn = loadWn(store, .conv);
         return .{
             .weight_v = wn.v,
             .weight_g = wn.g,
@@ -103,10 +81,7 @@ const WNConv1d = struct {
     }
 
     pub fn forward(self: WNConv1d, x: zml.Tensor) zml.Tensor {
-        const v = self.weight_v.convert(.f32).withPartialTags(.{ .co, .ci, .k });
-        const gs = squeezeToTag(self.weight_g.convert(.f32), .co);
-        const sq = squeezeToTag(v.mul(v).sum(.k).sum(.ci), .co).addConstant(1e-9);
-        const fused = v.mul(gs.mul(sq.rsqrt()).broad(v.shape()));
+        const fused = weightNorm(self.weight_v.withPartialTags(.{ .co, .ci, .k }), self.weight_g, .k, .ci);
         var y = x.convert(.f32).withPartialTags(.{ .b, .c, .t }).conv1d(fused, .{
             .window_strides = self.stride,
             .rhs_dilation = self.dilation,
@@ -126,7 +101,7 @@ const TransposeConv = struct {
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64, kernel: i64) TransposeConv {
         const inner = store.withPrefix("0");
-        const wn = loadWn(inner, true);
+        const wn = loadWn(inner, .conv_transpose);
         return .{
             .weight_v = wn.v,
             .weight_g = wn.g,
@@ -143,10 +118,7 @@ const TransposeConv = struct {
     }
 
     pub fn forward(self: TransposeConv, x: zml.Tensor) zml.Tensor {
-        const v = self.weight_v.convert(.f32).withPartialTags(.{ .ci, .co, .k });
-        const gs = squeezeToTag(self.weight_g.convert(.f32), .ci);
-        const sq = squeezeToTag(v.mul(v).sum(.k).sum(.co), .ci).addConstant(1e-9);
-        const fused = v.mul(gs.mul(sq.rsqrt()).broad(v.shape())).reverse(.{.k});
+        const fused = weightNorm(self.weight_v.withPartialTags(.{ .ci, .co, .k }), self.weight_g, .k, .co).reverse(.{.k});
         // conv_transpose1d: reverse the kernel, then conv1d with lhs dilation = stride.
         const conv_pad = @divFloor(self.kernel - self.stride, 2);
         const xla_pad = self.kernel - 1 - conv_pad;
@@ -170,8 +142,8 @@ const SnakeBeta = struct {
     pub fn init(store: zml.io.TensorStore.View) SnakeBeta {
         const act = store.withPrefix("act");
         return .{
-            .alpha = pickChannel(act, "alpha"),
-            .beta = pickChannel(act, "beta"),
+            .alpha = act.createTensor("alpha", .{.c}, .replicated),
+            .beta = act.createTensor("beta", .{.c}, .replicated),
         };
     }
 
@@ -216,12 +188,12 @@ const Activation1d = struct {
         const up = self.up_filter.convert(.f32).broad(zml.Shape.init(.{
             .co = channels,
             .ci = 1,
-            .k = self.up_filter.dim(-1),
+            .k = self.up_filter.dim(.k),
         }, .f32));
         const down = self.down_filter.convert(.f32).broad(zml.Shape.init(.{
             .co = channels,
             .ci = 1,
-            .k = self.down_filter.dim(-1),
+            .k = self.down_filter.dim(.k),
         }, .f32));
         const pad = @divFloor(config.audio_activation_kernel, config.audio_activation_ratio) - 1;
         const crop_left = pad * config.audio_activation_ratio + @divFloor(config.audio_activation_kernel - config.audio_activation_ratio, 2);
@@ -286,10 +258,7 @@ const AMPBlock = struct {
 };
 
 fn conv1x1(store: zml.io.TensorStore.View) zml.nn.Linear {
-    const weight = switch (tensorRank(store, "weight")) {
-        3 => store.createTensor("weight", .{ .dout, .d, .k }, .replicated),
-        else => store.createTensor("weight", .{ .dout, .d }, .replicated),
-    };
+    const weight = store.createTensor("weight", .{ .dout, .d, .k }, .replicated);
     return .init(weight, store.maybeCreateTensor("bias", .{.dout}, .replicated), .d);
 }
 
@@ -357,9 +326,8 @@ const DecodeOutput = struct { wav: zml.Tensor };
 
 fn projectIn(self: Model, latents: zml.Tensor) zml.Tensor {
     const x = latents.withPartialTags(.{ .b, .c, .t }).convert(.f32);
-    var weight = self.dec_in_proj.weight;
-    while (weight.rank() > 2) weight = weight.squeeze(-1);
-    return (zml.nn.Linear.init(weight.withTags(.{ .dout, .d }), self.dec_in_proj.bias, .d))
+    const weight = self.dec_in_proj.weight.squeeze(.k);
+    return (zml.nn.Linear.init(weight, self.dec_in_proj.bias, .d))
         .forward(x.rename(.{ .c = .d }))
         .rename(.{ .dout = .c })
         .transpose(.{ .b, .c, .t });
@@ -373,11 +341,9 @@ fn decode(input: DecodeInput) DecodeOutput {
     const n_k = self.cfg.resblock_kernels.len;
     for (0..n_up) |i| {
         x = self.ups[i].forward(x);
-        var acc = self.resblocks[i * n_k].forward(x);
-        var j: usize = 1;
-        while (j < n_k) : (j += 1) {
-            acc = acc.add(self.resblocks[i * n_k + j].forward(x));
-        }
+        const blocks = self.resblocks[i * n_k ..][0..n_k];
+        var acc = blocks[0].forward(x);
+        for (blocks[1..]) |block| acc = acc.add(block.forward(x));
         x = acc.scale(1.0 / @as(f32, @floatFromInt(n_k)));
     }
     x = self.activation_post.forward(x);
@@ -389,15 +355,14 @@ fn decode(input: DecodeInput) DecodeOutput {
 
 /// Packed DiT audio is `(2 * T, C)` left then right. VAE wants `(2, C, T)`.
 fn audioRowsToBct(dst: []f32, rows: []const f32, channels: u32, t: u32) void {
-    var ear: usize = 0;
-    while (ear < 2) : (ear += 1) {
-        const src = rows[ear * t * channels ..][0 .. t * channels];
-        const out = dst[ear * channels * t ..][0 .. channels * t];
-        var ti: usize = 0;
-        while (ti < t) : (ti += 1) {
-            var c: usize = 0;
-            while (c < channels) : (c += 1) {
-                out[c * t + ti] = src[ti * channels + c];
+    const ch: usize = channels;
+    const tt: usize = t;
+    for (0..2) |ear| {
+        const src = rows[ear * tt * ch ..][0 .. tt * ch];
+        const out = dst[ear * ch * tt ..][0 .. ch * tt];
+        for (0..tt) |ti| {
+            for (0..ch) |c| {
+                out[c * tt + ti] = src[ti * ch + c];
             }
         }
     }
@@ -448,7 +413,7 @@ pub const AudioVae = struct {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
         const cfg = self.inner.cfg;
         const channels: u32 = @intCast(cfg.latent_channels);
-        applyLatentNorm(packed_audio, channels, &cfg.latents_mean, &cfg.latents_std);
+        applyLatentNorm(packed_audio, &cfg.latents_mean, &cfg.latents_std);
         const t = geo.audio_t;
         const batch = try run.allocator.alloc(f32, 2 * @as(usize, channels) * t);
         defer run.allocator.free(batch);

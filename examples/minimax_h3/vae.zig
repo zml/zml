@@ -66,30 +66,32 @@ fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_ove
     return .{ .starts = starts, .overlaps = overlaps };
 }
 
-fn nchwIndex(c: u32, t: u32, y: u32, x: u32, tt: u32, h: u32, w: u32) usize {
+fn nchwIndex(c: usize, t: usize, y: usize, x: usize, tt: usize, h: usize, w: usize) usize {
     return ((((c * tt + t) * h) + y) * w) + x;
 }
 
-/// Linear blend of two NCHW tiles along H (`along_h`) or W.
-fn blend(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32, along_h: bool) void {
-    const e = @min(if (along_h) h else w, extent);
+const Axis = enum { h, w };
+
+/// Linear blend of two NCHW tiles along H or W.
+fn blend(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32, axis: Axis) void {
+    const e = @min(if (axis == .h) h else w, extent);
     if (e == 0) return;
     const ef: f32 = @floatFromInt(e);
-    var c: u32 = 0;
-    while (c < channels) : (c += 1) {
-        var ti: u32 = 0;
-        while (ti < t) : (ti += 1) {
-            var y: u32 = 0;
-            while (y < (if (along_h) e else h)) : (y += 1) {
-                var x: u32 = 0;
-                while (x < (if (along_h) w else e)) : (x += 1) {
-                    const k = if (along_h) y else x;
+    const t_n: usize = t;
+    const h_n: usize = h;
+    const w_n: usize = w;
+    const e_n: usize = e;
+    for (0..channels) |c| {
+        for (0..t_n) |ti| {
+            for (0..if (axis == .h) e_n else h_n) |y| {
+                for (0..if (axis == .h) w_n else e_n) |x| {
+                    const k = if (axis == .h) y else x;
                     const wb = @as(f32, @floatFromInt(k)) / ef;
-                    const ai = if (along_h)
-                        nchwIndex(c, ti, h - e + y, x, t, h, w)
+                    const ai = if (axis == .h)
+                        nchwIndex(c, ti, h_n - e_n + y, x, t_n, h_n, w_n)
                     else
-                        nchwIndex(c, ti, y, w - e + x, t, h, w);
-                    const bi = nchwIndex(c, ti, y, x, t, h, w);
+                        nchwIndex(c, ti, y, w_n - e_n + x, t_n, h_n, w_n);
+                    const bi = nchwIndex(c, ti, y, x, t_n, h_n, w_n);
                     b[bi] = a[ai] * (1.0 - wb) + b[bi] * wb;
                 }
             }
@@ -111,15 +113,21 @@ fn copyNchwCrop(
     channels: u32,
     t: u32,
 ) void {
-    var c: u32 = 0;
-    while (c < channels) : (c += 1) {
-        var ti: u32 = 0;
-        while (ti < t) : (ti += 1) {
-            var y: u32 = 0;
-            while (y < use_h) : (y += 1) {
+    const dst_h_n: usize = dst_h;
+    const dst_w_n: usize = dst_w;
+    const src_h_n: usize = src_h;
+    const src_w_n: usize = src_w;
+    const out_y_n: usize = out_y;
+    const out_x_n: usize = out_x;
+    const t_n: usize = t;
+    const use_h_n: usize = use_h;
+    const use_w_n: usize = use_w;
+    for (0..channels) |c| {
+        for (0..t_n) |ti| {
+            for (0..use_h_n) |y| {
                 @memcpy(
-                    dst[nchwIndex(c, ti, out_y + y, out_x, t, dst_h, dst_w)..][0..use_w],
-                    src[nchwIndex(c, ti, y, 0, t, src_h, src_w)..][0..use_w],
+                    dst[nchwIndex(c, ti, out_y_n + y, out_x_n, t_n, dst_h_n, dst_w_n)..][0..use_w_n],
+                    src[nchwIndex(c, ti, y, 0, t_n, src_h_n, src_w_n)..][0..use_w_n],
                 );
             }
         }
@@ -191,8 +199,8 @@ const NchwStitcher = struct {
         const n = @as(usize, self.channels) * self.t * self.tile_h * self.tile_w;
         @memcpy(self.curr_row[xi * n ..][0..n], tile[0..n]);
         @memcpy(self.work[0..n], tile[0..n]);
-        if (yi > 0) blend(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1], true);
-        if (xi > 0) blend(self.curr_row[(xi - 1) * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.x_overlaps[xi - 1], false);
+        if (yi > 0) blend(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1], .h);
+        if (xi > 0) blend(self.curr_row[(xi - 1) * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.x_overlaps[xi - 1], .w);
         const use_h = if (yi + 1 < self.n_y) self.tile_h - self.y_overlaps[yi] else self.tile_h;
         const use_w = if (xi + 1 < self.n_x) self.tile_w - self.x_overlaps[xi] else self.tile_w;
         copyNchwCrop(self.acc, self.acc_h, self.acc_w, self.out_y, self.out_x, self.work, self.tile_h, self.tile_w, use_h, use_w, self.channels, self.t);
@@ -245,16 +253,18 @@ fn vaePositions(allocator: std.mem.Allocator, registers: u32) ![]f32 {
     return out;
 }
 
-fn rgbPlane(c: u32, f: u32, frames: u32, plane: usize) usize {
-    return (@as(usize, c) * frames + f) * plane;
+fn rgbPlane(c: usize, f: usize, frames: usize, plane: usize) usize {
+    return (c * frames + f) * plane;
 }
 
 fn copyRgbFrames(dst: []f32, dst_frames: u32, dst_off: u32, src: []const f32, src_frames: u32, src_off: u32, n: u32, plane: usize) void {
-    var c: u32 = 0;
-    while (c < 3) : (c += 1) {
-        var f: u32 = 0;
-        while (f < n) : (f += 1) {
-            @memcpy(dst[rgbPlane(c, dst_off + f, dst_frames, plane)..][0..plane], src[rgbPlane(c, src_off + f, src_frames, plane)..][0..plane]);
+    const dst_frames_n: usize = dst_frames;
+    const src_frames_n: usize = src_frames;
+    const dst_off_n: usize = dst_off;
+    const src_off_n: usize = src_off;
+    for (0..3) |c| {
+        for (0..n) |f| {
+            @memcpy(dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane], src[rgbPlane(c, src_off_n + f, src_frames_n, plane)..][0..plane]);
         }
     }
 }
@@ -273,14 +283,19 @@ fn blendRgbFrames(
     blend_span: u32,
     plane: usize,
 ) void {
-    var f: u32 = 0;
-    while (f < n) : (f += 1) {
-        const w = @as(f32, @floatFromInt(f)) / @as(f32, @floatFromInt(blend_span));
-        var c: u32 = 0;
-        while (c < 3) : (c += 1) {
-            const d = dst[rgbPlane(c, dst_off + f, dst_frames, plane)..][0..plane];
-            const aa = a[rgbPlane(c, a_off + f, a_frames, plane)..][0..plane];
-            const bb = b[rgbPlane(c, b_off + f, b_frames, plane)..][0..plane];
+    const dst_frames_n: usize = dst_frames;
+    const a_frames_n: usize = a_frames;
+    const b_frames_n: usize = b_frames;
+    const dst_off_n: usize = dst_off;
+    const a_off_n: usize = a_off;
+    const b_off_n: usize = b_off;
+    const span: f32 = @floatFromInt(blend_span);
+    for (0..n) |f| {
+        const w = @as(f32, @floatFromInt(f)) / span;
+        for (0..3) |c| {
+            const d = dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane];
+            const aa = a[rgbPlane(c, a_off_n + f, a_frames_n, plane)..][0..plane];
+            const bb = b[rgbPlane(c, b_off_n + f, b_frames_n, plane)..][0..plane];
             for (d, aa, bb) |*o, av, bv| o.* = av * (1.0 - w) + bv * w;
         }
     }
@@ -302,7 +317,7 @@ const VitFf = struct {
     }
 
     pub fn forward(self: VitFf, x: zml.Tensor) zml.Tensor {
-        const value, const gate = applyLinear(self.w1, x).chunkExact(-1, 2);
+        const value, const gate = applyLinear(self.w1, x).chunkExact(.dout, 2);
         return applyLinear(self.w2, gate.silu().mul(value).rename(.{ .dout = .d }));
     }
 };
@@ -330,11 +345,9 @@ const VitAttn = struct {
 
     pub fn forward(self: VitAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
-        var q = applyLinear(self.q, x).splitAxis(.dout, heads);
-        var k = applyLinear(self.k, x).splitAxis(.dout, heads);
+        const q = zml.nn.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
+        const k = zml.nn.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
         const v = applyLinear(self.v, x).splitAxis(.dout, heads);
-        q = zml.nn.applyRotary(zml.nn.rmsNorm(q, .hd, self.eps), cos, sin);
-        k = zml.nn.applyRotary(zml.nn.rmsNorm(k, .hd, self.eps), cos, sin);
         // Portable SDPA (CPU / CUDA / …). DiT uses `attention.dense` for the long packed seq.
         return applyLinear(self.out, zml.nn.sdpa(
             q.rename(.{ .s = .q }),
@@ -388,9 +401,8 @@ const EmbedModel = struct {
     pub fn forward(input: Input) Output {
         const self = input.model;
         const x = input.latents.withPartialTags(.{ .b, .s, .d });
-        var post_w = self.post_quant.weight;
-        while (post_w.rank() > 2) post_w = post_w.squeeze(-1);
-        const quantized = (zml.nn.Linear.init(post_w.withTags(.{ .dout, .d }), self.post_quant.bias, .d))
+        const post_w = self.post_quant.weight.merge(.{ .d = .{ .d, .kt, .kh, .kw } });
+        const quantized = (zml.nn.Linear.init(post_w, self.post_quant.bias, .d))
             .forward(x.convert(post_w.dtype()))
             .convert(x.dtype())
             .rename(.{ .dout = .d });
@@ -517,7 +529,7 @@ pub const Vae = struct {
     ) ![]f32 {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
         const cfg = self.cfg;
-        applyLatentNorm(video_thwc, @intCast(cfg.latent_channels), &cfg.latents_mean, &cfg.latents_std);
+        applyLatentNorm(video_thwc, &cfg.latents_mean, &cfg.latents_std);
         const channels: u32 = @intCast(cfg.latent_channels);
         const y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, config.visual_spatial);
         defer y_plan.deinit(run.allocator);
@@ -557,16 +569,13 @@ pub const Vae = struct {
         defer run.allocator.free(pending);
         var has_overlap = false;
         var written: u32 = 0;
-        var chunk_i: u32 = 0;
-        while (chunk_i < num_chunks) : (chunk_i += 1) {
-            const start_t = chunk_i * config.visual_latents_per_chunk;
-            const tile_n = vaeTokens() * channels;
-            const n_tiles: u32 = @intCast(y_plan.starts.len * x_plan.starts.len);
+        for (0..num_chunks) |chunk_i| {
+            const start_t: u32 = @as(u32, @intCast(chunk_i)) * config.visual_latents_per_chunk;
+            const tile_n: usize = vaeTokens() * @as(usize, channels);
+            const n_x = x_plan.starts.len;
+            const n_tiles = y_plan.starts.len * n_x;
             const tile_lats = try run.allocator.alloc(f32, n_tiles * tile_n);
             defer run.allocator.free(tile_lats);
-            const jobs = try run.allocator.alloc(struct { yi: usize, xi: usize }, n_tiles);
-            defer run.allocator.free(jobs);
-            var job_i: usize = 0;
             for (y_plan.starts, 0..) |y0, yi| {
                 for (x_plan.starts, 0..) |x0, xi| {
                     copyLatentTile(
@@ -578,10 +587,8 @@ pub const Vae = struct {
                         start_t,
                         y0 / config.visual_spatial,
                         x0 / config.visual_spatial,
-                        tile_lats[job_i * tile_n ..][0..tile_n],
+                        tile_lats[(yi * n_x + xi) * tile_n ..][0..tile_n],
                     );
-                    jobs[job_i] = .{ .yi = yi, .xi = xi };
-                    job_i += 1;
                 }
             }
 
@@ -604,21 +611,19 @@ pub const Vae = struct {
             defer stitcher.deinit(run.allocator);
 
             const batch = compiled.tile_batch;
-            const packed_lat = try run.allocator.alloc(f32, batch * tile_n);
+            const packed_lat = try run.allocator.alloc(f32, @as(usize, batch) * tile_n);
             defer run.allocator.free(packed_lat);
             const tile_patch = vaeTokens() * @as(usize, @intCast(self.cfg.out_channels * config.visual_temporal * config.visual_spatial * config.visual_spatial));
             var off: usize = 0;
-            while (off < jobs.len) {
+            while (off < n_tiles) {
                 @memset(packed_lat, 0);
-                const take = @min(batch, @as(u32, @intCast(jobs.len - off)));
-                var b: u32 = 0;
-                while (b < take) : (b += 1) {
+                const take = @min(@as(usize, batch), n_tiles - off);
+                for (0..take) |b| {
                     @memcpy(packed_lat[b * tile_n ..][0..tile_n], tile_lats[(off + b) * tile_n ..][0..tile_n]);
                 }
                 const patches = try runVaeBatch(run, self, &embed, block_runners, &finish, pos, packed_lat);
                 defer run.allocator.free(patches);
-                b = 0;
-                while (b < take) : (b += 1) {
+                for (0..take) |b| {
                     const pix = try unpackPatches(
                         run.allocator,
                         patches[b * tile_patch ..][0..tile_patch],
@@ -627,7 +632,8 @@ pub const Vae = struct {
                         3,
                     );
                     defer run.allocator.free(pix);
-                    stitcher.push(@intCast(jobs[off + b].yi), @intCast(jobs[off + b].xi), pix);
+                    const idx = off + b;
+                    stitcher.push(@intCast(idx / n_x), @intCast(idx % n_x), pix);
                 }
                 off += take;
             }
@@ -665,29 +671,31 @@ pub const Vae = struct {
 
 /// Fold ViT patch tokens back into an NCHW pixel tile.
 fn unpackPatches(allocator: std.mem.Allocator, patches: []const f32, patch_t: u32, patch: u32, channels: u32) ![]f32 {
-    const pixel_t = config.vae_latent_t * patch_t;
-    const pixel_h = config.vae_latent_h * patch;
-    const pixel_w = config.vae_latent_w * patch;
-    const out = try allocator.alloc(f32, channels * pixel_t * pixel_h * pixel_w);
-    const width = channels * patch_t * patch * patch;
+    const pixel_t: usize = config.vae_latent_t * patch_t;
+    const pixel_h: usize = config.vae_latent_h * patch;
+    const pixel_w: usize = config.vae_latent_w * patch;
+    const ch: usize = channels;
+    const pt: usize = patch_t;
+    const p: usize = patch;
+    const out = try allocator.alloc(f32, ch * pixel_t * pixel_h * pixel_w);
+    const width = ch * pt * p * p;
+    const lt: usize = config.vae_latent_t;
+    const lh: usize = config.vae_latent_h;
+    const lw: usize = config.vae_latent_w;
     var row: usize = 0;
-    var tt: u32 = 0;
-    while (tt < config.vae_latent_t) : (tt += 1) {
-        var hh: u32 = 0;
-        while (hh < config.vae_latent_h) : (hh += 1) {
-            var ww: u32 = 0;
-            while (ww < config.vae_latent_w) : (ww += 1) {
+    for (0..lt) |tt| {
+        for (0..lh) |hh| {
+            for (0..lw) |ww| {
                 var src: usize = 0;
-                for (0..channels) |c| {
-                    for (0..patch_t) |dt| {
-                        const pt = tt * patch_t + @as(u32, @intCast(dt));
-                        var dh: u32 = 0;
-                        while (dh < patch) : (dh += 1) {
+                for (0..ch) |c| {
+                    for (0..pt) |dt| {
+                        const t = tt * pt + dt;
+                        for (0..p) |dh| {
                             @memcpy(
-                                out[(((c * pixel_t + pt) * pixel_h + (hh * patch + dh)) * pixel_w + (ww * patch))..][0..patch],
-                                patches[row * width + src ..][0..patch],
+                                out[(((c * pixel_t + t) * pixel_h + (hh * p + dh)) * pixel_w + (ww * p))..][0..p],
+                                patches[row * width + src ..][0..p],
                             );
-                            src += patch;
+                            src += p;
                         }
                     }
                 }
@@ -709,13 +717,16 @@ fn copyLatentTile(src: []const f32, src_t: u32, src_h: u32, src_w: u32, channels
     const copy_h = @min(config.vae_latent_h, src_h - h0);
     const copy_w = @min(config.vae_latent_w, src_w - w0);
     const row_n = @as(usize, copy_w) * channels;
-    var tt: u32 = 0;
-    while (tt < copy_t) : (tt += 1) {
-        var hh: u32 = 0;
-        while (hh < copy_h) : (hh += 1) {
+    const lh: usize = config.vae_latent_h;
+    const lw: usize = config.vae_latent_w;
+    const ch: usize = channels;
+    const sh: usize = src_h;
+    const sw: usize = src_w;
+    for (0..@as(usize, copy_t)) |tt| {
+        for (0..@as(usize, copy_h)) |hh| {
             @memcpy(
-                dst[(((tt * config.vae_latent_h + hh) * config.vae_latent_w) * channels)..][0..row_n],
-                src[((((t0 + tt) * src_h + (h0 + hh)) * src_w + w0) * channels)..][0..row_n],
+                dst[(((tt * lh + hh) * lw) * ch)..][0..row_n],
+                src[((((@as(usize, t0) + tt) * sh + (@as(usize, h0) + hh)) * sw + w0) * ch)..][0..row_n],
             );
         }
     }
@@ -778,17 +789,20 @@ fn runVaeBatch(
     defer cos.deinit();
     defer sin.deinit();
     // keep every hidden alive until finish waits — block.run is async
-    var held: std.ArrayList(zml.Buffer) = .empty;
+    const held = try run.allocator.alloc(zml.Buffer, blocks.len + 1);
+    var held_n: usize = 0;
     defer {
-        for (held.items) |*buf| buf.deinit();
-        held.deinit(run.allocator);
+        for (held[0..held_n]) |*buf| buf.deinit();
+        run.allocator.free(held);
     }
-    try held.append(run.allocator, hidden);
-    for (blocks) |*block| {
+    held[0] = hidden;
+    held_n = 1;
+    for (blocks, held[1..]) |*block, *slot| {
         var next: zml.Buffer = undefined;
         block.run(run.io, .{ .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin }, .outputs = .{ .hidden = &next } });
         hidden = next;
-        try held.append(run.allocator, next);
+        slot.* = next;
+        held_n += 1;
     }
     var patches: zml.Buffer = undefined;
     finish.run(run.io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .patches = &patches }, .opts = .{ .wait = true } });

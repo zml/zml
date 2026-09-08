@@ -28,10 +28,11 @@ pub const max_duration_s: f32 = 15.0;
 pub const video_shift: f32 = 12.0;
 /// Rectified-flow time-shift for the audio scheduler.
 pub const audio_shift: f32 = 3.0;
-/// Packed-sequence modalities: video, text, audio.
-pub const modality_count: i64 = 3;
+/// Packed-sequence modalities. Integer values are AdaLN table columns.
+pub const Modality = enum(u8) { video = 0, text = 1, audio = 2 };
+pub const modality_count: i64 = @intCast(std.meta.fields(Modality).len);
 /// AdaLN / time-embed table width (checkpoint). A packed row usually has 2 unique
-/// times (video/text vs audio); `pack.writeRowPlan` unique-sorts and pads to 4.
+/// times (video/text vs audio); those two are ordered and padded to 4.
 pub const timestep_slot_count: u32 = 4;
 
 /// Visual VAE decode tiling (official recipe). Default 1344×768 is 4×7 = 28 tiles.

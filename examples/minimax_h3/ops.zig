@@ -87,8 +87,14 @@ pub fn load(
 }
 
 /// `v ← v * std + mean` per latent channel.
-pub fn applyLatentNorm(values: []f32, channels: u32, mean: []const f32, stddev: []const f32) void {
-    for (values, 0..) |*v, i| v.* = v.* * stddev[i % channels] + mean[i % channels];
+pub fn applyLatentNorm(values: []f32, mean: []const f32, stddev: []const f32) void {
+    const channels = mean.len;
+    std.debug.assert(stddev.len == channels);
+    std.debug.assert(values.len % channels == 0);
+    for (0..values.len / channels) |row| {
+        const pix = values[row * channels ..][0..channels];
+        for (pix, mean, stddev) |*v, m, s| v.* = v.* * s + m;
+    }
 }
 
 /// 3-axis MM-RoPE: concat t/h/w freqs, then duplicate.

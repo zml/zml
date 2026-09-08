@@ -112,33 +112,29 @@ pub fn main(init: std.process.Init) !void {
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    var enc_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/text_encoder/model.safetensors.index.json", .{args.model}));
-    defer enc_reg.deinit();
-    var enc_store: zml.io.TensorStore = .fromRegistry(allocator, &enc_reg);
-    defer enc_store.deinit();
+    var enc_ckpt: Checkpoint = undefined;
+    try enc_ckpt.open(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/text_encoder/model.safetensors.index.json", .{args.model}));
+    defer enc_ckpt.deinit();
 
-    var dit_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/transformer/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
-    defer dit_reg.deinit();
-    var dit_store: zml.io.TensorStore = .fromRegistry(allocator, &dit_reg);
-    defer dit_store.deinit();
+    var dit_ckpt: Checkpoint = undefined;
+    try dit_ckpt.open(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/transformer/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
+    defer dit_ckpt.deinit();
 
-    var vae_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/vae/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
-    defer vae_reg.deinit();
-    var vae_store: zml.io.TensorStore = .fromRegistry(allocator, &vae_reg);
-    defer vae_store.deinit();
+    var vae_ckpt: Checkpoint = undefined;
+    try vae_ckpt.open(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/vae/diffusion_pytorch_model.safetensors.index.json", .{args.model}));
+    defer vae_ckpt.deinit();
 
-    var audio_reg: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/audio_vae/diffusion_pytorch_model.safetensors", .{args.model}));
-    defer audio_reg.deinit();
-    var audio_store: zml.io.TensorStore = .fromRegistry(allocator, &audio_reg);
-    defer audio_store.deinit();
+    var audio_ckpt: Checkpoint = undefined;
+    try audio_ckpt.open(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/audio_vae/diffusion_pytorch_model.safetensors", .{args.model}));
+    defer audio_ckpt.deinit();
 
-    var enc_model = try encoder.Encoder.init(allocator, enc_store.view());
+    var enc_model = try encoder.Encoder.init(allocator, enc_ckpt.store.view());
     defer enc_model.deinit(allocator);
-    var dit_model = try dit.Dit.init(allocator, dit_store.view());
+    var dit_model = try dit.Dit.init(allocator, dit_ckpt.store.view());
     defer dit_model.deinit(allocator);
-    var vae_model = try vae.Vae.init(allocator, vae_store.view());
+    var vae_model = try vae.Vae.init(allocator, vae_ckpt.store.view());
     defer vae_model.deinit(allocator);
-    var audio_model = try audio.AudioVae.init(allocator, audio_store.view());
+    var audio_model = try audio.AudioVae.init(allocator, audio_ckpt.store.view());
     defer audio_model.deinit(allocator);
 
     // =============================================================================
@@ -176,9 +172,9 @@ pub fn main(init: std.process.Init) !void {
     // 2–6. Encode → denoise → unpatchify → decode
     // =============================================================================
 
-    var text = try enc_model.encodeText(&run, &enc_store, tokens);
+    var text = try enc_model.encodeText(&run, &enc_ckpt.store, tokens);
     defer text.deinit();
-    const latents = try dit_model.denoise(&run, &dit_store, geo, text, @intCast(tokens.len), packed_run, args.seed);
+    const latents = try dit_model.denoise(&run, &dit_ckpt.store, geo, text, @intCast(tokens.len), packed_run, args.seed);
     defer latents.deinit(allocator);
     const thwc = try pack.unpatchify(
         allocator,
@@ -190,12 +186,31 @@ pub fn main(init: std.process.Init) !void {
         dit_model.cfg.patch_size,
     );
     defer allocator.free(thwc);
-    const rgb = try vae_model.decodeVideo(&run, &vae_store, geo, thwc);
+    const rgb = try vae_model.decodeVideo(&run, &vae_ckpt.store, geo, thwc);
     defer allocator.free(rgb);
-    const pcm_f32 = try audio_model.decodeAudio(&run, &audio_store, geo, latents.audio);
+    const pcm_f32 = try audio_model.decodeAudio(&run, &audio_ckpt.store, geo, latents.audio);
     defer allocator.free(pcm_f32);
 
     try writeOutputs(allocator, io, out, geo, rgb, pcm_f32);
+}
+
+const Checkpoint = struct {
+    reg: zml.safetensors.TensorRegistry,
+    store: zml.io.TensorStore,
+
+    fn open(self: *Checkpoint, allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+        self.reg = try .fromPath(allocator, io, path);
+        self.store = .fromRegistry(allocator, &self.reg);
+    }
+
+    fn deinit(self: *Checkpoint) void {
+        self.store.deinit();
+        self.reg.deinit();
+    }
+};
+
+fn u8fromUnit(x: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(x, 0, 1) * 255.0));
 }
 
 /// Visual VAE output is NCHW planar RGB in `[0, 1]`. Audio is interleaved stereo f32 in `[-1, 1]`.
@@ -221,11 +236,10 @@ fn writeOutputs(
     const plane = @as(usize, geo.frames) * geo.pixel_h * geo.pixel_w;
     const rgb8 = try allocator.alloc(u8, plane * 3);
     defer allocator.free(rgb8);
-    var i: usize = 0;
-    while (i < plane) : (i += 1) {
-        rgb8[i * 3 + 0] = @intFromFloat(@round(std.math.clamp(rgb[i], 0, 1) * 255.0));
-        rgb8[i * 3 + 1] = @intFromFloat(@round(std.math.clamp(rgb[plane + i], 0, 1) * 255.0));
-        rgb8[i * 3 + 2] = @intFromFloat(@round(std.math.clamp(rgb[2 * plane + i], 0, 1) * 255.0));
+    for (0..plane) |i| {
+        rgb8[i * 3 + 0] = u8fromUnit(rgb[i]);
+        rgb8[i * 3 + 1] = u8fromUnit(rgb[plane + i]);
+        rgb8[i * 3 + 2] = u8fromUnit(rgb[2 * plane + i]);
     }
     {
         const file = try out_dir.createFile(io, "video.rgb", .{});

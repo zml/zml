@@ -8,10 +8,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 
-/// AdaLN modality tags: video=0, text=1, audio=2.
-const tag_video: u8 = 0;
-const tag_text: u8 = 1;
-const tag_audio: u8 = 2;
+const Modality = config.Modality;
 
 /// Temporal span pattern along latent frames for video RoPE `t` (official 24 fps
 /// schedule: 1 then repeating 4s, scaled by 5/3 onto the RoPE time axis).
@@ -21,94 +18,71 @@ const frame_rescale: f64 = 5.0 / 3.0;
 
 /// One packed sequence: text rows, then audio rows, then video-patch rows.
 ///
-/// `positions` is `[seq, 3]` (t, h, w). Text uses `(token_index, 0, 0)`.
+/// `positions` is `[seq][t, h, w]`. Text uses `(token_index, 0, 0)`.
 /// Audio uses `(text_len + t, 0, w_low|w_high)`. Video RoPE `t` shares that origin.
 pub const Layout = struct {
-    positions: []f32,
-    token_tags: []u8,
-    text_indices: []u32,
-    audio_indices: []u32,
-    video_indices: []u32,
+    positions: [][3]f32,
+    text_len: u32,
+    audio_len: u32,
+    video_len: u32,
+
+    pub fn seqLen(self: Layout) u32 {
+        return self.text_len + self.audio_len + self.video_len;
+    }
+
+    pub fn videoStart(self: Layout) u32 {
+        return self.text_len + self.audio_len;
+    }
 
     pub fn deinit(self: Layout, allocator: std.mem.Allocator) void {
         allocator.free(self.positions);
-        allocator.free(self.token_tags);
-        allocator.free(self.text_indices);
-        allocator.free(self.audio_indices);
-        allocator.free(self.video_indices);
     }
 };
 
-fn padUnique(out: []f32, unique: []const f32) void {
-    if (out.len == 0 or unique.len == 0) return;
-    const n = @min(out.len, unique.len);
-    @memcpy(out[0..n], unique[0..n]);
-    for (n..out.len) |i| out[i] = unique[n - 1];
-}
-
-fn sortAscending(values: []f32) void {
-    var i: usize = 1;
-    while (i < values.len) : (i += 1) {
-        const key = values[i];
-        var j: usize = i;
-        while (j > 0 and values[j - 1] > key) : (j -= 1) {
-            values[j] = values[j - 1];
-        }
-        values[j] = key;
+/// Video/text share one time, audio another. Smaller time first, then pad to
+/// `config.timestep_slot_count` (checkpoint table width).
+fn fillSlots(out: []f32, video_t: f32, audio_t: f32) struct { video: u32, audio: u32 } {
+    std.debug.assert(out.len == config.timestep_slot_count);
+    if (video_t == audio_t) {
+        @memset(out, video_t);
+        return .{ .video = 0, .audio = 0 };
     }
-}
-
-/// Distinct row times, sorted, at most `config.timestep_slot_count`.
-fn uniqueSorted(values: []const f32, out: *[config.timestep_slot_count]f32) u32 {
-    var n: u32 = 0;
-    for (values) |v| {
-        var seen = false;
-        for (out[0..n]) |u| {
-            if (u == v) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen) continue;
-        if (n >= config.timestep_slot_count) std.debug.panic("too many unique timesteps", .{});
-        out[n] = v;
-        n += 1;
+    if (video_t < audio_t) {
+        out[0] = video_t;
+        @memset(out[1..], audio_t);
+        return .{ .video = 0, .audio = 1 };
     }
-    sortAscending(out[0..n]);
-    return n;
+    out[0] = audio_t;
+    @memset(out[1..], video_t);
+    return .{ .video = 1, .audio = 0 };
 }
 
-fn indexOfEqual(values: []const f32, needle: f32) u32 {
-    for (values, 0..) |v, i| {
-        if (v == needle) return @intCast(i);
-    }
-    std.debug.panic("timestep missing from unique set", .{});
-}
-
-/// Per-row times: video/text at `video_t`, audio at `audio_t`. Unique-sort
-/// and pad to `config.timestep_slot_count` (checkpoint table width, usually 2 uniques).
+/// Per-row times: video/text at `video_t`, audio at `audio_t`.
+/// AdaLN row = `slot * n_modalities + modality`.
 pub fn writeRowPlan(
     layout: Layout,
     video_t: f32,
     audio_t: f32,
-    row_ts: []f32,
     timestep_indices: []u32,
+    adaln_indices: []u32,
     unique_out: []f32,
 ) void {
-    std.debug.assert(row_ts.len == layout.token_tags.len);
-    @memset(row_ts, video_t);
-    for (layout.audio_indices) |idx| row_ts[idx] = audio_t;
-    var unique: [config.timestep_slot_count]f32 = undefined;
-    const n = uniqueSorted(row_ts, &unique);
-    padUnique(unique_out, unique[0..n]);
-    for (timestep_indices, row_ts) |*idx, t| idx.* = indexOfEqual(unique[0..n], t);
-}
+    const seq = layout.seqLen();
+    std.debug.assert(timestep_indices.len == seq);
+    std.debug.assert(adaln_indices.len == seq);
 
-/// AdaLN row = `slot * n_modalities + token_tag`.
-pub fn writeAdalnIndices(out: []u32, timestep_indices: []const u32, token_tags: []const u8) void {
-    for (out, timestep_indices, token_tags) |*a, t, tag| {
-        a.* = t * @as(u32, @intCast(config.modality_count)) + tag;
-    }
+    const slots = fillSlots(unique_out, video_t, audio_t);
+    const n_mod: u32 = @intCast(config.modality_count);
+    const text_end = layout.text_len;
+    const audio_end = layout.videoStart();
+
+    @memset(timestep_indices[0..text_end], slots.video);
+    @memset(timestep_indices[text_end..audio_end], slots.audio);
+    @memset(timestep_indices[audio_end..seq], slots.video);
+
+    @memset(adaln_indices[0..text_end], slots.video * n_mod + @intFromEnum(Modality.text));
+    @memset(adaln_indices[text_end..audio_end], slots.audio * n_mod + @intFromEnum(Modality.audio));
+    @memset(adaln_indices[audio_end..seq], slots.video * n_mod + @intFromEnum(Modality.video));
 }
 
 /// Spatial RoPE axis for one latent dimension, scaled onto a 32-unit canvas.
@@ -168,16 +142,8 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     errdefer audio.deinit(allocator);
 
     const n = text_len + geo.audio_tokens + geo.video_tokens;
-    const positions = try allocator.alloc(f32, n * 3);
+    const positions = try allocator.alloc([3]f32, n);
     errdefer allocator.free(positions);
-    const token_tags = try allocator.alloc(u8, n);
-    errdefer allocator.free(token_tags);
-    const text_indices = try allocator.alloc(u32, text_len);
-    errdefer allocator.free(text_indices);
-    const audio_indices = try allocator.alloc(u32, geo.audio_tokens);
-    errdefer allocator.free(audio_indices);
-    const video_indices = try allocator.alloc(u32, geo.video_tokens);
-    errdefer allocator.free(video_indices);
 
     const sqrt_area = @sqrt(@as(f64, @floatFromInt(geo.latent_h * geo.latent_w)));
     var h_buf: [256]f32 = undefined;
@@ -188,11 +154,7 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     const w_axis = spatialAxis(geo.latent_w, sqrt_area, &w_buf);
 
     for (0..text_len) |i| {
-        positions[i * 3 + 0] = @floatFromInt(i);
-        positions[i * 3 + 1] = 0;
-        positions[i * 3 + 2] = 0;
-        token_tags[i] = tag_text;
-        text_indices[i] = @intCast(i);
+        positions[i] = .{ @floatFromInt(i), 0, 0 };
     }
 
     var cursor: f64 = @floatFromInt(text_len);
@@ -200,12 +162,11 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     var a: u32 = 0;
     for (widths) |w| {
         for (0..geo.audio_t) |t| {
-            const idx = text_len + a;
-            audio_indices[a] = idx;
-            positions[idx * 3 + 0] = @floatCast(cursor + @as(f64, @floatFromInt(t)));
-            positions[idx * 3 + 1] = 0;
-            positions[idx * 3 + 2] = w;
-            token_tags[idx] = tag_audio;
+            positions[text_len + a] = .{
+                @floatCast(cursor + @as(f64, @floatFromInt(t))),
+                0,
+                w,
+            };
             a += 1;
         }
     }
@@ -214,12 +175,7 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     for (0..geo.latent_t) |ti| {
         for (h_axis) |h| {
             for (w_axis) |w| {
-                const idx = text_len + geo.audio_tokens + v;
-                video_indices[v] = idx;
-                positions[idx * 3 + 0] = @floatCast(cursor);
-                positions[idx * 3 + 1] = h;
-                positions[idx * 3 + 2] = w;
-                token_tags[idx] = tag_video;
+                positions[text_len + geo.audio_tokens + v] = .{ @floatCast(cursor), h, w };
                 v += 1;
             }
         }
@@ -229,10 +185,9 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     return .{
         .layout = .{
             .positions = positions,
-            .token_tags = token_tags,
-            .text_indices = text_indices,
-            .audio_indices = audio_indices,
-            .video_indices = video_indices,
+            .text_len = text_len,
+            .audio_len = geo.audio_tokens,
+            .video_len = geo.video_tokens,
         },
         .video = video,
         .audio = audio,
@@ -273,12 +228,12 @@ fn unpatchWalk(t: u32, h: u32, w: u32, c: u32, patch: [3]i64, src: []const f32, 
     const pw: u32 = @intCast(patch[2]);
     const width = c * pt * ph * pw;
     var row: usize = 0;
-    var tt: u32 = 0;
-    while (tt < t) : (tt += pt) {
-        var hh: u32 = 0;
-        while (hh < h) : (hh += ph) {
-            var ww: u32 = 0;
-            while (ww < w) : (ww += pw) {
+    for (0..t / pt) |ti| {
+        const tt: u32 = @as(u32, @intCast(ti)) * pt;
+        for (0..h / ph) |hi| {
+            const hh: u32 = @as(u32, @intCast(hi)) * ph;
+            for (0..w / pw) |wi| {
+                const ww: u32 = @as(u32, @intCast(wi)) * pw;
                 var i: usize = 0;
                 for (0..c) |ch| {
                     for (0..pt) |dt| {
