@@ -84,8 +84,8 @@ pub const Value = struct {
 
     pub fn isFloatElem(self: Value) bool {
         const et = self.elemType();
-        inline for (std.meta.fields(mlir.FloatTypes)) |f| {
-            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f.name))) != null) return true;
+        inline for (comptime std.meta.fieldNames(mlir.FloatTypes)) |f_name| {
+            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f_name))) != null) return true;
         }
         return false;
     }
