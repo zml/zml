@@ -95,6 +95,16 @@ pub const Shape = struct {
             try testing.expect(!spec_unknown.eql(.replicated));
         }
 
+        /// Reconcile two inputs contributing the same output axis. Conflicting
+        /// concrete constraints are left open for the partitioner to resolve.
+        pub fn merge(self: PartitionSpec, other: PartitionSpec) PartitionSpec {
+            if (self.eql(other)) return self;
+            if (!self.isClosed() and !other.isClosed()) return .open;
+            if (!self.isClosed()) return other;
+            if (!other.isClosed()) return self;
+            return .open;
+        }
+
         pub fn isClosed(self: PartitionSpec) bool {
             return switch (self) {
                 .axis => true,
@@ -732,6 +742,23 @@ pub const Shape = struct {
         try testing.expect(unspecified.partition(1).eql(.unknown));
         try testing.expect(source.partition(.batch).eql(unspecified.partition(.batch)));
         try testing.expectEqual(1, source.rank());
+    }
+
+    /// Run after collecting all inferred axes: a mesh axis cannot partition
+    /// multiple result dimensions. Read the original specs so every collision,
+    /// including three or more uses, is cleared independently of axis order.
+    pub fn withoutPartitioningConflicts(self: Shape) Shape {
+        var res = self;
+        for (self._partitioning.constSlice(), 0..) |spec, i| {
+            if (spec != .axis) continue;
+            for (self._partitioning.constSlice(), 0..) |other, j| {
+                if (i != j and spec.eql(other)) {
+                    res._partitioning.set(i, .open);
+                    break;
+                }
+            }
+        }
+        return res;
     }
 
     pub fn remove(self: Shape, axis_: anytype) Shape {
@@ -1629,13 +1656,52 @@ pub const Shape = struct {
             if (other.tag(ax) != Shape.TagUnknown) {
                 if (self.hasTag(other.tag(ax))) |batching_ax| {
                     stdx.debug.assert(batching_ax == batching_axes and batching_ax == ax, "outer expects batching dims to be the first dims in both tensors, got outer({f}, {f})", .{ self, other });
+                    stdx.debug.assert(self.dim(batching_ax) == other.dim(ax), "outer expects matching batch sizes, got {f} and {f}", .{ self, other });
+                    res_shape._partitioning.set(batching_ax, self.partition(batching_ax).merge(other.partition(ax)));
                     batching_axes += 1;
+                    continue;
                 }
             }
 
-            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax), null);
+            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax), other.partition(ax));
         }
-        return res_shape;
+        return res_shape.withoutPartitioningConflicts();
+    }
+
+    test "outer preserves independent partitions and clears conflicting mesh axes" {
+        const lhs = Shape.init(.{ .batch = 2, .m = 8 }, .f32).withPartitioning(.{ .m = .model });
+        const rhs = Shape.init(.{ .batch = 2, .n = 16 }, .f32).withPartitioning(.{ .batch = .data, .n = .expert });
+        const result = lhs.outer(rhs);
+        try testing.expectEqualSlices(i64, &.{ 2, 8, 16 }, result.dims());
+        try testing.expect(result.partition(.batch).eql(.init(.data)));
+        try testing.expect(result.partition(.m).eql(.init(.model)));
+        try testing.expect(result.partition(.n).eql(.init(.expert)));
+
+        const conflict = lhs.outer(rhs.withPartitioning(.{ .batch = .data, .n = .model }));
+        try testing.expect(conflict.partition(.batch).eql(.init(.data)));
+        try testing.expect(conflict.partition(.m).eql(.open));
+        try testing.expect(conflict.partition(.n).eql(.open));
+        const third = conflict.outer(Shape.init(.{ .p = 4 }, .f32).withPartitioning(.{ .p = .expert }));
+        try testing.expect(third.partition(.p).eql(.init(.expert)));
+    }
+
+    test "partition inference clears all repeated axes and reconciles batch constraints" {
+        const shape = Shape.init(.{}, .f32)
+            .appendDim(8, toTag(.a), .init(.model))
+            .appendDim(8, toTag(.b), .init(.model))
+            .appendDim(8, toTag(.c), .init(.model))
+            .appendDim(8, toTag(.d), .init(.data));
+        const resolved = shape.withoutPartitioningConflicts();
+        for (0..3) |axis_| try testing.expect(resolved.partition(axis_).eql(.open));
+        try testing.expect(resolved.partition(.d).eql(.init(.data)));
+        const specs: []const PartitionSpec = &.{ .unknown, .open, .replicated, .init(.data), .init(.model) };
+        for (specs) |left| {
+            for (specs) |right| try testing.expect(left.merge(right).eql(right.merge(left)));
+        }
+        try testing.expect(PartitionSpec.init(.data).merge(.unknown).eql(.init(.data)));
+        try testing.expect(PartitionSpec.init(.data).merge(.init(.data)).eql(.init(.data)));
+        try testing.expect(PartitionSpec.init(.data).merge(.init(.model)).eql(.open));
+        try testing.expect(PartitionSpec.init(.data).merge(.replicated).eql(.open));
     }
 
     pub fn iterator(self: Shape) MultiDimIterator {

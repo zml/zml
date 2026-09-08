@@ -1517,7 +1517,7 @@ pub const Tensor = struct {
             stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
-            res_shape = res_shape.appendDim(lhs._shape.dim(l), t, null);
+            res_shape = res_shape.appendDim(lhs._shape.dim(l), t, lhs.shape().partition(l).merge(rhs.shape().partition(r)));
             lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
             rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
         }
@@ -1542,7 +1542,7 @@ pub const Tensor = struct {
             if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
                 continue;
             }
-            res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l), null);
+            res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l), lhs.shape().partition(l));
         }
         for (0..rhs.rank()) |r| {
             if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -1551,8 +1551,10 @@ pub const Tensor = struct {
             if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
                 continue;
             }
-            res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r), null);
+            res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r), rhs.shape().partition(r));
         }
+
+        res_shape = res_shape.withoutPartitioningConflicts();
 
         const op = dialects.stablehlo.dot_general(
             mlirCtx(),
@@ -2951,6 +2953,7 @@ pub const Tensor = struct {
                 // Note: tags are required for batching.
                 self_batch_axes.appendAssumeCapacity(@intCast(self_ax));
                 indices_batch_axes.appendAssumeCapacity(indices._shape.axis(t));
+                res_shape._partitioning.set(res_shape.axis(t), self.shape().partition(self_ax).merge(indices.shape().partition(t)));
                 slice_dims.set(self_ax, 1);
                 stdx.debug.assert(slice_shape.hasTag(t) == null, "gatherSlices expect axes to be either batches or slices axes. Axis {s} has been found both in `slices={f}` and `indices={f}`", .{ t, slice_shape, indices });
             } else if (maybe_slice_ax) |slice_ax| {
@@ -2959,15 +2962,26 @@ pub const Tensor = struct {
                 const slice_dim = slice_shape.dim(slice_ax);
                 stdx.debug.assert(slice_dim <= self._shape.dim(self_ax), "gatherSlices expects `slice_shape` to be smaller than `self.shape()`. On axis {s}, got {f} > {f}.", .{ t, slice_shape, self._shape });
                 slice_dims.set(self_ax, slice_dim);
-                res_shape = res_shape.appendDim(slice_dim, t, null);
+                // A shortened window need not align with source shards. Only
+                // inherit the source partition for a full-width slice.
+                const slice_partition = slice_shape.partition(slice_ax);
+                const partition = if (slice_partition != .unknown)
+                    slice_partition
+                else if (slice_dim == self.dim(self_ax))
+                    self.shape().partition(self_ax)
+                else
+                    .unknown;
+                res_shape = res_shape.appendDim(slice_dim, t, partition);
                 start_index_map.appendAssumeCapacity(@intCast(self_ax));
                 self_offset_axes.appendAssumeCapacity(res_shape.rank() - 1);
             } else {
                 // non-batching, non-indexed axes
-                res_shape = res_shape.appendDim(self.dim(self_ax), t, null);
+                res_shape = res_shape.appendDim(self.dim(self_ax), t, self.shape().partition(self_ax));
                 self_offset_axes.appendAssumeCapacity(res_shape.rank() - 1);
             }
         }
+
+        res_shape = res_shape.withoutPartitioningConflicts();
 
         const gather_op = dialects.stablehlo.gather(
             mlirCtx(),
@@ -4428,12 +4442,85 @@ pub const Tensor = struct {
             if (x.rank() == 0) {
                 res_shape = res_shape.appendDim(1, null, null);
             } else {
-                res_shape = res_shape.appendDim(x.dim(0), x.shape().tag(0), null);
+                res_shape = res_shape.appendDim(x.dim(0), x.shape().tag(0), x.shape().partition(0));
             }
         }
 
+        res_shape = res_shape.withoutPartitioningConflicts();
+
         for (out, vectors, 0..) |*o, x, i| {
             o.* = x.broadcast(res_shape, &[1]i64{@intCast(i)});
+        }
+    }
+
+    test "axis-copying operations preserve partitions without duplicating mesh axes" {
+        const zml = @import("zml.zig");
+        var comp: Compiler = .init(std.testing.allocator, std.testing.io, zml.testing.env(), .{});
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
+        const block = mlir.Block.init(&.{}, &.{});
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
+        const Local = struct {
+            fn tensor(shape_: Shape) Tensor {
+                return Tensor.scalar(0, shape_.dtype()).broad(shape_);
+            }
+            fn expectPartition(t: Tensor, axis_: anytype, expected: Shape.PartitionSpec) !void {
+                try std.testing.expect(expected.eql(t.shape().partition(axis_)));
+                try std.testing.expect(t.value().owner().verify());
+            }
+        };
+        const make = Local.tensor;
+        const expectPartition = Local.expectPartition;
+        const lhs = make(Shape.init(.{ .b = 2, .m = 8, .k = 4 }, .f32).withPartitioning(.{ .m = .model }));
+        const rhs = make(Shape.init(.{ .b = 2, .n = 16, .k = 4 }, .f32).withPartitioning(.{ .b = .data, .n = .expert }));
+        const dot_result = lhs.dotGeneral(rhs, &.{.{ 2, 2 }}, &.{.{ 0, 0 }});
+        try expectPartition(dot_result, .b, .init(.data));
+        try expectPartition(dot_result, .m, .init(.model));
+        try expectPartition(dot_result, .n, .init(.expert));
+        var conflicting_rhs = rhs;
+        conflicting_rhs._shape = rhs.shape().withPartitioning(.{ .b = .data, .n = .model });
+        const conflict = lhs.dotGeneral(conflicting_rhs, &.{.{ 2, 2 }}, &.{.{ 0, 0 }});
+        try expectPartition(conflict, .m, .open);
+        try expectPartition(conflict, .n, .open);
+        const weight_scale = make(Shape.init(.{ .b = 1, .n = 1, .k = 1 }, .f32));
+        const scaled = zml.nn.scaledDot(lhs, conflicting_rhs, null, weight_scale, .k);
+        try expectPartition(scaled, .b, .init(.data));
+        try expectPartition(scaled, .m, .open);
+        try expectPartition(scaled, .n, .open);
+
+        const operand = make(Shape.init(.{ .row = 8, .feature = 16 }, .f32).withPartitioning(.{ .row = .rows, .feature = .model }));
+        const indices = make(Shape.init(.{ .sample = 4 }, .i32).withPartitioning(.{ .sample = .data }));
+        const gathered = operand.gather(.{ .row = indices }, .{});
+        try expectPartition(gathered, .sample, .init(.data));
+        try expectPartition(gathered, .feature, .init(.model));
+        var conflicting_indices = indices;
+        conflicting_indices._shape = indices.shape().withPartitioning(.{ .sample = .model });
+        const gathered_conflict = operand.gather(.{ .row = conflicting_indices }, .{});
+        try expectPartition(gathered_conflict, .sample, .open);
+        try expectPartition(gathered_conflict, .feature, .open);
+
+        const coords = make(Shape.init(.{ .sample = 4, .coord = 1 }, .i32).withPartitioning(.{ .sample = .data }));
+        const short = operand.gatherSlices(.{ .row = 2 }, coords, .{});
+        try expectPartition(short, .row, .unknown);
+        try expectPartition(short, .feature, .init(.model));
+        try expectPartition(short, .sample, .init(.data));
+        const full = operand.gatherSlices(.{ .row = 8 }, coords, .{});
+        try expectPartition(full, .row, .init(.rows));
+        const explicit = operand.gatherSlices(Shape.init(.{ .row = 2 }, .i32).withPartitioning(.{ .row = .slice }), coords, .{});
+        try expectPartition(explicit, .row, .init(.slice));
+
+        const a = make(Shape.init(.{ .a = 8 }, .f32).withPartitioning(.{ .a = .data }));
+        const b = make(Shape.init(.{ .b = 4 }, .f32).withPartitioning(.{ .b = .model }));
+        const product = cartesianProduct(2, .{ a, b });
+        for (product) |t| {
+            try expectPartition(t, .a, .init(.data));
+            try expectPartition(t, .b, .init(.model));
+        }
+        const repeated = cartesianProduct(3, .{ a, a.withTags(.{.b}), a.withTags(.{.c}) });
+        for (repeated) |t| {
+            for (0..3) |axis_| try expectPartition(t, axis_, .open);
         }
     }
 

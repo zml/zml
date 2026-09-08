@@ -156,7 +156,7 @@ pub fn scaledDot(
         stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
-        res_shape = res_shape.appendDim(lhs._shape.dim(l), t, lhs.shape().partition(l));
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t, lhs.shape().partition(l).merge(rhs.shape().partition(r)));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -188,6 +188,8 @@ pub fn scaledDot(
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r), rhs.shape().partition(r));
     }
+
+    res_shape = res_shape.withoutPartitioningConflicts();
 
     if (isBlock128ScaleGrid(rhs.shape(), rhs_scale.shape())) {
         switch (zml.Compiler.current().platform.target) {

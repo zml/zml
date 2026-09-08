@@ -1476,18 +1476,24 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
                 // Batching axis is already in self.
                 if (is_batching_axis) continue;
 
-                res_shape = res_shape.appendDim(id_inserted_dim, id_axis, null);
+                res_shape = res_shape.appendDim(id_inserted_dim, id_axis, indices_shape.partition(id_axis_order));
                 res_kind.appendAssumeCapacity(.indices);
             }
         }
         switch (kind) {
             .collapsed => continue,
             else => {
-                res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax), null);
+                const partition = if (kind == .batching)
+                    self.shape().partition(ax).merge(indices_shape.partition(self.shape().tag(ax)))
+                else
+                    self.shape().partition(ax);
+                res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax), partition);
                 res_kind.appendAssumeCapacity(kind);
             },
         }
     }
+
+    res_shape = res_shape.withoutPartitioningConflicts();
 
     // This is not a gather, but a dynamicSlice.
     // Sometimes the backend recognize this pattern, but not always.
