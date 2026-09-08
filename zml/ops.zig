@@ -1476,14 +1476,14 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
                 // Batching axis is already in self.
                 if (is_batching_axis) continue;
 
-                res_shape = res_shape.appendDim(id_inserted_dim, id_axis);
+                res_shape = res_shape.appendDim(id_inserted_dim, id_axis, null);
                 res_kind.appendAssumeCapacity(.indices);
             }
         }
         switch (kind) {
             .collapsed => continue,
             else => {
-                res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax));
+                res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax), null);
                 res_kind.appendAssumeCapacity(kind);
             },
         }

@@ -137,7 +137,7 @@ pub fn scaledDot(
         stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
-        res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t, null);
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -158,7 +158,7 @@ pub fn scaledDot(
         if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
             continue;
         }
-        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l), null);
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -167,7 +167,7 @@ pub fn scaledDot(
         if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
             continue;
         }
-        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r), null);
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {

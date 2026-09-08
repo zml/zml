@@ -1517,7 +1517,7 @@ pub const Tensor = struct {
             stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
-            res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+            res_shape = res_shape.appendDim(lhs._shape.dim(l), t, null);
             lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
             rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
         }
@@ -1542,7 +1542,7 @@ pub const Tensor = struct {
             if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
                 continue;
             }
-            res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+            res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l), null);
         }
         for (0..rhs.rank()) |r| {
             if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -1551,7 +1551,7 @@ pub const Tensor = struct {
             if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
                 continue;
             }
-            res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+            res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r), null);
         }
 
         const op = dialects.stablehlo.dot_general(
@@ -2959,12 +2959,12 @@ pub const Tensor = struct {
                 const slice_dim = slice_shape.dim(slice_ax);
                 stdx.debug.assert(slice_dim <= self._shape.dim(self_ax), "gatherSlices expects `slice_shape` to be smaller than `self.shape()`. On axis {s}, got {f} > {f}.", .{ t, slice_shape, self._shape });
                 slice_dims.set(self_ax, slice_dim);
-                res_shape = res_shape.appendDim(slice_dim, t);
+                res_shape = res_shape.appendDim(slice_dim, t, null);
                 start_index_map.appendAssumeCapacity(@intCast(self_ax));
                 self_offset_axes.appendAssumeCapacity(res_shape.rank() - 1);
             } else {
                 // non-batching, non-indexed axes
-                res_shape = res_shape.appendDim(self.dim(self_ax), t);
+                res_shape = res_shape.appendDim(self.dim(self_ax), t, null);
                 self_offset_axes.appendAssumeCapacity(res_shape.rank() - 1);
             }
         }
@@ -4426,9 +4426,9 @@ pub const Tensor = struct {
         var res_shape = Shape.init(.{}, vectors[0].dtype());
         for (vectors) |x| {
             if (x.rank() == 0) {
-                res_shape = res_shape.appendDim(1, null);
+                res_shape = res_shape.appendDim(1, null, null);
             } else {
-                res_shape = res_shape.appendDim(x.dim(0), x.shape().tag(0));
+                res_shape = res_shape.appendDim(x.dim(0), x.shape().tag(0), null);
             }
         }
 

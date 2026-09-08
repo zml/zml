@@ -706,12 +706,32 @@ pub const Shape = struct {
         );
     }
 
-    pub fn appendDim(self: Shape, d: i64, tag_: ?Tag) Shape {
+    /// Append an axis; null partitioning leaves the new axis unspecified.
+    pub fn appendDim(self: Shape, d: i64, tag_: ?Tag, partitioning: ?PartitionSpec) Shape {
         var res = self;
         res._dims.appendAssumeCapacity(d);
         res._tags.appendAssumeCapacity(if (tag_) |t| t else TagUnknown);
-        res._partitioning.appendAssumeCapacity(.unknown);
+        res._partitioning.appendAssumeCapacity(partitioning orelse .unknown);
         return res;
+    }
+
+    test "appendDim preserves existing axes and accepts optional partitioning" {
+        const source = Shape.init(.{ .batch = 8 }, .f32).withPartitioning(.{ .batch = .data });
+        const feature = Shape.toTag(.feature);
+        const partition_specs: []const PartitionSpec = &.{ .init(.model), .replicated, .open, .unknown };
+        for (partition_specs) |spec| {
+            const result = source.appendDim(16, feature, spec);
+            try testing.expectEqualSlices(i64, &.{ 8, 16 }, result.dims());
+            try testing.expectEqual(0, result.axis(.batch));
+            try testing.expectEqual(1, result.axis(.feature));
+            try testing.expect(source.partition(.batch).eql(result.partition(.batch)));
+            try testing.expect(spec.eql(result.partition(.feature)));
+        }
+        const unspecified = source.appendDim(16, null, null);
+        try testing.expectEqual(TagUnknown, unspecified.tag(1));
+        try testing.expect(unspecified.partition(1).eql(.unknown));
+        try testing.expect(source.partition(.batch).eql(unspecified.partition(.batch)));
+        try testing.expectEqual(1, source.rank());
     }
 
     pub fn remove(self: Shape, axis_: anytype) Shape {
@@ -1613,7 +1633,7 @@ pub const Shape = struct {
                 }
             }
 
-            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax));
+            res_shape = res_shape.appendDim(other.dim(ax), other.tag(ax), null);
         }
         return res_shape;
     }
