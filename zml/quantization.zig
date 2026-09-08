@@ -123,11 +123,13 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
     else
         x;
     const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = nvfp4_block_size });
-    const amax = grouped.abs().max(.blk);
 
-    const scales = amax.scale(1.0 / value_max)
+    const amax = grouped.abs()
+        .scale(1.0 / value_max)
         .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
-        .convert(.f8e4m3fn);
+        .max(.blk);
+
+    const scales = amax.convert(.f8e4m3fn);
 
     const divisor = scales.convert(dt)
         .maximum(.scalar(scale_min_normal, dt))
@@ -145,13 +147,7 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
 }
 
 fn supportsNvfp4InputQuantization(platform: *const Platform) bool {
-    if (platform.target != .cuda) return false;
-
-    const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-    const capability = platform_mod.cuda.tryGetComputeCapabilities(platform, device) orelse return false;
-    const major = std.fmt.parseInt(u8, std.mem.sliceTo(capability, '.'), 10) catch return false;
-
-    return major >= 10;
+    return if (platform_mod.cuda.computeCapability(platform)) |cc| cc.atLeast(.{ .major = 10, .minor = 0 }) else false;
 }
 
 fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
