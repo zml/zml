@@ -150,7 +150,7 @@ pub const Variant = enum {
 const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
 pub const Runners = struct {
-    runners: [std.meta.fields(Variant).len][max_num_devices]?DeviceRunner =
+    runners: [std.meta.fieldNames(Variant).len][max_num_devices]?DeviceRunner =
         @splat(@splat(null)),
 
     pub fn deinit(self: *Runners) void {
