@@ -1,6 +1,7 @@
 load("//third_party/arocc:repo.bzl", arocc = "repo")
 load("//third_party/cloud_accelerator_diagnostics:repo.bzl", cloud_accelerator_diagnostics = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
+load("//third_party/cuda_tile:repo.bzl", cuda_tile = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/flashinfer_cutlass_moe:repo.bzl", flashinfer_cutlass_moe = "repo")
 load("//third_party/iree:repo.bzl", iree = "repo")
@@ -32,6 +33,7 @@ def _non_module_deps_impl(mctx):
     libvaxis()
     mosaic_tpu()
     iree()
+    cuda_tile()
 
     return mctx.extension_metadata(
         reproducible = True,

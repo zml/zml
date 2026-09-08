@@ -20,6 +20,7 @@ zig_library(
     deps = [
         "//mlir",
         "//mlir:c",
+        "//mlir/dialects/cuda_tile",
         "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/stablehlo",
         "//mlir/dialects/ttir",
