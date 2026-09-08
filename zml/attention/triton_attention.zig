@@ -16,14 +16,15 @@ fn isOneapiTarget() bool {
     return zml.Compiler.current().platform.target == .oneapi;
 }
 
-fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
+fn use2dKernel(options: paged.PagedAttentionOptions, dtype: zml.DataType) bool {
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
-    if (all_decode and isOneapiTarget()) return false;
-    // prefill uses 2D; decode uses 3D until the batch is large enough to
-    // provide at least 128 2D launch programs across KV heads.
-    if (all_decode) {
-        const seq_threshold_3d = @divFloor(128, num_kv_heads);
-        return batch_size > seq_threshold_3d;
+    if (options.all_decode and isOneapiTarget()) return false;
+    // Decode needs enough independent sequences to fill the GPU without split-K.
+    if (options.all_decode) {
+        const program_threshold: usize = if (dtype == .bf16 and options.head_dim == 128 and
+            options.numQueriesPerKv() == 4 and isCudaComputeCapability("10.3")) 2048 else 128;
+        const seq_threshold_3d = @divFloor(program_threshold, options.num_kv_heads);
+        return options.batch_size > seq_threshold_3d;
     }
 
     return true;
@@ -160,7 +161,8 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
 
     var block_m = options.block_m;
     var block_q = options.block_q;
-    if (options.max_seqlen_q >= 256) {
+    // Decode has one query per sequence even when the model's prefill limit is large.
+    if (!options.all_decode and options.max_seqlen_q >= 256) {
         if (options.head_dim >= 256) {
             block_m = 64;
             tile_size = 16;
@@ -397,11 +399,7 @@ pub const paged = struct {
                         .scale = self.opts.scale,
                     };
 
-                    const use_2d_kernel = use2dKernel(
-                        paged_attention_opts.all_decode,
-                        paged_attention_opts.batch_size,
-                        paged_attention_opts.num_kv_heads,
-                    );
+                    const use_2d_kernel = use2dKernel(paged_attention_opts, self.q.dtype());
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else if (isOneapiTarget())

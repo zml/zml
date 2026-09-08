@@ -3601,7 +3601,11 @@ pub const Tensor = struct {
             else => stdx.debug.compileError(err_msg, .{}),
         };
         const ctx = Compiler.current();
-        var result: SortRes = switch (ctx.platform.target) {
+        var result: SortRes = if (ctx.platform.target == .cuda and
+            self.rank() == 2 and a == 1 and self.dim(a) >= 16384 and
+            k > 16 and k <= 64 and (self.dtype() == .f32 or self.dtype() == .bf16))
+            self.topKChunked(k, opts)
+        else switch (ctx.platform.target) {
             // Work around https://github.com/aws-neuron/aws-neuron-sdk/issues/1339 until Neuron's sort+slice rewrite uses the slice size as k.
             .neuron => blk: {
                 stdx.debug.assert(self.dtype().isFloat(), "Neuron Tensor.topK only supports float tensors, got {}", .{self.dtype()});
@@ -3652,6 +3656,90 @@ pub const Tensor = struct {
             result.indices._shape._tags.set(a, new_name.ptr);
         }
         return result;
+    }
+
+    fn topKChunked(self: Tensor, k: u32, opts: TopKOpts) SortRes {
+        const chunk_size = 1024;
+        const num_chunks = std.math.divCeil(i64, self.dim(1), chunk_size) catch unreachable;
+        const padding = num_chunks * chunk_size - self.dim(1);
+        const pad_value = if (opts.descending) -std.math.inf(f32) else std.math.inf(f32);
+        const chunks = self.withTags(.{ .row, .token })
+            .pad(pad_value, .{ .token = Pad{ .high = padding } })
+            .splitAxis(.token, .{ .chunk = num_chunks, .token = chunk_size });
+
+        // Every global top-k entry belongs to its chunk's top-k. Keep candidates
+        // in chunk order so stable sorting also preserves the original tie order.
+        const local = chunks.topK(.{ .token = .token }, k, opts);
+        const offsets = Tensor.iota(local.indices.shape(), .chunk).scale(chunk_size);
+        const candidate_indices = local.indices.add(offsets).merge(.{ .token = .{ .chunk, .token } });
+        const candidates = local.values.merge(.{ .token = .{ .chunk, .token } });
+        const selected = candidates.topK(.{ .selected = .token }, k, opts);
+        const indices = candidate_indices.gather(.{ .token = selected.indices }, .{});
+        const output_shape = self.shape().setDim(1, k);
+        return .{
+            .values = selected.values.reshape(output_shape),
+            .indices = indices.reshape(output_shape.withDtype(.i32)),
+        };
+    }
+
+    test "topK vocabulary selection preserves values and stable ties" {
+        const zml = @import("zml.zig");
+        const Local = struct {
+            const Entry = struct { value: f32, index: i32 };
+
+            fn before(descending: bool, left: Entry, right: Entry) bool {
+                if (left.value == right.value) return left.index < right.index;
+                return if (descending) left.value > right.value else left.value < right.value;
+            }
+
+            fn run(x: Tensor, dt: DataType, descending: bool, k_count: u32) SortRes {
+                const result = x.convert(dt).topK(.{ .best = .voc }, k_count, .{ .descending = descending });
+                return .{ .values = result.values.convert(.f32), .indices = result.indices };
+            }
+        };
+        const platform = zml.testing.env();
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+        const vocab = 128256;
+        const batch = 4;
+        const x: Tensor = .init(.{ .b = batch, .voc = vocab }, .f32);
+        const input = try allocator.alloc(f32, batch * vocab);
+        defer allocator.free(input);
+        for (input, 0..) |*item, i| {
+            item.* = @as(f32, @floatFromInt((i * 73 + (i / vocab) * 19) % 4096)) / 32 - 64;
+        }
+        var input_d: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(input));
+        defer input_d.deinit();
+        const expected = try allocator.alloc(Local.Entry, vocab);
+        defer allocator.free(expected);
+
+        for ([_]DataType{ .f32, .bf16 }) |dt| {
+            for ([_]bool{ true, false }) |descending| {
+                for ([_]u32{ 17, 50, 64 }) |k_count| {
+                    const exe = try platform.compileFn(allocator, io, Local.run, .{ x, dt, descending, k_count }, .{});
+                    defer exe.deinit();
+                    var output = try zml.testing.autoCall(allocator, io, &exe, Local.run, .{input_d});
+                    defer zml.Buffer.deinitAll(SortRes, &output);
+                    const values = try output.values.toSliceAlloc(allocator, io);
+                    defer values.free(allocator);
+                    const indices = try output.indices.toSliceAlloc(allocator, io);
+                    defer indices.free(allocator);
+                    try std.testing.expectEqual(@as(i64, k_count), output.values.shape().dim(.best));
+                    for (0..batch) |row| {
+                        for (expected, 0..) |*entry, col| {
+                            const raw = input[row * vocab + col];
+                            const quantized = if (dt == .bf16) zml.floats.BFloat16.fromF32(raw).toF32() else raw;
+                            entry.* = .{ .value = quantized, .index = @intCast(col) };
+                        }
+                        std.mem.sort(Local.Entry, expected, descending, Local.before);
+                        for (0..k_count) |col| {
+                            try std.testing.expectEqual(expected[col].value, values.items(f32)[row * k_count + col]);
+                            try std.testing.expectEqual(expected[col].index, indices.items(i32)[row * k_count + col]);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub const MaxPoolRes = ArgMaxRes;

@@ -7,6 +7,12 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "paged_attention",
+    main = "paged_attention.zig",
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":benchmark"],

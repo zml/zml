@@ -580,6 +580,109 @@ test pagedAttention {
     }
 }
 
+test "pagedAttention decode with a large prefill limit" {
+    const Local = struct {
+        fn run(parameters: Parameters, q: zml.Tensor, cache: KvCache, opts: AttentionOptions) zml.Tensor {
+            return pagedAttention(parameters, q, q, q, cache, opts);
+        }
+    };
+    const platform = zml.testing.env();
+    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Cover split-K and whole-sequence decode after tensor parallel sharding.
+    inline for ([_]usize{ 64, 128, 256, 512 }) |batch_size| {
+        const page_size = 16;
+        const num_pages = 32;
+        const max_num_pages = 16;
+        const partition = .{ .hkv = .model };
+        const q_tensor: zml.Tensor = .withPartitioning(.init(.{ .b = batch_size, .hkv = 8, .hg = 4, .hd = 128 }, .bf16), partition);
+        const cache_tensor: zml.Tensor = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 8, .hd = 128 }, .bf16), partition);
+        const cache: KvCache = .{ .split = .{ .k = cache_tensor, .v = .fromShape(cache_tensor.shape()) } };
+        const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
+
+        const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ q_tensor.shape(), .{} }, .{ .shardings = shardings });
+        defer rng_q.deinit();
+        const rng_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ cache_tensor.shape(), .{} }, .{ .shardings = shardings });
+        defer rng_cache.deinit();
+        var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+        defer q.deinit();
+        var cache_d: zml.Bufferized(KvCache) = .{ .split = .{
+            .k = try zml.testing.autoCall(allocator, io, &rng_cache, zml.Tensor.Rng.normal, {}),
+            .v = try zml.testing.autoCall(allocator, io, &rng_cache, zml.Tensor.Rng.normal, {}),
+        } };
+        defer zml.Buffer.deinitAll(KvCache, &cache_d);
+
+        const args: Options.Args = .{
+            .backend = .triton,
+            .is_prefill = false,
+            .batch_size = batch_size,
+            .seq_len = max_num_pages * page_size,
+            .max_num_pages = max_num_pages,
+            .max_token_count = batch_size,
+            .num_heads = 32,
+            .num_kv_heads = 8,
+            .head_dim = 128,
+            .max_seqlen_q = 256,
+        };
+        const parameters: Parameters = .init(.fromBackend(args));
+        var block_table: [batch_size][max_num_pages]i32 = undefined;
+        var seq_lens: [batch_size]i32 = undefined;
+        var query_start_len: [batch_size + 1]i32 = undefined;
+        const lengths = [_]i32{ 1, 15, 16, 17, 63, 65, 129, 255 };
+        for (0..batch_size) |seq| {
+            seq_lens[seq] = lengths[seq % lengths.len];
+            query_start_len[seq] = @intCast(seq);
+            for (0..max_num_pages) |page| {
+                block_table[seq][page] = if (page * page_size < seq_lens[seq]) @intCast((seq + page * 3) % num_pages) else -1;
+            }
+        }
+        query_start_len[batch_size] = batch_size;
+        var parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
+            .block_table = try .fromBytes(io, platform, parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
+            .seq_lens = try .fromBytes(io, platform, parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
+            .query_start_len = try .fromBytes(io, platform, parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
+        } };
+        defer zml.Buffer.deinitAll(Parameters, &parameters_d);
+
+        for ([_]AttentionOptions{ .{ .is_causal = true }, .{ .is_causal = true, .sliding_window = 33 } }) |opts| {
+            // The StableHLO reference does not implement sliding windows.
+            if (opts.sliding_window >= 0 and platform.target != .cuda) continue;
+            var reference_args = args;
+            reference_args.backend = .cuda_fa2;
+            const reference_parameters: Parameters = if (opts.sliding_window < 0)
+                .{ .stablehlo = parameters.triton }
+            else
+                .init(.fromBackend(reference_args));
+            const reference_parameters_d: zml.Bufferized(Parameters) = if (opts.sliding_window < 0)
+                .{ .stablehlo = parameters_d.triton }
+            else
+                .{ .cuda_fa2 = .{ .decode = .{
+                    .block_table = parameters_d.triton.block_table,
+                    .cu_seqlens_q = parameters_d.triton.query_start_len,
+                    .seqused_k = parameters_d.triton.seq_lens,
+                } } };
+            const reference_exe = try platform.compileFn(allocator, io, Local.run, .{ reference_parameters, q_tensor, cache, opts }, .{ .shardings = shardings });
+            defer reference_exe.deinit();
+            var reference = try zml.testing.autoCall(allocator, io, &reference_exe, Local.run, .{ reference_parameters_d, q, cache_d });
+            defer reference.deinit();
+
+            // Decode requests also run inside a mixed executable. Check both launch
+            // configurations against the same independently computed result.
+            for ([_]bool{ false, true }) |is_prefill| {
+                var candidate_args = args;
+                candidate_args.is_prefill = is_prefill;
+                const candidate_parameters: Parameters = .init(.fromBackend(candidate_args));
+                const exe = try platform.compileFn(allocator, io, Local.run, .{ candidate_parameters, q_tensor, cache, opts }, .{ .shardings = shardings });
+                defer exe.deinit();
+                var output = try zml.testing.autoCall(allocator, io, &exe, Local.run, .{ parameters_d, q, cache_d });
+                defer output.deinit();
+                try zml.testing.expectClose(io, reference, output, .{ .absolute_tolerance = 1e-2, .relative_tolerance = 1e-2 });
+            }
+        }
+    }
+}
+
 fn stablehlo_pagedAttention(
     parameters: triton.paged.Parameters,
     q: zml.Tensor,
