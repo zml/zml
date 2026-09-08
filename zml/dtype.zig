@@ -143,7 +143,7 @@ pub const DataType = enum(u8) {
             .f4e2m1 => floats.Float4E2M1.Packed,
             else => {
                 const T = @FieldType(Value, @tagName(dtype));
-                if (@bitSizeOf(T) < 8) @compileLog("Forgot type !", T);
+                if (dtype.bitSizeOf() < 8) @compileLog("Forgot type !", T);
                 return T;
             },
         };
@@ -165,6 +165,8 @@ pub const DataType = enum(u8) {
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
             .bool => 8, // In PJRT/stablehlo bool always occupy a full byte
+            .c64 => 64,
+            .c128 => 128,
             inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }

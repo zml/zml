@@ -204,7 +204,7 @@ pub const Device = struct {
     }
 
     pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
-        return self.memory_by_kind.values[@intFromEnum(memory_kind)];
+        return self.memory_by_kind.values[@backingInt(memory_kind)];
     }
 };
 
@@ -226,7 +226,7 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 
     std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
 
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         for (devices, 0..) |device, expected_id| {
             std.debug.assert(platformDeviceSortId(target, device) == expected_id);
         }

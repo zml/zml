@@ -33,7 +33,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             if (!struct_info.is_tuple) {
                 @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs");
             }
-            break :b struct_info.fields.len;
+            break :b struct_info.field_names.len;
         },
         .array => |array_info| b: {
             if (array_info.child != Tensor) {
@@ -71,7 +71,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
 
     const reducer_block = b: {
         const ArgsTypes: [input_tensors.len]type = @splat(ReduceArgs);
-        var args: std.meta.Tuple(&ArgsTypes) = undefined;
+        var args: @Tuple(&ArgsTypes) = undefined;
         var block_types: [2 * input_tensors.len]*const mlir.Type = undefined;
 
         inline for (0..input_tensors.len) |i| {
@@ -153,8 +153,8 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             }
 
             var out: @TypeOf(inputs) = undefined;
-            inline for (struct_info.fields, 0..) |field, i| {
-                @field(out, field.name) = Tensor._result(input_tensors[i].shape(), op.result(i));
+            inline for (struct_info.field_names, 0..) |field_name, i| {
+                @field(out, field_name) = Tensor._result(input_tensors[i].shape(), op.result(i));
             }
             break :b out;
         },
@@ -211,7 +211,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     // Note: inputs and inits are infered to be tuple of ReduceArgs
     const reduce_block, var result = b: {
         const ArgsTypes: [inits.len]type = @splat(ReduceArgs);
-        const ArgsType = std.meta.Tuple(&ArgsTypes);
+        const ArgsType = @Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inits.len]*const mlir.Type = undefined;
 
@@ -307,7 +307,7 @@ pub const ReduceWindowOpts = struct {
 pub fn ReduceWindowFn(N: comptime_int) type {
     return @Fn(
         &@as([N]type, @splat(ReduceArgs)),
-        &@as([N]std.builtin.Type.Fn.Param.Attributes, @splat(.{})),
+        &@as([N]std.builtin.Type.Fn.ParamAttributes, @splat(.{})),
         [N]Tensor,
         .{},
     );
@@ -397,7 +397,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
 
     const sort_block = b: {
         const ArgsTypes: [inputs.len]type = @splat(SortArgs);
-        const ArgsType = std.meta.Tuple(&ArgsTypes);
+        const ArgsType = @Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 
@@ -532,7 +532,7 @@ pub fn @"while"(
 
         const result: While.State = captured_context.body(initial_state);
 
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             const result_tensors = meta.collectPtrs(Tensor, allocator, &result) catch @panic("OOM");
             stdx.debug.assert(flat_operands.len == result_tensors.len, "zml.ops.while({s}) expects body to return {d} Tensor values, got {d} values in ", .{ @typeName(While), flat_operands.len, result_tensors.len });
             for (0.., flat_operands, result_tensors) |i, in, out| {
@@ -1115,7 +1115,7 @@ pub fn scatter(
 
     const update_block, var result = b: {
         const ArgsTypes: [inputs.len]type = @splat(ScatterArgs);
-        const ArgsType = std.meta.Tuple(&ArgsTypes);
+        const ArgsType = @Tuple(&ArgsTypes);
         var args: ArgsType = undefined;
         var block_types: [2 * inputs.len]*const mlir.Type = undefined;
 
@@ -1448,7 +1448,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     var self_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
     for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-        const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
+        const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, @intCast(self_ax), 1);
         if (indices_shape.hasTag(t)) |id_ax| {
             // tag is both in self and indices -> it's a batching dim
             // Note: tags are required for batching.
@@ -1472,7 +1472,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
         if (ax == idx_axes[0]) {
             // The first val_ax is special cause this is the place where we insert indices axes.
             for (0.., indices_shape.tags(), indices_shape.dims()) |id_axis_order, id_axis, id_inserted_dim| {
-                const is_batching_axis = std.mem.containsAtLeastScalar(i64, idx_batch_axes.constSlice(), 1, @intCast(id_axis_order));
+                const is_batching_axis = std.mem.containsAtLeastScalar(i64, idx_batch_axes.constSlice(), @intCast(id_axis_order), 1);
                 // Batching axis is already in self.
                 if (is_batching_axis) continue;
 
@@ -1663,10 +1663,10 @@ fn CustomCallResultTypeFromOutputSpec(comptime OutputSpecT: type) type {
         .@"struct" => |struct_info| b: {
             if (OutputSpecT == Shape) break :b Tensor;
             if (!struct_info.is_tuple) @compileError("Expected tuple output shape spec");
-            break :b if (struct_info.fields.len == 1)
+            break :b if (struct_info.field_names.len == 1)
                 Tensor
             else
-                [struct_info.fields.len]Tensor;
+                [struct_info.field_names.len]Tensor;
         },
         .array => |array_info| b: {
             break :b if (array_info.len == 1)
@@ -1707,20 +1707,20 @@ pub fn customCallOutputOperandAliases(
 ) ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias {
     const aliases_ = aliases orelse return null;
 
-    const output_fields = @typeInfo(O).@"struct".fields;
+    const output_field_names = @typeInfo(O).@"struct".field_names;
     comptime var num_aliases = 0;
-    inline for (output_fields) |field| {
-        if (@field(aliases_, field.name) != null) num_aliases += 1;
+    inline for (output_field_names) |field_name| {
+        if (@field(aliases_, field_name) != null) num_aliases += 1;
     }
 
     const output_operand_aliases = comptime blk: {
         var aliases_buffer: [num_aliases]dialects.stablehlo.CustomCallOpts.OutputOperandAlias = undefined;
         var i = 0;
-        for (output_fields, 0..) |field, output_index| {
-            if (@field(aliases_, field.name)) |operand| {
+        for (output_field_names, 0..) |field_name, output_index| {
+            if (@field(aliases_, field_name)) |operand| {
                 aliases_buffer[i] = .{
                     .output_index = @intCast(output_index),
-                    .operand_index = @intCast(@intFromEnum(operand)),
+                    .operand_index = @intCast(@backingInt(operand)),
                 };
                 i += 1;
             }
@@ -1832,7 +1832,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
                 break :b &[1]Tensor{inputs};
             }
             if (!struct_info.is_tuple) @compileError("Expected tuple");
-            var inputs_: [struct_info.fields.len]Tensor = undefined;
+            var inputs_: [struct_info.field_names.len]Tensor = undefined;
             meta.collectBuf((struct {
                 pub fn func(t: Tensor) Tensor {
                     return t;
@@ -1856,7 +1856,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
                 break :b &[1]Shape{outputs};
             }
             if (!struct_info.is_tuple) @compileError("Expected tuple");
-            var output_shapes: [struct_info.fields.len]Shape = undefined;
+            var output_shapes: [struct_info.field_names.len]Shape = undefined;
             meta.collectBuf((struct {
                 pub fn func(t: Shape) Shape {
                     return t;
@@ -1889,14 +1889,14 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
         .@"struct" => |struct_info| b: {
             if (@TypeOf(outputs) == Shape) break :b outputs_flat[0];
             if (!struct_info.is_tuple) @compileError("Expected tuple");
-            if (struct_info.fields.len == 1) break :b outputs_flat[0];
-            var outputs_: [struct_info.fields.len]Tensor = undefined;
+            if (struct_info.field_names.len == 1) break :b outputs_flat[0];
+            var outputs_: [struct_info.field_names.len]Tensor = undefined;
             @memcpy(&outputs_, outputs_flat);
             break :b outputs_;
         },
         .array => |array_info| b: {
             if (array_info.len == 1) break :b outputs_flat[0];
-            var outputs_: [array_info.fields.len]Tensor = undefined;
+            var outputs_: [array_info.len]Tensor = undefined;
             @memcpy(&outputs_, outputs_flat);
             break :b outputs_;
         },
@@ -1920,7 +1920,7 @@ pub fn manualComputation(
                 break :b &[1]Shape{outputs};
             }
             if (!struct_info.is_tuple) @compileError("Expected tuple output shapes");
-            var output_shapes_flat: [struct_info.fields.len]Shape = undefined;
+            var output_shapes_flat: [struct_info.field_names.len]Shape = undefined;
             meta.collectBuf((struct {
                 pub fn func(t: Shape) Shape {
                     return t;
@@ -2302,7 +2302,7 @@ fn manualComputationOutputShapesArg(comptime OutputShapesT: type, local_output_s
             if (pointer_info.size != .slice or pointer_info.child != Shape) {
                 @compileError("manualComputation body output shapes must be void, Shape, []Shape, or []const Shape; got " ++ @typeName(OutputShapesT));
             }
-            break :b if (pointer_info.is_const)
+            break :b if (pointer_info.attrs.@"const")
                 local_output_shapes
             else
                 @constCast(local_output_shapes);
@@ -2356,7 +2356,7 @@ fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value
     return switch (type_info) {
         .comptime_int => .int(mlir_ctx, .u64, @as(u64, value)),
         .@"enum" => |enum_field| switch (@typeInfo(enum_field.tag_type)) {
-            .int => |int_tag| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_tag, @intFromEnum(value)),
+            .int => |int_tag| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_tag, @backingInt(value)),
             else => @compileError("Unsupported tag type for enum metadata: " ++ @typeName(enum_field.tag_type)),
         },
         .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, value),
@@ -2463,15 +2463,11 @@ pub fn ShapeToTensor(T: type) type {
 }
 
 pub fn CustomCallOutputOperandAliases(I: type, O: type) type {
-    const output_fields = @typeInfo(O).@"struct".fields;
-    var field_names: [output_fields.len][]const u8 = undefined;
-    inline for (output_fields, 0..) |field, i| {
-        field_names[i] = field.name;
-    }
+    const field_names = @typeInfo(O).@"struct".field_names;
     return @Struct(
         .auto,
         null,
-        &field_names,
+        field_names,
         &@splat(?std.meta.FieldEnum(I)),
         &@splat(.{ .default_value_ptr = &@as(?std.meta.FieldEnum(I), null) }),
     );
@@ -2488,9 +2484,9 @@ pub fn shardingAwareTypedCustomCall(
     const Output = @TypeOf(output);
     const Attributes = @TypeOf(attributes);
 
-    var output_shapes: [@typeInfo(Output).@"struct".fields.len]Shape = undefined;
-    inline for (@typeInfo(Output).@"struct".fields, 0..) |field, i| {
-        output_shapes[i] = @field(output, field.name);
+    var output_shapes: [@typeInfo(Output).@"struct".field_names.len]Shape = undefined;
+    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
+        output_shapes[i] = @field(output, field_name);
     }
 
     const Handler = struct {
@@ -2509,8 +2505,8 @@ pub fn shardingAwareTypedCustomCall(
 
     // Convert the slice back to a struct
     var out: ShapeToTensor(Output) = undefined;
-    inline for (@typeInfo(Output).@"struct".fields, 0..) |field, i| {
-        @field(out, field.name) = output_tensors[i];
+    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
+        @field(out, field_name) = output_tensors[i];
     }
     return out;
 }
@@ -2533,9 +2529,9 @@ pub fn typedCustomCall(
 
     const input_tensors: []const Tensor = switch (@typeInfo(Input)) {
         .@"struct" => |struct_info| b: {
-            var input_tensors: [struct_info.fields.len]Tensor = undefined;
-            inline for (struct_info.fields, 0..) |field, i| {
-                input_tensors[i] = @field(input, field.name);
+            var input_tensors: [struct_info.field_names.len]Tensor = undefined;
+            inline for (struct_info.field_names, 0..) |field_name, i| {
+                input_tensors[i] = @field(input, field_name);
             }
             break :b &input_tensors;
         },
@@ -2549,9 +2545,9 @@ pub fn typedCustomCall(
 
     const output_shapes: []const Shape = switch (@typeInfo(Output)) {
         .@"struct" => |struct_info| b: {
-            var output_shapes: [struct_info.fields.len]Shape = undefined;
-            inline for (struct_info.fields, 0..) |field, i| {
-                output_shapes[i] = @field(output, field.name);
+            var output_shapes: [struct_info.field_names.len]Shape = undefined;
+            inline for (struct_info.field_names, 0..) |field_name, i| {
+                output_shapes[i] = @field(output, field_name);
             }
             break :b &output_shapes;
         },
@@ -2565,13 +2561,13 @@ pub fn typedCustomCall(
 
     var metadata_attribute_list = switch (@typeInfo(Attributes)) {
         .void => std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, 2) catch unreachable,
-        .@"struct" => |struct_info| std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, struct_info.fields.len + 2) catch unreachable,
+        .@"struct" => |struct_info| std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, struct_info.field_names.len + 2) catch unreachable,
         else => @compileError("Unsupported type: " ++ @typeName(Attributes)),
     };
     if (@typeInfo(Attributes) == .@"struct") {
-        inline for (@typeInfo(Attributes).@"struct".fields) |field| {
-            if (metadataFieldToMlirAttribute(ctx.mlir_ctx, field.type, @field(attributes, field.name))) |attribute| {
-                metadata_attribute_list.appendAssumeCapacity(mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute));
+        inline for (@typeInfo(Attributes).@"struct".field_names, @typeInfo(Attributes).@"struct".field_types) |field_name, Field| {
+            if (metadataFieldToMlirAttribute(ctx.mlir_ctx, Field, @field(attributes, field_name))) |attribute| {
+                metadata_attribute_list.appendAssumeCapacity(mlir.NamedAttribute.named(ctx.mlir_ctx, field_name, attribute));
             }
         }
     }
@@ -2627,8 +2623,8 @@ pub fn typedCustomCall(
     switch (@typeInfo(Output)) {
         .@"struct" => |struct_info| {
             var out: ShapeToTensor(Output) = undefined;
-            inline for (output_shapes, struct_info.fields, 0..) |output_shape, field, i| {
-                @field(out, field.name) = Tensor._result(output_shape, op.result(i));
+            inline for (output_shapes, struct_info.field_names, 0..) |output_shape, field_name, i| {
+                @field(out, field_name) = Tensor._result(output_shape, op.result(i));
             }
             return out;
         },
@@ -2651,26 +2647,26 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
     A,
 } {
     var input: TensorToCustomCallBuffer(I) = undefined;
-    inline for (@typeInfo(I).@"struct".fields, 0..) |field, i| {
+    inline for (@typeInfo(I).@"struct".field_names, 0..) |field_name, i| {
         const buf = call_frame.args.buffers()[i];
-        @field(input, field.name) = .fromPjrt(buf);
+        @field(input, field_name) = .fromPjrt(buf);
     }
 
     var output: ShapeToCustomCallBuffer(O) = undefined;
-    inline for (@typeInfo(O).@"struct".fields, 0..) |field, i| {
+    inline for (@typeInfo(O).@"struct".field_names, 0..) |field_name, i| {
         const shape_buf = call_frame.results.buffers()[i];
-        @field(output, field.name) = .fromPjrt(shape_buf);
+        @field(output, field_name) = .fromPjrt(shape_buf);
     }
 
     const attributes: A = switch (@typeInfo(A)) {
         .void => {},
         .@"struct" => blk: {
             var attrs: A = undefined;
-            inline for (@typeInfo(A).@"struct".fields) |field| {
+            inline for (@typeInfo(A).@"struct".field_names, @typeInfo(A).@"struct".field_types) |field_name, Field| {
                 // TODO: Use getByIndex instead?
-                const attribute = call_frame.attrs.getByName(.scalar, field.name) orelse
-                    @panic("Attribute not found: " ++ field.name);
-                @field(attrs, field.name) = attribute.get(field.type);
+                const attribute = call_frame.attrs.getByName(.scalar, field_name) orelse
+                    @panic("Attribute not found: " ++ field_name);
+                @field(attrs, field_name) = attribute.get(Field);
             }
             break :blk attrs;
         },

@@ -112,7 +112,6 @@ pub const VFSBase = struct {
             .netConnectUnix = netConnectUnix,
             .netSocketCreatePair = netSocketCreatePair,
             .netSend = netSend,
-            .netRead = netRead,
             .netWrite = netWrite,
             .netWriteFile = netWriteFile,
             .netClose = netClose,
@@ -261,7 +260,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.dirAccess(self.inner.userdata, dir, sub_path, options);
     }
 
-    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirCreateFile(self.inner.userdata, dir, sub_path, flags);
     }
@@ -271,7 +270,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.dirCreateFileAtomic(self.inner.userdata, dir, sub_path, options);
     }
 
-    pub fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    pub fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirOpenFile(self.inner.userdata, dir, sub_path, flags);
     }
@@ -496,7 +495,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.fileMemoryMapWrite(self.inner.userdata, memory_map);
     }
 
-    pub fn processExecutableOpen(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.process.OpenExecutableError!std.Io.File {
+    pub fn processExecutableOpen(userdata: ?*anyopaque, flags: std.Io.Dir.OpenFileOptions) std.process.OpenExecutableError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.processExecutableOpen(self.inner.userdata, flags);
     }
@@ -634,11 +633,6 @@ pub const VFSBase = struct {
     pub fn netSend(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, msgs: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netSend(self.inner.userdata, handle, msgs, flags);
-    }
-
-    pub fn netRead(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netRead(self.inner.userdata, src, data);
     }
 
     pub fn netWrite(userdata: ?*anyopaque, dest: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {

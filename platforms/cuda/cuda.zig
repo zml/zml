@@ -46,7 +46,7 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
         log.err("Failed to run CUDA compatibility probe: {any}", .{err});
         return err;
     };
-    const result: compat_probe.ExitCode = @enumFromInt(res.exited);
+    const result: compat_probe.ExitCode = @fromBackingInt(@intCast(res.exited));
 
     return switch (result) {
         .Success => true,
@@ -68,7 +68,7 @@ fn hasNvidiaDevice(io: std.Io) bool {
 
 fn hasCudaPathInLDPath() bool {
     const ldLibraryPath = std.c.getenv("LD_LIBRARY_PATH") orelse return false;
-    return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
+    return std.ascii.findIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
