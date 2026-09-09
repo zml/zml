@@ -138,56 +138,6 @@ pub const Parameters = union(Backend) {
     }
 };
 
-pub const Metadata = union(Backend) {
-    flashinfer_cutlass: cutlass_flashinfer.Metadata,
-    triton: triton.Metadata,
-    mosaic_tpu: mosaic_tpu.Metadata,
-    metal: metal.Metadata,
-
-    pub const InitOptions = union(Backend) {
-        flashinfer_cutlass: cutlass_flashinfer.Metadata.InitOptions,
-        triton: triton.Metadata.InitOptions,
-        mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
-        metal: metal.Metadata.InitOptions,
-
-        pub fn fromBackend(backend: Backend) InitOptions {
-            return switch (backend) {
-                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{} },
-                .triton => .{ .triton = .{} },
-                .mosaic_tpu => .{ .mosaic_tpu = .{} },
-                .metal => .{ .metal = .{} },
-            };
-        }
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return switch (opts) {
-            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v) },
-            .triton => |v| .{ .triton = triton.Metadata.init(v) },
-            .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
-            .metal => |v| .{ .metal = metal.Metadata.init(v) },
-        };
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        return switch (self) {
-            .flashinfer_cutlass => |metadata| .{ .flashinfer_cutlass = try metadata.initBuffer(io, platform) },
-            .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
-            .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
-            .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
-        };
-    }
-
-    pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-        switch (self.*) {
-            .flashinfer_cutlass => |*metadata| cutlass_flashinfer.deinitBuffer(metadata),
-            .triton => |*metadata| triton.deinitBuffer(metadata),
-            .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
-            .metal => |*metadata| metal.deinitBuffer(metadata),
-        }
-    }
-};
-
 pub const Options = struct {
     activation_threshold: ?f32 = null,
 };
@@ -199,7 +149,6 @@ pub fn forwardMoe(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: Options,
-    metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
@@ -422,11 +371,6 @@ pub fn forwardMoe(
             );
         },
         .triton => b: {
-            const triton_metadata = switch (metadata) {
-                .triton => |v| v,
-                else => return error.InvalidMetadata,
-            };
-
             const global_num_experts = gate_up.weight.dim(.expert);
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
@@ -437,7 +381,6 @@ pub fn forwardMoe(
                     down.weight,
                     topk_weights,
                     topk_ids,
-                    triton_metadata,
                     .{
                         .activation = parameters.triton.activation,
                         .global_num_experts = global_num_experts,
@@ -488,7 +431,6 @@ pub fn forwardMoe(
                             self.weights_down,
                             self.topk_weights,
                             self.topk_ids,
-                            .{},
                             .{
                                 .activation = self.activation,
                                 .global_num_experts = self.global_num_experts,
@@ -524,11 +466,6 @@ pub fn forwardMoe(
             );
         },
         .mosaic_tpu => b: {
-            const tpu_metadata = switch (metadata) {
-                .mosaic_tpu => |v| v,
-                else => return error.InvalidMetadata,
-            };
-
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
@@ -565,7 +502,6 @@ pub fn forwardMoe(
                                 self.weights_down,
                                 self.topk_weights,
                                 self.topk_ids,
-                                .{},
                                 .{
                                     .activation = self.activation,
                                     .global_num_experts = self.global_num_experts,
@@ -603,7 +539,6 @@ pub fn forwardMoe(
                 down.weight,
                 topk_weights,
                 topk_ids,
-                tpu_metadata,
                 .{
                     .activation = parameters.mosaic_tpu.activation,
                     .global_num_experts = gate_up.weight.dim(.expert),
@@ -617,18 +552,12 @@ pub fn forwardMoe(
         .metal => b: {
             const gate_up_weight_unpacked = unpackedWeight(gate_up);
             const down_weight_unpacked = unpackedWeight(down);
-            const metal_metadata = switch (metadata) {
-                .metal => |v| v,
-                else => return error.InvalidMetadata,
-            };
-
             break :b try metal.fusedExpertsImpl(
                 input,
                 gate_up_weight_unpacked,
                 down_weight_unpacked,
                 topk_weights,
                 topk_ids,
-                metal_metadata,
                 .{
                     .activation = parameters.metal.activation,
                     .global_num_experts = gate_up_weight_unpacked.dim(.expert),

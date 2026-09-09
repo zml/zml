@@ -38,26 +38,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    pub const InitOptions = struct {};
-
-    pub fn init(opts: InitOptions) Metadata {
-        _ = opts;
-        return .{};
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        _ = self;
-        _ = io;
-        _ = platform;
-        return {};
-    }
-};
-
-pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
-    _ = bufferized;
-}
-
 const QuantMode = enum { none, fp8, nvfp4 };
 
 fn quantMode(gate_up: Tensor, down: Tensor) !QuantMode {
@@ -136,10 +116,8 @@ pub fn fusedExpertsImpl(
     down: Tensor,
     topk_weights: Tensor,
     topk_ids: Tensor,
-    metadata: Metadata,
     opts: Options,
 ) !Tensor {
-    _ = metadata;
     if (opts.expert_map != null) return error.InvalidShape;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedBias;
 
