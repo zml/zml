@@ -54,6 +54,14 @@ const Handle = struct {
     }
 };
 
+/// Source request size is independent of DMA block size and source width.
+/// In historical warm Llama loads on one B70 at fixed width 12, 8/16/32 MiB
+/// requests achieved 27.05/24.21/21.33 GiB/s and used 96/192/384 MiB pinned
+/// high-water. Real AWS instead plateaued near 950 MiB/s: 16 MiB at width 24
+/// was within 3% of peak; 32 MiB cut GET count 39% but did not improve speed.
+/// A universal 32 MiB policy would trade a local regression for no remote
+/// throughput gain. Profiles supply minima; the loader also respects its
+/// independently calibrated DMA block and the supported request-size limit.
 pub const LoadProfile = struct {
     /// Generic fallback used by callers that do not prepare a profile from a
     /// VFS path. This value is borrowed and does not require deinitialization.
@@ -240,6 +248,12 @@ fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
 /// reject; the caller must ask before it reads. A read the kernel rejects
 /// afterwards is answered buffered, logged once, and the file stays
 /// buffered.
+/// The mechanism lives here because the VFS owns the real descriptor. A
+/// separate file backend formerly duplicated this handle table and mutex;
+/// moving direct reads into the loader instead would bypass the VFS. One
+/// descriptor is sufficient because planning chooses one mode per file.
+/// dup would not provide an independent buffered fallback: O_DIRECT belongs
+/// to the shared open file description.
 pub fn useDirectIo(self: *VFS, file: std.Io.File, policy: DirectIo) bool {
     if (comptime !direct_io.supported) return false;
     if (policy == .off) return false;
@@ -334,6 +348,11 @@ fn localName(self: *VFS, handle: *Handle, buffer: []u8) []const u8 {
 /// one is the reader's, either its plan or a continuation after a short
 /// read (which a network filesystem may answer), an error. Either way the
 /// file is read buffered from now on.
+/// Demote rather than fail: a legitimate short direct read can leave an
+/// unaligned continuation. Clear the flag before using the inner Io, whose
+/// threaded preadv path treats EINVAL/EFAULT as programmer errors. The
+/// filesystem accepting O_DIRECT at open does not prove it accepts these
+/// buffers (including PJRT-pinned memory) at read time.
 fn refuseDirect(self: *VFS, handle: *Handle, err: std.os.linux.E, data: []const []u8, offset: u64) void {
     if (!self.leaveDirect(handle)) return;
     var total: usize = 0;

@@ -20,6 +20,13 @@ pub const Result = struct {
     };
 };
 
+/// Keep a block screen rather than adopting one accelerator's preferred size.
+/// Historical loads on one MI300X measured 23.84/24.90/25.43 GiB/s at
+/// 8/16/32 MiB; replicated Gemma (58.25 GiB logical) on eight MI300X took
+/// 10.694 s at 8 MiB versus 7.829 s at 16 MiB. One B70 instead favored the
+/// 8 MiB neighborhood; using the 16 MiB preference cost about 10.5% goodput.
+/// These older-plugin results motivate screening, not fixed performance
+/// targets.
 pub const default_block_sizes = [_]usize{
     2 * 1024 * 1024,
     4 * 1024 * 1024,
@@ -31,9 +38,16 @@ pub const default_block_sizes = [_]usize{
 pub const Options = struct {
     block_sizes: []const usize = &default_block_sizes,
     /// Fixed per-device width used by the block screen and the loader.
+    /// Eight repeatedly won or tied on MI300X; wider stages mostly increased
+    /// callback latency and pinned memory. Adaptive DMA width added state with
+    /// little load benefit, so source width is the only runtime search.
     block_parallelism: usize = 8,
     /// A screen window runs for at least this long and, unless the target is
     /// zero, until the representative device completes the transfer target.
+    /// Reducing 10 ms/128 transfers to 2 ms/32 shortened calibration with
+    /// eight MI300X from 4.834 to 0.956 s while still selecting 16 MiB and
+    /// width eight. Short screens sometimes selected the wrong block under
+    /// noise, hence the longer borderline confirmation below.
     duration_ns: u64 = 2 * std.time.ns_per_ms,
     minimum_transfers: u64 = 32,
     /// Borderline block candidates receive longer alternating paired windows.
@@ -53,8 +67,13 @@ pub fn calibrate(
     opts: Options,
 ) !Result {
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
-    // the submitting thread and a load takes the same time at every block
-    // size, so the defaults stand and the loader grows its own arenas.
+    // the submitting thread. With four PJRT CPU devices, warm sharded Llama took
+    // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the defaults stand and the
+    // loader grows its own arenas. Calibration spent 607 ms measuring
+    // 102 GiB/s into a reused ring; the load instead first-touched fresh
+    // device buffers in 4 KiB pages (3.94M minor faults for 14.96 GiB).
+    // The synthetic bandwidth was not the load's bottleneck; other
+    // page-size/THP configurations were not measured.
     if (platform.target == .cpu) return .default;
 
     try validateOptions(opts, workspace.max_mapped_bytes);
@@ -81,6 +100,9 @@ const Report = struct {
 /// Measures synthetic PJRT transfers on one representative device.
 /// Every addressable device allocator is still warmed; benchmark allocations
 /// remain mapped in the supplied workspace for later use.
+/// The reported rate is that one device's synthetic H2D rate, not aggregate
+/// platform throughput or a prediction of checkpoint load speed. All-device
+/// warm-up and retained capacity do not turn this into an all-device sample.
 fn measureTransfer(
     workspace: *host_memory.Workspace,
     platform: *const platform_mod.Platform,

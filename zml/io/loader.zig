@@ -49,6 +49,12 @@ pub const Loader = struct {
         pub const auto: Options = .{};
 
         /// Concurrent positional source requests.
+        /// Twelve is an empirical bootstrap, not derived from tensor count
+        /// or bandwidth-delay product. On one GB300, starting warm DeepSeek-V4-Flash
+        /// at 12/24/32 averaged 3.37/3.43/3.23 s; a wider start also drove
+        /// probes into slab growth, so it was not adopted as a general default.
+        /// High-latency profiles can bootstrap before the first response
+        /// without changing this local default.
         read_parallelism: Parallelism = .{ .adaptive = .{
             .initial = 12,
             .maximum = limits.max_read_parallelism,
@@ -62,15 +68,22 @@ pub const Loader = struct {
         /// Upper bound for the direct backend's host arenas, not a growth target.
         max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
         /// Direct I/O for local source files, decided per file by the
-        /// profile's VFS: `auto` reads a file past the page cache when it is
-        /// mostly not cached at load time, `on` whenever the filesystem
-        /// allows it, `off` never. The planner widens the reads of a direct
-        /// file to the profile's alignment, at most two alignment units per
+        /// VFS that opens it: `auto` reads a file past the page cache when it
+        /// is mostly not cached at the first decision, `on` whenever the
+        /// filesystem allows it, `off` never. The planner widens a direct file's
+        /// reads to the profile's alignment, at most two alignment units per
         /// request. A direct read never fills the page cache, so under
         /// `auto` a cold file stays cold and comes from the disk on every
         /// load; on a host whose warm buffered reads beat its disk, a model
         /// loaded repeatedly is better served by `off`. Nothing changes for
         /// a profile without alignment.
+        /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but
+        /// ~4.53 s forced direct from a slow storage extent; on four GB300
+        /// with four NVMe drives in RAID0, direct took ~0.30 s versus ~0.32 s
+        /// warm buffered. These are loader times, not disk-only rates.
+        /// Residency alone cannot predict which path wins. The loader retains
+        /// each open file, so its decision is not remeasured on every submission
+        /// if cache residency changes.
         direct_io: VFS.DirectIo = .auto,
     };
 
@@ -279,6 +292,11 @@ pub const Handle = struct {
     /// logical bytes join `Loader.bytesLoaded`. Fails with the loader's
     /// sticky error when its pipeline failed. Idempotent: later calls return
     /// the cached outcome.
+    /// PJRT can order execution behind input definition events, but an
+    /// in-loader executor would add a task and hidden execution ordering.
+    /// Keeping execution here preserves caller control and the established
+    /// input lifetime; concurrent Execute on one executable was not covered
+    /// by the audited PJRT contract.
     pub fn await(self: Handle) !void {
         return self.state.await(true);
     }
@@ -302,6 +320,11 @@ pub const Handle = struct {
 /// freeing its inputs, until the next submission fits; one submission is
 /// always admitted, even above the budget. A window of one serializes
 /// submissions like a synchronous `loadExecute`.
+/// The caller chooses the overlap and device-memory cost, not the loader.
+/// On one RTX 5090, warm Llama-3.1-8B with 14 packs of 16 sources plus the bulk
+/// remainder took 0.628-0.644 s at window one and 0.593-0.612 s at window
+/// two in the same implementation. This is pack-workload evidence, not a
+/// promise that overlapping handles helps every model.
 pub const Window = struct {
     const Pending = struct {
         handle: Handle,

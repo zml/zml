@@ -44,6 +44,16 @@ pub const Backend = union(enum) {
         platform: *const Platform,
         config: Config,
     ) !Backend {
+        // Transfer-manager support and host pinning are independent. CPU
+        // implements byte-range transfers from ordinary pages but not DmaMap,
+        // so it can share coalescing and bounded blocks without DMA support.
+        // The whole-tensor buffered path lacked those benefits: on one B70,
+        // interleaved HF Qwen3.5-4B loads took 10.9/16.3 s direct versus
+        // 48.3/47.6 s buffered; coalescing
+        // reduced roughly 900 source calls to 278. Both coalescing and blind
+        // width growth changed, and network results varied between days.
+        // TPU symbols alone did not prove a working transfer implementation;
+        // TPU, neuron and metal keep the buffered path pending runtime checks.
         return switch (platform.target) {
             .cuda, .rocm, .oneapi, .cpu => .{ .direct = try direct_loader.Loader.create(allocator, io, platform, config) },
             .tpu, .neuron, .metal => initBuffered(allocator, io, platform, config.read_parallelism, config.load_profile),

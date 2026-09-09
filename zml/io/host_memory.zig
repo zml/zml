@@ -27,12 +27,24 @@ const Backend = union(enum) {
     dma_map: Pages,
     pageable: Pages,
 
+    /// With eight MI300X visible, hipHostRegister took ~6.3 s for 1 GiB
+    /// versus 0.6-0.7 s through hipHostMalloc. KFD/IOMMU registration maps
+    /// pages to every GPU; huge-page advice helped only ~9%, and touching
+    /// pages or changing HIP flags did not remove the cost. Standard PJRT
+    /// pinned_host buffers provide allocation-owned memory without a custom
+    /// allocator extension.
     const PjrtHost = struct {
         platform: *const Platform,
         host_nodes: []HostNode,
         allocations: std.ArrayListUnmanaged(PinnedHostAllocation) = .empty,
     };
 
+    /// Registration only avoids staging if the plugin recognizes the range as
+    /// pinned, including subranges. Older oneAPI plugins treated SYCL imports
+    /// as unknown; checking both ends against the same imported base removed
+    /// the userspace copy. On one B70, DMA caps two/eight then measured
+    /// 26.86/26.90 GiB/s instead of 21.17/11.01. More DMA credits had amplified
+    /// staging, not improved DMA.
     const Pages = struct {
         allocator: HugePageAllocator,
         allocations: std.ArrayListUnmanaged([]align(std.heap.page_size_min) u8) = .empty,
@@ -43,6 +55,17 @@ const Backend = union(enum) {
         io: std.Io,
         platform: *const Platform,
     ) !Backend {
+        // Interleave memory-bearing nodes, not just device-associated nodes.
+        // On four GB300, per-device local H2D was ~176-184 GiB/s versus ~110
+        // remote, yet strict locality could put page-cache copies and DMA on
+        // the same busy memory controller. With one shared interleaved pool, warm
+        // replicated DeepSeek-V4-Flash took 4.35 s against 4.92 s with node-local
+        // pools (three runs each, 16 MiB blocks, depth eight). Across one,
+        // two and four GB300, interleave was never worst; every single-node
+        // choice was worst somewhere.
+        // Unplaced is not reliably neutral either: CUDA registration applied
+        // a preferred-node policy based on the calling thread. These results
+        // favor a knowledge-free default, not a universal locality rule.
         // Interleaving over one node is that node; leave it to the kernel.
         const numa_mask = interleaveMask(memoryNodeMask(allocator, io));
         return switch (platform.target) {
@@ -53,6 +76,9 @@ const Backend = union(enum) {
                 .allocator = .initPageable(allocator, numa_mask),
             } },
             .rocm => {
+                // PJRT-pinned allocations choose placement through the device's
+                // host memory space, not our mbind policy. Retain one allocation
+                // path per reported node; the common block pool stays unpartitioned.
                 var discovered_nodes: std.ArrayListUnmanaged(struct {
                     device_index: usize,
                     node: usize,
@@ -121,6 +147,13 @@ const Backend = union(enum) {
         switch (self.*) {
             .pjrt_host => |*host| {
                 const started: std.Io.Timestamp = .now(io, .awake);
+                // Balance bytes, not arena/device counts: arenas differ in size.
+                // Replicated Llama-3.1-8B on eight MI300X lost the fast mode when
+                // all arenas came from device zero (1.27-1.45 s). Device rotation
+                // left a 61/39 byte split and took 0.98-1.33 s; byte-balanced
+                // allocation recovered 0.84-1.05 s over six runs, with 1.52 GiB
+                // mapped versus 2.03 GiB for the former per-node pools. Host
+                // contention affected both arms.
                 var host_node_index: usize = 0;
                 for (host.host_nodes[1..], 1..) |host_node, index| {
                     if (host_node.total_allocated_bytes < host.host_nodes[host_node_index].total_allocated_bytes)
@@ -132,6 +165,8 @@ const Backend = union(enum) {
                 const allocation: PinnedHostAllocation = try .init(memory, any_device_index, bytes);
                 errdefer allocation.deinit();
                 try host.allocations.append(allocator, allocation);
+                // Only retained allocations count: failed allocation/publication
+                // must not bias the next node choice with nonexistent bytes.
                 host.host_nodes[host_node_index].total_allocated_bytes += allocation.data.len;
                 log.info("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     any_device_index,
@@ -382,6 +417,13 @@ pub const Workspace = struct {
 };
 
 /// Owns a workspace and leases fixed-size blocks carved from its arenas.
+/// One free list shares retained capacity across every destination. Strict
+/// per-node pools duplicated source reserves and constrained leases to the
+/// smallest node; placement belongs to arena allocation, not block matching.
+/// Replicas share a source block until every child transfer releases it.
+/// Copying replicas to another CPU socket first was rejected on MI300X:
+/// raw local/remote H2D both reached ~49-50 GiB/s per GPU, while a single
+/// CPU thread copied across sockets at only 5-10 GiB/s.
 pub const BlockPool = struct {
     pub const Error = anyerror;
 
@@ -522,6 +564,10 @@ pub const BlockPool = struct {
 
     /// Requests of `blocks_per_request` blocks that can be leased without
     /// mapping a slab and without eating into the DMA stage reserve.
+    /// Capacity and reserve both cover the whole shared pool. The former
+    /// per-node design subtracted an all-device reserve from one node's
+    /// capacity and incorrectly clipped eight MI300X to width one; do not
+    /// mix those scopes if placement changes again.
     pub fn growthFreeRequestWidth(self: *const BlockPool, blocks_per_request: usize) !usize {
         if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
         return (self.capacity -| self.reserve) / blocks_per_request;
@@ -535,6 +581,8 @@ pub const BlockPool = struct {
         return (self.capacity + self.remainingBlockBudget()) / blocks_per_request;
     }
 
+    /// Independent 2 MiB mapped allocations were slower and multiplied
+    /// registration/pool overhead; retain arenas and subdivide them instead.
     const default_slab_size = 64 * 1024 * 1024;
 
     fn canEverAcquire(self: *const BlockPool, blocks: usize) bool {
@@ -588,6 +636,15 @@ pub const BlockPool = struct {
     }
 };
 
+/// PJRT is the sole owner of these hipHostMalloc-backed bytes. Never DmaMap
+/// or DmaUnmap the borrowed pointer: unregistering allocation-owned memory
+/// breaks the eventual hipHostFree. The buffer and external reference must
+/// both survive until all reads and DMA finish.
+/// The ROCm plugin must also recognize pinned ranges. On one MI300X, a
+/// recognized pinned-host path measured 46.6 GiB/s while a stale plugin
+/// allocated just as quickly but staged transfers at 6.5 GiB/s. The later
+/// apparent degradation was traced to missing IsHostMemoryPinned support,
+/// not the hardware.
 const PinnedHostAllocation = struct {
     buffer: *pjrt.Buffer,
     api: *const pjrt.Api,
@@ -632,6 +689,8 @@ const PinnedHostAllocation = struct {
 
 /// Bits of `/sys/devices/system/node/has_memory`, or zero when unreadable.
 /// Nodes 64 and above cannot be represented and are dropped.
+/// Device-coherent HBM nodes are not candidates for host pages: the measured
+/// four-GB300 topology had 34 NUMA nodes but only two with host memory.
 fn memoryNodeMask(allocator: std.mem.Allocator, io: std.Io) u64 {
     if (comptime builtin.os.tag != .linux) return 0;
     const contents = std.Io.Dir.cwd().readFileAlloc(

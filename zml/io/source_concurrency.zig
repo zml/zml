@@ -48,6 +48,10 @@ pub const widths = [_]usize{ 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 };
 /// adopted only when it beats the best rate, never on retention. The climb
 /// stops at the widest rung the pre-grown pinned capacity already covers, so
 /// no scored window pays for a slab the load has yet to map.
+/// Joint request-size/width tuning was rejected: draining between tuple
+/// probes and coupling size to modeled width spent finite loads measuring
+/// instead of loading. Size now comes from the source profile, DMA sizing
+/// from initialization, and only source width adapts.
 pub const Controller = struct {
     const State = enum { climbing, holding };
 
@@ -55,6 +59,15 @@ pub const Controller = struct {
     const improvement_ratio = 1.03;
     /// Tolerate one noisy rung before ending the climb. The hold rule then
     /// selects the lowest measured rung within the best rate's noise band.
+    /// Warm DeepSeek-V4-Flash on one GB300 sustained 44.8-48.8 GiB/s at
+    /// widths 12-48, but file-dependent window drift exceeded that entire
+    /// plateau. Tolerating one stall, requiring improvement on the downward
+    /// probe and clipping to growth-free capacity reduced mean load time
+    /// 3.622 -> 3.221 s in seven interleaved pairs; no run held width eight,
+    /// versus three before. Longer windows
+    /// would need about a second to resolve a 5% difference, a third of the
+    /// load. These bounds limit bad decisions; they do not promise to identify
+    /// the peak on a drifting workload.
     const stall_tolerance = 2;
     /// The hold rung is the lowest rung retaining this fraction of the best.
     const hold_ratio = 0.97;
@@ -104,8 +117,8 @@ pub const Controller = struct {
     last_backoff_generation: u64 = std.math.maxInt(u64),
 
     /// `growth_free_width` is the widest read width the pool already holds
-    /// mapped beyond the DMA stage (`dma.BlockPool.growthFreeRequestWidth`):
-    /// above it a scored window maps a new pinned slab, which on a GB300 cost
+    /// mapped beyond the DMA stage (`host_memory.BlockPool.growthFreeRequestWidth`):
+    /// above it a scored window maps a new pinned slab, which on one GB300 cost
     /// a whole window (20.8 GiB/s at 48 against 48.8 sustained at 32). It is
     /// a ceiling on the climb, never a reason to start below the configured
     /// rung: a pool with no growth-free headroom is better served by starting
@@ -388,9 +401,8 @@ test "source read evidence requires enough concurrency and duration" {
 }
 
 test "source read controller replays the B70 32 MiB curve and holds 12" {
-    // Recorded on one B70 at 32 MiB requests (CTX "Source request size is
-    // backend-dependent"), GiB/s. Eight was not screened there; the probe
-    // below the start rung gets a value below the best.
+    // Recorded on one B70 at 32 MiB requests, GiB/s. Eight was not screened
+    // there; the probe below the start rung gets a value below the best.
     var controller = Controller.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
@@ -418,12 +430,11 @@ test "source read controller replays the B70 32 MiB curve and holds 12" {
 }
 
 test "source read controller climbs past one rung inside the noise band" {
-    // gb300-2 loading DeepSeek-V4 at 16 MiB requests: the rungs from 12 to 48
+    // One GB300 loading DeepSeek-V4-Flash at 16 MiB requests: rungs 12 to 48
     // sustain 44.8 to 48.8 GiB/s over a whole load while one 120 ms window at
     // a single rung spreads 37.8 to 53.1, so a rung is regularly measured
-    // below its neighbour by more than the 3% band. Run 6 of the baseline set
-    // read 40.50 at 12 and 41.61 at 16 (1.027 of it) and ended its climb
-    // there.
+    // below its neighbour by more than the 3% band. A recorded baseline run
+    // read 40.50 at 12 and 41.61 at 16 (1.027 of it) and ended its climb there.
     var controller = Controller.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,
@@ -450,9 +461,9 @@ test "source read controller climbs past one rung inside the noise band" {
 }
 
 test "source read controller keeps the start rung when the probe only matches it" {
-    // Same host, run 6: the climb stopped at 12 and the probe at 8 read
-    // 41.07 GiB/s, above 12's 40.50 window but well under the 36.9 that 8
-    // sustains -- a rung stepped down to inherits the wider rung's queued
+    // On one GB300 loading DeepSeek-V4-Flash, the climb stopped at 12 and the
+    // probe at 8 read 41.07 GiB/s, above both 12's 40.50 window and the 36.9
+    // that 8 sustains -- a rung stepped down to inherits the wider rung's queued
     // transfers. Retention used to adopt it and hold the load at 8 (3.70 s
     // against 3.05 s at 32).
     var controller = Controller.init(
@@ -609,7 +620,8 @@ test "source read controller steps down on transient backpressure and climbs aga
 }
 
 test "source read controller stops climbing at the growth-free width" {
-    // gb300-2: a pool holding 49 blocks against a 16-block DMA stage
+    // Historical per-node capacity for two GB300 on one memory node, within
+    // a four-GB300 system: 49 blocks against that node's 16-block DMA stage
     // leaves 33 growth-free requests, so the climb stops at 32. Above it the
     // lifecycle limit maps a new pinned slab inside a scored window: one such
     // window measured 20.8 GiB/s at 48 against 48.8 sustained at 32.
@@ -632,10 +644,12 @@ test "source read controller stops climbing at the growth-free width" {
 
 test "source read controller starts at the configured rung without headroom" {
     // A pool fully covered by the DMA stage reports a growth-free width of
-    // 0. Clipping the ceiling to 1 there made every
-    // adaptive load on eight MI300X read one request at a time (5.34 s
-    // against 1.42 s); starting where the caller asked and accepting some
-    // mid-load growth is strictly better.
+    // zero. Historically, subtracting the all-device reserve from per-node
+    // capacity incorrectly produced zero on eight MI300X; flooring that to
+    // one forced serial reads (5.34 s against 1.42 s with a shared pool).
+    // The accounting bug and the fallback are distinct: even with correct
+    // accounting, genuinely tight capacity must not lower the configured
+    // start. This test covers that fallback only.
     var controller = Controller.init(
         .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
         128,

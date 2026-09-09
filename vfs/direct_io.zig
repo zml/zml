@@ -14,7 +14,9 @@ const linux = std.os.linux;
 pub const supported = builtin.target.os.tag == .linux and @hasField(std.posix.O, "DIRECT");
 
 /// Alignment of a direct read's offset, every buffer and the total length.
-/// 4 KiB satisfies every logical block size in use.
+/// 4 KiB covered the measured filesystems; this is not a statx(STATX_DIOALIGN)
+/// query. A filesystem requiring more alignment may reject the first read,
+/// after which the VFS demotes the handle to buffered.
 pub const alignment: usize = 4 * 1024;
 
 /// `Policy.auto` reads a file directly when at most this fraction of its
@@ -22,9 +24,13 @@ pub const alignment: usize = 4 * 1024;
 pub const cold_fraction: f64 = 0.5;
 
 /// Whether a local file is read past the page cache. A direct read comes
-/// from the disk even when the cache holds the data, and a cached read is
-/// several times faster than any disk; it also leaves the cache as it found
-/// it, so a file read directly is still cold for the next load.
+/// from the disk even when the cache holds the data; it also leaves the cache
+/// as it found it, so a file read directly is still cold for the next load.
+/// Raw warm-cache reads exceeded disk throughput in the measured setups,
+/// but the loader can still favor direct reads: page-cache copies compete
+/// with DMA for host memory bandwidth. Conversely, repeated loads from a
+/// slow disk can benefit greatly from warming the cache with `off`. See
+/// Loader.Options.direct_io for the contrasting GB300/MI300X load results.
 pub const Policy = enum {
     off,
     /// Every file the filesystem allows.
@@ -63,6 +69,11 @@ pub fn disable(fd: std.posix.fd_t) void {
     _ = linux.fcntl(fd, linux.F.SETFL, current & ~direct_flag);
 }
 
+/// Whole-file cachestat walked every cached folio: about 7 ms per cached GiB
+/// on a 4 KiB-page kernel, paid on the planner thread. It was also refused
+/// for files the process could read but not write. Fixed-count RWF_NOWAIT
+/// sampling bounds probe cost independently of checkpoint size and suffices
+/// for the coarse half-cached decision.
 pub const residency_samples = 32;
 
 /// The fraction of `residency_samples` pages spread over the file that the
@@ -71,6 +82,9 @@ pub const residency_samples = 32;
 /// header page a parser has just read. A sample of a page that is not
 /// cached queues readahead for it, a few pages per sample the reads that
 /// follow may reuse.
+/// Sampling offset zero instead made a cold shard report 1/32 cached solely
+/// because the safetensors parser had read its header. Mid-window samples
+/// avoid that systematic bias; unknown residency still selects buffered IO.
 pub fn cachedFraction(fd: std.posix.fd_t, size: u64) ?f64 {
     var buffer: [512]u8 = undefined;
     const iovec: std.posix.iovec = .{ .base = &buffer, .len = buffer.len };

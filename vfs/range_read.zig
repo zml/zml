@@ -87,6 +87,14 @@ const Retry = struct {
 /// delay or full-jitter exponential backoff is slept before the next attempt;
 /// `error.RetriesExhausted` after `retry.max_retries` retries. Statuses that
 /// are not retried fail immediately.
+/// One caller owns one source credit through every retry and sleep. Adding
+/// backend-local parallel readers would multiply the loader's chosen width
+/// and defeat its memory/backpressure bounds. Artificial S3Proxy tests with
+/// a per-request bandwidth cap rewarded very high concurrency (16 MiB at
+/// width 96 reached ~11.5 GiB/s), but real AWS plateaued near 950 MiB/s at
+/// widths 24-128; the proxy is not evidence for production defaults.
+/// The controller continues sampling retry/throttle counters while these
+/// callers sleep.
 pub fn performRangeRead(
     io: std.Io,
     client: *std.http.Client,

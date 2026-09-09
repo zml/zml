@@ -35,11 +35,25 @@ const load_log = std.log.scoped(.@"zml/io/load");
 /// live PJRT events are then bounded by the DMA width plus one pump batch
 /// rather than by a submission's transfer count. Set to false to keep every
 /// event until its batch retires.
+/// A retirement probe destroyed all 16,384 fired events on two B70 without
+/// errors; CUDA and ROCm also accepted retirement outside the
+/// event's own callback. This bounds live events, not the plan's context arrays.
 const retire_events_early = true;
 
 /// The widest source rung pre-grown during loader initialization.
+/// Mapping during a measured load contaminated width selection: allocating
+/// one 64 MiB pinned slab on one MI300X took 146 ms, compared with roughly
+/// 410 ms for the entire warm Llama-3.1-8B load at fixed width 12.
+/// Initialization pays that cost before source-width windows begin; the
+/// retained set also includes the DMA reserve.
 const preallocated_source_width = 32;
 
+/// Bounds per-device event overhead for tiny tensors. This is not a measured
+/// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
+/// byte budget. Raising the stage also costs host memory: replicated DeepSeek
+/// on four GB300 improved 5.536 -> 5.024 s at depth 8 -> 32, but pinned
+/// high-water grew 0.9-1.0 -> 2.36-2.50 GiB over six paired runs. That
+/// tradeoff did not justify a larger default stage.
 const max_dma_pieces_per_device: usize = 64;
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
@@ -891,6 +905,12 @@ const TensorTransfer = struct {
     /// only closes the buffer to further calls. The pump, the only
     /// submitter, therefore flags the submission that completes the
     /// placement's bytes, and no piece ever waits for another one.
+    /// The former highest-offset tail waited for its prefixes. On a sharded
+    /// multi-device load, tails could occupy every lifecycle credit while
+    /// their prefixes remained unclaimed: more pinned memory did not fix it.
+    /// Closing by submitted bytes removes that dependency. This follows
+    /// XLA's CommonAsyncHostToDeviceTransferManager: readiness requires zero
+    /// in-flight transfers and a last-call flag, not destination-offset order.
     const Target = struct {
         manager: *pjrt.AsyncHostToDeviceTransferManager,
         device_index: usize,
@@ -1006,6 +1026,12 @@ const TensorTransfer = struct {
 
 /// Builds immutable per-file source jobs and transfer records. Fairness is
 /// decided here once; the scheduler only publishes and claims those jobs.
+/// For DeepSeek-V4-Flash (148.65 GiB, 69,187 tensors), tensor-local reads made
+/// about 69,445 source calls despite a 16 MiB request limit. Coalescing reduced
+/// that to 9,524. A rigid grid still produced 78,665 DMA pieces; tensor-safe
+/// cuts kept the same read count with 69,572 pieces. Per-tensor device buffers
+/// remain intentional: reducing submissions below roughly tensors x destinations would require
+/// packed device allocations or device-side scattering, not another read cut.
 const Planner = struct {
     const Job = struct {
         source_slot: *SourceSlot,
@@ -1026,6 +1052,15 @@ const Planner = struct {
     /// widened read served from the page cache costs the DMA sources their
     /// block alignment for nothing, and an `io` that is no VFS never reads
     /// directly.
+    /// Whole-model planning delayed the first read by 0.32 s for DeepSeek's
+    /// 46 files on one MI300X. Publishing per file overlaps the rest with IO;
+    /// Llama's four files took only 1-2 ms total on one B70, so this was
+    /// throughput-neutral there.
+    /// Widening buffered reads is not free: warm replicated Llama on four
+    /// GB300 lost 3-6% when its first tensor no longer landed at block offset
+    /// zero. Ask the VFS actually owning the handle, not one remembered by
+    /// the profile, both to avoid that cost and to avoid indexing another
+    /// VFS's handle table.
     fn publishFiles(
         scheduler: *Scheduler,
         io: std.Io,
@@ -1655,6 +1690,10 @@ const Scheduler = struct {
 /// steps down, the workers spawned for the wider rung would otherwise queue
 /// at the credit gate for the rest of the load and inflate the credit wait
 /// the summary reports without moving a byte.
+/// At width 16 on one MI300X, 128 tasks measured 21 GiB/s against 36 GiB/s
+/// with 16 tasks. Parking also corrected misleading HF credit waits after a
+/// downward step: hundreds of milliseconds came from surplus workers, while
+/// the read gate stayed full and DMA took about 1 ms per request.
 const WorkerPool = struct {
     loader: *Loader,
     maximum: usize,
@@ -1969,19 +2008,30 @@ const Pipeline = struct {
     /// One device's submission state. Its pump runs on whichever thread
     /// finds work -- a worker after enqueueing, a ready callback after a
     /// completion -- one at a time per device, and shares nothing with the
-    /// other devices' pumps: four GB300 take ~180k submissions/s from
-    /// per-device submitters against 55k from one pump serialised on a
-    /// single mutex over all devices (DeepSeek replicated, CTX.md seventh
-    /// pass). One submitter per device is a correctness requirement, not a
+    /// other devices' pumps. On four GB300, a synthetic 1 MiB transfer probe
+    /// with parallel submitters reached 174k-184k submissions/s, while the
+    /// single-pump loader managed 51k-55k/s on replicated DeepSeek's mixed
+    /// 256 KiB/4 MiB traffic. Those are different workloads, not a measured
+    /// loader speedup. The end-to-end comparison was 5.41 -> 4.68 s (-13.5%)
+    /// over five interleaved pairs at depth eight and 16 MiB blocks, with
+    /// unchanged or lower pinned high-water.
+    /// One submitter per device is a correctness requirement, not a
     /// performance choice: a tensor's pieces for one device are flagged
     /// last by `Target.nextIsLast` in submission order, and two threads
     /// submitting pieces of the same tensor concurrently left targets
     /// unclosed (`IncompleteTransfer` on Llama, whose tensors span blocks).
     /// Concurrent submitters measured no faster anyway: a submission blocks
     /// ~28 us in the driver once four GB300 each hold ~32 pieces in flight,
-    /// but the engine's own latency for the loader's traffic is what bounds
-    /// the rate, not the submitter. A dedicated task per device woken by
-    /// completions, with or without hysteresis, was no better either.
+    /// and pumps mostly stop for lack of room. Synthetic probes attributed
+    /// part of the remaining gap to source misalignment (-13%), concurrent
+    /// CPU writes at 35 GB/s (-10%) and unplaced memory (-23%). Those are
+    /// separate probe arms, not additive loader losses; roughly 1.3x still
+    /// remained unattributed with the conditions stacked, so the gap
+    /// is not evidence that more submitters would help. A dedicated task per
+    /// device took 5.0-5.4 s with a wake per completion (a futex round trip
+    /// per piece), or 4.4-5.1 s with half-budget wake hysteresis. Concurrent
+    /// submitters took 4.56-4.58 s but failed two of four Llama runs with
+    /// IncompleteTransfer; DeepSeek's mostly single-piece tensors hid the bug.
     const DevicePump = struct {
         mutex: std.Io.Mutex = .init,
         queue: ReadyQueue = .empty,
@@ -1999,9 +2049,12 @@ const Pipeline = struct {
         /// not submissions: the calibrated depth is `max_in_flight_per_device`
         /// blocks, and a piece is one tensor's slice of a block, so a model of
         /// small tensors needs many more pieces in flight to keep the same
-        /// bytes moving (DeepSeek-V4 on a GB300: 8 pieces of 2.2 MiB reached
-        /// 24 GiB/s, 58 reached 44). The piece that crosses the budget is
-        /// admitted: a device with room always has a transfer in flight.
+        /// bytes moving: eight average DeepSeek pieces occupy only ~18 MiB
+        /// against the 128 MiB calibrated with 16 MiB blocks. On one GB300,
+        /// widening the stage AND adding lifecycle credits raised DeepSeek
+        /// from 24 to 44 GiB/s; this was not a byte-budget-only experiment.
+        /// The piece that crosses the budget is admitted: a device with room
+        /// always has a transfer in flight.
         fn hasRoom(self: *const DevicePump, budget_bytes: usize) bool {
             return self.active_bytes < budget_bytes and self.active_pieces < max_dma_pieces_per_device;
         }
@@ -2178,6 +2231,10 @@ const Pipeline = struct {
         device_pump.mutex.unlock(self.io);
     }
 
+    /// Queue the whole source job before pumping. The former per-piece path
+    /// paid roughly 69k-79k mutex/pump trips per DeepSeek load; coalesced reads
+    /// alone did not remove that cost. Reserve every destination first so
+    /// allocation failure cannot publish a subset of the block references.
     fn enqueueBlocks(
         self: *Pipeline,
         transfers: []const Batch.Plan.Transfer,
@@ -2420,7 +2477,10 @@ const SourceRuntime = struct {
     /// DMA stage per 1.3 s read, whatever a burst of completions does to
     /// the credit gate's occupancy. Credit waiting is not the signal: at a
     /// narrow start rung on a GB300 the workers wait 2 ms per 3 ms read
-    /// while the stage holds each request for 10.
+    /// while the stage holds each request for 7. The final one-GB300
+    /// DeepSeek measurements were 3.1-3.3 ms reading against 6.3-6.6 ms
+    /// in the DMA stage; one-B70 HF reads took 1200-1260 ms against 1 ms
+    /// in the stage.
     warmup_pending: bool = true,
     /// `dma_stage_ns` and `read_ns` when the current generation opened.
     window_dma_base_ns: u64 = 0,
@@ -2545,6 +2605,10 @@ const SourceRuntime = struct {
             const now_ns = awakeNs(io);
 
             const backpressure = self.takeRemoteBackpressure();
+            // Sample even while reads sleep in backend retries; evaluating
+            // only at completion would hide throttling until requests return.
+            // A transient 500 is not evidence of a width limit: unlike a
+            // throttle/timeout, it must not permanently clip the climb.
             if (backpressure.any()) {
                 // A read admitted under the current generation has begun
                 // once the window fenced at its start saw a read.
@@ -2845,6 +2909,9 @@ const SourceProbe = struct {
         // steady rate, whereas a clock started at the first admission would
         // charge a high-latency source its whole round trip and make longer
         // windows at higher rungs look faster than they are.
+        // The old admission clock reported 450 MiB/s for a remote width
+        // delivering 600 MiB/s. Count actual completed bytes, including
+        // short job tails.
         if (self.window_start_ns == 0) {
             const now: std.Io.Timestamp = .now(io, .awake);
             self.window_start_ns = @intCast(@max(now.nanoseconds, 1));
@@ -2887,6 +2954,9 @@ const SourceProbe = struct {
 };
 
 const ReadStatsCursor = struct {
+    /// Backend-wide, not tagged by loader or submission: control assumes
+    /// this load is the backend's only material user. Concurrent unrelated
+    /// traffic can otherwise look like this loader's backpressure.
     provider: VFS.ReadStatsProvider,
     previous: VFS.ReadStats,
 
@@ -2919,6 +2989,11 @@ const ReadStatsCursor = struct {
 /// permit held charges the interval since the previous tick to idle, so
 /// many short submissions jointly complete one window and the controller
 /// never learns that batches exist.
+/// The former per-submission epoch reset made short executable-input loads
+/// unmeasurable: windows need 100 ms, while individual packs often finished
+/// before then. Draining also inserted a controller-tick barrier between
+/// packs. Accumulating busy time preserves evidence without charging caller
+/// execution or idle gaps to the source.
 const BusyWindowClock = struct {
     idle_ns: u64 = 0,
     last_tick_ns: u64 = 0,
