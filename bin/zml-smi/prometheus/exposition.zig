@@ -123,9 +123,15 @@ fn writeAllDeviceMetrics(
 fn writeHostMetrics(writer: *std.Io.Writer, val: anytype) !void {
     inline for (host_metrics) |m| {
         if (@field(val, m.field)) |raw| {
-            try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s} ", .{ m.metric, m.help, m.metric, m.metric });
-            try fmtValue(m, writer, raw);
-            try writer.writeAll("\n\n");
+            if (std.mem.eql(u8, m.field, "cpu_cores")) {
+                try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s}{{name=\"{s}\"}} ", .{ m.metric, m.help, m.metric, m.metric, val.cpu_name orelse "Unknown" });
+                try fmtValue(m, writer, raw);
+                try writer.writeAll("\n\n");
+            } else {
+                try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s} ", .{ m.metric, m.help, m.metric, m.metric });
+                try fmtValue(m, writer, raw);
+                try writer.writeAll("\n\n");
+            }
         }
     }
 }
