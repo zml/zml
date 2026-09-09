@@ -110,10 +110,15 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
 }
 
-fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
+fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice(.out, .{ .end = mid });
-    const up = x.slice(.out, .{ .start = mid });
+    var gate = x.slice(.out, .{ .end = mid });
+    var up = x.slice(.out, .{ .start = mid });
+    if (activation_threshold) |limit_| {
+        const limit = Tensor.scalar(limit_, x.dtype());
+        gate = gate.minimum(limit);
+        up = up.clamp(limit.negate(), limit);
+    }
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
@@ -239,8 +244,7 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated = applyActivation(first_out, options.activation);
-
+    const activated = applyActivation(first_out, options.activation, options.activation_threshold);
     var activated_quant = activated;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
     if (down.dtype() == .f8e4m3fn) {
@@ -413,7 +417,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
         num_assignments + num_experts * (block_size_m - 1);
     const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
     const warp_size: i64 = 32;
-    const padded_num_experts = (std.math.divCeil(i64, num_experts, warp_size) catch unreachable) * warp_size;
+    const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(num_experts, warp_size))));
     const sort_block_size: i64 = 256;
     const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 
