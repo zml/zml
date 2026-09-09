@@ -2,16 +2,16 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 
 copy_file(
-    name = "libpjrt_metal.dylib",
-    src = "libpjrt_c_api_gpu_plugin.dylib",
-    out = "lib/libpjrt_c_api_gpu_plugin.dylib",
+    name = "libpjrt_metal_dylib",
+    src = "libpjrt_metal.dylib",
+    out = "lib/libpjrt_metal.dylib",
     allow_symlink = True,
 )
 
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":libpjrt_metal.dylib",
+        ":libpjrt_metal_dylib",
     ],
     add_directory_to_runfiles = False,
     include_external_repositories = ["**"],

@@ -46,7 +46,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_c_api_gpu_plugin.dylib" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_metal.dylib" });
         break :blk pjrt.Api.loadFrom(path);
     };
 }
