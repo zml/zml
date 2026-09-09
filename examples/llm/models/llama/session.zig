@@ -227,7 +227,7 @@ pub const Session = struct {
 };
 
 fn isEosToken(config: *const model.Config, token_id: u32) bool {
-    return switch (config.eos_token_id.value) {
+    return switch (config.eos_token_id) {
         .int => |eos| token_id == eos,
         .ints => |eos_list| for (eos_list) |eos| {
             if (token_id == eos) break true;
