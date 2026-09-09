@@ -40,34 +40,32 @@ pub const Linear = struct {
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
-        const y = self.forwardWeight(x);
+        if (self.quantization) |q| {
+            const lhs = x.convert(.bf16);
+            if (quantization.quantizeInput(q, lhs, self.tag, zml.Compiler.current().platform)) |input| {
+                return self.forwardQuantized(input, x.dtype());
+            }
+            return self.forwardScaled(lhs, null, null, x.dtype());
+        }
+        const y = x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 
-    fn forwardWeight(self: Linear, x: Tensor) Tensor {
-        const q = self.quantization orelse return x.dot(self.weight, self.tag);
+    /// Apply this layer to reusable quantized activation values and scales.
+    /// Convert to output_dtype before adding bias, which must have the same dtype.
+    pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput, output_dtype: DataType) Tensor {
+        stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
+        return self.forwardScaled(input.values, input.scales, input.global_scale, output_dtype);
+    }
 
+    fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
+        const q = self.quantization.?;
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
-
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
-            q.scales.bitCast(.f8e8m0)
-        else
-            q.scales;
-
-        var lhs = x.convert(.bf16);
-        var lhs_scale: ?Tensor = null;
-        var undo_input_scale: ?Tensor = null;
-
-        const platform = zml.Compiler.current().platform;
-        if (quantization.quantizeInput(q, lhs, self.tag, platform)) |quantized_input| {
-            lhs = quantized_input.values;
-            lhs_scale = quantized_input.scales;
-            undo_input_scale = quantized_input.global_scale;
-        }
-
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
-        return applyGlobalScale(acc, undo_input_scale, weight_global_scale).convert(x.dtype());
+        const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
 
