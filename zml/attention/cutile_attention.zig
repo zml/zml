@@ -14,10 +14,100 @@ pub const Config = struct {
     heads: i64,
     pages: i64,
     max_pages: i64,
+    page_size: i64 = 64,
+    force_gather: bool = false,
+    gather_latency: ?i32 = null,
+    prefill_occupancy: i32 = 2,
     splits: i64,
     scale: f32,
     // Cache layout in logical [page, KV head, token, dimension] order.
     strides: [4]i64,
+};
+
+// Cache allocation granularity is independent of the 64-token MMA tile.
+// Large divisible layouts retain tile loads; small or irregular pages use masked
+// row-addressed loads without switching attention implementations.
+const KVTile = struct { k: cut.Value, v: cut.Value };
+const KVLoader = struct {
+    b: *cut.Builder,
+    c: Config,
+    k: cut.Value,
+    v: cut.Value,
+    v_ptr: cut.Value,
+    table: cut.Value,
+    table_ptr: cut.Value,
+    tiled: bool,
+    token_major: bool,
+
+    fn init(b: *cut.Builder, c: Config, k: cut.Value, v: cut.Value, table: cut.Value) KVLoader {
+        const width: i64 = @intCast(std.math.gcd(@as(u64, @intCast(c.page_size)), 64));
+        // Four tiny transfers per operand are expensive on SM103. Pointer
+        // loads win for 16-token pieces and for 32-token pieces at larger batches.
+        const small_pages = width == 16 or (width == 32 and c.batch >= 32);
+        const tiled = width >= 16 and !small_pages and !c.force_gather;
+        const token_major = c.strides[1] < c.strides[2];
+        const shape = if (token_major) [_]i64{ c.pages, c.page_size, c.heads, 128 } else [_]i64{ c.pages, c.heads, c.page_size, 128 };
+        const strides = if (token_major) [_]i64{ c.strides[0], c.strides[2], c.strides[1], c.strides[3] } else c.strides;
+        const tile = if (token_major) [_]i64{ 1, width, 1, 128 } else [_]i64{ 1, 1, width, 128 };
+        return .{
+            .b = b,
+            .c = c,
+            .tiled = tiled,
+            .token_major = token_major,
+            .table_ptr = table,
+            .v_ptr = v,
+            .k = if (tiled) b.partitionView(b.tensorView(k, &shape, &strides), &tile, .{ .padding = null }) else k,
+            .v = if (tiled) b.partitionView(b.tensorView(v, &shape, &strides), &tile, .{ .padding = null }) else v,
+            .table = b.partitionView(b.tensorView(table, &.{ c.batch, c.max_pages }, &.{ c.max_pages, 1 }), &.{ 1, 1 }, .{ .padding = null }),
+        };
+    }
+
+    fn load(self: KVLoader, seq: cut.Value, head: cut.Value, block: cut.Value, len: cut.Value, mask_tail: bool) KVTile {
+        const b = self.b;
+        const c = self.c;
+        const zero = b.cst(.i32, 0);
+        if (self.tiled) {
+            const width: i64 = @intCast(std.math.gcd(@as(u64, @intCast(c.page_size)), 64));
+            const count = @divExact(64, width);
+            var pieces: [4]KVTile = undefined;
+            var i: i64 = 0;
+            while (i < count) : (i += 1) {
+                const start = block.mul(64).add(b.cst(.i32, i * width));
+                const page = (if (c.page_size < 64 and @mod(64, c.page_size) == 0) block.mul(b.cst(.i32, count)).add(b.cst(.i32, i)).minimum(len.sub(1).div(b.cst(.i32, c.page_size))) else if (c.page_size == 64) block else start.div(b.cst(.i32, c.page_size))).to(.i32);
+                const safe_page = if (@mod(64, c.page_size) != 0 and @mod(c.page_size, 64) != 0) page.minimum(len.sub(1).div(b.cst(.i32, c.page_size))) else page;
+                const physical = b.load(self.table, &.{ seq.to(.i32), safe_page }).reshape(&.{});
+                const within = (if (c.page_size == width) zero else start.rem(b.cst(.i32, c.page_size)).div(b.cst(.i32, width))).to(.i32);
+                const index = if (self.token_major) [_]cut.Value{ physical, within, head, zero } else [_]cut.Value{ physical, head, within, zero };
+                const k = b.loadOpts(self.k, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, 128 });
+                const v = if (mask_tail) blk: {
+                    // Express the valid extent in the view so padding is
+                    // handled by the load, not by converting an MMA operand.
+                    const valid_rows = len.sub(safe_page.mul(c.page_size)).minimum(c.page_size);
+                    const base = self.v_ptr.offset(physical.to(.i64).mul(c.strides[0]).add(head.to(.i64).mul(c.strides[1])));
+                    const view = b.partitionView(b.tensorViewDyn(base, &.{ .{ .dynamic = valid_rows }, .{ .static = 128 } }, &.{ .{ .static = c.strides[2] }, .{ .static = c.strides[3] } }), &.{ width, 128 }, .{});
+                    break :blk b.loadOpts(view, &.{ within, zero }, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile;
+                } else b.loadOpts(self.v, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, 128 });
+                pieces[@intCast(i)] = .{ .k = k, .v = v };
+            }
+            var n: usize = @intCast(count);
+            while (n > 1) : (n /= 2) {
+                for (0..n / 2) |j| pieces[j] = .{ .k = b.cat(pieces[j * 2].k, pieces[j * 2 + 1].k, 0), .v = b.cat(pieces[j * 2].v, pieces[j * 2 + 1].v, 0) };
+            }
+            return pieces[0];
+        }
+        const token = b.iota(64, .i32).add(b.assumeDivBy(block.mul(64), 64));
+        // Clamp only the unused tail's page-table lookup, not valid tokens.
+        const page = token.minimum(len.sub(1)).div(c.page_size);
+        const raw_physical = b.loadPtr(self.table_ptr.offset(seq.mul(c.max_pages).add(page)));
+        const physical = if (@mod(64, c.page_size) == 0) b.assumeSameElements(raw_physical, &.{c.page_size}) else raw_physical;
+        const offset = physical.to(.i64).mul(c.strides[0]).add(head.to(.i64).mul(c.strides[1])).add(token.rem(c.page_size).to(.i64).mul(c.strides[2]));
+        const address = offset.reshape(&.{ 64, 1 }).add(b.iota(128, .i64).mul(c.strides[3]).reshape(&.{ 1, 128 }));
+        const mask = token.lt(len).reshape(&.{ 64, 1 }).broadcastTo(&.{ 64, 128 });
+        return .{
+            .k = b.loadPtrOpts(self.k.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16), .hints = if (c.gather_latency != null) &.{.{ .latency = c.gather_latency }} else &.{} }).tile,
+            .v = b.loadPtrOpts(self.v.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16), .hints = if (c.gather_latency != null) &.{.{ .latency = c.gather_latency }} else &.{} }).tile,
+        };
+    }
 };
 
 // Plan on device: metadata capacity is not the number of active requests.
@@ -67,17 +157,9 @@ pub fn prefillWorkCapacity(batch: i64, query_tokens: i64, heads: i64) i64 {
 // First inclusive prefix strictly greater than work. Empty metadata slots
 // have repeated prefixes and are skipped by construction.
 fn workSequence(b: *cut.Builder, prefix: cut.Value, work: cut.Value, batch: i64) cut.Value {
-    if (batch <= 256) {
-        // One coalesced metadata load avoids a chain of dependent scalar
-        // loads in short-lived merge CTAs. Repeated prefixes remain valid.
-        const width: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(batch)));
-        const seq = b.iota(width, .i32);
-        const valid = seq.lt(batch);
-        const ends = b.loadPtrOpts(prefix.offset(seq), .{ .mask = valid, .padding = b.zeros(&.{width}, .i32) }).tile;
-        const matches = b.andi(valid, ends.gt(work));
-        const found = b.where(matches, seq, b.full(&.{width}, batch, .i32)).min(0);
-        return b.assumeBounded(found, 0, batch - 1);
-    }
+    // A vector reduction in this conditional path stalled SM103 mixed
+    // batches with short decode requests. Scalar search also handles repeated
+    // prefixes from inactive slots without a collective in the branch.
     var search = b.openFor(0, std.math.log2_int_ceil(u64, @intCast(batch)) + 1, 1, .{ b.cst(.i32, 0), b.cst(.i32, batch - 1) });
     const mid = search.carried[0].add(search.carried[1]).div(2);
     const right = b.loadPtr(prefix.offset(mid)).le(work);
@@ -176,44 +258,44 @@ fn emitDecodeImpl(b: *cut.Builder, c: Config, comptime scheduled: bool) cut.Fini
     const q4 = b.load(qview, &.{ qidx, head, zero }).reshape(&.{ 4, 128 });
     const q8 = b.cat(q4, b.zeros(&.{ 4, 128 }, .bf16), 0);
     const q = b.cat(q8, b.zeros(&.{ 8, 128 }, .bf16), 0);
-    const token_major = c.strides[1] < c.strides[2];
-    const kvshape = if (token_major) [_]i64{ c.pages, 64, c.heads, 128 } else [_]i64{ c.pages, c.heads, 64, 128 };
-    const kvstrides = if (token_major) [_]i64{ c.strides[0], c.strides[2], c.strides[1], c.strides[3] } else c.strides;
-    const kvtile = if (token_major) [_]i64{ 1, 64, 1, 128 } else [_]i64{ 1, 1, 64, 128 };
-    const kview = b.partitionView(b.tensorView(a.k, &kvshape, &kvstrides), &kvtile, .{ .padding = null });
-    const vview = b.partitionView(b.tensorView(a.v, &kvshape, &kvstrides), &kvtile, .{ .padding = null });
-    const pages_per_split = @divTrunc(c.max_pages + c.splits - 1, c.splits);
+    const loader = KVLoader.init(b, c, a.k, a.v, a.table);
+    const blocks = @divTrunc(c.max_pages * c.page_size + 63, 64);
+    const pages_per_split = @divTrunc(blocks + c.splits - 1, c.splits);
     const factor = @as(u64, 1) << @intCast(@ctz(@as(u64, @intCast(pages_per_split))));
     const chunk = if (scheduled) len.cdiv(64).cdiv(split_count) else b.cst(.i32, pages_per_split);
     const first = if (scheduled) split.mul(chunk) else b.assumeDivBy(split.mul(chunk), factor);
     const last = first.add(chunk).minimum(len.add(63).div(64));
-    const table = b.partitionView(b.tensorView(a.table, &.{ c.batch, c.max_pages }, &.{ c.max_pages, 1 }), &.{ 1, 1 }, .{ .padding = null });
-    var loop = b.openFor(first, last, 1, .{ b.zeros(&.{ 16, 128 }, .f32), b.full(&.{rows}, @as(f64, -1.0e20), .f32), b.zeros(&.{rows}, .f32) });
-    const page = loop.iv;
-    const physical = b.load(table, &.{ seq, page }).reshape(&.{});
-    const kvindex = if (token_major) [_]cut.Value{ physical, zero, head, zero } else [_]cut.Value{ physical, head, zero, zero };
-    const k = b.loadOpts(kview, &kvindex, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ 64, 128 });
-    const v = b.loadOpts(vview, &kvindex, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ 64, 128 });
-    const full_scores = b.mmaf(q, k.permute(&.{ 1, 0 }), b.zeros(&.{ 16, 64 }, .f32));
-    const scores = full_scores.mul(c.scale);
-    const start = b.assumeDivBy(page.mul(64), 64);
-    var tail = b.openIfElse(start.add(64).gt(len), .{b.tileTy(&.{ rows, 64 }, .f32)});
-    const valid = b.iota(64, .i32).add(start).lt(len).reshape(&.{ 1, 64 });
-    tail.yieldThen(.{b.where(valid, scores, b.full(&.{ rows, 64 }, @as(f64, -1.0e20), .f32))});
-    tail.yieldElse(.{scores});
-    const s = tail.results[0];
-    const m = loop.carried[1].maximum(s.max(1));
-    const alpha = b.exp2(loop.carried[1].sub(m).mul(1.4426950408889634));
-    const p = b.exp2(s.sub(m.reshape(&.{ rows, 1 })).mul(1.4426950408889634));
-    // Match the Python frontend's contraction explicitly. Separate mul/add
-    // increases live registers and changes tileiras' pipeline allocation.
-    const sum = b.fma(loop.carried[2], alpha, p.sum(1));
-    const scaled_acc = loop.carried[0].mul(alpha.reshape(&.{ 16, 1 }));
-    const acc = b.mmaf(p.to(.bf16), v, scaled_acc);
-    loop.yield(.{ acc, m, sum });
-    const m4 = b.extract(loop.results[1], &.{zero}, &.{4});
-    const sum4 = b.extract(loop.results[2], &.{zero}, &.{4});
-    const acc4 = b.extract(loop.results[0], &.{ zero, zero }, &.{ 4, 128 });
+    // Keep the full-page pipeline free of V masking/conversion. Select once
+    // per CTA, not once per iteration; the other path handles arbitrary tails.
+    var aligned = b.openIfElse(if (loader.tiled) len.rem(64).eq(0) else b.cst(.i1, 1), .{ b.tileTy(&.{ 16, 128 }, .f32), b.tileTy(&.{rows}, .f32), b.tileTy(&.{rows}, .f32) });
+    inline for (.{ false, true }) |mask_tail| {
+        var loop = b.openFor(first, last, 1, .{ b.zeros(&.{ 16, 128 }, .f32), b.full(&.{rows}, @as(f64, -1.0e20), .f32), b.zeros(&.{rows}, .f32) });
+        const page = loop.iv;
+        const loaded = loader.load(seq, head, page, len, mask_tail);
+        const k = loaded.k;
+        const v = loaded.v;
+        const full_scores = b.mmaf(q, k.permute(&.{ 1, 0 }), b.zeros(&.{ 16, 64 }, .f32));
+        const scores = full_scores.mul(c.scale);
+        const start = b.assumeDivBy(page.mul(64), 64);
+        var tail = b.openIfElse(start.add(64).gt(len), .{b.tileTy(&.{ rows, 64 }, .f32)});
+        const valid = b.iota(64, .i32).add(start).lt(len).reshape(&.{ 1, 64 });
+        tail.yieldThen(.{b.where(valid, scores, b.full(&.{ rows, 64 }, @as(f64, -1.0e20), .f32))});
+        tail.yieldElse(.{scores});
+        const s = tail.results[0];
+        const m = loop.carried[1].maximum(s.max(1));
+        const alpha = b.exp2(loop.carried[1].sub(m).mul(1.4426950408889634));
+        const p = b.exp2(s.sub(m.reshape(&.{ rows, 1 })).mul(1.4426950408889634));
+        // Match the Python frontend's contraction explicitly. Separate mul/add
+        // increases live registers and changes tileiras' pipeline allocation.
+        const sum = b.fma(loop.carried[2], alpha, p.sum(1));
+        const scaled_acc = loop.carried[0].mul(alpha.reshape(&.{ 16, 1 }));
+        const acc = b.mmaf(p.to(.bf16), v, scaled_acc);
+        loop.yield(.{ acc, m, sum });
+        if (!mask_tail) aligned.yieldThen(.{ loop.results[0], loop.results[1], loop.results[2] }) else aligned.yieldElse(.{ loop.results[0], loop.results[1], loop.results[2] });
+    }
+    const m4 = b.extract(aligned.results[1], &.{zero}, &.{4});
+    const sum4 = b.extract(aligned.results[2], &.{zero}, &.{4});
+    const acc4 = b.extract(aligned.results[0], &.{ zero, zero }, &.{ 4, 128 });
     var active = b.openIf(qidx.lt(qend));
     var direct: @TypeOf(work_active) = if (scheduled) b.openIf(split_count.eq(1)) else undefined;
     if (scheduled or c.splits == 1) {
@@ -321,7 +403,7 @@ fn emitPrefill(b: *cut.Builder, c: Config) cut.FinishError!void {
         .maxima = .{ .ptr = .f32 },
         .sums = .{ .ptr = .f32 },
         .acc = .{ .ptr = .f32 },
-    }, .{ .hints = &.{.{ .arch = .sm_103, .occupancy = 2, .num_worker_warps_per_cta = 4 }} });
+    }, .{ .hints = &.{.{ .arch = .sm_103, .occupancy = c.prefill_occupancy, .num_worker_warps_per_cta = 4 }} });
     const id = b.tileBlockId().x;
     const work = id.div(c.heads).to(.i32);
     const head = id.rem(c.heads).to(.i32);
@@ -340,22 +422,19 @@ fn emitPrefill(b: *cut.Builder, c: Config) cut.FinishError!void {
     const offsets = qi.mul(c.heads * 512).add(head.mul(512)).add(row.rem(4).mul(128)).reshape(&.{ 128, 1 }).add(b.iota(128, .i32).reshape(&.{ 1, 128 }));
     const mask = qi.lt(end).reshape(&.{ 128, 1 }).broadcastTo(&.{ 128, 128 });
     const q = b.loadPtrOpts(a.q.offset(offsets), .{ .mask = mask, .padding = b.zeros(&.{ 128, 128 }, .bf16) }).tile;
-    const token_major = c.strides[1] < c.strides[2];
-    const kvshape = if (token_major) [_]i64{ c.pages, 64, c.heads, 128 } else [_]i64{ c.pages, c.heads, 64, 128 };
-    const kvstrides = if (token_major) [_]i64{ c.strides[0], c.strides[2], c.strides[1], c.strides[3] } else c.strides;
-    const kvtile = if (token_major) [_]i64{ 1, 64, 1, 128 } else [_]i64{ 1, 1, 64, 128 };
-    const kv = b.partitionView(b.tensorView(a.k, &kvshape, &kvstrides), &kvtile, .{ .padding = null });
-    const vv = b.partitionView(b.tensorView(a.v, &kvshape, &kvstrides), &kvtile, .{ .padding = null });
-    const zero = b.cst(.i32, 0);
+    // Concatenating small tiles is particularly expensive for the larger
+    // prefill MMA. Keep tiled loads only when one page contains a whole tile.
+    var kv_config = c;
+    kv_config.force_gather = c.force_gather or @mod(c.page_size, 64) != 0;
+    const loader = KVLoader.init(b, kv_config, a.k, a.v, a.table);
     const context = len.sub(end.sub(begin));
     const stop = len.minimum(context.add(first).add(32)).cdiv(64);
     const chunk = stop.cdiv(ns);
     const begin_page = split.mul(chunk);
     var loop = b.openFor(begin_page, begin_page.add(chunk).minimum(stop), 1, .{ b.zeros(&.{ 128, 128 }, .f32), b.full(&.{128}, @as(f64, -1e20), .f32), b.zeros(&.{128}, .f32) });
-    const physical = b.loadPtr(a.table.offset(seq.mul(c.max_pages).add(loop.iv)));
-    const index = if (token_major) [_]cut.Value{ physical, zero, head, zero } else [_]cut.Value{ physical, head, zero, zero };
-    const k = b.loadOpts(kv, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ 64, 128 });
-    const v = b.loadOpts(vv, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ 64, 128 });
+    const loaded = loader.load(seq, head, loop.iv, len, true);
+    const k = loaded.k;
+    const v = loaded.v;
     const scores = b.mmaf(q, k.permute(&.{ 1, 0 }), b.zeros(&.{ 128, 64 }, .f32)).mul(c.scale * 1.4426950408889634);
     const token = b.iota(64, .i32).add(b.assumeDivBy(loop.iv.mul(64), 64)).reshape(&.{ 1, 64 });
     const causal = token.le(context.add(first).add(row.div(4)).reshape(&.{ 128, 1 }));
@@ -435,7 +514,7 @@ pub fn pagedAttention(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.T
     const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform);
     if (cc == null or !cc.?.eql(.{ .major = 10, .minor = 3 }) or
         q.dtype() != .bf16 or k.dtype() != .bf16 or v.dtype() != .bf16 or
-        q.dim(.hg) != 4 or q.dim(.hd) != 128 or k.dim(.k_chunk) != 64 or
+        q.dim(.hg) != 4 or q.dim(.hd) != 128 or k.dim(.k_chunk) <= 0 or
         opts.sliding_window >= 0 or
         q.axis(.b) != 0 or q.axis(.hkv) != 1 or q.axis(.hg) != 2 or q.axis(.hd) != 3 or
         !k.shape().eql(v.shape()))
@@ -459,7 +538,7 @@ fn pagedAttentionLocal(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.
     const batch = params.block_table.dim(.b);
     const heads = q.dim(.hkv);
     const splits: i64 = 32;
-    const cfg: Config = .{ .batch = batch, .query_tokens = q.dim(.b), .heads = heads, .pages = k.dim(.page), .max_pages = params.block_table.dim(.p), .splits = splits, .scale = opts.scale orelse 0.08838834764831845, .strides = .{ strides.get(k.axis(.page)), strides.get(k.axis(.hkv)), strides.get(k.axis(.k_chunk)), strides.get(k.axis(.hd)) } };
+    const cfg: Config = .{ .batch = batch, .query_tokens = q.dim(.b), .heads = heads, .pages = k.dim(.page), .max_pages = params.block_table.dim(.p), .page_size = k.dim(.k_chunk), .splits = splits, .scale = opts.scale orelse 0.08838834764831845, .strides = .{ strides.get(k.axis(.page)), strides.get(k.axis(.hkv)), strides.get(k.axis(.k_chunk)), strides.get(k.axis(.hd)) } };
     const plan = Plan.call(.{ .lengths = params.seq_lens, .starts = params.query_start_len }, .{ .plan = .init(.{ 4, batch }, .i32) }, .{ .cfg = cfg, .grid = .{ 1, 1, 1 } }).plan;
     const parts = ScheduledDecode.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len, .plan = plan }, .{
         .out = q.shape(),
@@ -507,6 +586,29 @@ test "cutile split policy preserves large batches" {
     try std.testing.expectEqual(@as(i64, 4), splitCount(16, 8192));
     try std.testing.expectEqual(@as(i64, 1), splitCount(64, 65536));
     try std.testing.expectEqual(@as(i64, 1), splitCount(256, 65536));
+}
+
+test "cutile cache pages are independent of MMA tiles" {
+    for ([_]i64{ 1, 2, 4, 8, 16, 17, 32, 48, 64, 96, 128, 192, 256 }) |page_size| {
+        for ([_]bool{ false, true }) |token_major| {
+            const cfg: Config = .{
+                .batch = 4,
+                .query_tokens = 130,
+                .heads = 8,
+                .pages = 520,
+                .max_pages = 130,
+                .page_size = page_size,
+                .splits = 32,
+                .scale = 0.08838835,
+                .strides = if (token_major) .{ page_size * 1024, 128, 1024, 1 } else .{ page_size * 1024, page_size * 128, 128, 1 },
+            };
+            inline for (.{ ScheduledDecode, Prefill }) |K| {
+                const ir = try K.emit(std.testing.allocator, cfg);
+                defer std.testing.allocator.free(ir);
+                try std.testing.expect(std.mem.indexOf(u8, ir, "mmaf") != null);
+            }
+        }
+    }
 }
 
 test "cutile prefill work capacity covers split query chunks" {
