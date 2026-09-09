@@ -262,7 +262,7 @@ fn conv1x1(store: zml.io.TensorStore.View) zml.nn.Linear {
     return .init(weight, store.maybeCreateTensor("bias", .{.dout}, .replicated), .d);
 }
 
-const Model = struct {
+const Decoder = struct {
     dec_in_proj: zml.nn.Linear,
     conv_pre: WNConv1d,
     ups: []TransposeConv,
@@ -271,7 +271,7 @@ const Model = struct {
     conv_post: WNConv1d,
     cfg: AudioConfig,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Model {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Decoder {
         const cfg: AudioConfig = .{};
         const dec = store.withPrefix("decoder");
         const ups = try allocator.alloc(TransposeConv, cfg.upsample_rates.len);
@@ -302,13 +302,13 @@ const Model = struct {
         };
     }
 
-    pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: Decoder, allocator: std.mem.Allocator) void {
         allocator.free(self.ups);
         allocator.free(self.resblocks);
     }
 
     /// Nested slices (`ups`, `resblocks`) are not freed by `Buffer.deinitAll`.
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
         self.dec_in_proj.weight.deinit();
         if (self.dec_in_proj.bias) |*bias| bias.deinit();
         WNConv1d.unloadBuffers(&self.conv_pre);
@@ -321,10 +321,10 @@ const Model = struct {
     }
 };
 
-const DecodeInput = struct { model: Model, latents: zml.Tensor };
+const DecodeInput = struct { model: Decoder, latents: zml.Tensor };
 const DecodeOutput = struct { wav: zml.Tensor };
 
-fn projectIn(self: Model, latents: zml.Tensor) zml.Tensor {
+fn projectIn(self: Decoder, latents: zml.Tensor) zml.Tensor {
     const x = latents.withPartialTags(.{ .b, .c, .t }).convert(.f32);
     const weight = self.dec_in_proj.weight.squeeze(.k);
     return (zml.nn.Linear.init(weight, self.dec_in_proj.bias, .d))
@@ -378,7 +378,7 @@ fn interleaveStereo(allocator: std.mem.Allocator, left: []const f32, right: []co
 }
 
 pub const AudioVae = struct {
-    inner: Model,
+    inner: Decoder,
     compiled: ?zml.FnExe(decode) = null,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !AudioVae {
@@ -419,8 +419,8 @@ pub const AudioVae = struct {
         defer run.allocator.free(batch);
         audioRowsToBct(batch, packed_audio, channels, t);
 
-        var bufs = try load(run, store, Model, &self.inner, null);
-        defer Model.unloadBuffers(&bufs, run.allocator);
+        var bufs = try load(run, store, Decoder, &self.inner, null);
+        defer Decoder.unloadBuffers(&bufs, run.allocator);
         var runner = try zml.FnExe(decode).Runner(.{.model}).init(compiled, run.allocator, .{ .model = bufs });
         defer runner.deinit(run.allocator);
 

@@ -24,35 +24,30 @@ pub const canvas_multiple: u32 = 32;
 pub const canvas_max_pixels: u32 = 768 * 1344;
 pub const min_duration_s: f32 = 5.0;
 pub const max_duration_s: f32 = 15.0;
-/// Rectified-flow time-shift for the video scheduler.
-pub const video_shift: f32 = 12.0;
-/// Rectified-flow time-shift for the audio scheduler.
-pub const audio_shift: f32 = 3.0;
 /// Packed-sequence modalities. Integer values are AdaLN table columns.
 pub const Modality = enum(u8) { video = 0, text = 1, audio = 2 };
 pub const modality_count: i64 = @intCast(std.meta.fields(Modality).len);
 /// AdaLN / time-embed table width (checkpoint). A packed row usually has 2 unique
 /// times (video/text vs audio); those two are ordered and padded to 4.
 pub const timestep_slot_count: u32 = 4;
+/// Rectified-flow time-shift for the video scheduler.
+pub const video_shift: f32 = 12.0;
+/// Rectified-flow time-shift for the audio scheduler.
+pub const audio_shift: f32 = 3.0;
 
-/// Visual VAE decode tiling (official recipe). Default 1344×768 is 4×7 = 28 tiles.
-pub const vae_tile_px: u32 = 256;
-pub const vae_tile_overlap_px: u32 = 64;
-pub const vae_token_drop: u32 = 3;
-pub const vae_frame_pre: u32 = 3;
-pub const vae_frame_overlap: u32 = 5;
-pub const vae_latent_t: u32 = 7;
-pub const vae_latent_h: u32 = 16;
-pub const vae_latent_w: u32 = 16;
-/// Tile batch compiled for the ViT decoder. Replicated on every device count.
-pub const vae_tile_batch: u32 = 28;
-
-/// Snake-beta upsample / downsample in the audio decoder.
-pub const audio_activation_ratio: i64 = 2;
-pub const audio_activation_kernel: i64 = 12;
+/// Qwen text tower is 64 layers; MiniMax-H3 uses the first 50 as `text_encoder`.
+pub const EncoderConfig = struct {
+    hidden_size: i64 = 5120,
+    used_hidden_layers: i64 = 50,
+    num_attention_heads: i64 = 64,
+    num_key_value_heads: i64 = 8,
+    head_dim: i64 = 128,
+    rms_norm_eps: f32 = 1e-6,
+    rope_theta: f32 = 5_000_000.0,
+};
 
 /// DiT (`transformer/config.json` snapshot).
-pub const Config = struct {
+pub const DitConfig = struct {
     hidden_size: i64 = 5376,
     num_layers: i64 = 50,
     num_refiner_layers: i64 = 2,
@@ -70,20 +65,9 @@ pub const Config = struct {
     final_norm_eps: f32 = 1e-5,
 
     /// MM-RoPE width: 3 axes × `rope_freq_dim`, then duplicated (`ops.ropeCat3`).
-    pub fn rotaryDim(self: Config) i64 {
+    pub fn rotaryDim(self: DitConfig) i64 {
         return 2 * 3 * self.rope_freq_dim;
     }
-};
-
-/// Qwen text tower is 64 layers; MiniMax-H3 uses the first 50 as `text_encoder`.
-pub const EncoderConfig = struct {
-    hidden_size: i64 = 5120,
-    used_hidden_layers: i64 = 50,
-    num_attention_heads: i64 = 64,
-    num_key_value_heads: i64 = 8,
-    head_dim: i64 = 128,
-    rms_norm_eps: f32 = 1e-6,
-    rope_theta: f32 = 5_000_000.0,
 };
 
 pub const Geometry = struct {
@@ -110,7 +94,7 @@ pub const Geometry = struct {
             @as(u64, width) * height > canvas_max_pixels)
             return error.InvalidCanvas;
 
-        const dit: Config = .{};
+        const dit: DitConfig = .{};
         const pt: u32 = @intCast(dit.patch_size[0]);
         const ph: u32 = @intCast(dit.patch_size[1]);
         const pw: u32 = @intCast(dit.patch_size[2]);
@@ -160,7 +144,7 @@ pub const Shardings = struct {
     model: zml.Sharding,
 
     fn tpCount(available: usize) usize {
-        const dit: Config = .{};
+        const dit: DitConfig = .{};
         const enc: EncoderConfig = .{};
         var n = available;
         while (n > 1) : (n -= 1) {
@@ -189,6 +173,18 @@ pub const Shardings = struct {
         };
     }
 };
+
+/// Visual VAE decode tiling (official recipe). Default 1344×768 is 4×7 = 28 tiles.
+pub const vae_tile_px: u32 = 256;
+pub const vae_tile_overlap_px: u32 = 64;
+pub const vae_token_drop: u32 = 3;
+pub const vae_frame_pre: u32 = 3;
+pub const vae_frame_overlap: u32 = 5;
+pub const vae_latent_t: u32 = 7;
+pub const vae_latent_h: u32 = 16;
+pub const vae_latent_w: u32 = 16;
+/// Tile batch compiled for the ViT decoder. Replicated on every device count.
+pub const vae_tile_batch: u32 = 28;
 
 /// Channel-wise latent moments (`vae/config.json` snapshot). Applied before decode.
 const visual_latents_mean = [24]f32{
@@ -230,6 +226,10 @@ pub const VisualConfig = struct {
         return @intFromFloat(@as(f32, @floatFromInt(self.decoder_attention_head_dim)) * self.decoder_rope_dim_ratio);
     }
 };
+
+/// Snake-beta upsample / downsample in the audio decoder.
+pub const audio_activation_ratio: i64 = 2;
+pub const audio_activation_kernel: i64 = 12;
 
 /// Channel-wise latent moments (`audio_vae/config.json` snapshot). Applied before decode.
 const audio_latents_mean = [32]f32{

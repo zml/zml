@@ -25,6 +25,20 @@ fn qwenSdpa(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 
+const EmbedTokens = struct {
+    embed_tokens: zml.nn.TokenEmbedding,
+    pub const Input = struct { embedding: EmbedTokens, tokens: zml.Tensor };
+    pub const Output = struct { hidden: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        return .{
+            .hidden = input.embedding.embed_tokens.forward(input.tokens.withPartialTags(.{.s}))
+                .withPartialTags(.{.d})
+                .withPartitioning(.{ .d = .replicated }),
+        };
+    }
+};
+
 // =============================================================================
 // SwiGLU MLP
 // =============================================================================
@@ -131,20 +145,6 @@ const TransformerLayer = struct {
             .hidden = x1.add(self.mlp.forward(self.post_attention_layernorm.forward(x1)).rename(.{ .dout = .d }))
                 .withPartitioning(.{ .d = .replicated })
                 .reuseBuffer(input.hidden),
-        };
-    }
-};
-
-const EmbedTokens = struct {
-    embed_tokens: zml.nn.TokenEmbedding,
-    pub const Input = struct { embedding: EmbedTokens, tokens: zml.Tensor };
-    pub const Output = struct { hidden: zml.Tensor };
-
-    pub fn forward(input: Input) Output {
-        return .{
-            .hidden = input.embedding.embed_tokens.forward(input.tokens.withPartialTags(.{.s}))
-                .withPartialTags(.{.d})
-                .withPartitioning(.{ .d = .replicated }),
         };
     }
 };
@@ -287,7 +287,7 @@ pub const Encoder = struct {
             var layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
             defer layer_runner.deinit(run.allocator);
             var next: zml.Buffer = undefined;
-            // Host sync per layer (same as DiT blocks; VAE queues then waits on finish).
+            // Host sync per layer.
             layer_runner.run(run.io, .{
                 .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf },
                 .outputs = .{ .hidden = &next },

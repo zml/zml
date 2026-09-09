@@ -1,5 +1,5 @@
-//! Shared load helpers and weight constructors.
-//! Model math is in `encoder.zig`, `pack.zig`, `dit.zig`, `vae.zig`, and `audio.zig`.
+//! Shared generation context, DMA load, and weight constructors.
+//! Model math lives in encoder / pack / dit / vae / audio.
 
 const std = @import("std");
 const zml = @import("zml");

@@ -26,282 +26,6 @@ fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
 }
 
 // =============================================================================
-// Tile / stitch  (256 px tiles, 64 px overlap)
-// =============================================================================
-
-const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
-const imagenet_std = [_]f32{ 0.229, 0.224, 0.225 };
-
-const TilePlan = struct {
-    starts: []u32,
-    overlaps: []u32,
-
-    pub fn deinit(self: TilePlan, allocator: std.mem.Allocator) void {
-        allocator.free(self.starts);
-        allocator.free(self.overlaps);
-    }
-};
-
-/// Evenly spaced tile origins along one axis, overlaps aligned to `align_to`.
-fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_overlap: u32, align_to: u32) !TilePlan {
-    if (tile_size >= length) {
-        const starts = try allocator.alloc(u32, 1);
-        starts[0] = 0;
-        return .{ .starts = starts, .overlaps = try allocator.alloc(u32, 0) };
-    }
-    var num_tiles = std.math.divCeil(u32, length, tile_size) catch unreachable;
-    while (tile_size * num_tiles < min_overlap * (num_tiles - 1) + length) num_tiles += 1;
-    const overlaps = try allocator.alloc(u32, num_tiles - 1);
-    errdefer allocator.free(overlaps);
-    @memset(overlaps, min_overlap);
-    var remaining: i64 = @as(i64, tile_size) * num_tiles - @as(i64, min_overlap) * (num_tiles - 1) - length;
-    var i: usize = 0;
-    while (remaining >= align_to) : (i += 1) {
-        overlaps[i % overlaps.len] += align_to;
-        remaining -= align_to;
-    }
-    const starts = try allocator.alloc(u32, num_tiles);
-    starts[0] = 0;
-    for (1..num_tiles) |ti| starts[ti] = starts[ti - 1] + tile_size - overlaps[ti - 1];
-    return .{ .starts = starts, .overlaps = overlaps };
-}
-
-fn nchwIndex(c: usize, t: usize, y: usize, x: usize, tt: usize, h: usize, w: usize) usize {
-    return ((((c * tt + t) * h) + y) * w) + x;
-}
-
-const Axis = enum { h, w };
-
-/// Linear blend of two NCHW tiles along H or W.
-fn blend(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32, axis: Axis) void {
-    const e = @min(if (axis == .h) h else w, extent);
-    if (e == 0) return;
-    const ef: f32 = @floatFromInt(e);
-    const t_n: usize = t;
-    const h_n: usize = h;
-    const w_n: usize = w;
-    const e_n: usize = e;
-    for (0..channels) |c| {
-        for (0..t_n) |ti| {
-            for (0..if (axis == .h) e_n else h_n) |y| {
-                for (0..if (axis == .h) w_n else e_n) |x| {
-                    const k = if (axis == .h) y else x;
-                    const wb = @as(f32, @floatFromInt(k)) / ef;
-                    const ai = if (axis == .h)
-                        nchwIndex(c, ti, h_n - e_n + y, x, t_n, h_n, w_n)
-                    else
-                        nchwIndex(c, ti, y, w_n - e_n + x, t_n, h_n, w_n);
-                    const bi = nchwIndex(c, ti, y, x, t_n, h_n, w_n);
-                    b[bi] = a[ai] * (1.0 - wb) + b[bi] * wb;
-                }
-            }
-        }
-    }
-}
-
-fn copyNchwCrop(
-    dst: []f32,
-    dst_h: u32,
-    dst_w: u32,
-    out_y: u32,
-    out_x: u32,
-    src: []const f32,
-    src_h: u32,
-    src_w: u32,
-    use_h: u32,
-    use_w: u32,
-    channels: u32,
-    t: u32,
-) void {
-    const dst_h_n: usize = dst_h;
-    const dst_w_n: usize = dst_w;
-    const src_h_n: usize = src_h;
-    const src_w_n: usize = src_w;
-    const out_y_n: usize = out_y;
-    const out_x_n: usize = out_x;
-    const t_n: usize = t;
-    const use_h_n: usize = use_h;
-    const use_w_n: usize = use_w;
-    for (0..channels) |c| {
-        for (0..t_n) |ti| {
-            for (0..use_h_n) |y| {
-                @memcpy(
-                    dst[nchwIndex(c, ti, out_y_n + y, out_x_n, t_n, dst_h_n, dst_w_n)..][0..use_w_n],
-                    src[nchwIndex(c, ti, y, 0, t_n, src_h_n, src_w_n)..][0..use_w_n],
-                );
-            }
-        }
-    }
-}
-
-/// Places decoded tiles into the canvas, blending 64 px overlaps.
-const NchwStitcher = struct {
-    acc: []f32,
-    prev_row: []f32,
-    curr_row: []f32,
-    work: []f32,
-    channels: u32,
-    t: u32,
-    acc_h: u32,
-    acc_w: u32,
-    tile_h: u32,
-    tile_w: u32,
-    n_y: u32,
-    n_x: u32,
-    y_overlaps: []u32,
-    x_overlaps: []u32,
-    out_y: u32,
-    out_x: u32,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        acc: []f32,
-        channels: u32,
-        t: u32,
-        acc_h: u32,
-        acc_w: u32,
-        tile_h: u32,
-        tile_w: u32,
-        y: TilePlan,
-        x: TilePlan,
-    ) !NchwStitcher {
-        const n_y: u32 = @intCast(y.starts.len);
-        const n_x: u32 = @intCast(x.starts.len);
-        const tile_n = @as(usize, channels) * t * tile_h * tile_w;
-        return .{
-            .acc = acc,
-            .prev_row = try allocator.alloc(f32, n_x * tile_n),
-            .curr_row = try allocator.alloc(f32, n_x * tile_n),
-            .work = try allocator.alloc(f32, tile_n),
-            .channels = channels,
-            .t = t,
-            .acc_h = acc_h,
-            .acc_w = acc_w,
-            .tile_h = tile_h,
-            .tile_w = tile_w,
-            .n_y = n_y,
-            .n_x = n_x,
-            .y_overlaps = y.overlaps,
-            .x_overlaps = x.overlaps,
-            .out_y = 0,
-            .out_x = 0,
-        };
-    }
-
-    pub fn deinit(self: *NchwStitcher, allocator: std.mem.Allocator) void {
-        allocator.free(self.prev_row);
-        allocator.free(self.curr_row);
-        allocator.free(self.work);
-    }
-
-    /// Blend this tile with its top/left neighbors and copy the unique region into `acc`.
-    pub fn push(self: *NchwStitcher, yi: u32, xi: u32, tile: []const f32) void {
-        const n = @as(usize, self.channels) * self.t * self.tile_h * self.tile_w;
-        @memcpy(self.curr_row[xi * n ..][0..n], tile[0..n]);
-        @memcpy(self.work[0..n], tile[0..n]);
-        if (yi > 0) blend(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1], .h);
-        if (xi > 0) blend(self.curr_row[(xi - 1) * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.x_overlaps[xi - 1], .w);
-        const use_h = if (yi + 1 < self.n_y) self.tile_h - self.y_overlaps[yi] else self.tile_h;
-        const use_w = if (xi + 1 < self.n_x) self.tile_w - self.x_overlaps[xi] else self.tile_w;
-        copyNchwCrop(self.acc, self.acc_h, self.acc_w, self.out_y, self.out_x, self.work, self.tile_h, self.tile_w, use_h, use_w, self.channels, self.t);
-        self.out_x += use_w;
-        if (xi + 1 == self.n_x) {
-            const tmp = self.prev_row;
-            self.prev_row = self.curr_row;
-            self.curr_row = tmp;
-            self.out_y += use_h;
-            self.out_x = 0;
-        }
-    }
-};
-
-fn vitCoords(dim: u32, out: []f32) void {
-    const d: f32 = @floatFromInt(dim);
-    for (0..dim) |i| out[i] = 2.0 * ((@as(f32, @floatFromInt(i)) + 0.5) / d) - 1.0;
-}
-
-fn vaeTokens() u32 {
-    return config.vae_latent_t * config.vae_latent_h * config.vae_latent_w;
-}
-
-fn vaeSeq(registers: u32) u32 {
-    return vaeTokens() + registers + 1;
-}
-
-/// RoPE (t,h,w) for the 7×16×16 latent tile, plus zeros for register/pad tokens.
-fn vaePositions(allocator: std.mem.Allocator, registers: u32) ![]f32 {
-    const patches = vaeTokens();
-    const out = try allocator.alloc(f32, (patches + registers + 1) * 3);
-    var t_axis: [config.vae_latent_t]f32 = undefined;
-    var h_axis: [config.vae_latent_h]f32 = undefined;
-    var w_axis: [config.vae_latent_w]f32 = undefined;
-    vitCoords(config.vae_latent_t, &t_axis);
-    vitCoords(config.vae_latent_h, &h_axis);
-    vitCoords(config.vae_latent_w, &w_axis);
-    var i: usize = 0;
-    for (0..config.vae_latent_t) |tt| {
-        for (0..config.vae_latent_h) |hh| {
-            for (0..config.vae_latent_w) |ww| {
-                out[i * 3 + 0] = t_axis[tt];
-                out[i * 3 + 1] = h_axis[hh];
-                out[i * 3 + 2] = w_axis[ww];
-                i += 1;
-            }
-        }
-    }
-    @memset(out[patches * 3 ..], 0);
-    return out;
-}
-
-fn rgbPlane(c: usize, f: usize, frames: usize, plane: usize) usize {
-    return (c * frames + f) * plane;
-}
-
-fn copyRgbFrames(dst: []f32, dst_frames: u32, dst_off: u32, src: []const f32, src_frames: u32, src_off: u32, n: u32, plane: usize) void {
-    const dst_frames_n: usize = dst_frames;
-    const src_frames_n: usize = src_frames;
-    const dst_off_n: usize = dst_off;
-    const src_off_n: usize = src_off;
-    for (0..3) |c| {
-        for (0..n) |f| {
-            @memcpy(dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane], src[rgbPlane(c, src_off_n + f, src_frames_n, plane)..][0..plane]);
-        }
-    }
-}
-
-fn blendRgbFrames(
-    dst: []f32,
-    dst_frames: u32,
-    dst_off: u32,
-    a: []const f32,
-    a_frames: u32,
-    a_off: u32,
-    b: []const f32,
-    b_frames: u32,
-    b_off: u32,
-    n: u32,
-    blend_span: u32,
-    plane: usize,
-) void {
-    const dst_frames_n: usize = dst_frames;
-    const a_frames_n: usize = a_frames;
-    const b_frames_n: usize = b_frames;
-    const dst_off_n: usize = dst_off;
-    const a_off_n: usize = a_off;
-    const b_off_n: usize = b_off;
-    const span: f32 = @floatFromInt(blend_span);
-    for (0..n) |f| {
-        const w = @as(f32, @floatFromInt(f)) / span;
-        for (0..3) |c| {
-            const d = dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane];
-            const aa = a[rgbPlane(c, a_off_n + f, a_frames_n, plane)..][0..plane];
-            const bb = b[rgbPlane(c, b_off_n + f, b_frames_n, plane)..][0..plane];
-            for (d, aa, bb) |*o, av, bv| o.* = av * (1.0 - w) + bv * w;
-        }
-    }
-}
-
-// =============================================================================
 // Decoder  (embed → 36 blocks → finish)
 // =============================================================================
 
@@ -433,6 +157,44 @@ const FinishModel = struct {
         return .{ .patches = proj.slice(.s, .{ .start = 0, .end = proj.dim(.s) - input.model.cfg.decoder_num_register_tokens - 1 }) };
     }
 };
+
+fn vitCoords(dim: u32, out: []f32) void {
+    const d: f32 = @floatFromInt(dim);
+    for (0..dim) |i| out[i] = 2.0 * ((@as(f32, @floatFromInt(i)) + 0.5) / d) - 1.0;
+}
+
+fn vaeTokens() u32 {
+    return config.vae_latent_t * config.vae_latent_h * config.vae_latent_w;
+}
+
+fn vaeSeq(registers: u32) u32 {
+    return vaeTokens() + registers + 1;
+}
+
+/// RoPE (t,h,w) for the 7×16×16 latent tile, plus zeros for register/pad tokens.
+fn vaePositions(allocator: std.mem.Allocator, registers: u32) ![]f32 {
+    const patches = vaeTokens();
+    const out = try allocator.alloc(f32, (patches + registers + 1) * 3);
+    var t_axis: [config.vae_latent_t]f32 = undefined;
+    var h_axis: [config.vae_latent_h]f32 = undefined;
+    var w_axis: [config.vae_latent_w]f32 = undefined;
+    vitCoords(config.vae_latent_t, &t_axis);
+    vitCoords(config.vae_latent_h, &h_axis);
+    vitCoords(config.vae_latent_w, &w_axis);
+    var i: usize = 0;
+    for (0..config.vae_latent_t) |tt| {
+        for (0..config.vae_latent_h) |hh| {
+            for (0..config.vae_latent_w) |ww| {
+                out[i * 3 + 0] = t_axis[tt];
+                out[i * 3 + 1] = h_axis[hh];
+                out[i * 3 + 2] = w_axis[ww];
+                i += 1;
+            }
+        }
+    }
+    @memset(out[patches * 3 ..], 0);
+    return out;
+}
 
 /// Tiled ViT decoder.
 pub const Vae = struct {
@@ -669,6 +431,244 @@ pub const Vae = struct {
     }
 };
 
+// =============================================================================
+// Tile / stitch  (256 px tiles, 64 px overlap)
+// =============================================================================
+
+const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
+const imagenet_std = [_]f32{ 0.229, 0.224, 0.225 };
+
+const TilePlan = struct {
+    starts: []u32,
+    overlaps: []u32,
+
+    pub fn deinit(self: TilePlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.starts);
+        allocator.free(self.overlaps);
+    }
+};
+
+/// Evenly spaced tile origins along one axis, overlaps aligned to `align_to`.
+fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_overlap: u32, align_to: u32) !TilePlan {
+    if (tile_size >= length) {
+        const starts = try allocator.alloc(u32, 1);
+        starts[0] = 0;
+        return .{ .starts = starts, .overlaps = try allocator.alloc(u32, 0) };
+    }
+    var num_tiles = std.math.divCeil(u32, length, tile_size) catch unreachable;
+    while (tile_size * num_tiles < min_overlap * (num_tiles - 1) + length) num_tiles += 1;
+    const overlaps = try allocator.alloc(u32, num_tiles - 1);
+    errdefer allocator.free(overlaps);
+    @memset(overlaps, min_overlap);
+    var remaining: i64 = @as(i64, tile_size) * num_tiles - @as(i64, min_overlap) * (num_tiles - 1) - length;
+    var i: usize = 0;
+    while (remaining >= align_to) : (i += 1) {
+        overlaps[i % overlaps.len] += align_to;
+        remaining -= align_to;
+    }
+    const starts = try allocator.alloc(u32, num_tiles);
+    starts[0] = 0;
+    for (1..num_tiles) |ti| starts[ti] = starts[ti - 1] + tile_size - overlaps[ti - 1];
+    return .{ .starts = starts, .overlaps = overlaps };
+}
+
+fn nchwIndex(c: usize, t: usize, y: usize, x: usize, tt: usize, h: usize, w: usize) usize {
+    return ((((c * tt + t) * h) + y) * w) + x;
+}
+
+const Axis = enum { h, w };
+
+/// Linear blend of two NCHW tiles along H or W.
+fn blend(a: []const f32, b: []f32, channels: u32, t: u32, h: u32, w: u32, extent: u32, axis: Axis) void {
+    const e = @min(if (axis == .h) h else w, extent);
+    if (e == 0) return;
+    const ef: f32 = @floatFromInt(e);
+    const t_n: usize = t;
+    const h_n: usize = h;
+    const w_n: usize = w;
+    const e_n: usize = e;
+    for (0..channels) |c| {
+        for (0..t_n) |ti| {
+            for (0..if (axis == .h) e_n else h_n) |y| {
+                for (0..if (axis == .h) w_n else e_n) |x| {
+                    const k = if (axis == .h) y else x;
+                    const wb = @as(f32, @floatFromInt(k)) / ef;
+                    const ai = if (axis == .h)
+                        nchwIndex(c, ti, h_n - e_n + y, x, t_n, h_n, w_n)
+                    else
+                        nchwIndex(c, ti, y, w_n - e_n + x, t_n, h_n, w_n);
+                    const bi = nchwIndex(c, ti, y, x, t_n, h_n, w_n);
+                    b[bi] = a[ai] * (1.0 - wb) + b[bi] * wb;
+                }
+            }
+        }
+    }
+}
+
+fn copyNchwCrop(
+    dst: []f32,
+    dst_h: u32,
+    dst_w: u32,
+    out_y: u32,
+    out_x: u32,
+    src: []const f32,
+    src_h: u32,
+    src_w: u32,
+    use_h: u32,
+    use_w: u32,
+    channels: u32,
+    t: u32,
+) void {
+    const dst_h_n: usize = dst_h;
+    const dst_w_n: usize = dst_w;
+    const src_h_n: usize = src_h;
+    const src_w_n: usize = src_w;
+    const out_y_n: usize = out_y;
+    const out_x_n: usize = out_x;
+    const t_n: usize = t;
+    const use_h_n: usize = use_h;
+    const use_w_n: usize = use_w;
+    for (0..channels) |c| {
+        for (0..t_n) |ti| {
+            for (0..use_h_n) |y| {
+                @memcpy(
+                    dst[nchwIndex(c, ti, out_y_n + y, out_x_n, t_n, dst_h_n, dst_w_n)..][0..use_w_n],
+                    src[nchwIndex(c, ti, y, 0, t_n, src_h_n, src_w_n)..][0..use_w_n],
+                );
+            }
+        }
+    }
+}
+
+/// Places decoded tiles into the canvas, blending 64 px overlaps.
+const NchwStitcher = struct {
+    acc: []f32,
+    prev_row: []f32,
+    curr_row: []f32,
+    work: []f32,
+    channels: u32,
+    t: u32,
+    acc_h: u32,
+    acc_w: u32,
+    tile_h: u32,
+    tile_w: u32,
+    n_y: u32,
+    n_x: u32,
+    y_overlaps: []u32,
+    x_overlaps: []u32,
+    out_y: u32,
+    out_x: u32,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        acc: []f32,
+        channels: u32,
+        t: u32,
+        acc_h: u32,
+        acc_w: u32,
+        tile_h: u32,
+        tile_w: u32,
+        y: TilePlan,
+        x: TilePlan,
+    ) !NchwStitcher {
+        const n_y: u32 = @intCast(y.starts.len);
+        const n_x: u32 = @intCast(x.starts.len);
+        const tile_n = @as(usize, channels) * t * tile_h * tile_w;
+        return .{
+            .acc = acc,
+            .prev_row = try allocator.alloc(f32, n_x * tile_n),
+            .curr_row = try allocator.alloc(f32, n_x * tile_n),
+            .work = try allocator.alloc(f32, tile_n),
+            .channels = channels,
+            .t = t,
+            .acc_h = acc_h,
+            .acc_w = acc_w,
+            .tile_h = tile_h,
+            .tile_w = tile_w,
+            .n_y = n_y,
+            .n_x = n_x,
+            .y_overlaps = y.overlaps,
+            .x_overlaps = x.overlaps,
+            .out_y = 0,
+            .out_x = 0,
+        };
+    }
+
+    pub fn deinit(self: *NchwStitcher, allocator: std.mem.Allocator) void {
+        allocator.free(self.prev_row);
+        allocator.free(self.curr_row);
+        allocator.free(self.work);
+    }
+
+    /// Blend this tile with its top/left neighbors and copy the unique region into `acc`.
+    pub fn push(self: *NchwStitcher, yi: u32, xi: u32, tile: []const f32) void {
+        const n = @as(usize, self.channels) * self.t * self.tile_h * self.tile_w;
+        @memcpy(self.curr_row[xi * n ..][0..n], tile[0..n]);
+        @memcpy(self.work[0..n], tile[0..n]);
+        if (yi > 0) blend(self.prev_row[xi * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.y_overlaps[yi - 1], .h);
+        if (xi > 0) blend(self.curr_row[(xi - 1) * n ..][0..n], self.work, self.channels, self.t, self.tile_h, self.tile_w, self.x_overlaps[xi - 1], .w);
+        const use_h = if (yi + 1 < self.n_y) self.tile_h - self.y_overlaps[yi] else self.tile_h;
+        const use_w = if (xi + 1 < self.n_x) self.tile_w - self.x_overlaps[xi] else self.tile_w;
+        copyNchwCrop(self.acc, self.acc_h, self.acc_w, self.out_y, self.out_x, self.work, self.tile_h, self.tile_w, use_h, use_w, self.channels, self.t);
+        self.out_x += use_w;
+        if (xi + 1 == self.n_x) {
+            const tmp = self.prev_row;
+            self.prev_row = self.curr_row;
+            self.curr_row = tmp;
+            self.out_y += use_h;
+            self.out_x = 0;
+        }
+    }
+};
+
+fn rgbPlane(c: usize, f: usize, frames: usize, plane: usize) usize {
+    return (c * frames + f) * plane;
+}
+
+fn copyRgbFrames(dst: []f32, dst_frames: u32, dst_off: u32, src: []const f32, src_frames: u32, src_off: u32, n: u32, plane: usize) void {
+    const dst_frames_n: usize = dst_frames;
+    const src_frames_n: usize = src_frames;
+    const dst_off_n: usize = dst_off;
+    const src_off_n: usize = src_off;
+    for (0..3) |c| {
+        for (0..n) |f| {
+            @memcpy(dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane], src[rgbPlane(c, src_off_n + f, src_frames_n, plane)..][0..plane]);
+        }
+    }
+}
+
+fn blendRgbFrames(
+    dst: []f32,
+    dst_frames: u32,
+    dst_off: u32,
+    a: []const f32,
+    a_frames: u32,
+    a_off: u32,
+    b: []const f32,
+    b_frames: u32,
+    b_off: u32,
+    n: u32,
+    blend_span: u32,
+    plane: usize,
+) void {
+    const dst_frames_n: usize = dst_frames;
+    const a_frames_n: usize = a_frames;
+    const b_frames_n: usize = b_frames;
+    const dst_off_n: usize = dst_off;
+    const a_off_n: usize = a_off;
+    const b_off_n: usize = b_off;
+    const span: f32 = @floatFromInt(blend_span);
+    for (0..n) |f| {
+        const w = @as(f32, @floatFromInt(f)) / span;
+        for (0..3) |c| {
+            const d = dst[rgbPlane(c, dst_off_n + f, dst_frames_n, plane)..][0..plane];
+            const aa = a[rgbPlane(c, a_off_n + f, a_frames_n, plane)..][0..plane];
+            const bb = b[rgbPlane(c, b_off_n + f, b_frames_n, plane)..][0..plane];
+            for (d, aa, bb) |*o, av, bv| o.* = av * (1.0 - w) + bv * w;
+        }
+    }
+}
+
 /// Fold ViT patch tokens back into an NCHW pixel tile.
 fn unpackPatches(allocator: std.mem.Allocator, patches: []const f32, patch_t: u32, patch: u32, channels: u32) ![]f32 {
     const pixel_t: usize = config.vae_latent_t * patch_t;
@@ -707,7 +707,7 @@ fn unpackPatches(allocator: std.mem.Allocator, patches: []const f32, patch_t: u3
 }
 
 // =============================================================================
-// Compile / run
+// Decode runtime (tile extract, weight cache, one GPU batch)
 // =============================================================================
 
 /// Copy a 7×16×16 latent window at `(t0,h0,w0)` into `dst` (zero-padded at edges).
@@ -812,5 +812,3 @@ fn runVaeBatch(
     try patches.toSlice(run.io, .init(patches.shape(), std.mem.sliceAsBytes(raw)));
     return raw;
 }
-
-

@@ -39,52 +39,6 @@ pub const Layout = struct {
     }
 };
 
-/// Video/text share one time, audio another. Smaller time first, then pad to
-/// `config.timestep_slot_count` (checkpoint table width).
-fn fillSlots(out: []f32, video_t: f32, audio_t: f32) struct { video: u32, audio: u32 } {
-    std.debug.assert(out.len == config.timestep_slot_count);
-    if (video_t == audio_t) {
-        @memset(out, video_t);
-        return .{ .video = 0, .audio = 0 };
-    }
-    if (video_t < audio_t) {
-        out[0] = video_t;
-        @memset(out[1..], audio_t);
-        return .{ .video = 0, .audio = 1 };
-    }
-    out[0] = audio_t;
-    @memset(out[1..], video_t);
-    return .{ .video = 1, .audio = 0 };
-}
-
-/// Per-row times: video/text at `video_t`, audio at `audio_t`.
-/// AdaLN row = `slot * n_modalities + modality`.
-pub fn writeRowPlan(
-    layout: Layout,
-    video_t: f32,
-    audio_t: f32,
-    timestep_indices: []u32,
-    adaln_indices: []u32,
-    unique_out: []f32,
-) void {
-    const seq = layout.seqLen();
-    std.debug.assert(timestep_indices.len == seq);
-    std.debug.assert(adaln_indices.len == seq);
-
-    const slots = fillSlots(unique_out, video_t, audio_t);
-    const n_mod: u32 = @intCast(config.modality_count);
-    const text_end = layout.text_len;
-    const audio_end = layout.videoStart();
-
-    @memset(timestep_indices[0..text_end], slots.video);
-    @memset(timestep_indices[text_end..audio_end], slots.audio);
-    @memset(timestep_indices[audio_end..seq], slots.video);
-
-    @memset(adaln_indices[0..text_end], slots.video * n_mod + @intFromEnum(Modality.text));
-    @memset(adaln_indices[text_end..audio_end], slots.audio * n_mod + @intFromEnum(Modality.audio));
-    @memset(adaln_indices[audio_end..seq], slots.video * n_mod + @intFromEnum(Modality.video));
-}
-
 /// Spatial RoPE axis for one latent dimension, scaled onto a 32-unit canvas.
 fn spatialAxis(dim: u32, sqrt_area: f64, out: []f32) []f32 {
     const count = dim / 2;
@@ -257,4 +211,50 @@ pub fn unpatchify(allocator: std.mem.Allocator, src: []const f32, t: u32, h: u32
     const out = try allocator.alloc(f32, @as(usize, t) * h * w * c);
     unpatchWalk(t, h, w, c, patch, src, out);
     return out;
+}
+
+/// Video/text share one time, audio another. Smaller time first, then pad to
+/// `config.timestep_slot_count` (checkpoint table width).
+fn fillSlots(out: []f32, video_t: f32, audio_t: f32) struct { video: u32, audio: u32 } {
+    std.debug.assert(out.len == config.timestep_slot_count);
+    if (video_t == audio_t) {
+        @memset(out, video_t);
+        return .{ .video = 0, .audio = 0 };
+    }
+    if (video_t < audio_t) {
+        out[0] = video_t;
+        @memset(out[1..], audio_t);
+        return .{ .video = 0, .audio = 1 };
+    }
+    out[0] = audio_t;
+    @memset(out[1..], video_t);
+    return .{ .video = 1, .audio = 0 };
+}
+
+/// Per-row times: video/text at `video_t`, audio at `audio_t`.
+/// AdaLN row = `slot * n_modalities + modality`.
+pub fn writeRowPlan(
+    layout: Layout,
+    video_t: f32,
+    audio_t: f32,
+    timestep_indices: []u32,
+    adaln_indices: []u32,
+    unique_out: []f32,
+) void {
+    const seq = layout.seqLen();
+    std.debug.assert(timestep_indices.len == seq);
+    std.debug.assert(adaln_indices.len == seq);
+
+    const slots = fillSlots(unique_out, video_t, audio_t);
+    const n_mod: u32 = @intCast(config.modality_count);
+    const text_end = layout.text_len;
+    const audio_end = layout.videoStart();
+
+    @memset(timestep_indices[0..text_end], slots.video);
+    @memset(timestep_indices[text_end..audio_end], slots.audio);
+    @memset(timestep_indices[audio_end..seq], slots.video);
+
+    @memset(adaln_indices[0..text_end], slots.video * n_mod + @intFromEnum(Modality.text));
+    @memset(adaln_indices[text_end..audio_end], slots.audio * n_mod + @intFromEnum(Modality.audio));
+    @memset(adaln_indices[audio_end..seq], slots.video * n_mod + @intFromEnum(Modality.video));
 }

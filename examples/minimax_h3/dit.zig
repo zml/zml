@@ -21,7 +21,7 @@ const pack = @import("pack.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
-const DitConfig = config.Config;
+const DitConfig = config.DitConfig;
 const linear = ops.linear;
 const rms = ops.rms;
 const load = ops.load;
@@ -326,6 +326,124 @@ const FinalLayer = struct {
             .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size),
             .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
             .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
+        };
+    }
+};
+
+// =============================================================================
+// Compiled kernels (text refine, pack, finish, RoPE, Euler)
+// =============================================================================
+
+/// Linear `context_embedder` then two refiner blocks.
+const TextPrep = struct {
+    condition_proj: zml.nn.Linear,
+    blocks: []TokenRefinerBlock,
+    final_norm: zml.nn.RmsNorm,
+    pub const Input = struct { model: TextPrep, text: zml.Tensor, attn_backend: zml.attention.Backend };
+    pub const Output = struct { text: zml.Tensor };
+
+    /// Nested `blocks` slice is not freed by `Buffer.deinitAll`.
+    fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
+        zml.nn.Linear.unloadBuffers(&self.condition_proj);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(TokenRefinerBlock, block);
+        allocator.free(self.blocks);
+        self.final_norm.weight.deinit();
+    }
+
+    pub fn forward(input: Input) Output {
+        var text = input.model.condition_proj.forward(input.text.convert(input.model.condition_proj.weight.dtype())).rename(.{ .dout = .d });
+        text = text.convert(input.model.final_norm.weight.dtype());
+        for (input.model.blocks) |block| text = block.forward(text, input.attn_backend);
+        return .{ .text = input.model.final_norm.forward(text) };
+    }
+};
+
+/// Pack refined text, projected audio, and video patches into one sequence.
+/// Writes into a dense `{b,s,d}` buffer (same layout scatter used) so FA2 sees a contiguous packed seq.
+const PatchEmbed = struct {
+    video_proj: zml.nn.Linear,
+    audio_proj: zml.nn.Linear,
+    pub const Input = struct {
+        model: PatchEmbed,
+        video: zml.Tensor,
+        audio: zml.Tensor,
+        text: zml.Tensor,
+    };
+    pub const Output = struct { hidden: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        const dt = input.text.dtype();
+        const video = input.model.video_proj.forward(input.video.convert(input.model.video_proj.weight.dtype())).rename(.{ .dout = .d }).convert(dt);
+        const audio = input.model.audio_proj.forward(input.audio.convert(input.model.audio_proj.weight.dtype())).rename(.{ .dout = .d }).convert(dt);
+        return .{ .hidden = packedHidden(input.text, audio, video) };
+    }
+};
+
+/// Final RMS + time-slot AdaLN, then fp32 video/audio heads on those rows only.
+const FinishCore = struct {
+    norm: zml.nn.RmsNorm,
+    video_out: zml.nn.Linear,
+    audio_out: zml.nn.Linear,
+    text_len: i64,
+    audio_len: i64,
+    pub const Input = struct {
+        model: FinishCore,
+        hidden: zml.Tensor,
+        table: zml.Tensor,
+        step: zml.Tensor,
+        timestep_indices: zml.Tensor,
+    };
+    pub const Output = struct { video: zml.Tensor, audio: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        const mods = input.table.gather(.{ .t = input.step }, .{});
+        const n = input.model.norm.forward(input.hidden.withPartitioning(.{ .d = .replicated }));
+        const shift, const scale = mods.gather(.{ .n = input.timestep_indices }, .{}).chunkExact(.k, 2);
+        const head_dt = input.model.video_out.weight.dtype();
+        const audio_end = input.model.text_len + input.model.audio_len;
+        const audio_s: zml.Tensor.Slice = .{ .start = input.model.text_len, .end = audio_end };
+        const video_s: zml.Tensor.Slice = .{ .start = audio_end };
+        return .{
+            .video = input.model.video_out.forward(
+                shiftScale(sliceS(n, video_s), sliceS(shift, video_s), sliceS(scale, video_s)).convert(head_dt),
+            ).rename(.{ .dout = .d }),
+            .audio = input.model.audio_out.forward(
+                shiftScale(sliceS(n, audio_s), sliceS(shift, audio_s), sliceS(scale, audio_s)).convert(head_dt),
+            ).rename(.{ .dout = .d }),
+        };
+    }
+};
+
+/// Cos/sin from packed (t,h,w) via `ops.ropeCat3`.
+const Rope = struct {
+    pub const Input = struct { position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32, out_dtype: zml.DataType };
+    pub const Output = struct { cos: zml.Tensor, sin: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        const emb = ropeCat3(input.position_ids, zml.nn.invFreq(2 * input.rope_freq_dim, .{
+            .layout = .real_im_pass,
+            .scaling = .{ .default = .{ .rope_theta = input.rope_theta } },
+        }).withTags(.{.f}));
+        return .{ .cos = emb.cos().convert(input.out_dtype), .sin = emb.sin().convert(input.out_dtype) };
+    }
+};
+
+/// Rectified-flow Euler (η=0):  x0 = x + σ v;  x' = (σ'/σ) x + (1 − σ'/σ) x0.
+const Euler = struct {
+    pub const Input = struct { sample: zml.Tensor, velocity: zml.Tensor, sigma: zml.Tensor, sigma_next: zml.Tensor };
+    pub const Output = struct { sample: zml.Tensor };
+
+    pub fn apply(input: Input) Output {
+        const x = input.sample;
+        const v = input.velocity.convert(x.dtype());
+        const sigma = input.sigma.convert(x.dtype()).broad(x.shape());
+        const x0 = x.add(v.mul(sigma));
+        const ratio = input.sigma_next.convert(.f32).div(input.sigma.convert(.f32)).broad(x.convert(.f32).shape());
+        return .{
+            .sample = ratio.mul(x.convert(.f32))
+                .add(zml.Tensor.scalar(1.0, .f32).sub(ratio).mul(x0.convert(.f32)))
+                .convert(x.dtype())
+                .reuseBuffer(x),
         };
     }
 };
@@ -753,7 +871,7 @@ pub const Dit = struct {
             });
             defer hidden.deinit();
 
-            // Host sync per block (unlike VAE, which queues layers and waits on finish).
+            // Host sync per block.
             for (block_runners, tables) |*block_runner, table| {
                 var next: zml.Buffer = undefined;
                 block_runner.run(io, .{
@@ -822,119 +940,5 @@ pub const Dit = struct {
         for (cores) |*core| zml.Buffer.deinitAll(BlockCore, core);
         allocator.free(cores);
         return .{ .video = video, .audio = audio };
-    }
-};
-
-/// Linear `context_embedder` then two refiner blocks.
-const TextPrep = struct {
-    condition_proj: zml.nn.Linear,
-    blocks: []TokenRefinerBlock,
-    final_norm: zml.nn.RmsNorm,
-    pub const Input = struct { model: TextPrep, text: zml.Tensor, attn_backend: zml.attention.Backend };
-    pub const Output = struct { text: zml.Tensor };
-
-    /// Nested `blocks` slice is not freed by `Buffer.deinitAll`.
-    fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
-        zml.nn.Linear.unloadBuffers(&self.condition_proj);
-        for (self.blocks) |*block| zml.Buffer.deinitAll(TokenRefinerBlock, block);
-        allocator.free(self.blocks);
-        self.final_norm.weight.deinit();
-    }
-
-    pub fn forward(input: Input) Output {
-        var text = input.model.condition_proj.forward(input.text.convert(input.model.condition_proj.weight.dtype())).rename(.{ .dout = .d });
-        text = text.convert(input.model.final_norm.weight.dtype());
-        for (input.model.blocks) |block| text = block.forward(text, input.attn_backend);
-        return .{ .text = input.model.final_norm.forward(text) };
-    }
-};
-
-/// Pack refined text, projected audio, and video patches into one sequence.
-/// Writes into a dense `{b,s,d}` buffer (same layout scatter used) so FA2 sees a contiguous packed seq.
-const PatchEmbed = struct {
-    video_proj: zml.nn.Linear,
-    audio_proj: zml.nn.Linear,
-    pub const Input = struct {
-        model: PatchEmbed,
-        video: zml.Tensor,
-        audio: zml.Tensor,
-        text: zml.Tensor,
-    };
-    pub const Output = struct { hidden: zml.Tensor };
-
-    pub fn forward(input: Input) Output {
-        const dt = input.text.dtype();
-        const video = input.model.video_proj.forward(input.video.convert(input.model.video_proj.weight.dtype())).rename(.{ .dout = .d }).convert(dt);
-        const audio = input.model.audio_proj.forward(input.audio.convert(input.model.audio_proj.weight.dtype())).rename(.{ .dout = .d }).convert(dt);
-        return .{ .hidden = packedHidden(input.text, audio, video) };
-    }
-};
-
-/// Final RMS + time-slot AdaLN, then fp32 video/audio heads on those rows only.
-const FinishCore = struct {
-    norm: zml.nn.RmsNorm,
-    video_out: zml.nn.Linear,
-    audio_out: zml.nn.Linear,
-    text_len: i64,
-    audio_len: i64,
-    pub const Input = struct {
-        model: FinishCore,
-        hidden: zml.Tensor,
-        table: zml.Tensor,
-        step: zml.Tensor,
-        timestep_indices: zml.Tensor,
-    };
-    pub const Output = struct { video: zml.Tensor, audio: zml.Tensor };
-
-    pub fn forward(input: Input) Output {
-        const mods = input.table.gather(.{ .t = input.step }, .{});
-        const n = input.model.norm.forward(input.hidden.withPartitioning(.{ .d = .replicated }));
-        const shift, const scale = mods.gather(.{ .n = input.timestep_indices }, .{}).chunkExact(.k, 2);
-        const head_dt = input.model.video_out.weight.dtype();
-        const audio_end = input.model.text_len + input.model.audio_len;
-        const audio_s: zml.Tensor.Slice = .{ .start = input.model.text_len, .end = audio_end };
-        const video_s: zml.Tensor.Slice = .{ .start = audio_end };
-        return .{
-            .video = input.model.video_out.forward(
-                shiftScale(sliceS(n, video_s), sliceS(shift, video_s), sliceS(scale, video_s)).convert(head_dt),
-            ).rename(.{ .dout = .d }),
-            .audio = input.model.audio_out.forward(
-                shiftScale(sliceS(n, audio_s), sliceS(shift, audio_s), sliceS(scale, audio_s)).convert(head_dt),
-            ).rename(.{ .dout = .d }),
-        };
-    }
-};
-
-/// Cos/sin from packed (t,h,w) via `ops.ropeCat3`.
-const Rope = struct {
-    pub const Input = struct { position_ids: zml.Tensor, rope_freq_dim: i64, rope_theta: f32, out_dtype: zml.DataType };
-    pub const Output = struct { cos: zml.Tensor, sin: zml.Tensor };
-
-    pub fn forward(input: Input) Output {
-        const emb = ropeCat3(input.position_ids, zml.nn.invFreq(2 * input.rope_freq_dim, .{
-            .layout = .real_im_pass,
-            .scaling = .{ .default = .{ .rope_theta = input.rope_theta } },
-        }).withTags(.{.f}));
-        return .{ .cos = emb.cos().convert(input.out_dtype), .sin = emb.sin().convert(input.out_dtype) };
-    }
-};
-
-/// Rectified-flow Euler (η=0):  x0 = x + σ v;  x' = (σ'/σ) x + (1 − σ'/σ) x0.
-const Euler = struct {
-    pub const Input = struct { sample: zml.Tensor, velocity: zml.Tensor, sigma: zml.Tensor, sigma_next: zml.Tensor };
-    pub const Output = struct { sample: zml.Tensor };
-
-    pub fn apply(input: Input) Output {
-        const x = input.sample;
-        const v = input.velocity.convert(x.dtype());
-        const sigma = input.sigma.convert(x.dtype()).broad(x.shape());
-        const x0 = x.add(v.mul(sigma));
-        const ratio = input.sigma_next.convert(.f32).div(input.sigma.convert(.f32)).broad(x.convert(.f32).shape());
-        return .{
-            .sample = ratio.mul(x.convert(.f32))
-                .add(zml.Tensor.scalar(1.0, .f32).sub(ratio).mul(x0.convert(.f32)))
-                .convert(x.dtype())
-                .reuseBuffer(x),
-        };
     }
 };
