@@ -13,18 +13,6 @@ const rms = ops.rms;
 const load = ops.load;
 const Run = ops.Run;
 
-/// Qwen3 eager: `(q @ k.T) * scale` then fp32 softmax. Scale-on-K (`zml.nn.sdpa`) drifts in bf16.
-/// DiT uses `zml.attention.dense` (FA2); this path stays local because of that scale.
-fn qwenSdpa(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
-    var q = q_.splitAxis(.h, .{ .h = k_.dim(.h), .hq = .auto });
-    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
-    const mask = zml.nn.causalAttnMask(.{ .q = q.dim(.q), .k = k_.dim(.k) }, .f32, null);
-    var scores = q.dot(k_, .hd).convert(.f32).scale(scale);
-    scores = scores.add(mask.broad(scores.shape()));
-    const attn = scores.softmax(.k).convert(q.dtype()).dot(v_, .k);
-    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
-}
-
 const EmbedTokens = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     pub const Input = struct { embedding: EmbedTokens, tokens: zml.Tensor };
@@ -107,9 +95,12 @@ const SelfAttn = struct {
             sin,
         );
         const v = self.v_proj.forward(x_qkv).splitAxis(.dout, kv_heads).withPartitioning(.{ .h = .model });
-        const attn = qwenSdpa(q.rename(.{ .s = .q }), k.rename(.{ .s = .k }), v.rename(.{ .s = .k }))
-            .rename(.{ .q = .s })
-            .merge(.{ .d = .{ .h, .hd } });
+        const attn = zml.nn.sdpa(
+            q.rename(.{ .s = .q }),
+            k.rename(.{ .s = .k }),
+            v.rename(.{ .s = .k }),
+            .{ .attn_mask = zml.nn.causalAttnMask(.{ .q = q.dim(.s), .k = k.dim(.s) }, q.dtype(), null) },
+        ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         return self.o_proj.forward(attn).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
     }
 };
