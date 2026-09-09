@@ -1,6 +1,6 @@
 //! Tiled ViT decoder.
 //!
-//!   1. denormalize latents with pinned `vae/config.json` moments
+//!   1. denormalize latents with `vae/config.json` moments
 //!   2. split the canvas into 256 px tiles (64 px overlap)
 //!   3. for each temporal chunk of 5 latent frames:
 //!        extract tiles → embed → 36 ViT blocks → unpatch pixels → stitch
@@ -217,8 +217,7 @@ pub const Vae = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Vae {
-        const cfg: VisualConfig = .{};
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: VisualConfig) !Vae {
         const dec = store.withPrefix("decoder");
         const blocks = try allocator.alloc(VitBlock, @intCast(cfg.decoder_num_layers));
         errdefer allocator.free(blocks);
@@ -291,14 +290,17 @@ pub const Vae = struct {
     ) ![]f32 {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
         const cfg = self.cfg;
+        const spatial = cfg.spatial();
+        const temporal = cfg.temporal();
+        const token_drop: u32 = @intCast(cfg.token_drop);
         applyLatentNorm(video_thwc, &cfg.latents_mean, &cfg.latents_std);
         const channels: u32 = @intCast(cfg.latent_channels);
-        const y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, config.visual_spatial);
+        const y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
         defer y_plan.deinit(run.allocator);
-        const x_plan = try splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, config.visual_spatial);
+        const x_plan = try splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
         defer x_plan.deinit(run.allocator);
-        const num_chunks = (geo.latent_t + config.vae_token_drop) / config.visual_latents_per_chunk - 1;
-        const chunk_frames = config.visual_latents_per_chunk * config.visual_temporal;
+        const num_chunks = (geo.latent_t + token_drop) / config.visual_latents_per_chunk - 1;
+        const chunk_frames = config.visual_latents_per_chunk * temporal;
         const out_frames = geo.frames;
         const out = try run.allocator.alloc(f32, 3 * out_frames * geo.pixel_h * geo.pixel_w);
         errdefer run.allocator.free(out);
@@ -347,14 +349,14 @@ pub const Vae = struct {
                         geo.latent_w,
                         channels,
                         start_t,
-                        y0 / config.visual_spatial,
-                        x0 / config.visual_spatial,
+                        y0 / spatial,
+                        x0 / spatial,
                         tile_lats[(yi * n_x + xi) * tile_n ..][0..tile_n],
                     );
                 }
             }
 
-            const clip_t = config.vae_latent_t * config.visual_temporal;
+            const clip_t = config.vae_latent_t * temporal;
             const clip = try run.allocator.alloc(f32, 3 * clip_t * geo.pixel_h * geo.pixel_w);
             defer run.allocator.free(clip);
             @memset(clip, 0);
@@ -365,8 +367,8 @@ pub const Vae = struct {
                 clip_t,
                 geo.pixel_h,
                 geo.pixel_w,
-                config.vae_latent_h * config.visual_spatial,
-                config.vae_latent_w * config.visual_spatial,
+                config.vae_latent_h * spatial,
+                config.vae_latent_w * spatial,
                 y_plan,
                 x_plan,
             );
@@ -375,7 +377,7 @@ pub const Vae = struct {
             const batch = compiled.tile_batch;
             const packed_lat = try run.allocator.alloc(f32, @as(usize, batch) * tile_n);
             defer run.allocator.free(packed_lat);
-            const tile_patch = vaeTokens() * @as(usize, @intCast(self.cfg.out_channels * config.visual_temporal * config.visual_spatial * config.visual_spatial));
+            const tile_patch = vaeTokens() * @as(usize, @intCast(self.cfg.out_channels)) * temporal * spatial * spatial;
             var off: usize = 0;
             while (off < n_tiles) {
                 @memset(packed_lat, 0);
@@ -389,8 +391,8 @@ pub const Vae = struct {
                     const pix = try unpackPatches(
                         run.allocator,
                         patches[b * tile_patch ..][0..tile_patch],
-                        config.visual_temporal,
-                        config.visual_spatial,
+                        temporal,
+                        spatial,
                         3,
                     );
                     defer run.allocator.free(pix);
@@ -807,7 +809,7 @@ fn runVaeBatch(
     var patches: zml.Buffer = undefined;
     finish.run(run.io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .patches = &patches }, .opts = .{ .wait = true } });
     defer patches.deinit();
-    const raw = try run.allocator.alloc(f32, @as(usize, batch) * vaeTokens() * @as(usize, @intCast(loaded.cfg.out_channels * config.visual_temporal * config.visual_spatial * config.visual_spatial)));
+    const raw = try run.allocator.alloc(f32, @as(usize, batch) * vaeTokens() * @as(usize, @intCast(loaded.cfg.out_channels)) * loaded.cfg.temporal() * loaded.cfg.spatial() * loaded.cfg.spatial());
     errdefer run.allocator.free(raw);
     try patches.toSlice(run.io, .init(patches.shape(), std.mem.sliceAsBytes(raw)));
     return raw;

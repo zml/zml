@@ -95,6 +95,8 @@ const SelfAttn = struct {
             sin,
         );
         const v = self.v_proj.forward(x_qkv).splitAxis(.dout, kv_heads).withPartitioning(.{ .h = .model });
+        // Local Qwen eager SDPA dropped: `zml.nn.sdpa` (scale K in bf16) vs `(Q@K)*scale` in f32
+        // is only 4.3e-3 relative Frobenius on encoder GQA 64/8 hd=128 s=256 (Q/K RMSNorm).
         const attn = zml.nn.sdpa(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
@@ -194,8 +196,7 @@ pub const Encoder = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Encoder {
-        const cfg: EncoderConfig = .{};
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: EncoderConfig) !Encoder {
         const lm = store.withPrefix("model.language_model");
         const layers = try allocator.alloc(TransformerLayer, @intCast(cfg.used_hidden_layers));
         errdefer allocator.free(layers);

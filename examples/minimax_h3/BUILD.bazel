@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "minimax_h3",
@@ -14,5 +14,11 @@ zig_binary(
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "test",
+    srcs = ["config.zig"],
     deps = ["//zml"],
 )

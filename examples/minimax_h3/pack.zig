@@ -1,7 +1,7 @@
 //! Packed sequence, rectified-flow schedule, noise, and 1×2×2 unpatchify.
 //!
 //!   1. Layout — text, then audio, then the video patch grid; RoPE (t,h,w) per row
-//!   2. Schedule — σ from t ∈ [1→0] (video shift 12, audio shift 3)
+//!   2. Schedule — σ from t ∈ [1→0] (video/audio shifts from scheduler JSON)
 //!   3. Noise — N(0,1) video tokens then audio tokens
 //!   4. Unpatchify — DiT video tokens `{s, 96}` → THWC latents for the VAE
 
@@ -89,10 +89,10 @@ pub const Packed = struct {
 };
 
 /// Build the packed sequence and video/audio σ schedules for this prompt length.
-pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, steps: u32) !Packed {
-    const video = try Schedule.init(allocator, config.video_shift, steps);
+pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, steps: u32, video_shift: f32, audio_shift: f32) !Packed {
+    const video = try Schedule.init(allocator, video_shift, steps);
     errdefer video.deinit(allocator);
-    const audio = try Schedule.init(allocator, config.audio_shift, steps);
+    const audio = try Schedule.init(allocator, audio_shift, steps);
     errdefer audio.deinit(allocator);
 
     const n = text_len + geo.audio_tokens + geo.video_tokens;

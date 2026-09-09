@@ -414,8 +414,7 @@ pub const Dit = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Dit {
-        const cfg: DitConfig = .{};
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: DitConfig) !Dit {
         const n_layers: usize = @intCast(cfg.num_layers);
         const blocks = try allocator.alloc(Block, n_layers);
         errdefer allocator.free(blocks);

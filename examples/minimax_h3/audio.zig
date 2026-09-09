@@ -271,23 +271,22 @@ const Decoder = struct {
     conv_post: WNConv1d,
     cfg: AudioConfig,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Decoder {
-        const cfg: AudioConfig = .{};
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: AudioConfig) !Decoder {
         const dec = store.withPrefix("decoder");
-        const ups = try allocator.alloc(TransposeConv, cfg.upsample_rates.len);
+        const ups = try allocator.alloc(TransposeConv, cfg.decoder_rates.len);
         errdefer allocator.free(ups);
         for (ups, 0..) |*up, i| {
-            up.* = .init(dec.withPrefix("ups").withLayer(i), cfg.upsample_rates[i], cfg.upsample_kernels[i]);
+            up.* = .init(dec.withPrefix("ups").withLayer(i), cfg.decoder_rates[i], cfg.decoder_kernel_sizes[i]);
         }
-        const n_res = cfg.upsample_rates.len * cfg.resblock_kernels.len;
+        const n_res = cfg.decoder_rates.len * cfg.resblock_kernel_sizes.len;
         const resblocks = try allocator.alloc(AMPBlock, n_res);
         errdefer allocator.free(resblocks);
-        for (0..cfg.upsample_rates.len) |i| {
-            for (0..cfg.resblock_kernels.len) |j| {
-                resblocks[i * cfg.resblock_kernels.len + j] = .init(
-                    dec.withPrefix("resblocks").withLayer(i * cfg.resblock_kernels.len + j),
-                    cfg.resblock_kernels[j],
-                    cfg.resblock_dilations[j],
+        for (0..cfg.decoder_rates.len) |i| {
+            for (0..cfg.resblock_kernel_sizes.len) |j| {
+                resblocks[i * cfg.resblock_kernel_sizes.len + j] = .init(
+                    dec.withPrefix("resblocks").withLayer(i * cfg.resblock_kernel_sizes.len + j),
+                    cfg.resblock_kernel_sizes[j],
+                    cfg.resblock_dilation_sizes[j],
                 );
             }
         }
@@ -338,7 +337,7 @@ fn decode(input: DecodeInput) DecodeOutput {
     var x = projectIn(self, input.latents);
     x = self.conv_pre.forward(x);
     const n_up = self.ups.len;
-    const n_k = self.cfg.resblock_kernels.len;
+    const n_k = self.cfg.resblock_kernel_sizes.len;
     for (0..n_up) |i| {
         x = self.ups[i].forward(x);
         const blocks = self.resblocks[i * n_k ..][0..n_k];
@@ -381,8 +380,8 @@ pub const AudioVae = struct {
     inner: Decoder,
     compiled: ?zml.FnExe(decode) = null,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !AudioVae {
-        return .{ .inner = try .init(allocator, store) };
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, cfg: AudioConfig) !AudioVae {
+        return .{ .inner = try .init(allocator, store, cfg) };
     }
 
     pub fn deinit(self: *AudioVae, allocator: std.mem.Allocator) void {
@@ -441,7 +440,7 @@ pub const AudioVae = struct {
         });
         defer wav.deinit();
 
-        const samples = t * cfg.hop;
+        const samples = t * cfg.hop();
         const host_pcm = try run.allocator.alloc(f32, 2 * samples);
         errdefer run.allocator.free(host_pcm);
         try wav.toSlice(run.io, .init(zml.Shape.init(.{ .b = 2, .c = 1, .t = samples }, .f32), std.mem.sliceAsBytes(host_pcm)));

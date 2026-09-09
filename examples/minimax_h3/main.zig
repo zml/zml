@@ -79,6 +79,7 @@ fn writeOutputs(
     geo: config.Geometry,
     rgb: []const f32,
     pcm_f32: []const f32,
+    sample_rate: u32,
 ) !void {
     var out_dir: std.Io.Dir = if (std.fs.path.isAbsolute(out)) blk: {
         var root = try std.Io.Dir.openDirAbsolute(io, std.fs.path.dirname(out).?, .{});
@@ -124,8 +125,8 @@ fn writeOutputs(
         try writer.interface.writeInt(u32, 16, .little);
         try writer.interface.writeInt(u16, 1, .little);
         try writer.interface.writeInt(u16, channels, .little);
-        try writer.interface.writeInt(u32, config.audio_sample_rate, .little);
-        try writer.interface.writeInt(u32, config.audio_sample_rate * channels * 2, .little);
+        try writer.interface.writeInt(u32, sample_rate, .little);
+        try writer.interface.writeInt(u32, sample_rate * channels * 2, .little);
         try writer.interface.writeInt(u16, channels * 2, .little);
         try writer.interface.writeInt(u16, 16, .little);
         try writer.interface.writeAll("data");
@@ -159,6 +160,7 @@ pub fn main(init: std.process.Init) !void {
     // =============================================================================
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    const cfgs = try config.load(allocator, io, repo);
     const platform: *zml.Platform = try .auto(allocator, io, .{
         .physical_mesh = .{ .custom = config.Shardings.physicalMesh },
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
@@ -167,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const shardings: config.Shardings = try .init(platform);
-    const geo = config.Geometry.init(args.width, args.height, args.duration) catch |err| switch (err) {
+    const geo = config.Geometry.init(args.width, args.height, args.duration, cfgs.dit, cfgs.vae) catch |err| switch (err) {
         error.InvalidCanvas => stdx.flags.fatal(
             "--width/--height must be positive multiples of {d} with area at most {d}",
             .{ config.canvas_multiple, config.canvas_max_pixels },
@@ -210,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(tokens);
     log.info("prompt tokens={d}", .{tokens.len});
 
-    var packed_run = try pack.pack(allocator, geo, @intCast(tokens.len), args.steps);
+    var packed_run = try pack.pack(allocator, geo, @intCast(tokens.len), args.steps, cfgs.video_shift, cfgs.audio_shift);
     defer packed_run.deinit(allocator);
 
     // =============================================================================
@@ -235,13 +237,13 @@ pub fn main(init: std.process.Init) !void {
     try audio_ckpt.open(allocator, io, try std.fmt.bufPrint(&path_buf, "{s}/audio_vae/diffusion_pytorch_model.safetensors", .{args.model}));
     defer audio_ckpt.deinit();
 
-    var enc_model = try encoder.Encoder.init(allocator, enc_ckpt.store.view());
+    var enc_model = try encoder.Encoder.init(allocator, enc_ckpt.store.view(), cfgs.encoder);
     defer enc_model.deinit(allocator);
-    var dit_model = try dit.Dit.init(allocator, dit_ckpt.store.view());
+    var dit_model = try dit.Dit.init(allocator, dit_ckpt.store.view(), cfgs.dit);
     defer dit_model.deinit(allocator);
-    var vae_model = try vae.Vae.init(allocator, vae_ckpt.store.view());
+    var vae_model = try vae.Vae.init(allocator, vae_ckpt.store.view(), cfgs.vae);
     defer vae_model.deinit(allocator);
-    var audio_model = try audio.AudioVae.init(allocator, audio_ckpt.store.view());
+    var audio_model = try audio.AudioVae.init(allocator, audio_ckpt.store.view(), cfgs.audio);
     defer audio_model.deinit(allocator);
 
     // =============================================================================
@@ -278,5 +280,5 @@ pub fn main(init: std.process.Init) !void {
     const pcm_f32 = try audio_model.decodeAudio(&run, &audio_ckpt.store, geo, latents.audio);
     defer allocator.free(pcm_f32);
 
-    try writeOutputs(allocator, io, out, geo, rgb, pcm_f32);
+    try writeOutputs(allocator, io, out, geo, rgb, pcm_f32, cfgs.audio.sampling_rate);
 }
