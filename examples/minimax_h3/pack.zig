@@ -175,8 +175,9 @@ fn thwcAt(tt: u32, hh: u32, ww: u32, ch: usize, h: u32, w: u32, c: u32) usize {
     return (((@as(usize, tt) * h + hh) * w + ww) * c) + ch;
 }
 
-/// Scatter 1×2×2 DiT tokens `{s, 96}` back onto the THWC latent grid.
-fn unpatchWalk(t: u32, h: u32, w: u32, c: u32, patch: [3]i64, src: []const f32, dst: []f32) void {
+/// DiT video tokens `{s, 96}` → THWC latents for the VAE.
+pub fn unpatchify(allocator: std.mem.Allocator, src: []const f32, t: u32, h: u32, w: u32, c: u32, patch: [3]i64) ![]f32 {
+    const out = try allocator.alloc(f32, @as(usize, t) * h * w * c);
     const pt: u32 = @intCast(patch[0]);
     const ph: u32 = @intCast(patch[1]);
     const pw: u32 = @intCast(patch[2]);
@@ -194,7 +195,7 @@ fn unpatchWalk(t: u32, h: u32, w: u32, c: u32, patch: [3]i64, src: []const f32, 
                         for (0..ph) |dh| {
                             for (0..pw) |dw| {
                                 const base = thwcAt(tt + @as(u32, @intCast(dt)), hh + @as(u32, @intCast(dh)), ww + @as(u32, @intCast(dw)), ch, h, w, c);
-                                dst[base] = src[row * width + i];
+                                out[base] = src[row * width + i];
                                 i += 1;
                             }
                         }
@@ -204,12 +205,6 @@ fn unpatchWalk(t: u32, h: u32, w: u32, c: u32, patch: [3]i64, src: []const f32, 
             }
         }
     }
-}
-
-/// DiT video tokens `{s, 96}` → THWC latents for the VAE.
-pub fn unpatchify(allocator: std.mem.Allocator, src: []const f32, t: u32, h: u32, w: u32, c: u32, patch: [3]i64) ![]f32 {
-    const out = try allocator.alloc(f32, @as(usize, t) * h * w * c);
-    unpatchWalk(t, h, w, c, patch, src, out);
     return out;
 }
 

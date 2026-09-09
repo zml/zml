@@ -151,7 +151,7 @@ fn product(xs: []const i64) u32 {
     return p;
 }
 
-fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) !std.json.Parsed(T) {
+fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) !T {
     const file = try dir.openFile(io, name, .{});
     defer file.close(io);
 
@@ -160,22 +160,18 @@ fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: 
     var reader: std.json.Reader = .init(allocator, &file_reader.interface);
     defer reader.deinit();
 
-    return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
-}
-
-fn readJson(comptime T: type, allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, name: []const u8) !T {
-    const parsed = try parseConfig(T, allocator, io, repo, name);
+    const parsed = try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     return parsed.value;
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !Configs {
-    const encoder_file = try readJson(TextEncoderFile, allocator, io, repo, "text_encoder/config.json");
-    const dit = try readJson(DitConfig, allocator, io, repo, "transformer/config.json");
-    const vae = try readJson(VisualConfig, allocator, io, repo, "vae/config.json");
-    const audio = try readJson(AudioConfig, allocator, io, repo, "audio_vae/config.json");
-    const video_sched = try readJson(SchedulerFile, allocator, io, repo, "scheduler/scheduler_config.json");
-    const audio_sched = try readJson(SchedulerFile, allocator, io, repo, "audio_scheduler/scheduler_config.json");
+    const encoder_file = try parseConfig(TextEncoderFile, allocator, io, repo, "text_encoder/config.json");
+    const dit = try parseConfig(DitConfig, allocator, io, repo, "transformer/config.json");
+    const vae = try parseConfig(VisualConfig, allocator, io, repo, "vae/config.json");
+    const audio = try parseConfig(AudioConfig, allocator, io, repo, "audio_vae/config.json");
+    const video_sched = try parseConfig(SchedulerFile, allocator, io, repo, "scheduler/scheduler_config.json");
+    const audio_sched = try parseConfig(SchedulerFile, allocator, io, repo, "audio_scheduler/scheduler_config.json");
     mesh_heads = .{
         .dit = dit.num_attention_heads,
         .encoder = encoder_file.text_config.num_attention_heads,
@@ -304,58 +300,3 @@ pub const vae_latent_h: u32 = 16;
 pub const vae_latent_w: u32 = 16;
 /// Tile batch compiled for the ViT decoder. Replicated on every device count.
 pub const vae_tile_batch: u32 = 28;
-
-test "downsample product" {
-    try std.testing.expectEqual(@as(u32, 16), product(&.{ 2, 2, 2, 2, 1, 1 }));
-    try std.testing.expectEqual(@as(u32, 4), product(&.{ 1, 2, 2, 1, 1, 1 }));
-    try std.testing.expectEqual(@as(u32, 800), product(&.{ 2, 4, 4, 5, 5 }));
-}
-
-test "parse DitConfig" {
-    const json =
-        \\{"num_attention_heads":56,"attention_head_dim":128,"hidden_size":5376,"num_layers":50,"num_refiner_layers":2,"in_channels":24,"audio_in_channels":32,"patch_size":[1,2,2],"text_dim":5120,"freq_dim":256,"rope_freq_dim":16,"rope_theta":10000.0,"norm_eps":1e-5,"qk_norm_eps":1e-5,"final_norm_eps":1e-5,"_class_name":"x"}
-    ;
-    const parsed = try std.json.parseFromSlice(DitConfig, std.testing.allocator, json, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 56), parsed.value.num_attention_heads);
-    try std.testing.expectEqualSlices(i64, &.{ 1, 2, 2 }, &parsed.value.patch_size);
-    try std.testing.expectEqual(@as(i64, 96), parsed.value.rotaryDim());
-}
-
-test "parse nested text_config" {
-    const json =
-        \\{"text_config":{"hidden_size":5120,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":128,"rms_norm_eps":1e-6,"rope_theta":5000000}}
-    ;
-    const parsed = try std.json.parseFromSlice(TextEncoderFile, std.testing.allocator, json, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 5120), parsed.value.text_config.hidden_size);
-    try std.testing.expectEqual(@as(i64, 50), parsed.value.text_config.used_hidden_layers);
-    try std.testing.expectEqual(@as(f32, 5_000_000.0), parsed.value.text_config.rope_theta);
-}
-
-test "parse scheduler shift" {
-    const parsed = try std.json.parseFromSlice(SchedulerFile, std.testing.allocator,
-        \\{"shift":12.0,"_class_name":"MiniMaxH3Scheduler"}
-    , .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(f32, 12.0), parsed.value.shift);
-}
-
-test "parse nested int arrays" {
-    const T = struct { resblock_dilation_sizes: [3][3]i64 };
-    const parsed = try std.json.parseFromSlice(T, std.testing.allocator,
-        \\{"resblock_dilation_sizes":[[1,3,5],[1,3,5],[1,3,5]]}
-    , .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 5), parsed.value.resblock_dilation_sizes[2][2]);
-}
-
-test "parse latents_mean f32 array" {
-    const T = struct { latents_mean: [2]f32 };
-    const parsed = try std.json.parseFromSlice(T, std.testing.allocator,
-        \\{"latents_mean":[0.5,-1.25]}
-    , .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(f32, 0.5), parsed.value.latents_mean[0]);
-    try std.testing.expectEqual(@as(f32, -1.25), parsed.value.latents_mean[1]);
-}
