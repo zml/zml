@@ -32,28 +32,6 @@ const Latents = pack.Latents;
 
 const Rotary = struct { cos: zml.Tensor, sin: zml.Tensor };
 
-const Ada = struct {
-    shift: zml.Tensor,
-    scale: zml.Tensor,
-    gate: zml.Tensor,
-
-    fn apply(self: Ada, x: zml.Tensor) zml.Tensor {
-        return shiftScale(x, self.shift, self.scale);
-    }
-
-    fn gated(self: Ada, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
-        return residualGate(x, self.gate, y);
-    }
-};
-
-fn adaPair(mods: zml.Tensor) struct { msa: Ada, mlp: Ada } {
-    const c = mods.chunkExact(.k, 6);
-    return .{
-        .msa = .{ .shift = c[0], .scale = c[1], .gate = c[2] },
-        .mlp = .{ .shift = c[3], .scale = c[4], .gate = c[5] },
-    };
-}
-
 fn shiftScale(x: zml.Tensor, shift: zml.Tensor, scale: zml.Tensor) zml.Tensor {
     const dt = x.dtype();
     return x.mul(zml.Tensor.scalar(1.0, dt).add(scale.squeeze(.k).convert(dt).broad(x.shape())))
@@ -62,10 +40,6 @@ fn shiftScale(x: zml.Tensor, shift: zml.Tensor, scale: zml.Tensor) zml.Tensor {
 
 fn residualGate(x: zml.Tensor, gate: zml.Tensor, y: zml.Tensor) zml.Tensor {
     return x.add(gate.squeeze(.k).convert(y.dtype()).broad(y.shape()).mul(y));
-}
-
-fn sliceS(x: zml.Tensor, s: zml.Tensor.Slice) zml.Tensor {
-    return x.slice(.s, s);
 }
 
 /// Dense `{b,s,d}` pack: text | audio | video. Update-slice matches scatter's FA2 layout.
@@ -207,14 +181,11 @@ fn AdaLn(comptime expand: i64, comptime modalities: i64) type {
             };
         }
 
-        pub fn forward(self: Self, temb: zml.Tensor) zml.Tensor {
-            const raw = self.linear.forward(temb.silu().convert(self.linear.weight.dtype()))
-                .splitAxis(.dout, .{ .mod = modalities, .k = expand, .d = self.hidden_size });
-            return if (comptime modalities == 1) raw.squeeze(.mod) else raw;
-        }
-
         pub fn prepare(input: PrepareInput) PrepareOutput {
-            return .{ .table = input.adaln.forward(input.temb).splitAxis(.n, .{ .t = input.steps, .n = input.slots }) };
+            const raw = input.adaln.linear.forward(input.temb.silu().convert(input.adaln.linear.weight.dtype()))
+                .splitAxis(.dout, .{ .mod = modalities, .k = expand, .d = input.adaln.hidden_size });
+            const table = if (comptime modalities == 1) raw.squeeze(.mod) else raw;
+            return .{ .table = table.splitAxis(.n, .{ .t = input.steps, .n = input.slots }) };
         }
     };
 }
@@ -226,13 +197,13 @@ const FinalAdaLn = AdaLn(2, 1);
 // Transformer block
 // =============================================================================
 
-const BlockCore = struct {
+const Block = struct {
     norm1: zml.nn.RmsNorm,
     attn: Attention,
     norm2: zml.nn.RmsNorm,
     mlp: SwiGlu,
     pub const Input = struct {
-        layer: BlockCore,
+        layer: Block,
         hidden: zml.Tensor,
         table: zml.Tensor,
         step: zml.Tensor,
@@ -243,54 +214,7 @@ const BlockCore = struct {
     };
     pub const Output = struct { hidden: zml.Tensor };
 
-    pub fn forward(input: Input) Output {
-        const self = input.layer;
-        const mods = input.table.gather(.{ .t = input.step }, .{}).merge(.{ .n = .{ .n, .mod } });
-        const pair = adaPair(mods.gather(.{ .n = input.adaln_indices }, .{}));
-
-        const residual = input.hidden.withPartitioning(.{ .d = .replicated });
-        const attn_out = self.attn.forward(
-            pair.msa.apply(self.norm1.forward(residual)),
-            .{ .cos = input.cos, .sin = input.sin },
-            input.attn_backend,
-        );
-        const x1 = pair.msa.gated(residual, attn_out).withPartitioning(.{ .d = .replicated });
-        const mlp_out = self.mlp.forward(pair.mlp.apply(self.norm2.forward(x1))).rename(.{ .dout = .d });
-        return .{
-            .hidden = pair.mlp.gated(x1, mlp_out).withPartitioning(.{ .d = .replicated }).reuseBuffer(input.hidden),
-        };
-    }
-};
-
-/// Weights for one layer: AdaLN projector + `BlockCore`.
-const DitBlock = struct {
-    core: BlockCore,
-    adaln: BlockAdaLn,
-
-    pub fn init(store: zml.io.TensorStore.View, cfg: DitConfig) DitBlock {
-        return .{
-            .core = .{
-                .norm1 = rms(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
-                .attn = .init(store.withPrefix("attn"), cfg),
-                .norm2 = rms(store.withPrefix("norm2"), .{.d}, cfg.norm_eps),
-                .mlp = .init(store.withPrefix("ff")),
-            },
-            .adaln = .init(store.withPrefix("adaln_proj"), cfg.hidden_size),
-        };
-    }
-};
-
-// =============================================================================
-// Text refiner
-// =============================================================================
-
-const TokenRefinerBlock = struct {
-    norm1: zml.nn.RmsNorm,
-    attn: Attention,
-    norm2: zml.nn.RmsNorm,
-    mlp: SwiGlu,
-
-    pub fn init(store: zml.io.TensorStore.View, cfg: DitConfig) TokenRefinerBlock {
+    pub fn init(store: zml.io.TensorStore.View, cfg: DitConfig) Block {
         return .{
             .norm1 = rms(store.withPrefix("norm1"), .{.d}, cfg.norm_eps),
             .attn = .init(store.withPrefix("attn"), cfg),
@@ -299,34 +223,30 @@ const TokenRefinerBlock = struct {
         };
     }
 
-    pub fn forward(self: TokenRefinerBlock, x: zml.Tensor, backend: zml.attention.Backend) zml.Tensor {
+    pub fn forward(input: Input) Output {
+        const self = input.layer;
+        const c = input.table.gather(.{ .t = input.step }, .{}).merge(.{ .n = .{ .n, .mod } })
+            .gather(.{ .n = input.adaln_indices }, .{}).chunkExact(.k, 6);
+
+        const residual = input.hidden.withPartitioning(.{ .d = .replicated });
+        const attn_out = self.attn.forward(
+            shiftScale(self.norm1.forward(residual), c[0], c[1]),
+            .{ .cos = input.cos, .sin = input.sin },
+            input.attn_backend,
+        );
+        const x1 = residualGate(residual, c[2], attn_out).withPartitioning(.{ .d = .replicated });
+        const mlp_out = self.mlp.forward(shiftScale(self.norm2.forward(x1), c[3], c[4])).rename(.{ .dout = .d });
+        return .{
+            .hidden = residualGate(x1, c[5], mlp_out).withPartitioning(.{ .d = .replicated }).reuseBuffer(input.hidden),
+        };
+    }
+
+    fn refine(self: Block, x: zml.Tensor, backend: zml.attention.Backend) zml.Tensor {
         const residual = x.withPartitioning(.{ .d = .replicated });
         const x1 = residual.add(self.attn.forward(self.norm1.forward(residual), null, backend));
         return x1.add(self.mlp.forward(self.norm2.forward(x1)).rename(.{ .dout = .d }))
             .withPartitioning(.{ .d = .replicated })
             .reuseBuffer(x);
-    }
-};
-
-// =============================================================================
-// Final layer
-// =============================================================================
-
-/// Weights for the finish kernel. AdaLN here is time-only (`expand=2`,
-/// `modalities=1`); block AdaLN is 3 modalities × 6 shift/scale/gate.
-const FinalLayer = struct {
-    norm: zml.nn.RmsNorm,
-    adaln: FinalAdaLn,
-    video_out: zml.nn.Linear,
-    audio_out: zml.nn.Linear,
-
-    pub fn init(store: zml.io.TensorStore.View, cfg: DitConfig) FinalLayer {
-        return .{
-            .norm = rms(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
-            .adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size),
-            .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
-            .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
-        };
     }
 };
 
@@ -337,7 +257,7 @@ const FinalLayer = struct {
 /// Linear `context_embedder` then two refiner blocks.
 const TextPrep = struct {
     condition_proj: zml.nn.Linear,
-    blocks: []TokenRefinerBlock,
+    blocks: []Block,
     final_norm: zml.nn.RmsNorm,
     pub const Input = struct { model: TextPrep, text: zml.Tensor, attn_backend: zml.attention.Backend };
     pub const Output = struct { text: zml.Tensor };
@@ -345,7 +265,7 @@ const TextPrep = struct {
     /// Nested `blocks` slice is not freed by `Buffer.deinitAll`.
     fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
         zml.nn.Linear.unloadBuffers(&self.condition_proj);
-        for (self.blocks) |*block| zml.Buffer.deinitAll(TokenRefinerBlock, block);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(Block, block);
         allocator.free(self.blocks);
         self.final_norm.weight.deinit();
     }
@@ -353,7 +273,7 @@ const TextPrep = struct {
     pub fn forward(input: Input) Output {
         var text = input.model.condition_proj.forward(input.text.convert(input.model.condition_proj.weight.dtype())).rename(.{ .dout = .d });
         text = text.convert(input.model.final_norm.weight.dtype());
-        for (input.model.blocks) |block| text = block.forward(text, input.attn_backend);
+        for (input.model.blocks) |block| text = block.refine(text, input.attn_backend);
         return .{ .text = input.model.final_norm.forward(text) };
     }
 };
@@ -380,14 +300,14 @@ const PatchEmbed = struct {
 };
 
 /// Final RMS + time-slot AdaLN, then fp32 video/audio heads on those rows only.
-const FinishCore = struct {
+const Finish = struct {
     norm: zml.nn.RmsNorm,
     video_out: zml.nn.Linear,
     audio_out: zml.nn.Linear,
     text_len: i64,
     audio_len: i64,
     pub const Input = struct {
-        model: FinishCore,
+        model: Finish,
         hidden: zml.Tensor,
         table: zml.Tensor,
         step: zml.Tensor,
@@ -405,10 +325,10 @@ const FinishCore = struct {
         const video_s: zml.Tensor.Slice = .{ .start = audio_end };
         return .{
             .video = input.model.video_out.forward(
-                shiftScale(sliceS(n, video_s), sliceS(shift, video_s), sliceS(scale, video_s)).convert(head_dt),
+                shiftScale(n.slice(.s, video_s), shift.slice(.s, video_s), scale.slice(.s, video_s)).convert(head_dt),
             ).rename(.{ .dout = .d }),
             .audio = input.model.audio_out.forward(
-                shiftScale(sliceS(n, audio_s), sliceS(shift, audio_s), sliceS(scale, audio_s)).convert(head_dt),
+                shiftScale(n.slice(.s, audio_s), shift.slice(.s, audio_s), scale.slice(.s, audio_s)).convert(head_dt),
             ).rename(.{ .dout = .d }),
         };
     }
@@ -457,10 +377,14 @@ pub const Dit = struct {
     audio_proj: zml.nn.Linear,
     condition_proj: zml.nn.Linear,
     time_embedder: TimeEmbedder,
-    refiner_blocks: []TokenRefinerBlock,
+    refiner_blocks: []Block,
     refiner_norm: zml.nn.RmsNorm,
-    blocks: []DitBlock,
-    final_layer: FinalLayer,
+    blocks: []Block,
+    adalns: []BlockAdaLn,
+    final_adaln: FinalAdaLn,
+    final_norm: zml.nn.RmsNorm,
+    video_out: zml.nn.Linear,
+    audio_out: zml.nn.Linear,
     cfg: DitConfig,
     compiled: ?Compiled = null,
 
@@ -471,8 +395,8 @@ pub const Dit = struct {
         prepare_temb: zml.FnExe(TimeEmbedder.forward),
         prepare_adaln: zml.FnExe(BlockAdaLn.prepare),
         prepare_final_adaln: zml.FnExe(FinalAdaLn.prepare),
-        block: zml.FnExe(BlockCore.forward),
-        finish: zml.FnExe(FinishCore.forward),
+        block: zml.FnExe(Block.forward),
+        finish: zml.FnExe(Finish.forward),
         apply_video: zml.FnExe(Euler.apply),
         apply_audio: zml.FnExe(Euler.apply),
 
@@ -492,13 +416,20 @@ pub const Dit = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !Dit {
         const cfg: DitConfig = .{};
-        const blocks = try allocator.alloc(DitBlock, @intCast(cfg.num_layers));
+        const n_layers: usize = @intCast(cfg.num_layers);
+        const blocks = try allocator.alloc(Block, n_layers);
         errdefer allocator.free(blocks);
+        const adalns = try allocator.alloc(BlockAdaLn, n_layers);
+        errdefer allocator.free(adalns);
         const refiner = store.withPrefix("token_refiner");
-        const refiner_blocks = try allocator.alloc(TokenRefinerBlock, @intCast(cfg.num_refiner_layers));
+        const refiner_blocks = try allocator.alloc(Block, @intCast(cfg.num_refiner_layers));
         errdefer allocator.free(refiner_blocks);
         for (refiner_blocks, 0..) |*block, i| block.* = .init(refiner.withPrefix("refiner_blocks").withLayer(i), cfg);
-        for (blocks, 0..) |*block, i| block.* = .init(store.withPrefix("transformer_blocks").withLayer(i), cfg);
+        for (blocks, adalns, 0..) |*block, *adaln, i| {
+            const layer = store.withPrefix("transformer_blocks").withLayer(i);
+            block.* = .init(layer, cfg);
+            adaln.* = .init(layer.withPrefix("adaln_proj"), cfg.hidden_size);
+        }
         return .{
             .video_proj = linear(store, "proj_in.weight", "proj_in.bias", .replicated, .replicated),
             .audio_proj = linear(store, "audio_proj_in.weight", "audio_proj_in.bias", .replicated, .replicated),
@@ -507,7 +438,11 @@ pub const Dit = struct {
             .refiner_blocks = refiner_blocks,
             .refiner_norm = rms(refiner.withPrefix("final_norm"), .{.d}, cfg.final_norm_eps),
             .blocks = blocks,
-            .final_layer = FinalLayer.init(store, cfg),
+            .adalns = adalns,
+            .final_adaln = .init(store.withPrefix("norm_out"), cfg.hidden_size),
+            .final_norm = rms(store.withPrefix("norm_out.norm"), .{.d}, cfg.final_norm_eps),
+            .video_out = linear(store, "proj_out.weight", "proj_out.bias", .replicated, .replicated),
+            .audio_out = linear(store, "audio_proj_out.weight", "audio_proj_out.bias", .replicated, .replicated),
             .cfg = cfg,
         };
     }
@@ -516,18 +451,19 @@ pub const Dit = struct {
         if (self.compiled) |*c| c.deinit();
         allocator.free(self.refiner_blocks);
         allocator.free(self.blocks);
+        allocator.free(self.adalns);
     }
 
     /// Ten kernels: text, RoPE, patch pack, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
     /// Shapes come from `packed_run`.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
         const attn = zml.attention.Backend.auto(run.platform);
-        const layer = self.blocks[0].core;
+        const layer = self.blocks[0];
         const seq_len: u32 = packed_run.layout.seqLen();
         const steps: u32 = @intCast(packed_run.video.sigmas.len - 1);
         const flat_n: i64 = @intCast(steps * config.timestep_slot_count);
         const temb_dim = self.time_embedder.proj_out.weight.dim(.dout);
-        log.info("dit attn={s} (dense is FA2) seq={d} audio_tokens={d} devices={d}", .{
+        log.info("dit attn={s} seq={d} audio_tokens={d} devices={d}", .{
             @tagName(attn),
             seq_len,
             geo.audio_tokens,
@@ -586,7 +522,7 @@ pub const Dit = struct {
             .shardings = &run.mesh,
             .program_name = "minimax_h3_prepare_adaln",
         }, .{.{
-            .adaln = self.blocks[0].adaln,
+            .adaln = self.adalns[0],
             .temb = .init(.{ .n = flat_n, .d = temb_dim }, .f32),
             .steps = steps,
             .slots = config.timestep_slot_count,
@@ -596,14 +532,14 @@ pub const Dit = struct {
             .shardings = &run.mesh,
             .program_name = "minimax_h3_prepare_final_adaln",
         }, .{.{
-            .adaln = self.final_layer.adaln,
+            .adaln = self.final_adaln,
             .temb = .init(.{ .n = flat_n, .d = temb_dim }, .f32),
             .steps = steps,
             .slots = config.timestep_slot_count,
         }});
         errdefer prepare_final_adaln.deinit();
 
-        const block_exe = try zml.FnExe(BlockCore.forward).compile(run.allocator, run.io, run.platform, .{
+        const block_exe = try zml.FnExe(Block.forward).compile(run.allocator, run.io, run.platform, .{
             .shardings = &run.mesh,
             .program_name = "minimax_h3_block",
         }, .{.{
@@ -617,14 +553,14 @@ pub const Dit = struct {
             .attn_backend = attn,
         }});
         errdefer block_exe.deinit();
-        const finish_exe = try zml.FnExe(FinishCore.forward).compile(run.allocator, run.io, run.platform, .{
+        const finish_exe = try zml.FnExe(Finish.forward).compile(run.allocator, run.io, run.platform, .{
             .shardings = &run.mesh,
             .program_name = "minimax_h3_finish",
         }, .{.{
             .model = .{
-                .norm = self.final_layer.norm,
-                .video_out = self.final_layer.video_out,
-                .audio_out = self.final_layer.audio_out,
+                .norm = self.final_norm,
+                .video_out = self.video_out,
+                .audio_out = self.audio_out,
                 .text_len = text_len,
                 .audio_len = geo.audio_tokens,
             },
@@ -758,29 +694,29 @@ pub const Dit = struct {
             for (tables[0..tables_filled]) |*tb| tb.deinit();
             allocator.free(tables);
         }
-        var cores = try allocator.alloc(zml.Bufferized(BlockCore), n_blocks);
+        var cores = try allocator.alloc(zml.Bufferized(Block), n_blocks);
         var cores_filled: usize = 0;
         errdefer {
-            for (cores[0..cores_filled]) |*core| zml.Buffer.deinitAll(BlockCore, core);
+            for (cores[0..cores_filled]) |*core| zml.Buffer.deinitAll(Block, core);
             allocator.free(cores);
         }
         var loader: zml.io.Loader = try .init(allocator, run.platform, ops.loader_opts);
         defer loader.deinit();
         const AdaLnRunner = zml.FnExe(BlockAdaLn.prepare).Runner(.{.adaln});
-        for (self.blocks, tables, cores) |block, *table, *core| {
-            var adaln_bufs = try load(run, store, BlockAdaLn, &block.adaln, &loader);
+        for (self.adalns, self.blocks, tables, cores) |adaln, block, *table, *core| {
+            var adaln_bufs = try load(run, store, BlockAdaLn, &adaln, &loader);
             defer zml.Buffer.deinitAll(BlockAdaLn, &adaln_bufs);
             var adaln_runner = try AdaLnRunner.init(&compiled.prepare_adaln, allocator, .{ .adaln = adaln_bufs });
             defer adaln_runner.deinit(allocator);
             adaln_runner.run(io, .{ .inputs = .{ .temb = all_temb }, .outputs = .{ .table = table }, .opts = .{ .wait = true } });
             tables_filled += 1;
-            core.* = try load(run, store, BlockCore, &block.core, &loader);
+            core.* = try load(run, store, Block, &block, &loader);
             cores_filled += 1;
         }
 
         var final_table: zml.Buffer = undefined;
         {
-            var final_adaln = try load(run, store, FinalAdaLn, &self.final_layer.adaln, null);
+            var final_adaln = try load(run, store, FinalAdaLn, &self.final_adaln, null);
             var final_runner = try zml.FnExe(FinalAdaLn.prepare).Runner(.{.adaln}).init(&compiled.prepare_final_adaln, allocator, .{ .adaln = final_adaln });
             defer final_runner.deinit(allocator);
             final_runner.run(io, .{ .inputs = .{ .temb = all_temb }, .outputs = .{ .table = &final_table }, .opts = .{ .wait = true } });
@@ -796,19 +732,19 @@ pub const Dit = struct {
         defer zml.Buffer.deinitAll(PatchEmbed, &patch_bufs);
         var patch_runner = try zml.FnExe(PatchEmbed.forward).Runner(.{.model}).init(&compiled.embed_patches, allocator, .{ .model = patch_bufs });
         defer patch_runner.deinit(allocator);
-        const finish_part: FinishCore = .{
-            .norm = self.final_layer.norm,
-            .video_out = self.final_layer.video_out,
-            .audio_out = self.final_layer.audio_out,
+        const finish_part: Finish = .{
+            .norm = self.final_norm,
+            .video_out = self.video_out,
+            .audio_out = self.audio_out,
             .text_len = text_len,
             .audio_len = geo.audio_tokens,
         };
-        var finish_bufs = try load(run, store, FinishCore, &finish_part, null);
-        defer zml.Buffer.deinitAll(FinishCore, &finish_bufs);
-        var finish_runner = try zml.FnExe(FinishCore.forward).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = finish_bufs });
+        var finish_bufs = try load(run, store, Finish, &finish_part, null);
+        defer zml.Buffer.deinitAll(Finish, &finish_bufs);
+        var finish_runner = try zml.FnExe(Finish.forward).Runner(.{.model}).init(&compiled.finish, allocator, .{ .model = finish_bufs });
         defer finish_runner.deinit(allocator);
 
-        const BlockRunner = zml.FnExe(BlockCore.forward).Runner(.{.layer});
+        const BlockRunner = zml.FnExe(Block.forward).Runner(.{.layer});
         const block_runners = try allocator.alloc(BlockRunner, n_blocks);
         var runners_ready: usize = 0;
         defer {
@@ -937,7 +873,7 @@ pub const Dit = struct {
         log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
         for (tables) |*tb| tb.deinit();
         allocator.free(tables);
-        for (cores) |*core| zml.Buffer.deinitAll(BlockCore, core);
+        for (cores) |*core| zml.Buffer.deinitAll(Block, core);
         allocator.free(cores);
         return .{ .video = video, .audio = audio };
     }
