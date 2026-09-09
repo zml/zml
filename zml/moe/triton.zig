@@ -320,6 +320,18 @@ pub fn fusedExpertsImpl(
             Tensor.scalar(1.0, .f32),
         },
         .block128_fp8 => blk: {
+            const fused_swiglu = switch (zml.Compiler.current().platform.target) {
+                .cuda, .rocm => options.activation == .silu,
+                else => false,
+            };
+            if (fused_swiglu) {
+                break :blk siluAndQuantizePerTokenGroupFp8(
+                    first_out,
+                    128,
+                    down.dtype(),
+                    options.activation_threshold,
+                );
+            }
             const activated = applyActivation(first_out, options.activation, options.activation_threshold);
             break :blk quantizePerTokenGroupFp8(activated, 128, down.dtype());
         },
@@ -361,15 +373,30 @@ pub fn fusedExpertsImpl(
     );
 
     // Materialize each expert's down projection as BF16, then apply router
-    // weights and accumulate in FP32.
-    const output = reduceExpertRoutes(
-        second_out,
-        weights,
-        ids,
-        opts.expert_map,
-        num_experts,
-        gate_up.dim(.expert),
-    );
+    // weights and accumulate in FP32. The fused reduction adds routes in
+    // source order and skips invalid/non-local routes before loading them.
+    const fused_reduction = weights.dtype() == .f32 and switch (zml.Compiler.current().platform.target) {
+        .cuda, .rocm => true,
+        else => false,
+    };
+    const output = if (fused_reduction)
+        fusedReduceExpertRoutes(
+            second_out,
+            weights,
+            ids,
+            opts.expert_map,
+            num_experts,
+            gate_up.dim(.expert),
+        )
+    else
+        reduceExpertRoutes(
+            second_out,
+            weights,
+            ids,
+            opts.expert_map,
+            num_experts,
+            gate_up.dim(.expert),
+        );
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }
@@ -407,6 +434,68 @@ fn reduceExpertRoutes(
         .convert(.f32)
         .mul(active_weights.convert(.f32).broad(routes.shape().withDtype(.f32)));
     return weighted_routes.sum(.topk).squeeze(.topk).convert(.bf16);
+}
+
+/// Fused route weighting and reduction in source order for BF16 expert
+/// outputs and FP32 router weights on CUDA and ROCm.
+fn fusedReduceExpertRoutes(
+    routes: Tensor,
+    weights: Tensor,
+    ids: Tensor,
+    expert_map: ?Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+) Tensor {
+    const num_tokens: usize = @intCast(routes.dim(.token));
+    const hidden_size: usize = @intCast(routes.dim(.out));
+    const block_d: usize = @intCast(std.math.gcd(@as(u64, @intCast(hidden_size)), 1024));
+    const map_operand = expert_map orelse ids;
+    return kernels.FusedReduceExpertRoutes.Kernel.call(
+        .{
+            .routes = routes,
+            .weights = weights,
+            .topk_ids = ids,
+            .expert_map = map_operand,
+        },
+        .{ .output = routes.shape().remove(.topk).withDtype(.bf16) },
+        .{
+            .cfg = .{
+                .num_tokens = num_tokens,
+                .top_k = @intCast(ids.dim(.topk)),
+                .hidden_size = hidden_size,
+                .global_num_experts = @intCast(global_num_experts),
+                .local_num_experts = @intCast(local_num_experts),
+                .block_d = block_d,
+                .has_expert_map = expert_map != null,
+            },
+            .grid = .{
+                @intCast(@divExact(hidden_size, block_d)),
+                @intCast(@min(num_tokens, 1024)),
+                1,
+            },
+            .num_warps = 2,
+            .num_stages = 1,
+        },
+    ).output;
+}
+
+test "fused route reduction emits valid Triton IR for different top-k counts" {
+    for ([_]usize{ 1, 3, 8, 16 }) |top_k| {
+        for ([_]bool{ false, true }) |has_expert_map| {
+            // emit verifies the generated MLIR, including the accumulator
+            // carried through each route's conditional branch.
+            const ir = try kernels.FusedReduceExpertRoutes.Kernel.emit(std.testing.allocator, .{
+                .num_tokens = 2,
+                .top_k = top_k,
+                .hidden_size = 128,
+                .global_num_experts = 288,
+                .local_num_experts = if (has_expert_map) 36 else 288,
+                .block_d = 128,
+                .has_expert_map = has_expert_map,
+            });
+            defer std.testing.allocator.free(ir);
+        }
+    }
 }
 
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
@@ -674,6 +763,52 @@ pub fn prepareBlock128Fp8Activation(x: Tensor, output_dtype: DataType) zml.quant
         .scales = scale.reshape(x.shape().setDim(1, @divExact(x.dim(1), 128)).withDtype(.f32)),
         .global_scale = null,
     };
+}
+
+fn siluAndQuantizePerTokenGroupFp8(
+    x: Tensor,
+    group_size: i64,
+    output_dtype: DataType,
+    activation_threshold: ?f32,
+) struct { Tensor, Tensor } {
+    stdx.debug.assert(x.rank() == 2, "expected a rank-2 SwiGLU input, got {f}", .{x.shape()});
+    const output_columns = @divExact(x.dim(1), 2);
+    stdx.debug.assert(@mod(output_columns, group_size) == 0, "SwiGLU output width must be divisible by group size {d}, got {d}", .{ group_size, output_columns });
+
+    const groups_per_row = @divExact(output_columns, group_size);
+    const scale_dtype: DataType = .f32;
+    const fp8_max: f32 = switch (output_dtype) {
+        .f8e4m3fn => 448.0,
+        .f8e4m3fnuz => 224.0,
+        else => stdx.debug.panic("unsupported FP8 activation dtype: {}", .{output_dtype}),
+    };
+    const outs = kernels.SiluAndQuantizePerTokenGroupFp8.Kernel.call(
+        .{
+            .x = x,
+        },
+        .{
+            .q = Shape.init(.{ .token = x.dim(0), .feature = output_columns }, output_dtype),
+            .scale = Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype),
+        },
+        .{
+            .cfg = .{
+                .input_dtype = toDType(x.dtype()),
+                .output_dtype = toDType(output_dtype),
+                .scale_dtype = toDType(scale_dtype),
+                .input_columns = @intCast(x.dim(1)),
+                .output_columns = @intCast(output_columns),
+                .block = @intCast(group_size),
+                .fp8_min = -fp8_max,
+                .fp8_max = fp8_max,
+                .eps = rawScaleEpsilon,
+                .activation_threshold = activation_threshold,
+            },
+            .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
+            .num_stages = 1,
+            .num_warps = 1,
+        },
+    );
+    return .{ outs.q, outs.scale };
 }
 
 // =============================================================================
