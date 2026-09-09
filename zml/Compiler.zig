@@ -740,15 +740,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_subchannel_dequantisation_fusion", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
             },
-            .rocm => {
-                // Use lld from libllvm instead of invoking the ld.lld binary.
-                // This saves us from having to sandbox it.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
-
-                // Do not enable the FUSION command buffer to avoid some weird crashes.
-                // This is what AMD recommendeds in the meantime.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
-            },
+            .rocm => {},
             .metal => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
             },

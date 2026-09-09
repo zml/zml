@@ -217,12 +217,12 @@ PJRT_CUDA_RELEASE = "manual-2026-09-08T13-23-00Z"
 
 _PJRT_CUDA_ASSETS = {
     "amd64": {
-        "sha256": "e86ee894daeeeb83c95347bcda89df4317185d5e9ef9ff9290afa471f57a135a",
-        "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
+        "sha256": "f2e8e32547a9929de854d61a4e3c31b92fe7acba2447e5d508cb4b239012723d",
+        "url": "https://mirror.zml.ai/pjrt-plugins/20260909.69bab05e48b6.14.1/pjrt-cuda-linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "60aae4b73193d980a04d478f85038f4c6069f2dd9559a6549a8f14c420e0d857",
-        "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
+        "sha256": "03af2a0b2bf60c4b111947af00a819ccd67bcc9fe22548bd1573593dcfe69a79",
+        "url": "https://mirror.zml.ai/pjrt-plugins/20260909.69bab05e48b6.14.1/pjrt-cuda-linux-arm64.tar.gz",
     },
 }
 
