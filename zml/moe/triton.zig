@@ -73,43 +73,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    w1_zero_bias: ?Tensor = null,
-    w2_zero_bias: ?Tensor = null,
-
-    pub const InitOptions = struct {
-        w1_zero_bias_shape: ?Shape = null,
-        w2_zero_bias_shape: ?Shape = null,
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return .{
-            .w1_zero_bias = if (opts.w1_zero_bias_shape) |shape| Tensor.fromShape(shape) else null,
-            .w2_zero_bias = if (opts.w2_zero_bias_shape) |shape| Tensor.fromShape(shape) else null,
-        };
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        const replicated_sharding = platform.replicated_sharding;
-        return .{
-            .w1_zero_bias = if (self.w1_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
-            .w2_zero_bias = if (self.w2_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
-        };
-    }
-};
-
-pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
-    if (bufferized.w1_zero_bias) |*buffer| buffer.deinit();
-    if (bufferized.w2_zero_bias) |*buffer| buffer.deinit();
-}
-
-fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding, shape: Shape) !zml.Buffer {
-    var zero_slice: zml.Slice = try .alloc(std.heap.c_allocator, shape);
-    defer zero_slice.free(std.heap.c_allocator);
-    @memset(zero_slice.data(), 0);
-    return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
-}
-
 fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
     var gate = x.slice(.out, .{ .end = mid });
@@ -140,7 +103,6 @@ pub fn fusedExpertsImpl(
     w2: Tensor,
     topk_weights: Tensor,
     topk_ids: Tensor,
-    metadata: Metadata,
     opts: Options,
 ) !Tensor {
     try validateOptions(opts);
@@ -222,7 +184,6 @@ pub fn fusedExpertsImpl(
 
     const b_bias_1 =
         opts.w1_bias orelse
-        metadata.w1_zero_bias orelse
         Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, .bf16));
 
     const b_scale_1 = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
@@ -264,7 +225,6 @@ pub fn fusedExpertsImpl(
 
     const b_bias_2 =
         opts.w2_bias orelse
-        metadata.w2_zero_bias orelse
         Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, .bf16));
 
     const b_scale_2 = opts.w2_scale orelse Tensor.scalar(1.0, .f32);

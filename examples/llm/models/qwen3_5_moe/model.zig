@@ -233,11 +233,10 @@ pub const Model = struct {
         active_length: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
-        moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const new_tokens, const updated_kv_cache, const new_rng = self.text_model.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_metadata, moe_parameters);
+        const new_tokens, const updated_kv_cache, const new_rng = self.text_model.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_parameters);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 };
@@ -356,7 +355,6 @@ pub const TextModel = struct {
         kv_cache: KvCache,
         config: Config,
         rng: zml.Tensor.Rng,
-        moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         var hidden_states = EmbedTokens.forward(.{
@@ -366,7 +364,7 @@ pub const TextModel = struct {
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, active_length, updated_kv_cache.atLayer(i), config, moe_metadata, moe_parameters);
+            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, active_length, updated_kv_cache.atLayer(i), config, moe_parameters);
         }
 
         const result = Sampler.sampleTokens(.{
@@ -396,7 +394,6 @@ pub const TransformerLayer = struct {
         token_index: zml.Tensor,
         cache: KvCache.SelfAttnCache,
         config: Config,
-        moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     };
 
@@ -411,7 +408,6 @@ pub const TransformerLayer = struct {
         active_length: zml.Tensor,
         cache: KvCache.GatedDeltaNetCache,
         config: Config,
-        moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     };
 
@@ -463,7 +459,7 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_metadata, input.moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, input.moe_parameters);
 
         return .{
             .hidden = moe_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
@@ -487,7 +483,7 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_metadata, input.moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, input.moe_parameters);
 
         return .{
             .hidden = moe_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
@@ -502,7 +498,6 @@ pub const TransformerLayer = struct {
         active_length: zml.Tensor,
         kv_cache: KvCache.LayerView,
         config: Config,
-        moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache } {
         _ = config;
@@ -527,7 +522,7 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, moe_parameters);
 
         return .{ moe_output.add(x1).withPartitioning(.{ .d = .replicated }), updated_kv_cache };
     }
@@ -773,7 +768,7 @@ pub const Moe = struct {
         _ = allocator;
     }
 
-    pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
+    pub fn forward(self: Moe, x: zml.Tensor, moe_parameters: zml.moe.Parameters) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
 
         const moe_output = zml.moe.forwardMoe(
@@ -783,7 +778,6 @@ pub const Moe = struct {
             self.gate_up_proj,
             self.down_proj,
             .{},
-            moe_metadata,
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
