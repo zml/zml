@@ -1,0 +1,12 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "dialect",
+    srcs = ["CuteNVGPUDialect.cpp"],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/CuteNVGPU/IR:headers",
+        "@llvm-project//mlir:IR",
+    ],
+)

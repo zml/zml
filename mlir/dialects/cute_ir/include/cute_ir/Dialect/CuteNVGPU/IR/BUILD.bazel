@@ -1,0 +1,88 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+td_library(
+    name = "td_files",
+    srcs = glob(["*.td"]),
+    includes = ["/mlir/dialects/cute_ir/include"],
+    deps = ["@llvm-project//mlir:OpBaseTdFiles"],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=cute_nvgpu",
+            ],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=cute_nvgpu",
+            ],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cute_nvgpu",
+            ],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUTypes.h.inc",
+        ),
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cute_nvgpu",
+            ],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUTypes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUOps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = ["CuteNVGPUDialect.h"],
+    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    deps = [
+        ":dialect_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+    ],
+)
