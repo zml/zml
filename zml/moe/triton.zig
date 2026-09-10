@@ -508,7 +508,9 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
             };
             const dtype: DataType = if (fp4) .u8 else .bf16;
             // E2M1 codes 1, 2, 3 encode 0.5, 1, 1.5; each byte holds two values.
-            const gate_up_values = is_gate.select(Tensor.scalar(@as(f32, if (fp4) 0x11 else 0.5), dtype), Tensor.scalar(@as(f32, if (fp4) 0x33 else 1.5), dtype));
+            const gate_value = if (fp4) Tensor.scalar(0x11, .u8) else Tensor.scalar(0.5, .bf16);
+            const up_value = if (fp4) Tensor.scalar(0x33, .u8) else Tensor.scalar(1.5, .bf16);
+            const gate_up_values = is_gate.select(gate_value, up_value);
             var gate_up: zml.nn.Linear = .{
                 .weight = gate_up_values.broad(Shape.init(.{ .expert = 8, .dout = 256, .d = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .tag = Shape.toTag(.d),
@@ -518,7 +520,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 } else null,
             };
             var down: zml.nn.Linear = .{
-                .weight = Tensor.scalar(@as(f32, if (fp4) 0x22 else 1), dtype).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = @as(i64, if (fp4) 64 else 128) }, dtype)),
+                .weight = (if (fp4) Tensor.scalar(0x22, .u8) else Tensor.scalar(1, .bf16)).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .bias = Tensor.scalar(2, .bf16).broad(Shape.init(.{ .expert = 8, .d = 128 }, .bf16)),
                 .tag = Shape.toTag(.dout),
                 .quantization = if (fp4) .{
