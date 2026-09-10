@@ -4,6 +4,7 @@ const platforms = @import("platforms");
 
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
+pub const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
@@ -21,6 +22,7 @@ pub const ActivationMode = enum {
 };
 
 pub const Backend = enum {
+    triton_mxfp4,
     flashinfer_cutlass,
     triton,
     mosaic_tpu,
@@ -62,6 +64,7 @@ pub const Backend = enum {
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
+            .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
             .triton => switch (platform.target) {
                 .cuda, .rocm, .oneapi => true,
@@ -74,6 +77,7 @@ pub const Backend = enum {
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
+            .triton_mxfp4 => {},
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton => {},
             .mosaic_tpu => {},
@@ -83,12 +87,14 @@ pub const Backend = enum {
 };
 
 pub const Parameters = union(Backend) {
+    triton_mxfp4: triton_mxfp4.Parameters,
     flashinfer_cutlass: cutlass_flashinfer.Parameters,
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
     metal: metal.Parameters,
 
     pub const InitOptions = union(Backend) {
+        triton_mxfp4: triton_mxfp4.Parameters.InitOptions,
         flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
@@ -96,6 +102,7 @@ pub const Parameters = union(Backend) {
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
+                .triton_mxfp4 => .{ .triton_mxfp4 = .{ .num_experts_per_tok = num_experts_per_tok, .activation = activation } },
                 .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
                     .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
@@ -134,6 +141,7 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
+            .triton_mxfp4 => |v| .{ .triton_mxfp4 = triton_mxfp4.Parameters.init(v) },
             .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
@@ -182,6 +190,7 @@ pub fn forwardMoe(
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
 
     return switch (parameters) {
+        .triton_mxfp4 => |p| triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
         .flashinfer_cutlass => b: {
             if (comptime !platforms.isEnabled(.cuda)) {
                 return error.UnsupportedPlatform;
