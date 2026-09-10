@@ -23,22 +23,22 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_linux_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_LINUX,
-        sha256 = "551cd6e2e4999504c1e9b7639680756e79ae6d2bb15c597a955dbae67c2ef65d",
-        url = "https://mirror.zml.ai/pjrt-plugins/20260909.69bab05e48b6.14.1/pjrt-cpu-linux-amd64.tar.gz",
+        sha256 = "fdaa2087df6a25e13f9c27fc1841fbd07aacfc244abf9bfa9757cb2177d96839",
+        url = "https://mirror.zml.ai/pjrt-plugins/20260910.c6a043b8e354.16.1/pjrt-cpu-linux-amd64.tar.gz",
     )
 
     http_archive(
         name = "libpjrt_cpu_darwin_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "1650d56a9a734ce7bf9269d29ee426da8b45550a253cf9f565daf1c11b51cfe5",
-        url = "https://mirror.zml.ai/pjrt-plugins/20260909.69bab05e48b6.14.1/pjrt-cpu-darwin-amd64.tar.gz",
+        sha256 = "f2f3fa43fc330a65faf410596f600bafcf106a7cd1b2672738e492677c64cf9f",
+        url = "https://mirror.zml.ai/pjrt-plugins/20260910.c6a043b8e354.16.1/pjrt-cpu-darwin-amd64.tar.gz",
     )
 
     http_archive(
         name = "libpjrt_cpu_darwin_arm64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "8b7bb1280559bae111a8b1a91b88f4edee5870267b20c745df94ee62a0ebf587",
-        url = "https://mirror.zml.ai/pjrt-plugins/20260909.69bab05e48b6.14.1/pjrt-cpu-darwin-arm64.tar.gz",
+        sha256 = "a273862e6755eaf4ff7208f612d1f4214ade5fdfbfd5ecc8bc078f2b7aeda4bd",
+        url = "https://mirror.zml.ai/pjrt-plugins/20260910.c6a043b8e354.16.1/pjrt-cpu-darwin-arm64.tar.gz",
     )
 
     return mctx.extension_metadata(
