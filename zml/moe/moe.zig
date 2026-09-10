@@ -146,6 +146,10 @@ pub const Options = struct {
     activation_threshold: ?f32 = null,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
+    /// Gate/up layout; non-Triton backends require split columns.
+    gate_up_layout: triton.GateUpLayout,
+    /// Where routing weights are applied; non-Triton backends require after_down.
+    routing_weight_placement: triton.RoutingWeightPlacement,
 };
 
 pub fn forwardMoe(
@@ -157,6 +161,16 @@ pub fn forwardMoe(
     opts: Options,
     parameters: Parameters,
 ) !zml.Tensor {
+    switch (parameters) {
+        .triton => {},
+        .flashinfer_cutlass, .mosaic_tpu, .metal => {
+            stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+            stdx.debug.assert(opts.gate_up_layout == .split, "Non-Triton MoE backends require split gate/up columns", .{});
+            stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+            stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
+        },
+    }
+
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const down_scheme: ?zml.Quantization.Scheme = if (down.quantization) |q| q.scheme else null;
     if (gate_up_scheme != down_scheme) return error.UnsupportedQuantization;
@@ -386,6 +400,8 @@ pub fn forwardMoe(
                 .activation = parameters.triton.activation,
                 .activation_threshold = opts.activation_threshold,
                 .quantize_input = opts.quantize_input,
+                .gate_up_layout = opts.gate_up_layout,
+                .routing_weight_placement = opts.routing_weight_placement,
             };
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
