@@ -11,8 +11,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "https://mirror.zml.ai/pjrt-plugins/20260910.c6a043b8e354.16.1/pjrt-rocm-linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "02d06b12674f2d10713b7eae27501c3309e9df11bdbf6e30ebe44b4330d87db1"
+_PJRT_ROCM_URL = "https://mirror.zml.ai/pjrt-plugins/20260910.3cf307d5d5df.17.1/pjrt-rocm-linux-amd64.tar.gz"
+_PJRT_ROCM_SHA256 = "166ec41dcd0105295e2028c5e1960b82d3b3776479b03c3c07aec6c6d3501b51"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
