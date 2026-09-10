@@ -1,0 +1,111 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+td_library(
+    name = "dialect_td",
+    srcs = [
+        "include/cute_ir/Dialect/Cute/IR/CuteAttrs.td",
+        "include/cute_ir/Dialect/Cute/IR/CuteDialect.td",
+        "include/cute_ir/Dialect/Cute/IR/CuteOps.td",
+        "include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
+        "include/cute_ir/Dialect/Cute/IR/CuteTypes.td",
+    ],
+    includes = ["include"],
+    deps = [
+        "@llvm-project//mlir:BuiltinDialectTdFiles",
+        "@llvm-project//mlir:DataLayoutInterfacesTdFiles",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-dialect-decls", "-dialect=cute"],
+            "include/cute_ir/Dialect/Cute/IR/CuteDialect.h.inc",
+        ),
+        (
+            ["-gen-dialect-defs", "-dialect=cute"],
+            "include/cute_ir/Dialect/Cute/IR/CuteDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/cute_ir/Dialect/Cute/IR/CuteDialect.td",
+    deps = [":dialect_td"],
+)
+
+gentbl_cc_library(
+    name = "type_interfaces_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-type-interface-decls"],
+            "include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.h.inc",
+        ),
+        (
+            ["-gen-type-interface-defs"],
+            "include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
+    deps = [":dialect_td"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-attrdef-decls", "-attrdefs-dialect=cute"],
+            "include/cute_ir/Dialect/Cute/IR/CuteAttrs.h.inc",
+        ),
+        (
+            ["-gen-attrdef-defs", "-attrdefs-dialect=cute"],
+            "include/cute_ir/Dialect/Cute/IR/CuteAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/cute_ir/Dialect/Cute/IR/CuteAttrs.td",
+    deps = [":dialect_td"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "include/cute_ir/Dialect/Cute/IR/CuteOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "include/cute_ir/Dialect/Cute/IR/CuteOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/cute_ir/Dialect/Cute/IR/CuteOps.td",
+    deps = [":dialect_td"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = [
+        hdr for hdr in [
+            "include/cute_ir/Dialect/Cute/IR/CuteDialect.h",
+            "include/cute_ir/Dialect/Cute/IR/CuteOps.h",
+            "include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.h",
+        ]
+    ],
+    strip_include_prefix = "include",
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":ops_inc_gen",
+        ":type_interfaces_inc_gen",
+    ],
+)

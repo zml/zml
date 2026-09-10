@@ -1,0 +1,92 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+td_library(
+    name = "private_tabledefs",
+    srcs = [
+        "CuteOpsPrivate.td",
+        "CuteTypesAll.td",
+        "CuteTypesPrivate.td",
+    ],
+    includes = ["/mlir/dialects/cute_ir/include"],
+    deps = [
+        "@cute_ir//:dialect_td",
+        "@llvm-project//mlir:BuiltinDialectTdFiles",
+        "@llvm-project//mlir:DataLayoutInterfacesTdFiles",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "ops_private_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "cute_ir/Dialect/Cute/IR/CuteOpsPrivate.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "cute_ir/Dialect/Cute/IR/CuteOpsPrivate.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteOpsPrivate.td",
+    deps = [":private_tabledefs"],
+)
+
+gentbl_cc_library(
+    name = "types_private_decl_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cute",
+            ],
+            "cute_ir/Dialect/Cute/IR/CuteTypesPrivate.h.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteTypesPrivate.td",
+    deps = [":private_tabledefs"],
+)
+
+gentbl_cc_library(
+    name = "types_all_defs_inc_gen",
+    strip_include_prefix = ".",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cute",
+            ],
+            "cute_ir/Dialect/Cute/IR/CuteTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteTypesAll.td",
+    deps = [":private_tabledefs"],
+)
+
+cc_library(
+    name = "private_headers",
+    hdrs = [
+        "CuteDialectPrivate.h",
+    ],
+    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    deps = [
+        ":ops_private_inc_gen",
+        ":types_private_decl_inc_gen",
+        "@cute_ir//:dialect_headers",
+    ],
+)
+
+alias(
+    name = "dialect",
+    actual = ":private_headers",
+)

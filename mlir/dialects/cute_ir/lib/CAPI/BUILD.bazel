@@ -1,0 +1,25 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "cute",
+    srcs = ["Cute.cpp"],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute",
+        "//mlir/dialects/cute_ir/lib/Dialect/IR:dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "cute_nvgpu",
+    srcs = ["CuteNVGPU.cpp"],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute_nvgpu",
+        "//mlir/dialects/cute_ir/lib/Dialect/CuteNVGPU/IR:dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
