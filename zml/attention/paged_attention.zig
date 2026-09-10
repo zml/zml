@@ -43,7 +43,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => true,
             .triton => platform.target != .cpu,
-            .cutile => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 10, .minor = 3 }) else false,
+            .cutile => if (zml.platform.cuda.computeCapability(platform)) |cc| cutile.isBlackwell(cc.major, cc.minor) else false,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,

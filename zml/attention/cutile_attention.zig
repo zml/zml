@@ -19,7 +19,222 @@ pub const Config = struct {
     scale: f32,
     // Cache layout in logical [page, KV head, token, dimension] order.
     strides: [4]i64,
+    head_dim: i64 = 128,
+    group_size: i64 = 4,
 };
+
+/// Explicitly list the Blackwell targets supported by the kernel (will have to be extended for future architectures)
+pub fn isBlackwell(major: u32, minor: u32) bool {
+    return (major == 10 and (minor == 0 or minor == 3)) or
+        (major == 11 and minor == 0) or (major == 12 and minor <= 1);
+}
+
+/// Portable MMA path: flattened (query, group-head) rows, padded features.
+/// It uses no SM103 scheduling assumptions and never reads padded features.
+pub const Generic = cut.Kernel(Config, .{
+    .name = "unified_attention_bf16_generic",
+    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts" },
+    .outputs = &.{"out"},
+    .run = emitGeneric,
+});
+
+pub fn genericRows(c: Config) i64 {
+    const enough_queries = c.query_tokens >= c.batch * (if (c.group_size >= 8 and c.head_dim >= 128) @as(i64, 8) else 32);
+    return if (c.head_dim <= 256 and enough_queries and !(c.head_dim <= 64 and c.group_size == 1)) 64 else 16;
+}
+
+fn emitGeneric(b: *cut.Builder, c: Config) cut.FinishError!void {
+    return emitGenericImpl(b, c, false, false);
+}
+
+pub const GenericPlanned = cut.Kernel(Config, .{
+    .name = "unified_attention_bf16_generic_planned",
+    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "plan" },
+    .outputs = &.{"out"},
+    .run = emitGenericPlanned,
+});
+
+fn emitGenericPlanned(b: *cut.Builder, c: Config) cut.FinishError!void {
+    return emitGenericImpl(b, c, false, true);
+}
+
+pub const GenericPlan = cut.Kernel(Config, .{
+    .name = "unified_attention_generic_plan",
+    .inputs = &.{"starts"},
+    .outputs = &.{"plan"},
+    .run = emitGenericPlan,
+});
+
+fn emitGenericPlan(b: *cut.Builder, c: Config) cut.FinishError!void {
+    const a = try b.declareArgs(.{ .starts = .{ .ptr = .i32 }, .plan = .{ .ptr = .i32 } });
+    const width: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(c.batch)));
+    const seq = b.iota(width, .i32);
+    const valid = seq.lt(c.batch);
+    const begin = b.loadPtrOpts(a.starts.offset(seq), .{ .mask = valid, .padding = b.zeros(&.{width}, .i32) }).tile;
+    const end = b.loadPtrOpts(a.starts.offset(seq.add(1)), .{ .mask = valid, .padding = b.zeros(&.{width}, .i32) }).tile;
+    const count = end.sub(begin).maximum(0).mul(c.group_size).cdiv(genericRows(c)).to(.i32);
+    _ = b.storePtrOpts(a.plan.offset(seq), b.cumsum(count, 0), .{ .mask = valid });
+}
+
+pub fn genericWorkCapacity(c: Config) i64 {
+    return c.batch + @divTrunc(c.query_tokens * c.group_size, genericRows(c));
+}
+
+pub const GenericPartial = cut.Kernel(Config, .{
+    .name = "unified_attention_bf16_generic_partial",
+    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts" },
+    .outputs = &.{"out"},
+    .run = emitGenericPartial,
+});
+
+fn emitGenericPartial(b: *cut.Builder, c: Config) cut.FinishError!void {
+    return emitGenericImpl(b, c, true, false);
+}
+
+pub fn genericSplits(batch: i64, heads: i64, capacity: i64) i64 {
+    return @max(1, @min(16, @min(@divTrunc(304 + batch * heads - 1, batch * heads), @divTrunc(capacity + 511, 512))));
+}
+
+fn emitGenericImpl(b: *cut.Builder, c: Config, comptime partial: bool, comptime planned: bool) cut.FinishError!void {
+    const d: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, c.head_dim))));
+    const rows = genericRows(c);
+    const args = .{
+        .q = .{ .ptr = .bf16 },
+        .k = .{ .ptr = .bf16 },
+        .v = .{ .ptr = .bf16 },
+        .table = .{ .ptr = .i32 },
+        .lengths = .{ .ptr = .i32 },
+        .starts = .{ .ptr = .i32 },
+        .out = .{ .ptr = if (partial) .f32 else .bf16 },
+    };
+    const a = try b.declareArgs(if (planned) .{
+        .q = args.q,
+        .k = args.k,
+        .v = args.v,
+        .table = args.table,
+        .lengths = args.lengths,
+        .starts = args.starts,
+        .plan = .{ .ptr = .i32 },
+        .out = args.out,
+    } else args);
+    const id = b.tileBlockId();
+    const work = id.x.div(c.heads).to(.i32);
+    var has_work: @TypeOf(b.openIf(id.x.eq(0))) = if (planned) b.openIf(work.lt(b.loadPtr(a.plan.offset(b.cst(.i32, c.batch - 1))))) else undefined;
+    const seq = if (planned) workSequence(b, a.plan, work, c.batch) else work;
+    const head = id.x.rem(c.heads).to(.i32);
+    const begin = b.loadPtr(a.starts.offset(seq));
+    const end = b.loadPtr(a.starts.offset(seq.add(1)));
+    const query_tile = if (planned) work.sub(previousWork(b, a.plan, seq)) else id.y.to(.i32);
+    const base = b.assumeDivBy(query_tile.mul(rows), @intCast(rows));
+    var active = b.openIf(base.lt(end.sub(begin).mul(c.group_size)));
+    const len = b.loadPtr(a.lengths.offset(seq));
+    const row = b.iota(rows, .i32).add(base);
+    const qi = row.div(c.group_size).add(begin);
+    const feature = b.iota(d, .i64);
+    const qoffset = qi.to(.i64).mul(c.heads * c.group_size * c.head_dim)
+        .add(head.to(.i64).mul(c.group_size * c.head_dim))
+        .add(row.rem(c.group_size).to(.i64).mul(c.head_dim)).reshape(&.{ rows, 1 })
+        .add(feature.reshape(&.{ 1, d }));
+    const qmask = b.andi(qi.lt(end).reshape(&.{ rows, 1 }).broadcastTo(&.{ rows, d }), feature.lt(c.head_dim).reshape(&.{ 1, d }).broadcastTo(&.{ rows, d }));
+    const q = b.loadPtrOpts(a.q.offset(qoffset), .{ .mask = qmask, .padding = b.zeros(&.{ rows, d }, .bf16) }).tile;
+    const context = len.sub(end.sub(begin));
+    const stop = len.minimum(context.add(base.add(rows - 1).div(c.group_size)).add(1)).maximum(0).cdiv(64).to(.i32);
+    const small_mha_prefill = c.head_dim == 64 and c.group_size == 1 and c.query_tokens >= c.batch * 32;
+    // Tiled transfers benefit wide query reuse, but hurt the small split-KV
+    // chunks. Keep the latter row-addressed even for divisible page sizes.
+    const use_tiles = !partial and c.head_dim == d and @mod(c.page_size, 64) == 0 and
+        (rows >= 64 or c.head_dim == 64) and !small_mha_prefill;
+    const loader = if (use_tiles) KVLoader.init(b, c, a.k, a.v, a.table, true) else undefined;
+    const chunk = stop.cdiv(b.cst(.i32, if (partial) c.splits else 1));
+    const first = if (partial) id.z.to(.i32).mul(chunk) else b.cst(.i32, 0);
+    var loop = b.openFor(first, first.add(chunk).minimum(stop), 1, .{ b.zeros(&.{ rows, d }, .f32), b.full(&.{rows}, @as(f64, -1e20), .f32), b.zeros(&.{rows}, .f32) });
+    const token = b.iota(64, .i32).add(b.assumeDivBy(loop.iv.mul(64), 64));
+    const valid_token = token.lt(len);
+    const loaded = if (use_tiles) loader.load(seq, head, loop.iv, len, true) else blk: {
+        // A 64-token compute tile cannot cross a multiple-of-64 page boundary.
+        // Keep that page ID scalar rather than loading 64 duplicate IDs.
+        const page = if (@mod(c.page_size, 64) == 0)
+            b.loadPtr(a.table.offset(seq.to(.i64).mul(c.max_pages).add(loop.iv.to(.i64).mul(64).div(c.page_size))))
+        else
+            b.loadPtrOpts(a.table.offset(seq.to(.i64).mul(c.max_pages).add(token.div(c.page_size).to(.i64))), .{ .mask = valid_token, .padding = b.zeros(&.{64}, .i32) }).tile;
+        const address = page.to(.i64).mul(c.strides[0]).add(head.to(.i64).mul(c.strides[1]))
+            .add(token.rem(c.page_size).to(.i64).mul(c.strides[2])).reshape(&.{ 64, 1 })
+            .add(feature.mul(c.strides[3]).reshape(&.{ 1, d }));
+        const kmask = b.andi(valid_token.reshape(&.{ 64, 1 }).broadcastTo(&.{ 64, d }), feature.lt(c.head_dim).reshape(&.{ 1, d }).broadcastTo(&.{ 64, d }));
+        break :blk KVTile{
+            .k = b.loadPtrOpts(a.k.offset(address), .{ .mask = kmask, .padding = b.zeros(&.{ 64, d }, .bf16) }).tile,
+            .v = b.loadPtrOpts(a.v.offset(address), .{ .mask = kmask, .padding = b.zeros(&.{ 64, d }, .bf16) }).tile,
+        };
+    };
+    const k = loaded.k;
+    const v = loaded.v;
+    const scores = b.mmaf(q, k.permute(&.{ 1, 0 }), b.zeros(&.{ rows, 64 }, .f32)).mul(c.scale * 1.4426950408889634);
+    const causal = token.reshape(&.{ 1, 64 }).le(context.add(row.div(c.group_size)).reshape(&.{ rows, 1 }));
+    const valid = b.andi(causal, valid_token.reshape(&.{ 1, 64 }).broadcastTo(&.{ rows, 64 }));
+    const s = b.where(valid, scores, b.full(&.{ rows, 64 }, @as(f64, -1e20), .f32));
+    const m = loop.carried[1].maximum(s.max(1));
+    const alpha = b.exp2(loop.carried[1].sub(m));
+    const p = b.where(valid, b.exp2(s.sub(m.reshape(&.{ rows, 1 }))), b.zeros(&.{ rows, 64 }, .f32));
+    loop.yield(.{
+        b.mmaf(p.to(.bf16), v, loop.carried[0].mul(alpha.reshape(&.{ rows, 1 }))),
+        m,
+        b.fma(loop.carried[2], alpha, p.sum(1)),
+    });
+    if (partial) {
+        const stat = qi.to(.i64).mul(c.heads * c.group_size).add(head.to(.i64).mul(c.group_size)).add(row.rem(c.group_size).to(.i64))
+            .mul(c.splits).add(id.z.to(.i64)).mul(c.head_dim + 2);
+        const addr = stat.reshape(&.{ rows, 1 }).add(feature.reshape(&.{ 1, d }));
+        _ = b.storePtrOpts(a.out.offset(addr), loop.results[0], .{ .mask = qmask });
+        _ = b.storePtrOpts(a.out.offset(stat.add(c.head_dim)), loop.results[1], .{ .mask = qi.lt(end) });
+        _ = b.storePtrOpts(a.out.offset(stat.add(c.head_dim + 1)), loop.results[2], .{ .mask = qi.lt(end) });
+    } else {
+        const out = loop.results[0].div(loop.results[2].maximum(1e-20).reshape(&.{ rows, 1 })).to(.bf16);
+        _ = b.storePtrOpts(a.out.offset(qoffset), out, .{ .mask = qmask });
+    }
+    active.yieldThen(.{});
+    if (planned) has_work.yieldThen(.{});
+}
+
+pub const GenericReduce = cut.Kernel(Config, .{
+    .name = "unified_attention_bf16_generic_reduce",
+    .inputs = &.{ "parts", "starts" },
+    .outputs = &.{"out"},
+    .run = emitGenericReduce,
+});
+
+fn emitGenericReduce(b: *cut.Builder, c: Config) cut.FinishError!void {
+    const d: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, c.head_dim))));
+    const rows = genericRows(c);
+    const a = try b.declareArgs(.{ .parts = .{ .ptr = .f32 }, .starts = .{ .ptr = .i32 }, .out = .{ .ptr = .bf16 } });
+    const id = b.tileBlockId();
+    const seq = id.x.div(c.heads).to(.i32);
+    const head = id.x.rem(c.heads).to(.i32);
+    const begin = b.loadPtr(a.starts.offset(seq));
+    const end = b.loadPtr(a.starts.offset(seq.add(1)));
+    const base = id.y.to(.i32).mul(rows);
+    var active = b.openIf(base.lt(end.sub(begin).mul(c.group_size)));
+    const row = b.iota(rows, .i32).add(base);
+    const qi = row.div(c.group_size).add(begin);
+    const index = qi.to(.i64).mul(c.heads * c.group_size).add(head.to(.i64).mul(c.group_size)).add(row.rem(c.group_size).to(.i64));
+    const feature = b.iota(d, .i64).reshape(&.{ 1, d });
+    const mask = b.andi(qi.lt(end).reshape(&.{ rows, 1 }).broadcastTo(&.{ rows, d }), feature.lt(c.head_dim).broadcastTo(&.{ rows, d }));
+    var loop = b.openFor(0, c.splits, 1, .{ b.zeros(&.{ rows, d }, .f32), b.full(&.{rows}, @as(f64, -1e20), .f32), b.zeros(&.{rows}, .f32) });
+    const stat = index.mul(c.splits).add(loop.iv.to(.i64)).mul(c.head_dim + 2);
+    const acc = b.loadPtrOpts(a.parts.offset(stat.reshape(&.{ rows, 1 }).add(feature)), .{ .mask = mask, .padding = b.zeros(&.{ rows, d }, .f32) }).tile;
+    const m = b.loadPtrOpts(a.parts.offset(stat.add(c.head_dim)), .{ .mask = qi.lt(end), .padding = b.full(&.{rows}, @as(f64, -1e20), .f32) }).tile;
+    const sum = b.loadPtrOpts(a.parts.offset(stat.add(c.head_dim + 1)), .{ .mask = qi.lt(end), .padding = b.zeros(&.{rows}, .f32) }).tile;
+    const new_m = loop.carried[1].maximum(m);
+    const alpha = b.exp2(loop.carried[1].sub(new_m));
+    const weight = b.exp2(m.sub(new_m));
+    loop.yield(.{
+        b.fma(loop.carried[0], alpha.reshape(&.{ rows, 1 }).broadcastTo(&.{ rows, d }), acc.mul(weight.reshape(&.{ rows, 1 }))),
+        new_m,
+        b.fma(loop.carried[2], alpha, sum.mul(weight)),
+    });
+    const out = loop.results[0].div(loop.results[2].maximum(1e-20).reshape(&.{ rows, 1 })).to(.bf16);
+    _ = b.storePtrOpts(a.out.offset(index.mul(c.head_dim).reshape(&.{ rows, 1 }).add(feature)), out, .{ .mask = mask });
+    active.yieldThen(.{});
+}
 
 // Cache allocation granularity is independent of the 64-token MMA tile.
 // Large divisible layouts retain tile loads; small or irregular pages use masked
@@ -43,9 +258,9 @@ const KVLoader = struct {
         const small_pages = width == 16 or (width == 32 and c.batch >= 32);
         const tiled = width >= 16 and !small_pages and (!prefill or @mod(c.page_size, 64) == 0);
         const token_major = c.strides[1] < c.strides[2];
-        const shape = if (token_major) [_]i64{ c.pages, c.page_size, c.heads, 128 } else [_]i64{ c.pages, c.heads, c.page_size, 128 };
+        const shape = if (token_major) [_]i64{ c.pages, c.page_size, c.heads, c.head_dim } else [_]i64{ c.pages, c.heads, c.page_size, c.head_dim };
         const strides = if (token_major) [_]i64{ c.strides[0], c.strides[2], c.strides[1], c.strides[3] } else c.strides;
-        const tile = if (token_major) [_]i64{ 1, width, 1, 128 } else [_]i64{ 1, 1, width, 128 };
+        const tile = if (token_major) [_]i64{ 1, width, 1, c.head_dim } else [_]i64{ 1, 1, width, c.head_dim };
         return .{
             .b = b,
             .c = c,
@@ -75,15 +290,15 @@ const KVLoader = struct {
                 const physical = b.load(self.table, &.{ seq.to(.i32), safe_page }).reshape(&.{});
                 const within = (if (c.page_size == width) zero else start.rem(b.cst(.i32, c.page_size)).div(b.cst(.i32, width))).to(.i32);
                 const index = if (self.token_major) [_]cut.Value{ physical, within, head, zero } else [_]cut.Value{ physical, head, within, zero };
-                const k = b.loadOpts(self.k, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, 128 });
+                const k = b.loadOpts(self.k, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, c.head_dim });
                 const v = if (mask_tail) blk: {
                     // Express the valid extent in the view so padding is
                     // handled by the load, not by converting an MMA operand.
                     const valid_rows = len.sub(safe_page.mul(c.page_size)).minimum(c.page_size);
                     const base = self.v_ptr.offset(physical.to(.i64).mul(c.strides[0]).add(head.to(.i64).mul(c.strides[1])));
-                    const view = b.partitionView(b.tensorViewDyn(base, &.{ .{ .dynamic = valid_rows }, .{ .static = 128 } }, &.{ .{ .static = c.strides[2] }, .{ .static = c.strides[3] } }), &.{ width, 128 }, .{});
+                    const view = b.partitionView(b.tensorViewDyn(base, &.{ .{ .dynamic = valid_rows }, .{ .static = c.head_dim } }, &.{ .{ .static = c.strides[2] }, .{ .static = c.strides[3] } }), &.{ width, c.head_dim }, .{});
                     break :blk b.loadOpts(view, &.{ within, zero }, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile;
-                } else b.loadOpts(self.v, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, 128 });
+                } else b.loadOpts(self.v, &index, .{ .hints = &.{.{ .allow_tma = true, .latency = 5 }} }).tile.reshape(&.{ width, c.head_dim });
                 pieces[@intCast(i)] = .{ .k = k, .v = v };
             }
             var n: usize = @intCast(count);
@@ -98,11 +313,11 @@ const KVLoader = struct {
         const raw_physical = b.loadPtr(self.table_ptr.offset(seq.mul(c.max_pages).add(page)));
         const physical = if (@mod(64, c.page_size) == 0) b.assumeSameElements(raw_physical, &.{c.page_size}) else raw_physical;
         const offset = physical.to(.i64).mul(c.strides[0]).add(head.to(.i64).mul(c.strides[1])).add(token.rem(c.page_size).to(.i64).mul(c.strides[2]));
-        const address = offset.reshape(&.{ 64, 1 }).add(b.iota(128, .i64).mul(c.strides[3]).reshape(&.{ 1, 128 }));
-        const mask = token.lt(len).reshape(&.{ 64, 1 }).broadcastTo(&.{ 64, 128 });
+        const address = offset.reshape(&.{ 64, 1 }).add(b.iota(c.head_dim, .i64).mul(c.strides[3]).reshape(&.{ 1, c.head_dim }));
+        const mask = token.lt(len).reshape(&.{ 64, 1 }).broadcastTo(&.{ 64, c.head_dim });
         return .{
-            .k = b.loadPtrOpts(self.k.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16) }).tile,
-            .v = b.loadPtrOpts(self.v.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16) }).tile,
+            .k = b.loadPtrOpts(self.k.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, c.head_dim }, .bf16) }).tile,
+            .v = b.loadPtrOpts(self.v.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, c.head_dim }, .bf16) }).tile,
         };
     }
 };
@@ -512,9 +727,10 @@ fn emitPrefillReduce(b: *cut.Builder, c: Config) cut.FinishError!void {
 
 pub fn pagedAttention(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform);
-    if (cc == null or !cc.?.eql(.{ .major = 10, .minor = 3 }) or
+    if (cc == null or !isBlackwell(cc.?.major, cc.?.minor) or
         q.dtype() != .bf16 or k.dtype() != .bf16 or v.dtype() != .bf16 or
-        q.dim(.hg) != 4 or q.dim(.hd) != 128 or k.dim(.k_chunk) <= 0 or
+        q.dim(.hg) <= 0 or q.dim(.hd) <= 0 or q.dim(.hd) > 512 or k.dim(.k_chunk) <= 0 or
+        q.dim(.hd) != k.dim(.hd) or q.dim(.hkv) != k.dim(.hkv) or
         opts.sliding_window >= 0 or
         q.axis(.b) != 0 or q.axis(.hkv) != 1 or q.axis(.hg) != 2 or q.axis(.hd) != 3 or
         !k.shape().eql(v.shape()))
@@ -542,7 +758,31 @@ fn pagedAttentionLocal(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.
     const batch = params.block_table.dim(.b);
     const heads = q.dim(.hkv);
     const splits: i64 = 32;
-    const cfg: Config = .{ .batch = batch, .query_tokens = q.dim(.b), .heads = heads, .pages = k.dim(.page), .max_pages = params.block_table.dim(.p), .page_size = k.dim(.k_chunk), .splits = splits, .scale = opts.scale orelse 0.08838834764831845, .strides = .{ strides.get(k.axis(.page)), strides.get(k.axis(.hkv)), strides.get(k.axis(.k_chunk)), strides.get(k.axis(.hd)) } };
+    const cfg: Config = .{ .batch = batch, .query_tokens = q.dim(.b), .heads = heads, .pages = k.dim(.page), .max_pages = params.block_table.dim(.p), .page_size = k.dim(.k_chunk), .splits = splits, .scale = opts.scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd))))), .strides = .{ strides.get(k.axis(.page)), strides.get(k.axis(.hkv)), strides.get(k.axis(.k_chunk)), strides.get(k.axis(.hd)) }, .head_dim = q.dim(.hd), .group_size = q.dim(.hg) };
+    const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform).?;
+    if (cfg.head_dim != 128 or cfg.group_size != 4 or !cc.eql(.{ .major = 10, .minor = 3 })) {
+        const max_queries: i64 = @intCast(params.options_.max_seqlen_q);
+        const grid: [3]i32 = .{ @intCast(batch * heads), @intCast(@divTrunc(max_queries * cfg.group_size + genericRows(cfg) - 1, genericRows(cfg))), 1 };
+        if (params.options_.is_prefill and cfg.query_tokens * 2 < batch * max_queries) {
+            const plan = GenericPlan.call(.{ .starts = params.query_start_len }, .{ .plan = .init(.{batch}, .i32) }, .{ .cfg = cfg, .grid = .{ 1, 1, 1 } }).plan;
+            return GenericPlanned.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len, .plan = plan }, .{ .out = q.shape() }, .{
+                .cfg = cfg,
+                .grid = .{ @intCast(genericWorkCapacity(cfg) * heads), 1, 1 },
+            }).out;
+        }
+        var split_cfg = cfg;
+        split_cfg.splits = if (!params.options_.is_prefill and cfg.max_pages * cfg.page_size > 512 and cc.eql(.{ .major = 10, .minor = 3 })) genericSplits(batch, heads, cfg.max_pages * cfg.page_size) else 1;
+        if (split_cfg.splits > 1) {
+            const parts = GenericPartial.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len }, .{
+                .out = .init(.{ cfg.query_tokens, heads, cfg.group_size, split_cfg.splits, cfg.head_dim + 2 }, .f32),
+            }, .{ .cfg = split_cfg, .grid = .{ grid[0], grid[1], @intCast(split_cfg.splits) } }).out;
+            return GenericReduce.call(.{ .parts = parts, .starts = params.query_start_len }, .{ .out = q.shape() }, .{ .cfg = split_cfg, .grid = grid }).out;
+        }
+        return Generic.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len }, .{ .out = q.shape() }, .{
+            .cfg = cfg,
+            .grid = grid,
+        }).out;
+    }
     // At most eight KV compute tiles fit in this cache capacity. The device
     // planner would always select one split, so neither planning nor merging
     // is needed. This uses the allocation bound, not an assumed runtime length.
