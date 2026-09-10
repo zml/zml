@@ -342,6 +342,10 @@ pub const Type = opaque {
         return @ptrCast(c.mlirTypeParseGet(ctx.ptr(), stringRef(str)).ptr orelse return Error.InvalidMlir);
     }
 
+    pub fn isFloat(self: *const Type) bool {
+        return c.mlirTypeIsAFloat(self.ptr());
+    }
+
     pub fn index(ctx: *Context) *const Type {
         return @ptrCast(IndexType.get(ctx));
     }
@@ -462,6 +466,10 @@ pub const IntegerType = opaque {
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
+
+    pub fn width(self: *const IntegerType) u32 {
+        return c.mlirIntegerTypeGetWidth(self.ptr());
+    }
 
     fn get(ctx: *Context, it: IntegerTypes) *const IntegerType {
         return exact(ctx, it.bitwidth(), it.signedness());

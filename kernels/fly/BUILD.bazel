@@ -1,0 +1,25 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "fly_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+        "layout.zig",
+    ],
+    import_name = "kernels/fly/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/fly",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":fly_builder"],
+)

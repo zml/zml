@@ -927,6 +927,180 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     return outputs_;
 }
 
+pub const FlyOps = struct {
+    name: []const u8,
+    /// The whole module text: a `gpu.func @name ... kernel` inside a
+    /// `gpu.module`, one `!fly.ptr` per operand then per result; or a
+    /// top-level `func.func @name` in the destination-passing tensor ABI.
+    ir: []const u8,
+    grid: [3]i32,
+    /// Threads per block = num_warps * 64 on CDNA.
+    num_warps: i32,
+    waves_per_eu: i32 = 0,
+    /// Required when the kernel uses `fly.get_dyn_shared`.
+    shared_mem_bytes: i64 = 0,
+    /// Indices into the full argument list, operands first, so result `i` is
+    /// `inputs.len + i`. A no-op inside HIP graphs: a kernel that must see
+    /// zeroed outputs should zero them itself.
+    zeroed_args: []const i32 = &.{},
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+pub fn fly(inputs: anytype, outputs: anytype, opts: FlyOps) [outputs.len]Tensor {
+    const mlir_ctx = Compiler.current().mlir_ctx;
+    var arena = std.heap.ArenaAllocator.init(Compiler.current().allocator);
+    defer arena.deinit();
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+    }
+
+    // The plugin silently ignores unknown or wrong-typed optional keys, so a
+    // misspelled one here is not an error, just an override that never lands.
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 10) = .empty;
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
+        .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
+        .named(mlir_ctx, "num_warps", .int(mlir_ctx, .i32, opts.num_warps)),
+        .named(mlir_ctx, "grid_x", .int(mlir_ctx, .i32, opts.grid[0])),
+        .named(mlir_ctx, "grid_y", .int(mlir_ctx, .i32, opts.grid[1])),
+        .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
+    });
+    if (opts.waves_per_eu > 0) attrs.appendAssumeCapacity(.named(mlir_ctx, "waves_per_eu", .int(mlir_ctx, .i32, opts.waves_per_eu)));
+    if (opts.shared_mem_bytes > 0) attrs.appendAssumeCapacity(.named(mlir_ctx, "shared_mem_bytes", .int(mlir_ctx, .i64, opts.shared_mem_bytes)));
+    if (opts.zeroed_args.len > 0) {
+        const Opts = dialects.stablehlo.CustomCallOpts;
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, Opts.MAX_OPERANDS + Opts.MAX_RESULTS) = .empty;
+        for (opts.zeroed_args) |i| {
+            std.debug.assert(i >= 0 and i < inputs.len + outputs.len);
+            zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
+        }
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
+    }
+    const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
+
+    // The kernel sees raw pointers and assumes row-major: pin the layouts.
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    }
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "__gpu$xla.gpu.fly",
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = false,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(Compiler.current().currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test "fly custom call, both entry ABIs" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    // Compile `forward` over one f32 input and bring the result back.
+    const call = struct {
+        fn f(comptime forward: anytype, p: *const zml.Platform, t: Tensor, h: []const f32) !zml.Slice {
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{t}, p, .{});
+            defer exe.deinit();
+            var buf: zml.Buffer = try .fromBytes(std.testing.io, p, t.shape(), .replicated, std.mem.sliceAsBytes(h));
+            defer buf.deinit();
+            var out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{buf});
+            defer out.deinit();
+            return out.toSliceAlloc(std.testing.allocator, std.testing.io);
+        }
+    }.f;
+
+    // Native Fly ABI: a `gpu.func ... kernel` taking one !fly.ptr per operand
+    // then per result. This is what `zml.kernel.fly` emits.
+    {
+        const Mod = struct {
+            const ir =
+                \\module attributes {gpu.container_module} {
+                \\  gpu.module @zml_fly_kernels {
+                \\    gpu.func @add_one(%a: !fly.ptr<f32, global>, %c: !fly.ptr<f32, global>) kernel {
+                \\      %tid = gpu.thread_id x
+                \\      %t = arith.index_cast %tid : index to i32
+                \\      %off = fly.make_int_tuple(%t) : (i32) -> !fly.int_tuple<?>
+                \\      %pa = fly.add_offset(%a, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
+                \\      %pc = fly.add_offset(%c, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
+                \\      %va = fly.ptr.load(%pa) : (!fly.ptr<f32, global>) -> f32
+                \\      %one = arith.constant 1.0 : f32
+                \\      %vc = arith.addf %va, %one : f32
+                \\      fly.ptr.store(%vc, %pc) : (f32, !fly.ptr<f32, global>) -> ()
+                \\      gpu.return
+                \\    }
+                \\  }
+                \\}
+            ;
+            pub fn forward(a: Tensor) Tensor {
+                return fly(.{a}, .{a.shape()}, .{ .name = "add_one", .ir = ir, .grid = .{ 1, 1, 1 }, .num_warps = 2 })[0];
+            }
+        };
+
+        var input: [128]f32 = undefined;
+        for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+
+        var host = try call(Mod.forward, platform, .init(.{ .n = 128 }, .f32), &input);
+        defer host.free(allocator);
+        for (host.items(f32), 0..) |v, i| try std.testing.expectEqual(@as(f32, @floatFromInt(i)) + 1, v);
+    }
+
+    {
+        const Mod = struct {
+            const ir =
+                \\module {
+                \\  func.func @add_one(%input: tensor<64xf32>, %output: tensor<64xf32>) -> tensor<64xf32> {
+                \\    %thread = gpu.thread_id x
+                \\    %value = tensor.extract %input[%thread] : tensor<64xf32>
+                \\    %one = arith.constant 1.0 : f32
+                \\    %sum = arith.addf %value, %one : f32
+                \\    %updated = tensor.insert %sum into %output[%thread] : tensor<64xf32>
+                \\    return %updated : tensor<64xf32>
+                \\  }
+                \\}
+            ;
+            pub fn forward(a: Tensor) Tensor {
+                return fly(.{a}, .{a.shape()}, .{ .name = "add_one", .ir = ir, .grid = .{ 1, 1, 1 }, .num_warps = 1 })[0];
+            }
+        };
+
+        var input: [64]f32 = undefined;
+        for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+
+        var host = try call(Mod.forward, platform, .init(.{ .n = 64 }, .f32), &input);
+        defer host.free(allocator);
+        for (host.items(f32), 0..) |v, i| try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), v);
+    }
+}
+
 pub const NeuronNkiOps = struct {
     name: []const u8,
     entrypoint: []const u8,

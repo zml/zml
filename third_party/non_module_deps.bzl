@@ -4,6 +4,7 @@ load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece
 load("//third_party/cuda_tile:repo.bzl", cuda_tile = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/flashinfer_cutlass_moe:repo.bzl", flashinfer_cutlass_moe = "repo")
+load("//third_party/flydsl:repo.bzl", flydsl = "repo")
 load("//third_party/iree:repo.bzl", iree = "repo")
 load("//third_party/libvaxis:repo.bzl", libvaxis = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
@@ -34,6 +35,7 @@ def _non_module_deps_impl(mctx):
     mosaic_tpu()
     iree()
     cuda_tile()
+    flydsl()
 
     return mctx.extension_metadata(
         reproducible = True,

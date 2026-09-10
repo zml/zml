@@ -1,0 +1,39 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "fly_capi",
+    srcs = ["fly_capi.cc"],
+    hdrs = ["fly_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "@flydsl//:FlyDialect",
+        "@flydsl//:FlyROCDLDialect",
+        "@flydsl//:TiledOpTraits",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:GPUDialect",
+        "@llvm-project//mlir:UBDialect",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "fly",
+    tags = ["manual"],
+    import_name = "mlir/dialects/fly",
+    main = "fly.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":fly_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":fly"],
+)
