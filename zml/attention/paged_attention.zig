@@ -61,8 +61,6 @@ pub const Options = union(Backend) {
         backend: Backend,
         is_prefill: bool,
         batch_size: u32,
-        batch_size_prefill: ?u32 = null,
-        batch_size_decode: ?u32 = null,
         seq_len: u32,
         max_num_pages: u32,
         max_token_count: u32,
@@ -74,60 +72,6 @@ pub const Options = union(Backend) {
 
     pub fn fromBackend(args: Args) Options {
         return switch (args.backend) {
-            .cuda_fa2 => if (args.is_prefill) .{
-                .cuda_fa2 = .{
-                    .mixed = .{
-                        .batch_size_decode = args.batch_size_decode orelse args.batch_size,
-                        .batch_size_prefill = args.batch_size_prefill orelse args.batch_size,
-                        .max_num_pages = args.max_num_pages,
-                        .max_seqlen_k = args.seq_len,
-                        .max_seqlen_q = args.max_seqlen_q,
-                        .max_token_count = args.max_token_count,
-                        .num_heads = args.num_heads,
-                        .num_kv_heads = args.num_kv_heads,
-                        .head_dim = args.head_dim,
-                    },
-                },
-            } else .{
-                .cuda_fa2 = .{
-                    .decode = .{
-                        .batch_size = args.batch_size,
-                        .max_num_pages = args.max_num_pages,
-                        .max_seqlen_k = args.seq_len,
-                        .max_token_count = args.max_token_count,
-                        .num_heads = args.num_heads,
-                        .num_kv_heads = args.num_kv_heads,
-                        .head_dim = args.head_dim,
-                    },
-                },
-            },
-            .cuda_fa3 => if (args.is_prefill) .{
-                .cuda_fa3 = .{
-                    .mixed = .{
-                        .batch_size_decode = args.batch_size_decode orelse args.batch_size,
-                        .batch_size_prefill = args.batch_size_prefill orelse args.batch_size,
-                        .max_num_pages = args.max_num_pages,
-                        .max_seqlen_k = args.seq_len,
-                        .max_seqlen_q = args.max_seqlen_q,
-                        .max_token_count = args.max_token_count,
-                        .num_heads = args.num_heads,
-                        .num_kv_heads = args.num_kv_heads,
-                        .head_dim = args.head_dim,
-                    },
-                },
-            } else .{
-                .cuda_fa3 = .{
-                    .decode = .{
-                        .batch_size = args.batch_size,
-                        .max_num_pages = args.max_num_pages,
-                        .max_seqlen_k = args.seq_len,
-                        .max_token_count = args.max_token_count,
-                        .num_heads = args.num_heads,
-                        .num_kv_heads = args.num_kv_heads,
-                        .head_dim = args.head_dim,
-                    },
-                },
-            },
             .mosaic_tpu => .{
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
@@ -140,7 +84,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .cuda_fa2, .cuda_fa3, .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -344,6 +288,18 @@ test "Backend.auto selects triton on oneAPI" {
 }
 
 test pagedAttention {
+    try testPagedAttention("mixed", .{ 32, 1, 1, 1, 1, 1, 1, 0 }, true, std.enums.values(Backend));
+    // StableHLO's pagewise prefill requires full query pages. Compare the extra
+    // CUDA cases, including partial pages, against Triton.
+    const cuda_backends: []const Backend = &.{ .cuda_fa2, .cuda_fa3, .triton };
+    try testPagedAttention("multiple_prefills", .{ 24, 8, 1, 1, 1, 1, 1, 0 }, true, cuda_backends);
+    try testPagedAttention("prefill_only", .{ 32, 6, 0, 0, 0, 0, 0, 0 }, true, cuda_backends);
+    try testPagedAttention("decode_in_mixed", .{ 1, 1, 1, 1, 1, 1, 1, 0 }, true, cuda_backends);
+    try testPagedAttention("short_mixed", .{ 2, 1, 0, 0, 0, 0, 0, 0 }, true, cuda_backends);
+    try testPagedAttention("decode_only", .{ 1, 1, 1, 1, 1, 1, 1, 1 }, false, cuda_backends);
+}
+
+fn testPagedAttention(comptime name: []const u8, comptime query_lens: [8]u32, comptime is_prefill: bool, comptime backends: []const Backend) !void {
     const platform = zml.testing.env();
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -354,12 +310,13 @@ test pagedAttention {
     const num_pages = 64;
     const page_size = 16;
     const max_num_pages = 16;
-    const prefill_token_count = 32;
-    const num_prefill = 1;
-    const num_decode = 6;
-    const active_batch_size = num_prefill + num_decode;
-    const batch_size = active_batch_size + 1;
-    const query_token_count = prefill_token_count + num_decode;
+    const batch_size = query_lens.len;
+    const query_start_len: [batch_size + 1]i32 = comptime b: {
+        var offsets: [batch_size + 1]i32 = @splat(0);
+        for (query_lens, 0..) |len, i| offsets[i + 1] = offsets[i] + @as(i32, @intCast(len));
+        break :b offsets;
+    };
+    const query_token_count = query_start_len[batch_size];
     const dt: zml.DataType = .bf16;
     const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
@@ -384,17 +341,15 @@ test pagedAttention {
 
     const triton_options_args: Options.Args = .{
         .backend = .triton,
-        .is_prefill = true,
+        .is_prefill = is_prefill,
         .batch_size = batch_size,
-        .batch_size_prefill = num_prefill,
-        .batch_size_decode = num_decode,
         .seq_len = max_num_pages * page_size,
         .max_num_pages = max_num_pages,
         .max_token_count = 16 * page_size,
         .num_heads = @intCast(tensors.q.dim(.hg) * tensors.q.dim(.hkv)),
         .num_kv_heads = @intCast(tensors.q.dim(.hkv)),
         .head_dim = @intCast(tensors.q.dim(.hd)),
-        .max_seqlen_q = 16 * 2,
+        .max_seqlen_q = comptime std.mem.max(u32, &query_lens),
     };
     const triton_parameters: Parameters = .init(.fromBackend(triton_options_args));
     var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
@@ -420,7 +375,7 @@ test pagedAttention {
         .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
         .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
         .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-        .{ -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        if (query_lens[7] == 0) @splat(-1) else .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     };
 
     const seq_lens: [batch_size]i32 = .{
@@ -431,10 +386,8 @@ test pagedAttention {
         4 * page_size + 3,
         4 * page_size + 3,
         4 * page_size + 3,
-        0,
+        if (query_lens[7] == 0) 0 else 4 * page_size + 3,
     };
-
-    const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 38, 38 };
     var triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
         .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
         .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
@@ -442,10 +395,9 @@ test pagedAttention {
     } };
     defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
 
-    const all_backends = std.enums.values(Backend);
-    // stablehlo ignores these options, cuda_fa3 has no materializer in this fixture, and
-    // mosaic_tpu requires a dense KV cache instead of the split cache used by this test.
-    const option_sensitive_backends = [_]Backend{ .cuda_fa2, .triton, .metal };
+    // stablehlo ignores these options, and mosaic_tpu requires a dense KV cache
+    // instead of the split cache used by this test.
+    const option_sensitive_backends = [_]Backend{ .cuda_fa2, .cuda_fa3, .triton, .metal };
     const test_cases = [_]struct {
         name: []const u8,
         attention_options: AttentionOptions,
@@ -454,7 +406,7 @@ test pagedAttention {
         .{
             .name = "unbounded",
             .attention_options = .{ .is_causal = true },
-            .backends = all_backends,
+            .backends = backends,
         },
         .{
             .name = "non_causal",
@@ -477,11 +429,12 @@ test pagedAttention {
         }
 
         for (test_case.backends) |backend| {
+            if (std.mem.indexOfScalar(Backend, backends, backend) == null) continue;
             if (!backend.isAvailable(platform)) {
                 std.log.warn("paged_attention backend {t} not available", .{backend});
                 continue;
             }
-            std.log.warn("Testing paged_attention {s} with backend {t}", .{ test_case.name, backend });
+            std.log.warn("Testing paged_attention {s}/{s} with backend {t}", .{ name, test_case.name, backend });
 
             var backend_options_args = triton_options_args;
             backend_options_args.backend = backend;
@@ -492,52 +445,18 @@ test pagedAttention {
                 io,
                 pagedAttention,
                 .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options },
-                .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .shardings = shardings },
+                .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{s}_{t}", .{ name, test_case.name, backend }), .shardings = shardings },
             );
             defer exe.deinit();
 
-            var parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
-                // No materializer implemented for cuda fa3
-                .cuda_fa3 => continue,
-                .cuda_fa2 => |params| cuda_fa2: {
-                    var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
-                    @memcpy(&block_table_prefill, block_table[0..num_prefill]);
-                    var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
-                    @memcpy(&block_table_decode, block_table[num_prefill .. num_prefill + num_decode]);
-
-                    var cu_seqlens_q_prefill: [num_prefill + 1]i32 = undefined;
-                    @memcpy(&cu_seqlens_q_prefill, query_start_len[0 .. num_prefill + 1]);
-                    var cu_seqlens_q_decode: [num_decode + 1]i32 = undefined;
-                    for (&cu_seqlens_q_decode, query_start_len[num_prefill .. num_prefill + num_decode + 1]) |*decode_len, query_start| {
-                        decode_len.* = query_start - prefill_token_count;
-                    }
-
-                    var seqused_k_prefill: [num_prefill]i32 = undefined;
-                    @memcpy(&seqused_k_prefill, seq_lens[0..num_prefill]);
-                    var seqused_k_decode: [num_decode]i32 = undefined;
-                    @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
-
-                    break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
-                        .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
-                        .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
-                        .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
-
-                        .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
-                        .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
-                        .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
-
-                        .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
-                    } } };
-                },
+            const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
                 .triton => triton_parameters_d,
-                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .cuda_fa2, .cuda_fa3, .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
                 }),
             };
-            // cu_fa2 creates new buffers while other reuse triton buffers.
-            defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
 
             var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
             defer output_d.deinit();
@@ -561,7 +480,8 @@ test pagedAttention {
             zml.testing.expectClose(io, reference, output_h, tolerance) catch |err| switch (err) {
                 error.TestUnexpectedResult => {
                     num_failed += 1;
-                    std.log.err("test pagedAttention {s} failed on backend {t} against reference {t}", .{
+                    std.log.err("test pagedAttention {s}/{s} failed on backend {t} against reference {t}", .{
+                        name,
                         test_case.name,
                         backend,
                         reference_backend,

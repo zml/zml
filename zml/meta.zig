@@ -234,8 +234,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
             else => stdx.debug.compileError("zml.meta.mapAlloc doesn't support: {}", .{FromStruct}),
         },
         .optional => if (from) |f| {
-            to.* = @as(@typeInfo(type_info_to_ptr.pointer.child).optional.child, undefined);
-            try mapAlloc(cb, allocator, ctx, f, &(to.*.?));
+            // Construct the payload before wrapping it; unwrapping an undefined
+            // optional can inspect an uninitialized representation in release builds.
+            var payload: type_info_to.optional.child = undefined;
+            try mapAlloc(cb, allocator, ctx, f, &payload);
+            to.* = payload;
         } else {
             to.* = null;
         },
@@ -254,11 +257,14 @@ test mapAlloc {
     };
 
     const Empty = struct {};
+    const Alias = struct { output: i64, operand: i64 };
 
     const AA = struct {
         field: A,
         array: [2]A,
         slice: []const A,
+        aliases: ?[]const Alias,
+        missing_aliases: ?[]const Alias,
         other: u8,
         // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
         comptime static_val: u8 = 8,
@@ -269,6 +275,8 @@ test mapAlloc {
         field: B,
         array: [2]B,
         slice: []const B,
+        aliases: ?[]const Alias,
+        missing_aliases: ?[]const Alias,
         other: u8,
         static_val: u8,
         static_slice: []B,
@@ -280,6 +288,8 @@ test mapAlloc {
         .array = .{ .{ .a = 5 }, .{ .a = 6 } },
         .other = 7,
         .slice = &.{ .{ .a = 9 }, .{ .a = 10 } },
+        .aliases = &.{ .{ .output = 0, .operand = 10 }, .{ .output = 1, .operand = 7 } },
+        .missing_aliases = null,
         .field_with_empty = .{ .{ .a = 9 }, .{} },
     };
     var bb: BB = undefined;
@@ -287,6 +297,7 @@ test mapAlloc {
     try mapAlloc(A.convert, testing.allocator, {}, aa, &bb);
     defer testing.allocator.free(bb.slice);
     defer testing.allocator.free(bb.static_slice);
+    defer testing.allocator.free(bb.aliases.?);
 
     try testing.expectEqual(4, bb.field.b);
     try testing.expectEqual(5, bb.array[0].b);
@@ -297,6 +308,8 @@ test mapAlloc {
     try testing.expectEqual(10, bb.slice[1].b);
     try testing.expectEqual(11, bb.static_slice[0].b);
     try testing.expectEqual(12, bb.static_slice[1].b);
+    try testing.expectEqualDeep(aa.aliases.?, bb.aliases.?);
+    try testing.expectEqual(null, bb.missing_aliases);
 }
 
 /// Visit a given type `T` and:
