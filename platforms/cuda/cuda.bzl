@@ -221,7 +221,7 @@ _PJRT_CUDA_ASSETS = {
         "url": "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cuda-linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "138f9f0620255c74f0c4a9722efc321113c290ff76eeb68f3a6078506d672510",
+        "sha256": "fc4040b0ce7c1d9ecd6a550ef84571aa31290f24f18409a907896061a00a67e8",
         "url": "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cuda-linux-arm64.tar.gz",
     },
 }
