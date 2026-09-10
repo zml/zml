@@ -123,9 +123,7 @@ zig_library(
         "zml.zig",
         "//zml/attention/nki:attention",
     ],
-    data = [
-        "moe/triton_kernels/config.json",
-    ] + select({
+    data = select({
         "//platforms:neuron.enabled": [
             "//zml/attention/nki:attention_kernel",
         ],
