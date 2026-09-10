@@ -87,8 +87,8 @@ def _neuron_impl(mctx):
     ])
 
     simple_repository(
-        name = "libpjrt_neuron",
-        build_file = ":libpjrt_neuron.BUILD.bazel",
+        name = "libzml_neuron",
+        build_file = ":libzml_neuron.BUILD.bazel",
     )
 
     for repo_name, package in _UBUNTU_PACKAGES.items():
@@ -119,7 +119,7 @@ def _neuron_impl(mctx):
             "libgcc_s1",
             "libgomp1",
             "libstdcpp6",
-            "libpjrt_neuron",
+            "libzml_neuron",
         ],
         root_module_direct_dev_deps = [],
     )

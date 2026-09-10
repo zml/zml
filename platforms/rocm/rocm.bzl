@@ -11,8 +11,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-rocm-linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "d2d57212afbef61dbdca6f42d6250f17995533223a9567f4a5c6d24ac87a1ebb"
+_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-rocm-linux-amd64.tar.zst"
+_PLUGIN_ROCM_SHA256 = "d2a311f15532691d7335c0436d4dda13d39e8597e4bb10dbe83b11b02a627546"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
@@ -262,10 +262,10 @@ def _rocm_impl(mctx):
     )
 
     http_archive(
-        name = "libpjrt_rocm",
-        build_file = "libpjrt_rocm.BUILD.bazel",
-        url = _PJRT_ROCM_URL,
-        sha256 = _PJRT_ROCM_SHA256,
+        name = "libzml_rocm",
+        build_file = "libzml_rocm.BUILD.bazel",
+        url = _PLUGIN_ROCM_URL,
+        sha256 = _PLUGIN_ROCM_SHA256,
     )
 
     return mctx.extension_metadata(
@@ -286,7 +286,7 @@ def _rocm_impl(mctx):
             "amdrocm-sysdeps",
             "libatomic1",
             "libdrm-common",
-            "libpjrt_rocm",
+            "libzml_rocm",
         ],
         root_module_direct_dev_deps = [],
     )

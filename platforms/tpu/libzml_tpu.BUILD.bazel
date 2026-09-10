@@ -2,15 +2,15 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 
 copy_file(
-    name = "libpjrt_tpu.so",
+    name = "libzml_tpu.so",
     src = "libtpu/libtpu.so",
-    out = "lib/libpjrt_tpu.so",
+    out = "lib/libzml_tpu.so",
 )
 
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        "lib/libpjrt_tpu.so",
+        "lib/libzml_tpu.so",
     ],
     add_directory_to_runfiles = False,
     allow_overwrites = True,
@@ -29,7 +29,7 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_tpu",
+    name = "libzml_tpu",
     data = [":sandbox"],
     visibility = ["@zml//platforms/tpu:__subpackages__"],
 )

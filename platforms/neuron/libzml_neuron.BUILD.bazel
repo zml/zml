@@ -23,16 +23,16 @@ patchelf(
 )
 
 patchelf(
-    name = "libpjrt_neuron_so",
-    src = "@zml//platforms/neuron:libpjrt_neuron",
+    name = "libzml_neuron_so",
+    src = "@zml//platforms/neuron:libzml_neuron",
     set_rpath = "$ORIGIN",
-    soname = "libpjrt_neuron.so",
+    soname = "libzml_neuron.so",
 )
 
 patchelf(
     name = "neuron_explorer",
     src = "@aws-neuronx-tools//:neuron-explorer",
-    add_needed = ["libpjrt_neuron.so"],
+    add_needed = ["libzml_neuron.so"],
     set_rpath = "$ORIGIN/../lib",
 )
 
@@ -46,7 +46,7 @@ copy_to_directory(
     srcs = [
         ":libneuronpjrt_so",
         ":libneuronxla_files",
-        ":libpjrt_neuron_so",
+        ":libzml_neuron_so",
         ":neuron_explorer",
         "@aws-neuronx-collectives//:libnccom",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
@@ -96,7 +96,7 @@ copy_to_directory(
         "platforms/neuron/nki_kernel_compiler.py": "site-packages/nki_kernel_compiler.py",
         "neuron_explorer": "bin",
         "libneuronpjrt_so": "lib",
-        "libpjrt_neuron_so": "lib",
+        "libzml_neuron_so": "lib",
         "libnrt.patchelf": "lib",
         "libncfw.patchelf": "lib",
         "libnrtucode_extisa": "lib",
@@ -130,7 +130,7 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_neuron",
+    name = "libzml_neuron",
     data = [":sandbox"],
     visibility = ["@zml//platforms/neuron:__subpackages__"],
 )

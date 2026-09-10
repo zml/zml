@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$0.runfiles/+neuron_packages+libzml_neuron/sandbox/bin/neuron-explorer"
 
 run_dir="$1"
 execution_dir="${run_dir}/execution"

@@ -18,8 +18,8 @@ fn findCudaSandbox(
     buffer: *[std.Io.Dir.max_path_bytes]u8,
 ) !?[]const u8 {
     const candidate = switch (builtin.cpu.arch) {
-        .aarch64 => "libpjrt_cuda_linux_arm64/sandbox",
-        .x86_64 => "libpjrt_cuda_linux_amd64/sandbox",
+        .aarch64 => "libzml_cuda_linux_arm64/sandbox",
+        .x86_64 => "libzml_cuda_linux_amd64/sandbox",
         else => return null,
     };
     return try r.rlocation(candidate, buffer);
@@ -125,7 +125,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_cuda.so" });
         break :blk .loadFrom(path);
     };
 }

@@ -15,11 +15,11 @@ exports_files([
 # The proxy also initializes the Neuron runtime environment and exposes the
 # sandboxed compiler binaries to libneuronxla 3.0.
 zig_shared_library(
-    name = "libpjrt_neuron",
+    name = "libzml_neuron",
     srcs = ["neuron.zig"],
-    main = "libpjrt_neuron.zig",
+    main = "libzml_neuron.zig",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     zigopts = ["-fno-stack-check"],
     deps = [
         ":libnrt_headers",
@@ -49,14 +49,14 @@ zig_binary(
 runfiles_to_default(
     name = "neuronx-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     deps = [":neuronx-cc"],
 )
 
 runfiles_to_default(
     name = "nki-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     deps = [":nki-cc"],
 )
 
@@ -90,7 +90,7 @@ cc_library(
     visibility = [
         "//bin/zml-smi:__subpackages__",
     ],
-    deps = ["@libpjrt_neuron//:libnrt_headers"],
+    deps = ["@libzml_neuron//:libnrt_headers"],
 )
 
 cc_import(
@@ -176,7 +176,7 @@ zig_library(
             ":zmlxneuron",
             "//bazel",
             "//stdx",
-            "@libpjrt_neuron",
+            "@libzml_neuron",
             "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [":empty"],
@@ -185,7 +185,7 @@ zig_library(
 
 zig_library(
     name = "topology",
-    data = [":libpjrt_neuron"],
+    data = [":libzml_neuron"],
     import_name = "platforms/neuron/topology",
     main = "topology.zig",
     tags = ["manual"],

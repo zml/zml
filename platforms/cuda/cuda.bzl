@@ -213,16 +213,14 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-09-08T13-23-00Z"
-
-_PJRT_CUDA_ASSETS = {
+_PLUGINS = {
     "amd64": {
-        "sha256": "df66d4ecac57ab6a23a875d11dfcc8bd00087d1214da11c709d39d9073001e11",
-        "url": "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cuda-linux-amd64.tar.gz",
+        "sha256": "2ef0e28330d22ce3039adb1de0d5dabf8bd7126988f9b61ba427946d6c60cb93",
+        "url": "https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "fc4040b0ce7c1d9ecd6a550ef84571aa31290f24f18409a907896061a00a67e8",
-        "url": "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cuda-linux-arm64.tar.gz",
+        "sha256": "f8180188c4557c526571b90cb54354819043d05c492228a9d1179ac2bef26862",
+        "url": "https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-cuda-linux-arm64.tar.zst",
     },
 }
 
@@ -349,19 +347,19 @@ def _cuda_impl(mctx):
             ]),
         )
 
-    for arch, arch_config in _PJRT_CUDA_ASSETS.items():
+    for arch, arch_config in _PLUGINS.items():
         http_archive(
-            name = _repo_name("libpjrt_cuda", arch),
-            build_file = "libpjrt_cuda.BUILD.bazel",
-            url = arch_config["url"].format(release = PJRT_CUDA_RELEASE),
+            name = _repo_name("libzml_cuda", arch),
+            build_file = "libzml_cuda.BUILD.bazel",
+            url = arch_config["url"],
             sha256 = arch_config["sha256"],
         )
 
     return mctx.extension_metadata(
         reproducible = True,
         root_module_direct_deps = [
-            "libpjrt_cuda_linux_amd64",
-            "libpjrt_cuda_linux_arm64",
+            "libzml_cuda_linux_amd64",
+            "libzml_cuda_linux_arm64",
             "cuda_nvml_dev_linux_x86_64",
             "cuda_nvml_dev_linux_sbsa",
             "zlib1g_linux_arm64",

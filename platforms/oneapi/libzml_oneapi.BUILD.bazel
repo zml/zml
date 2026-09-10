@@ -2,7 +2,7 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 patchelf(
-    name = "libpjrt_oneapi_so",
+    name = "libzml_oneapi_so",
     src = "libpjrt_oneapi.so",
     add_needed = [
         "libzmlxoneapi.so.0",
@@ -86,7 +86,7 @@ copy_to_directory(
         ":libiga64_so_2",
         ":libigc_so_2",
         ":libigdfcl_so_2",
-        ":libpjrt_oneapi_so",
+        ":libzml_oneapi_so",
         ":libsycl_so",
         ":libtbb_so_12",
         ":libze_intel_gpu_so",
@@ -121,7 +121,7 @@ copy_to_directory(
         "libigdfcl_so_2": "lib",
         "libigc_so_2": "lib",
         "libdnnl_so_3": "lib",
-        "libpjrt_oneapi_so": "lib",
+        "libzml_oneapi_so": "lib",
         "libsycl_so": "lib",
         "libtbb_so_12": "lib",
         ONEAPI_CCL_LIB: "lib",
@@ -139,7 +139,7 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_oneapi",
+    name = "libzml_oneapi",
     data = [":sandbox"],
     visibility = ["@zml//platforms/oneapi:__subpackages__"],
 )

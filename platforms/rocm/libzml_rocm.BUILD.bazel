@@ -5,8 +5,8 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 patchelf(
-    name = "libpjrt_rocm_so",
-    src = "libpjrt_rocm.so",
+    name = "libzml_rocm_so",
+    src = "libzml_rocm.so",
     add_needed = [
         "libzmlxrocm.so.0",
     ],
@@ -41,7 +41,7 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":amdgpu_ids",
-        ":libpjrt_rocm_so",
+        ":libzml_rocm_so",
         "@amdrocm-amdsmi//:libamd_smi",
         "@amdrocm-base//:rocm-core",
         "@amdrocm-base//:rocprofiler-register",
@@ -93,7 +93,7 @@ copy_to_directory(
         "lib/host-math/lib": "lib",
         "lib/llvm/lib": "lib",
         "lib/llvm/amdgcn": "amdgcn",
-        "libpjrt_rocm_so": "lib",
+        "libzml_rocm_so": "lib",
         "amdgpu.ids": "share/libdrm/amdgpu.ids",
         "rccl": "lib",
         "rocblas": "lib",
@@ -115,7 +115,7 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_rocm",
+    name = "libzml_rocm",
     data = [":sandbox"],
     visibility = ["@zml//platforms/rocm:__subpackages__"],
 )
