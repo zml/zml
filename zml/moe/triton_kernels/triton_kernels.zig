@@ -13,8 +13,6 @@ const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
 
-const log = std.log.scoped(.moe_triton);
-
 /// Floor to a multiple of 16 — matches the Python `(v // 16) * 16` guards
 /// that keep dynamic strides aligned for tt.load/store.
 fn blockFloor16(v: Value) Value {
@@ -175,49 +173,37 @@ pub const FusedMoe = struct {
         a_scale_dtype: ?DType,
         b_scale_dtype: ?DType,
         b_bias_dtype: ?DType,
-        topk_weights_dtype: ?DType,
+        routing_weights_dtype: ?DType,
         block_size_m: usize,
         block_size_n: usize,
         block_size_k: usize,
         group_size_m: usize,
         top_k: usize,
         naive_block_assignment: bool,
-        mul_routed_weight: bool,
         compute_type: DType,
-        // Validation flags — the kernel rejects configs that set any of
-        // these to true (the body only implements the bf16 / no-quant /
-        // no-bias path).
-        use_fp8_w8a8: bool,
-        use_int8_w8a8: bool,
-        use_int8_w8a16: bool,
-        per_channel_quant: bool,
-        has_bias: bool,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "fused_moe_kernel",
         .inputs = &.{
-            "a_ptr",            "b_ptr",                "b_bias_ptr",           "a_scale_ptr",                "b_scale_ptr",
-            "topk_weights_ptr", "sorted_token_ids_ptr", "expert_ids_ptr",       "num_tokens_post_padded_ptr", "N_ptr",
-            "K_ptr",            "EM_ptr",               "num_valid_tokens_ptr", "stride_am_ptr",              "stride_be_ptr",
-            "stride_bn_ptr",    "stride_cm_ptr",        "stride_asm_ptr",       "stride_ask_ptr",             "stride_bse_ptr",
-            "stride_bsk_ptr",   "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",
+            "a_ptr",               "b_ptr",                "b_bias_ptr",           "a_scale_ptr",                "b_scale_ptr",
+            "routing_weights_ptr", "sorted_token_ids_ptr", "expert_ids_ptr",       "num_tokens_post_padded_ptr", "N_ptr",
+            "K_ptr",               "EM_ptr",               "num_valid_tokens_ptr", "stride_am_ptr",              "stride_be_ptr",
+            "stride_bn_ptr",       "stride_cm_ptr",        "stride_asm_ptr",       "stride_ask_ptr",             "stride_bse_ptr",
+            "stride_bsk_ptr",      "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",
         },
         .outputs = &.{"c"},
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
-        if (cfg.use_fp8_w8a8 or cfg.use_int8_w8a8 or cfg.use_int8_w8a16 or cfg.has_bias or cfg.per_channel_quant) {
-            log.err("fused_moe_kernel: unsupported config (fp8/int8/bias/per_channel)", .{});
-            return error.InvalidMlir;
-        }
-
         const a = try b.declareArgs(.{
             .a_ptr = .{ .ptr = cfg.a_dtype },
             .b_ptr = .{ .ptr = cfg.b_dtype },
-            .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse cfg.c_dtype },
+            // The fixed signature requires concrete pointer types even for absent,
+            // unused inputs. FP32 matches the caller's placeholder tensors.
+            .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse .f32 },
             .a_scale_ptr = .{ .ptr = cfg.a_scale_dtype orelse .f32 },
             .b_scale_ptr = .{ .ptr = cfg.b_scale_dtype orelse .f32 },
-            .topk_weights_ptr = .{ .ptr = cfg.topk_weights_dtype orelse .f32 },
+            .routing_weights_ptr = .{ .ptr = cfg.routing_weights_dtype orelse .f32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .expert_ids_ptr = .{ .ptr = .i32 },
             .num_tokens_post_padded_ptr = .{ .ptr = .i32 },
@@ -411,11 +397,10 @@ pub const FusedMoe = struct {
         }
         var accumulator = loop.results[2];
 
-        if (cfg.mul_routed_weight) {
-            const tw_dtype = cfg.topk_weights_dtype orelse .f32;
-            const tw_other = b.zeros(&.{block_size_m}, tw_dtype);
-            const tw = b.loadOpts(a.topk_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = tw_other });
-            accumulator = accumulator.mul(tw.expandDims(1));
+        if (cfg.routing_weights_dtype) |dtype| {
+            const other = b.zeros(&.{block_size_m}, dtype);
+            const routing_weights = b.loadOpts(a.routing_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = other });
+            accumulator = accumulator.mul(routing_weights.to(.f32).expandDims(1));
         }
 
         accumulator = accumulator.to(compute_type);

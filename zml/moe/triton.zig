@@ -86,25 +86,25 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
     const down = opts.down.weight.withTags(.{ .expert, .out, .mid });
-    const weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const routing_weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "expected BF16 hidden states, got {}", .{hidden.dtype()});
     stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn, "expected BF16 or FP8 E4M3FN gate/up weights, got {}", .{gate_up.dtype()});
     stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn, "expected BF16 or FP8 E4M3FN down weights, got {}", .{down.dtype()});
-    stdx.debug.assert(weights.dtype() == .f32 or weights.dtype() == .bf16, "expected FP32 or BF16 routing weights, got {}", .{weights.dtype()});
+    stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "expected FP32 or BF16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "expected I32 expert ids, got {}", .{ids.dtype()});
     stdx.debug.assert(hidden.dim(.in) == gate_up.dim(.in), "hidden width {} must match gate/up input width {}", .{ hidden.dim(.in), gate_up.dim(.in) });
     stdx.debug.assert(@rem(gate_up.dim(.out), 2) == 0, "gate/up output width must be even, got {}", .{gate_up.dim(.out)});
     stdx.debug.assert(down.dim(.mid) == @divFloor(gate_up.dim(.out), 2), "down input width {} must equal half the gate/up output width {}", .{ down.dim(.mid), gate_up.dim(.out) });
-    stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and weights.dim(.token) == hidden.dim(.token), "routing ids and weights must match hidden token count {}, got {} and {}", .{ hidden.dim(.token), ids.dim(.token), weights.dim(.token) });
-    stdx.debug.assert(ids.dim(.topk) == weights.dim(.topk), "routing ids and weights must have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), weights.dim(.topk) });
+    stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "routing ids and weights must match hidden token count {}, got {} and {}", .{ hidden.dim(.token), ids.dim(.token), routing_weights.dim(.token) });
+    stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "routing ids and weights must have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
     stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "gate/up and down expert counts must match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
     if (opts.expert_map) |expert_map|
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "expected a rank-1 I32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
     const num_experts = if (opts.expert_map) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
-    const routing = prepareRouting(ids, num_experts, launch_config.block_size_m);
+    const routing = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
 
     const expert_ids = if (opts.expert_map) |expert_map|
         expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
@@ -112,96 +112,49 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
         routing.expert_ids;
 
     var hidden_quant = hidden;
-    var a_scale = Tensor.scalar(1.0, .f32);
+    var input_scale: ?Tensor = null;
 
     if (gate_up.dtype() == .f8e4m3fn) {
-        hidden_quant, a_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden));
+        hidden_quant, input_scale = quantizePerTokenGroupFp8(hidden, fp8ActivationGroupSize(hidden));
     }
 
-    const first_cfg = makeFusedMoeConfig(
-        hidden_quant,
-        gate_up,
-        opts.gate_up.quantizationScheme(),
-        launch_config,
-        routing.naive_block_assignment,
-        ids.dim(.topk),
-        false,
-        false,
-        .bf16,
-    );
+    const gate_up_out = callFusedMoe(.{
+        .input = hidden_quant,
+        .weight = gate_up,
+        .bias = opts.gate_up.bias,
+        .input_scale = input_scale,
+        .weight_scale = opts.gate_up.quantizationScales(),
+        .routing = routing,
+        .expert_ids = expert_ids,
+        .launch_config = launch_config,
+        .top_k = @intCast(ids.dim(.topk)),
+        .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
+    });
 
-    const gate_up_bias =
-        opts.gate_up.bias orelse
-        Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, .bf16));
-
-    const gate_up_scale = if (opts.gate_up.quantization) |q| q.scales else Tensor.scalar(1.0, .f32);
-
-    const first_out = callFusedMoe(
-        hidden_quant,
-        gate_up,
-        gate_up_bias,
-        a_scale,
-        gate_up_scale,
-        weights,
-        routing.sorted_token_ids,
-        expert_ids,
-        routing.num_tokens_post_padded,
-        first_cfg,
-        launch_config,
-        routing.max_num_tokens_padded,
-        routing.num_assignments,
-        Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
-    );
-
-    const activated = applyActivation(first_out, opts.activation, opts.activation_threshold);
+    const activated = applyActivation(gate_up_out, opts.activation, opts.activation_threshold);
     var activated_quant = activated;
-    a_scale = Tensor.scalar(1.0, .f32);
+    input_scale = null;
     if (down.dtype() == .f8e4m3fn) {
-        activated_quant, a_scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated));
+        activated_quant, input_scale = quantizePerTokenGroupFp8(activated, fp8ActivationGroupSize(activated));
     }
 
-    const second_cfg = makeFusedMoeConfig(
-        activated_quant,
-        down,
-        opts.gate_up.quantizationScheme(),
-        launch_config,
-        routing.naive_block_assignment,
-        1,
-        true,
-        false,
-        .bf16,
-    );
+    const down_out = callFusedMoe(.{
+        .input = activated_quant,
+        .weight = down,
+        .bias = opts.down.bias,
+        .input_scale = input_scale,
+        .weight_scale = opts.down.quantizationScales(),
+        .routing_weights = routing_weights,
+        .routing = routing,
+        .expert_ids = expert_ids,
+        .launch_config = launch_config,
+        .top_k = 1,
+        .output_shape = Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
+    });
 
-    const down_bias =
-        opts.down.bias orelse
-        Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, .bf16));
-
-    const down_scale = if (opts.down.quantization) |q| q.scales else Tensor.scalar(1.0, .f32);
-
-    const second_out = callFusedMoe(
-        activated_quant,
-        down,
-        down_bias,
-        a_scale,
-        down_scale,
-        weights,
-        routing.sorted_token_ids,
-        expert_ids,
-        routing.num_tokens_post_padded,
-        second_cfg,
-        launch_config,
-        routing.max_num_tokens_padded,
-        routing.num_assignments,
-        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
-    );
-
-    const output = second_out.sum(.topk).squeeze(.topk);
+    const output = down_out.sum(.topk).squeeze(.topk);
 
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
-}
-
-fn isMxFp8(quant_scheme: ?zml.Quantization.Scheme) bool {
-    return quant_scheme != null and quant_scheme.? == .mxfp8;
 }
 
 fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32) Tensor {
@@ -221,61 +174,55 @@ fn applyActivation(x: Tensor, mode: Parameters.ActivationMode, activation_thresh
 }
 
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
-fn callFusedMoe(
-    a: Tensor,
-    b: Tensor,
-    b_bias: Tensor,
-    a_scale: Tensor,
-    b_scale: Tensor,
-    topk_weights: Tensor,
-    sorted_token_ids: Tensor,
+fn callFusedMoe(opts: struct {
+    input: Tensor,
+    weight: Tensor,
+    bias: ?Tensor = null,
+    input_scale: ?Tensor = null,
+    weight_scale: ?Tensor = null,
+    routing_weights: ?Tensor = null,
+    routing: Routing,
     expert_ids: Tensor,
-    num_tokens_post_padded: Tensor,
-    cfg: kernels.FusedMoe.Cfg,
     launch_config: LaunchConfig,
-    max_num_tokens_padded: i64,
-    num_valid_tokens: i64,
+    top_k: usize,
     output_shape: Shape,
-) Tensor {
-    const block_size_m: i64 = @intCast(cfg.block_size_m);
-    const block_size_n: i64 = @intCast(cfg.block_size_n);
-    const m_tokens = a.dim(0);
+}) Tensor {
+    const block_size_m: i64 = @intCast(opts.launch_config.block_size_m);
+    const block_size_n: i64 = @intCast(opts.launch_config.block_size_n);
+    const m_tokens = opts.input.dim(0);
     const em_effective = if (m_tokens < block_size_m)
-        @min(max_num_tokens_padded, num_valid_tokens * block_size_m)
+        @min(opts.routing.max_num_tokens_padded, opts.routing.num_assignments * block_size_m)
     else
-        max_num_tokens_padded;
+        opts.routing.max_num_tokens_padded;
     const grid_x =
         (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
-        (std.math.divCeil(i64, b.dim(1), block_size_n) catch unreachable);
+        (std.math.divCeil(i64, opts.weight.dim(1), block_size_n) catch unreachable);
 
-    const stride_asm: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) a_scale.dim(1) else 0;
-    const stride_ask: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) 1 else 0;
-    const stride_bse: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3)
-        b_scale.dim(1) * b_scale.dim(2)
-    else
-        0;
-    const stride_bsk: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) 1 else 0;
-    const stride_bsn: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) b_scale.dim(2) else 0;
+    const stride_asm: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
+    const stride_ask: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
+    const stride_bse: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) scale.dim(1) * scale.dim(2) else 0) else 0;
+    const stride_bsk: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) 1 else 0) else 0;
+    const stride_bsn: i64 = if (opts.weight_scale) |scale| (if (scale.rank() == 3) scale.dim(2) else 0) else 0;
 
     return kernels.FusedMoe.Kernel.call(
         .{
-            .a_ptr = a,
-            .b_ptr = b,
-            .b_bias_ptr = b_bias,
-            .a_scale_ptr = a_scale,
-            .b_scale_ptr = b_scale,
-            .topk_weights_ptr = topk_weights,
-            .sorted_token_ids_ptr = sorted_token_ids,
-            .expert_ids_ptr = expert_ids,
-            .num_tokens_post_padded_ptr = num_tokens_post_padded,
-            .N_ptr = Tensor.constant(.{ .i64 = b.dim(1) }).reshape(.{1}),
-            .K_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
+            .a_ptr = opts.input,
+            .b_ptr = opts.weight,
+            .b_bias_ptr = opts.bias orelse Tensor.scalar(0, .f32),
+            .a_scale_ptr = opts.input_scale orelse Tensor.scalar(1.0, .f32),
+            .b_scale_ptr = opts.weight_scale orelse Tensor.scalar(1.0, .f32),
+            .routing_weights_ptr = opts.routing_weights orelse Tensor.scalar(1.0, .f32),
+            .sorted_token_ids_ptr = opts.routing.sorted_token_ids,
+            .expert_ids_ptr = opts.expert_ids,
+            .num_tokens_post_padded_ptr = opts.routing.num_tokens_post_padded,
+            .N_ptr = Tensor.constant(.{ .i64 = opts.weight.dim(1) }).reshape(.{1}),
+            .K_ptr = Tensor.constant(.{ .i64 = opts.weight.dim(2) }).reshape(.{1}),
             .EM_ptr = Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
-            .num_valid_tokens_ptr = Tensor.constant(.{ .i64 = num_valid_tokens }).reshape(.{1}),
-            .stride_am_ptr = Tensor.constant(.{ .i64 = a.dim(1) }).reshape(.{1}),
-            .stride_be_ptr = Tensor.constant(.{ .i64 = b.dim(1) * b.dim(2) }).reshape(.{1}),
-            .stride_bn_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
-            .stride_cm_ptr = Tensor.constant(.{ .i64 = b.dim(.out) }).reshape(.{1}),
+            .num_valid_tokens_ptr = Tensor.constant(.{ .i64 = opts.routing.num_assignments }).reshape(.{1}),
+            .stride_am_ptr = Tensor.constant(.{ .i64 = opts.input.dim(1) }).reshape(.{1}),
+            .stride_be_ptr = Tensor.constant(.{ .i64 = opts.weight.dim(1) * opts.weight.dim(2) }).reshape(.{1}),
+            .stride_bn_ptr = Tensor.constant(.{ .i64 = opts.weight.dim(2) }).reshape(.{1}),
+            .stride_cm_ptr = Tensor.constant(.{ .i64 = opts.weight.dim(.out) }).reshape(.{1}),
             .stride_asm_ptr = Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
             .stride_ask_ptr = Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
             .stride_bse_ptr = Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
@@ -284,12 +231,27 @@ fn callFusedMoe(
             .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
             .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
         },
-        .{ .c = output_shape },
+        .{ .c = opts.output_shape },
         .{
-            .cfg = cfg,
+            .cfg = .{
+                .a_dtype = toDType(opts.input.dtype()),
+                .b_dtype = toDType(opts.weight.dtype()),
+                .c_dtype = toDType(opts.output_shape.dtype()),
+                .a_scale_dtype = if (opts.input_scale) |scale| toDType(scale.dtype()) else null,
+                .b_scale_dtype = if (opts.weight_scale) |scale| toDType(scale.dtype()) else null,
+                .b_bias_dtype = if (opts.bias) |bias| toDType(bias.dtype()) else null,
+                .routing_weights_dtype = if (opts.routing_weights) |weights| toDType(weights.dtype()) else null,
+                .block_size_m = opts.launch_config.block_size_m,
+                .block_size_n = opts.launch_config.block_size_n,
+                .block_size_k = opts.launch_config.block_size_k,
+                .group_size_m = opts.launch_config.group_size_m,
+                .top_k = opts.top_k,
+                .naive_block_assignment = opts.routing.naive_block_assignment,
+                .compute_type = .bf16,
+            },
             .grid = .{ @intCast(grid_x), 1, 1 },
-            .num_warps = @intCast(launch_config.num_warps),
-            .num_stages = @intCast(launch_config.num_stages),
+            .num_warps = opts.launch_config.num_warps,
+            .num_stages = opts.launch_config.num_stages,
         },
     ).c;
 }
@@ -471,50 +433,13 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
 // Config / validation helpers
 // =============================================================================
 
-fn makeFusedMoeConfig(
-    a: Tensor,
-    b: Tensor,
-    quant_scheme: ?zml.Quantization.Scheme,
-    launch_config: LaunchConfig,
-    naive_block_assignment: bool,
-    top_k: i64,
-    mul_routed_weight: bool,
-    has_bias: bool,
-    output_dtype: DataType,
-) kernels.FusedMoe.Cfg {
-    var use_fp8 = isMxFp8(quant_scheme);
-    if (b.dtype() == .f8e4m3fn) use_fp8 = true;
-    return .{
-        .a_dtype = toDType(a.dtype()),
-        .b_dtype = toDType(b.dtype()),
-        .c_dtype = toDType(output_dtype),
-        .a_scale_dtype = if (use_fp8) .bf16 else null,
-        .b_scale_dtype = if (use_fp8) .bf16 else null,
-        .b_bias_dtype = null,
-        .topk_weights_dtype = null,
-        .block_size_m = @intCast(launch_config.block_size_m),
-        .block_size_n = @intCast(launch_config.block_size_n),
-        .block_size_k = @intCast(launch_config.block_size_k),
-        .group_size_m = @intCast(launch_config.group_size_m),
-        .top_k = @intCast(top_k),
-        .naive_block_assignment = naive_block_assignment,
-        .mul_routed_weight = mul_routed_weight,
-        .compute_type = .bf16,
-        .use_fp8_w8a8 = use_fp8,
-        .use_int8_w8a8 = false,
-        .use_int8_w8a16 = false,
-        .per_channel_quant = false,
-        .has_bias = has_bias,
-    };
-}
-
 const LaunchConfig = struct {
-    block_size_m: i64,
-    block_size_n: i64,
-    block_size_k: i64,
-    group_size_m: i64,
-    num_warps: i64,
-    num_stages: i64,
+    block_size_m: usize,
+    block_size_n: usize,
+    block_size_k: usize,
+    group_size_m: usize,
+    num_warps: i32,
+    num_stages: i32,
 };
 
 const launch_configs = [_]struct { tokens: i64, config: LaunchConfig }{
@@ -554,8 +479,8 @@ test "MoE launch config selects the nearest token bucket" {
     try std.testing.expectEqualDeep(launchConfigForTokens(8), launchConfigForTokens(7));
     try std.testing.expectEqualDeep(launchConfigForTokens(1), launchConfigForTokens(0));
     try std.testing.expectEqualDeep(launchConfigForTokens(4096), launchConfigForTokens(8192));
-    try std.testing.expectEqual(@as(i64, 64), launchConfigForTokens(16).group_size_m);
-    try std.testing.expectEqual(@as(i64, 5), launchConfigForTokens(16).num_stages);
+    try std.testing.expectEqual(@as(usize, 64), launchConfigForTokens(16).group_size_m);
+    try std.testing.expectEqual(@as(i32, 5), launchConfigForTokens(16).num_stages);
 }
 
 fn fp8ActivationGroupSize(x: Tensor) i64 {
