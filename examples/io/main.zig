@@ -192,7 +192,18 @@ pub fn main(init: std.process.Init) !void {
 
             const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
 
-            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            // A platform setting, not a loader knob: a smaller pool lets a
+            // run observe the loader's admission on a device with room.
+            const memory_fraction: f32 = if (init.environ_map.get("ZML_GPU_MEMORY_FRACTION")) |text|
+                std.fmt.parseFloat(f32, text) catch {
+                    log.err("ZML_GPU_MEMORY_FRACTION must be a number", .{});
+                    return error.InvalidArgument;
+                }
+            else
+                0.90;
+            const platform: *zml.Platform = try .auto(allocator, io, .{
+                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
+            });
             defer platform.deinit(allocator, io);
 
             const load_dma_block_sizes = try envMibList(
@@ -217,20 +228,18 @@ pub fn main(init: std.process.Init) !void {
             const pack_options: PackOptions = .{
                 .packs = try envUsize(init.environ_map, "ZML_LOAD_PACKS", 0),
                 .width = try envUsize(init.environ_map, "ZML_LOAD_PACK_WIDTH", 64),
-                .window = try envUsize(init.environ_map, "ZML_LOAD_PACK_WINDOW", 1),
                 .pairs = try envUsize(init.environ_map, "ZML_LOAD_PACK_PAIRS", 0),
                 .check = try envUsize(init.environ_map, "ZML_LOAD_PACK_CHECK", 1) != 0,
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
-            if (pack_options.width == 0 or pack_options.window == 0) return error.InvalidArgument;
+            if (pack_options.width == 0) return error.InvalidArgument;
             const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, sharded_sharding, pack_options);
             defer for (pack_plan.exes) |*exe| exe.deinit();
             if (pack_options.packs > 0) {
-                log.info("pack plan: packs={d} requested={d} width={d} window={d} pairs={d} executables={d} bytes={Bi:.2}", .{
+                log.info("pack plan: packs={d} requested={d} width={d} pairs={d} executables={d} bytes={Bi:.2}", .{
                     pack_plan.packs.len,
                     pack_options.packs,
                     pack_options.width,
-                    pack_options.window,
                     pack_options.pairs,
                     pack_plan.exes.len,
                     pack_plan.bytes,
@@ -316,18 +325,9 @@ pub fn main(init: std.process.Init) !void {
                 });
                 defer loader.deinit();
 
-                // `window` submissions of `packs_per_submission` packs in
-                // flight, budgeted by the largest pack's executable inputs.
+                // The loader admits the pack submissions itself; the bulk
+                // queues behind them and one await retires everything.
                 const packs_per_submission: usize = if (pack_options.pairs != 0) 2 else 1;
-                var pack_input_bytes: usize = 0;
-                for (pack_plan.exes) |*exe| {
-                    pack_input_bytes = @max(pack_input_bytes, try loader.executeInputBytesPerDevice(exe));
-                }
-                const window_budget = pack_options.window * packs_per_submission * pack_input_bytes;
-                var window: zml.io.Window = .init(allocator, window_budget, pack_options.window);
-                defer window.deinit();
-
-                const pack_start: std.Io.Timestamp = .now(io, .awake);
                 var next_pack: usize = 0;
                 while (next_pack < pack_plan.packs.len) {
                     const count = @min(packs_per_submission, pack_plan.packs.len - next_pack);
@@ -343,36 +343,13 @@ pub fn main(init: std.process.Init) !void {
                             .exe = &pack_plan.exes[pack.exe_index],
                         };
                     }
-                    try window.submit(&loader, &store, bindings[0..count], &progress);
+                    try loader.loadExecute(&store, bindings[0..count], &progress);
                     next_pack += count;
                 }
-                try window.drain();
+                try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding}, &progress);
+                try loader.awaitAll();
                 packs_loaded = pack_plan.packs.len;
-                const pack_took = pack_start.untilNow(io, .awake);
-                const pack_bytes = loader.bytesLoaded();
-                log.info("pack phase: packs={d} width={d} window={d} pairs={d} budget={Bi:.2} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
-                    pack_plan.packs.len,
-                    pack_options.width,
-                    pack_options.window,
-                    pack_options.pairs,
-                    window_budget,
-                    pack_bytes,
-                    pack_took,
-                    gibPerSecond(pack_bytes, pack_took),
-                });
-
-                const bulk_start: std.Io.Timestamp = .now(io, .awake);
-                const bulk = try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding}, &progress);
-                try bulk.await();
-                const bulk_took = bulk_start.untilNow(io, .awake);
                 total_bytes = loader.bytesLoaded();
-                const bulk_bytes = total_bytes - pack_bytes;
-                log.info("bulk phase: tensors={d} bytes={Bi:.2} elapsed={f} GiB/s={d:.2}", .{
-                    load_count,
-                    bulk_bytes,
-                    bulk_took,
-                    gibPerSecond(bulk_bytes, bulk_took),
-                });
                 defer {
                     for (loaded.tensors) |*buffer_| buffer_.deinit();
                     init.arena.allocator().free(loaded.tensors);
@@ -401,9 +378,7 @@ const PackOptions = struct {
     packs: usize,
     /// Sources per pack.
     width: usize,
-    /// Submissions in flight; logged only until the loader exposes handles.
-    window: usize,
-    /// Pair two packs per submission; logged only until the loader supports it.
+    /// Pair two packs per submission.
     pairs: usize,
     /// Read sample packs back and compare with the source bytes.
     check: bool,

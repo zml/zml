@@ -77,6 +77,10 @@ pub const Loader = struct {
     controller_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
+    /// Device bytes allocated for outputs so far, per `platform.devices`
+    /// index, cumulative: the front end subtracts it from what it submitted
+    /// to know what is still to land.
+    allocated_bytes: []std.atomic.Value(u64),
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
@@ -98,6 +102,9 @@ pub const Loader = struct {
     ) !*Loader {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
+        const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);
+        errdefer allocator.free(allocated_bytes);
+        @memset(allocated_bytes, .init(0));
         const block_pool = try initCalibratedBlockPool(allocator, io, platform, opts);
         const calibration = block_pool.calibration;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
@@ -131,6 +138,7 @@ pub const Loader = struct {
             .pipeline = undefined,
             .controller_runtime = undefined,
             .worker_pool = undefined,
+            .allocated_bytes = allocated_bytes,
             .created_at = .now(io, .awake),
             .source_request_size = block_pool.request_size,
             .direct_io = opts.direct_io,
@@ -329,6 +337,7 @@ pub const Loader = struct {
         self.pool.deinit();
 
         const allocator = self.allocator;
+        allocator.free(self.allocated_bytes);
         allocator.destroy(self);
     }
 
@@ -849,7 +858,7 @@ const Item = struct {
     const InitContext = struct { item: *Item, direct: *Loader };
 
     fn initTransfer(ctx: InitContext) !TensorTransfer {
-        return TensorTransfer.initResolved(
+        const transfer = try TensorTransfer.initResolved(
             ctx.direct.allocator,
             ctx.direct.platform,
             ctx.item.source,
@@ -858,6 +867,11 @@ const Item = struct {
             ctx.item.output,
             ctx.item.progress,
         );
+        // Counted once per tensor (`LazyOnce`), by the worker that allocated it.
+        for (transfer.targets) |target| {
+            _ = ctx.direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
+        }
+        return transfer;
     }
 
     source: *const safetensors.Tensor,

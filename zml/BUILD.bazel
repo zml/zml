@@ -99,6 +99,7 @@ zig_library(
         "io/direct_loader.zig",
         "io/DispatchSpans.zig",
         "io/dma_calibration.zig",
+        "io/execute_admission.zig",
         "io/host_memory.zig",
         "io/limits.zig",
         "io/backend.zig",

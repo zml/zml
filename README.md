@@ -170,10 +170,17 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
         shardings: []const zml.Sharding,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .shardings = shardings,
+        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
+        errdefer unloadBuffers(&buffers);
+
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .read_parallelism = .{ .fixed = 1 },
         });
+        defer loader.deinit();
+        try loader.load(Mnist, self, &buffers, store, shardings, null);
+        try loader.awaitAll();
+
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {

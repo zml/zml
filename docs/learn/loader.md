@@ -2,9 +2,10 @@
 
 `zml.io.Loader` turns checkpoint sources into device buffers. `load` submits
 the single-source tensors of a model; `loadExecute` submits the sources of
-executable bindings. Both return a `Handle`. Reads and transfers may start
-before submission returns, while executable bindings run when their handle
-is awaited.
+executable bindings. Reads and transfers may start before submission returns.
+Submissions are retired in submission order: the loader waits for the reads,
+then for `loadExecute` runs each executable in binding order on the calling
+task, writes its output and frees its inputs.
 
 ```zig
 var buffers = try zml.mem.bufferize(allocator, Model, &model);
@@ -15,51 +16,57 @@ var loader = try zml.io.Loader.init(allocator, io, platform, .{
 });
 defer loader.deinit();
 
-const handle = try loader.load(Model, &model, &buffers, &store, shardings, null);
-try handle.await();
+try loader.load(Model, &model, &buffers, &store, shardings, null);
+try loader.awaitAll();
 ```
 
 `load` and `loadBuffer` accept shardings for each submission; an empty slice
 selects replicated placement. `loadExecute` uses the executable’s input and
 output shardings. The loader does not retain the shardings slice.
 
-The store is passed to each `load`, `loadBuffer`, or `loadExecute` submission;
-`Window.submit` forwards it to `loadExecute`. Initialization needs no store.
-These submission calls also accept an optional progress node as their final
-argument (`null` disables reporting). Keep it alive until the handle completes.
+The store is passed to each `load`, `loadBuffer`, or `loadExecute` submission.
+Initialization needs no store. These submission calls also accept an optional
+progress node as their final argument (`null` disables reporting). Keep it
+alive until `awaitAll` or `deinit` returns.
 The caller owns the estimated total. For a whole checkpoint loaded once,
 `store.view().count()` estimates the number of source tensors. Each loaded
 source completes one item; bulk loads skip already delivered transformed
 tensors, and executable loads count their input sources, not their outputs.
 Unused or repeatedly loaded sources can make the checkpoint estimate inexact.
 Source progress completes before the executable runs; keep the enclosing node
-alive until all handles finish to cover the full loading lifecycle.
+alive until `awaitAll` returns to cover the full loading lifecycle.
 The caller owns the store, platform, model buffers, and executable outputs.
-Each submission borrows the store’s source metadata until its handle completes.
-The loader owns its backend and handles. Declare cleanup in
+Each submission borrows the store’s source metadata until it is retired.
+The loader owns its backend and its pending submissions. Declare cleanup in
 the order above so the loader finishes using buffers before they are freed.
 Submit and await serially on the owning task; the backend provides the read
-and transfer concurrency. A loader may have any number of outstanding handles.
+and transfer concurrency. A loader may have any number of pending submissions.
 
-`Handle.await` is idempotent and caches its outcome. For `loadExecute`, it
-runs each executable in binding order and frees the inputs. Loaded logical
-bytes are counted only after a successful await. `Handle.isDone` reports
-completion of the source reads and transfers; awaiting may still execute the
-bindings. Handles remain valid until `Loader.deinit`, which waits for pending
-transfers and frees inputs without executing pending bindings.
+`loadExecute` admits its submission itself. Before publishing, it retires the
+oldest pending submissions until the new one fits the room the devices report
+(their memory limit minus what is in use, minus the loader’s own unlanded
+weights), at a cost of inputs, temporaries and output per device; it always
+admits when nothing is pending. Where a device reports no memory limit (CPU)
+or the backend cannot account its allocations, every pending submission is
+retired first. `load` is never gated: submitted after `loadExecute`, it queues
+behind the packs, and a transformed tensor counts as delivered once a
+`loadExecute` naming it was submitted. Outputs of earlier bindings may
+therefore be written by a later `loadExecute` or by `awaitAll`.
 
-`zml.io.Window` adds a caller-side budget for executable inputs per device and
-a maximum outstanding-handle count. It awaits the oldest handle before a new
-submission would exceed either limit. An otherwise empty window always admits
-one submission, even when its inputs exceed the budget. `Window.drain` awaits
-everything and reports the first error; `Window.deinit` drains and drops errors.
+`awaitAll` retires everything and returns the first error; a failure is
+sticky: later submissions are refused and `awaitAll` keeps returning it.
+`bytesLoaded` counts the logical bytes of submissions retired with execution.
+`deinit` awaits what is still pending without executing it (outputs
+unwritten, inputs freed), then destroys the backend. There is no
+per-submission handle and no memory knob.
 
 ## Implementation map
 
 | Module | Responsibility |
 | --- | --- |
 | `zml/io.zig` | Public IO facade |
-| `zml/io/loader.zig` | Loader options, handles, execution window, source preparation and executable ownership |
+| `zml/io/loader.zig` | Loader options, FIFO submissions, admission, source preparation and executable ownership |
+| `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind `loadExecute` admission |
 | `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
 | `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |

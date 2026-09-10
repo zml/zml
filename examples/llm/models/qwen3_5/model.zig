@@ -88,8 +88,8 @@ pub const LoadedModel = struct {
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        const weights_handle = try loader.load(Model, &self.inner, &buffers, store, shardings, progress);
-        try weights_handle.await();
+        try loader.load(Model, &self.inner, &buffers, store, shardings, progress);
+        try loader.awaitAll();
         const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);
@@ -183,8 +183,8 @@ pub const Model = struct {
         });
         defer loader.deinit();
         progress.increaseEstimatedTotalItems(store.view().count());
-        const weights_handle = try loader.load(Model, self, &buffers, store, shardings, progress);
-        try weights_handle.await();
+        try loader.load(Model, self, &buffers, store, shardings, progress);
+        try loader.awaitAll();
         const total_bytes = loader.bytesLoaded();
 
         const took = now.untilNow(io, .awake);

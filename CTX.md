@@ -123,23 +123,32 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 
 - `zml.io.Loader` selects the direct path for CUDA, ROCm, oneAPI and CPU
   (`mem.DmaWorkspace.isSupported`; CPU arenas are plain pages, see "Ninth
-  pass") and the buffered path for TPU, neuron and metal. A loader owns its store, sharding/profile options,
-  worker pool, and every handle it created. Every submission returns a
-  `Handle`: `load(Model, model, buffers)` submits all single-source tensors of
-  a model; `loadExecute(bindings)` submits the sources of one or more
-  `Binding{tensor, output, exe}` as ONE planned submission so adjacent
-  sources of different bindings coalesce. Any number of handles may be open;
-  `Handle.await` (idempotent, cached) waits for the submission's reads and
-  DMA, then for bindings runs each executable in binding order on the
-  awaiting task with `.wait = true`, writes `output.*`, frees the inputs and
-  commits the submission's logical bytes to `bytesLoaded()`. `awaitAll`
-  awaits in publish order; `deinit` awaits open handles without running
-  executables and frees every handle. A zero-byte tensor is `error.EmptyTensor`.
-- The loader has no memory policy: `zml.io.Window{budget_bytes, max_handles}`
-  is the caller-side policy, awaiting the oldest pending `loadExecute` handle
-  before submitting the next one whose inputs (sized by
-  `Loader.executeInputBytesPerDevice(exe)`) would exceed the budget or the
-  handle cap. A window of one reproduces the former synchronous behaviour.
+  pass") and the buffered path for TPU, neuron and metal. A loader owns its
+  worker pool and every submission it published, kept in a FIFO until
+  retired. `load(Model, model, buffers, store, shardings, progress)` submits
+  all single-source tensors of a model; `loadExecute(store, bindings,
+  progress)` submits the sources of one or more `Binding{tensor, output,
+  exe}` as ONE planned submission so adjacent sources of different bindings
+  coalesce; both return `!void` (fourteenth pass; before it every submission
+  returned a `Handle`). Retiring a submission waits for its reads and DMA,
+  then for bindings runs each executable in binding order on the retiring
+  task with `.wait = true`, writes `output.*`, frees the inputs and commits
+  the submission's logical bytes to `bytesLoaded()`. `awaitAll` retires
+  everything in publish order and returns the first error, which is sticky:
+  later submissions are refused. `deinit` awaits what is pending without
+  running executables. A zero-byte tensor is `error.EmptyTensor`.
+- Memory policy lives in `loadExecute` (fourteenth pass): before publishing
+  it retires the oldest pending submissions, running their executables on the
+  calling task, until its own cost (inputs, output and the executable's
+  compiled temporaries per device) fits the room the devices report
+  (`bytes_limit - bytes_in_use` minus the loader's submitted-but-unallocated
+  bytes minus a 64 MiB reserve, `zml/io/execute_admission.zig`); one
+  submission is always admitted. Where a device reports no limit (CPU) or the
+  backend does not count its allocations (buffered), every pending submission
+  is retired first, the pre-rework synchronous order. `load` is never gated,
+  and a transformed tensor counts as delivered once a `loadExecute` naming it
+  was submitted, so a bulk submitted after the packs queues behind them.
+  There is no caller-side window and no memory knob.
 - `VFS.loadProfile(path)` is prepared once for a model load and passed as a
   borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
   `high_latency`, and optional aggregate retry/throttle feedback. It assumes
@@ -152,9 +161,9 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   shardings, progress, and profile now belong to loader initialization.
 - `DirectMemoryWriter`, `DirectShardWriter`, and `DynamicBufferPool` are no
   longer public loader mechanisms. There is no executor inside the loader:
-  executables run on whichever task awaits the handle, so the caller's number
-  of un-awaited `loadExecute` handles bounds device memory and its await
-  order is the execution order.
+  executables run on the caller's task, inside `loadExecute` when admission
+  retires older submissions and inside `awaitAll`; publish order is the
+  execution order.
 - Model traversal, tensor-store lookup, resolved sharding selection, and output
   flattening happen once in the shared `Loader.load` front end. Executable
   source lookup, validation, input-shell allocation (`BoundExecutable`),
@@ -2776,9 +2785,493 @@ should set `off`. The option's doc comment says so.
   offset 0 was the header page the registry parser had just read, so a
   cold file reported 3% cached (the decision was unaffected).
 
+## Thirteenth pass: loader-owned `loadExecute` concurrency (exploration, 2026-09-10)
+
+Not a change: an exploration the user asked for, with its evidence. The
+question: `loadExecute` needs device memory for its inputs (and for the
+execution itself) beyond the model, which is why the caller sizes a
+`Window`. The executable can report what it needs, so the loader could admit
+submissions itself, execute them as soon as their inputs land, and expose
+less concurrency control. Tree: `fa232bb2 direct io` (the twelfth pass,
+committed by the user), read-only apart from a temporary log line in the
+playground's `planPacks` that printed `PJRT_Executable_GetCompiledMemoryStats`
+and `PJRT_Device_MemoryStats` (removed again).
+
+### What the loader does today
+
+- `loadExecute(bindings)` plans one submission; `Handle.await` runs the
+  executables in binding order on the awaiting task with `.wait = true`,
+  writes the outputs and frees the inputs (`zml/io/loader.zig`
+  `HandleState.await`, `BoundExecutable.execute`). `zml.io.Window{budget_bytes,
+  max_handles}` is the only admission control: `submit` awaits the oldest
+  handle until the next submission fits, sized by
+  `Loader.executeInputBytesPerDevice(exe)`, which sums the inputs'
+  per-device placements and knows nothing about temporaries or the output.
+- llmd Laguna submits one `loadExecute` per sparse layer (both packs) through
+  a window whose budget is `--expert_pack_budget`, default 0, i.e. a window
+  of one: submit layer k, await it (reads, then execute), submit k+1. The
+  read pipeline drains at every layer.
+- Device memory for a submission is not taken at submission. Every tensor
+  allocates its PJRT buffers at the first read job that touches it
+  (`direct_loader.zig` `Item.ensureState` from `ReadRequest.run`,
+  `TensorTransfer.initResolved` -> `createBuffersForAsyncHostToDevice`), and
+  jobs are claimed in strict FIFO order across submissions. Submitting many
+  `loadExecute` handles therefore costs host metadata only; the device
+  footprint of not-yet-executed inputs grows with the reads, and the reads
+  run at most `width` jobs ahead of the batch whose await has not returned.
+  What the `Window` bounds is the number of landed-but-unexecuted
+  submissions the caller lets accumulate.
+
+### What the consumer looks like (monorepo `master` a64fd7a9, 2026-09-10)
+
+Read in a detached worktree of `~/github/zml/monorepo` at `master`; the
+working copy there is still the `loader-third-pass` branch (`d426dde4`).
+
+- `master` builds against the pre-rework zml (`origin/master` `f8ddb3e5`,
+  `zml/io.zig`): `Loader.loadExecute(arena, io, tensor, buffer, store,
+  shardings, exe, opts)` is synchronous. It spawns one `loadSingle` per
+  source into the loader's single `LimitedGroup` (`parallelism` 16 in
+  llmd), awaits the whole group, which also holds any bulk `load` tasks in
+  flight, runs the executable with `.wait = true`, writes the output and
+  frees the inputs before returning. One fused tensor's inputs at a time on
+  the device, by construction; the read pipeline stops for every one.
+- There is exactly one `loadExecute` call site: `llmd/weights.zig:985` in
+  `loadPacked`, which walks the model's tensors in declaration order and
+  submits every tensor that has a `Packer` recipe, one at a time.
+  `weights.loadInto` (`weights.zig:1078-1095`) runs `loadPacked` first,
+  then the bulk `loader.load`; `models.zig:254` awaits once. Recipes:
+  `fuse` (head-interleaved QKV, gate/up), `stack` (experts),
+  `concatenate_rows`, `convert_rows`, `dequantize_blocks` and the NVFP4
+  cutlass layouts. The pack executables are compiled lazily inside that
+  loop (`weights.zig:990-1069`, deduplicated by recipe and shapes), so a
+  handful of XLA compiles sit on the load's critical path with nothing in
+  flight.
+- Every model packs, not only the MoE ones: llama, gemma3_text, ministral3,
+  muse_glimmer and dflash_drafter fuse QKV and gate/up (2 per layer);
+  lfm2 fuses `in_proj_b/c/x`, QKV and `w13`; gemma4_text, qwen3_5 and
+  laguna add expert stacks (4 to 5 per layer); deepseek4 adds fp8 block
+  scale conversion, weight+scale concatenation and block dequantization
+  (many per layer). On Llama-3.1-8B the packed tensors are about 8.5 of
+  the 15 GiB (QKV 48 MiB and gate/up 224 MiB per layer), so the
+  sequential path carries most of the bytes of a dense model.
+  `laguna_dflash.zig:793` loads its target with a bare `loader.load`,
+  bypassing the packer (inconsistent with the other dflash wrappers).
+- Device memory is budgeted before the load, not by it: `Model.init`
+  compiles every executable, then `CacheSpec.initWithAllAvailableMemory`
+  (`attention.zig:838-866`) sizes the KV cache as
+  `bytes_limit x cache_memory_fraction (0.95) - fixed_memory`, where
+  `fixed_memory` is the model's bytes per device plus the attention
+  working set (`llama.zig:349`), and allocates it (`llama.zig:633`) before
+  `Loader.init` (`main.zig:429`). `bytes_limit` is `gpu_memory_fraction`
+  (0.9) of the device (`mem.zig:6`; CPU has no stats and falls back to
+  16 GiB). Nothing reserves the packing transient (inputs plus `temp`):
+  it lives in the 5% the cache leaves plus whatever the attention estimate
+  overshoots, about 8 GB on a 192 GB MI300X. That is what made the
+  sequential `loadExecute` the safe choice, and it is also exactly the
+  headroom a loader would read back from `bytes_limit - bytes_in_use`
+  minus its own unlanded weights.
+- Nothing else runs on the devices during the load: no compile/load
+  overlap (`models.zig:441-491` joins before the load), the tokenizer load
+  is the only concurrent task and it is joined first, servers start after.
+  No `loadExecute` output feeds another; the only ordering is packed
+  before bulk and `loader.await` before `finalizeLoadedBuffers`.
+- Consequence for a migration: the `loader-third-pass` branch predates
+  `weights.zig` (it windowed Laguna's expert packs only, with
+  `--expert_pack_budget`); the handle API has to be adopted in
+  `loadPacked`, which can submit per tensor or per layer, and `master`
+  has no `Window` to delete.
+
+### What PJRT and XLA allow
+
+Read in the local openxla checkout `~/github/openxla/xla` at `b014a9c1`
+(2026-07-27, 25 days after zml's pin `41370d1124`); the shipped CUDA plugin
+is manual-2026-07-31.
+
+- `PJRT_Executable_GetCompiledMemoryStats` is implemented by the CPU client
+  (`xla/pjrt/cpu/cpu_client.cc:1218`) and the stream-executor client for a
+  single-program executable (`xla/pjrt/se/stream_executor_executable.cc:174`;
+  MPMD returns Unimplemented). `compiled_memory_stats.cc:34-105` classifies
+  the buffer assignment of one partition: entry parameters -> `argument`,
+  live-out -> `output`, preallocated temporaries -> `temp`, plus host-memory
+  variants. zml already binds it (`pjrt.zig` `Executable.getCompiledMemoryStats`,
+  reached through `LoadedExecutable.executable`), unused so far.
+- `PJRT_Device_MemoryStats` (`bytes_in_use`, `bytes_limit`,
+  `largest_free_block`, `pool_bytes`) is the BFC allocator on the
+  stream-executor GPU clients (`xla/pjrt/gpu/se_gpu_pjrt_client.cc:1714`); the
+  CPU client has no `GetAllocatorStats`, so `Device.memoryStats()` returns
+  zeroes there (`platform.zig:213`) after the plugin logs
+  `Unimplemented: GetAllocatorStats is not supported` on every call.
+- An async host-to-device manager allocates its device buffers synchronously
+  when created (`host_to_device_transfer_manager.cc:137` ->
+  `pjrt_stream_executor_client.cc:505-530`, `retry_on_oom = true`).
+- Execute on inputs whose transfers have not landed: `ExecutePrepare`
+  (`common_pjrt_client.cc:1912-1945`) collects the inputs' definition events
+  as `extra_deps` and allocates the outputs as delayed memory
+  (`AllocateRawBufferForExecute`, `pjrt_stream_executor_client.cc:540-550`),
+  materialized only when the launch runs. The raw launch
+  (`pjrt_stream_executor_client.cc:1866-1880`) is scheduled on the device's
+  `async_dispatch_thread` when there is one and the call returns at once;
+  otherwise it runs inline, and `BufferSequencingEvent::WaitForEventOnStream`
+  (`buffer_sequencing_event.cc:58-61`) blocks the calling thread with
+  `BlockUntilReady` until every input event has been recorded, that is,
+  until the pump has submitted each input's last piece. The dispatch thread
+  exists when `use_async_dispatch` is set (`se_gpu_pjrt_client.cc:1795-1800`,
+  default off, env `PJRT_GPU_ENABLE_ASYNC_DISPATCH=1`) or the C API option
+  `use_tfrt_gpu_client` is true (`plugin/xla_gpu/xla_gpu_pjrt_client.cc:27-31`,
+  `pjrt_c_api_gpu_internal.cc:191-229`). zml passes
+  `use_tfrt_gpu_client = gpu_async_dispatch` (default true) for CUDA only
+  (`zml/platform.zig:792,836`); ROCm and oneAPI get the blocking form. The
+  CPU client always defers the launch (`cpu_client.cc:1945`,
+  `ExecuteWhenReady` on the input events). So "execute at submission and
+  let PJRT order it" is host-free on CUDA and CPU today, and would block
+  the submitting task inside `Execute` on ROCm/oneAPI unless the same
+  option is passed there (untested).
+- Unchanged from the third pass: `PJRT_Buffer_Destroy` while an execution
+  references the buffer is safe; concurrent `Execute` on one executable is
+  undocumented, so executions must stay on one task.
+
+### Measurements (2026-09-10)
+
+Executable memory stats of the playground pack executable (`stackPack`:
+`Tensor.stack` of `width` rank-2 sources, replicated output), one call per
+distinct source shape, `ZML_LOAD_PACKS=2 ZML_LOAD_PACK_WIDTH=16`:
+
+| platform | executable | argument | output | temp |
+|---|---|---:|---:|---:|
+| B70 host, CPU x4 (Qwen3.5-4B) | 16 x {9216,2560} bf16 | 720 MiB | 720 MiB | 2.72 GiB |
+| B70 host, CPU x4 | 16 x {2560,9216} bf16 | 720 MiB | 720 MiB | 2.72 GiB |
+| gb300-2 GPU 1 (Llama-3.1-8B) | 16 x {14336,4096} bf16 | 1.75 GiB | 1.75 GiB | 0 |
+| gb300-2 GPU 1 | 16 x {4096,4096} bf16 | 512 MiB | 512 MiB | 0 |
+
+`alias`, `generated_code` and every host figure were 0. The numbers are per
+partition, i.e. per device. On the GPU the stack is a copy into the output;
+on XLA CPU it needs 3.8x the output in temporaries, so a CPU pack of 720 MiB
+on four replicated devices holds 4 x (0.7 + 0.7 + 2.72) GiB while it
+executes. `executeInputBytesPerDevice` cannot see that term; the
+executable can. Device stats: CUDA `bytes_limit` 248.96 GiB,
+`bytes_in_use` 0 before the load (`largest_free_block` and `pool` 0 until
+the BFC pool grows); CPU nothing.
+
+CPU anatomy of one pack (same run, Qwen3.5-4B, cold files read direct,
+window 1): batch 0 (pack 0, 720 MiB) done at +0.201 s; batch 1 published at
++1.476 s, so the caller spent 1.27 s executing pack 0 on four CPU devices
+between the two submissions; pack phase 2.935 s for 1.41 GiB (0.48 GiB/s)
+against the bulk 7.27 GiB in 0.777 s (9.36 GiB/s). On CPU the execution is
+six times the read, the opposite of the GPU case below.
+
+Window sweep, gb300-2, GPU 1 alone (`CUDA_VISIBLE_DEVICES=1`; GPU 0 held
+19 GB of another user's job), Llama-3.1-8B-Instruct warm (`auto` chose
+buffered), `ZML_LOAD_PACKS=64 ZML_LOAD_PACK_WIDTH=16`: 14 packs of 16
+sources (13.00 GiB) then the 1.96 GiB bulk remainder; three interleaved
+rounds of `ZML_LOAD_PACK_WINDOW` 1, 2, 4, 8 in the `zml-directio`
+worktree (tree `fa232bb2` plus the temporary log line):
+
+| window | pack phase (3 rounds) | GiB/s | `Loaded weights` wall |
+|---:|---|---:|---|
+| 1 | 304 / 294 / 292 ms | 42.7 to 44.6 | 571 / 553 / 551 ms |
+| 2 | 246 / 245 / 245 | 53.0 | 507 / 507 / 505 |
+| 4 | 236 / 236 / 236 | 55.0 | 498 / 499 / 499 |
+| 8 | 236 / 237 / 236 | 55.0 | 498 / 500 / 497 |
+
+The bulk remainder read at 54 to 57 GiB/s in every arm. A window of one
+costs 20% of the pack phase: about 4 ms per submission of drain, plan,
+execute and ramp for packs that read in 17 ms each. Window 2 recovers
+85% of it; window 4 is at bulk speed and window 8 adds nothing. This is
+the 5090 result of the third pass (0.63 -> 0.60 s) with a clearer knee.
+
+### The design space
+
+The cost the loader must bound, per device: the inputs of every submission
+that has started reading and not executed (held from first read until the
+execution frees them), plus `temp + output` of the one executing. Everything
+in it is known before submission: inputs and output from shapes and
+shardings, `temp` from `GetCompiledMemoryStats`. What the loader can learn
+about the room: on GPUs `bytes_limit - bytes_in_use` minus the bytes of
+admitted tensors that have not been allocated yet (a per-device counter the
+backend would keep, one atomic add in `initResolved`, because `bytes_in_use`
+already contains the lazily allocated part) minus a reserve; on CPU
+nothing, so a fallback depth.
+
+- A. The window moves into the loader, execution stays on the caller's
+  task. `loadExecute` admits by awaiting the oldest handles (running their
+  executables, as `Window.submit` does now) until the new submission fits
+  a budget the loader derives: headroom where the device reports it, else
+  a depth. Deletes `zml.io.Window`, `executeInputBytesPerDevice`, llmd's
+  `--expert_pack_budget` and `max_expert_pack_handles`, the playground's
+  `ZML_LOAD_PACK_WINDOW`. No task, no new PJRT usage. Execution is not
+  "as soon as landed" but at the next admission or await; the sweep says
+  that costs nothing once two to four submissions overlap. Transient
+  memory: up to the budget.
+- B. An executor task in the loader awaits `loadExecute` batches in FIFO
+  order, executes each as it lands, frees its inputs and signals the
+  handle; `loadExecute` blocks on a condition while admitted-but-unexecuted
+  bytes would exceed the budget; `Handle.await` waits for the executor's
+  flag. Same throughput as A at the same depth, the minimum transient
+  (one executing submission plus the read-ahead), and the caller never
+  runs executables, so it can submit everything and do other work.
+  Costs one task, cross-task state (`delivered`, failure, `deinit`
+  stopping it) and the "execution happens elsewhere" semantics the third
+  pass avoided. Its natural extension, E: one `loadExecute` for every
+  layer with per-binding readiness counters, executing each binding as
+  its own inputs land; more coalescing and no planning gaps, at the price
+  of a per-binding counter on the DMA completion path.
+- C. Device-ordered execution: at submission force `ensureState` for the
+  bindings' inputs, enqueue the execute at once, drop the host references
+  to the inputs and await the output's ready event in `Handle.await`.
+  No loader task at all on CUDA and CPU (PJRT's dispatch thread or the
+  CPU deferral does the waiting; outputs and temporaries are allocated at
+  launch). Needs eager input allocation (the inputs occupy memory for the
+  whole FIFO delay), a per-platform gate (blocking on ROCm/oneAPI unless
+  `use_tfrt_gpu_client` is passed there too), completion callbacks to
+  release the budget, and a new error path (a failed read reaches the
+  caller as an errored output). Buys only the latency of freeing inputs
+  over B; not worth its risk now, recorded because the facts above were
+  not in the tree before.
+- D. Change nothing in the loader; give llmd a default window of two to
+  four. The cheapest way to collect the 20%, and it keeps every knob.
+
+### Recommendation (the user's decision)
+
+Confirmed by the rethink below after two corrections from the user: the
+cache belongs after the weights (`master` allocates it before), and
+machines where the cache would be small must be supported. A with the
+derived byte budget (headroom from device stats minus unlanded weights,
+cost = inputs + `temp` + output, sequential when the room is one pack,
+depth 1 without stats), plus the ordering and compile items of the
+rethink; B and C are not needed.
+
+### Rethink: the cache belongs after the weights (2026-09-10)
+
+The user's correction to the consumer survey: the KV cache should be
+allocated after the weights are loaded, not before as `master` does today
+(`Model.init` sizes `cache_spec`, compiles, then `State.init` ->
+`KvCache.initBuffers` -> `Buffer.uninitialized`, `llama.zig:1118-1147`,
+`attention.zig:79-87`, all before `Loader.init` at `main.zig:429`). That
+ordering is llmd's to fix; the loader design below assumes the intended
+order.
+
+- Room during the load is then the device minus the landed weights, at
+  least the eventual cache size: tens of GB on every GPU here, against
+  pack transients of 0.2 to 1.75 GiB. Depth is bounded by the pipeline,
+  not by memory: reads run at most one read width ahead of the submission
+  being awaited, and a GPU pack executes in about a millisecond as it
+  lands. Memory binds only on CPU (no allocator stats, host RAM is the
+  device, one Qwen pack replicated on four devices costs 4 x (0.7 + 0.7 +
+  2.72) GiB = 16.5 GB on the 62 GB B70), where depth 1 stays right.
+- On this host a plain depth would do, but the user's follow-up stands:
+  machines where the cache would be small must be supported properly, and
+  there the room during the load is the future cache plus the 5% margin,
+  possibly a few GB against packs of 1 to 3 GiB. So `A` keeps the derived
+  byte budget of the design space: headroom = `bytes_limit - bytes_in_use`
+  minus the loader's own unlanded weights (a per-device allocated-bytes
+  counter, one atomic add in `initResolved`) minus a reserve; a submission
+  costs `inputs + temp + output` per device (`temp` from
+  `GetCompiledMemoryStats`, the term the fp8 `dequantize_blocks` recipes
+  may carry); the loader awaits the oldest handles until the next fits and
+  always admits one, which degrades to `master`'s sequential order when
+  the room is one pack. Depth 1 where the device reports no memory (CPU).
+  The transient is released by `awaitAll`, before the app sizes the cache.
+  The budget does not depend on the allocation order: with the cache
+  allocated first (as `master` does) the measured room is the residual
+  margin, about 8 GB on a 192 GB MI300X and 12 GB on a GB300, which still
+  overlaps dense packs four deep and fp8 packs one or two deep, and admits
+  one submission when the room is smaller than that, i.e. the sequential
+  order with the risk `master` already has. Allocating the cache after the
+  load only widens the room. Runtime temporaries are one contiguous XLA
+  allocation each, so the holes the load leaves matter near the margin;
+  at the depths a tight device allows they are the reused hole of the
+  previous pack.
+  `B` and `C` buy nothing here: early freeing shortens the hold by
+  milliseconds, and the caller has nothing else to do during the load
+  (`master` compiles everything before it); `D` keeps a knob whose value
+  the loader can measure.
+- Fragmentation is the one way overlap could still hurt a cache sized
+  from what is free after the load. Measured on gb300-2 GPU 1 (Llama, 14
+  packs of 16, `PJRT_Device_MemoryStats` right after the bulk phase,
+  before any output is freed, two rounds each; BFC pool = `bytes_limit`
+  = 248.96 GiB):
+
+  | window | pack phase | bytes_in_use | largest_free_block | num_allocs |
+  |---:|---|---:|---:|---:|
+  | 1 | 292.8 / 293.7 ms | 15.04 GiB | 232.12 / 232.12 GiB | 347 |
+  | 8 | 240.4 / 235.7 ms | 14.99 / 15.05 GiB | 231.90 / 231.65 GiB | 347 |
+
+  Free memory is 233.9 GiB in both arms; the sequential order leaves
+  1.8 GiB of it outside the largest block, the overlapped order 0.2 to
+  0.5 GiB more. Against the 5% that `cache_memory_fraction` keeps back
+  (12 GiB on this device) that is noise; the KV buffers are per-layer
+  allocations that fit the tail region either way.
+- What the freedom allows and where it stops: a dense model could submit
+  every packed tensor in ONE `loadExecute` (maximum coalescing, the
+  executes run at the end while the bulk queued behind keeps the pipeline
+  busy), because holding all pack inputs at once is 8.5 GiB on Llama-8B;
+  a MoE model cannot, since its pack inputs are most of the model. Per-layer
+  submissions with a depth of two to four work for both, so that is the
+  general shape.
+- The remaining work is ordering and compile, on the llmd side plus one
+  loader change: `master` loads packed tensors before the bulk, and the
+  handle API's `load` refuses transformed tensors that were not yet
+  awaited (`prepareModelLoad`, `TransformedTensorNotDelivered`), so the
+  bulk cannot queue behind the packs without a drain; letting `load` skip
+  transformed tensors whose `loadExecute` was submitted (the `delivered`
+  entry exists) removes the last drain. `master` also compiles the pack
+  executables lazily inside the load loop with nothing in flight;
+  compiling them in `Model.init` with the rest (they are deduplicated by
+  recipe and shape) takes them off the critical path.
+
+- Decided with the user (2026-09-10): the per-submission `Handle` goes.
+  It existed so the caller could sequence `loadExecute`; with admission
+  inside the loader nothing needs it. Every in-repo `load` user awaits its
+  handle on the next line (`examples/llm` models, `examples/mnist`,
+  `zml/testing.zig`), the playground's `Window` and `bulk.await()` were
+  the control itself, and monorepo `master` already has one
+  `loader.await`. Surface: `load`, `loadExecute`, `awaitAll`,
+  `bytesLoaded`, `deinit`; submissions kept internally in FIFO order.
+  Executables still run on the caller's task, inside `loadExecute` when
+  admission retires older submissions and inside `awaitAll`, so calling
+  `awaitAll` right after the last submission gives the progressive
+  behaviour. `load` after `loadExecute` treats a transformed tensor as
+  delivered once its `loadExecute` is submitted. `deinit` keeps the
+  await-without-execute path for errors; `awaitAll` returns the first
+  error (the sticky error made per-submission attribution moot). Dropped
+  on purpose: selective or early awaits (no user) and the playground's
+  separate pack/bulk timing (the batch diagnostics carry it).
+
+### Open questions
+
+- Laguna's `gate_up_proj` executable stacks twice and concatenates; the
+  playground only stacks. Its `temp` on ROCm and CUDA should be read before
+  the budget relies on the GPU `temp = 0` above.
+- Whether the ROCm and oneAPI plugins honor `use_tfrt_gpu_client` the way
+  the CUDA one does (only C needs it).
+- Whether the CPU platform should use packs at all: execution is six times
+  the read and needs 3.8x the output in temporaries there.
+- `bytes_limit` on CUDA was 248.96 GiB of a 284 GB device; how it tracks
+  `memory_fraction` and what `bytes_in_use` includes on ROCm were not
+  checked.
+
+## Fourteenth pass: loader-owned `loadExecute` admission, `awaitAll` only (2026-09-10)
+
+Implements the thirteenth-pass decision on top of `2f170c75 simplification`
+(uncommitted). Plan: `~/.claude/plans/abstract-crunching-donut.md`.
+
+### The change
+
+- `Loader.load`, `loadBuffer` and `loadExecute` return `!void`;
+  `Loader.awaitAll` is the only wait. `Handle`, `Window`,
+  `executeInputBytesPerDevice` and `Submission.isDone` are gone, with the
+  `zml.io` exports. Submissions live in a `std.Deque(PendingSubmission)` in
+  publish order; `retireOldest` awaits the reads, runs the executables when
+  asked, frees the inputs and commits the bytes only when it ran. The first
+  retire error is kept in `Loader.failure`: `load`/`loadExecute` refuse
+  afterwards and `awaitAll` keeps returning it. `deinit` retires without
+  executing.
+- Admission in `loadExecute` (`zml/io/execute_admission.zig`, pure
+  arithmetic with its own tests): cost per device = input placements +
+  output placement + the executable's `temp_size_in_bytes` from
+  `PJRT_Executable_GetCompiledMemoryStats` (queried per distinct `*const
+  Exe` within the call, 0 when the plugin cannot answer, no cross-call
+  cache because an `Exe` address can be reused); room per device =
+  `bytes_limit - bytes_in_use - (submitted - allocated) - 64 MiB`, where
+  `submitted` is the front end's per-device placement bytes of every
+  published submission and `allocated` a cumulative per-device counter the
+  direct backend increments in `Item.initTransfer` once per tensor
+  (`Backend.allocatedBytesPerDevice`; the buffered backend does not count).
+  The loop retires the FIFO head (a bulk `load` too, it just frees nothing)
+  until `pending_execution + inputs + execution <= room` on every device;
+  one submission is always admitted, with a warning once when it exceeds the
+  room alone. `memory_supported` is decided once at init (direct backend and
+  every device reporting `bytes_limit`); without it every pending submission
+  is retired first, the pre-rework order. Placement bytes use
+  `shape.packedShape()` like the backend, so `submitted` and `allocated`
+  cancel exactly once everything landed (tested).
+- `load` is never gated. A transformed tensor counts as delivered once a
+  `loadExecute` naming it was published (`delivered` is now a set of ids
+  filled after a successful publish), so the bulk queues behind the packs
+  without a drain; a missing `loadExecute` still fails with
+  `TransformedTensorNotDelivered`, now logged at `warn` because the test
+  runner counts logged errors as failures.
+- Callers: `examples/llm` models, `examples/mnist`, `zml/testing.zig`
+  (`load` + `awaitAll`); the playground submits every pack, then the bulk,
+  then one `awaitAll`, keeps `ZML_LOAD_PACKS/_WIDTH/_PAIRS/_CHECK/_MAX_ELEMENTS`,
+  drops `ZML_LOAD_PACK_WINDOW` and the separate pack/bulk timings, and gains
+  `ZML_GPU_MEMORY_FRACTION` (the platform's BFC `memory_fraction`, a platform
+  setting used to shrink the pool and watch admission). Docs:
+  `docs/learn/loader.md`, the README `Mnist.load` snippet (it called a
+  `zml.io.load` that no longer existed), the loader header.
+- Logs: `execute admission: retired=...` at debug when a retire happened,
+  `loader admission: submissions=, execute_submissions=,
+  execute_admission_retires=, memory_supported=, min_room_seen=, reserve=`
+  at deinit.
+
+### Verification
+
+- `bazel test //zml:test //vfs:test` pass (275 tests, 3 skipped);
+  `bazel build //examples/io //examples/llm //examples/mnist` pass; `zig fmt`
+  clean.
+- B70 CPU (`Qwen3.5-4B` sharded on four CPU devices, two packs of 16,
+  `ZML_LOAD_CHECK=64`): `memory_supported=false`, one retire before the
+  second pack (`inputs=720 MiB execution=3.43 GiB`, the 2.72 GiB of XLA CPU
+  temporaries counted), `pack check: ok`, `load check: ok`. Warm A/B, two
+  rounds each: with packs 3.58 / 3.73 s, without 1.03 / 1.00 s. The bulk now
+  publishes right behind the second pack and its reads overlap that pack's
+  1.2 s execution (its 7.27 GiB took 2.1 s instead of 1.0 s alone, CPU
+  contention with the executable), which still beats the serial order
+  (3.99 s this morning, cold direct).
+- gb300-2 GPU 1 (`CUDA_VISIBLE_DEVICES=1`, GPU 0 held another user's job,
+  load average 6 to 20; Llama-3.1-8B-Instruct warm, 14 packs of 16 =
+  13.00 GiB then the 1.96 GiB bulk, `zml-directio` worktree carrying this
+  tree): `memory_supported=true`, `bytes_limit` 248.96 GiB, `min_room_seen`
+  237.64 GiB, `execute_admission_retires=0`, `pack check: ok` every run,
+  `load check: ok` (`ZML_LOAD_CHECK=16`). Loader `elapsed` (from creation
+  to summary, the metric that excludes calibration):
+
+  | tree | loader elapsed | wall `Loaded weights` |
+  |---|---|---|
+  | this morning, window 1 (3) | 0.346 / 0.329 / 0.327 s | 571 / 553 / 551 ms |
+  | this morning, window 8 (3) | 0.274 / 0.274 / 0.271 | 498 / 500 / 497 |
+  | this tree, packs + bulk (6) | 0.267 / 0.276 / 0.327 / 0.261 / 0.265 / 0.265 | 369 / 586 / 638 / 364 / 576 / 575 |
+  | this tree, bulk only (3) | 0.259 / 0.260 / 0.264 | 361 / 361 / 365 |
+
+  Packs plus bulk now load at bulk-only speed: no drain between the two
+  phases and the executes overlap the reads. The wall clock is bimodal in
+  the packed runs only because DMA calibration (inside `Loaded weights`,
+  before the loader's clock) took 96 ms and chose 16 MiB blocks in the fast
+  runs and 310 ms with 8 MiB blocks in the slow ones (5 of 9 packed runs, 0
+  of 3 bulk-only runs; calibration starts right after the pack executables
+  compiled). Not the loader; a calibration-robustness item, see Open work.
+- gb300-2, `ZML_GPU_MEMORY_FRACTION=0.08` (`bytes_limit` about 20 GiB for
+  15 GiB of weights): room 11.4 GiB at the first retire, 4 retires (one
+  before submission 11, three before 13), no OOM, `pack check: ok`, wall
+  578 ms (8 MiB calibration). The measured path degrades to partial overlap
+  as designed.
+- Left on gb300-2: the `zml-directio` worktree now carries this tree (every
+  file changed since `b59c41b7`), logs in `~/zml-directio-logs/adm_*.log`
+  and `adm2_*.log`, scripts `~/zml-admission-run.sh`.
+
+### Follow-ups
+
+- llmd on monorepo `master`: migrate `loadPacked` (`llmd/weights.zig:985`)
+  to submit every packed tensor, then the bulk, then one `awaitAll`;
+  compile the pack executables in `Model.init`; allocate the KV cache after
+  the weights when wanted (the budget measures either way); absorb the zml
+  API drift since `f8ddb3e5`.
+- DMA calibration right after an XLA compile on gb300-2 sometimes measures
+  low (310 ms, 8 MiB blocks) and costs 200 ms of wall time; the loader is
+  unaffected. Worth a look with the calibration diagnostics.
+- `docs/howtos/howto_torch2zml.md:246` still shows the old `zml.io.load`.
+- On CPU the bulk's reads overlap the last pack's execution and slow down
+  under CPU contention; the total still improves. If CPU pack loads ever
+  matter, the executable's 3.8x temporaries are the first thing to fix.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
+
+- Thirteenth pass (exploration): decided and implemented as the fourteenth
+  pass (loader-owned admission, `awaitAll` only). Left for the llmd side, on
+  monorepo `master`: migrate `loadPacked`, compile the pack executables in
+  `Model.init`, allocate the KV cache after the weights.
 
 - The NUMA placement experiment (task 12) is done; see "Seventh pass". The
   2026-09-04 "MI300 host degradation" was a stale ROCm plugin, so the Laguna

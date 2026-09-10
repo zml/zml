@@ -90,6 +90,19 @@ pub const Backend = union(enum) {
         };
     }
 
+    /// Device bytes the backend allocated for outputs so far, per
+    /// `platform.devices` index. False for the buffered backend, which does
+    /// not count and which the front end keeps serial.
+    pub fn allocatedBytesPerDevice(self: Backend, out: []u64) bool {
+        switch (self) {
+            .direct => |direct| for (out, direct.allocated_bytes) |*bytes, *counter| {
+                bytes.* = counter.load(.acquire);
+            },
+            .buffered => return false,
+        }
+        return true;
+    }
+
     pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) !Submission {
         return switch (self) {
             .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs, progress) } },
@@ -108,13 +121,6 @@ pub const Backend = union(enum) {
 pub const Submission = union(enum) {
     direct: struct { loader: *direct_loader.Loader, batch: *direct_loader.Batch },
     buffered: struct { loader: *buffered_loader.Loader, batch: *buffered_loader.Batch },
-
-    pub fn isDone(self: Submission) bool {
-        return switch (self) {
-            .direct => |direct| direct.batch.done.isSet(),
-            .buffered => |buffered| buffered.batch.done.isSet(),
-        };
-    }
 
     /// Waits for and retires the batch. Its pointer is dangling afterwards.
     pub fn await(self: Submission) !void {

@@ -464,8 +464,8 @@ pub fn testLayer(
     var args_buffers = try zml.mem.bufferize(allocator, ArgsT, &args);
     var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
     defer loader.deinit();
-    const weights = try loader.load(ArgsT, &args, &args_buffers, activation_store.store, shardings, null);
-    try weights.await();
+    try loader.load(ArgsT, &args, &args_buffers, activation_store.store, shardings, null);
+    try loader.awaitAll();
     defer zml.mem.deinitBufferized(allocator, ArgsT, &args_buffers);
 
     exe_args.set(.{ layer_weights, args_buffers });
