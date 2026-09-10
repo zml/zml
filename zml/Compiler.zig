@@ -68,6 +68,8 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
 }
 
 pub const Options = struct {
+    /// Incremented once after successful compilation.
+    progress: std.Progress.Node = .none,
     shardings: []const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
@@ -346,6 +348,7 @@ pub fn compile(
     );
     errdefer exe.deinit();
 
+    opts.progress.completeOne();
     return exe;
 }
 
