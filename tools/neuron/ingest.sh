@@ -2,7 +2,7 @@
 set -euo pipefail
 shopt -s nullglob
 
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$0.runfiles/+neuron_packages+libzml_neuron/sandbox/bin/neuron-explorer"
 data_path="$1"
 default_profile_root="$2"
 shift 2

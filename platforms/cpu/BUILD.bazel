@@ -27,16 +27,16 @@ cc_library(
 copy_to_directory(
     name = "sandbox",
     srcs = select({
-        ":darwin_arm64": ["@libpjrt_cpu_darwin_arm64//:libpjrt_cpu"],
-        ":darwin_amd64": ["@libpjrt_cpu_darwin_amd64//:libpjrt_cpu"],
-        "@platforms//os:linux": ["@libpjrt_cpu_linux_amd64//:libpjrt_cpu"],
+        ":darwin_arm64": ["@libzml_cpu_darwin_arm64//:libzml_cpu"],
+        ":darwin_amd64": ["@libzml_cpu_darwin_amd64//:libzml_cpu"],
+        "@platforms//os:linux": ["@libzml_cpu_linux_amd64//:libzml_cpu"],
     }),
     out = "sandbox/lib",
     include_external_repositories = ["**"],
 )
 
 cc_library(
-    name = "libpjrt_cpu",
+    name = "libzml_cpu",
     tags = ["manual"],
     data = [":sandbox"],
     defines = ["ZML_RUNTIME_CPU"],
@@ -52,7 +52,7 @@ zig_library(
         "//pjrt",
     ] + select({
         "//platforms:cpu.enabled": [
-            ":libpjrt_cpu",
+            ":libzml_cpu",
             "//bazel",
             "//stdx",
             "@rules_zig//zig/runfiles",

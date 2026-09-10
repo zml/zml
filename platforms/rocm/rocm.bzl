@@ -9,10 +9,10 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 """
 
-_ROCM_VERSION = "7.14"
+_ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PJRT_ROCM_URL = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-20T15-30-00Z/pjrt-rocm_linux-amd64.tar.gz"
-_PJRT_ROCM_SHA256 = "6fd0515beb299550e298996f6919db09aec79859feee7362443bf2ebff900d0f"
+_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-rocm-linux-amd64.tar.zst"
+_PLUGIN_ROCM_SHA256 = "d2a311f15532691d7335c0436d4dda13d39e8597e4bb10dbe83b11b02a627546"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
@@ -88,18 +88,19 @@ def _rocm_base_build_files(loaded_packages):
     return {
         _rocm_package_name("amdrocm-amdsmi"): "\n\n".join([
             packages.cc_library(name = "amdsmi", hdrs = ["include/amd_smi/amdsmi.h"], includes = ["include/amd_smi"]),
-            packages.filegroup(name = "libamd_smi", srcs = ["lib/libamd_smi.so.26"]),
+            packages.filegroup(name = "libamd_smi", srcs = ["lib/libamd_smi.so.27"]),
         ]),
         _rocm_package_name("amdrocm-base"): "\n\n".join([
             _rocm_dlopen_patchelf(name = "rocm-core", src = "lib/librocm-core.so.1"),
-            _rocm_dlopen_patchelf(name = "rocm_smi", src = "lib/librocm_smi64.so.1"),
             _rocm_dlopen_patchelf(name = "rocprofiler-register", src = "lib/librocprofiler-register.so.0"),
         ]),
         _rocm_package_name("amdrocm-blas-dev"): _glob_filegroup("headers", ["include/**"]),
         _rocm_package_name("amdrocm-blas-host"): "\n\n".join([
             _rocm_dlopen_patchelf(name = "hipblas", src = "lib/libhipblas.so.3"),
-            packages.filegroup(name = "hipblaslt", srcs = ["lib/libhipblaslt.so.1"]),
-            _rocm_dlopen_patchelf(name = "hipsparselt", src = "lib/libhipsparselt.so.0"),
+            packages.filegroup(name = "hipblaslt", srcs = [
+                "lib/libhipblaslt.so.1",
+                "lib/liborigami.so.1",
+            ]),
             packages.filegroup(name = "rocblas", srcs = ["lib/librocblas.so.5"]),
             _rocm_dlopen_patchelf(name = "rocroller", src = "lib/librocroller.so.1"),
             _glob_filegroup("hipblaslt_support", [
@@ -117,7 +118,6 @@ def _rocm_base_build_files(loaded_packages):
             ]),
             packages.filegroup(name = "rocblas", srcs = [
                 "@amdrocm-blas-host//:hipblas",
-                "@amdrocm-blas-host//:hipsparselt",
                 "@amdrocm-blas-host//:rocblas",
             ]),
             packages.filegroup(name = "rocblas_runfiles", srcs = _family_runfile_labels(loaded_packages, "blas")),
@@ -151,8 +151,8 @@ def _rocm_base_build_files(loaded_packages):
         ]),
         _rocm_package_name("amdrocm-llvm"): "\n\n".join([
             packages.filegroup(name = "llvm_libs", srcs = [
-                "lib/llvm/lib/libLLVM.so.23.0git",
-                "lib/llvm/lib/libclang-cpp.so.23.0git",
+                "lib/llvm/lib/libLLVM.so.24.0git",
+                "lib/llvm/lib/libclang-cpp.so.24.0git",
             ]),
             _glob_filegroup("rocm_device_libs_runfiles", ["lib/llvm/amdgcn/**"]),
         ]),
@@ -262,10 +262,10 @@ def _rocm_impl(mctx):
     )
 
     http_archive(
-        name = "libpjrt_rocm",
-        build_file = "libpjrt_rocm.BUILD.bazel",
-        url = _PJRT_ROCM_URL,
-        sha256 = _PJRT_ROCM_SHA256,
+        name = "libzml_rocm",
+        build_file = "libzml_rocm.BUILD.bazel",
+        url = _PLUGIN_ROCM_URL,
+        sha256 = _PLUGIN_ROCM_SHA256,
     )
 
     return mctx.extension_metadata(
@@ -286,7 +286,7 @@ def _rocm_impl(mctx):
             "amdrocm-sysdeps",
             "libatomic1",
             "libdrm-common",
-            "libpjrt_rocm",
+            "libzml_rocm",
         ],
         root_module_direct_dev_deps = [],
     )

@@ -80,7 +80,7 @@ pub fn compileNkiKernel(allocator: std.mem.Allocator, io: std.Io, kernel: Kernel
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &sandbox_path_buf) orelse return error.FileNotFound;
+    const sandbox_path = try r.rlocation("libzml_neuron/sandbox", &sandbox_path_buf) orelse return error.FileNotFound;
 
     var source_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const source_path = try r.rlocation(kernel.source_path, &source_path_buf) orelse return error.FileNotFound;

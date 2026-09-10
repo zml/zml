@@ -4,8 +4,8 @@ load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@zml//platforms/cuda:cuda.bzl", "CUDA_COMPAT_FILES")
 
 patchelf(
-    name = "libpjrt_cuda_so",
-    src = "libpjrt_cuda.so",
+    name = "libzml_cuda_so",
+    src = "libzml_cuda.so",
     add_needed = [
         "libzmlxcuda.so.0",
     ],
@@ -18,7 +18,7 @@ patchelf(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":libpjrt_cuda_so",
+        ":libzml_cuda_so",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
     ] + select({
@@ -67,7 +67,7 @@ copy_to_directory(
         "compat": "lib/compat",
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
-        "libpjrt_cuda_so": "lib",
+        "libzml_cuda_so": "lib",
         "lib/x86_64-linux-gnu": "lib",
         "lib/aarch64-linux-gnu": "lib",
         "platforms/cuda/compat_probe": "bin/compat_probe",
@@ -79,7 +79,7 @@ copy_to_directory(
 )
 
 cc_library(
-    name = "libpjrt_cuda",
+    name = "libzml_cuda",
     data = [":sandbox"],
     linkopts = [
         # Defer function call resolution until the function is called
