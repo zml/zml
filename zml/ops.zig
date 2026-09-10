@@ -856,8 +856,8 @@ fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(b
 
 pub const TritonOps = struct {
     debug: bool = false,
-    name: [:0]const u8,
-    ir: [:0]const u8,
+    name: []const u8,
+    ir: []const u8,
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
@@ -1091,8 +1091,8 @@ test "triton" {
 }
 
 pub const CudaTileOps = struct {
-    name: [:0]const u8,
-    ir: [:0]const u8,
+    name: []const u8,
+    ir: []const u8,
     grid: [3]i32,
     /// The Tile IR bytecode version XLA serializes at, "MAJOR.MINOR"; XLA's
     /// default is 13.3.
