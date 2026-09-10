@@ -1,7 +1,7 @@
 //! Audio VAE decoder.
 //!
-//!   1. denormalize latents (`v ← v * std + mean`)
-//!   2. reshape packed `(2·T, C)` left/right rows → `(2, C, T)`
+//!   1. reshape packed `(2·T, C)` left/right rows → `(2, C, T)`
+//!   2. denormalize latents (`x * std + mean`)
 //!   3. proj → conv_pre → 7× (upsample + AMP residual average) → conv_post
 //!   4. clamp to `[-1, 1]`, interleave stereo
 
@@ -11,9 +11,9 @@ const config = @import("config.zig");
 const ops = @import("ops.zig");
 
 const AudioConfig = config.AudioConfig;
-const load = ops.load;
-const applyLatentNorm = ops.applyLatentNorm;
 const Run = ops.Run;
+
+const log = std.log.scoped(.minimax_h3);
 
 const WnLayout = enum { conv, conv_transpose };
 
@@ -323,6 +323,12 @@ const Decoder = struct {
 const DecodeInput = struct { model: Decoder, latents: zml.Tensor };
 const DecodeOutput = struct { wav: zml.Tensor };
 
+fn packedToBct(latents: zml.Tensor) zml.Tensor {
+    const x = latents.withPartialTags(.{ .b, .s, .d }).squeeze(.b);
+    const t = @divExact(x.dim(.s), 2);
+    return x.splitAxis(.s, .{ .b = 2, .t = t }).rename(.{ .d = .c }).transpose(.{ .b, .c, .t });
+}
+
 fn projectIn(self: Decoder, latents: zml.Tensor) zml.Tensor {
     const x = latents.withPartialTags(.{ .b, .c, .t }).convert(.f32);
     const weight = self.dec_in_proj.weight.squeeze(.k);
@@ -334,7 +340,9 @@ fn projectIn(self: Decoder, latents: zml.Tensor) zml.Tensor {
 
 fn decode(input: DecodeInput) DecodeOutput {
     const self = input.model;
-    var x = projectIn(self, input.latents);
+    var x = packedToBct(input.latents);
+    x = ops.denorm(x, &self.cfg.latents_mean, &self.cfg.latents_std);
+    x = projectIn(self, x);
     x = self.conv_pre.forward(x);
     const n_up = self.ups.len;
     const n_k = self.cfg.resblock_kernel_sizes.len;
@@ -352,21 +360,6 @@ fn decode(input: DecodeInput) DecodeOutput {
     return .{ .wav = x.minimum(one).maximum(neg) };
 }
 
-/// Packed DiT audio is `(2 * T, C)` left then right. VAE wants `(2, C, T)`.
-fn audioRowsToBct(dst: []f32, rows: []const f32, channels: u32, t: u32) void {
-    const ch: usize = channels;
-    const tt: usize = t;
-    for (0..2) |ear| {
-        const src = rows[ear * tt * ch ..][0 .. tt * ch];
-        const out = dst[ear * ch * tt ..][0 .. ch * tt];
-        for (0..tt) |ti| {
-            for (0..ch) |c| {
-                out[c * tt + ti] = src[ti * ch + c];
-            }
-        }
-    }
-}
-
 fn interleaveStereo(allocator: std.mem.Allocator, left: []const f32, right: []const f32) ![]f32 {
     const out = try allocator.alloc(f32, left.len * 2);
     for (left, right, 0..) |l, r, i| {
@@ -375,6 +368,25 @@ fn interleaveStereo(allocator: std.mem.Allocator, left: []const f32, right: []co
     }
     return out;
 }
+
+pub const Loaded = struct {
+    bufs: zml.Bufferized(Decoder),
+    loader: ?zml.io.Loader = null,
+
+    pub fn wait(self: *Loaded, io: std.Io) !void {
+        if (self.loader) |*loader| {
+            try loader.await(io);
+            loader.deinit();
+            self.loader = null;
+        }
+    }
+
+    pub fn deinit(self: *Loaded, allocator: std.mem.Allocator, io: std.Io) void {
+        self.wait(io) catch {};
+        Decoder.unloadBuffers(&self.bufs, allocator);
+        allocator.destroy(self);
+    }
+};
 
 pub const AudioVae = struct {
     inner: Decoder,
@@ -397,55 +409,53 @@ pub const AudioVae = struct {
             .program_name = "minimax_h3_audio_decode",
         }, .{.{
             .model = self.inner,
-            .latents = .init(.{ .b = 2, .c = self.inner.cfg.latent_channels, .t = geo.audio_t }, .f32),
+            .latents = .init(.{ .b = 1, .s = geo.audio_tokens, .d = self.inner.cfg.latent_channels }, .f32),
         }});
+    }
+
+    pub fn startLoad(self: *const AudioVae, run: *const Run, store: *zml.io.TensorStore) !*Loaded {
+        const loaded = try run.allocator.create(Loaded);
+        errdefer run.allocator.destroy(loaded);
+        loaded.* = .{
+            .bufs = try zml.mem.bufferize(run.allocator, Decoder, &self.inner),
+            .loader = try .init(run.allocator, run.platform, ops.loader_opts),
+        };
+        errdefer Decoder.unloadBuffers(&loaded.bufs, run.allocator);
+        errdefer loaded.loader.?.deinit();
+        if (loaded.loader) |*loader| {
+            try loader.load(run.io, Decoder, &self.inner, &loaded.bufs, store, &run.mesh, .{ .progress = run.progress });
+        }
+        return loaded;
     }
 
     /// Denoised audio tokens → interleaved stereo f32 in `[-1, 1]`.
     pub fn decodeAudio(
         self: *const AudioVae,
         run: *const Run,
-        store: *zml.io.TensorStore,
-        geo: config.Geometry,
-        packed_audio: []f32,
+        packed_audio: zml.Buffer,
+        loaded: *Loaded,
     ) ![]f32 {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
-        const cfg = self.inner.cfg;
-        const channels: u32 = @intCast(cfg.latent_channels);
-        applyLatentNorm(packed_audio, &cfg.latents_mean, &cfg.latents_std);
-        const t = geo.audio_t;
-        const batch = try run.allocator.alloc(f32, 2 * @as(usize, channels) * t);
-        defer run.allocator.free(batch);
-        audioRowsToBct(batch, packed_audio, channels, t);
-
-        var bufs = try load(run, store, Decoder, &self.inner, null);
-        defer Decoder.unloadBuffers(&bufs, run.allocator);
-        var runner = try zml.FnExe(decode).Runner(.{.model}).init(compiled, run.allocator, .{ .model = bufs });
+        try loaded.wait(run.io);
+        var runner = try zml.FnExe(decode).Runner(.{.model}).init(compiled, run.allocator, .{ .model = loaded.bufs });
         defer runner.deinit(run.allocator);
 
-        var latent_buf = try zml.Buffer.fromBytes(
-            run.io,
-            run.platform,
-            .init(.{ .b = 2, .c = cfg.latent_channels, .t = t }, .f32),
-            .replicated,
-            std.mem.sliceAsBytes(batch),
-        );
-        defer latent_buf.deinit();
-
+        const decode_start: std.Io.Timestamp = .now(run.io, .awake);
         var wav: zml.Buffer = undefined;
         runner.run(run.io, .{
-            .inputs = .{ .latents = latent_buf },
+            .inputs = .{ .latents = packed_audio },
             .outputs = .{ .wav = &wav },
             .opts = .{ .wait = true },
         });
         defer wav.deinit();
 
-        const samples = t * cfg.hop();
+        const samples: usize = @intCast(wav.shape().dim(.t));
         const host_pcm = try run.allocator.alloc(f32, 2 * samples);
         errdefer run.allocator.free(host_pcm);
-        try wav.toSlice(run.io, .init(zml.Shape.init(.{ .b = 2, .c = 1, .t = samples }, .f32), std.mem.sliceAsBytes(host_pcm)));
+        try wav.toSlice(run.io, .init(wav.shape(), std.mem.sliceAsBytes(host_pcm)));
         const interleaved = try interleaveStereo(run.allocator, host_pcm[0..samples], host_pcm[samples..]);
         run.allocator.free(host_pcm);
+        log.info("decode audio: ok [{f}]", .{decode_start.untilNow(run.io, .awake)});
         return interleaved;
     }
 };

@@ -86,15 +86,11 @@ pub fn load(
     return buffers;
 }
 
-/// `v ← v * std + mean` per latent channel.
-pub fn applyLatentNorm(values: []f32, mean: []const f32, stddev: []const f32) void {
-    const channels = mean.len;
-    std.debug.assert(stddev.len == channels);
-    std.debug.assert(values.len % channels == 0);
-    for (0..values.len / channels) |row| {
-        const pix = values[row * channels ..][0..channels];
-        for (pix, mean, stddev) |*v, m, s| v.* = v.* * s + m;
-    }
+/// `x * std + mean` broadcast on `.c`.
+pub fn denorm(x: zml.Tensor, mean: []const f32, stddev: []const f32) zml.Tensor {
+    const mean_t = zml.Tensor.constantTensor(.init(.{ .c = mean.len }, .f32), std.mem.sliceAsBytes(mean));
+    const std_t = zml.Tensor.constantTensor(.init(.{ .c = stddev.len }, .f32), std.mem.sliceAsBytes(stddev));
+    return x.mul(std_t.broad(x.shape())).add(mean_t.broad(x.shape()));
 }
 
 /// 3-axis MM-RoPE: concat t/h/w freqs, then duplicate.

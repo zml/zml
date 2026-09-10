@@ -1,6 +1,6 @@
 //! MiniMax-H3 text-to-video.
 //!
-//! tokenize → encode → pack → denoise → unpatchify → visual VAE + audio VAE → rgb + wav
+//! tokenize → encode → pack → denoise → visual VAE + audio VAE → rgb + wav
 //!
 //! Weights (`--model`):
 //!   text_encoder/   transformer/   vae/   audio_vae/
@@ -253,31 +253,26 @@ pub fn main(init: std.process.Init) !void {
     const compile_start: std.Io.Timestamp = .now(io, .awake);
     try enc_model.compile(&run, @intCast(tokens.len));
     try dit_model.compile(&run, geo, @intCast(tokens.len), packed_run, enc_model.embed_tokens.weight.dtype());
-    try vae_model.compile(&run);
+    try vae_model.compile(&run, geo, dit_model.cfg.patch_size);
     try audio_model.compile(&run, geo);
     log.info("compile all: ok [{f}]", .{compile_start.untilNow(io, .awake)});
 
     // =============================================================================
-    // 2–6. Encode → denoise → unpatchify → decode
+    // Encode → denoise → decode
     // =============================================================================
+
+    const vae_loaded = try vae_model.startLoad(&run, &vae_ckpt.store);
+    defer vae_loaded.deinit(allocator, io);
+    const audio_loaded = try audio_model.startLoad(&run, &audio_ckpt.store);
+    defer audio_loaded.deinit(allocator, io);
 
     var text = try enc_model.encodeText(&run, &enc_ckpt.store, tokens);
     defer text.deinit();
-    const latents = try dit_model.denoise(&run, &dit_ckpt.store, geo, text, @intCast(tokens.len), packed_run, args.seed);
-    defer latents.deinit(allocator);
-    const thwc = try pack.unpatchify(
-        allocator,
-        latents.video,
-        geo.latent_t,
-        geo.latent_h,
-        geo.latent_w,
-        @intCast(dit_model.cfg.in_channels),
-        dit_model.cfg.patch_size,
-    );
-    defer allocator.free(thwc);
-    const rgb = try vae_model.decodeVideo(&run, &vae_ckpt.store, geo, thwc);
+    var latents = try dit_model.denoise(&run, &dit_ckpt.store, geo, text, @intCast(tokens.len), packed_run, args.seed);
+    defer latents.deinit();
+    const rgb = try vae_model.decodeVideo(&run, geo, latents.video, vae_loaded);
     defer allocator.free(rgb);
-    const pcm_f32 = try audio_model.decodeAudio(&run, &audio_ckpt.store, geo, latents.audio);
+    const pcm_f32 = try audio_model.decodeAudio(&run, latents.audio, audio_loaded);
     defer allocator.free(pcm_f32);
 
     try writeOutputs(allocator, io, out, geo, rgb, pcm_f32, cfgs.audio.sampling_rate);

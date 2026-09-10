@@ -298,5 +298,4 @@ pub const vae_frame_overlap: u32 = 5;
 pub const vae_latent_t: u32 = 7;
 pub const vae_latent_h: u32 = 16;
 pub const vae_latent_w: u32 = 16;
-/// Tile batch compiled for the ViT decoder. Replicated on every device count.
 pub const vae_tile_batch: u32 = 28;

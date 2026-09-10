@@ -1,9 +1,8 @@
-//! Packed sequence, rectified-flow schedule, noise, and 1×2×2 unpatchify.
+//! Packed sequence, rectified-flow schedule, and noise.
 //!
 //!   1. Layout — text, then audio, then the video patch grid; RoPE (t,h,w) per row
 //!   2. Schedule — σ from t ∈ [1→0] (video/audio shifts from scheduler JSON)
 //!   3. Noise — N(0,1) video tokens then audio tokens
-//!   4. Unpatchify — DiT video tokens `{s, 96}` → THWC latents for the VAE
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -169,43 +168,6 @@ pub fn noise(allocator: std.mem.Allocator, seed: u64, geo: config.Geometry) !Lat
     errdefer allocator.free(audio);
     for (audio) |*x| x.* = r.floatNorm(f32);
     return .{ .video = video, .audio = audio };
-}
-
-fn thwcAt(tt: u32, hh: u32, ww: u32, ch: usize, h: u32, w: u32, c: u32) usize {
-    return (((@as(usize, tt) * h + hh) * w + ww) * c) + ch;
-}
-
-/// DiT video tokens `{s, 96}` → THWC latents for the VAE.
-pub fn unpatchify(allocator: std.mem.Allocator, src: []const f32, t: u32, h: u32, w: u32, c: u32, patch: [3]i64) ![]f32 {
-    const out = try allocator.alloc(f32, @as(usize, t) * h * w * c);
-    const pt: u32 = @intCast(patch[0]);
-    const ph: u32 = @intCast(patch[1]);
-    const pw: u32 = @intCast(patch[2]);
-    const width = c * pt * ph * pw;
-    var row: usize = 0;
-    for (0..t / pt) |ti| {
-        const tt: u32 = @as(u32, @intCast(ti)) * pt;
-        for (0..h / ph) |hi| {
-            const hh: u32 = @as(u32, @intCast(hi)) * ph;
-            for (0..w / pw) |wi| {
-                const ww: u32 = @as(u32, @intCast(wi)) * pw;
-                var i: usize = 0;
-                for (0..c) |ch| {
-                    for (0..pt) |dt| {
-                        for (0..ph) |dh| {
-                            for (0..pw) |dw| {
-                                const base = thwcAt(tt + @as(u32, @intCast(dt)), hh + @as(u32, @intCast(dh)), ww + @as(u32, @intCast(dw)), ch, h, w, c);
-                                out[base] = src[row * width + i];
-                                i += 1;
-                            }
-                        }
-                    }
-                }
-                row += 1;
-            }
-        }
-    }
-    return out;
 }
 
 /// Video/text share one time, audio another. Smaller time first, then pad to

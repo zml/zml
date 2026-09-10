@@ -28,7 +28,16 @@ const load = ops.load;
 const ropeCat3 = ops.ropeCat3;
 const Run = ops.Run;
 const Packed = pack.Packed;
-const Latents = pack.Latents;
+
+pub const DeviceLatents = struct {
+    video: zml.Buffer,
+    audio: zml.Buffer,
+
+    pub fn deinit(self: *DeviceLatents) void {
+        self.video.deinit();
+        self.audio.deinit();
+    }
+};
 
 const Rotary = struct { cos: zml.Tensor, sin: zml.Tensor };
 
@@ -613,14 +622,12 @@ pub const Dit = struct {
         text_len: u32,
         packed_run: Packed,
         seed: u64,
-    ) !Latents {
+    ) !DeviceLatents {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
         const allocator = run.allocator;
         const io = run.io;
         const drawn = try pack.noise(allocator, seed, geo);
-        errdefer drawn.deinit(allocator);
-        const video = drawn.video;
-        const audio = drawn.audio;
+        defer drawn.deinit(allocator);
         const video_shape = zml.Shape.init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32);
         const audio_shape = zml.Shape.init(.{ .b = 1, .s = geo.audio_tokens, .d = geo.audio_dim }, .f32);
         const layout = packed_run.layout;
@@ -758,10 +765,10 @@ pub const Dit = struct {
         defer apply_v.deinit(allocator);
         var apply_a = try zml.FnExe(Euler.apply).Runner(.{}).init(&compiled.apply_audio, allocator, .{});
         defer apply_a.deinit(allocator);
-        var video_buf = try zml.Buffer.fromBytes(io, run.platform, video_shape, .replicated, std.mem.sliceAsBytes(video));
-        defer video_buf.deinit();
-        var audio_buf = try zml.Buffer.fromBytes(io, run.platform, audio_shape, .replicated, std.mem.sliceAsBytes(audio));
-        defer audio_buf.deinit();
+        var video_buf = try zml.Buffer.fromBytes(io, run.platform, video_shape, .replicated, std.mem.sliceAsBytes(drawn.video));
+        errdefer video_buf.deinit();
+        var audio_buf = try zml.Buffer.fromBytes(io, run.platform, audio_shape, .replicated, std.mem.sliceAsBytes(drawn.audio));
+        errdefer audio_buf.deinit();
 
         log.info("denoise: blocks={d} seq={d} audio_tokens={d} devices={d}", .{
             n_blocks,
@@ -867,13 +874,11 @@ pub const Dit = struct {
             });
         }
 
-        try video_buf.toSlice(io, .init(video_shape, std.mem.sliceAsBytes(video)));
-        try audio_buf.toSlice(io, .init(audio_shape, std.mem.sliceAsBytes(audio)));
         log.info("denoise: ok steps={d} [{f}]", .{ steps, denoise_start.untilNow(io, .awake) });
         for (tables) |*tb| tb.deinit();
         allocator.free(tables);
         for (cores) |*core| zml.Buffer.deinitAll(Block, core);
         allocator.free(cores);
-        return .{ .video = video, .audio = audio };
+        return .{ .video = video_buf, .audio = audio_buf };
     }
 };

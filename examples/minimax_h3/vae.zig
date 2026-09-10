@@ -1,6 +1,6 @@
 //! Tiled ViT decoder.
 //!
-//!   1. denormalize latents with `vae/config.json` moments
+//!   1. unpatch DiT tokens and denormalize with `vae/config.json` moments
 //!   2. split the canvas into 256 px tiles (64 px overlap)
 //!   3. for each temporal chunk of 5 latent frames:
 //!        extract tiles → embed → 36 ViT blocks → unpatch pixels → stitch
@@ -16,10 +16,10 @@ const VisualConfig = config.VisualConfig;
 const linear = ops.linear;
 const rms = ops.rms;
 const ln = ops.ln;
-const load = ops.load;
 const ropeCat3 = ops.ropeCat3;
-const applyLatentNorm = ops.applyLatentNorm;
 const Run = ops.Run;
+
+const log = std.log.scoped(.minimax_h3);
 
 fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     return lin.forward(x.convert(lin.weight.dtype())).convert(x.dtype());
@@ -196,7 +196,130 @@ fn vaePositions(allocator: std.mem.Allocator, registers: u32) ![]f32 {
     return out;
 }
 
-/// Tiled ViT decoder.
+const Unpatch = struct {
+    latent_t: u32,
+    latent_h: u32,
+    latent_w: u32,
+    channels: u32,
+    patch: [3]i64,
+    mean: [24]f32,
+    std: [24]f32,
+    pub const Input = struct { spec: Unpatch, tokens: zml.Tensor };
+    pub const Output = struct { thwc: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        const spec = input.spec;
+        const pt: u32 = @intCast(spec.patch[0]);
+        const ph: u32 = @intCast(spec.patch[1]);
+        const pw: u32 = @intCast(spec.patch[2]);
+        const x = input.tokens.withPartialTags(.{ .b, .s, .d })
+            .splitAxis(.s, .{
+                .tp = spec.latent_t / pt,
+                .hp = spec.latent_h / ph,
+                .wp = spec.latent_w / pw,
+            })
+            .splitAxis(.d, .{
+                .c = spec.channels,
+                .pt = pt,
+                .ph = ph,
+                .pw = pw,
+            })
+            .transpose(.{ .b, .tp, .pt, .hp, .ph, .wp, .pw, .c })
+            .merge(.{ .t = .{ .tp, .pt }, .h = .{ .hp, .ph }, .w = .{ .wp, .pw } })
+            .squeeze(.b);
+        return .{ .thwc = ops.denorm(x, spec.mean[0..spec.channels], spec.std[0..spec.channels]) };
+    }
+};
+
+fn unpackNchw(patches: zml.Tensor, temporal: u32, spatial: u32, channels: i64) zml.Tensor {
+    return patches.withPartialTags(.{ .b, .s, .d })
+        .splitAxis(.s, .{
+            .lt = config.vae_latent_t,
+            .lh = config.vae_latent_h,
+            .lw = config.vae_latent_w,
+        })
+        .splitAxis(.d, .{
+            .c = channels,
+            .pt = temporal,
+            .ph = spatial,
+            .pw = spatial,
+        })
+        .transpose(.{ .b, .c, .lt, .pt, .lh, .ph, .lw, .pw })
+        .merge(.{ .t = .{ .lt, .pt }, .h = .{ .lh, .ph }, .w = .{ .lw, .pw } });
+}
+
+const Decode = struct {
+    embed: EmbedModel,
+    blocks: []VitBlock,
+    finish: FinishModel,
+    y_starts: []const u32,
+    x_starts: []const u32,
+    partition_b: bool,
+    pub const Input = struct { model: Decode, thwc: zml.Tensor, start_t: zml.Tensor, position_ids: zml.Tensor };
+    pub const Output = struct { tiles: zml.Tensor };
+
+    pub fn unload(self: *zml.Bufferized(Decode), allocator: std.mem.Allocator) void {
+        zml.Buffer.deinitAll(EmbedModel, &self.embed);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
+        allocator.free(self.blocks);
+        zml.Buffer.deinitAll(FinishModel, &self.finish);
+    }
+
+    pub fn forward(input: Input) Output {
+        const self = input.model;
+        const channels = self.embed.cfg.latent_channels;
+        const temporal: u32 = self.embed.cfg.temporal();
+        const spatial: u32 = self.embed.cfg.spatial();
+        const thwc = input.thwc.withPartialTags(.{ .t, .h, .w, .c });
+        const padded = thwc.pad(0, .{
+            .t = zml.Tensor.Pad{ .high = @as(i64, config.vae_latent_t) },
+            .h = zml.Tensor.Pad{ .high = @as(i64, config.vae_latent_h) },
+            .w = zml.Tensor.Pad{ .high = @as(i64, config.vae_latent_w) },
+        });
+        var parts: [config.vae_tile_batch]zml.Tensor = undefined;
+        var n: usize = 0;
+        for (self.y_starts) |y0| {
+            for (self.x_starts) |x0| {
+                const window = padded.slices(.{ .t, .h, .w }, &.{
+                    .dyn(input.start_t, @as(i64, config.vae_latent_t)),
+                    .{ .start = @as(i64, @intCast(y0 / spatial)), .len = @as(i64, config.vae_latent_h) },
+                    .{ .start = @as(i64, @intCast(x0 / spatial)), .len = @as(i64, config.vae_latent_w) },
+                });
+                parts[n] = window.reshape(.{ .b = 1, .s = vaeTokens(), .d = channels });
+                n += 1;
+            }
+        }
+        var latents = zml.Tensor.concatenate(parts[0..n], .b);
+        if (self.partition_b) latents = latents.withPartitioning(.{ .b = .model });
+        const emb = EmbedModel.forward(.{ .model = self.embed, .latents = latents, .position_ids = input.position_ids });
+        var hidden = emb.hidden;
+        for (self.blocks) |block| {
+            hidden = VitBlock.forward(.{ .layer = block, .hidden = hidden, .cos = emb.cos, .sin = emb.sin }).hidden;
+        }
+        const patches = FinishModel.forward(.{ .model = self.finish, .hidden = hidden }).patches;
+        return .{ .tiles = unpackNchw(patches, temporal, spatial, self.embed.cfg.out_channels) };
+    }
+};
+
+pub const Loaded = struct {
+    decode: zml.Bufferized(Decode),
+    loader: ?zml.io.Loader = null,
+
+    pub fn wait(self: *Loaded, io: std.Io) !void {
+        if (self.loader) |*loader| {
+            try loader.await(io);
+            loader.deinit();
+            self.loader = null;
+        }
+    }
+
+    pub fn deinit(self: *Loaded, allocator: std.mem.Allocator, io: std.Io) void {
+        self.wait(io) catch {};
+        Decode.unload(&self.decode, allocator);
+        allocator.destroy(self);
+    }
+};
+
 pub const Vae = struct {
     embed: EmbedModel,
     blocks: []VitBlock,
@@ -205,15 +328,16 @@ pub const Vae = struct {
     compiled: ?Compiled = null,
 
     const Compiled = struct {
-        embed: zml.FnExe(EmbedModel.forward),
-        block: zml.FnExe(VitBlock.forward),
-        finish: zml.FnExe(FinishModel.forward),
-        tile_batch: u32,
+        unpatch: zml.FnExe(Unpatch.forward),
+        decode: zml.FnExe(Decode.forward),
+        y_plan: TilePlan,
+        x_plan: TilePlan,
 
-        fn deinit(self: *Compiled) void {
-            self.embed.deinit();
-            self.block.deinit();
-            self.finish.deinit();
+        fn deinit(self: *Compiled, allocator: std.mem.Allocator) void {
+            self.unpatch.deinit();
+            self.decode.deinit();
+            self.y_plan.deinit(allocator);
+            self.x_plan.deinit(allocator);
         }
     };
 
@@ -241,64 +365,111 @@ pub const Vae = struct {
     }
 
     pub fn deinit(self: *Vae, allocator: std.mem.Allocator) void {
-        if (self.compiled) |*c| c.deinit();
+        if (self.compiled) |*c| c.deinit(allocator);
         allocator.free(self.blocks);
     }
 
-    pub fn compile(self: *Vae, run: *const Run) !void {
-        const batch: u32 = config.vae_tile_batch;
+    pub fn compile(self: *Vae, run: *const Run, geo: config.Geometry, patch: [3]i64) !void {
+        const spatial = self.cfg.spatial();
+        var y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
+        errdefer y_plan.deinit(run.allocator);
+        var x_plan = try splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
+        errdefer x_plan.deinit(run.allocator);
+        const n_tiles: u32 = @intCast(y_plan.starts.len * x_plan.starts.len);
+        if (n_tiles > config.vae_tile_batch) return error.TooManyVaeTiles;
+        const tp: u32 = @intCast(run.shardings.model.numPartitionsForLogicalAxis(.model));
+        const partition_b = tp > 1 and n_tiles % tp == 0;
         const seq_len = vaeSeq(@intCast(self.cfg.decoder_num_register_tokens));
-        var node = run.progress.start("Compiling MiniMax-H3 VAE", 3);
+        var node = run.progress.start("Compiling MiniMax-H3 VAE", 2);
         defer node.end();
-        const vae_dt = self.embed.proj.weight.dtype();
-        const embed_exe = try zml.FnExe(EmbedModel.forward).compile(run.allocator, run.io, run.platform, .{
+        const unpatch_exe = try zml.FnExe(Unpatch.forward).compile(run.allocator, run.io, run.platform, .{
             .shardings = &run.mesh,
-            .program_name = "minimax_h3_vae_embed",
+            .program_name = "minimax_h3_vae_unpatch",
         }, .{.{
-            .model = self.embed,
-            .latents = .init(.{ .b = batch, .s = vaeTokens(), .d = self.cfg.latent_channels }, .f32),
+            .spec = Unpatch{
+                .latent_t = geo.latent_t,
+                .latent_h = geo.latent_h,
+                .latent_w = geo.latent_w,
+                .channels = @intCast(self.cfg.latent_channels),
+                .patch = patch,
+                .mean = self.cfg.latents_mean,
+                .std = self.cfg.latents_std,
+            },
+            .tokens = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
+        }});
+        errdefer unpatch_exe.deinit();
+        const decode_model = Decode{
+            .embed = self.embed,
+            .blocks = self.blocks,
+            .finish = self.finish,
+            .y_starts = y_plan.starts,
+            .x_starts = x_plan.starts,
+            .partition_b = partition_b,
+        };
+        const decode_exe = try zml.FnExe(Decode.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = &run.mesh,
+            .program_name = "minimax_h3_vae_decode",
+        }, .{.{
+            .model = decode_model,
+            .thwc = .init(.{ .t = geo.latent_t, .h = geo.latent_h, .w = geo.latent_w, .c = self.cfg.latent_channels }, .f32),
+            .start_t = .init(.{}, .i32),
             .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
         }});
-        errdefer embed_exe.deinit();
-        const block_exe = try zml.FnExe(VitBlock.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = &run.mesh,
-            .program_name = "minimax_h3_vae_block",
-        }, .{.{
-            .layer = self.blocks[0],
-            .hidden = .init(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt),
-            .cos = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, vae_dt),
-            .sin = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, vae_dt),
-        }});
-        errdefer block_exe.deinit();
-        const finish_exe = try zml.FnExe(FinishModel.forward).compile(run.allocator, run.io, run.platform, .{
-            .shardings = &run.mesh,
-            .program_name = "minimax_h3_vae_finish",
-        }, .{.{
-            .model = self.finish,
-            .hidden = .init(.{ .b = batch, .s = seq_len, .d = self.cfg.dim() }, vae_dt),
-        }});
-        self.compiled = .{ .embed = embed_exe, .block = block_exe, .finish = finish_exe, .tile_batch = batch };
+        self.compiled = .{
+            .unpatch = unpatch_exe,
+            .decode = decode_exe,
+            .y_plan = y_plan,
+            .x_plan = x_plan,
+        };
     }
 
-    /// THWC latents → NCHW RGB in `[0, 1]`, tiled and temporally chunked.
+    pub fn startLoad(self: *const Vae, run: *const Run, store: *zml.io.TensorStore) !*Loaded {
+        const loaded = try run.allocator.create(Loaded);
+        errdefer run.allocator.destroy(loaded);
+        const blocks_buf = try run.allocator.alloc(zml.Bufferized(VitBlock), self.blocks.len);
+        var blocks_owned = false;
+        errdefer if (!blocks_owned) run.allocator.free(blocks_buf);
+        for (self.blocks, blocks_buf) |*src, *dst| {
+            dst.* = try zml.mem.bufferize(run.allocator, VitBlock, src);
+        }
+        loaded.* = .{
+            .decode = .{
+                .embed = try zml.mem.bufferize(run.allocator, EmbedModel, &self.embed),
+                .blocks = blocks_buf,
+                .finish = try zml.mem.bufferize(run.allocator, FinishModel, &self.finish),
+            },
+            .loader = try .init(run.allocator, run.platform, ops.loader_opts),
+        };
+        blocks_owned = true;
+        errdefer Decode.unload(&loaded.decode, run.allocator);
+        errdefer loaded.loader.?.deinit();
+        if (loaded.loader) |*loader| {
+            try loader.load(run.io, EmbedModel, &self.embed, &loaded.decode.embed, store, &run.mesh, .{ .progress = run.progress });
+            for (self.blocks, loaded.decode.blocks) |*src, *dst| {
+                try loader.load(run.io, VitBlock, src, dst, store, &run.mesh, .{ .progress = run.progress });
+            }
+            try loader.load(run.io, FinishModel, &self.finish, &loaded.decode.finish, store, &run.mesh, .{ .progress = run.progress });
+        }
+        return loaded;
+    }
+
+    /// Packed DiT video tokens → NCHW RGB in `[0, 1]`.
     pub fn decodeVideo(
         self: *const Vae,
         run: *const Run,
-        store: *zml.io.TensorStore,
         geo: config.Geometry,
-        video_thwc: []f32,
+        video_tokens: zml.Buffer,
+        loaded: *Loaded,
     ) ![]f32 {
         const compiled = if (self.compiled) |*c| c else return error.NotCompiled;
+        try loaded.wait(run.io);
         const cfg = self.cfg;
         const spatial = cfg.spatial();
         const temporal = cfg.temporal();
         const token_drop: u32 = @intCast(cfg.token_drop);
-        applyLatentNorm(video_thwc, &cfg.latents_mean, &cfg.latents_std);
-        const channels: u32 = @intCast(cfg.latent_channels);
-        const y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
-        defer y_plan.deinit(run.allocator);
-        const x_plan = try splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
-        defer x_plan.deinit(run.allocator);
+        const y_plan = compiled.y_plan;
+        const x_plan = compiled.x_plan;
+        const n_tiles: u32 = @intCast(y_plan.starts.len * x_plan.starts.len);
         const num_chunks = (geo.latent_t + token_drop) / config.visual_latents_per_chunk - 1;
         const chunk_frames = config.visual_latents_per_chunk * temporal;
         const out_frames = geo.frames;
@@ -306,57 +477,52 @@ pub const Vae = struct {
         errdefer run.allocator.free(out);
         @memset(out, 0);
 
-        var cache = try loadVaeCache(run, self, store);
-        defer cache.deinit(run.allocator);
-        const registers: u32 = @intCast(self.cfg.decoder_num_register_tokens);
+        const registers: u32 = @intCast(cfg.decoder_num_register_tokens);
         const positions = try vaePositions(run.allocator, registers);
         defer run.allocator.free(positions);
-        var embed = try EmbedRunner.init(&compiled.embed, run.allocator, .{ .model = cache.embed });
-        defer embed.deinit(run.allocator);
-        const block_runners = try run.allocator.alloc(VitRunner, cache.blocks.len);
-        var blocks_ready: usize = 0;
-        defer {
-            for (block_runners[0..blocks_ready]) |*r| r.deinit(run.allocator);
-            run.allocator.free(block_runners);
-        }
-        for (block_runners, cache.blocks) |*r, layer| {
-            r.* = try VitRunner.init(&compiled.block, run.allocator, .{ .layer = layer });
-            blocks_ready += 1;
-        }
-        var finish = try FinishRunner.init(&compiled.finish, run.allocator, .{ .model = cache.finish });
-        defer finish.deinit(run.allocator);
         var pos = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .s = vaeSeq(registers), .ax = 3 }, .f32), .replicated, std.mem.sliceAsBytes(positions));
         defer pos.deinit();
+
+        var unpatch_runner = try zml.FnExe(Unpatch.forward).Runner(.{}).init(&compiled.unpatch, run.allocator, .{});
+        defer unpatch_runner.deinit(run.allocator);
+        var thwc: zml.Buffer = undefined;
+        unpatch_runner.run(run.io, .{
+            .inputs = .{ .tokens = video_tokens },
+            .outputs = .{ .thwc = &thwc },
+            .opts = .{ .wait = true },
+        });
+        defer thwc.deinit();
+
+        var decode_runner = try zml.FnExe(Decode.forward).Runner(.{.model}).init(&compiled.decode, run.allocator, .{ .model = loaded.decode });
+        defer decode_runner.deinit(run.allocator);
+
+        const clip_t = config.vae_latent_t * temporal;
+        const tile_h = config.vae_latent_h * spatial;
+        const tile_w = config.vae_latent_w * spatial;
+        const tile_n = @as(usize, 3) * clip_t * tile_h * tile_w;
+        const host = try run.allocator.alloc(f32, @as(usize, n_tiles) * tile_n);
+        defer run.allocator.free(host);
 
         const plane = geo.pixel_h * geo.pixel_w;
         const pending = try run.allocator.alloc(f32, 3 * config.vae_frame_overlap * plane);
         defer run.allocator.free(pending);
         var has_overlap = false;
         var written: u32 = 0;
-        for (0..num_chunks) |chunk_i| {
-            const start_t: u32 = @as(u32, @intCast(chunk_i)) * config.visual_latents_per_chunk;
-            const tile_n: usize = vaeTokens() * @as(usize, channels);
-            const n_x = x_plan.starts.len;
-            const n_tiles = y_plan.starts.len * n_x;
-            const tile_lats = try run.allocator.alloc(f32, n_tiles * tile_n);
-            defer run.allocator.free(tile_lats);
-            for (y_plan.starts, 0..) |y0, yi| {
-                for (x_plan.starts, 0..) |x0, xi| {
-                    copyLatentTile(
-                        video_thwc,
-                        geo.latent_t,
-                        geo.latent_h,
-                        geo.latent_w,
-                        channels,
-                        start_t,
-                        y0 / spatial,
-                        x0 / spatial,
-                        tile_lats[(yi * n_x + xi) * tile_n ..][0..tile_n],
-                    );
-                }
-            }
+        const decode_start: std.Io.Timestamp = .now(run.io, .awake);
 
-            const clip_t = config.vae_latent_t * temporal;
+        for (0..num_chunks) |chunk_i| {
+            const start_t: i32 = @intCast(@as(u32, @intCast(chunk_i)) * config.visual_latents_per_chunk);
+            var start_buf = try zml.Buffer.scalar(run.io, run.platform, start_t, .i32);
+            defer start_buf.deinit();
+            var tiles: zml.Buffer = undefined;
+            decode_runner.run(run.io, .{
+                .inputs = .{ .thwc = thwc, .start_t = start_buf, .position_ids = pos },
+                .outputs = .{ .tiles = &tiles },
+                .opts = .{ .wait = true },
+            });
+            defer tiles.deinit();
+            try tiles.toSlice(run.io, .init(tiles.shape(), std.mem.sliceAsBytes(host)));
+
             const clip = try run.allocator.alloc(f32, 3 * clip_t * geo.pixel_h * geo.pixel_w);
             defer run.allocator.free(clip);
             @memset(clip, 0);
@@ -367,39 +533,15 @@ pub const Vae = struct {
                 clip_t,
                 geo.pixel_h,
                 geo.pixel_w,
-                config.vae_latent_h * spatial,
-                config.vae_latent_w * spatial,
+                tile_h,
+                tile_w,
                 y_plan,
                 x_plan,
             );
             defer stitcher.deinit(run.allocator);
-
-            const batch = compiled.tile_batch;
-            const packed_lat = try run.allocator.alloc(f32, @as(usize, batch) * tile_n);
-            defer run.allocator.free(packed_lat);
-            const tile_patch = vaeTokens() * @as(usize, @intCast(self.cfg.out_channels)) * temporal * spatial * spatial;
-            var off: usize = 0;
-            while (off < n_tiles) {
-                @memset(packed_lat, 0);
-                const take = @min(@as(usize, batch), n_tiles - off);
-                for (0..take) |b| {
-                    @memcpy(packed_lat[b * tile_n ..][0..tile_n], tile_lats[(off + b) * tile_n ..][0..tile_n]);
-                }
-                const patches = try runVaeBatch(run, self, &embed, block_runners, &finish, pos, packed_lat);
-                defer run.allocator.free(patches);
-                for (0..take) |b| {
-                    const pix = try unpackPatches(
-                        run.allocator,
-                        patches[b * tile_patch ..][0..tile_patch],
-                        temporal,
-                        spatial,
-                        3,
-                    );
-                    defer run.allocator.free(pix);
-                    const idx = off + b;
-                    stitcher.push(@intCast(idx / n_x), @intCast(idx % n_x), pix);
-                }
-                off += take;
+            const n_x = x_plan.starts.len;
+            for (0..n_tiles) |b| {
+                stitcher.push(@intCast(b / n_x), @intCast(b % n_x), host[b * tile_n ..][0..tile_n]);
             }
 
             const take = @min(chunk_frames - config.vae_frame_pre, out_frames - written);
@@ -418,7 +560,6 @@ pub const Vae = struct {
             }
             if (written >= out_frames) break;
         }
-
         if (has_overlap and written < out_frames) {
             copyRgbFrames(out, out_frames, written, pending, config.vae_frame_overlap, 0, @min(config.vae_frame_overlap, out_frames - written), plane);
         }
@@ -429,6 +570,7 @@ pub const Vae = struct {
                 out[c * rgb_plane + pi] = std.math.clamp(out[c * rgb_plane + pi] * imagenet_std[c] + imagenet_mean[c], 0.0, 1.0);
             }
         }
+        log.info("decode video: ok [{f}]", .{decode_start.untilNow(run.io, .awake)});
         return out;
     }
 };
@@ -671,146 +813,3 @@ fn blendRgbFrames(
     }
 }
 
-/// Fold ViT patch tokens back into an NCHW pixel tile.
-fn unpackPatches(allocator: std.mem.Allocator, patches: []const f32, patch_t: u32, patch: u32, channels: u32) ![]f32 {
-    const pixel_t: usize = config.vae_latent_t * patch_t;
-    const pixel_h: usize = config.vae_latent_h * patch;
-    const pixel_w: usize = config.vae_latent_w * patch;
-    const ch: usize = channels;
-    const pt: usize = patch_t;
-    const p: usize = patch;
-    const out = try allocator.alloc(f32, ch * pixel_t * pixel_h * pixel_w);
-    const width = ch * pt * p * p;
-    const lt: usize = config.vae_latent_t;
-    const lh: usize = config.vae_latent_h;
-    const lw: usize = config.vae_latent_w;
-    var row: usize = 0;
-    for (0..lt) |tt| {
-        for (0..lh) |hh| {
-            for (0..lw) |ww| {
-                var src: usize = 0;
-                for (0..ch) |c| {
-                    for (0..pt) |dt| {
-                        const t = tt * pt + dt;
-                        for (0..p) |dh| {
-                            @memcpy(
-                                out[(((c * pixel_t + t) * pixel_h + (hh * p + dh)) * pixel_w + (ww * p))..][0..p],
-                                patches[row * width + src ..][0..p],
-                            );
-                            src += p;
-                        }
-                    }
-                }
-                row += 1;
-            }
-        }
-    }
-    return out;
-}
-
-// =============================================================================
-// Decode runtime (tile extract, weight cache, one GPU batch)
-// =============================================================================
-
-/// Copy a 7×16×16 latent window at `(t0,h0,w0)` into `dst` (zero-padded at edges).
-fn copyLatentTile(src: []const f32, src_t: u32, src_h: u32, src_w: u32, channels: u32, t0: u32, h0: u32, w0: u32, dst: []f32) void {
-    @memset(dst, 0);
-    const copy_t = @min(config.vae_latent_t, src_t - t0);
-    const copy_h = @min(config.vae_latent_h, src_h - h0);
-    const copy_w = @min(config.vae_latent_w, src_w - w0);
-    const row_n = @as(usize, copy_w) * channels;
-    const lh: usize = config.vae_latent_h;
-    const lw: usize = config.vae_latent_w;
-    const ch: usize = channels;
-    const sh: usize = src_h;
-    const sw: usize = src_w;
-    for (0..@as(usize, copy_t)) |tt| {
-        for (0..@as(usize, copy_h)) |hh| {
-            @memcpy(
-                dst[(((tt * lh + hh) * lw) * ch)..][0..row_n],
-                src[((((@as(usize, t0) + tt) * sh + (@as(usize, h0) + hh)) * sw + w0) * ch)..][0..row_n],
-            );
-        }
-    }
-}
-
-const VaeCache = struct {
-    embed: zml.Bufferized(EmbedModel),
-    blocks: []zml.Bufferized(VitBlock),
-    finish: zml.Bufferized(FinishModel),
-
-    pub fn deinit(self: *VaeCache, allocator: std.mem.Allocator) void {
-        zml.Buffer.deinitAll(EmbedModel, &self.embed);
-        for (self.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
-        allocator.free(self.blocks);
-        zml.Buffer.deinitAll(FinishModel, &self.finish);
-    }
-};
-
-fn loadVaeCache(run: *const Run, loaded: *const Vae, store: *zml.io.TensorStore) !VaeCache {
-    var embed_bufs = try load(run, store, EmbedModel, &loaded.embed, null);
-    errdefer zml.Buffer.deinitAll(EmbedModel, &embed_bufs);
-    var finish_bufs = try load(run, store, FinishModel, &loaded.finish, null);
-    errdefer zml.Buffer.deinitAll(FinishModel, &finish_bufs);
-    const blocks = try run.allocator.alloc(zml.Bufferized(VitBlock), loaded.blocks.len);
-    errdefer run.allocator.free(blocks);
-    var filled: usize = 0;
-    errdefer for (blocks[0..filled]) |*block| zml.Buffer.deinitAll(VitBlock, block);
-    var loader: zml.io.Loader = try .init(run.allocator, run.platform, ops.loader_opts);
-    defer loader.deinit();
-    for (0..loaded.blocks.len) |i| {
-        blocks[i] = try load(run, store, VitBlock, &loaded.blocks[i], &loader);
-        filled += 1;
-    }
-    return .{ .embed = embed_bufs, .blocks = blocks, .finish = finish_bufs };
-}
-
-const EmbedRunner = zml.FnExe(EmbedModel.forward).Runner(.{.model});
-const VitRunner = zml.FnExe(VitBlock.forward).Runner(.{.layer});
-const FinishRunner = zml.FnExe(FinishModel.forward).Runner(.{.model});
-
-/// Embed → 36 ViT blocks → unpatch one GPU batch of latent tiles.
-fn runVaeBatch(
-    run: *const Run,
-    loaded: *const Vae,
-    embed: *EmbedRunner,
-    blocks: []VitRunner,
-    finish: *FinishRunner,
-    pos: zml.Buffer,
-    packed_latents: []const f32,
-) ![]f32 {
-    const compiled = if (loaded.compiled) |*c| c else return error.NotCompiled;
-    const batch = compiled.tile_batch;
-    const latent_shape: zml.Shape = .init(.{ .b = batch, .s = vaeTokens(), .d = loaded.cfg.latent_channels }, .f32);
-    var latent_buf = try zml.Buffer.fromBytes(run.io, run.platform, latent_shape, .replicated, std.mem.sliceAsBytes(packed_latents));
-    defer latent_buf.deinit();
-    var hidden: zml.Buffer = undefined;
-    var cos: zml.Buffer = undefined;
-    var sin: zml.Buffer = undefined;
-    embed.run(run.io, .{ .inputs = .{ .latents = latent_buf, .position_ids = pos }, .outputs = .{ .hidden = &hidden, .cos = &cos, .sin = &sin } });
-    defer cos.deinit();
-    defer sin.deinit();
-    // keep every hidden alive until finish waits — block.run is async
-    const held = try run.allocator.alloc(zml.Buffer, blocks.len + 1);
-    var held_n: usize = 0;
-    defer {
-        for (held[0..held_n]) |*buf| buf.deinit();
-        run.allocator.free(held);
-    }
-    held[0] = hidden;
-    held_n = 1;
-    for (blocks, held[1..]) |*block, *slot| {
-        var next: zml.Buffer = undefined;
-        block.run(run.io, .{ .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin }, .outputs = .{ .hidden = &next } });
-        hidden = next;
-        slot.* = next;
-        held_n += 1;
-    }
-    var patches: zml.Buffer = undefined;
-    finish.run(run.io, .{ .inputs = .{ .hidden = hidden }, .outputs = .{ .patches = &patches }, .opts = .{ .wait = true } });
-    defer patches.deinit();
-    const raw = try run.allocator.alloc(f32, @as(usize, batch) * vaeTokens() * @as(usize, @intCast(loaded.cfg.out_channels)) * loaded.cfg.temporal() * loaded.cfg.spatial() * loaded.cfg.spatial());
-    errdefer run.allocator.free(raw);
-    try patches.toSlice(run.io, .init(patches.shape(), std.mem.sliceAsBytes(raw)));
-    return raw;
-}
