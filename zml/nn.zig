@@ -39,6 +39,10 @@ pub const Linear = struct {
         return if (self.quantization) |q| q.scheme else null;
     }
 
+    pub fn quantizationScales(self: Linear) ?Tensor {
+        return if (self.quantization) |q| q.scales else null;
+    }
+
     pub fn forward(self: Linear, x: Tensor) Tensor {
         if (self.quantization) |q| {
             const lhs = x.convert(.bf16);
