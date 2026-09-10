@@ -23,22 +23,22 @@ def _cpu_pjrt_plugin_impl(mctx):
     http_archive(
         name = "libpjrt_cpu_linux_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_LINUX,
-        sha256 = "65e631db0f842845e7799d245a414b361a3c3e77bf4cc0547c20c71f28a9fd70",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_linux-amd64.tar.gz",
+        sha256 = "9861bb5314ecc0f28846c49c61c5c2a64a61d6ae2637c0fb7b1e307412a70e8f",
+        url = "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cpu-linux-amd64.tar.gz",
     )
 
     http_archive(
         name = "libpjrt_cpu_darwin_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "22130f752abdaaa0f3ff48e71b9191ce74b29cd3fdb0c4784f04e4c4a436f25e",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_darwin-amd64.tar.gz",
+        sha256 = "d6c3dd715aca5d1453d8282896163612e377b2cc29688686e51733153e712b8b",
+        url = "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cpu-darwin-amd64.tar.gz",
     )
 
     http_archive(
         name = "libpjrt_cpu_darwin_arm64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "14c85504d801c75fa8d157ce951a2644d8a8d7983346b3ac281aa7f64abf8390",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_darwin-arm64.tar.gz",
+        sha256 = "d88cf830ea5020e86ab38c6ed8e2582559b4187acdfb8dc9587d9f9742f34793",
+        url = "https://mirror.zml.ai/pjrt-plugins/202609100934.19.1.c22f39a3b260/pjrt-cpu-darwin-arm64.tar.gz",
     )
 
     return mctx.extension_metadata(
