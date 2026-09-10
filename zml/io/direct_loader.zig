@@ -1,12 +1,12 @@
 //! Direct loading follows a batch from per-file planning through FIFO claims,
-//! source reads and DMA completion. The source concurrency policy lives in
-//! `source_concurrency.zig`; runtime ownership and synchronization stay here.
+//! source reads and DMA completion. The source width is fixed per load
+//! profile (`limits.defaultReadParallelism`) and only steps down when the
+//! source throttles; runtime ownership and synchronization live here.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
-const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -20,33 +20,13 @@ const pjrtx = @import("../pjrtx.zig");
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
-const source_concurrency = @import("source_concurrency.zig");
-const tracer = @import("../profiling/tracer.zig");
 
 const CreateOptions = platform_mod.CreateOptions;
-const Config = backend.Config;
+const BackendConfig = backend.Config;
 const LoadSpec = backend.LoadSpec;
 const Platform = platform_mod.Platform;
 
 const load_log = std.log.scoped(.@"zml/io/load");
-
-/// Destroy a DMA event as soon as its ready callback has run, from the next
-/// pump (never inside the callback), instead of at its batch's retirement:
-/// live PJRT events are then bounded by the DMA width plus one pump batch
-/// rather than by a submission's transfer count. Set to false to keep every
-/// event until its batch retires.
-/// A retirement probe destroyed all 16,384 fired events on two B70 without
-/// errors; CUDA and ROCm also accepted retirement outside the
-/// event's own callback. This bounds live events, not the plan's context arrays.
-const retire_events_early = true;
-
-/// The widest source rung pre-grown during loader initialization.
-/// Mapping during a measured load contaminated width selection: allocating
-/// one 64 MiB pinned slab on one MI300X took 146 ms, compared with roughly
-/// 410 ms for the entire warm Llama-3.1-8B load at fixed width 12.
-/// Initialization pays that cost before source-width windows begin; the
-/// retained set also includes the DMA reserve.
-const preallocated_source_width = 32;
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
@@ -57,7 +37,8 @@ const preallocated_source_width = 32;
 const max_dma_pieces_per_device: usize = 64;
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
-/// time; the workers, pump and controller run concurrently with them.
+/// time; the workers, the pumps and the throttle watch run concurrently
+/// with them.
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -67,16 +48,15 @@ pub const Loader = struct {
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
-    source_probe: SourceProbe = .{},
     read_gate: RequestGate,
     request_gate: RequestGate,
     pipeline: Pipeline,
-    controller_runtime: SourceRuntime,
-    worker_pool: WorkerPool,
+    /// Present when the profile reports read statistics (the remote VFS
+    /// backends): the one thing that changes the width during a load.
+    throttle: ?ThrottleWatch = null,
     worker_group: std.Io.Group = .init,
-    controller_group: std.Io.Group = .init,
+    throttle_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
-    bytes_loaded: std.atomic.Value(usize) = .init(0),
     /// Device bytes allocated for outputs so far, per `platform.devices`
     /// index, cumulative: the front end subtracts it from what it submitted
     /// to know what is still to land.
@@ -84,73 +64,65 @@ pub const Loader = struct {
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
-    source_request_size: usize,
+    /// Concurrent source reads: the configured width clipped to what the
+    /// pinned budget holds, halved by the throttle watch while it runs.
+    width: usize,
+    limits: RequestGateLimits.Config,
+    plan_config: Planner.Config,
     /// See `Config.direct_io`.
     direct_io: VFS.DirectIo,
-    /// Every read of a file read directly starts and ends at a multiple of
-    /// this (the profile's alignment); 0 reads exact tensor ranges.
-    source_alignment: usize,
     maximum_blocks_per_job: usize,
-    workers_started: bool = false,
-    controller_started: bool = false,
 
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        opts: Config,
+        opts: BackendConfig,
     ) !*Loader {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
         const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);
         errdefer allocator.free(allocated_bytes);
         @memset(allocated_bytes, .init(0));
-        const block_pool = try initCalibratedBlockPool(allocator, io, platform, opts);
-        const calibration = block_pool.calibration;
+        const sizing = try Sizing.init(allocator, io, platform, opts);
+        const calibration = sizing.calibration;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
-
-        const source_parallelism = opts.read_parallelism;
-        const controller = source_concurrency.Controller.init(
-            source_parallelism,
-            block_pool.feasible_width,
-            block_pool.growth_free_width,
-        );
-        const limits: RequestGateLimits = .init(
-            controller.width(),
-            block_pool.feasible_width,
-            block_pool.retained_credits,
-            block_pool.dma_stage_requests,
-        );
-        const read_stats: ?ReadStatsCursor = if (opts.load_profile.stats) |provider| cursor: {
-            const initial = provider.snapshot();
-            break :cursor .{ .provider = provider, .previous = initial };
-        } else null;
+        const width = @min(opts.read_parallelism, sizing.feasible_width);
+        const limits_config: RequestGateLimits.Config = .{
+            .feasible_width = sizing.feasible_width,
+            .retained = sizing.retained_credits,
+            .dma_stage = sizing.dma_stage_requests,
+        };
+        const limits = limits_config.at(width);
         self.* = .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .load_profile = opts.load_profile,
             .calibration = calibration,
-            .pool = block_pool.pool,
+            .pool = sizing.pool,
             .scheduler = .init(allocator),
             .read_gate = .init(limits.read),
             .request_gate = .init(limits.lifecycle),
             .pipeline = undefined,
-            .controller_runtime = undefined,
-            .worker_pool = undefined,
             .allocated_bytes = allocated_bytes,
             .created_at = .now(io, .awake),
-            .source_request_size = block_pool.request_size,
+            .width = width,
+            .limits = limits_config,
+            .plan_config = .{
+                .device_count = platform.devices.len,
+                .block_size = calibration.block_size,
+                .request_size = sizing.request_size,
+                .alignment = source_alignment,
+            },
             .direct_io = opts.direct_io,
-            .source_alignment = source_alignment,
-            .maximum_blocks_per_job = block_pool.maximum_blocks_per_job,
+            .maximum_blocks_per_job = sizing.maximum_blocks_per_job,
         };
         errdefer {
             self.scheduler.deinit();
             self.pool.deinit();
         }
-        _ = Planner.maximumJobLen(block_pool.request_size, calibration.block_size, source_alignment) catch
-            return error.InvalidLoadProfile;
+        _ = Planner.maximumJobLen(self.plan_config) catch return error.InvalidLoadProfile;
 
         self.pipeline = try Pipeline.init(
             allocator,
@@ -161,56 +133,35 @@ pub const Loader = struct {
             &self.request_gate,
             calibration.block_size,
             &self.metrics,
-            &self.source_probe,
             &self.scheduler,
             calibration.max_in_flight_per_device * calibration.block_size,
         );
         errdefer self.pipeline.deinit();
-
-        self.worker_pool = .{
-            .loader = self,
-            .maximum = RequestGateLimits.init(
-                source_parallelism.maximum(),
-                block_pool.feasible_width,
-                block_pool.retained_credits,
-                block_pool.dma_stage_requests,
-            ).workers(),
-        };
-        self.controller_runtime = .{
-            .controller = controller,
-            .read_gate = &self.read_gate,
-            .request_gate = &self.request_gate,
-            .metrics = &self.metrics,
-            .probe = &self.source_probe,
-            .workers = &self.worker_pool,
-            .scheduler = &self.scheduler,
-            .pinned_feasible_width = block_pool.feasible_width,
-            .read_stats = read_stats,
-            .source_bootstrap_enabled = opts.load_profile.high_latency,
-            .retained_credits = block_pool.retained_credits,
-            .dma_stage_requests = block_pool.dma_stage_requests,
-            .reported_width = controller.width(),
-        };
-        // Born busy: both gates are open at the controller's width, the
-        // first window is fenced before any worker can admit a read, and the
-        // initial workers are spawned by the decision that opened the gates.
+        if (opts.load_profile.stats) |provider| {
+            self.throttle = .{
+                .cursor = .{ .provider = provider, .previous = provider.snapshot() },
+                .metrics = &self.metrics,
+                .read_gate = &self.read_gate,
+                .request_gate = &self.request_gate,
+                .limits = limits_config,
+                .width = &self.width,
+            };
+        }
         errdefer self.stopWorkers();
-        self.workers_started = true;
-        self.controller_runtime.start(io);
-        try self.startController();
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, lifecycle_credits={d}, workers={d}, max_workers={d}, feasible_width={d}, width_ceiling={d}, retained={Bi:.2}", .{
+        for (0..limits.workers()) |_| try self.worker_group.concurrent(io, workerMain, .{self});
+        if (self.throttle) |*watch| try self.throttle_group.concurrent(io, ThrottleWatch.run, .{ watch, io });
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, feasible_width={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,
-            block_pool.request_size,
+            sizing.request_size,
             opts.direct_io,
             source_alignment,
             calibration.block_size,
             self.pipeline.dma_budget_bytes,
+            width,
             limits.lifecycle,
-            self.worker_pool.spawned,
-            self.worker_pool.maximum,
-            block_pool.feasible_width,
-            source_concurrency.widths[self.controller_runtime.controller.max_index],
+            limits.workers(),
+            sizing.feasible_width,
             self.pool.workspace.mapped_bytes,
         });
         return self;
@@ -235,19 +186,9 @@ pub const Loader = struct {
             batch.items = try self.createItems(specs, &batch.diagnostics.logical_bytes, progress);
             break :batch batch;
         };
-        Planner.publishFiles(
-            &self.scheduler,
-            self.io,
-            batch,
-            self.platform.devices.len,
-            batch.items,
-            self.calibration.block_size,
-            self.source_request_size,
-            self.source_alignment,
-            self.direct_io,
-        ) catch |err| {
+        Planner.publishFiles(&self.scheduler, self.io, batch, batch.items, self.plan_config, self.direct_io) catch |err| {
             if (batch.plans.items.len == 0) {
-                batch.destroy();
+                self.destroyBatch(batch);
                 return err;
             }
             // Planning failed after part of the batch was published: fail
@@ -293,7 +234,7 @@ pub const Loader = struct {
             load_error = self.pipeline.errorValue();
         }
         if (load_error != null) {
-            for (batch.items) |item| {
+            for (batch.items) |*item| {
                 const state = item.state.readyValue() orelse continue;
                 for (state.targets) |*target| {
                     if (!target.closed) {
@@ -308,17 +249,8 @@ pub const Loader = struct {
         }
         self.pipeline.retireBatch(batch);
         self.logBatch(batch, done_at, load_error == null);
-        batch.destroy();
+        self.destroyBatch(batch);
         if (load_error) |err| return err;
-    }
-
-    pub fn checkOpen(self: *Loader) !void {
-        if (self.pipeline.errorValue()) |err| return err;
-    }
-
-    /// Counts a submission's logical bytes once its await succeeded.
-    pub fn commitBytes(self: *Loader, logical_bytes: usize) void {
-        _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
     }
 
     /// The front end awaited every batch before this; nothing is queued or
@@ -341,113 +273,120 @@ pub const Loader = struct {
         allocator.destroy(self);
     }
 
-    const CalibratedBlockPool = struct {
+    fn checkOpen(self: *Loader) !void {
+        if (self.pipeline.errorValue()) |err| return err;
+    }
+
+    /// The calibrated block pool and the request sizing derived from it.
+    const Sizing = struct {
         calibration: dma_calibration.Result,
         pool: host_memory.BlockPool,
         request_size: usize,
         maximum_blocks_per_job: usize,
         feasible_width: usize,
         retained_credits: usize,
-        growth_free_width: usize,
         dma_stage_requests: usize,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: BackendConfig,
+        ) !Sizing {
+            const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
+                var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
+                    .max_mapped_bytes = opts.max_host_bytes,
+                });
+                errdefer workspace.deinit();
+                const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
+
+                const request_size = try load_limits.effectiveSourceRequestSize(
+                    opts.load_profile.read_chunk_size,
+                    calibration.block_size,
+                );
+                const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
+                    request_size,
+                    calibration.block_size,
+                );
+                // The DMA stage of every device, kept mapped as the pool's growth floor.
+                const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
+                // Grow the DMA stage reserve and the source working set of
+                // the configured width before reads begin (mapping a slab
+                // during a load cost 146 ms on one MI300X); calibration
+                // arenas become the load's initial capacity.
+                const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
+                const retained_before = workspace.mapped_bytes;
+                try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
+                try ensureSourceWorkingSet(
+                    &workspace,
+                    calibration.block_size,
+                    maximum_blocks_per_job,
+                    opts.read_parallelism,
+                    dma_reserve,
+                );
+                const pregrown_bytes = workspace.mapped_bytes - retained_before;
+                const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
+                load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
+                    workspace.mapped_bytes,
+                    pregrown_bytes,
+                    @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
+                });
+                const pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
+                break :pool .{ calibration, request_size, maximum_blocks_per_job, pool };
+            };
+            errdefer pool.deinit();
+            const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
+            if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
+
+            return .{
+                .calibration = calibration,
+                .pool = pool,
+                .request_size = request_size,
+                .maximum_blocks_per_job = maximum_blocks_per_job,
+                .feasible_width = feasible_width,
+                .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
+                .dma_stage_requests = dmaStageRequests(
+                    calibration.max_in_flight_per_device,
+                    platform.devices.len,
+                    calibration.block_size,
+                    request_size,
+                ),
+            };
+        }
     };
 
-    fn initCalibratedBlockPool(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        opts: Config,
-    ) !CalibratedBlockPool {
-        const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
-            var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
-                .max_mapped_bytes = opts.max_host_bytes,
-            });
-            errdefer workspace.deinit();
-            const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
-
-            const request_size = try load_limits.effectiveSourceRequestSize(
-                opts.load_profile.read_chunk_size,
-                calibration.block_size,
-            );
-            const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
-                request_size,
-                calibration.block_size,
-            );
-            // The DMA stage of every device, kept mapped as the pool's growth floor.
-            const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
-            // Grow the DMA stage reserve and source working set before reads begin;
-            // calibration arenas become the load's initial capacity.
-            const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
-            const retained_before = workspace.mapped_bytes;
-            try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
-            try ensureSourceWorkingSet(
-                &workspace,
-                calibration.block_size,
-                maximum_blocks_per_job,
-                preallocated_source_width,
-                dma_reserve,
-            );
-            const pregrown_bytes = workspace.mapped_bytes - retained_before;
-            const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-            load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
-                workspace.mapped_bytes,
-                pregrown_bytes,
-                @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
-            });
-            const pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
-            break :pool .{ calibration, request_size, maximum_blocks_per_job, pool };
-        };
-        errdefer pool.deinit();
-        const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
-        if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
-
-        return .{
-            .calibration = calibration,
-            .pool = pool,
-            .request_size = request_size,
-            .maximum_blocks_per_job = maximum_blocks_per_job,
-            .feasible_width = feasible_width,
-            .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
-            .growth_free_width = try pool.growthFreeRequestWidth(maximum_blocks_per_job),
-            .dma_stage_requests = dmaStageRequests(
-                calibration.max_in_flight_per_device,
-                platform.devices.len,
-                calibration.block_size,
-                request_size,
-            ),
-        };
-    }
-
-    /// Creates the batch's items; on failure nothing stays allocated.
+    /// Creates the batch's items; on failure nothing stays allocated. An
+    /// item's device state is created lazily by the first worker that
+    /// reads for it.
     fn createItems(
         self: *Loader,
         specs: []const LoadSpec,
         logical_bytes: *usize,
         progress: ?*std.Progress.Node,
-    ) ![]*Item {
-        const items = try self.allocator.alloc(*Item, specs.len);
+    ) ![]Item {
+        const items = try self.allocator.alloc(Item, specs.len);
         errdefer self.allocator.free(items);
-        var initialized: usize = 0;
-        errdefer for (items[0..initialized]) |item| item.deinit(self.allocator);
-        for (specs, items) |spec, *item_ptr| {
+        for (specs, items) |spec, *item| {
             // An empty source has no transfer, so its output would never be
             // written; the front ends reject it too.
             if (spec.source.byteSize() == 0) return error.EmptyTensor;
-            const source_slot = try self.sourceSlot(spec.source.file_uri);
-            const item = try self.allocator.create(Item);
             item.* = .{
                 .source = spec.source,
-                .source_slot = source_slot,
+                .source_slot = try self.sourceSlot(spec.source.file_uri),
                 .shape = spec.shape,
                 .sharding = spec.sharding,
                 .output = spec.output,
                 .progress = progress,
             };
-            item_ptr.* = item;
-            initialized += 1;
             logical_bytes.* += spec.source.shape.byteSize();
         }
         return items;
+    }
+
+    /// Releases the items' device state, then the batch's memory.
+    fn destroyBatch(self: *Loader, batch: *Batch) void {
+        for (batch.items) |*item| item.deinit(self.allocator, self.platform.pjrt_api);
+        batch.destroy();
     }
 
     fn sourceSlot(self: *Loader, uri: []const u8) !*SourceSlot {
@@ -459,16 +398,7 @@ pub const Loader = struct {
         return slot;
     }
 
-    fn startController(self: *Loader) !void {
-        try self.controller_group.concurrent(
-            self.io,
-            SourceRuntime.run,
-            .{ &self.controller_runtime, self.io },
-        );
-        self.controller_started = true;
-    }
-
-    fn workerMain(self: *Loader, index: usize) void {
+    fn workerMain(self: *Loader) void {
         var scratch = ReadRequest.Scratch.init(
             self.allocator,
             self.maximum_blocks_per_job,
@@ -478,9 +408,7 @@ pub const Loader = struct {
             return;
         };
         defer scratch.deinit();
-        while (true) {
-            if (!self.worker_pool.admit(self.io, index)) return;
-            if (!self.scheduler.waitForWork(self.io)) return;
+        while (self.scheduler.waitForWork(self.io)) {
             if (self.pipeline.failed()) return;
             const credit_wait_started = awakeNs(self.io);
             if (!self.request_gate.acquire(self.io)) return;
@@ -489,56 +417,42 @@ pub const Loader = struct {
                 self.request_gate.release(self.io);
                 continue;
             };
-            _ = self.pipeline.metrics.lifecycle_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
+            _ = self.metrics.lifecycle_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
             const request = ReadRequest.init(&self.pipeline, claim);
-            // The scheduling sentinel keeps the batch, and with it
-            // `claim.job.transfers`, alive through `run` and error reporting.
+            // The scheduling sentinel keeps the batch, and with it the
+            // claim's plan, alive through `run` and error reporting.
             defer request.finishScheduling();
-            request.run(self, claim.job, &scratch) catch |err| self.pipeline.recordError(err);
+            request.run(self, claim, &scratch) catch |err| self.pipeline.recordError(err);
         }
     }
 
+    /// Stops the workers and the throttle watch; awaiting a group that never
+    /// spawned returns at once, so this also cleans up a failed `create`.
     fn stopWorkers(self: *Loader) void {
         self.scheduler.stop(self.io);
-        self.worker_pool.stop(self.io);
         self.read_gate.close(self.io);
         self.request_gate.close(self.io);
-        if (self.controller_started) {
-            self.controller_runtime.done.set(self.io);
-            self.controller_runtime.control.set(self.io);
-        }
-        if (self.workers_started) self.worker_group.await(self.io) catch {};
-        if (self.controller_started) self.controller_group.await(self.io) catch {};
-        self.workers_started = false;
-        self.controller_started = false;
+        if (self.throttle) |*watch| watch.done.set(self.io);
+        self.worker_group.await(self.io) catch {};
+        self.throttle_group.await(self.io) catch {};
     }
 
     fn logBatch(self: *Loader, batch: *const Batch, done_at: std.Io.Timestamp, successful: bool) void {
         const diagnostics = &batch.diagnostics;
         const published_at = diagnostics.published_at orelse self.created_at;
         const sealed_at = diagnostics.sealed_at orelse published_at;
-        const first_claim_at = diagnostics.first_claim_at orelse published_at;
-        const first_read_ns = diagnostics.first_read_ns.load(.acquire);
-        const first_read_at: std.Io.Timestamp = if (first_read_ns == 0)
-            first_claim_at
-        else
-            std.Io.Timestamp.fromNanoseconds(@intCast(first_read_ns));
-        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, first_claim=+{d:.3}s, first_read=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, selected_source_width={d}, request_size={Bi:.2}", .{
+        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, source_width={d}, request_size={Bi:.2}", .{
             diagnostics.sequence,
             successful,
             diagnostics.logical_bytes,
             secondsBetween(self.created_at, published_at),
             secondsBetween(self.created_at, sealed_at),
-            secondsBetween(self.created_at, first_claim_at),
-            secondsBetween(self.created_at, first_read_at),
             secondsBetween(self.created_at, done_at),
             secondsBetween(published_at, done_at),
-            self.controller_runtime.reported_width,
-            self.source_request_size,
+            self.width,
+            self.plan_config.request_size,
         });
 
-        var longest_planning_ns: u64 = 0;
-        for (batch.plans.items) |plan| longest_planning_ns = @max(longest_planning_ns, plan.planning_ns);
         const average_read_size = if (diagnostics.source_jobs == 0)
             0
         else
@@ -548,14 +462,12 @@ pub const Loader = struct {
         else
             @as(f64, @floatFromInt(diagnostics.source_items)) /
                 @as(f64, @floatFromInt(diagnostics.source_jobs));
-        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, longest_planning={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, source_runs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
             diagnostics.sequence,
             diagnostics.plans,
             @as(f64, @floatFromInt(diagnostics.planning_ns)) / std.time.ns_per_s,
-            @as(f64, @floatFromInt(longest_planning_ns)) / std.time.ns_per_s,
             diagnostics.source_bytes,
             diagnostics.source_jobs,
-            diagnostics.source_runs,
             diagnostics.source_items,
             diagnostics.planned_transfers,
             diagnostics.planned_dma_submissions,
@@ -578,16 +490,15 @@ pub const Loader = struct {
 
     fn logSummary(self: *Loader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, bytes_loaded={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, selected_source_width={d}, gate_closed_ticks={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, source_width={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
             !self.pipeline.failed(),
-            self.bytes_loaded.load(.acquire),
+            self.metrics.read_bytes.load(.acquire),
             secondsBetween(self.created_at, .now(self.io, .awake)),
             reads,
             self.metrics.source_calls.load(.acquire),
-            self.controller_runtime.reported_width,
-            self.controller_runtime.gate_closed_ticks,
-            self.source_request_size,
+            self.width,
+            self.plan_config.request_size,
             self.pool.high_water * self.pool.block_size,
             self.pool.workspace.mapped_bytes,
         });
@@ -622,23 +533,23 @@ pub const Loader = struct {
 pub const Batch = struct {
     /// One file's jobs in claim order with their transfer records and every
     /// context the jobs can need, allocated by the planner: one request per
-    /// job, the job's blocks (`Job.blocks` slices `blocks`) and one event per
-    /// planned DMA submission, handed out in submission order. Contexts hold
-    /// the plan's address, so plans are heap objects freed with the batch.
+    /// job, the job's blocks and one event per planned DMA submission,
+    /// handed out in submission order. Contexts hold the plan's address, so
+    /// plans are heap objects freed with the batch.
     const Plan = struct {
-        /// A claimable job: its source range, its transfer records and the
-        /// contexts the plan preallocated for it.
+        /// A claimable job: its source range and its slices of the plan's
+        /// transfers and block contexts. Its request slot is its index.
         const Job = struct {
-            source_slot: *SourceSlot,
             /// The read: `len` bytes from `file_offset`, of which the first
             /// `minimum_len` hold tensor data and must exist. The rest is
             /// alignment padding the end of the file may cut.
             file_offset: u64,
             len: usize,
             minimum_len: usize,
-            transfers: []const Batch.Plan.Transfer,
-            request: *ReadRequest,
-            blocks: []Pipeline.BlockContext,
+            transfer_start: usize,
+            transfer_len: usize,
+            block_start: usize,
+            block_len: usize,
         };
 
         const Transfer = struct {
@@ -651,8 +562,10 @@ pub const Batch = struct {
         };
 
         allocator: std.mem.Allocator,
+        /// The file every job of the plan reads.
+        source_slot: *SourceSlot,
         jobs: []Job,
-        transfers: []Batch.Plan.Transfer,
+        transfers: []Transfer,
         requests: []ReadRequest,
         blocks: []Pipeline.BlockContext,
         events: []Pipeline.EventContext,
@@ -660,7 +573,6 @@ pub const Batch = struct {
         /// any device's pump.
         events_used: std.atomic.Value(usize) = .init(0),
         source_bytes: u64,
-        source_runs: usize,
         planning_ns: u64 = 0,
         /// Next job to claim; owned by the scheduler mutex.
         cursor: usize = 0,
@@ -669,11 +581,11 @@ pub const Batch = struct {
         /// allocated here, before publication makes the plan visible to workers.
         fn create(
             allocator: std.mem.Allocator,
+            source_slot: *SourceSlot,
             job_count: usize,
             block_count: usize,
             transfers: []Transfer,
             source_bytes: u64,
-            source_runs: usize,
         ) !*Plan {
             var dma_submissions: usize = 0;
             for (transfers) |transfer| dma_submissions += @popCount(transfer.writer_mask);
@@ -689,13 +601,13 @@ pub const Batch = struct {
             const self = try allocator.create(Plan);
             self.* = .{
                 .allocator = allocator,
+                .source_slot = source_slot,
                 .jobs = jobs,
                 .transfers = transfers,
                 .requests = requests,
                 .blocks = blocks,
                 .events = events,
                 .source_bytes = source_bytes,
-                .source_runs = source_runs,
             };
             return self;
         }
@@ -718,7 +630,6 @@ pub const Batch = struct {
         logical_bytes: usize = 0,
         source_bytes: u64 = 0,
         source_jobs: usize = 0,
-        source_runs: usize = 0,
         source_items: usize = 0,
         planned_transfers: usize = 0,
         planned_dma_submissions: usize = 0,
@@ -729,19 +640,9 @@ pub const Batch = struct {
         /// seal.
         published_at: ?std.Io.Timestamp = null,
         sealed_at: ?std.Io.Timestamp = null,
-        /// Stamped by the scheduler when the first job is claimed.
-        first_claim_at: ?std.Io.Timestamp = null,
-        /// Awake-clock nanoseconds of the first read admitted for the batch,
-        /// stamped by the worker that admitted it; 0 until then.
-        first_read_ns: std.atomic.Value(u64) = .init(0),
         /// Aggregate source statistics at publish; the completion log reports
         /// the delta against them (loader-wide while batches overlap).
         source_stats: ?VFS.ReadStats = null,
-
-        fn noteRead(self: *Diagnostics, io: std.Io) void {
-            if (self.first_read_ns.load(.monotonic) != 0) return;
-            _ = self.first_read_ns.cmpxchgStrong(0, awakeNs(io), .monotonic, .monotonic);
-        }
     };
 
     allocator: std.mem.Allocator,
@@ -755,8 +656,9 @@ pub const Batch = struct {
     sealed: bool = false,
     /// In the scheduler's queue; owned by the scheduler mutex.
     queued: bool = false,
-    /// Owned by the batch and freed at `destroy`.
-    items: []*Item = &.{},
+    /// Owned by the batch; their device state by the loader, released
+    /// before `destroy`.
+    items: []Item = &.{},
     remaining: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
     diagnostics: Diagnostics,
@@ -780,8 +682,7 @@ pub const Batch = struct {
     /// Scheduler mutex. Takes ownership of a prepared plan and adds one
     /// completion unit per job; the caller reserved the list capacity, so
     /// the plan and its units appear together.
-    fn appendPlanAssumeCapacity(self: *Batch, plan: *Plan, planning_ns: u64) void {
-        plan.planning_ns = planning_ns;
+    fn appendPlanAssumeCapacity(self: *Batch, plan: *Plan) void {
         self.plans.appendAssumeCapacity(plan);
         _ = self.remaining.fetchAdd(plan.jobs.len, .acq_rel);
     }
@@ -792,9 +693,9 @@ pub const Batch = struct {
         while (self.plan_cursor < self.plans.items.len) : (self.plan_cursor += 1) {
             const plan = self.plans.items[self.plan_cursor];
             if (plan.cursor == plan.jobs.len) continue;
-            const job = plan.jobs[plan.cursor];
+            const index = plan.cursor;
             plan.cursor += 1;
-            return .{ .batch = self, .plan = plan, .job = job };
+            return .{ .batch = self, .plan = plan, .index = index };
         }
         return null;
     }
@@ -831,10 +732,9 @@ pub const Batch = struct {
         if (previous == count) self.done.set(self.io);
     }
 
-    /// Frees the items and the plans with their contexts, which
+    /// Frees the items' memory and the plans with their contexts, which
     /// `Pipeline.retireBatch` must already have retired.
     fn destroy(self: *Batch) void {
-        for (self.items) |item| item.deinit(self.allocator);
         self.allocator.free(self.items);
         for (self.plans.items) |plan| plan.destroy();
         self.plans.deinit(self.allocator);
@@ -844,7 +744,7 @@ pub const Batch = struct {
     /// After `done`: every item was touched and every target received its
     /// last transfer.
     fn fullySubmitted(self: *const Batch) bool {
-        for (self.items) |item| {
+        for (self.items) |*item| {
             const state = item.state.readyValue() orelse return false;
             for (state.targets) |target| {
                 if (!target.fullySubmitted()) return false;
@@ -855,23 +755,10 @@ pub const Batch = struct {
 };
 
 const Item = struct {
-    const InitContext = struct { item: *Item, direct: *Loader };
+    const InitContext = struct { item: *const Item, direct: *Loader };
 
     fn initTransfer(ctx: InitContext) !TensorTransfer {
-        const transfer = try TensorTransfer.initResolved(
-            ctx.direct.allocator,
-            ctx.direct.platform,
-            ctx.item.source,
-            ctx.item.shape,
-            ctx.item.sharding,
-            ctx.item.output,
-            ctx.item.progress,
-        );
-        // Counted once per tensor (`LazyOnce`), by the worker that allocated it.
-        for (transfer.targets) |target| {
-            _ = ctx.direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
-        }
-        return transfer;
+        return TensorTransfer.init(ctx.direct, ctx.item);
     }
 
     source: *const safetensors.Tensor,
@@ -886,9 +773,8 @@ const Item = struct {
         return self.state.ensure(direct.io, .{ .item = self, .direct = direct });
     }
 
-    fn deinit(self: *Item, allocator: std.mem.Allocator) void {
-        if (self.state.readyValue()) |state| state.deinit();
-        allocator.destroy(self);
+    fn deinit(self: *Item, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
+        if (self.state.readyValue()) |state| state.deinit(allocator, api);
     }
 };
 
@@ -958,24 +844,19 @@ const TensorTransfer = struct {
         }
     };
 
-    allocator: std.mem.Allocator,
-    platform: *const Platform,
     targets: []Target,
     completed_read_bytes: std.atomic.Value(usize) = .init(0),
     progress: ?std.Progress.Node = null,
 
-    fn initResolved(
-        allocator: std.mem.Allocator,
-        platform: *const Platform,
-        source: *const safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
-        progress_parent: ?*std.Progress.Node,
-    ) !TensorTransfer {
-        const packed_shape = shape.packedShape();
-        const packed_placement = try sharding.placement(packed_shape);
-        const ordered_devices = sharding.devicesInCanonicalOrder();
+    /// Creates the item's device buffers and transfer managers and writes
+    /// the output shell. Runs once per tensor (`LazyOnce`), on the worker
+    /// that first reads for it, which also counts the allocation.
+    fn init(direct: *Loader, item: *const Item) !TensorTransfer {
+        const allocator = direct.allocator;
+        const platform = direct.platform;
+        const packed_shape = item.shape.packedShape();
+        const packed_placement = try item.sharding.placement(packed_shape);
+        const ordered_devices = item.sharding.devicesInCanonicalOrder();
         const targets = try allocator.alloc(Target, ordered_devices.len);
         errdefer allocator.free(targets);
 
@@ -1006,28 +887,29 @@ const TensorTransfer = struct {
             initialized += 1;
             pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
         }
+        for (targets) |target| {
+            _ = direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
+        }
 
-        output.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
-        const progress = if (progress_parent) |parent|
+        item.output.* = .fromPjrtBuffers(platform, item.shape, item.sharding, pjrt_buffers.constSlice());
+        const progress = if (item.progress) |parent|
             parent.start(
-                source.name,
-                shape.byteSize() / 1024 + @intFromBool(shape.byteSize() % 1024 != 0),
+                item.source.name,
+                item.shape.byteSize() / 1024 + @intFromBool(item.shape.byteSize() % 1024 != 0),
             )
         else
             null;
 
         return .{
-            .allocator = allocator,
-            .platform = platform,
             .targets = targets,
             .progress = progress,
         };
     }
 
-    fn deinit(self: *TensorTransfer) void {
+    fn deinit(self: *TensorTransfer, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
         if (self.progress) |*progress| progress.end();
-        for (self.targets) |target| target.manager.deinit(self.platform.pjrt_api);
-        self.allocator.free(self.targets);
+        for (self.targets) |target| target.manager.deinit(api);
+        allocator.free(self.targets);
     }
 
     fn recordReadProgress(self: *TensorTransfer, bytes: usize) void {
@@ -1047,21 +929,28 @@ const TensorTransfer = struct {
 /// remain intentional: reducing submissions below roughly tensors x destinations would require
 /// packed device allocations or device-side scattering, not another read cut.
 const Planner = struct {
-    const Job = struct {
-        source_slot: *SourceSlot,
-        file_offset: u64,
-        len: usize,
-        minimum_len: usize,
-        transfer_start: usize,
-        transfer_len: usize,
-        block_start: usize,
-        block_len: usize,
+    /// What every plan of a loader is cut by.
+    const Config = struct {
+        device_count: usize,
+        block_size: usize,
+        request_size: usize,
+        /// Every read of a file read directly starts and ends at a multiple
+        /// of this; 0 reads exact tensor ranges.
+        alignment: usize,
+    };
+
+    /// One item's placement, expanded once per plan.
+    const TensorPlan = struct {
+        item: *Item,
+        dispatch_spans: DispatchSpans,
+        device_indices: []usize,
+        total: usize,
     };
 
     /// Plans `items` one file at a time and publishes each plan as soon as
     /// it exists, so workers claim the first file while the rest is planned.
     /// Stops at the first error; the caller seals or fails the batch. With
-    /// an `alignment`, a file is planned with widened reads only when the
+    /// an alignment, a file is planned with widened reads only when the
     /// VFS the files are opened through reads it directly under `policy`: a
     /// widened read served from the page cache costs the DMA sources their
     /// block alignment for nothing, and an `io` that is no VFS never reads
@@ -1079,35 +968,25 @@ const Planner = struct {
         scheduler: *Scheduler,
         io: std.Io,
         batch: *Batch,
-        device_count: usize,
-        items: []const *Item,
-        block_size: usize,
-        request_size: usize,
-        alignment: usize,
+        items: []Item,
+        config: Config,
         policy: VFS.DirectIo,
     ) !void {
         const order = try sortedItemOrder(scheduler.allocator, items);
         defer scheduler.allocator.free(order);
-        const vfs = if (alignment != 0) VFS.fromIo(io) else null;
+        const vfs = if (config.alignment != 0) VFS.fromIo(io) else null;
         var file_start: usize = 0;
         while (file_start < order.len) {
             const file_end = fileGroupEnd(items, order, file_start);
             const planning_started: std.Io.Timestamp = .now(io, .awake);
-            const file_alignment = if (vfs) |v| file_alignment: {
+            var file_config = config;
+            if (vfs) |v| {
                 const file = try items[order[file_start]].source_slot.ensure(io);
-                break :file_alignment if (v.useDirectIo(file, policy)) alignment else 0;
-            } else 0;
-            const plan = try preparePlan(
-                scheduler.allocator,
-                device_count,
-                items,
-                order[file_start..file_end],
-                block_size,
-                request_size,
-                file_alignment,
-            );
-            const planning_ns: u64 = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
-            scheduler.publish(io, batch, plan, planning_ns) catch |err| {
+                if (!v.useDirectIo(file, policy)) file_config.alignment = 0;
+            }
+            const plan = try preparePlan(scheduler.allocator, items, order[file_start..file_end], file_config);
+            plan.planning_ns = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
+            scheduler.publish(io, batch, plan) catch |err| {
                 plan.destroy();
                 return err;
             };
@@ -1123,24 +1002,19 @@ const Planner = struct {
     /// submitted as soon as its block is read. The plan also carries the
     /// contexts its jobs need: one request per job, one block per job block,
     /// one event per DMA submission (a transfer's writer count). With an
-    /// `alignment`, a job's read is widened to aligned bounds around its
+    /// alignment, a job's read is widened to aligned bounds around its
     /// tensor range (`maximumJobLen` leaves room for it); the transfers
     /// address the widened read.
     fn preparePlan(
         allocator: std.mem.Allocator,
-        device_count: usize,
-        items: []const *Item,
+        items: []Item,
         order: []const usize,
-        block_size: usize,
-        request_size: usize,
-        alignment: usize,
+        config: Config,
     ) !*Batch.Plan {
-        const maximum_job_len = try maximumJobLen(request_size, block_size, alignment);
-        const TensorPlan = struct {
-            dispatch_spans: DispatchSpans,
-            device_indices: []usize,
-            total: usize,
-        };
+        const device_count = config.device_count;
+        const block_size = config.block_size;
+        const alignment = config.alignment;
+        const maximum_job_len = try maximumJobLen(config);
         const tensor_plans = try allocator.alloc(TensorPlan, order.len);
         var initialized_plans: usize = 0;
         defer {
@@ -1151,10 +1025,11 @@ const Planner = struct {
             allocator.free(tensor_plans);
         }
         for (order, tensor_plans) |item_index, *plan| {
-            const item = items[item_index];
+            const item = &items[item_index];
             std.debug.assert(std.mem.eql(u8, item.source.file_uri, items[order[0]].source.file_uri));
             const packed_shape = item.shape.packedShape();
             plan.* = .{
+                .item = item,
                 .dispatch_spans = try .init(allocator, packed_shape, item.sharding),
                 .device_indices = &.{},
                 .total = packed_shape.byteSize(),
@@ -1168,7 +1043,7 @@ const Planner = struct {
                 if (device_index.* >= device_count) return error.DmaDeviceMismatch;
             }
         }
-        var jobs_list: std.ArrayList(Job) = .empty;
+        var jobs_list: std.ArrayList(Batch.Plan.Job) = .empty;
         defer jobs_list.deinit(allocator);
         var transfers_list: std.ArrayList(Batch.Plan.Transfer) = .empty;
         defer transfers_list.deinit(allocator);
@@ -1183,7 +1058,6 @@ const Planner = struct {
         @memset(queues, .empty);
         defer for (queues) |*queue| queue.deinit(allocator);
         var source_bytes: u64 = 0;
-        var source_runs: usize = 0;
         var block_total: usize = 0;
         var run_cursor: usize = 0;
         while (run_cursor < order.len) {
@@ -1216,7 +1090,6 @@ const Planner = struct {
                 }
                 run_end = @max(run_end, candidate_end);
             }
-            source_runs += 1;
 
             var job_start = first_offset;
             var candidate_start = run_cursor;
@@ -1279,7 +1152,7 @@ const Planner = struct {
                     candidate_start += 1;
                 }
                 for (order[candidate_start..run_item_end], candidate_start..) |item_index, position| {
-                    const item = items[item_index];
+                    const item = &items[item_index];
                     if (item.source.offset >= job_end) break;
                     const item_end = std.math.add(u64, item.source.offset, item.source.byteSize()) catch
                         return error.InvalidLoaderJob;
@@ -1290,20 +1163,17 @@ const Planner = struct {
                         allocator,
                         &transfers_list,
                         transfer_start,
-                        item,
+                        &tensor_plans[position],
                         @intCast(intersection_start - item.source.offset),
                         @intCast(intersection_end - intersection_start),
                         read_start,
                         block_size,
-                        tensor_plans[position].dispatch_spans,
-                        tensor_plans[position].device_indices,
                         row,
                     );
                 }
                 std.debug.assert(transfers_list.items.len > transfer_start);
                 const block_len = read_len / block_size + @intFromBool(read_len % block_size != 0);
                 try jobs_list.append(allocator, .{
-                    .source_slot = items[first_index].source_slot,
                     .file_offset = read_start,
                     .len = read_len,
                     .minimum_len = @intCast(job_end - read_start),
@@ -1330,17 +1200,22 @@ const Planner = struct {
         const plan = plan: {
             const transfers = try transfers_list.toOwnedSlice(allocator);
             errdefer allocator.free(transfers);
-            break :plan try Batch.Plan.create(allocator, planning_jobs.len, block_total, transfers, source_bytes, source_runs);
+            break :plan try Batch.Plan.create(
+                allocator,
+                items[order[0]].source_slot,
+                planning_jobs.len,
+                block_total,
+                transfers,
+                source_bytes,
+            );
         };
         errdefer plan.destroy();
         if (device_count == 1) {
-            for (plan.jobs, planning_jobs, 0..) |*job, planned, index| job.* = finalJob(plan, planned, index);
+            @memcpy(plan.jobs, planning_jobs);
         } else {
-            const fair_order = try fairOrder(allocator, planning_jobs, physical_list.items, queues);
+            const fair_order = try fairOrder(allocator, planning_jobs.len, physical_list.items, queues);
             defer allocator.free(fair_order);
-            for (plan.jobs, fair_order, 0..) |*job, planning_index, index| {
-                job.* = finalJob(plan, planning_jobs[planning_index], index);
-            }
+            for (plan.jobs, fair_order) |*job, planning_index| job.* = planning_jobs[planning_index];
         }
         return plan;
     }
@@ -1348,22 +1223,22 @@ const Planner = struct {
     /// The longest tensor range one job may cover: the request size within
     /// the scatter limit, less the two alignment units its widened read
     /// can add, so a widened job still fits `maximumCoalescedJobBlocks`.
-    fn maximumJobLen(request_size: usize, block_size: usize, alignment: usize) !usize {
-        const scatter_limit = block_size *| load_limits.max_positional_iovecs;
-        const unpadded = @min(request_size, scatter_limit);
+    fn maximumJobLen(config: Config) !usize {
+        const scatter_limit = config.block_size *| load_limits.max_positional_iovecs;
+        const unpadded = @min(config.request_size, scatter_limit);
         if (unpadded == 0) return error.InvalidLoaderJob;
-        if (alignment == 0) return unpadded;
-        if (!std.math.isPowerOfTwo(alignment) or 2 * alignment >= unpadded) return error.InvalidLoaderJob;
-        return unpadded - 2 * alignment;
+        if (config.alignment == 0) return unpadded;
+        if (!std.math.isPowerOfTwo(config.alignment) or 2 * config.alignment >= unpadded) return error.InvalidLoaderJob;
+        return unpadded - 2 * config.alignment;
     }
 
     /// Item indices sorted by file URI, offset, size and index: the planner's
     /// input, taken one file group at a time (`fileGroupEnd`).
-    fn sortedItemOrder(allocator: std.mem.Allocator, items: []const *Item) ![]usize {
+    fn sortedItemOrder(allocator: std.mem.Allocator, items: []const Item) ![]usize {
         const order = try allocator.alloc(usize, items.len);
         for (order, 0..) |*index, i| index.* = i;
         const SortContext = struct {
-            items: []const *Item,
+            items: []const Item,
 
             fn lessThan(ctx: @This(), lhs: usize, rhs: usize) bool {
                 const left = ctx.items[lhs];
@@ -1383,26 +1258,30 @@ const Planner = struct {
     }
 
     /// The end of the file group that begins at `order[start]`.
-    fn fileGroupEnd(items: []const *Item, order: []const usize, start: usize) usize {
+    fn fileGroupEnd(items: []const Item, order: []const usize, start: usize) usize {
         const uri = items[order[start]].source.file_uri;
         var end = start + 1;
         while (end < order.len and std.mem.eql(u8, uri, items[order[end]].source.file_uri)) : (end += 1) {}
         return end;
     }
 
+    /// Appends the transfers of `len` bytes of `tensor` from `tensor_offset`
+    /// read by the job at `job_file_offset`, merging with the previous
+    /// transfer where contiguous, and charges the bytes to each destination
+    /// device in `physical_bytes`.
     fn appendTransfers(
         allocator: std.mem.Allocator,
         output: *std.ArrayList(Batch.Plan.Transfer),
         transfer_start: usize,
-        item: *Item,
+        tensor: *const TensorPlan,
         tensor_offset: usize,
         len: usize,
         job_file_offset: u64,
         block_size: usize,
-        spans: DispatchSpans,
-        device_indices: []const usize,
         physical_bytes: []usize,
     ) !void {
+        const item = tensor.item;
+        const spans = tensor.dispatch_spans;
         const piece_end = tensor_offset + len;
         var cursor = tensor_offset;
         var span_index = spans.spanIndexAt(cursor) orelse return error.InvalidLoaderJob;
@@ -1444,26 +1323,28 @@ const Planner = struct {
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
-                if (writer_index >= device_indices.len) return error.InvalidLoaderJob;
-                const device_index = device_indices[writer_index];
-                physical_bytes[device_index] += take;
+                if (writer_index >= tensor.device_indices.len) return error.InvalidLoaderJob;
+                physical_bytes[tensor.device_indices[writer_index]] += take;
             }
             cursor += take;
             if (cursor == span.end) span_index += 1;
         }
     }
 
+    /// The claim order of `job_count` jobs: each turn goes to the device
+    /// with the fewest scheduled bytes that still has a queued job, ties
+    /// rotating, so every device's DMA engine is fed early.
     fn fairOrder(
         allocator: std.mem.Allocator,
-        jobs: []const Job,
+        job_count: usize,
         physical_bytes: []const usize,
         queues: []const std.ArrayListUnmanaged(usize),
     ) ![]usize {
         const device_count = queues.len;
         if (device_count == 0 or device_count > 64) return error.DmaDeviceMismatch;
-        if (physical_bytes.len != jobs.len * device_count) return error.InvalidLoaderJob;
+        if (physical_bytes.len != job_count * device_count) return error.InvalidLoaderJob;
 
-        const order = try allocator.alloc(usize, jobs.len);
+        const order = try allocator.alloc(usize, job_count);
         errdefer allocator.free(order);
         const cursors = try allocator.alloc(usize, device_count);
         defer allocator.free(cursors);
@@ -1471,7 +1352,7 @@ const Planner = struct {
         const scheduled = try allocator.alloc(u64, device_count);
         defer allocator.free(scheduled);
         @memset(scheduled, 0);
-        const claimed = try allocator.alloc(bool, jobs.len);
+        const claimed = try allocator.alloc(bool, job_count);
         defer allocator.free(claimed);
         @memset(claimed, false);
 
@@ -1506,20 +1387,6 @@ const Planner = struct {
         }
         return order;
     }
-
-    /// The claimable job at `index` of `plan`: its transfers, its request
-    /// slot and its block slots.
-    fn finalJob(plan: *Batch.Plan, planned: Job, index: usize) Batch.Plan.Job {
-        return .{
-            .source_slot = planned.source_slot,
-            .file_offset = planned.file_offset,
-            .len = planned.len,
-            .minimum_len = planned.minimum_len,
-            .transfers = plan.transfers[planned.transfer_start..][0..planned.transfer_len],
-            .request = &plan.requests[index],
-            .blocks = plan.blocks[planned.block_start..][0..planned.block_len],
-        };
-    }
 };
 
 /// A strict FIFO of published batches. A batch holds one plan per source
@@ -1535,16 +1402,32 @@ const Planner = struct {
 /// plans are exhausted keeps the head and the workers wait for its next
 /// plan, at most one file's planning time.
 const Scheduler = struct {
-    const Snapshot = struct {
-        remaining_jobs: usize,
-    };
-
-    /// A claimed job with the plan and batch that own it. The claim holds
-    /// one of the batch's completion units until the request releases it.
+    /// A claimed job: its position in the plan and batch that own it. The
+    /// claim holds one of the batch's completion units until the request
+    /// releases it.
     const Claim = struct {
         batch: *Batch,
         plan: *Batch.Plan,
-        job: Batch.Plan.Job,
+        index: usize,
+
+        fn job(self: Claim) Batch.Plan.Job {
+            return self.plan.jobs[self.index];
+        }
+
+        /// The job's request slot, one per job in the plan.
+        fn request(self: Claim) *ReadRequest {
+            return &self.plan.requests[self.index];
+        }
+
+        fn transfers(self: Claim) []const Batch.Plan.Transfer {
+            const claimed = self.job();
+            return self.plan.transfers[claimed.transfer_start..][0..claimed.transfer_len];
+        }
+
+        fn blocks(self: Claim) []Pipeline.BlockContext {
+            const claimed = self.job();
+            return self.plan.blocks[claimed.block_start..][0..claimed.block_len];
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -1567,16 +1450,11 @@ const Scheduler = struct {
         self.queue.deinit(self.allocator);
         self.* = undefined;
     }
+
     /// Publishes one plan of an open batch behind every earlier plan and
     /// batch. The batch joins the queue with its first plan that has jobs;
     /// a plan without jobs only counts in the diagnostics.
-    fn publish(
-        self: *Scheduler,
-        io: std.Io,
-        batch: *Batch,
-        plan: *Batch.Plan,
-        planning_ns: u64,
-    ) !void {
+    fn publish(self: *Scheduler, io: std.Io, batch: *Batch, plan: *Batch.Plan) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.stopping) return error.LoaderShuttingDown;
@@ -1590,13 +1468,12 @@ const Scheduler = struct {
         const diagnostics = &batch.diagnostics;
         if (diagnostics.published_at == null) diagnostics.published_at = .now(io, .awake);
         diagnostics.plans += 1;
-        diagnostics.planning_ns += planning_ns;
+        diagnostics.planning_ns += plan.planning_ns;
         diagnostics.source_bytes += plan.source_bytes;
         diagnostics.source_jobs += job_count;
-        diagnostics.source_runs += plan.source_runs;
         diagnostics.planned_transfers += plan.transfers.len;
         diagnostics.planned_dma_submissions += plan.events.len;
-        batch.appendPlanAssumeCapacity(plan, planning_ns);
+        batch.appendPlanAssumeCapacity(plan);
         if (joins_queue) {
             self.queue.appendAssumeCapacity(batch);
             batch.queued = true;
@@ -1675,11 +1552,11 @@ const Scheduler = struct {
             std.debug.assert(!batch.sealed);
             return null;
         };
-        if (batch.diagnostics.first_claim_at == null) batch.diagnostics.first_claim_at = .now(io, .awake);
         self.unclaimed_total -= 1;
         if (batch.sealed and batch.exhausted()) self.popHead();
         return claimed;
     }
+
     fn waitForWork(self: *Scheduler, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -1689,69 +1566,10 @@ const Scheduler = struct {
         return !self.stopping;
     }
 
-    fn snapshot(self: *Scheduler, io: std.Io) Snapshot {
+    fn remainingJobs(self: *Scheduler, io: std.Io) usize {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        return .{ .remaining_jobs = self.unclaimed_total };
-    }
-};
-
-/// Worker tasks, spawned as the width first needs them (`width + 1`, never
-/// more than the configured maximum; 128 persistent workers cost about 7%
-/// on one MI300X while the controller held width 12) and never retired.
-/// A worker whose index is beyond what the current width needs parks
-/// between jobs instead of competing for lifecycle credits: after a rung
-/// steps down, the workers spawned for the wider rung would otherwise queue
-/// at the credit gate for the rest of the load and inflate the credit wait
-/// the summary reports without moving a byte.
-/// At width 16 on one MI300X, 128 tasks measured 21 GiB/s against 36 GiB/s
-/// with 16 tasks. Parking also corrected misleading HF credit waits after a
-/// downward step: hundreds of milliseconds came from surplus workers, while
-/// the read gate stayed full and DMA took about 1 ms per request.
-const WorkerPool = struct {
-    loader: *Loader,
-    maximum: usize,
-    mutex: std.Io.Mutex = .init,
-    /// Parked workers; woken when `wanted` grows or the pool stops.
-    condition: std.Io.Condition = .init,
-    spawned: usize = 0,
-    /// Workers the current width needs (`RequestGateLimits.workers`).
-    wanted: usize = 0,
-    stopping: bool = false,
-
-    fn ensure(self: *WorkerPool, io: std.Io, wanted: usize) void {
-        const target = @min(wanted, self.maximum);
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        // A controller tick racing `stopWorkers` must not spawn into a
-        // group being awaited.
-        if (self.stopping) return;
-        self.wanted = target;
-        while (self.spawned < target) : (self.spawned += 1) {
-            self.loader.worker_group.concurrent(io, Loader.workerMain, .{ self.loader, self.spawned }) catch |err| {
-                load_log.err("cannot spawn source worker {d}: {}", .{ self.spawned + 1, err });
-                break;
-            };
-        }
-        self.condition.broadcast(io);
-    }
-
-    /// Parks worker `index` while the width does not need it. False once
-    /// the pool stops.
-    fn admit(self: *WorkerPool, io: std.Io, index: usize) bool {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        while (!self.stopping and index >= self.wanted) {
-            self.condition.waitUncancelable(io, &self.mutex);
-        }
-        return !self.stopping;
-    }
-
-    fn stop(self: *WorkerPool, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.stopping = true;
-        self.condition.broadcast(io);
+        return self.unclaimed_total;
     }
 };
 
@@ -1803,9 +1621,6 @@ const ReadRequest = struct {
     blocks_registered: usize = 0,
     pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
     completed: std.atomic.Value(bool) = .init(false),
-    source_finished: std.atomic.Value(bool) = .init(false),
-    read_epoch: u64,
-    admission_id: u64 = 0,
     /// Awake-clock nanoseconds of the enqueue; 0 until then.
     enqueued_ns: u64 = 0,
 
@@ -1818,37 +1633,32 @@ const ReadRequest = struct {
         .blocks = &.{},
         .pending = .init(0),
         .completed = .init(true),
-        .source_finished = .init(true),
-        .read_epoch = 0,
     };
 
     /// Takes the claimed job's request context. The claim holds the batch's
     /// completion unit; the request's final reference drop releases it.
     fn init(pipeline: *Pipeline, claim: Scheduler.Claim) *ReadRequest {
-        const self = claim.job.request;
+        const self = claim.request();
         self.* = .{
             .pipeline = pipeline,
             .batch = claim.batch,
             .plan = claim.plan,
-            .blocks = claim.job.blocks,
-            .read_epoch = 0,
+            .blocks = claim.blocks(),
         };
-        _ = pipeline.metrics.pending_source_jobs.fetchAdd(1, .acq_rel);
         return self;
     }
 
-    fn run(self: *ReadRequest, loader: *Loader, job: Batch.Plan.Job, scratch: *Scratch) !void {
+    fn run(self: *ReadRequest, loader: *Loader, claim: Scheduler.Claim, scratch: *Scratch) !void {
         const pipeline = self.pipeline;
         const io = pipeline.io;
         if (pipeline.failed()) return;
 
-        const file = try job.source_slot.ensure(io);
+        const job = claim.job();
+        const transfers = claim.transfers();
+        const file = try claim.plan.source_slot.ensure(io);
         const block_count = job.len / pipeline.block_size +
             @intFromBool(job.len % pipeline.block_size != 0);
-        if (block_count == 0) {
-            self.finishSourceJob();
-            return;
-        }
+        if (block_count == 0) return;
 
         std.debug.assert(block_count <= scratch.leased.len);
         std.debug.assert(block_count == self.blocks.len);
@@ -1858,29 +1668,28 @@ const ReadRequest = struct {
         const queue_counts = scratch.queue_counts;
         @memset(queue_counts, 0);
 
-        for (job.transfers) |transfer| {
+        // The planner cut the transfers to this job's blocks and the tensor's
+        // writers are the devices it planned for (both come from the
+        // sharding's canonical device order), so these are invariants.
+        for (transfers) |transfer| {
             const init_started = awakeNs(io);
             const tensor = try transfer.item.ensureState(loader);
             _ = pipeline.metrics.tensor_init_ns.fetchAdd(awakeNs(io) -| init_started, .monotonic);
-            if (transfer.block_index >= block_count or
-                transfer.block_offset >= pipeline.block_size or
-                transfer.len > pipeline.block_size - transfer.block_offset)
-                return error.InvalidLoaderJob;
+            std.debug.assert(transfer.block_index < block_count and
+                transfer.block_offset < pipeline.block_size and
+                transfer.len <= pipeline.block_size - transfer.block_offset);
             references[transfer.block_index] += @popCount(transfer.writer_mask);
             var mask = transfer.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
-                if (writer_index >= tensor.targets.len) return error.InvalidLoaderJob;
+                std.debug.assert(writer_index < tensor.targets.len);
                 queue_counts[tensor.targets[writer_index].device_index] += 1;
             }
         }
-
         // Every block of a job is covered by a transfer: a block without a
         // reference would never be released.
-        for (references) |refs| {
-            if (refs == 0) return error.InvalidLoaderJob;
-        }
+        for (references) |refs| std.debug.assert(refs != 0);
         {
             const block_wait_started = awakeNs(io);
             try pipeline.pool.acquireMany(io, leased);
@@ -1895,9 +1704,8 @@ const ReadRequest = struct {
             }
 
             {
-                if (!self.beginRead()) return error.LoaderShuttingDown;
-                defer self.endRead();
-                self.batch.diagnostics.noteRead(io);
+                if (!pipeline.read_gate.acquire(io)) return error.LoaderShuttingDown;
+                defer pipeline.read_gate.release(io);
                 const read_started = awakeNs(io);
                 const read_result = safetensors.readFilePositionalAllV(
                     io,
@@ -1909,11 +1717,9 @@ const ReadRequest = struct {
                 );
                 _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(io) -| read_started, .monotonic);
                 const bytes_read = try read_result;
-                pipeline.probe.recordRead(io, self.read_epoch, self.admission_id, job.len);
                 _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
                 _ = pipeline.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
-                for (job.transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
-                self.finishSourceJob();
+                for (transfers) |transfer| transfer.item.state.value.recordReadProgress(transfer.len);
             }
             if (pipeline.errorValue()) |err| return err;
 
@@ -1921,31 +1727,14 @@ const ReadRequest = struct {
             for (leased, references) |lease, refs| _ = self.registerBlock(lease, refs);
         }
         self.enqueued_ns = awakeNs(io);
-        pipeline.enqueueBlocks(job.transfers, self.blocks, queue_counts) catch |err| {
+        pipeline.enqueueBlocks(transfers, self.blocks, queue_counts) catch |err| {
             self.enqueued_ns = 0;
             // Nothing was queued. The worker still holds the scheduling reference.
-            for (job.transfers) |transfer| {
+            for (transfers) |transfer| {
                 Pipeline.abandonSubmissions(&self.blocks[transfer.block_index], @popCount(transfer.writer_mask));
             }
             return err;
         };
-    }
-
-    fn beginRead(self: *ReadRequest) bool {
-        const pipeline = self.pipeline;
-        if (!pipeline.read_gate.acquire(pipeline.io)) return false;
-        // Generation and admission identity belong to the source-call permit,
-        // not to earlier job claim or pinned-block waits.
-        self.read_epoch = pipeline.probe.config_epoch.load(.acquire);
-        self.admission_id = pipeline.probe.next_admission.fetchAdd(1, .monotonic);
-        pipeline.probe.beginRead(pipeline.io, self.read_epoch, self.admission_id);
-        return true;
-    }
-
-    fn endRead(self: *ReadRequest) void {
-        const pipeline = self.pipeline;
-        pipeline.probe.endRead(pipeline.io, self.read_epoch, self.admission_id);
-        pipeline.read_gate.release(pipeline.io);
     }
 
     /// Takes the request's next block context for a leased block. Only the
@@ -1962,16 +1751,8 @@ const ReadRequest = struct {
         return block;
     }
 
-    fn finishSourceJob(self: *ReadRequest) void {
-        if (!self.source_finished.swap(true, .acq_rel)) {
-            const previous = self.pipeline.metrics.pending_source_jobs.fetchSub(1, .acq_rel);
-            std.debug.assert(previous > 0);
-        }
-    }
-
     /// Final worker access, after any error was recorded on the pipeline.
     fn finishScheduling(self: *ReadRequest) void {
-        self.finishSourceJob();
         self.release();
     }
 
@@ -2056,7 +1837,12 @@ const Pipeline = struct {
         ready_entries: usize = 0,
         /// Contexts whose callback fired, for the next pump to destroy: an
         /// intrusive stack through `EventContext.next_retired`, owned by
-        /// `mutex`. Empty unless `retire_events_early`.
+        /// `mutex`. Destroying an event from the next pump instead of at
+        /// its batch's retirement bounds live PJRT events by the DMA width
+        /// plus one pump batch rather than by a submission's transfer
+        /// count; every shipped plugin accepted destruction outside the
+        /// event's own callback (16,384 fired events on two B70, CUDA and
+        /// ROCm alike).
         retired: ?*EventContext = null,
 
         /// Whether the next queued transfer may go. The budget is in bytes,
@@ -2115,7 +1901,6 @@ const Pipeline = struct {
     request_gate: *RequestGate,
     block_size: usize,
     metrics: *Metrics,
-    probe: *SourceProbe,
     scheduler: *Scheduler,
     first_error: std.atomic.Value(u16) = .init(0),
     /// One per device. Where several are locked at once (`enqueueBlocks`,
@@ -2134,7 +1919,6 @@ const Pipeline = struct {
         request_gate: *RequestGate,
         block_size: usize,
         metrics: *Metrics,
-        probe: *SourceProbe,
         scheduler: *Scheduler,
         dma_budget_bytes: usize,
     ) !Pipeline {
@@ -2152,7 +1936,6 @@ const Pipeline = struct {
             .request_gate = request_gate,
             .block_size = block_size,
             .metrics = metrics,
-            .probe = probe,
             .scheduler = scheduler,
             .pumps = pumps,
             .dma_budget_bytes = dma_budget_bytes,
@@ -2234,7 +2017,7 @@ const Pipeline = struct {
         }
     }
 
-    /// Hands a context whose callback fired to its device's next device_pump. Under
+    /// Hands a context whose callback fired to its device's next pump. Under
     /// that pump's mutex, so the batch's retirement sees it before the batch
     /// is freed.
     fn retireEvent(self: *Pipeline, ctx: *EventContext) void {
@@ -2325,7 +2108,7 @@ const Pipeline = struct {
         while (true) {
             var selected: ?ReadyTransfer = null;
             device_pump.mutex.lockUncancelable(self.io);
-            if (retire_events_early) device_pump.destroyRetired();
+            device_pump.destroyRetired();
             if (!self.failed()) {
                 if (!device_pump.hasRoom(self.dma_budget_bytes)) {
                     _ = self.metrics.pump_stops_full.fetchAdd(1, .monotonic);
@@ -2417,7 +2200,7 @@ const Pipeline = struct {
                 // After the pump this callback may have run, so the event is
                 // destroyed by a later pump or by the batch's retirement,
                 // never inside its own callback.
-                if (retire_events_early) pipeline.retireEvent(ctx_);
+                pipeline.retireEvent(ctx_);
                 block.complete();
             }
         }.call, ctx) catch |err| {
@@ -2462,260 +2245,57 @@ const Pipeline = struct {
     }
 };
 
-const SourceRuntime = struct {
-    /// `measuring` while the controller climbs: the current generation's
-    /// window is open. `blind` during the pre-response bootstrap of a
-    /// high-latency source. `inactive` while holding.
-    const Measurement = enum { inactive, measuring, blind };
-
-    controller: source_concurrency.Controller,
+/// Halves the source width when the source throttles: the one width change
+/// left after the adaptive controller went (CTX.md, fifteenth pass). Runs as
+/// a task only when the profile has a statistics side channel, which the
+/// local backend has not, and samples it every 25 ms so a throttle is seen
+/// while the workers sleep in the backend's retries.
+const ThrottleWatch = struct {
+    cursor: ReadStatsCursor,
+    metrics: *const Metrics,
     read_gate: *RequestGate,
     request_gate: *RequestGate,
-    metrics: *Metrics,
-    probe: *SourceProbe,
-    scheduler: *Scheduler,
-    pinned_feasible_width: usize,
-    read_stats: ?ReadStatsCursor,
-    source_bootstrap_enabled: bool,
-    /// Lifecycle credits: see `RequestGateLimits`.
-    retained_credits: usize = 1,
-    dma_stage_requests: usize = 1,
-    /// The load's first scoreable window is a warm-up when the load is
-    /// DMA-bound, which the window itself shows: the requests completing in
-    /// it spent at least as long in the DMA stage (enqueue to last
-    /// callback) as reading. Such a window opened on an empty DMA stage and
-    /// measured the burst that filled it (47 GiB/s on a GB300 whose steady
-    /// rate was 42), which no later rung can beat, so it is discarded and
-    /// the start rung measured again. A read-bound load keeps its first
-    /// window: on a Hugging Face load a request spends a millisecond in the
-    /// DMA stage per 1.3 s read, whatever a burst of completions does to
-    /// the credit gate's occupancy. Credit waiting is not the signal: at a
-    /// narrow start rung on a GB300 the workers wait 2 ms per 3 ms read
-    /// while the stage holds each request for 7. The final one-GB300
-    /// DeepSeek measurements were 3.1-3.3 ms reading against 6.3-6.6 ms
-    /// in the DMA stage; one-B70 HF reads took 1200-1260 ms against 1 ms
-    /// in the stage.
-    warmup_pending: bool = true,
-    /// `dma_stage_ns` and `read_ns` when the current generation opened.
-    window_dma_base_ns: u64 = 0,
-    window_read_base_ns: u64 = 0,
-    /// Grown with the lifecycle limit; null in unit tests without workers.
-    workers: ?*WorkerPool = null,
-    source_response_observed: bool = false,
-    measurement: Measurement = .inactive,
-    last_blind_growth_ns: u64 = 0,
-    clock: BusyWindowClock = .{},
-    reported_width: usize = 1,
-    /// Control ticks that found the read gate closed while jobs were still
-    /// unclaimed. Nothing closes the gate any more; the counter stays as
-    /// the invariant's witness in the loader summary.
-    gate_closed_ticks: u64 = 0,
-    control: std.Io.Event = .unset,
+    limits: RequestGateLimits.Config,
+    /// The loader's width; this task is its only writer while it runs.
+    width: *usize,
+    /// Reads completed at the last step and the width in flight then: the
+    /// next step waits until that many reads have completed since, so the
+    /// delayed feedback of the old width cannot ratchet through several
+    /// steps.
+    reads_at_step: u64 = 0,
+    settle_reads: u64 = 0,
     done: std.Io.Event = .unset,
 
-    fn takeRemoteBackpressure(self: *SourceRuntime) ReadStatsCursor.Backpressure {
-        const cursor = if (self.read_stats) |*value| value else return .{};
-        return cursor.takeBackpressure();
-    }
-
-    /// Applies a decision: both gates at its width and a window for its
-    /// generation fenced at the next admission. The read gate is never
-    /// closed: reads admitted under the previous generation are excluded by
-    /// the fence and return at their own pace.
-    fn applyDecision(
-        self: *SourceRuntime,
-        io: std.Io,
-        decision: source_concurrency.Controller.Decision,
-    ) void {
-        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width, self.retained_credits, self.dma_stage_requests);
-        std.debug.assert(limits.read > 0);
-        self.reported_width = decision.width;
-        self.read_gate.setLimit(io, limits.read);
-        self.request_gate.setLimit(io, limits.lifecycle);
-        if (self.workers) |pool| pool.ensure(io, limits.workers());
-        // Advance the diagnostic baseline at the generation boundary.
-        _ = self.takeRemoteBackpressure();
-        self.probe.prepare(io, decision.generation, self.probe.next_admission.load(.acquire));
-        self.clock.reset();
-        self.window_dma_base_ns = self.metrics.dma_stage_ns.load(.monotonic);
-        self.window_read_base_ns = self.metrics.read_ns.load(.monotonic);
-        self.measurement = switch (self.controller.state) {
-            .climbing => .measuring,
-            .holding => .inactive,
-        };
-    }
-
-    /// Born busy: the gates already carry the controller's width; the first
-    /// window is fenced before any worker can admit a read.
-    fn start(self: *SourceRuntime, io: std.Io) void {
-        self.applyDecision(io, self.controller.currentDecision());
-    }
-
-    fn applyBlindGrowth(
-        self: *SourceRuntime,
-        io: std.Io,
-        decision: source_concurrency.Controller.Decision,
-    ) void {
-        const limits: RequestGateLimits = .init(decision.width, self.pinned_feasible_width, self.retained_credits, self.dma_stage_requests);
-        self.reported_width = decision.width;
-        self.read_gate.setLimit(io, limits.read);
-        self.request_gate.setLimit(io, limits.lifecycle);
-        if (self.workers) |pool| pool.ensure(io, limits.workers());
-        self.probe.clear(io);
-        self.probe.config_epoch.store(decision.generation, .release);
-        self.measurement = .blind;
-    }
-
-    fn evidenceFrom(
-        self: *const SourceRuntime,
-        probe: SourceProbe.Snapshot,
-        now_ns: u64,
-    ) ?source_concurrency.Controller.Evidence {
-        if (probe.epoch != self.controller.generation) return null;
-        // No window before the generation's first completion.
-        if (probe.window_start_ns == 0) return null;
-        const evidence: source_concurrency.Controller.Evidence = .{
-            .completed_requests = @intCast(probe.read_operations),
-            .elapsed_ns = self.clock.busyNs(probe.window_start_ns, now_ns),
-            .bytes = probe.read_bytes,
-            .exercised_width = probe.peak_reads,
-        };
-        return if (evidence.scoreable(self.controller.width())) evidence else null;
-    }
-
-    /// Once per load: the first scoreable window is dropped when the
-    /// requests completing inside it spent at least as long in the DMA
-    /// stage as reading.
-    fn discardWarmup(self: *SourceRuntime) bool {
-        const pending = self.warmup_pending;
-        self.warmup_pending = false;
-        if (!pending) return false;
-        const staged = self.metrics.dma_stage_ns.load(.monotonic) -| self.window_dma_base_ns;
-        const read = self.metrics.read_ns.load(.monotonic) -| self.window_read_base_ns;
-        return staged != 0 and staged >= read;
-    }
-
-    fn finalize(self: *SourceRuntime, io: std.Io) void {
-        std.debug.assert(self.read_gate.inUse(io) == 0);
-        _ = self.takeRemoteBackpressure();
-        self.probe.clear(io);
-    }
-
-    fn run(self: *SourceRuntime, io: std.Io) std.Io.Cancelable!void {
-        self.clock.tick(awakeNs(io), false);
+    fn run(self: *ThrottleWatch, io: std.Io) std.Io.Cancelable!void {
         while (true) {
-            self.control.waitTimeout(io, .{ .duration = .{
-                .raw = .fromMilliseconds(if (self.source_response_observed) 25 else 10),
+            self.done.waitTimeout(io, .{ .duration = .{
+                .raw = .fromMilliseconds(25),
                 .clock = .awake,
             } }) catch |err| switch (err) {
                 error.Timeout => {},
                 error.Canceled => return error.Canceled,
             };
-            if (self.control.isSet()) self.control.reset();
-            if (self.done.isSet()) {
-                self.finalize(io);
-                break;
-            }
-            const now_ns = awakeNs(io);
-
-            const backpressure = self.takeRemoteBackpressure();
-            // Sample even while reads sleep in backend retries; evaluating
-            // only at completion would hide throttling until requests return.
-            // A transient 500 is not evidence of a width limit: unlike a
-            // throttle/timeout, it must not permanently clip the climb.
-            if (backpressure.any()) {
-                // A read admitted under the current generation has begun
-                // once the window fenced at its start saw a read.
-                const fresh_admissions = self.probe.snapshot(io).peak_reads != 0;
-                const decision = if (backpressure.throttle)
-                    self.controller.backoff(fresh_admissions)
-                else
-                    self.controller.stepDownTransient(fresh_admissions);
-                if (decision) |value| {
-                    load_log.debug("source width {s}: generation={d}, width={d}, fresh_admissions={}", .{
-                        if (backpressure.throttle) "backoff" else "transient step-down",
-                        value.generation,
-                        value.width,
-                        fresh_admissions,
-                    });
-                    self.applyDecision(io, value);
-                }
-                self.clock.tick(now_ns, false);
-                continue;
-            }
-            if (self.metrics.read_bytes.load(.acquire) != 0) self.source_response_observed = true;
-            const scheduler_snapshot = self.scheduler.snapshot(io);
-            if (scheduler_snapshot.remaining_jobs != 0 and self.read_gate.currentLimit(io) == 0)
-                self.gate_closed_ticks += 1;
-
-            if (!self.source_response_observed) {
-                self.clock.tick(now_ns, false);
-                if (now_ns -| self.last_blind_growth_ns >= 10 * std.time.ns_per_ms and
-                    shouldBootstrapSource(
-                        self.source_bootstrap_enabled,
-                        false,
-                        self.metrics.read_bytes.load(.acquire),
-                        self.request_gate.inUse(io),
-                        self.controller.width(),
-                        scheduler_snapshot.remaining_jobs,
-                    ))
-                {
-                    self.last_blind_growth_ns = now_ns;
-                    if (self.controller.blindGrow()) |decision| {
-                        self.applyBlindGrowth(io, decision);
-                    }
-                }
-                continue;
-            }
-
-            switch (self.measurement) {
-                // Blind admissions overlap generations. The first response
-                // opens the first measured window at the reached width; the
-                // fence excludes what was admitted before it.
-                .blind => {
-                    self.applyDecision(io, self.controller.newGeneration());
-                    self.clock.tick(now_ns, false);
-                    continue;
-                },
-                .inactive => {
-                    self.clock.tick(now_ns, false);
-                    continue;
-                },
-                .measuring => {},
-            }
-
-            const probe = self.probe.snapshot(io);
-            const idle = scheduler_snapshot.remaining_jobs == 0 and
-                self.metrics.pending_source_jobs.load(.acquire) == 0 and
-                self.read_gate.inUse(io) == 0;
-            // Idle before the window's first admission is not its time.
-            self.clock.tick(now_ns, idle and probe.window_start_ns != 0);
-            if (idle) continue;
-            const evidence = self.evidenceFrom(probe, now_ns) orelse continue;
-            if (self.discardWarmup()) {
-                load_log.debug("source width warm-up window discarded: generation={d}, width={d}, rate={Bi:.2}/s", .{
-                    probe.epoch,
-                    self.controller.width(),
-                    @as(u64, @intFromFloat(evidence.bytesPerSecond())),
-                });
-                self.applyDecision(io, self.controller.newGeneration());
-                continue;
-            }
-            const scored_index = self.controller.index;
-            const decision = self.controller.observe(evidence);
-            load_log.debug("source width window: generation={d}, width={d}, rate={Bi:.2}/s, busy_ms={d:.1}, completed={d}, exercised={d}, samples={d}, next_width={d}, state={s}", .{
-                probe.epoch,
-                source_concurrency.widths[scored_index],
-                @as(u64, @intFromFloat(evidence.bytesPerSecond())),
-                @as(f64, @floatFromInt(evidence.elapsed_ns)) / std.time.ns_per_ms,
-                evidence.completed_requests,
-                evidence.exercised_width,
-                self.controller.samples[scored_index],
-                decision.width,
-                @tagName(self.controller.state),
-            });
-            self.applyDecision(io, decision);
+            if (self.done.isSet()) return;
+            self.tick(io);
         }
+    }
+
+    /// One sample: on a throttle, halve the width once everything in flight
+    /// at the previous step has returned.
+    fn tick(self: *ThrottleWatch, io: std.Io) void {
+        if (!self.cursor.takeThrottle()) return;
+        const completed = self.metrics.read_operations.load(.acquire);
+        if (completed -| self.reads_at_step < self.settle_reads) return;
+        const width = self.width.*;
+        if (width == 1) return;
+        const narrower = width / 2;
+        const limits = self.limits.at(narrower);
+        self.read_gate.setLimit(io, limits.read);
+        self.request_gate.setLimit(io, limits.lifecycle);
+        self.width.* = narrower;
+        self.reads_at_step = completed;
+        self.settle_reads = width;
+        load_log.debug("source throttled: width {d} -> {d}, lifecycle_credits={d}", .{ width, narrower, limits.lifecycle });
     }
 };
 
@@ -2726,11 +2306,6 @@ const RequestGate = struct {
     mutex: std.Io.Mutex = .init,
     /// Admission waiters; one release wakes one of them.
     condition: std.Io.Condition = .init,
-    /// `waitEmpty` waiters, woken when the gate drains. Kept apart from the
-    /// admission waiters: workers spawned for a wide rung stay parked on
-    /// the read gate after a backoff, and at width 1 every completion
-    /// drains the gate.
-    drained: std.Io.Condition = .init,
 
     fn init(limit: usize) RequestGate {
         return .{ .limit = limit };
@@ -2752,19 +2327,14 @@ const RequestGate = struct {
         defer self.mutex.unlock(io);
         std.debug.assert(self.in_use > 0);
         self.in_use -= 1;
-        if (self.in_use == 0) self.drained.broadcast(io);
         // One release creates one admission slot. Waking every worker here
-        // turns a high adaptive cap into a thundering herd even when the
-        // active limit is small.
+        // turns a wide gate into a thundering herd even when the active
+        // limit is small.
         self.condition.signal(io);
     }
 
-    fn waitEmpty(self: *RequestGate, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        while (self.in_use != 0) self.drained.waitUncancelable(io, &self.mutex);
-    }
-
+    /// Requests admitted under the old limit keep their permits; a lower
+    /// limit only holds back new admissions.
     fn setLimit(self: *RequestGate, io: std.Io, new_limit: usize) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -2776,12 +2346,6 @@ const RequestGate = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         return self.in_use;
-    }
-
-    fn currentLimit(self: *RequestGate, io: std.Io) usize {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        return self.limit;
     }
 
     fn close(self: *RequestGate, io: std.Io) void {
@@ -2807,6 +2371,17 @@ const RequestGate = struct {
 /// reading. Workers stay at `read + 1`: a worker hands its request to the
 /// DMA stage and claims the next, so credits need no workers of their own.
 const RequestGateLimits = struct {
+    /// What the limits at any width derive from, fixed at creation.
+    const Config = struct {
+        feasible_width: usize,
+        retained: usize,
+        dma_stage: usize,
+
+        fn at(self: Config, width: usize) RequestGateLimits {
+            return .init(width, self.feasible_width, self.retained, self.dma_stage);
+        }
+    };
+
     read: usize,
     lifecycle: usize,
 
@@ -2830,7 +2405,6 @@ const Metrics = struct {
     transfer_pieces: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
-    pending_source_jobs: std.atomic.Value(usize) = .init(0),
     /// Time workers spend waiting for a lifecycle credit, for pinned
     /// blocks, and inside the source read, summed over requests: waits
     /// above the read time mean the load is DMA-completion bound.
@@ -2855,175 +2429,22 @@ const Metrics = struct {
     tensor_init_ns: std.atomic.Value(u64) = .init(0),
 };
 
-/// Source-controller evidence shared by read workers and the controller.
-/// Generations and admission fences attribute reads to the width that admitted
-/// them, even while older reads are still in flight.
-const SourceProbe = struct {
-    next_admission: std.atomic.Value(u64) = .init(1),
-    config_epoch: std.atomic.Value(u64) = .init(0),
-    epoch: u64 = std.math.maxInt(u64),
-    admission_start: u64 = std.math.maxInt(u64),
-    window_start_ns: u64 = 0,
-    active_reads: usize = 0,
-    peak_reads: usize = 0,
-    read_operations: u64 = 0,
-    read_bytes: u64 = 0,
-    mutex: std.Io.Mutex = .init,
-
-    const Snapshot = struct {
-        epoch: u64,
-        window_start_ns: u64,
-        active_reads: usize,
-        peak_reads: usize,
-        read_operations: u64,
-        read_bytes: u64,
-    };
-
-    fn snapshot(self: *SourceProbe, io: std.Io) Snapshot {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        return .{
-            .epoch = self.epoch,
-            .window_start_ns = self.window_start_ns,
-            .active_reads = self.active_reads,
-            .peak_reads = self.peak_reads,
-            .read_operations = self.read_operations,
-            .read_bytes = self.read_bytes,
-        };
-    }
-
-    fn beginRead(self: *SourceProbe, io: std.Io, epoch: u64, admission_id: u64) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (epoch != self.epoch or admission_id < self.admission_start) return;
-        self.active_reads += 1;
-        self.peak_reads = @max(self.peak_reads, self.active_reads);
-    }
-
-    fn endRead(self: *SourceProbe, io: std.Io, epoch: u64, admission_id: u64) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (epoch != self.epoch or admission_id < self.admission_start) return;
-        std.debug.assert(self.active_reads > 0);
-        self.active_reads -= 1;
-    }
-
-    fn recordRead(
-        self: *SourceProbe,
-        io: std.Io,
-        epoch: u64,
-        admission_id: u64,
-        bytes: usize,
-    ) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (epoch != self.epoch or admission_id < self.admission_start) return;
-        // The window opens at the generation's first completion, which is
-        // not counted: from then on completions arrive at the source's
-        // steady rate, whereas a clock started at the first admission would
-        // charge a high-latency source its whole round trip and make longer
-        // windows at higher rungs look faster than they are.
-        // The old admission clock reported 450 MiB/s for a remote width
-        // delivering 600 MiB/s. Count actual completed bytes, including
-        // short job tails.
-        if (self.window_start_ns == 0) {
-            const now: std.Io.Timestamp = .now(io, .awake);
-            self.window_start_ns = @intCast(@max(now.nanoseconds, 1));
-            return;
-        }
-        self.read_operations +|= 1;
-        self.read_bytes +|= @intCast(bytes);
-    }
-
-    fn prepare(
-        self: *SourceProbe,
-        io: std.Io,
-        epoch: u64,
-        admission_start: u64,
-    ) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.epoch = std.math.maxInt(u64);
-        self.window_start_ns = 0;
-        self.active_reads = 0;
-        self.peak_reads = 0;
-        self.read_operations = 0;
-        self.read_bytes = 0;
-        self.admission_start = admission_start;
-        self.epoch = epoch;
-        self.config_epoch.store(epoch, .release);
-    }
-
-    fn clear(self: *SourceProbe, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.epoch = std.math.maxInt(u64);
-        self.admission_start = std.math.maxInt(u64);
-        self.window_start_ns = 0;
-        self.active_reads = 0;
-        self.peak_reads = 0;
-        self.read_operations = 0;
-        self.read_bytes = 0;
-    }
-};
-
 const ReadStatsCursor = struct {
-    /// Backend-wide, not tagged by loader or submission: control assumes
+    /// Backend-wide, not tagged by loader or submission: the watch assumes
     /// this load is the backend's only material user. Concurrent unrelated
-    /// traffic can otherwise look like this loader's backpressure.
+    /// traffic can otherwise look like this loader's throttling.
     provider: VFS.ReadStatsProvider,
     previous: VFS.ReadStats,
 
-    /// The two classes of source backpressure, exclusive: a throttle in the
-    /// same interval outranks a transient failure.
-    const Backpressure = struct {
-        /// Throttles and timeouts: the source rejects this width.
-        throttle: bool = false,
-        /// Retries, connection failures and other 5xx: an unhealthy request,
-        /// not evidence about the width.
-        transient: bool = false,
-
-        fn any(self: Backpressure) bool {
-            return self.throttle or self.transient;
-        }
-    };
-
-    fn takeBackpressure(self: *ReadStatsCursor) Backpressure {
+    /// Whether the source throttled or timed out a request since the last
+    /// call. Retries, connection failures and other 5xx are the backend's
+    /// retry loop's business: they say nothing about the width, and the
+    /// width cannot climb back.
+    fn takeThrottle(self: *ReadStatsCursor) bool {
         const current = self.provider.snapshot();
         const delta = current.sub(self.previous);
         self.previous = current;
-        const throttle = delta.throttles != 0 or delta.timeouts != 0;
-        const transient = delta.retries != 0 or delta.transient_retries != 0 or delta.server_failures != 0;
-        return .{ .throttle = throttle, .transient = transient and !throttle };
-    }
-};
-
-/// The window clock of the width controller counts busy time only. A
-/// control tick that found nothing unclaimed, nothing pending and no read
-/// permit held charges the interval since the previous tick to idle, so
-/// many short submissions jointly complete one window and the controller
-/// never learns that batches exist.
-/// The former per-submission epoch reset made short executable-input loads
-/// unmeasurable: windows need 100 ms, while individual packs often finished
-/// before then. Draining also inserted a controller-tick barrier between
-/// packs. Accumulating busy time preserves evidence without charging caller
-/// execution or idle gaps to the source.
-const BusyWindowClock = struct {
-    idle_ns: u64 = 0,
-    last_tick_ns: u64 = 0,
-
-    fn tick(self: *BusyWindowClock, now_ns: u64, idle: bool) void {
-        if (idle) self.idle_ns +|= now_ns -| self.last_tick_ns;
-        self.last_tick_ns = now_ns;
-    }
-
-    /// A new window starts: idle time accrued before it does not count.
-    fn reset(self: *BusyWindowClock) void {
-        self.idle_ns = 0;
-    }
-
-    fn busyNs(self: *const BusyWindowClock, from_ns: u64, now_ns: u64) u64 {
-        return (now_ns -| from_ns) -| self.idle_ns;
+        return delta.throttles != 0 or delta.timeouts != 0;
     }
 };
 
@@ -3133,23 +2554,6 @@ fn dmaStageRequests(per_device: usize, devices: usize, block_size: usize, reques
     return @max(@as(usize, 1), bytes / request_size + @intFromBool(bytes % request_size != 0));
 }
 
-/// Blind growth is warranted while a high-latency source has not answered
-/// and the read gate is the limiter: at least `read_limit` workers hold a
-/// lifecycle credit (taken before the claim, returned after the last DMA
-/// callback), no read has returned, so the admitted reads are all still
-/// pending and the other credit holders wait for a read permit.
-fn shouldBootstrapSource(
-    enabled: bool,
-    response_observed: bool,
-    read_bytes: u64,
-    lifecycle_in_use: usize,
-    read_limit: usize,
-    remaining_jobs: usize,
-) bool {
-    return enabled and !response_observed and read_bytes == 0 and
-        lifecycle_in_use >= read_limit and remaining_jobs != 0;
-}
-
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
 }
@@ -3179,7 +2583,7 @@ test "plan construction releases allocations and takes transfers only on success
                     .len = 64,
                 });
                 transfers[0].writer_mask = 0b11;
-                break :plan try Batch.Plan.create(allocator, 2, 3, transfers, 128, 1);
+                break :plan try Batch.Plan.create(allocator, undefined, 2, 3, transfers, 128);
             };
             defer plan.destroy();
             try std.testing.expectEqual(@as(usize, 2), plan.jobs.len);
@@ -3205,7 +2609,7 @@ test "loader releases the calibrated pool when alignment validation fails" {
     var profile: VFS.LoadProfile = .local;
     profile.direct_io_alignment = 3;
     const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
-        .read_parallelism = .{ .fixed = 2 },
+        .read_parallelism = 2,
         .load_profile = profile,
         .dma = .{},
         .max_host_bytes = 64 * 1024 * 1024,
@@ -3251,7 +2655,7 @@ test "loader failures clean up before publication, after publication and during 
         });
         defer for (&outputs) |*output| output.deinit();
         const loader = try Loader.create(allocator, io, platform, .{
-            .read_parallelism = .{ .fixed = 2 },
+            .read_parallelism = 2,
             .load_profile = .local,
             .dma = .{},
             .max_host_bytes = 64 * 1024 * 1024,
@@ -3283,11 +2687,10 @@ test "loader failures clean up before publication, after publication and during 
                 try std.testing.expect(loader.pool.high_water > 0);
             },
         }
-        try std.testing.expectEqual(@as(usize, 0), loader.scheduler.snapshot(io).remaining_jobs);
+        try std.testing.expectEqual(@as(usize, 0), loader.scheduler.remainingJobs(io));
         try std.testing.expectEqual(@as(usize, 0), loader.request_gate.inUse(io));
         try std.testing.expectEqual(@as(usize, 0), loader.read_gate.inUse(io));
         try std.testing.expectEqual(@as(usize, 0), loader.pool.in_use);
-        try std.testing.expectEqual(@as(usize, 0), loader.metrics.pending_source_jobs.load(.acquire));
 
         if (failure == .before_publication) {
             try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
@@ -3319,8 +2722,8 @@ test "DMA stage requests cover the per-device in-flight bytes" {
     try std.testing.expectEqual(@as(usize, 1), dmaStageRequests(1, 1, 16 * mib, 64 * mib));
 }
 
-/// Planning input for the fair-order tests: one job per entry; `file_offset`
-/// is the entry index.
+/// Planning input for the fair-order tests: one job per entry, charged to
+/// the devices its `physical_bytes` names.
 const FairOrderJob = struct {
     physical_bytes: []const usize,
 };
@@ -3334,28 +2737,16 @@ fn testFairOrder(
     defer allocator.free(queues);
     @memset(queues, .empty);
     defer for (queues) |*queue| queue.deinit(allocator);
-    const planning_jobs = try allocator.alloc(Planner.Job, jobs.len);
-    defer allocator.free(planning_jobs);
     const physical_bytes = try allocator.alloc(usize, jobs.len * device_count);
     defer allocator.free(physical_bytes);
-    for (jobs, planning_jobs, 0..) |job, *planned, job_index| {
+    for (jobs, 0..) |job, job_index| {
         if (job.physical_bytes.len != device_count) return error.InvalidTestJob;
-        planned.* = .{
-            .source_slot = undefined,
-            .file_offset = job_index,
-            .len = 1,
-            .minimum_len = 1,
-            .transfer_start = 0,
-            .transfer_len = 0,
-            .block_start = 0,
-            .block_len = 0,
-        };
         for (job.physical_bytes, queues, 0..) |bytes, *queue, device_index| {
             physical_bytes[job_index * device_count + device_index] = bytes;
             if (bytes != 0) try queue.append(allocator, job_index);
         }
     }
-    return Planner.fairOrder(allocator, planning_jobs, physical_bytes, queues);
+    return Planner.fairOrder(allocator, jobs.len, physical_bytes, queues);
 }
 
 fn expectFairOrder(
@@ -3380,25 +2771,25 @@ fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
     errdefer allocator.free(blocks);
     const events = try allocator.alloc(Pipeline.EventContext, job_count);
     errdefer allocator.free(events);
-    for (jobs, requests, 0..) |*job, *request, index| job.* = .{
-        .source_slot = undefined,
+    for (jobs, 0..) |*job, index| job.* = .{
         .file_offset = index,
         .len = 1,
         .minimum_len = 1,
-        .transfers = &.{},
-        .request = request,
-        .blocks = blocks[index..][0..1],
+        .transfer_start = 0,
+        .transfer_len = 0,
+        .block_start = index,
+        .block_len = 1,
     };
     const plan = try allocator.create(Batch.Plan);
     plan.* = .{
         .allocator = allocator,
+        .source_slot = undefined,
         .jobs = jobs,
         .transfers = &.{},
         .requests = requests,
         .blocks = blocks,
         .events = events,
         .source_bytes = job_count,
-        .source_runs = job_count,
     };
     return plan;
 }
@@ -3406,7 +2797,7 @@ fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
 /// Publishes a plan of `job_count` unit jobs into an open batch.
 fn publishTestPlan(scheduler: *Scheduler, batch: *Batch, job_count: usize) !void {
     const plan = try testPlan(std.testing.allocator, job_count);
-    scheduler.publish(std.testing.io, batch, plan, 0) catch |err| {
+    scheduler.publish(std.testing.io, batch, plan) catch |err| {
         plan.destroy();
         return err;
     };
@@ -3468,8 +2859,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     };
     var outputs: [sources.len]Buffer = undefined;
     var items: [sources.len]Item = undefined;
-    var item_ptrs: [sources.len]*Item = undefined;
-    for (&items, &item_ptrs, 0..) |*item, *item_ptr, i| {
+    for (&items, 0..) |*item, i| {
         item.* = .{
             .source = &sources[i],
             .source_slot = if (i == sources.len - 1) &slots[1] else &slots[0],
@@ -3477,7 +2867,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
             .sharding = platform.replicated_sharding,
             .output = &outputs[i],
         };
-        item_ptr.* = item;
     }
     var device_count: usize = 0;
     for (platform.replicated_sharding.devicesInCanonicalOrder()) |device| {
@@ -3487,18 +2876,25 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
-    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 8, 0, .off);
+    try Planner.publishFiles(&scheduler, io, batch, &items, .{
+        .device_count = device_count,
+        .block_size = 4,
+        .request_size = 8,
+        .alignment = 0,
+    }, .off);
 
     // One plan per file. a:[10,18) merges adjacency and the duplicate,
     // a:[20,24) remains exact, and b:[3,15) is split at the request-size
     // boundary.
     const plans = batch.plans.items;
     try std.testing.expectEqual(@as(usize, 2), plans.len);
+    try std.testing.expect(plans[0].source_slot == &slots[0]);
+    try std.testing.expect(plans[1].source_slot == &slots[1]);
     try std.testing.expectEqual(@as(usize, 2), plans[0].jobs.len);
     try std.testing.expectEqual(@as(usize, 4), plans[0].transfers.len);
     try std.testing.expectEqual(@as(u64, 10), plans[0].jobs[0].file_offset);
     try std.testing.expectEqual(@as(usize, 8), plans[0].jobs[0].len);
-    try std.testing.expectEqual(@as(usize, 3), plans[0].jobs[0].transfers.len);
+    try std.testing.expectEqual(@as(usize, 3), plans[0].jobs[0].transfer_len);
     try std.testing.expectEqual(@as(u64, 20), plans[0].jobs[1].file_offset);
     try std.testing.expectEqual(@as(usize, 2), plans[1].jobs.len);
     try std.testing.expectEqual(@as(usize, 3), plans[1].transfers.len);
@@ -3507,26 +2903,25 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 4), plans[1].jobs[1].len);
     // The totals equal the former single-plan numbers for the same inputs.
     try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
-    try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_runs);
     try std.testing.expectEqual(@as(usize, 4), batch.diagnostics.source_jobs);
     try std.testing.expectEqual(@as(u64, 24), batch.diagnostics.source_bytes);
     try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_transfers);
     // One writer per transfer on one device: one event per transfer. Each
-    // job's contexts are slices of its plan's arrays, blocks by 4-byte block.
+    // job's contexts are ranges of its plan's arrays, blocks by 4-byte block.
     try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_dma_submissions);
     try std.testing.expectEqual(@as(usize, 4), plans[0].events.len);
     try std.testing.expectEqual(@as(usize, 3), plans[1].events.len);
     try std.testing.expectEqual(@as(usize, 2), plans[0].requests.len);
     try std.testing.expectEqual(@as(usize, 3), plans[0].blocks.len);
-    try std.testing.expect(plans[0].jobs[1].request == &plans[0].requests[1]);
-    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[0].blocks.len);
-    try std.testing.expect(plans[0].jobs[1].blocks.ptr == plans[0].blocks[2..3].ptr);
-    try std.testing.expectEqual(plans[0].blocks[2..3].len, plans[0].jobs[1].blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), plans[0].jobs[0].block_start);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[0].block_len);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[1].block_start);
+    try std.testing.expectEqual(@as(usize, 1), plans[0].jobs[1].block_len);
     try std.testing.expectEqual(@as(usize, 3), plans[1].blocks.len);
-    try std.testing.expect(plans[1].jobs[0].blocks.ptr == plans[1].blocks[0..2].ptr);
-    try std.testing.expectEqual(plans[1].blocks[0..2].len, plans[1].jobs[0].blocks.len);
-    try std.testing.expect(plans[1].jobs[1].blocks.ptr == plans[1].blocks[2..3].ptr);
-    try std.testing.expectEqual(plans[1].blocks[2..3].len, plans[1].jobs[1].blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), plans[1].jobs[0].block_start);
+    try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[0].block_len);
+    try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[1].block_start);
+    try std.testing.expectEqual(@as(usize, 1), plans[1].jobs[1].block_len);
     for (plans) |plan| {
         for (plan.requests) |*request| try std.testing.expect(request.completed.load(.acquire));
     }
@@ -3540,22 +2935,19 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     };
     var iov_slot: SourceSlot = .{ .uri = "iov" };
     var iov_output: Buffer = undefined;
-    var iov_item: Item = .{
+    var iov_items = [_]Item{.{
         .source = &iov_source,
         .source_slot = &iov_slot,
         .shape = iov_source.shape,
         .sharding = platform.replicated_sharding,
         .output = &iov_output,
-    };
-    const iov_plan = try Planner.preparePlan(
-        allocator,
-        device_count,
-        &.{&iov_item},
-        &.{0},
-        1,
-        load_limits.max_positional_iovecs + 1,
-        0,
-    );
+    }};
+    const iov_plan = try Planner.preparePlan(allocator, &iov_items, &.{0}, .{
+        .device_count = device_count,
+        .block_size = 1,
+        .request_size = load_limits.max_positional_iovecs + 1,
+        .alignment = 0,
+    });
     defer iov_plan.destroy();
     try std.testing.expectEqual(@as(usize, 2), iov_plan.jobs.len);
     try std.testing.expectEqual(load_limits.max_positional_iovecs, iov_plan.jobs[0].len);
@@ -3569,8 +2961,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var aligned_slot: SourceSlot = .{ .uri = "aligned" };
     var aligned_outputs: [aligned_sources.len]Buffer = undefined;
     var aligned_items: [aligned_sources.len]Item = undefined;
-    var aligned_item_ptrs: [aligned_sources.len]*Item = undefined;
-    for (&aligned_items, &aligned_item_ptrs, 0..) |*item, *item_ptr, i| {
+    for (&aligned_items, 0..) |*item, i| {
         item.* = .{
             .source = &aligned_sources[i],
             .source_slot = &aligned_slot,
@@ -3578,17 +2969,13 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
             .sharding = platform.replicated_sharding,
             .output = &aligned_outputs[i],
         };
-        item_ptr.* = item;
     }
-    const aligned_plan = try Planner.preparePlan(
-        allocator,
-        device_count,
-        &aligned_item_ptrs,
-        &.{ 0, 1, 2 },
-        4,
-        8,
-        0,
-    );
+    const aligned_plan = try Planner.preparePlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
+        .device_count = device_count,
+        .block_size = 4,
+        .request_size = 8,
+        .alignment = 0,
+    });
     defer aligned_plan.destroy();
     try std.testing.expectEqual(@as(usize, 3), aligned_plan.jobs.len);
     try std.testing.expectEqual(@as(usize, 6), aligned_plan.transfers.len);
@@ -3600,15 +2987,12 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     // at the tensor-safe boundaries 7 and 15), each read at 4-byte bounds,
     // its transfers relative to the widened start; the last read runs past
     // the tensor data, of which every byte is required.
-    const widened_plan = try Planner.preparePlan(
-        allocator,
-        device_count,
-        &aligned_item_ptrs,
-        &.{ 0, 1, 2 },
-        4,
-        16,
-        4,
-    );
+    const widened_plan = try Planner.preparePlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
+        .device_count = device_count,
+        .block_size = 4,
+        .request_size = 16,
+        .alignment = 4,
+    });
     defer widened_plan.destroy();
     try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs.len);
     try std.testing.expectEqual(@as(u64, 0), widened_plan.jobs[0].file_offset);
@@ -3617,30 +3001,33 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(u64, 4), widened_plan.jobs[1].file_offset);
     try std.testing.expectEqual(@as(usize, 12), widened_plan.jobs[1].len);
     try std.testing.expectEqual(@as(usize, 11), widened_plan.jobs[1].minimum_len);
-    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].blocks.len);
-    try std.testing.expectEqual(@as(usize, 0), widened_plan.jobs[1].transfers[0].block_index);
-    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].transfers[0].block_offset);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].block_len);
+    const second_transfer = widened_plan.transfers[widened_plan.jobs[1].transfer_start];
+    try std.testing.expectEqual(@as(usize, 0), second_transfer.block_index);
+    try std.testing.expectEqual(@as(usize, 3), second_transfer.block_offset);
     try std.testing.expectEqual(@as(u64, 12), widened_plan.jobs[2].file_offset);
     try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].len);
     try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].minimum_len);
-    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[2].transfers[0].block_offset);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.transfers[widened_plan.jobs[2].transfer_start].block_offset);
     try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
 
     // No room for the widening: two alignment units must fit in a request.
-    const invalid_plan: anyerror!void = if (Planner.preparePlan(
-        allocator,
-        device_count,
-        &aligned_item_ptrs,
-        &.{ 0, 1, 2 },
-        4,
-        8,
-        4,
-    )) |plan| unexpected: {
+    const invalid_plan: anyerror!void = if (Planner.preparePlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
+        .device_count = device_count,
+        .block_size = 4,
+        .request_size = 8,
+        .alignment = 4,
+    })) |plan| unexpected: {
         plan.destroy();
         break :unexpected {};
     } else |err| err;
     try std.testing.expectError(error.InvalidLoaderJob, invalid_plan);
-    try std.testing.expectError(error.InvalidLoaderJob, Planner.maximumJobLen(16, 4, 3));
+    try std.testing.expectError(error.InvalidLoaderJob, Planner.maximumJobLen(.{
+        .device_count = 1,
+        .block_size = 4,
+        .request_size = 16,
+        .alignment = 3,
+    }));
 }
 
 test "scheduler publishes a submission one file at a time and claims the files in order" {
@@ -3662,8 +3049,7 @@ test "scheduler publishes a submission one file at a time and claims the files i
     };
     var outputs: [sources.len]Buffer = undefined;
     var items: [sources.len]Item = undefined;
-    var item_ptrs: [sources.len]*Item = undefined;
-    for (&items, &item_ptrs, 0..) |*item, *item_ptr, i| {
+    for (&items, 0..) |*item, i| {
         item.* = .{
             .source = &sources[i],
             .source_slot = if (i == 0) &slots[1] else &slots[0],
@@ -3671,7 +3057,6 @@ test "scheduler publishes a submission one file at a time and claims the files i
             .sharding = platform.replicated_sharding,
             .output = &outputs[i],
         };
-        item_ptr.* = item;
     }
     var device_count: usize = 0;
     for (platform.replicated_sharding.devicesInCanonicalOrder()) |device| {
@@ -3681,26 +3066,31 @@ test "scheduler publishes a submission one file at a time and claims the files i
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
-    try Planner.publishFiles(&scheduler, io, batch, device_count, &item_ptrs, 4, 4, 0, .off);
+    try Planner.publishFiles(&scheduler, io, batch, &items, .{
+        .device_count = device_count,
+        .block_size = 4,
+        .request_size = 4,
+        .alignment = 0,
+    }, .off);
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items.len);
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items[0].jobs.len);
     try std.testing.expectEqual(@as(usize, 1), batch.plans.items[1].jobs.len);
     try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
     try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_jobs);
-    try std.testing.expectEqual(@as(usize, 3), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.remainingJobs(io));
     try std.testing.expect(batch.diagnostics.published_at != null);
     try std.testing.expect(batch.diagnostics.sealed_at == null);
 
     // File a's jobs in offset order, then file b's.
     var claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.job.source_slot == &slots[0]);
-    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    try std.testing.expect(claim.plan.source_slot == &slots[0]);
+    try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.job.source_slot == &slots[0]);
-    try std.testing.expectEqual(@as(u64, 4), claim.job.file_offset);
+    try std.testing.expect(claim.plan.source_slot == &slots[0]);
+    try std.testing.expectEqual(@as(u64, 4), claim.job().file_offset);
     claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.job.source_slot == &slots[1]);
-    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    try std.testing.expect(claim.plan.source_slot == &slots[1]);
+    try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     // Open and exhausted: the batch keeps the head until it is sealed.
     try std.testing.expect(scheduler.claim(io) == null);
     try std.testing.expectEqual(@as(usize, 1), scheduler.queue.items.len);
@@ -3746,20 +3136,10 @@ test "fair order validates jobs and cleans up allocation failures" {
         .{ .physical_bytes = &.{ 0, 0 } },
     }));
     try std.testing.expectError(error.DmaDeviceMismatch, testFairOrder(allocator, 0, &.{}));
-    var planning = [_]Planner.Job{.{
-        .source_slot = undefined,
-        .file_offset = 0,
-        .len = 1,
-        .minimum_len = 1,
-        .transfer_start = 0,
-        .transfer_len = 0,
-        .block_start = 0,
-        .block_len = 0,
-    }};
     const queues = [_]std.ArrayListUnmanaged(usize){ .empty, .empty };
     try std.testing.expectError(
         error.InvalidLoaderJob,
-        Planner.fairOrder(allocator, &planning, &.{1}, &queues),
+        Planner.fairOrder(allocator, 1, &.{1}, &queues),
     );
 
     const AllocationTest = struct {
@@ -3780,22 +3160,21 @@ test "fifo scheduler claims batches in publish order" {
     defer scheduler.deinit();
     const first = try publishTestBatch(&scheduler, 2);
     const second = try publishTestBatch(&scheduler, 1);
-    try std.testing.expectEqual(@as(usize, 3), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 3), scheduler.remainingJobs(io));
 
     var claim = scheduler.claim(io).?;
     try std.testing.expect(claim.batch == first);
-    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
-    try std.testing.expect(first.diagnostics.first_claim_at != null);
-    try std.testing.expect(second.diagnostics.first_claim_at == null);
+    try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
+    try std.testing.expect(claim.request() == &first.plans.items[0].requests[0]);
     claim = scheduler.claim(io).?;
     try std.testing.expect(claim.batch == first);
-    try std.testing.expectEqual(@as(u64, 1), claim.job.file_offset);
-    try std.testing.expectEqual(@as(usize, 1), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(u64, 1), claim.job().file_offset);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.remainingJobs(io));
     claim = scheduler.claim(io).?;
     try std.testing.expect(claim.batch == second);
-    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
 
     first.finishJobs(2);
     second.finishJobs(1);
@@ -3816,7 +3195,7 @@ test "fifo scheduler completes a batch while a later batch has unclaimed jobs" {
     first.finishJobs(1);
     try std.testing.expect(first.done.isSet());
     try std.testing.expect(!second.done.isSet());
-    try std.testing.expectEqual(@as(usize, 2), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.remainingJobs(io));
     // The completed batch left the queue with its last claim, so it can go
     // away while the other one is still being claimed.
     first.destroy();
@@ -3847,7 +3226,7 @@ test "fifo scheduler failure retires the unclaimed units of every queued batch" 
     try std.testing.expectEqual(@as(usize, 1), first.remaining.load(.acquire));
     try std.testing.expect(second.done.isSet());
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     try std.testing.expect(!scheduler.waitForWork(io));
     const publish_result: anyerror!void = if (publishTestBatch(&scheduler, 1)) |_| {} else |err| err;
     try std.testing.expectError(error.LoaderShuttingDown, publish_result);
@@ -3923,7 +3302,7 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
         ) void {
             while (scheduler_.claim(std.testing.io)) |claim| {
                 const base: u64 = if (claim.batch == batches_[0]) 0 else 16;
-                const mask = @as(u64, 1) << @intCast(base + claim.job.file_offset);
+                const mask = @as(u64, 1) << @intCast(base + claim.job().file_offset);
                 if (seen_.fetchOr(mask, .acq_rel) & mask != 0) duplicate_.store(true, .release);
                 _ = claim_count_.fetchAdd(1, .monotonic);
             }
@@ -3933,7 +3312,7 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
     try std.testing.expectEqual(std.math.maxInt(u32), @as(u32, @truncate(seen.load(.acquire))));
     try std.testing.expectEqual(@as(usize, 32), claim_count.load(.acquire));
     try std.testing.expect(!duplicate.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     for (batches) |batch| {
         batch.finishJobs(16);
         try std.testing.expect(batch.done.isSet());
@@ -3953,7 +3332,7 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     // The published plan is exhausted but the batch is open: nothing to
     // claim, and the head is kept.
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     try std.testing.expect(batch.queued);
     try std.testing.expect(!batch.done.isSet());
 
@@ -3978,11 +3357,11 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     // left, the last claim pops it.
     claim = scheduler.claim(io).?;
     try std.testing.expect(claim.batch == batch);
-    try std.testing.expectEqual(@as(u64, 0), claim.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     scheduler.seal(io, batch);
     try std.testing.expect(batch.queued);
     claim = scheduler.claim(io).?;
-    try std.testing.expectEqual(@as(u64, 1), claim.job.file_offset);
+    try std.testing.expectEqual(@as(u64, 1), claim.job().file_offset);
     try std.testing.expect(!batch.queued);
     try std.testing.expect(scheduler.claim(io) == null);
     batch.finishJobs(1);
@@ -4011,7 +3390,7 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     const batch = try Batch.create(std.testing.allocator, io, .{});
     try publishTestPlan(&scheduler, batch, 2);
     try publishTestPlan(&scheduler, batch, 3);
-    try std.testing.expectEqual(@as(usize, 5), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 5), scheduler.remainingJobs(io));
     try std.testing.expectEqual(@as(usize, 6), batch.remaining.load(.acquire));
     try std.testing.expect(scheduler.claim(io).?.batch == batch);
 
@@ -4021,7 +3400,7 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     try std.testing.expect(!batch.done.isSet());
     try std.testing.expect(!batch.queued);
     try std.testing.expectEqual(@as(usize, 2), batch.remaining.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     try std.testing.expect(scheduler.claim(io) == null);
     // The submission goes on: its next plan is refused, and the seal with
     // the sentinel drop leaves only the claim to complete it.
@@ -4047,105 +3426,93 @@ test "fair order is the identity for one device" {
     }, &.{ 0, 1, 2, 3, 4, 5 });
 }
 
-test "one load-profile feedback cursor reports only new backpressure" {
-    const FakeProvider = struct {
-        stats: VFS.ReadStats = .{},
+/// A read statistics provider the tests move by hand.
+const FakeStatsProvider = struct {
+    stats: VFS.ReadStats = .{},
 
-        fn snapshot(userdata: *anyopaque) VFS.ReadStats {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            return self.stats;
-        }
-    };
+    fn snapshot(userdata: *anyopaque) VFS.ReadStats {
+        const self: *@This() = @ptrCast(@alignCast(userdata));
+        return self.stats;
+    }
 
-    var fake: FakeProvider = .{};
-    const provider: VFS.ReadStatsProvider = .{
-        .userdata = &fake,
-        .snapshotFn = FakeProvider.snapshot,
-    };
+    fn provider(self: *FakeStatsProvider) VFS.ReadStatsProvider {
+        return .{ .userdata = self, .snapshotFn = snapshot };
+    }
+};
+
+test "one load-profile feedback cursor reports only new throttles" {
+    var fake: FakeStatsProvider = .{};
     var cursor: ReadStatsCursor = .{
-        .provider = provider,
-        .previous = provider.snapshot(),
+        .provider = fake.provider(),
+        .previous = fake.provider().snapshot(),
     };
 
-    const Backpressure = ReadStatsCursor.Backpressure;
-    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
+    try std.testing.expect(!cursor.takeThrottle());
+    // Retries and failures are the backend's retry loop's business.
     fake.stats.retries = 2;
     fake.stats.server_failures = 1;
-    try std.testing.expectEqual(Backpressure{ .transient = true }, cursor.takeBackpressure());
-    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
     fake.stats.transient_retries = 1;
-    try std.testing.expectEqual(Backpressure{ .transient = true }, cursor.takeBackpressure());
-    // A throttle outranks the retries it caused in the same interval.
-    fake.stats.retries = 3;
+    try std.testing.expect(!cursor.takeThrottle());
     fake.stats.throttles = 1;
-    try std.testing.expectEqual(Backpressure{ .throttle = true }, cursor.takeBackpressure());
+    try std.testing.expect(cursor.takeThrottle());
+    // Only what moved since the last call.
+    try std.testing.expect(!cursor.takeThrottle());
     fake.stats.timeouts = 1;
-    try std.testing.expectEqual(Backpressure{ .throttle = true }, cursor.takeBackpressure());
-    try std.testing.expectEqual(Backpressure{}, cursor.takeBackpressure());
+    try std.testing.expect(cursor.takeThrottle());
+    try std.testing.expect(!cursor.takeThrottle());
 }
 
-test "source warm-up window is discarded once when the DMA stage held requests as long as the reads" {
-    var metrics: Metrics = .{};
-    var runtime: SourceRuntime = undefined;
-    runtime.metrics = &metrics;
-    runtime.window_dma_base_ns = 0;
-    runtime.window_read_base_ns = 0;
-    runtime.warmup_pending = true;
-    // Reads dominated the window (a network load): the first window is
-    // scored.
-    metrics.read_ns.store(1000, .monotonic);
-    metrics.dma_stage_ns.store(10, .monotonic);
-    try std.testing.expect(!runtime.discardWarmup());
-    try std.testing.expect(!runtime.warmup_pending);
-
-    // Requests sat in the DMA stage longer than they read: discarded.
-    runtime.warmup_pending = true;
-    metrics.dma_stage_ns.store(3000, .monotonic);
-    try std.testing.expect(runtime.discardWarmup());
-    // Only once: the re-measured window is scored even under pressure.
-    try std.testing.expect(!runtime.discardWarmup());
-
-    // Residency is counted from the generation's start, not the load's.
-    runtime.warmup_pending = true;
-    runtime.window_dma_base_ns = 3000;
-    runtime.window_read_base_ns = 1000;
-    metrics.read_ns.store(2000, .monotonic);
-    metrics.dma_stage_ns.store(3005, .monotonic);
-    try std.testing.expect(!runtime.discardWarmup());
-}
-
-test "source measurement rejects another controller generation" {
+test "throttle watch halves the width once the reads in flight at the last step returned" {
     const io = std.testing.io;
-    var probe: SourceProbe = .{};
-    var runtime: SourceRuntime = undefined;
-    runtime.controller = source_concurrency.Controller.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-        64,
-    );
-    runtime.probe = &probe;
-    runtime.clock = .{};
-    probe.prepare(io, runtime.controller.generation + 1, 1);
-    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), 1_000) == null);
-}
+    var fake: FakeStatsProvider = .{};
+    var metrics: Metrics = .{};
+    const limits: RequestGateLimits.Config = .{ .feasible_width = 64, .retained = 41, .dma_stage = 8 };
+    var width: usize = 32;
+    var read_gate: RequestGate = .init(limits.at(width).read);
+    var request_gate: RequestGate = .init(limits.at(width).lifecycle);
+    var watch: ThrottleWatch = .{
+        .cursor = .{ .provider = fake.provider(), .previous = fake.provider().snapshot() },
+        .metrics = &metrics,
+        .read_gate = &read_gate,
+        .request_gate = &request_gate,
+        .limits = limits,
+        .width = &width,
+    };
 
-test "busy window clock subtracts idle intervals from a window" {
-    var clock: BusyWindowClock = .{};
-    clock.tick(0, false);
-    clock.reset();
-    // Busy 0-40 ms, idle 40-240 ms, busy 240-280 ms, sampled every 20 ms.
-    var now_ns: u64 = 0;
-    while (now_ns < 280 * std.time.ns_per_ms) {
-        now_ns += 20 * std.time.ns_per_ms;
-        const idle = now_ns > 40 * std.time.ns_per_ms and now_ns <= 240 * std.time.ns_per_ms;
-        clock.tick(now_ns, idle);
-    }
-    try std.testing.expectEqual(200 * std.time.ns_per_ms, clock.idle_ns);
-    try std.testing.expectEqual(80 * std.time.ns_per_ms, clock.busyNs(0, now_ns));
-    // The next window starts clean.
-    clock.reset();
-    clock.tick(now_ns + 25 * std.time.ns_per_ms, false);
-    try std.testing.expectEqual(25 * std.time.ns_per_ms, clock.busyNs(now_ns, now_ns + 25 * std.time.ns_per_ms));
+    // Nothing moved, then retries alone: the width stays.
+    watch.tick(io);
+    fake.stats.retries = 3;
+    fake.stats.server_failures = 1;
+    watch.tick(io);
+    try std.testing.expectEqual(@as(usize, 32), width);
+    try std.testing.expectEqual(@as(usize, 32), read_gate.limit);
+
+    // A throttle halves the width; both gates follow.
+    fake.stats.throttles = 1;
+    watch.tick(io);
+    try std.testing.expectEqual(@as(usize, 16), width);
+    try std.testing.expectEqual(@as(usize, 16), read_gate.limit);
+    try std.testing.expectEqual(@as(usize, 41), request_gate.limit);
+
+    // A throttle before the 32 reads in flight at the step have returned is
+    // the old width's feedback.
+    fake.stats.throttles = 2;
+    watch.tick(io);
+    try std.testing.expectEqual(@as(usize, 16), width);
+    metrics.read_operations.store(32, .release);
+    fake.stats.timeouts = 1;
+    watch.tick(io);
+    try std.testing.expectEqual(@as(usize, 8), width);
+    try std.testing.expectEqual(@as(usize, 8), read_gate.limit);
+    try std.testing.expectEqual(@as(usize, 41), request_gate.limit);
+
+    // One read at a time is the floor.
+    width = 1;
+    watch.settle_reads = 0;
+    fake.stats.throttles = 3;
+    watch.tick(io);
+    try std.testing.expectEqual(@as(usize, 1), width);
+    try std.testing.expectEqual(@as(usize, 8), read_gate.limit);
 }
 
 test "device pump admits by bytes and by pieces" {
@@ -4158,14 +3525,6 @@ test "device pump admits by bytes and by pieces" {
     try std.testing.expect(pump.hasRoom(8));
     pump.active_pieces = max_dma_pieces_per_device;
     try std.testing.expect(!pump.hasRoom(8));
-}
-
-test "source bootstrap requires a high-latency source with no observed response" {
-    try std.testing.expect(shouldBootstrapSource(true, false, 0, 12, 12, 1));
-    try std.testing.expect(!shouldBootstrapSource(false, false, 0, 12, 12, 1));
-    try std.testing.expect(!shouldBootstrapSource(true, true, 0, 12, 12, 1));
-    try std.testing.expect(!shouldBootstrapSource(true, false, 1, 12, 12, 1));
-    try std.testing.expect(!shouldBootstrapSource(true, false, 0, 12, 12, 0));
 }
 
 test "source request size combines the VFS floor with DMA granularity" {
@@ -4203,71 +3562,9 @@ test "coalesced job block bound is independent of device count" {
     );
 }
 
-test "probe source capacity counts active reads and keeps their peak" {
-    const io = std.testing.io;
-    var probe: SourceProbe = .{};
-    probe.prepare(io, 7, 10);
-    for (0..8) |index| probe.beginRead(io, 7, 10 + @as(u64, @intCast(index)));
-
-    const active = probe.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 8), active.peak_reads);
-    try std.testing.expectEqual(@as(usize, 8), active.active_reads);
-
-    for (0..4) |index| probe.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    const draining = probe.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 8), draining.peak_reads);
-    try std.testing.expectEqual(@as(usize, 4), draining.active_reads);
-    for (4..8) |index| probe.endRead(io, 7, 10 + @as(u64, @intCast(index)));
-    probe.clear(io);
-}
-
-test "source probe excludes pre-boundary admissions" {
-    const io = std.testing.io;
-    var probe: SourceProbe = .{};
-    probe.beginRead(io, 6, 40);
-    probe.prepare(io, 7, 41);
-    probe.beginRead(io, 7, 40);
-    probe.recordRead(io, 7, 40, load_limits.max_read_request_size);
-    probe.beginRead(io, 7, 41);
-    // The first in-generation completion opens the window and is not counted.
-    probe.recordRead(io, 7, 41, load_limits.max_read_request_size);
-    probe.beginRead(io, 7, 42);
-    probe.recordRead(io, 7, 42, load_limits.max_read_request_size);
-    const admitted = probe.snapshot(io);
-    try std.testing.expect(admitted.window_start_ns != 0);
-    try std.testing.expectEqual(@as(usize, 2), admitted.active_reads);
-    try std.testing.expectEqual(@as(u64, 1), admitted.read_operations);
-    try std.testing.expectEqual(@as(u64, load_limits.max_read_request_size), admitted.read_bytes);
-    probe.endRead(io, 6, 40);
-    probe.endRead(io, 7, 40);
-    probe.endRead(io, 7, 41);
-    const draining = probe.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 1), draining.active_reads);
-    probe.endRead(io, 7, 42);
-    const drained = probe.snapshot(io);
-    try std.testing.expectEqual(@as(usize, 0), drained.active_reads);
-    probe.clear(io);
-}
-
-test "partial source jobs contribute adaptive evidence" {
-    const io = std.testing.io;
-    var probe: SourceProbe = .{};
-    probe.prepare(io, 3, 1);
-    // A full read opens the window; the partial tail read that follows
-    // contributes its actual byte count.
-    probe.beginRead(io, 3, 1);
-    probe.recordRead(io, 3, 1, load_limits.max_read_request_size);
-    probe.endRead(io, 3, 1);
-    probe.beginRead(io, 3, 2);
-    probe.recordRead(io, 3, 2, 256 * 1024);
-    probe.endRead(io, 3, 2);
-    const snapshot = probe.snapshot(io);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.read_operations);
-    try std.testing.expectEqual(@as(u64, 256 * 1024), snapshot.read_bytes);
-}
-
 test "request lifecycle gate holds the DMA stage beyond the read width" {
-    const normal: RequestGateLimits = .init(12, 64, 41, 8);
+    const config: RequestGateLimits.Config = .{ .feasible_width = 64, .retained = 41, .dma_stage = 8 };
+    const normal = config.at(12);
     try std.testing.expectEqual(@as(usize, 12), normal.read);
     try std.testing.expectEqual(@as(usize, 41), normal.lifecycle);
     try std.testing.expectEqual(@as(usize, 13), normal.workers());
@@ -4282,31 +3579,6 @@ test "request lifecycle gate holds the DMA stage beyond the read width" {
     try std.testing.expectEqual(@as(usize, 32), clipped.read);
     try std.testing.expectEqual(@as(usize, 32), clipped.lifecycle);
     try std.testing.expectEqual(@as(usize, 32), clipped.workers());
-}
-
-test "request lifecycle gate waits for every active request" {
-    const io = std.testing.io;
-    var gate: RequestGate = .init(2);
-    try std.testing.expect(gate.acquire(io));
-    try std.testing.expect(gate.acquire(io));
-
-    var drained: std.Io.Event = .unset;
-    var group: std.Io.Group = .init;
-    try group.concurrent(io, struct {
-        fn run(gate_: *RequestGate, io_: std.Io, drained_: *std.Io.Event) void {
-            gate_.waitEmpty(io_);
-            drained_.set(io_);
-        }
-    }.run, .{ &gate, io, &drained });
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!drained.isSet());
-
-    gate.release(io);
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!drained.isSet());
-    gate.release(io);
-    try group.await(io);
-    try std.testing.expect(drained.isSet());
 }
 
 fn buildMesh2x2(
@@ -4329,7 +3601,7 @@ fn buildMesh2x2(
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
-test "adaptive request gate reductions drain without cancelling active requests" {
+test "request gate reductions drain without cancelling active requests" {
     const io = std.testing.io;
     var gate: RequestGate = .init(2);
     try std.testing.expect(gate.acquire(io));
@@ -4357,168 +3629,6 @@ test "adaptive request gate reductions drain without cancelling active requests"
     try std.testing.expectEqual(@as(usize, 0), gate.inUse(io));
 }
 
-test "source read runtime never closes the read gate across decisions" {
-    const io = std.testing.io;
-    var metrics: Metrics = .{};
-    var read_gate: RequestGate = .init(12);
-    var request_gate: RequestGate = .init(13);
-    var probe: SourceProbe = .{ .next_admission = .init(41) };
-    var runtime: SourceRuntime = .{
-        .controller = source_concurrency.Controller.init(
-            .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-            64,
-            64,
-        ),
-        .read_gate = &read_gate,
-        .request_gate = &request_gate,
-        .metrics = &metrics,
-        .probe = &probe,
-        .scheduler = undefined,
-        .pinned_feasible_width = 64,
-        .read_stats = null,
-        .source_bootstrap_enabled = false,
-    };
-
-    // Born busy: the first window is fenced at the next admission and
-    // measures at the initial width with both gates open.
-    runtime.start(io);
-    try std.testing.expect(runtime.measurement == .measuring);
-    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
-    try std.testing.expectEqual(runtime.controller.generation, probe.snapshot(io).epoch);
-    probe.beginRead(io, runtime.controller.generation, 40);
-    try std.testing.expectEqual(@as(usize, 0), probe.snapshot(io).active_reads);
-    probe.beginRead(io, runtime.controller.generation, 41);
-    try std.testing.expectEqual(@as(usize, 1), probe.snapshot(io).active_reads);
-    probe.endRead(io, runtime.controller.generation, 40);
-    probe.endRead(io, runtime.controller.generation, 41);
-
-    // A scored window moves one rung up without touching the gate limit
-    // below the new width; a hold at another width does the same.
-    var expected_generation = runtime.controller.generation;
-    for ([_]f64{ 100, 100, 90, 90 }) |rate| {
-        probe.next_admission.store(probe.next_admission.load(.acquire) + 5, .release);
-        const decision = runtime.controller.observe(.{
-            .completed_requests = @max(@as(usize, 8), runtime.controller.width()),
-            .elapsed_ns = std.time.ns_per_s,
-            .bytes = @intFromFloat(rate * 1024 * 1024),
-            .exercised_width = runtime.controller.width(),
-        });
-        runtime.applyDecision(io, decision);
-        expected_generation += 1;
-        try std.testing.expectEqual(expected_generation, decision.generation);
-        try std.testing.expect(read_gate.currentLimit(io) > 0);
-        try std.testing.expect(request_gate.currentLimit(io) > read_gate.currentLimit(io));
-        try std.testing.expectEqual(decision.width, read_gate.currentLimit(io));
-        try std.testing.expectEqual(decision.width, runtime.reported_width);
-        try std.testing.expectEqual(decision.generation, probe.snapshot(io).epoch);
-        try std.testing.expectEqual(decision.generation, probe.config_epoch.load(.acquire));
-        try std.testing.expectEqual(probe.next_admission.load(.acquire), probe.admission_start);
-        try std.testing.expect((runtime.measurement == .measuring) == (runtime.controller.state == .climbing));
-    }
-    // 12 -> 16 and 24 (not better) -> the downward probe of 8 (10% below the
-    // best) -> hold 12.
-    try std.testing.expect(runtime.controller.state == .holding);
-    try std.testing.expect(runtime.measurement == .inactive);
-    try std.testing.expectEqual(@as(usize, 12), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 13), request_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(u64, 0), runtime.gate_closed_ticks);
-
-    // Backoff while holding: one rung down, gate still open, window fenced
-    // so a fresh admission can be told from delayed old-width feedback.
-    try std.testing.expectEqual(@as(usize, 0), probe.snapshot(io).peak_reads);
-    const backoff = runtime.controller.backoff(false).?;
-    runtime.applyDecision(io, backoff);
-    try std.testing.expectEqual(@as(usize, 8), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 9), request_gate.currentLimit(io));
-    try std.testing.expect(runtime.measurement == .inactive);
-    try std.testing.expect(runtime.controller.backoff(false) == null);
-    probe.beginRead(io, runtime.controller.generation, probe.next_admission.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), probe.snapshot(io).peak_reads);
-    try std.testing.expectEqual(@as(usize, 4), runtime.controller.backoff(true).?.width);
-}
-
-test "source read runtime measures from the reached width after a blind bootstrap" {
-    const io = std.testing.io;
-    var metrics: Metrics = .{};
-    var read_gate: RequestGate = .init(12);
-    var request_gate: RequestGate = .init(13);
-    var probe: SourceProbe = .{ .next_admission = .init(1) };
-    var runtime: SourceRuntime = .{
-        .controller = source_concurrency.Controller.init(
-            .{ .adaptive = .{ .initial = 12, .maximum = 128 } },
-            128,
-            128,
-        ),
-        .read_gate = &read_gate,
-        .request_gate = &request_gate,
-        .metrics = &metrics,
-        .probe = &probe,
-        .scheduler = undefined,
-        .pinned_feasible_width = 128,
-        .read_stats = null,
-        .source_bootstrap_enabled = true,
-    };
-    runtime.start(io);
-    runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
-    try std.testing.expect(runtime.measurement == .blind);
-    try std.testing.expectEqual(@as(usize, 24), read_gate.currentLimit(io));
-    try std.testing.expectEqual(std.math.maxInt(u64), probe.snapshot(io).epoch);
-    runtime.applyBlindGrowth(io, runtime.controller.blindGrow().?);
-    try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
-
-    // The first response opens a measured window at 32 without a drain.
-    probe.next_admission.store(33, .release);
-    runtime.applyDecision(io, runtime.controller.newGeneration());
-    try std.testing.expect(runtime.measurement == .measuring);
-    try std.testing.expectEqual(@as(usize, 32), read_gate.currentLimit(io));
-    try std.testing.expectEqual(@as(usize, 33), request_gate.currentLimit(io));
-    try std.testing.expectEqual(runtime.controller.generation, probe.snapshot(io).epoch);
-    try std.testing.expectEqual(@as(u64, 33), probe.admission_start);
-    try std.testing.expectEqual(@as(usize, 32), source_concurrency.widths[runtime.controller.start_index]);
-}
-
-test "source read runtime scores a window from its first admission on busy time" {
-    const io = std.testing.io;
-    var probe: SourceProbe = .{};
-    var runtime: SourceRuntime = undefined;
-    runtime.controller = source_concurrency.Controller.init(
-        .{ .adaptive = .{ .initial = 12, .maximum = 64 } },
-        64,
-        64,
-    );
-    runtime.probe = &probe;
-    runtime.clock = .{};
-    probe.prepare(io, runtime.controller.generation, 1);
-    // No admission yet: nothing to score however long the window has been open.
-    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), std.math.maxInt(u64)) == null);
-    // Thirteen reads: the first completion opens the window uncounted.
-    for (1..14) |admission| {
-        probe.beginRead(io, runtime.controller.generation, admission);
-    }
-    for (1..14) |admission| {
-        probe.recordRead(io, runtime.controller.generation, admission, load_limits.max_read_request_size);
-        probe.endRead(io, runtime.controller.generation, admission);
-    }
-    const first_read_ns = probe.snapshot(io).window_start_ns;
-    try std.testing.expect(first_read_ns != 0);
-    runtime.clock.tick(first_read_ns, false);
-    // 40 ms busy, 200 ms idle, 40 ms busy: 80 ms of busy time is too short.
-    runtime.clock.tick(first_read_ns + 40 * std.time.ns_per_ms, false);
-    runtime.clock.tick(first_read_ns + 240 * std.time.ns_per_ms, true);
-    const short_ns = first_read_ns + 280 * std.time.ns_per_ms;
-    try std.testing.expectEqual(80 * std.time.ns_per_ms, runtime.clock.busyNs(first_read_ns, short_ns));
-    try std.testing.expect(runtime.evidenceFrom(probe.snapshot(io), short_ns) == null);
-    // Another 20 ms of busy time completes the 100 ms window.
-    const scored_ns = short_ns + 20 * std.time.ns_per_ms;
-    runtime.clock.tick(scored_ns, false);
-    const evidence = runtime.evidenceFrom(probe.snapshot(io), scored_ns).?;
-    try std.testing.expectEqual(100 * std.time.ns_per_ms, evidence.elapsed_ns);
-    try std.testing.expectEqual(@as(usize, 12), evidence.completed_requests);
-    try std.testing.expectEqual(@as(usize, 13), evidence.exercised_width);
-    try std.testing.expectEqual(@as(u64, 12 * load_limits.max_read_request_size), evidence.bytes);
-}
-
 test "the submission that completes a target's bytes carries the last flag" {
     var target: TensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 100 };
     try std.testing.expect(!target.fullySubmitted());
@@ -4538,7 +3648,6 @@ test "the submission that completes a target's bytes carries the last flag" {
 /// batch lifecycle tests. Must not move after `init`.
 const TestPipeline = struct {
     metrics: Metrics = .{},
-    probe: SourceProbe = .{},
     gate: RequestGate,
     pumps: [1]Pipeline.DevicePump = .{.{}},
     pipeline: Pipeline,
@@ -4559,7 +3668,6 @@ const TestPipeline = struct {
             .request_gate = &self.gate,
             .block_size = 64,
             .metrics = &self.metrics,
-            .probe = &self.probe,
             .scheduler = scheduler,
             .pumps = &self.pumps,
             .dma_budget_bytes = 64,
@@ -4731,7 +3839,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     try std.testing.expect(plan.events[0].next_retired == null);
     try std.testing.expect(plan.events[1].next_retired == null);
 
-    // A callback that fires after the last device_pump leaves its context linked;
+    // A callback that fires after the last pump leaves its context linked;
     // the batch's retirement unlinks it before the batch is freed.
     pipeline.retireEvent(&plan.events[0]);
     for (requests) |request| request.finishScheduling();
@@ -4789,10 +3897,14 @@ test "overlapping batches complete under concurrent claims and retirement" {
             fixture.pipeline.retireBatch(batch);
             batch.destroy();
         }
-        try std.testing.expectEqual(@as(usize, 0), scheduler.snapshot(io).remaining_jobs);
+        try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     }
-    fixture.gate.waitEmpty(io);
-    try std.testing.expectEqual(@as(usize, 0), fixture.metrics.pending_source_jobs.load(.acquire));
+    // Every request released its credit before its batch completed; the
+    // workers only hold one while a claim is in progress.
+    scheduler.stop(io);
+    fixture.gate.close(io);
+    try group.await(io);
+    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
 }
 
 fn buildMesh2x2x2(
@@ -4911,6 +4023,12 @@ const DispatchTest = struct {
             .sharding = sharding,
             .output = undefined,
         };
+        const tensor_plan: Planner.TensorPlan = .{
+            .item = &item,
+            .dispatch_spans = dispatch_spans,
+            .device_indices = device_indices,
+            .total = shape.byteSize(),
+        };
         var transfers: std.ArrayList(Batch.Plan.Transfer) = .empty;
         defer transfers.deinit(allocator);
         const physical_bytes = try allocator.alloc(usize, device_count);
@@ -4933,13 +4051,11 @@ const DispatchTest = struct {
                 allocator,
                 &transfers,
                 0,
-                &item,
+                &tensor_plan,
                 source_offset,
                 request_len,
                 source_offset,
                 block_size,
-                dispatch_spans,
-                device_indices,
                 physical_bytes,
             );
             for (transfers.items) |transfer| {

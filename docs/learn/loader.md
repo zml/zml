@@ -69,8 +69,7 @@ per-submission handle and no memory knob.
 | `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind `loadExecute` admission |
 | `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
-| `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
-| `zml/io/source_concurrency.zig` | Pure adaptive source-width policy and its evidence |
+| `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers, transfer completion and the throttle watch |
 | `zml/io/DispatchSpans.zig` | Pure expansion of sharding into source ranges and destination offsets |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
@@ -128,7 +127,12 @@ strategy and the loader's transfer path are separate decisions.
 
 The source profile supplies a minimum read size. The effective request size
 is the larger of that minimum and the selected DMA block, within the supported
-limit. `source_concurrency.Controller` receives completed-read evidence and
-backpressure, then returns a width and measurement generation. Runtime gates
-enforce that width without draining requests on each decision. Request
-lifecycle credits separately cover transfers that still hold host blocks.
+limit. The source width is fixed for the load: `Options.read_parallelism`, or
+the profile's default when null (`limits.defaultReadParallelism`: 16 reads for
+local files, 32 for a high-latency source), clipped to what the host budget
+pins. The direct backend pre-grows that many requests plus the DMA reserve
+before the first read, so nothing maps during a load. A read gate enforces
+the width; request lifecycle credits separately cover transfers that still
+hold host blocks. The one change during a load is a step down: when a remote
+source reports a throttle or timeout, the width is halved once the reads in
+flight at the previous step have returned. Nothing raises it again.

@@ -156,7 +156,8 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 - Profile minima are local/file 8 MiB, HTTP/S3/GCS 16 MiB, and HF 32 MiB.
   Effective source request size is the greater of the profile minimum and
   calibrated DMA block size, capped at the supported 32 MiB maximum.
-- Adaptive and fixed source-width configurations remain supported. The current
+- The source width is fixed per load (fifteenth pass): `Options.read_parallelism`,
+  null for the profile's default of 16 (local) or 32 (high-latency). The current
   `Loader` API differs from the adjacent monorepo's older checkout: store,
   shardings, progress, and profile now belong to loader initialization.
 - `DirectMemoryWriter`, `DirectShardWriter`, and `DynamicBufferPool` are no
@@ -173,7 +174,7 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 - `zml/io.zig` is the public facade. The shared loader front end is in
   `zml/io/loader.zig`, while `zml/io/backend.zig` owns backend selection,
   submission dispatch, and the `LoadSpec` contract. Direct planning,
-  scheduling, adaptive control, transfer lifecycle, and their tests are in
+  scheduling, the throttle watch, transfer lifecycle, and their tests are in
   `zml/io/direct_loader.zig`; platform-owned DMA settings, retained arenas,
   and calibration are in `zml/io/dma_calibration.zig`; pure sharding-to-byte-span
   expansion is in `zml/io/DispatchSpans.zig`.
@@ -181,13 +182,13 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   recovering duplicated state from its active backend. The buffered backend
   retains none of the unused store/options; the direct backend retains only
   the load profile and progress pointer needed after construction.
-- Both backends count a submission's logical bytes only when its await
-  succeeds. Direct diagnostics are batch-owned (publish, seal, first-claim,
-  first-read and completion offsets from loader creation, planned
-  jobs/runs/items/transfers, plan count with total and longest per-file
+- The front end counts a submission's logical bytes when it is retired with
+  execution (`bytesLoaded`; the backends no longer count, fifteenth pass).
+  Direct diagnostics are batch-owned (publish, seal and completion offsets
+  from loader creation, planned jobs/items/transfers, plan count with total
   planning time, VFS delta since publish) and logged once per batch at await;
-  loader-wide totals (reads, DMA submissions, pool high-water/mapped, width)
-  are logged once at `destroy`.
+  loader-wide totals (reads, physical bytes, DMA submissions, pool
+  high-water/mapped, width) are logged once at `destroy`.
 - The compatibility target observed in `~/github/zml/monorepo` is behavioral:
   repeated `loadExecute`, whole-model `load`, multi-source `TensorStore`
   bindings, and cumulative loaded-byte accounting. That checkout is migrated
@@ -357,9 +358,10 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   `divCeil(len, block_size)`; `Job.blocks` is the job's slice) and one
   `EventContext` per planned DMA submission (the transfers' writer count,
   `planned_dma_submissions` on the batch line), handed out in submission
-  order under `metadata_mutex`. A `Job` carries its request and block
-  slots and a `Claim` its plan, so `registerRequest` and `registerBlock`
-  cannot fail and take no lock; a load allocates only per file. The batch
+  order under `metadata_mutex`. A `Claim` names its plan and job index and
+  slices the plan's request, block and transfer arrays from it, so
+  `registerBlock` cannot fail and takes no lock; a load allocates only per
+  file. The batch
   completes when `remaining` (one publish sentinel held until the seal,
   plus one unit per job added as each plan is published) reaches zero and
   sets `done`. A job's unit is released exactly once: at the request's
@@ -383,142 +385,67 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   a pump draining `retired` can race the free: leftover events are
   destroyed, the batch's contexts unlinked, and the completion asserts run
   over the arrays), logs the batch and frees items and plans with their
-  arrays. Nothing drains the gates or the controller per batch and there is
-  no barrier: the controller sees submissions only as activity (below). A
+  arrays. Nothing drains the gates per batch and there is no barrier. A
   pipeline failure is sticky: every open handle's await returns it and later
   submissions are rejected with it. There is no loader-wide context list or
   reap. The buffered backend mirrors this with `BufferedBatch{pending, done}`
   over the `LimitedGroup` read tasks.
-- Source concurrency is adaptive for every direct-loader profile. The old
-  conversion of local/default `.adaptive` to `.fixed = 12` was removed.
-  `high_latency` only permits blind pre-response bootstrap to 24 then 32.
-- Default source configuration remains adaptive initial 12, maximum 128,
-  clipped by pinned-memory feasibility. Twelve is an empirical bootstrap, not
-  a value derived from tensor count, request size, storage queue depth, or
-  bandwidth-delay product.
-- The source ladder is `1,2,4,8,12,16,24,32,48,64,96,128`. Ninety-six is only
-  a ladder rung and was useful as a fixed S3Proxy control; it is not a default
-  or model-derived number.
-- Completed jobs contribute their actual byte count to adaptive evidence,
-  including partial tails. The controller (`SourceReadWidthController`) is
-  climb-and-hold with two states. Climbing: each window (at least 100 ms of
-  busy time, max(8, width) completions, the width exercised) scores the
-  current rung into that rung's mean; a rung that beats the best rate seen
-  by 3% moves the width one rung up (or holds at the pinned clip). One rung
-  that does not is tolerated and the climb carries on to the next
-  (`stall_tolerance`, sixth pass); two in a row end it, and the controller
-  holds at the lowest measured rung at or below the best within 3% of it.
-  When that hold rung is the start rung it probes the rung below once and
-  adopts it only if it beats the best rate by the same 3% -- never on
-  retention, because a rung stepped down to inherits the wider rung's queued
-  transfers and reads high. Holding: evidence changes nothing. A plain load
-  therefore spends four or five windows away from its final width. No
-  tail rule: a window that cannot complete before the load ends leaves the
-  width in place. Metadata can cheaply clip feasibility, but cannot predict
-  a source's latency/bandwidth saturation point, so no job-size-derived
-  initial-width heuristic was added, and a wider start rung was measured and
-  rejected (sixth pass). Confirmed on B70 (holds 12 or 16 at equal load
-  time, 0.67 s against 0.65 s fixed 12); MI300 and CUDA confirmation
-  pending.
-- The adaptive climb stops at the widest rung whose lifecycle credits the
-  pool already holds mapped (`retained - dma_stage`, reported as
-  `width_ceiling`): 32 on gb300-2, 64 on the B70, 32 on the HF profile.
-  Above it a scored window maps a new pinned slab, which the pre-growth
-  above is meant to avoid; one such window on a GB300 read 20.8 GiB/s at
-  width 48 with 136 completions against 400 in a normal window. A width the
-  caller fixed is clipped only by feasibility.
-- Measurement mechanics are separate from width policy. Runtime state is one
-  value—inactive (holding), measuring (climbing) or blind (pre-response
-  bootstrap)—rather than several coupled booleans. Every decision opens a
-  generation: `applyDecision` puts both gates at the width and fences the
-  generation's window at the next admission (`prepareProbe`), so every read
-  is attributed to the width in effect when it was admitted and nothing is
-  ever drained. The measurement layer rejects stale or insufficient evidence
-  before invoking the controller. Probe counters are ordinary fields
-  protected by one mutex; only the source-call configuration generation
-  remains atomic for lock-free worker admission.
-- Two gates separate clean read-measurement generations from complete request
-  lifecycles. All workers compete for lifecycle capacity
+- The source width is fixed for the load (fifteenth pass): the profile's
+  default (`limits.defaultReadParallelism`: 16 for local files, 32 for a
+  high-latency source, from the sweeps recorded in that pass) or the
+  caller's `Options.read_parallelism`, clipped to what the host budget pins
+  (`feasible_width`). The adaptive controller, its measurement windows,
+  generations and fences, the warm-up rule, the blind bootstrap, worker
+  parking and `source_concurrency.zig` are gone; the evidence is in the
+  fifteenth pass.
+- Two gates bound the pipeline. All workers compete for lifecycle capacity
   (`RequestGateLimits`): `min(feasible, max(retained, width + dma_stage))`,
   where `retained` is the pre-grown pinned capacity in requests and
   `dma_stage` the calibrated per-device DMA depth in requests, so the DMA
   stage keeps its depth whatever the read width (fourth pass); the read gate
-  alone limits source calls. A request returns lifecycle credit only after
-  all its DMA children finish.
-- Nothing closes the read gate. A changed width sets the new limit and the
-  reads admitted under the previous generation return at their own pace,
-  excluded from the new window by the fence. Source backpressure has two
-  classes, read from the profile's stats side channel every control tick
-  (`ReadStatsCursor.takeBackpressure` returns `{throttle, transient}`; the
-  local file backend has no side channel and never sees either). Throttle (a
-  throttle or timeout moved): `backoff` lowers the width one rung, clips the
-  ladder there and holds. Transient (retries, connection failures or other
-  5xx moved without a throttle): `stepDownTransient` lowers one rung with
-  the ceiling and state unchanged; a climbing controller restarts its climb
-  at that rung (it becomes the best rung and its mean is forgotten, so the
-  next window there is a fresh climb sample and the width can climb back
-  above the step), a holding one keeps holding. Both are limited to once per
-  generation: a further sample in the generation a step opened is ignored
-  unless a read admitted under that generation has begun, so delayed
-  old-width feedback cannot ratchet through several rungs. A single early
-  500 therefore costs one rung and one window instead of pinning the width.
-  `gate_closed_ticks` in the loader summary counts control ticks that found
-  the read gate at 0 with jobs unclaimed and is 0 by construction.
-- A window opens at its generation's first completed read, which is not
-  counted; from then on completions arrive at the source's steady rate, so
-  the window's bytes over its busy time is the true throughput even on a
-  high-latency source (a clock started at the first admission charged the
-  whole round trip and reported 450 MiB/s for a width that delivers 600).
-  The window clock counts busy time. The 10/25 ms control tick still runs
-  while workers sleep in retries (it samples backpressure); a tick that finds
-  nothing unclaimed, no pending source job and no read permit held, after
-  the window opened, charges the interval since the previous tick to idle,
-  and the window's elapsed time excludes it. Windows therefore span
-  submissions: many short submissions jointly complete one window, an idle
-  gap neither scores nor resets it, and the controller never learns that
-  batches exist. `create` fences the first window before the workers start
-  (born busy). Every scored window logs `source width window` (generation,
-  width, rate, busy time, completions, exercised width, samples, next width,
-  state).
-- Pinned pre-growth happens in calibration, before any load: after
-  selecting the block, `benchTransfer` grows every NUMA pool so it can lease
-  `(32 + 1)` requests of `max(block, 16 MiB)` (`preallocated_source_width`,
-  `preallocated_request_size`), clipped to the mapped ceiling with room for
-  the feed reserves; 528 MiB for blocks up to 16 MiB. The rungs the
-  controller climbs through never map a slab inside a load (146-230 ms of
-  hipHostMalloc on MI300X, which at first sat inside the measured load when
-  the growth ran at loader creation). `DirectLoader.create` only grows the
-  remainder for larger requests (a 32 MiB HF profile with 8 MiB blocks adds
-  528 MiB in about 90 ms on B70). A dedicated pregrowth line logs `retained`,
-  `pregrown` and `pregrowth_ms` immediately after the growth completes.
-- Worker tasks are spawned on demand (`WorkerPool`): the decision that opens
-  the gates spawns `min(lifecycle, width + 1)` workers (a worker hands its
-  request to the DMA stage and claims the next, so credits beyond the read
-  width need no workers), and a raised width spawns more, up to the
-  configured maximum. Workers are never retired, but one whose index is
-  beyond what the current width needs parks between jobs (fifth pass):
-  after a rung steps down, the workers spawned for the wider rung would
-  otherwise queue at the credit gate for the rest of the load and inflate
-  the reported credit wait without moving a byte. On one MI300X, 128
-  persistent workers cost about 7% at a held width of 12 and made every rung
-  measure slower (width 16: 21 GiB/s with 128 tasks, 36 GiB/s with 16); 13
-  workers serve width 12.
+  alone limits source calls, at the width. A request returns its lifecycle
+  credit only after all its DMA children finish.
+- The one width change during a load is a step down (`ThrottleWatch`): a
+  profile with a statistics side channel (the remote VFS backends; the local
+  backend has none and runs no watch) is sampled every 25 ms, also while
+  the workers sleep in the backend's retries, and a throttle or timeout
+  halves the width; both gates take the new limits and requests admitted
+  under the old width keep their permits. The next step waits until as many
+  reads have completed as were in flight at the previous one, so the old
+  width's delayed feedback cannot ratchet through several steps. Retries,
+  connection failures and other 5xx are the backend retry loop's business
+  and change nothing: they say nothing about the width, and nothing raises
+  it again.
+- Pinned pre-growth happens at loader creation, before any load: the DMA
+  reserve (calibrated depth x devices) plus `width + 1` source requests,
+  clipped to the mapped ceiling with the reserve fitted first (264 MiB for
+  width 16 with 8 MiB requests on the CPU platform, against the 528 MiB the
+  former 32-wide set took). Nothing maps a slab inside a load (146-230 ms
+  of hipHostMalloc on MI300X when it did). A dedicated pregrowth line logs
+  `retained`, `pregrown` and `pregrowth_ms`.
+- `min(lifecycle, width + 1)` worker tasks are spawned at creation and
+  never retired or parked: a worker hands its request to the DMA stage and
+  claims the next, so credits beyond the read width need no workers of
+  their own, and after a throttle step the surplus workers wait at the read
+  gate (only remote loads step down, where a waiting worker costs nothing
+  measurable; 128 persistent workers had cost 7% on one MI300X, which is why
+  the count follows the width).
 - DMA depth is fixed at eight blocks per device by default after calibration
   work showed adaptive DMA width added substantial complexity and little
   load value. The pump enforces it as a byte budget
   (`max_in_flight_per_device x block_size`) with a cap of 64 pieces in
   flight per device, so a block of small tensors keeps the calibrated bytes
   moving (fourth pass). There is no global DMA parallelism cap.
-- DMA event lifetime (`retire_events_early`, enabled): a ready callback
-  hands its `EventContext` to the pipeline's intrusive `retired` stack
-  under `metadata_mutex`, after its own `eventCompleted` (and any pump it
-  ran) and before `block.complete()`; `pump` destroys the stack at the top
-  of every iteration under the lock, so an event is destroyed by a later
-  pump or by `retireBatch`, never inside its own callback. Live PJRT events
-  are bounded by devices x 64 plus one pump batch instead of a submission's
+- DMA event lifetime: a ready callback hands its `EventContext` to its
+  device pump's intrusive `retired` stack under that pump's mutex, after
+  its own `eventCompleted` (and any pump it ran) and before
+  `block.complete()`; `pump` destroys the stack at the top of every
+  iteration under the lock, so an event is destroyed by a later pump or by
+  `retireBatch`, never inside its own callback. Live PJRT events are
+  bounded by devices x 64 plus one pump batch instead of a submission's
   transfer count. Checked against the oneAPI plugin under sustained load
-  with the playground's `ZML_LOAD_EVENT_RETIRE_CHECK` (PLAN.md task 9); the
-  constant turns it off.
+  (PLAN.md task 9); the `retire_events_early` switch that could turn it off
+  went in the fifteenth pass.
 
 ### DMA memory and calibration
 
@@ -568,8 +495,8 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   pre-grown working set and load-time demand - and it holds the mapped-ceiling
   check; `ensureLoadBlockReserves` and `ensureSourceWorkingSet` only compute
   per-pool block targets and grow independent nodes concurrently. Workspace
-  validation, arena reserves, worker scratch, and adaptive pinned feasibility
-  use the exact maximum
+  validation, arena reserves, worker scratch, and pinned feasibility use the
+  exact maximum
   coalesced-job bound `ceil(max_job_len / block_size)`; device or writer count
   does not inflate the blocks required by one source job.
 
@@ -3264,6 +3191,142 @@ Implements the thirteenth-pass decision on top of `2f170c75 simplification`
   under CPU contention; the total still improves. If CPU pack loads ever
   matter, the executable's 3.8x temporaries are the first thing to fix.
 
+## Fifteenth pass: fixed source width and the review's simplifications (2026-09-10)
+
+Trigger: a review of the loader code, `direct_loader.zig` in particular,
+asked what could be simplified. The adaptive width machinery was the
+largest block whose recorded evidence did not justify it; the user asked
+to remove it with the best fixed values the recordings support and to apply
+the rest of the review. Uncommitted on top of the fourteenth pass.
+
+### The width evidence, and the values chosen
+
+Every width measurement in this file, by source class and host:
+
+| source, host | widths | result |
+|---|---|---|
+| local, B70 oneAPI, 32 MiB requests, Llama | 12 / 16 / 24 / 32 / 48 / 64 | 21.3 / 20.7 / 18.9 / 17.3 / 15.1 / 13.2 GiB/s: knee at 12, 24 costs 11% |
+| local, B70, 8 MiB requests | 4 / 8 / 12 / 16 / 24 / 32 / 48 | 19.5 / 18.4 / 23.0 / 23.0 / 22.5 / 21.9 / 21.9 GiB/s: 12 and 16 tie |
+| local, one MI300X, Llama | fixed 12 / fixed 24 / adaptive (24) | 0.41-0.44 / 0.62-0.67 / 0.90-0.97 s; 16 tasks 0.424, 24 0.476, 32 0.572, 128 0.61-0.68 s |
+| local, RTX 5090 host, Llama | adaptive / fixed 12 / fixed 16 | 0.50-0.55 / 0.49-0.50 / 0.46-0.48 s |
+| local, gb300-2, DeepSeek (sixth pass) | 8 / 12 / 16 / 24 / 32 / 48 | 36.9 / 44.8 / 46.7 / 48.2 / 48.8 / 47.3 GiB/s: one 8% plateau from 12, 16 within 5% of the best |
+| local, gb300-2, DeepSeek, adaptive start rung | 12 / 24 / 32 | 3.37 / 3.43 / 3.23 s (four rounds); those loads ended at 48, 64 and 96 |
+| remote, hf:// Qwen3.5-4B, buffered | 12 / 32 / 64 in flight | 37.3 / 20.8 / 20.8 s |
+| remote, hf:// Qwen3.5-4B, direct | fixed 32 (blind bootstrap) | 10.9 / 16.3 s against 48 s buffered the same hour |
+| remote, hf:// Qwen3.5-9B, direct adaptive | held 24 / 32 | 20.6-23.9 s, `width_ceiling=32` |
+| remote, real AWS S3, 16 MiB requests | 24 to 128 | within 0.7%; latency and pinned memory rise with the width |
+
+What the controller added on top of a good fixed width: locally nothing
+outside noise (the sixth pass measured the gb300-2 plateau at 8% wide
+against 13 to 15% of within-load spread, and the controller settled at 12
+in some loads and at 24 or 32 in the rest, 5% above the fixed-32 oracle);
+remotely it climbed to the 32 its blind bootstrap started at. Its cost was
+about 900 lines carrying the subtlest invariants in the tree (generations,
+admission fences, the busy clock, the warm-up rule, parking).
+
+Chosen: **16 for local sources**, never more than 5% from the recorded
+optimum of any host (B70 12 to 16, MI300X 12, RTX 5090 16, GB300 24 to 32;
+12 would give up 5% on the RTX 5090 host and 8% on gb300-2), and **32 for
+high-latency sources** (hf:// reads 32 and 64 alike, AWS is flat from 24,
+and 32 x 32 MiB requests pin 1 GiB). `limits.zig` carries the constants
+with this summary.
+
+### The change
+
+- `Loader.Options.read_parallelism: ?usize = null` (the profile's default
+  when null), validated against `limits.max_read_parallelism`; the
+  `Parallelism` union and `zml.io.Parallelism` are gone; the backend
+  `Config` carries the resolved `usize`. The playground's
+  `ZML_LOAD_READ_PARALLELISM` overrides it (`ZML_LOAD_FIXED_READ_PARALLELISM`
+  and `ZML_LOAD_READ_INITIAL_PARALLELISM` are gone).
+- `direct_loader.zig`: `SourceRuntime`, `SourceProbe`, `BusyWindowClock`,
+  `WorkerPool` (parking), the generation and admission fields of
+  `ReadRequest`, `gate_closed_ticks`, `RequestGate.waitEmpty`/`currentLimit`/
+  `drained`, `shouldBootstrapSource`, `preallocated_source_width` and
+  `source_concurrency.zig` are deleted (5051 -> 4167 lines with the tests;
+  the working copy is 688 insertions against 2362 deletions). What remains
+  of width control is `ThrottleWatch` (halve on a throttle or timeout, the
+  settle rule, a 25 ms tick, only with a stats side channel) over
+  `ReadStatsCursor.takeThrottle`. Workers are spawned once at creation; the
+  pre-growth is `width + 1` requests; `host_memory.growthFreeRequestWidth`
+  (the climb ceiling) is gone.
+- The review's mechanical items: batch items are one `[]Item` allocation
+  (`Item.deinit(allocator, api)`; `Loader.destroyBatch` releases the device
+  state, `Batch.destroy` the memory); `retire_events_early` and its dead
+  branch are gone; `RequestGateLimits.Config.at(width)` replaces four
+  copies of the same call; `workers_started`/`controller_started` are gone
+  (`Io.Group.await` on a group that never spawned returns at once);
+  `Scheduler.remainingJobs` replaces the one-field `Snapshot`;
+  `ReadRequest.run` asserts the planner's invariants instead of
+  re-validating them; `Planner.Config{device_count, block_size,
+  request_size, alignment}` threads through `publishFiles`, `preparePlan`
+  and `maximumJobLen`, and `Planner.TensorPlan` carries the item into
+  `appendTransfers`; `Planner.Job` and `finalJob` are gone, `Plan.Job`
+  holds index ranges and `Scheduler.Claim{batch, plan, index}` slices the
+  request, blocks and transfers from them; `Plan.source_slot` replaces the
+  per-job copy; `TensorTransfer.init(direct, item)` and `deinit(allocator,
+  api)` drop the per-tensor allocator and platform copies; `first_claim_at`,
+  `first_read_ns`, `longest_planning_ns`, `source_runs` and
+  `pending_source_jobs`/`source_finished` are gone; `checkOpen` is private.
+- `bytes_loaded` moved to the front end (`Loader.bytes_loaded`, added in
+  `retire`); `Backend.bytesLoaded`, `Submission.commitBytes` and both
+  backends' counters are gone; the direct summary logs `read_bytes`
+  (physical) instead.
+- The buffered backend (TPU, neuron, metal, untestable here) takes the same
+  width for its reads and permits (16 local, 32 remote, against the former
+  12 and 128) but keeps its host staging at `min(width, 12)` tensors
+  (`staging_tensors`), the former start width, so the staging bound of
+  12 x largest tensor is unchanged; 32 reads is the plateau the hf://
+  measurements put at 32 and 64 alike.
+- `loader.zig`: `admit` is one loop over `measureFit` (`unmeasured`, `fits`,
+  `exceeds`), and an executable submission is admitted as soon as nothing
+  executable is pending, measured or not: a pending bulk load frees
+  nothing, so retiring it first only delayed the pack's reads (the CPU peak
+  is the same either way). `execute_admission.zig` keeps `room`,
+  `roomPerDevice` and `admits`; `Decision`, `decide`, `addPending` and
+  `subPending` are gone. The scratch words are a field;
+  `BoundExecutable.deinit` is no longer idempotent (nothing calls it twice).
+  The read-failure test now fails through a `loadExecute` of the missing
+  tensor retired by the next `loadExecute`, deterministic on both backends.
+- Docs: `docs/learn/loader.md` (width paragraph, implementation map), the
+  README and mnist callers (`.read_parallelism = 1`).
+
+### Verification
+
+- `bazel test //zml:test //vfs:test` pass; `bazel build //examples/io
+  //examples/llm //examples/mnist` pass; `zig fmt --check` clean. New unit
+  tests: the throttle watch (halves once, ignores retries, waits for the
+  in-flight reads to settle, floors at one) and the cursor's throttle-only
+  delta.
+- B70 CPU (`Qwen3.5-4B` sharded, two packs of 16, `ZML_LOAD_CHECK=64`):
+  `source_width=16, lifecycle_credits=33, workers=17`, pregrown 264 MiB
+  (528 MiB before), one serial retire, `pack check: ok`, `load check: ok`,
+  `Loaded weights` 3.64 s against 3.58 / 3.73 s in the fourteenth pass.
+- gb300-2 GPU 1 (`CUDA_VISIBLE_DEVICES=1`; GPU 0 held another user's job at
+  98%, load average 10 to 18; Llama-3.1-8B-Instruct replicated, warm, the
+  `zml-directio` worktree carrying this tree, script `~/zml-fifteenth-run.sh`,
+  logs `~/zml-directio-logs/fw_*.log`): `source_width=16, lifecycle_credits=25,
+  workers=17`, pinned 400 MiB mapped and high-water (656 MiB with the former
+  32-wide set, as the width-32 run below shows), no throttle watch (local
+  profile). Loader `elapsed`:
+
+  | run | loader elapsed | wall `Loaded weights` |
+  |---|---|---|
+  | packs 64 x 16 + bulk (3) | 0.265 / 0.325 / 0.286 s | 387 / 422 / 384 ms |
+  | bulk only (3) | 0.281 / 0.278 / 0.268 | 379 / 375 / 1279 |
+  | bulk only, `ZML_LOAD_READ_PARALLELISM=12` | 0.277 | 374 |
+  | bulk only, `ZML_LOAD_READ_PARALLELISM=32` | 0.276 | 380 |
+  | fourteenth pass, packs + bulk (6) | 0.261 to 0.327 | 364 to 638 |
+  | fourteenth pass, bulk only (3) | 0.259 / 0.260 / 0.264 | 361 / 361 / 365 |
+
+  Parity with the adaptive tree on a busier host, and the width is flat
+  (12, 16 and 32 within 2%), as the sixth-pass sweep said. `pack check: ok`
+  in every packed run, `load check: ok` (`ZML_LOAD_CHECK=16`, 5 of 67
+  tensors). The 1.279 s wall of the third bulk run is DMA calibration on
+  the loaded host choosing 4 MiB blocks (8 MiB requests, 1918 reads); the
+  loader's own elapsed stayed at 0.268 s, the calibration-robustness item
+  of the fourteenth pass again.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
@@ -3294,10 +3357,8 @@ Third-pass items left open; `PLAN.md` holds the checklist.
 - Fifth-pass follow-ups: the controller rule for DMA-bound windows is the
   sixth pass; the `toSliceAlloc` sub-byte shard placement and the pump-side
   race with an errored manager are still open.
-- Sixth-pass follow-up: the remaining 5% on gb300-2 needs a controller that
-  keeps sampling for the whole load (see the sixth-pass limits). The B70,
-  CUDA and MI300 trees have not been re-measured against the width ceiling;
-  the B70 was (`width_ceiling=64`, no behaviour change).
+- Sixth-pass follow-up (a controller that keeps sampling for the whole
+  load): moot since the fifteenth pass, the width is fixed per profile.
 - The 8% smallest-near-peak block rule is fragile on a busy host (it chose
   2 MiB on MI300 while degraded). Calibration caching per host/plugin, or
   re-screening when the measured rate is implausibly low, remains open.

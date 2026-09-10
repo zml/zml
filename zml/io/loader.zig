@@ -25,7 +25,6 @@ const load_log = std.log.scoped(.@"zml/io/load");
 const dma_calibration = @import("dma_calibration.zig");
 const limits = @import("limits.zig");
 const TensorStore = @import("TensorStore.zig");
-pub const Parallelism = @import("source_concurrency.zig").Parallelism;
 const Backend = backend.Backend;
 const LoadSpec = backend.LoadSpec;
 const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, void);
@@ -51,6 +50,8 @@ pub const Loader = struct {
     delivered: DeliveryMap = .empty,
     /// The first error a retire returned; every later call reports it.
     failure: ?anyerror = null,
+    /// Logical bytes of every submission retired with execution.
+    bytes_loaded: usize = 0,
     /// Whether admission can measure the room: the backend counts its
     /// allocations and every device reported an allocator limit at init.
     /// Otherwise `loadExecute` retires everything pending before it
@@ -72,6 +73,8 @@ pub const Loader = struct {
     scratch: Scratch,
 
     const Scratch = struct {
+        /// The five `u64` slices below, one allocation.
+        words: []u64,
         stats: []admission.DeviceStats,
         room: []u64,
         allocated: []u64,
@@ -83,17 +86,12 @@ pub const Loader = struct {
     pub const Options = struct {
         pub const auto: Options = .{};
 
-        /// Concurrent positional source requests.
-        /// Twelve is an empirical bootstrap, not derived from tensor count
-        /// or bandwidth-delay product. On one GB300, starting warm DeepSeek-V4-Flash
-        /// at 12/24/32 averaged 3.37/3.43/3.23 s; a wider start also drove
-        /// probes into slab growth, so it was not adopted as a general default.
-        /// High-latency profiles can bootstrap before the first response
-        /// without changing this local default.
-        read_parallelism: Parallelism = .{ .adaptive = .{
-            .initial = 12,
-            .maximum = limits.max_read_parallelism,
-        } },
+        /// Concurrent source reads, at most `limits.max_read_parallelism`.
+        /// Null takes the profile's default (`limits.defaultReadParallelism`:
+        /// 16 locally, 32 on a high-latency source), clipped to what the
+        /// host budget pins. The direct backend halves it when the source
+        /// throttles; nothing raises it during a load.
+        read_parallelism: ?usize = null,
         /// Model-wide source tuning prepared from the VFS path. The default is
         /// generic for callers that do not have an explicit VFS profile.
         load_profile: VFS.LoadProfile = .default,
@@ -139,7 +137,7 @@ pub const Loader = struct {
     ) !Loader {
         try validateOptions(opts);
         const selected = try Backend.init(allocator, io, platform, .{
-            .read_parallelism = opts.read_parallelism,
+            .read_parallelism = opts.read_parallelism orelse limits.defaultReadParallelism(opts.load_profile.high_latency),
             .load_profile = opts.load_profile,
             .dma = opts.dma,
             .max_host_bytes = opts.max_host_bytes,
@@ -171,6 +169,7 @@ pub const Loader = struct {
             .submitted_bytes = submitted_bytes,
             .pending_execution = pending_execution,
             .scratch = .{
+                .words = words,
                 .stats = stats,
                 .room = words[0..devices],
                 .allocated = words[devices .. 2 * devices],
@@ -296,7 +295,7 @@ pub const Loader = struct {
 
     /// Logical bytes of every submission retired with execution so far.
     pub fn bytesLoaded(self: *const Loader) usize {
-        return self.backend.bytesLoaded();
+        return self.bytes_loaded;
     }
 
     /// Awaits every pending submission without running executables (their
@@ -310,15 +309,18 @@ pub const Loader = struct {
         self.allocator.free(self.submitted_bytes);
         self.allocator.free(self.pending_execution);
         self.allocator.free(self.scratch.stats);
-        self.allocator.free(self.scratch.room.ptr[0 .. 5 * self.platform.devices.len]);
+        self.allocator.free(self.scratch.words);
         self.backend.destroy();
         self.* = undefined;
     }
 
     /// Fills `execution` with the submission's output and temporary bytes
-    /// per device, then retires pending submissions until the submission
-    /// fits. Without memory measurement everything pending is retired: one
-    /// executable submission in flight, the old synchronous order.
+    /// per device, then retires pending submissions, oldest first, until
+    /// the submission fits the measured room or nothing executable is
+    /// pending: a bulk load frees nothing, and once nothing can be retired
+    /// for it the submission is admitted whatever its size. Without memory
+    /// measurement one executable submission is in flight at a time, the
+    /// old synchronous order.
     fn admit(self: *Loader, executables: []const BoundExecutable, execution: []u64) !void {
         const inputs = self.scratch.inputs;
         @memset(inputs, 0);
@@ -341,31 +343,18 @@ pub const Loader = struct {
         }
         const cost: admission.Cost = .{ .inputs = inputs, .execution = execution };
         var retired: usize = 0;
-        if (self.memory_supported) {
-            while (self.pending.len != 0) {
-                if (!self.readRoom()) break;
-                switch (admission.decide(self.scratch.room, self.pending_execution, cost, self.pending_executes)) {
-                    .admit => {
-                        if (!admission.admits(self.scratch.room, self.pending_execution, cost) and !self.oversized_logged) {
-                            self.oversized_logged = true;
-                            load_log.warn("executable submission exceeds the device room alone: inputs={Bi:.2} execution={Bi:.2} room={Bi:.2} (device 0); admitted anyway", .{
-                                inputs[0],
-                                execution[0],
-                                self.scratch.room[0],
-                            });
-                        }
-                        break;
-                    },
-                    .retire_oldest => {
-                        try self.retireOldest(true);
-                        retired += 1;
-                    },
-                }
-            }
+        var fit = self.measureFit(cost);
+        while (fit != .fits and self.pending_executes != 0) : (retired += 1) {
+            try self.retireOldest(true);
+            fit = self.measureFit(cost);
         }
-        if (!self.memory_supported or self.pending.len != 0 and self.pending_executes != 0 and !self.readRoom()) {
-            // No measurement: the old order, one executable submission at a time.
-            while (self.pending.len != 0) : (retired += 1) try self.retireOldest(true);
+        if (fit == .exceeds and !self.oversized_logged) {
+            self.oversized_logged = true;
+            load_log.warn("executable submission exceeds the device room alone: inputs={Bi:.2} execution={Bi:.2} room={Bi:.2} (device 0); admitted anyway", .{
+                inputs[0],
+                execution[0],
+                self.scratch.room[0],
+            });
         }
         self.admission_retires += retired;
         if (retired != 0) {
@@ -379,6 +368,15 @@ pub const Loader = struct {
                 execution[0],
             });
         }
+    }
+
+    const Fit = enum { unmeasured, fits, exceeds };
+
+    /// Whether `cost` fits beside the pending executions in the room the
+    /// devices report now.
+    fn measureFit(self: *Loader, cost: admission.Cost) Fit {
+        if (!self.memory_supported or !self.readRoom()) return .unmeasured;
+        return if (admission.admits(self.scratch.room, self.pending_execution, cost)) .fits else .exceeds;
     }
 
     /// Refreshes the per-device room; false when a device stopped answering.
@@ -435,7 +433,7 @@ pub const Loader = struct {
         for (self.submitted_bytes, placed) |*submitted, bytes| submitted.* +|= bytes;
         self.submissions += 1;
         if (executables.len != 0) {
-            admission.addPending(self.pending_execution, execution);
+            for (self.pending_execution, execution) |*pending, bytes| pending.* +|= bytes;
             self.pending_executes += 1;
             self.execute_submissions += 1;
         }
@@ -457,13 +455,13 @@ pub const Loader = struct {
         try oldest.submission.await();
         if (!execute) return;
         for (oldest.executables) |*executable| try executable.execute(self.allocator, self.io);
-        oldest.submission.commitBytes(oldest.logical_bytes);
+        self.bytes_loaded += oldest.logical_bytes;
     }
 
     fn release(self: *Loader, oldest: *PendingSubmission) void {
         for (oldest.executables) |*executable| executable.deinit(self.allocator);
         if (oldest.executables.len != 0) {
-            admission.subPending(self.pending_execution, oldest.execution);
+            for (self.pending_execution, oldest.execution) |*pending, bytes| pending.* -= bytes;
             self.pending_executes -= 1;
         }
         self.allocator.free(oldest.executables);
@@ -601,10 +599,9 @@ fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []c
 
 fn validateOptions(opts: Loader.Options) !void {
     _ = try limits.effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
-    const initial = opts.read_parallelism.initial();
-    const maximum = opts.read_parallelism.maximum();
-    if (initial == 0 or maximum < initial or maximum > limits.max_read_parallelism)
-        return error.InvalidLoadParallelism;
+    if (opts.read_parallelism) |width| {
+        if (width == 0 or width > limits.max_read_parallelism) return error.InvalidLoadParallelism;
+    }
 }
 
 /// One executable of a `loadExecute` submission and the input shells its
@@ -652,11 +649,9 @@ const BoundExecutable = struct {
     }
 
     /// Frees the inputs; a shell the loader never wrote owns no shards.
-    /// Idempotent.
     fn deinit(self: *BoundExecutable, allocator: std.mem.Allocator) void {
         for (self.inputs) |*input| input.deinit();
         allocator.free(self.inputs);
-        self.inputs = &.{};
     }
 };
 
@@ -782,7 +777,7 @@ const LoaderTestFixture = struct {
     const backends = [_]BackendKind{ .direct, .buffered };
 
     fn loader(self: *LoaderTestFixture, allocator: std.mem.Allocator, io: std.Io, kind: BackendKind) !Loader {
-        const opts: Loader.Options = .{ .read_parallelism = .{ .fixed = 2 } };
+        const opts: Loader.Options = .{ .read_parallelism = 2 };
         return switch (kind) {
             .direct => try Loader.init(allocator, io, self.platform, opts),
             .buffered => buffered: {
@@ -790,7 +785,7 @@ const LoaderTestFixture = struct {
                     allocator,
                     io,
                     self.platform,
-                    opts.read_parallelism,
+                    opts.read_parallelism.?,
                     opts.load_profile,
                 );
                 errdefer selected.destroy();
@@ -990,12 +985,9 @@ test "loader read failure fails later submissions and awaitAll" {
         const model: Model = .{ .value = fixture.value };
         var buffers = try mem.bufferize(allocator, Model, &model);
         defer mem.deinitBufferized(allocator, Model, &buffers);
-        const Broken = struct { missing: Tensor };
-        const broken_model: Broken = .{ .missing = fixture.missing };
-        var broken_buffers = try mem.bufferize(allocator, Broken, &broken_model);
-        defer mem.deinitBufferized(allocator, Broken, &broken_buffers);
 
-        try loader.load(Broken, &broken_model, &broken_buffers, &fixture.store, &.{}, null);
+        var broken_output: Buffer = undefined;
+        try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.missing, &broken_output)}, null);
         var never_written: Buffer = undefined;
         // Serial admission retires the broken submission first and reports it.
         try std.testing.expectError(error.FileNotFound, loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null));

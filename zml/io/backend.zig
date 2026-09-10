@@ -11,10 +11,9 @@ const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
 
-pub const Parallelism = @import("source_concurrency.zig").Parallelism;
-
 pub const Config = struct {
-    read_parallelism: Parallelism,
+    /// Concurrent source reads; the front end resolved the profile default.
+    read_parallelism: usize,
     load_profile: VFS.LoadProfile,
     dma: dma_calibration.Options,
     max_host_bytes: usize,
@@ -64,7 +63,7 @@ pub const Backend = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        read_parallelism: Parallelism,
+        read_parallelism: usize,
         load_profile: VFS.LoadProfile,
     ) !Backend {
         return .{ .buffered = try buffered_loader.Loader.create(
@@ -80,13 +79,6 @@ pub const Backend = union(enum) {
         return switch (self) {
             .direct => |direct| direct.calibration,
             .buffered => null,
-        };
-    }
-
-    pub fn bytesLoaded(self: Backend) usize {
-        return switch (self) {
-            .direct => |direct| direct.bytes_loaded.load(.acquire),
-            .buffered => |buffered| buffered.bytes_loaded.load(.acquire),
         };
     }
 
@@ -128,12 +120,5 @@ pub const Submission = union(enum) {
             .direct => |direct| direct.loader.awaitBatch(direct.batch),
             .buffered => |buffered| buffered.loader.awaitBatch(buffered.batch),
         };
-    }
-
-    pub fn commitBytes(self: Submission, logical_bytes: usize) void {
-        switch (self) {
-            .direct => |direct| direct.loader.commitBytes(logical_bytes),
-            .buffered => |buffered| buffered.loader.commitBytes(logical_bytes),
-        }
     }
 };

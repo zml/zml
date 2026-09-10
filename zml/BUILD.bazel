@@ -104,7 +104,6 @@ zig_library(
         "io/limits.zig",
         "io/backend.zig",
         "io/loader.zig",
-        "io/source_concurrency.zig",
         "io/TensorStore.zig",
         "kernel.zig",
         "logo.zig",

@@ -562,17 +562,6 @@ pub const BlockPool = struct {
         return self.capacity / blocks_per_request;
     }
 
-    /// Requests of `blocks_per_request` blocks that can be leased without
-    /// mapping a slab and without eating into the DMA stage reserve.
-    /// Capacity and reserve both cover the whole shared pool. The former
-    /// per-node design subtracted an all-device reserve from one node's
-    /// capacity and incorrectly clipped eight MI300X to width one; do not
-    /// mix those scopes if placement changes again.
-    pub fn growthFreeRequestWidth(self: *const BlockPool, blocks_per_request: usize) !usize {
-        if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
-        return (self.capacity -| self.reserve) / blocks_per_request;
-    }
-
     /// The largest request width the pool could support if each request
     /// consumes `blocks_per_request` blocks. Arena tails count against the
     /// mapped-byte cap but do not contribute usable blocks.
@@ -1051,44 +1040,6 @@ test "BlockPool potential request width accounts for retained arena tails" {
     try std.testing.expectEqual(@as(usize, 3), try pool.potentialRequestWidth(2));
     try std.testing.expectEqual(@as(usize, 0), try pool.potentialRequestWidth(8));
     try std.testing.expectError(error.InvalidRequestBlockCount, pool.potentialRequestWidth(0));
-}
-
-test "BlockPool growth-free width subtracts the DMA stage" {
-    const allocator = std.testing.allocator;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 2 * 128 * 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(128 * 64);
-
-        // Eight devices at eight in-flight blocks each reserve 64 of 128 blocks.
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 64);
-    };
-    defer pool.deinit();
-
-    try std.testing.expectEqual(@as(usize, 128), try pool.retainedRequestWidth(1));
-    try std.testing.expectEqual(@as(usize, 64), try pool.growthFreeRequestWidth(1));
-    try std.testing.expectEqual(@as(usize, 32), try pool.growthFreeRequestWidth(2));
-    try std.testing.expectError(error.InvalidRequestBlockCount, pool.growthFreeRequestWidth(0));
-}
-
-test "BlockPool growth-free width saturates when the reserve covers the pool" {
-    const allocator = std.testing.allocator;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 16 * 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(2 * 64);
-
-        // The pool has not grown to its reserve yet, which is allowed only while
-        // the mapped-byte budget can still cover the deficit.
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 5);
-    };
-    defer pool.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), try pool.growthFreeRequestWidth(1));
-    try std.testing.expectEqual(@as(usize, 2), try pool.retainedRequestWidth(1));
-    try std.testing.expectEqual(@as(usize, 16), try pool.potentialRequestWidth(1));
 }
 
 test "BlockPool rejects requests that can never fit without leasing" {

@@ -1,5 +1,5 @@
 //! Whole-tensor staging for platforms that use Buffer.from.
-//! The shared front end owns source lookup, executable bindings, and handles.
+//! The shared front end owns source lookup, executable bindings and admission.
 const std = @import("std");
 const stdx = @import("stdx");
 const VFS = @import("vfs");
@@ -11,7 +11,13 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const backend = @import("backend.zig");
 const LoadSpec = backend.LoadSpec;
-const Parallelism = backend.Parallelism;
+
+/// Concurrent whole tensors staged on the host: the byte budget is this
+/// many times the largest tensor submitted. Kept at the former start width
+/// rather than the read width, which on a high-latency profile would
+/// triple the host staging for nothing this path can use (a tensor already
+/// splits its reads across the width).
+const staging_tensors: usize = 12;
 
 pub const Loader = struct {
     allocator: std.mem.Allocator,
@@ -30,28 +36,19 @@ pub const Loader = struct {
     /// transfers keep permits free, lost time to helpers it had no use for.
     tensor_workers: usize,
     permits: ReadPermits,
-    /// Concurrent tensors the caller asked for; sizes the staging budget.
+    /// Concurrent tensors; sizes the staging budget.
     staging_slots: usize,
     admission: StagingAdmission = .{},
     staging: StagingPool = .{},
-    bytes_loaded: std.atomic.Value(usize) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
 
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        read_parallelism: Parallelism,
+        read_parallelism: usize,
         profile: VFS.LoadProfile,
     ) !*Loader {
-        // The initial width sizes the byte budget for staging whole tensors.
-        const tensors = read_parallelism.initial();
-        // High-latency sources may use spare read permits to split tensors
-        // already staging, increasing concurrency without more host memory.
-        const reads = if (profile.high_latency)
-            @max(tensors, read_parallelism.maximum())
-        else
-            tensors;
         const self = try allocator.create(Loader);
         self.* = .{
             .allocator = allocator,
@@ -59,12 +56,14 @@ pub const Loader = struct {
             .platform = platform,
             // Tasks are capped by the read budget; the staging budget is
             // what actually decides how many run.
-            .group = .init(reads),
-            .staging_slots = tensors,
+            .group = .init(read_parallelism),
+            .staging_slots = @min(read_parallelism, staging_tensors),
             .read_chunk_size = profile.read_chunk_size,
-            .read_parallelism = reads,
-            .tensor_workers = if (profile.high_latency) reads else 1,
-            .permits = .init(reads),
+            .read_parallelism = read_parallelism,
+            // A high-latency source may use spare read permits to split a
+            // tensor already staging: more concurrency without more host memory.
+            .tensor_workers = if (profile.high_latency) read_parallelism else 1,
+            .permits = .init(read_parallelism),
         };
         return self;
     }
@@ -90,10 +89,6 @@ pub const Loader = struct {
         batch.done.waitUncancelable(self.io);
         self.allocator.destroy(batch);
         try self.checkOpen();
-    }
-
-    pub fn commitBytes(self: *Loader, logical_bytes: usize) void {
-        _ = self.bytes_loaded.fetchAdd(logical_bytes, .monotonic);
     }
 
     /// Every batch was awaited, so the group is idle.

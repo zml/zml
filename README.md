@@ -174,7 +174,7 @@ const Mnist = struct {
         errdefer unloadBuffers(&buffers);
 
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
-            .read_parallelism = .{ .fixed = 1 },
+            .read_parallelism = 1,
         });
         defer loader.deinit();
         try loader.load(Mnist, self, &buffers, store, shardings, null);

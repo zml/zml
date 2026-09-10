@@ -299,13 +299,8 @@ pub fn main(init: std.process.Init) !void {
                     log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
                 }
 
-                const load_read_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM")) |fixed|
-                    .{ .fixed = fixed }
-                else
-                    .{ .adaptive = .{
-                        .initial = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12),
-                        .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
-                    } };
+                // Null takes the profile's width (16 locally, 32 remote).
+                const load_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM");
                 const load_profile = try vfs.loadProfile(path);
                 const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
 
