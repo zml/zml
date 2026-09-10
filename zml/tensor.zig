@@ -1986,10 +1986,7 @@ pub const Tensor = struct {
                 start + s.len
             else
                 s.end;
-            const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
-            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
-            stdx.debug.assert(end <= d, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
-            return res;
+            return .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
         }
 
         const to_the_end = std.math.maxInt(i64);
@@ -2084,10 +2081,11 @@ pub const Tensor = struct {
         var res_shape: Shape = self._shape;
 
         for (axes_, slices_) |a, s| {
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
+            stdx.debug.assert(s.step > 0, "{f}.slice({d}, {f}) expects 'step' to be positive, got {d}", .{ self, a, s, s.step });
 
-            const args: Slice = s.absolute(self.dim(a));
+            const d = self.dim(a);
+            const args: Slice = s.absolute(d);
+            stdx.debug.assert(0 <= args.start and args.start < args.end and args.end <= d, "{f}.slice({d}, {f}) is out of bound (resolved to {f})", .{ self, d, s, args });
             start_indices[a] = args.start;
             limit_indices[a] = args.end;
             strides[a] = args.step;
