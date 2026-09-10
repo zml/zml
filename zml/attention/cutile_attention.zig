@@ -15,9 +15,6 @@ pub const Config = struct {
     pages: i64,
     max_pages: i64,
     page_size: i64 = 64,
-    force_gather: bool = false,
-    gather_latency: ?i32 = null,
-    prefill_occupancy: i32 = 2,
     splits: i64,
     scale: f32,
     // Cache layout in logical [page, KV head, token, dimension] order.
@@ -39,12 +36,12 @@ const KVLoader = struct {
     tiled: bool,
     token_major: bool,
 
-    fn init(b: *cut.Builder, c: Config, k: cut.Value, v: cut.Value, table: cut.Value) KVLoader {
+    fn init(b: *cut.Builder, c: Config, k: cut.Value, v: cut.Value, table: cut.Value, prefill: bool) KVLoader {
         const width: i64 = @intCast(std.math.gcd(@as(u64, @intCast(c.page_size)), 64));
         // Four tiny transfers per operand are expensive on SM103. Pointer
         // loads win for 16-token pieces and for 32-token pieces at larger batches.
         const small_pages = width == 16 or (width == 32 and c.batch >= 32);
-        const tiled = width >= 16 and !small_pages and !c.force_gather;
+        const tiled = width >= 16 and !small_pages and (!prefill or @mod(c.page_size, 64) == 0);
         const token_major = c.strides[1] < c.strides[2];
         const shape = if (token_major) [_]i64{ c.pages, c.page_size, c.heads, 128 } else [_]i64{ c.pages, c.heads, c.page_size, 128 };
         const strides = if (token_major) [_]i64{ c.strides[0], c.strides[2], c.strides[1], c.strides[3] } else c.strides;
@@ -104,8 +101,8 @@ const KVLoader = struct {
         const address = offset.reshape(&.{ 64, 1 }).add(b.iota(128, .i64).mul(c.strides[3]).reshape(&.{ 1, 128 }));
         const mask = token.lt(len).reshape(&.{ 64, 1 }).broadcastTo(&.{ 64, 128 });
         return .{
-            .k = b.loadPtrOpts(self.k.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16), .hints = if (c.gather_latency != null) &.{.{ .latency = c.gather_latency }} else &.{} }).tile,
-            .v = b.loadPtrOpts(self.v.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16), .hints = if (c.gather_latency != null) &.{.{ .latency = c.gather_latency }} else &.{} }).tile,
+            .k = b.loadPtrOpts(self.k.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16) }).tile,
+            .v = b.loadPtrOpts(self.v.offset(address), .{ .mask = mask, .padding = b.zeros(&.{ 64, 128 }, .bf16) }).tile,
         };
     }
 };
@@ -258,7 +255,7 @@ fn emitDecodeImpl(b: *cut.Builder, c: Config, comptime scheduled: bool) cut.Fini
     const q4 = b.load(qview, &.{ qidx, head, zero }).reshape(&.{ 4, 128 });
     const q8 = b.cat(q4, b.zeros(&.{ 4, 128 }, .bf16), 0);
     const q = b.cat(q8, b.zeros(&.{ 8, 128 }, .bf16), 0);
-    const loader = KVLoader.init(b, c, a.k, a.v, a.table);
+    const loader = KVLoader.init(b, c, a.k, a.v, a.table, false);
     const blocks = @divTrunc(c.max_pages * c.page_size + 63, 64);
     const pages_per_split = @divTrunc(blocks + c.splits - 1, c.splits);
     const factor = @as(u64, 1) << @intCast(@ctz(@as(u64, @intCast(pages_per_split))));
@@ -390,6 +387,11 @@ pub const Prefill = cut.Kernel(Config, .{
 });
 
 fn emitPrefill(b: *cut.Builder, c: Config) cut.FinishError!void {
+    // Eight workers amortize short token-major gather loads, but regress long
+    // loops, sparse queries and tiled loads. These are allocation bounds, not
+    // assumptions about runtime sequence lengths.
+    const short_gather = c.page_size == 16 and c.max_pages <= 32 and
+        c.query_tokens >= c.batch * 64 and c.strides[1] < c.strides[2];
     const a = try b.declareArgsOpts(.{
         .q = .{ .ptr = .bf16 },
         .k = .{ .ptr = .bf16 },
@@ -403,7 +405,7 @@ fn emitPrefill(b: *cut.Builder, c: Config) cut.FinishError!void {
         .maxima = .{ .ptr = .f32 },
         .sums = .{ .ptr = .f32 },
         .acc = .{ .ptr = .f32 },
-    }, .{ .hints = &.{.{ .arch = .sm_103, .occupancy = c.prefill_occupancy, .num_worker_warps_per_cta = 4 }} });
+    }, .{ .hints = &.{.{ .arch = .sm_103, .occupancy = 2, .num_worker_warps_per_cta = if (short_gather) 8 else 4 }} });
     const id = b.tileBlockId().x;
     const work = id.div(c.heads).to(.i32);
     const head = id.rem(c.heads).to(.i32);
@@ -424,9 +426,7 @@ fn emitPrefill(b: *cut.Builder, c: Config) cut.FinishError!void {
     const q = b.loadPtrOpts(a.q.offset(offsets), .{ .mask = mask, .padding = b.zeros(&.{ 128, 128 }, .bf16) }).tile;
     // Concatenating small tiles is particularly expensive for the larger
     // prefill MMA. Keep tiled loads only when one page contains a whole tile.
-    var kv_config = c;
-    kv_config.force_gather = c.force_gather or @mod(c.page_size, 64) != 0;
-    const loader = KVLoader.init(b, kv_config, a.k, a.v, a.table);
+    const loader = KVLoader.init(b, c, a.k, a.v, a.table, true);
     const context = len.sub(end.sub(begin));
     const stop = len.minimum(context.add(first).add(32)).cdiv(64);
     const chunk = stop.cdiv(ns);
@@ -533,12 +533,29 @@ pub fn pagedAttention(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.T
     return zml.ops.manualComputation(Context.body, Context{ .params = params, .q = q, .k = k, .v = v, .opts = opts }, q.shape());
 }
 
+fn useDirectDecode(max_pages: i64, page_size: i64, is_prefill: bool) bool {
+    return !is_prefill and max_pages <= @divTrunc(512, page_size);
+}
+
 fn pagedAttentionLocal(params: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     const strides = k.shape().computeElementStrides();
     const batch = params.block_table.dim(.b);
     const heads = q.dim(.hkv);
     const splits: i64 = 32;
     const cfg: Config = .{ .batch = batch, .query_tokens = q.dim(.b), .heads = heads, .pages = k.dim(.page), .max_pages = params.block_table.dim(.p), .page_size = k.dim(.k_chunk), .splits = splits, .scale = opts.scale orelse 0.08838834764831845, .strides = .{ strides.get(k.axis(.page)), strides.get(k.axis(.hkv)), strides.get(k.axis(.k_chunk)), strides.get(k.axis(.hd)) } };
+    // At most eight KV compute tiles fit in this cache capacity. The device
+    // planner would always select one split, so neither planning nor merging
+    // is needed. This uses the allocation bound, not an assumed runtime length.
+    if (useDirectDecode(cfg.max_pages, cfg.page_size, params.options_.is_prefill)) {
+        var direct_cfg = cfg;
+        direct_cfg.splits = 1;
+        return Decode.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len }, .{
+            .out = q.shape(),
+            .maxima = .init(.{1}, .f32),
+            .sums = .init(.{1}, .f32),
+            .acc = .init(.{1}, .f32),
+        }, .{ .cfg = direct_cfg, .grid = .{ @intCast(batch * heads), 1, 1 } }).out;
+    }
     const plan = Plan.call(.{ .lengths = params.seq_lens, .starts = params.query_start_len }, .{ .plan = .init(.{ 4, batch }, .i32) }, .{ .cfg = cfg, .grid = .{ 1, 1, 1 } }).plan;
     const parts = ScheduledDecode.call(.{ .q = q, .k = k, .v = v, .table = params.block_table, .lengths = params.seq_lens, .starts = params.query_start_len, .plan = plan }, .{
         .out = q.shape(),
@@ -586,6 +603,16 @@ test "cutile split policy preserves large batches" {
     try std.testing.expectEqual(@as(i64, 4), splitCount(16, 8192));
     try std.testing.expectEqual(@as(i64, 1), splitCount(64, 65536));
     try std.testing.expectEqual(@as(i64, 1), splitCount(256, 65536));
+}
+
+test "cutile direct decode requires a bounded cache and decode-only graph" {
+    for ([_]i64{ 1, 16, 32, 64, 128, 256, 512 }) |page_size| {
+        const pages = @divTrunc(512, page_size);
+        try std.testing.expect(useDirectDecode(pages, page_size, false));
+        try std.testing.expect(!useDirectDecode(pages + 1, page_size, false));
+        try std.testing.expect(!useDirectDecode(pages, page_size, true));
+    }
+    try std.testing.expect(!useDirectDecode(1, 1024, false));
 }
 
 test "cutile cache pages are independent of MMA tiles" {
