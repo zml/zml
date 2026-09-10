@@ -138,56 +138,6 @@ pub const Parameters = union(Backend) {
     }
 };
 
-pub const Metadata = union(Backend) {
-    flashinfer_cutlass: cutlass_flashinfer.Metadata,
-    triton: triton.Metadata,
-    mosaic_tpu: mosaic_tpu.Metadata,
-    metal: metal.Metadata,
-
-    pub const InitOptions = union(Backend) {
-        flashinfer_cutlass: cutlass_flashinfer.Metadata.InitOptions,
-        triton: triton.Metadata.InitOptions,
-        mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
-        metal: metal.Metadata.InitOptions,
-
-        pub fn fromBackend(backend: Backend) InitOptions {
-            return switch (backend) {
-                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{} },
-                .triton => .{ .triton = .{} },
-                .mosaic_tpu => .{ .mosaic_tpu = .{} },
-                .metal => .{ .metal = .{} },
-            };
-        }
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return switch (opts) {
-            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v) },
-            .triton => |v| .{ .triton = triton.Metadata.init(v) },
-            .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
-            .metal => |v| .{ .metal = metal.Metadata.init(v) },
-        };
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        return switch (self) {
-            .flashinfer_cutlass => |metadata| .{ .flashinfer_cutlass = try metadata.initBuffer(io, platform) },
-            .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
-            .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
-            .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
-        };
-    }
-
-    pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-        switch (self.*) {
-            .flashinfer_cutlass => |*metadata| cutlass_flashinfer.deinitBuffer(metadata),
-            .triton => |*metadata| triton.deinitBuffer(metadata),
-            .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
-            .metal => |*metadata| metal.deinitBuffer(metadata),
-        }
-    }
-};
-
 pub const Options = struct {
     activation_threshold: ?f32 = null,
 };
@@ -199,7 +149,6 @@ pub fn forwardMoe(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: Options,
-    metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
@@ -422,113 +371,52 @@ pub fn forwardMoe(
             );
         },
         .triton => b: {
-            const triton_metadata = switch (metadata) {
-                .triton => |v| v,
-                else => return error.InvalidMetadata,
+            const args: triton.FusedExpertsArgs = .{
+                .hidden_states = input,
+                .gate_up = gate_up,
+                .down = down,
+                .topk_weights = topk_weights,
+                .topk_ids = topk_ids,
+                .activation = parameters.triton.activation,
+                .activation_threshold = opts.activation_threshold,
             };
-
-            const global_num_experts = gate_up.weight.dim(.expert);
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (!expert_partition.eql(.init(.experts))) {
-                break :b try triton.fusedExpertsImpl(
-                    input,
-                    gate_up.weight,
-                    down.weight,
-                    topk_weights,
-                    topk_ids,
-                    triton_metadata,
-                    .{
-                        .activation = parameters.triton.activation,
-                        .global_num_experts = global_num_experts,
-                        .w1_scale = gate_up_scales,
-                        .w2_scale = down_scales,
-                        .w1_bias = gate_up.bias,
-                        .w2_bias = down.bias,
-                        .quant_scheme = quant_scheme,
-                        .activation_threshold = opts.activation_threshold,
-                    },
-                );
+                break :b try triton.fusedExpertsImpl(args);
             }
 
             break :b zml.ops.manualComputation(
                 (struct {
-                    input: zml.Tensor,
-                    topk_ids: zml.Tensor,
-                    topk_weights: zml.Tensor,
-                    weights_gate_up: zml.Tensor,
-                    weights_down: zml.Tensor,
-                    activation: triton.Parameters.ActivationMode,
+                    args: triton.FusedExpertsArgs,
                     global_num_experts: i64,
-                    bias_gate_up: ?zml.Tensor,
-                    bias_down: ?zml.Tensor,
-                    quant_scheme: ?zml.Quantization.Scheme,
-                    activation_threshold: ?f32,
-                    scales_gate_up: ?zml.Tensor,
-                    scales_down: ?zml.Tensor,
 
                     fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                        const local_num_experts = self.weights_gate_up.dim(.expert);
+                        const local_args = self.args;
+                        const local_num_experts = local_args.gate_up.weight.dim(.expert);
                         const partition_id = zml.ops.partitionId().convert(.i32);
                         const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                        // List of global expert ids
                         const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
 
-                        // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
+                        // Map global expert ids to local ids, or -1 for experts outside this partition.
                         const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
                             .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                        const expert_map = local_expert_mask.select(
+                        var mapped_args = local_args;
+                        mapped_args.expert_map = local_expert_mask.select(
                             global_expert_ids.sub(expert_start),
                             zml.Tensor.scalar(-1, .i32),
                         );
 
-                        const local_output = triton.fusedExpertsImpl(
-                            self.input,
-                            self.weights_gate_up,
-                            self.weights_down,
-                            self.topk_weights,
-                            self.topk_ids,
-                            .{},
-                            .{
-                                .activation = self.activation,
-                                .global_num_experts = self.global_num_experts,
-                                .expert_map = expert_map,
-                                .w1_scale = self.scales_gate_up,
-                                .w2_scale = self.scales_down,
-                                .w1_bias = self.bias_gate_up,
-                                .w2_bias = self.bias_down,
-                                .quant_scheme = self.quant_scheme,
-                                .activation_threshold = self.activation_threshold,
-                            },
-                        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                        const local_reshaped = local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
+                        const local_output = triton.fusedExpertsImpl(mapped_args) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                        const local_reshaped = local_output.reshape(local_args.hidden_states.shape().dims()).withTags(.{ .b, .s, .d });
                         return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                     }
                 }).call,
-                .{
-                    .input = input,
-                    .topk_ids = topk_ids,
-                    .topk_weights = topk_weights,
-                    .weights_gate_up = gate_up.weight,
-                    .weights_down = down.weight,
-                    .activation = parameters.triton.activation,
-                    .global_num_experts = global_num_experts,
-                    .bias_gate_up = gate_up.bias,
-                    .bias_down = down.bias,
-                    .quant_scheme = quant_scheme,
-                    .activation_threshold = opts.activation_threshold,
-                    .scales_gate_up = gate_up_scales,
-                    .scales_down = down_scales,
-                },
+                .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
                 input.shape(),
             );
         },
         .mosaic_tpu => b: {
-            const tpu_metadata = switch (metadata) {
-                .mosaic_tpu => |v| v,
-                else => return error.InvalidMetadata,
-            };
-
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
@@ -565,7 +453,6 @@ pub fn forwardMoe(
                                 self.weights_down,
                                 self.topk_weights,
                                 self.topk_ids,
-                                .{},
                                 .{
                                     .activation = self.activation,
                                     .global_num_experts = self.global_num_experts,
@@ -603,7 +490,6 @@ pub fn forwardMoe(
                 down.weight,
                 topk_weights,
                 topk_ids,
-                tpu_metadata,
                 .{
                     .activation = parameters.mosaic_tpu.activation,
                     .global_num_experts = gate_up.weight.dim(.expert),
@@ -617,18 +503,12 @@ pub fn forwardMoe(
         .metal => b: {
             const gate_up_weight_unpacked = unpackedWeight(gate_up);
             const down_weight_unpacked = unpackedWeight(down);
-            const metal_metadata = switch (metadata) {
-                .metal => |v| v,
-                else => return error.InvalidMetadata,
-            };
-
             break :b try metal.fusedExpertsImpl(
                 input,
                 gate_up_weight_unpacked,
                 down_weight_unpacked,
                 topk_weights,
                 topk_ids,
-                metal_metadata,
                 .{
                     .activation = parameters.metal.activation,
                     .global_num_experts = gate_up_weight_unpacked.dim(.expert),

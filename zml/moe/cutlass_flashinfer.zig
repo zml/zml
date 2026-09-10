@@ -70,31 +70,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    variant: Variant = .bf16xbf16,
-
-    pub const InitOptions = struct {
-        variant: Variant = .bf16xbf16,
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return .{
-            .variant = opts.variant,
-        };
-    }
-
-    pub fn initBuffer(
-        _: Metadata,
-        _: std.Io,
-        _: *const zml.Platform,
-    ) !zml.Bufferized(Metadata) {
-        return {};
-    }
-};
-
-/// NVFP4 scale buffers are borrowed from the model and are not owned by Metadata.
-pub fn deinitBuffer(_: *zml.Bufferized(Metadata)) void {}
-
 const Input = struct {
     hidden_states: zml.Tensor,
     fc1_weights: zml.Tensor,
