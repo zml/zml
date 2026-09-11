@@ -3327,6 +3327,102 @@ with this summary.
   loader's own elapsed stayed at 0.268 s, the calibration-robustness item
   of the fourteenth pass again.
 
+## Sixteenth pass: simplification review and its checklist (2026-09-11)
+
+Question (user, 2026-09-10): given how the monorepo uses the loader and the
+recordings in this file, what else can be simplified in `zml/io` and
+`vfs/direct_io`? Method: ten scoped finders (direct backend in four slices,
+front end, host memory and calibration, buffered seam, VFS direct I/O, a
+CTX.md evidence audit, a caller-surface audit against llmd at monorepo
+`master` `a64fd7a9` and the zml examples), 54 raw candidates merged to 37, a
+completeness critic that added 7 more, and three adversarial verifiers per
+candidate (correctness and callers, recorded evidence here, net simplicity;
+the last 19 verdicts on Opus 5). 23 candidates survived (14 with all three
+verdicts clean, 9 in an amended form); 21 were rejected. `PLAN.md` holds the
+survivors as a sequential checklist with file and line references; this
+section records the decisions.
+
+llmd at monorepo `master` still targets the previous single-file loader
+(`origin/master` `f8ddb3e5`): one `Loader` per process, `loadExecute` per
+packed tensor then one bulk `load` then one `await`, several stores and
+sharding sets per loader (dflash), `bytes_loaded` for the bandwidth log. It
+never calls `vfs.loadProfile`, so on this branch it would take the local
+profile: width 16 on hf://, no direct I/O, no throttle watch. The migration
+must pass `vfs.loadProfile(model)`.
+
+### Survivors (details in PLAN.md)
+
+- Mechanism changes, each with a device run: lifecycle credits are a
+  constant (after pre-growth `retained >= width + dma_stage`, so
+  `RequestGateLimits` always yields `read = width`, `lifecycle = retained`;
+  both recorded ready lines confirm it: 33 = 17 + 16 on CPU, 25 = 17 + 8 on
+  gb300-2); the pinned pool sized once at creation with no slab growth
+  (every fifteenth-pass run has `pinned_mapped == high_water`; the two
+  arena allocations stay for ROCm's per-node balance); the scheduler as a
+  FIFO of plans (ordering is unchanged because `submit` publishes and seals
+  on one task, CTX 1136-1139).
+- Surface trims with no device run: dead TensorStore accessors, the
+  `loadBuffer` alias, `backend.Config` folded into one `Options`, the
+  `max_host_bytes` knob (the 16 GiB guard stays as a constant), dead pool
+  fields, the host-memory backend union merge, single-pass DispatchSpans,
+  the admission module's boundary types, two log-only metrics and the
+  `call_count` parameter, three derivable pipeline fields, the bool on
+  `allocatedBytesPerDevice`, one no-VFS profile at 8 MiB, one worker group.
+- Needs a measurement first: the ReadyTransfer/EventContext merge (gb300-2
+  DeepSeek pair plus a multi-device read-back), dropping `fairOrder` (an
+  A/B on the B70, where the pump is not the ceiling), a `block_size`
+  override that skips the DMA screen (the per-target table is refuted:
+  CUDA hosts chose 2 MiB on the RTX 5090 host and 16 MiB on gb300-2).
+
+### Decisions
+
+- The throttle watch stays. The review found no recorded run in which the
+  halving fired (real AWS and hf runs report zero throttles; the S3Proxy
+  has no fault injection) and recommended deleting it; the user's
+  requirement is the opposite: rate limits must be handled and traffic
+  reduced when they occur. The watch's shortcomings stand recorded: it
+  never recovers, it ignores the server-named delay for all but the one
+  request, the five-retry budget can fail a load under a sustained limit,
+  timeouts count as throttles, the counters are backend-global. The
+  replacement, rate-limit handling inside the VFS (a hold on the
+  server-named delay, reduction, recovery, a retry budget that does not
+  burn during a hold), was designed the same day: three independent
+  designs, two adversarial critics each (Opus 5). Placement in the VFS
+  survived unanimously (the quota belongs to the backend and its
+  credentials, shared by the tokenizer and config reads, a second loader
+  and the buffered backend, none of which the watch covers); an AIMD permit
+  ladder and additive recovery did not (unmeasured policy of the class the
+  fifteenth pass deleted; the ladder collapses to one permit on a burst
+  because permits are released per attempt). The surviving shape is a
+  per-backend hold in `range_read.zig` on the server-named delay with a
+  floor (`Retry-After: 0` parses to zero and would hot-loop once throttles
+  stop charging `max_retries`), a jittered wake (`std.Io.Condition` has no
+  timed wait), a wall-clock throttle budget on the limiter instead of the
+  per-request retry count, timeouts never holding, the loader's width as an
+  immutable ceiling, and the stats side channel kept for observability.
+  Decided with the user the same day: the VFS owns it, one governor per
+  backend instance keyed by URI authority so a per-authority scope is a
+  local change later, and the loop governs every HTTP request a backend
+  makes (range GETs, HEADs, listings, the HF tree and redirect hops, the
+  GCS token POSTs). Defaults taken: holds capped at 2 minutes, a 5 minute
+  throttle budget per episode, the hold floor at the initial retry delay,
+  jittered wakes, timeouts never holding, one 401/403 retried on the HF
+  data GET after re-resolving the URL, `error.Canceled` propagated through
+  the backend wrappers. `PLAN.md` group D (tasks 23 to 28) is the
+  implementation checklist. Until it lands the loader keeps the watch on
+  the read gate alone.
+- Rejected, with the decisive reason: batch diagnostics (every field is
+  consumed by a table here); `Options.auto` (used by `zml/testing.zig`);
+  eager file opens on the submit task (hf and s3 opens are HEAD round
+  trips); `validateExecutableSharding` (guards `device.id` indexing);
+  single-binding `loadExecute` (Laguna's per-layer pack coalescing);
+  removing either gate (the read gate is the watch's actuator; the
+  fourth-pass measurement); direct I/O demotion (the streaming fallback
+  and a recorded defect); a per-target DMA block table (above); the
+  buffered backend's chunked split (needs a TPU host); the placement,
+  ledger and `Item` reshapes (net zero lines); folding `stop` into `fail`;
+  inlining `initBuffered`; a `Batch` union for `Submission`.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
