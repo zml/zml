@@ -989,3 +989,107 @@ test "loader initialization releases its workspace on an invalid profile" {
     } else |err| err;
     try std.testing.expectError(error.InvalidLoadProfile, result);
 }
+
+test "a rate-limited HTTP source loads through the VFS hold" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const tensor_bytes = 1024;
+    const tensors = 4;
+
+    // Four tensor ranges with a gap between them, so the planner keeps four
+    // jobs and the load makes four concurrent GETs.
+    var object: [(2 * tensors - 1) * tensor_bytes]u8 = undefined;
+    for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+
+    var server = try VFS.mock_server.MockServer.init(io, &object, .{
+        // Two GETs per 100 ms: the four readers are throttled repeatedly.
+        .throttle = .{ .window = .{ .gets = 2, .per_ms = 100 } },
+    });
+    var server_group: std.Io.Group = .init;
+    try VFS.mock_server.startMockServer(&server, &server_group, io);
+    var server_joined = false;
+    defer VFS.mock_server.cleanupMockServer(&server, &server_group, io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var http: VFS.HTTP = try .initWithOptions(allocator, io, &client, .http, .{
+        .max_retries = 5,
+        .retry_initial_delay = .fromMilliseconds(20),
+        .retry_max_delay = .fromMilliseconds(20),
+        .max_hold = .fromSeconds(5),
+        .throttle_budget = .fromSeconds(30),
+    });
+    defer http.deinit();
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    try vfs.registerBackend("http", http.backend());
+    const stats = http.backend().read_stats.?;
+
+    var url_buffer: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
+
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    const names = [tensors][]const u8{ "a", "b", "c", "d" };
+    for (names, 0..) |name, index| {
+        try registry.registerTensor(.{
+            .file_uri = url,
+            .name = name,
+            .shape = .init(.{tensor_bytes}, .u8),
+            .offset = 2 * index * tensor_bytes,
+        });
+    }
+    var store: TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+
+    const platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+
+    const Model = struct { a: Tensor, b: Tensor, c: Tensor, d: Tensor };
+    const model: Model = .{
+        .a = store.view().createTensor("a", null, .replicated),
+        .b = store.view().createTensor("b", null, .replicated),
+        .c = store.view().createTensor("c", null, .replicated),
+        .d = store.view().createTensor("d", null, .replicated),
+    };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+
+    var loader = try Loader.init(allocator, vfs.io(), platform, .{
+        .read_parallelism = 4,
+        .load_profile = try vfs.loadProfile(url),
+    });
+    defer loader.deinit();
+    try loader.load(Model, &model, &buffers, &store, &.{}, null);
+    try loader.awaitAll();
+
+    inline for (@typeInfo(Model).@"struct".fields, 0..) |field, index| {
+        try LoaderTestFixture.expectContents(
+            allocator,
+            io,
+            &@field(buffers, field.name),
+            object[2 * index * tensor_bytes ..][0..tensor_bytes],
+        );
+    }
+
+    server_group.cancel(io);
+    server_joined = true;
+    try server.check();
+
+    // The server rate limited the load, the backend held every reader, and
+    // no reader burned its retry budget for it.
+    const snapshot = stats.snapshot();
+    try std.testing.expect(snapshot.throttles > 0);
+    try std.testing.expect(snapshot.holds > 0);
+    try std.testing.expect(snapshot.hold_wait_ns > 0);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.retries);
+    try std.testing.expectEqual(@as(u64, tensors * tensor_bytes), snapshot.physical_bytes);
+
+    // Holding costs time, not pinned memory or credits: the pool never grew
+    // beyond the width and every lifecycle credit came back.
+    const direct = loader.backend.direct;
+    try std.testing.expect(direct.pool.high_water <= 4);
+    try std.testing.expectEqual(@as(usize, 0), direct.request_gate.in_use);
+    try std.testing.expectEqual(@as(usize, direct.pool.capacity), direct.pool.free_blocks.items.len);
+}

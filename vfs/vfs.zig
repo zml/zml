@@ -6,6 +6,9 @@ pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
+/// A test-only HTTP origin and its harness, so a caller above this layer
+/// (the loader) can exercise a real socket without its own server.
+pub const mock_server = @import("mock_server.zig");
 const base_module = @import("base.zig");
 const direct_io = @import("direct_io.zig");
 pub const Backend = base_module.Backend;

@@ -165,28 +165,6 @@ with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
 
-- [ ] 27. One end-to-end test through the loader. Move `MockServer` to
-  `vfs/mock_server.zig`, exported as `VFS.MockServer` behind
-  `builtin.is_test`, so `zml/io/loader.zig`'s test section can serve the
-  fixture's safetensors file over the `http` VFS backend: `HTTP.init(...,
-  .http)`, `vfs.registerBackend("http", ...)`, the store built with
-  `TensorRegistry.fromRepo` on a `Dir` opened through `vfs.io()` at
-  `127.0.0.1:port/` (the mock answers 404 for the index and serves
-  `model.safetensors`). Feasible as checked on 2026-09-11: `HTTP.dirOpenDir`
-  exists (`http.zig:195`), `HTTP.dirRead` is a stub (`:264`) that nothing
-  on this path calls, and `resolveModelEntrypoint`
-  (`zml/safetensors.zig:1066-1080`) only probes the two names by `openFile`,
-  which the path table answers; the HEAD at open goes through the governor
-  too, so a throttled HEAD is covered by the same test.
-  Direct backend on CPU, `read_parallelism = 4`, the window limiter at 2
-  GETs per 100 ms: the load completes, the buffers match, `holds > 0` on
-  the backend's stats, the loader's `request_gate.inUse == 0` after
-  `awaitAll`, and pinned `high_water` equals the fifteenth-pass fixture
-  value (the hold lengthens the time credits and blocks are held; it does
-  not raise the count). If `fromRepo` cannot be driven through the HTTP
-  backend, replace the store with the fixture's file served whole and
-  keep the rest of the assertions.
-
 - [ ] 28. Record: CTX.md "Current design" bullets at 154 (the side channel
   is observability, not control), 177 (no throttle watch), 218-240 (the
   governed loop, the two budgets, the hold), 404-432 (the width is

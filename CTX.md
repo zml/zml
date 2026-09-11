@@ -3705,6 +3705,20 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   loader header, the `read_parallelism` doc, `docs/learn/loader.md` (the
   implementation map gained a `vfs/request.zig` row) and the CTX design
   bullets now say that a rate-limited source is handled one layer down.
+- Task 27 (group D), one end-to-end test through the loader. `MockServer`
+  moved to `vfs/mock_server.zig` and the module is exported as
+  `VFS.mock_server`, so the loader's own test section can serve a fixture
+  over a real socket. The test registers four tensor ranges with gaps (so
+  the planner keeps four jobs) at one `http://127.0.0.1:port/object` URL,
+  registers the `http` backend in a `VFS`, and loads them with the direct
+  backend on CPU at `read_parallelism = 4` against a 2-GETs-per-100 ms
+  window. It asserts the four buffers byte for byte, `throttles > 0`,
+  `holds > 0`, `hold_wait_ns > 0`, `retries == 0`, exactly the tensor bytes
+  transferred, and that holding cost time and not memory: pinned
+  `high_water <= 4`, every lifecycle credit returned and the whole pool free
+  after `awaitAll`. The simpler route than the plan's `fromRepo`: the
+  loader's registry takes `file_uri` directly, so no entrypoint resolution
+  is involved.
 
 ## Open work
 
