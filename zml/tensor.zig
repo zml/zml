@@ -2085,7 +2085,7 @@ pub const Tensor = struct {
 
             const d = self.dim(a);
             const args: Slice = s.absolute(d);
-            stdx.debug.assert(0 <= args.start and args.start < args.end and args.end <= d, "{f}.slice({d}, {f}) is out of bound (resolved to {f})", .{ self, d, s, args });
+            stdx.debug.assert(0 <= args.start and args.start < args.end and args.end <= d, "{f}.slice({d}, {f}) is out of bound (resolved to {f})", .{ self, a, s, args });
             start_indices[a] = args.start;
             limit_indices[a] = args.end;
             strides[a] = args.step;
@@ -2117,7 +2117,7 @@ pub const Tensor = struct {
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
         defer x_buffer.deinit();
 
         // Wrap slice to hide the anytype in the signature.

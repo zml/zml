@@ -1336,7 +1336,7 @@ pub const Shape = struct {
         }
 
         new_shape.inferMissingAxis(self.count()) catch |err| {
-            std.debug.panic("Can't split {any} along axis {d} into {any}: {t}", .{ self.dims(), ax, new_shape.dims(), err });
+            std.debug.panic("Can't split {f} along axis {d} into {any}: {t}", .{ self, ax, new_shape.dims(), err });
         };
 
         return new_shape;
