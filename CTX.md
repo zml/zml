@@ -3437,6 +3437,11 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `u64` slices in one allocation (room, allocated, inputs, placed); the
   unread fifth is gone. `admit` still fills `inputs` and `submit` still
   fills `placed`.
+- Task 3 (C30), `execute_submissions`: the counter is derivable from the
+  submissions that carried executables and nothing consumed it; the
+  `loader admission` debug line keeps `submissions`,
+  `execute_admission_retires`, `memory_supported`, `min_room_seen` and the
+  reserve.
 
 ## Open work
 

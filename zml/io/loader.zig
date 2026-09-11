@@ -64,7 +64,6 @@ pub const Loader = struct {
     pending_execution: []u64,
     pending_executes: usize = 0,
     submissions: usize = 0,
-    execute_submissions: usize = 0,
     admission_retires: usize = 0,
     min_room_seen: ?u64 = null,
     oversized_logged: bool = false,
@@ -433,7 +432,6 @@ pub const Loader = struct {
         if (executables.len != 0) {
             for (self.pending_execution, execution) |*pending, bytes| pending.* +|= bytes;
             self.pending_executes += 1;
-            self.execute_submissions += 1;
         }
     }
 
@@ -468,9 +466,8 @@ pub const Loader = struct {
 
     fn logAdmission(self: *const Loader) void {
         if (self.submissions == 0) return;
-        load_log.debug("loader admission: submissions={d}, execute_submissions={d}, execute_admission_retires={d}, memory_supported={}, min_room_seen={Bi:.2}, reserve={Bi:.2}", .{
+        load_log.debug("loader admission: submissions={d}, execute_admission_retires={d}, memory_supported={}, min_room_seen={Bi:.2}, reserve={Bi:.2}", .{
             self.submissions,
-            self.execute_submissions,
             self.admission_retires,
             self.memory_supported,
             self.min_room_seen orelse 0,

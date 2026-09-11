@@ -63,12 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 3. Drop `execute_submissions` (C30, 3 lines).
-  `zml/io/loader.zig`: the field at `:67`, its increment at `:438`, the
-  `execute_submissions={d}` field and argument in `logAdmission` (`:473-475`).
-  Keep `submissions`, `admission_retires`, `min_room_seen`, `pending_executes`
-  and both once-flags (the fourteenth-pass numbers, CTX 3151-3152).
-
 - [ ] 4. Remove `Loader.loadBuffer` (C19, 5 lines).
   Delete `zml/io/loader.zig:232-235`. Rewrite the four test calls as
   `loader.load(Tensor, &tensor, &output, store, &.{}, null)`: `:886`
