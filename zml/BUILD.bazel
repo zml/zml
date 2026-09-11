@@ -144,6 +144,7 @@ zig_library(
         "//bazel",
         "//ffi:zig",
         "//kernels/cuda_tile:cuda_tile_builder",
+        "//kernels/cute:cute_builder",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//kernels/triton:triton_builder",
         "//mlir",
