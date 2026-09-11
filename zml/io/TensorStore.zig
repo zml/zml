@@ -208,7 +208,7 @@ pub const View = struct {
             stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
     }
 
-    pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+    pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
         const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
         if (tensor) |t| self.store.setMemory(t, .host_pinned);
         return tensor;

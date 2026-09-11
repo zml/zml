@@ -407,6 +407,34 @@ pub const Shape = struct {
         return self.eql(other) and std.mem.eql(Tag, self.tags(), other.tags()) and self.dtype() == other.dtype();
     }
 
+    /// Compares dimensions, dtype, tags, mesh, and per-axis partition specs.
+    pub fn eqlWithTagsAndPartitioning(self: Shape, other: Shape) bool {
+        if (!self.eqlWithTags(other) or self._sharding.mesh != other._sharding.mesh) return false;
+        for (0..self.rank()) |ax| {
+            if (self.partition(ax) != other.partition(ax)) return false;
+        }
+        return true;
+    }
+
+    test eqlWithTagsAndPartitioning {
+        const other_mesh: Sharding.Mesh = .initTest(.other, .{ .batch, .feature });
+        const shape = Shape.init(.{ .out = 8, .in = 16 }, .f32)
+            .withPartitioning(&test_mesh, .{ .out = .feature, .in = .replicated });
+        const specs: []const Sharding.PartitionSpec = &.{ .sharded(1), .sharded(0), .replicated, .open };
+        for (specs) |spec| {
+            const other = shape.withPartitioning(&test_mesh, .{ .out = spec, .in = .replicated });
+            try testing.expect(shape.eqlWithTags(other));
+            try testing.expectEqual(spec == Sharding.PartitionSpec.sharded(1), shape.eqlWithTagsAndPartitioning(other));
+        }
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withPartitioning(&other_mesh, .{ .out = .feature, .in = .replicated })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withDtype(.bf16)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.setDim(.out, 9)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.rename(.{ .out = .features })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(Shape.init(.{ .out = 8 }, .f32)));
+        try testing.expect(!shape.withDefaultPartitioning().eqlWithTagsAndPartitioning(Shape.init(.{ .out = 8, .in = 16 }, .f32)));
+        try testing.expect(Shape.init(.{}, .f32).eqlWithTagsAndPartitioning(Shape.init(.{}, .f32)));
+    }
+
     /// Format the shape.
     /// "Shape({.a=10, .b=20}, dtype=.f32)"
     pub fn format(self: Shape, writer: *std.Io.Writer) !void {
@@ -422,14 +450,14 @@ pub const Shape = struct {
                 try writer.print("{d}", .{d});
             }
 
-            const partitioning = self._sharding.get(i);
-            switch (partitioning) {
+            const spec = self._sharding.get(i);
+            switch (spec) {
                 .replicated => {},
                 .open => try writer.writeAll("/?"),
                 // this state is invalid, but don't panic cause we may be called from a panic
                 .out_of_bound => try writer.writeAll("/!"),
                 else => {
-                    const mesh_ax = partitioning.meshAxis().?;
+                    const mesh_ax = spec.meshAxis().?;
                     try writer.print("/{s}", .{self._sharding.mesh.?.logical.axes.get(mesh_ax)});
                 },
             }
@@ -828,18 +856,18 @@ pub const Shape = struct {
         .folds_consumed = .empty,
     };
 
-    pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {
-        if (@TypeOf(partitioning) != Sharding.Partitioning) {
-            return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partitioning));
+    pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partition_: anytype) Shape {
+        if (@TypeOf(partition_) != Sharding.Partitioning) {
+            return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partition_));
         }
         var res = self;
-        res._sharding = .{ .mesh = mesh, .partition = partitioning };
+        res._sharding = .{ .mesh = mesh, .partition = partition_ };
         for (0..self.rank()) |ax| {
             if (res._sharding.get(ax) == .out_of_bound) res._sharding = res._sharding.set(ax, .replicated);
         }
         for (self.rank()..MAX_RANK) |ax| res._sharding.partition = res._sharding.partition.set(ax, .out_of_bound);
 
-        stdx.debug.assert(res._sharding.partition.hasUniqueAxes(), "{f}.withPartitioning({s}, ...) expects mesh axes to be used a most once, got {any}", .{ self, mesh.name, partitioning.toArray()[0..self.rank()] });
+        stdx.debug.assert(res._sharding.partition.hasUniqueAxes(), "{f}.withPartitioning({s}, ...) expects mesh axes to be used a most once, got {any}", .{ self, mesh.name, partition_.toArray()[0..self.rank()] });
 
         return res;
     }
@@ -985,6 +1013,40 @@ pub const Shape = struct {
         try testing.expectEqual(Sharding.PartitionSpec.sharded(0), shape.partition(.a));
         try testing.expectEqual(.open, shape.partition(.b));
         try testing.expectEqual(Sharding.PartitionSpec.sharded(1), shape.partition(.c));
+    }
+
+    /// Returns the partitioning keyed by tensor tags, using `_0`, `_1`, etc. for untagged axes.
+    /// Re-applying it with `.withPartitioning(mesh, ...)` is robust to axis reordering.
+    pub fn partitioning(self: Shape) Sharding.Partitioning.Logical {
+        const positional_tags: [MAX_RANK]Tag = .{ "_0", "_1", "_2", "_3", "_4", "_5", "_6", "_7" };
+        var result: Sharding.Partitioning.Logical = .{};
+        for (self.tags(), 0..) |axis_tag, ax| {
+            const spec: Sharding.Partitioning.Logical.Spec = switch (self.partition(ax)) {
+                .replicated => .replicated,
+                .open => .open,
+                .out_of_bound => unreachable,
+                else => |s| .{ .axis = self._sharding.mesh.?.logical.axes.get(s.meshAxis().?) },
+            };
+            result = result.set(if (axis_tag == TagUnknown) positional_tags[ax] else axis_tag, spec);
+        }
+        return result;
+    }
+
+    test partitioning {
+        const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32 }, .f32)
+            .withPartitioning(&test_mesh, .{ .a = .feature, .b = .replicated, .c = .open });
+        const reordered = shape.transpose(.{ 2, 0, 1 }).withDefaultPartitioning().withPartitioning(&test_mesh, shape.partitioning());
+        for (shape.tags()) |axis_tag| {
+            try testing.expectEqual(shape.partition(axis_tag), reordered.partition(axis_tag));
+        }
+
+        const untagged = Shape.init(.{ 8, 16 }, .f32).withPartitioning(&test_mesh, .{ ._0 = .batch, ._1 = .replicated });
+        const restored = untagged.withDefaultPartitioning().withPartitioning(&test_mesh, untagged.partitioning());
+        try testing.expect(restored.eqlWithTagsAndPartitioning(untagged));
+
+        const replicated = Shape.init(.{ .a = 8 }, .f32).partitioning();
+        try testing.expect(replicated.get(.a).?.eql(.replicated));
+        try testing.expectEqual(0, Shape.init(.{}, .f32).partitioning().entries.len);
     }
 
     pub fn containsPartitionSpec(self: Shape, part: Sharding.PartitionSpec) bool {
