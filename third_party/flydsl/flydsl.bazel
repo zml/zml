@@ -1,0 +1,396 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+    features = [
+        "-parse_headers",
+        "-use_header_modules",
+    ],
+    licenses = ["notice"],
+)
+
+exports_files(["LICENSE"])
+
+td_library(
+    name = "td_files",
+    srcs = glob(["include/flydsl/**/*.td"]),
+    includes = ["include"],
+    deps = [
+        "@llvm-project//mlir:ArithOpsTdFiles",
+        "@llvm-project//mlir:BuiltinDialectBytecodeTdFiles",
+        "@llvm-project//mlir:BytecodeOpInterfaceTdFiles",
+        "@llvm-project//mlir:FunctionInterfacesTdFiles",
+        "@llvm-project//mlir:GPUOpsTdFiles",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:LLVMOpsTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:PassBaseTdFiles",
+        "@llvm-project//mlir:ROCDLOpsTdFiles",
+        "@llvm-project//mlir:SCFTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+        "@llvm-project//mlir:VectorOpsTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "fly_dialect_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/IR/FlyDialect.cpp.inc": ["--gen-dialect-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyDialect.h.inc": ["--gen-dialect-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/IR/FlyDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_interfaces_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/IR/FlyAttrInterfaces.cpp.inc": ["--gen-attr-interface-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyAttrInterfaces.h.inc": ["--gen-attr-interface-decls"],
+        "include/flydsl/Dialect/Fly/IR/FlyOpInterfaces.cpp.inc": ["--gen-op-interface-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyOpInterfaces.h.inc": ["--gen-op-interface-decls"],
+        "include/flydsl/Dialect/Fly/IR/FlyTypeInterfaces.cpp.inc": ["--gen-type-interface-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyTypeInterfaces.h.inc": ["--gen-type-interface-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/IR/FlyInterfaces.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_types_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/IR/FlyTypeConstraints.cpp.inc": [
+            "--gen-type-constraint-defs",
+            "--typedefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyTypeConstraints.h.inc": [
+            "--gen-type-constraint-decls",
+            "--typedefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyTypeDefs.cpp.inc": [
+            "--gen-typedef-defs",
+            "--typedefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyTypeDefs.h.inc": [
+            "--gen-typedef-decls",
+            "--typedefs-dialect=fly",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/IR/FlyTypeDefs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_attrs_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/IR/FlyAttrConstraints.cpp.inc": [
+            "--gen-attr-constraint-defs",
+            "--attrdefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyAttrConstraints.h.inc": [
+            "--gen-attr-constraint-decls",
+            "--attrdefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyAttrDefs.cpp.inc": [
+            "--gen-attrdef-defs",
+            "--attrdefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyAttrDefs.h.inc": [
+            "--gen-attrdef-decls",
+            "--attrdefs-dialect=fly",
+        ],
+        "include/flydsl/Dialect/Fly/IR/FlyEnums.cpp.inc": ["--gen-enum-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyEnums.h.inc": ["--gen-enum-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/IR/FlyAttrDefs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_ops_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/IR/FlyOps.cpp.inc": ["--gen-op-defs"],
+        "include/flydsl/Dialect/Fly/IR/FlyOps.h.inc": ["--gen-op-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/IR/FlyOps.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_passes_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/Transforms/Passes.h.inc": [
+            "--gen-pass-decls",
+            "--name=Fly",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/Transforms/Passes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_int_tuple_lowering_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/Transforms/IntTupleLowering.cpp.inc": ["--gen-rewriters"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/Transforms/IntTupleLowering.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_layout_lowering_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/Transforms/LayoutLowering.cpp.inc": ["--gen-rewriters"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/Transforms/LayoutLowering.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_memref_lowering_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/Fly/Transforms/MemrefLowering.cpp.inc": ["--gen-rewriters"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/Fly/Transforms/MemrefLowering.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_rocdl_dialect_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/FlyROCDL/IR/Dialect.cpp.inc": ["--gen-dialect-defs"],
+        "include/flydsl/Dialect/FlyROCDL/IR/Dialect.h.inc": ["--gen-dialect-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/FlyROCDL/IR/Dialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_rocdl_atom_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/FlyROCDL/IR/Atom.cpp.inc": [
+            "--gen-typedef-defs",
+            "--typedefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/Atom.h.inc": [
+            "--gen-typedef-decls",
+            "--typedefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.cpp.inc": [
+            "--gen-enum-defs",
+            "--typedefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/AtomStateEnums.h.inc": [
+            "--gen-enum-decls",
+            "--typedefs-dialect=fly_rocdl",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/FlyROCDL/IR/Atom.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_rocdl_attrs_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/FlyROCDL/IR/AttrDefs.cpp.inc": [
+            "--gen-attrdef-defs",
+            "--attrdefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/AttrDefs.h.inc": [
+            "--gen-attrdef-decls",
+            "--attrdefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/AttrEnums.cpp.inc": [
+            "--gen-enum-defs",
+            "--attrdefs-dialect=fly_rocdl",
+        ],
+        "include/flydsl/Dialect/FlyROCDL/IR/AttrEnums.h.inc": [
+            "--gen-enum-decls",
+            "--attrdefs-dialect=fly_rocdl",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/FlyROCDL/IR/AttrDefs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_rocdl_ops_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/FlyROCDL/IR/Ops.cpp.inc": ["--gen-op-defs"],
+        "include/flydsl/Dialect/FlyROCDL/IR/Ops.h.inc": ["--gen-op-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/FlyROCDL/IR/Ops.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "fly_to_rocdl_passes_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Conversion/FlyToROCDL/Passes.h.inc": [
+            "--gen-pass-decls",
+            "--name=FlyToROCDL",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Conversion/FlyToROCDL/Passes.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "FlyDialect",
+    srcs = [
+        "lib/Dialect/Fly/IR/FlyAttrDefs.cpp",
+        "lib/Dialect/Fly/IR/FlyDialect.cpp",
+        "lib/Dialect/Fly/IR/FlyOps.cpp",
+        "lib/Dialect/Fly/IR/FlyTypeDefs.cpp",
+        "lib/Dialect/Fly/IR/FlyUniversalOps.cpp",
+        "lib/Dialect/Fly/Utils/IntTupleUtils.cpp",
+        "lib/Dialect/Fly/Utils/IntUtils.cpp",
+        "lib/Dialect/Fly/Utils/NormalForm.cpp",
+        "lib/Dialect/Fly/Utils/PointerUtils.cpp",
+    ],
+    hdrs = glob(
+        [
+            "include/flydsl/Dialect/Fly/IR/*.h",
+            "include/flydsl/Dialect/Fly/Utils/*.h",
+            "include/flydsl/Dialect/Fly/Utils/*.inc",
+        ],
+        exclude = ["include/flydsl/Dialect/Fly/IR/FlyLLVMTranslation.h"],
+    ),
+    includes = ["include"],
+    deps = [
+        ":fly_attrs_inc_gen",
+        ":fly_dialect_inc_gen",
+        ":fly_interfaces_inc_gen",
+        ":fly_ops_inc_gen",
+        ":fly_types_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//llvm:ir_headers",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:GPUDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "FlyTransforms",
+    srcs = glob(["lib/Dialect/Fly/Transforms/*.cpp"]),
+    hdrs = glob(["include/flydsl/Dialect/Fly/Transforms/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":FlyDialect",
+        ":fly_int_tuple_lowering_inc_gen",
+        ":fly_layout_lowering_inc_gen",
+        ":fly_memref_lowering_inc_gen",
+        ":fly_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:ArithUtils",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:FuncTransforms",
+        "@llvm-project//mlir:GPUDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFTransforms",
+        "@llvm-project//mlir:Transforms",
+        "@llvm-project//mlir:UBDialect",
+        "@llvm-project//mlir:VectorDialect",
+    ],
+)
+
+cc_library(
+    name = "FlyROCDLDialect",
+    srcs = [
+        "lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp",
+        "lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/CDNA4/CopyAtom.cpp",
+        "lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/Dialect.cpp",
+        "lib/Dialect/FlyROCDL/GFX11/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/GFX120X/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/GFX1250/CopyAtom.cpp",
+        "lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp",
+        "lib/Dialect/FlyROCDL/Ops.cpp",
+    ],
+    hdrs = glob([
+        "include/flydsl/Dialect/FlyROCDL/**/*.h",
+        "lib/Dialect/FlyROCDL/**/*.h",
+    ]),
+    includes = ["include"],
+    deps = [
+        ":FlyDialect",
+        ":fly_rocdl_atom_inc_gen",
+        ":fly_rocdl_attrs_inc_gen",
+        ":fly_rocdl_dialect_inc_gen",
+        ":fly_rocdl_ops_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:ROCDLDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:VectorDialect",
+    ],
+)
+
+cc_library(
+    name = "FlyToROCDL",
+    srcs = ["lib/Conversion/FlyToROCDL/FlyToROCDL.cpp"],
+    hdrs = glob(["include/flydsl/Conversion/**/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":FlyDialect",
+        ":FlyROCDLDialect",
+        ":fly_to_rocdl_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:ArithUtils",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:GPUDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:ROCDLDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:Transforms",
+        "@llvm-project//mlir:VectorDialect",
+    ],
+)
+
+# ZML addition: the per-type accessors FlyDSL's Python bindings use to derive
+# tiled TV layouts and MMA tile sizes. They live under lib/Bindings/Python but
+# depend only on the dialect (no nanobind).
+cc_library(
+    name = "TiledOpTraits",
+    srcs = ["lib/Bindings/Python/TiledOpTraits.cpp"],
+    hdrs = ["lib/Bindings/Python/TiledOpTraits.h"],
+    includes = ["lib/Bindings/Python"],
+    deps = [
+        ":FlyDialect",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+    ],
+)

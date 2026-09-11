@@ -1,0 +1,25 @@
+diff --git a/include/flydsl/Dialect/Fly/IR/FlyAttrDefs.td b/include/flydsl/Dialect/Fly/IR/FlyAttrDefs.td
+--- a/include/flydsl/Dialect/Fly/IR/FlyAttrDefs.td
++++ b/include/flydsl/Dialect/Fly/IR/FlyAttrDefs.td
+@@ -43,7 +43,8 @@
+   I32EnumAttrCase<"And", 3, "and">,
+   I32EnumAttrCase<"Or", 4, "or">,
+   I32EnumAttrCase<"Inc", 5, "inc">,
+-  I32EnumAttrCase<"Dec", 6, "dec">
++  I32EnumAttrCase<"Dec", 6, "dec">,
++  I32EnumAttrCase<"Exchange", 7, "exchange">
+ ]>;
+ def Fly_AtomicOpAttr : Fly_EnumAttr<Fly_AtomicOp, "atomic_op"> {}
+ 
+diff --git a/lib/Dialect/Fly/IR/FlyUniversalOps.cpp b/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
+--- a/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
++++ b/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
+@@ -228,6 +228,8 @@
+     return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::uinc_wrap);
+   case AtomicOp::Dec:
+     return isFloat ? std::nullopt : std::optional(LLVM::AtomicBinOp::udec_wrap);
++  case AtomicOp::Exchange:
++    return LLVM::AtomicBinOp::xchg;
+   }
+   return std::nullopt;
+ }
