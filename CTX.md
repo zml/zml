@@ -330,30 +330,31 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   and the oldest requests' blocks complete first. There are no live device
   queues, debt counters, claimed bitmap, runtime order indirection, or
   suffix-metadata arrays.
-- `FairVectoredReadScheduler` is a strict FIFO of published batches under one
-  mutex and condition: `publish(batch, plan)` appends a plan to an open batch
-  behind every earlier plan and batch (the batch joins the queue with its
-  first plan that has jobs; capacity is reserved first so the plan, its
-  completion units and the queue entry appear together), `seal(batch)` ends
-  the submission, `claim` walks the head batch's plans in order and hands out
-  the next job by advancing that plan's plain cursor, `waitForWork` sleeps
-  while nothing is unclaimed, `fail` retires the unclaimed units of every
-  plan of every queued batch and clears the queue, `snapshot` reports the
-  unclaimed total. A later batch's first job is claimed only after every job
-  of the earlier ones; fairness is intra-plan, plans follow file order and
-  the caller's submission order is the cross-batch policy. The queue holds
-  only open batches (their submission still planning) and batches with
-  unclaimed jobs: a sealed batch is popped with its last claim, at its seal
-  when already exhausted, or by `fail`. An open head whose published plans
-  are exhausted keeps the head; the unclaimed total is then 0, so workers
-  sleep in `waitForWork` until the next plan's broadcast, at most one file's
-  planning time. A batch can only be freed after `done`, which needs the
-  sentinel (dropped only after the seal) and every job claimed or retired,
-  so a queued batch is never freed and no worker rendezvous is needed.
-  Persistent workers loop `waitForWork` -> lifecycle credit -> `claim` ->
-  read -> enqueue; the claim takes the mutex the idle wait already takes.
-- A `Batch` owns its plans (heap `Plan{jobs, transfers, requests, blocks,
-  events, events_used, planning_ns, cursor}`, one per file in file order)
+- The scheduler is a strict FIFO of published plans under one mutex and
+  condition (sixteenth pass; it queued batches before): `publish(batch,
+  plan)` stamps the plan with its batch, appends it to the batch and adds
+  its completion units, and queues it behind every earlier plan when it has
+  jobs (capacity is reserved first so the plan, its units and the queue
+  entry appear together); `seal(batch)` only stamps the diagnostics; `claim`
+  advances the head plan's plain cursor and pops the plan with its last job;
+  `waitForWork` sleeps while nothing is unclaimed; `fail` retires the
+  unclaimed units of every queued plan and clears the queue; `remainingJobs`
+  reports the unclaimed total. A submission publishes and seals on one task,
+  so its plans are contiguous in the queue in file order and a later
+  submission's first job is claimed only after every job of the earlier
+  ones; fairness is intra-plan and the caller's submission order is the
+  cross-submission policy. While a submission is still planning, its
+  published plans are simply claimed out and the unclaimed total drops to 0,
+  so workers sleep in `waitForWork` until the next plan's broadcast, at most
+  one file's planning time. A plan is queued only with jobs left and its
+  units are added in the same critical section, so a queued plan's batch
+  still holds a unit, can never be freed under the scheduler, and needs no
+  worker rendezvous. Persistent workers loop `waitForWork` -> lifecycle
+  credit -> `claim` -> read -> enqueue; the claim takes the mutex the idle
+  wait already takes.
+- A `Batch` owns its plans (heap `Plan{batch, jobs, transfers, requests,
+  blocks, events, events_used, planning_ns, cursor}`, one per file in file
+  order)
   and its items from creation. The planner preallocates every context a
   plan's jobs can need: one `RequestContext` per job (initialised idle:
   nothing pending), one `BlockContext` per job block (exact
@@ -3604,6 +3605,23 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   growth (commit `a2a0a9b8`) post-dates the last MI300X runs. The two-arena
   pre-growth is unchanged, but one 8x MI300X Llama load should confirm it
   when the host is free (check the stale ROCm plugin first).
+- Task 18 (C25), the scheduler is a FIFO of plans: the queue holds `*Plan`
+  and a plan leaves it with its last claim, so `Batch.plan_cursor`,
+  `queued`, `sealed`, `claimJob`, `exhausted`, `retireUnclaimed` and
+  `appendPlanAssumeCapacity` are gone with the seal-time pop and the
+  open-exhausted-head rule; `seal` only stamps the diagnostics. `publish`
+  sets `plan.batch` and adds the units in the same critical section, and
+  `Claim.batch()` and `ReadRequest` read the batch through the plan. The
+  ownership rule re-derives one level down: a plan is queued only with jobs
+  left, so its batch still holds a unit and cannot be freed under the
+  scheduler, and a batch's queued plans are contiguous, so the `fail` that
+  may complete it is the last access to it. Ordering is unchanged because a
+  submission publishes every plan and seals on one task.
+  Verification. CPU playground: same width, credits, workers and
+  pre-growth, both checks ok, 3.243 s. gb300-2 (same conditions): loader
+  `elapsed` 0.251 / 0.259 / 0.249 s against 0.265 to 0.268 s before the
+  task, `pinned_high_water == pinned_mapped == 400 MiB`, `pack check: ok`,
+  `load check: ok`. Logs `~/zml-directio-logs/b18_*.log`.
 
 ## Open work
 

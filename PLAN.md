@@ -65,29 +65,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group B: mechanism changes (CPU playground plus gb300-2 after each)
 
-- [ ] 18. Scheduler as a FIFO of plans (C25, about 55 lines).
-  `Scheduler.queue` holds `*Plan` (`direct_loader.zig:1434-1438`); `publish`
-  appends the plan under the mutex, sets `plan.batch` there (not in
-  `Plan.create`, which the planner and the allocation-failure test at
-  `:2571-2600` call without a batch) and adds its completion units to the
-  batch; `claim` hands out `queue[head]`'s next job and pops the plan when
-  its cursor reaches `jobs.len`; `fail` retires each queued plan's unclaimed
-  jobs through `plan.batch.finishJobs` as the last access to that batch;
-  `seal` only stamps diagnostics (the sentinel already prevents completion
-  before the seal); keep `std.debug.assert(batch.diagnostics.sealed_at ==
-  null)` on publish. Derive `Claim.batch` and `ReadRequest.batch` (`:1617`,
-  `:1631`, `:1769`) from `plan.batch`. Delete `Batch.plan_cursor`, `queued`,
-  `sealed`, `claimJob`, `exhausted`, `retireUnclaimed`,
-  `appendPlanAssumeCapacity` (`:648-660`, `:681-721`), the seal-time pop and
-  the open-exhausted-head rule (`:1400-1403`, `:1489-1512`, `:1551-1556`).
-  The ownership rule re-derives one level down: a plan is queued only with
-  jobs, its units are added in the same critical section, it is popped on
-  its last claim or cleared by `fail`, so a queued plan's batch cannot reach
-  `done`. Ordering is unchanged because `submit` publishes every plan and
-  seals before returning on one task (CTX 1136-1139). Tests `:3046-3100`,
-  `:3168`, `:3323-3414` rewritten on `remaining` and `done`. Rewrite the
-  Scheduler doc (`:1391-1403`) and CTX 331-350.
-
 ## Group C: sound, but needs a measurement or a decision first
 
 - [ ] 19. Merge `ReadyTransfer` and `EventContext` into one plan-owned node

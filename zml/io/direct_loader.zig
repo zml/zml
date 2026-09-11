@@ -583,6 +583,9 @@ pub const Batch = struct {
         };
 
         allocator: std.mem.Allocator,
+        /// The submission this plan belongs to; set when it is published,
+        /// under the scheduler mutex, with its completion units.
+        batch: *Batch = undefined,
         /// The file every job of the plan reads.
         source_slot: *SourceSlot,
         jobs: []Job,
@@ -668,15 +671,9 @@ pub const Batch = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    /// Published plans in file order: appended by the submitting task and
-    /// read by claims, both under the scheduler mutex; freed at `destroy`.
+    /// Published plans in file order: appended by the submitting task under
+    /// the scheduler mutex; freed at `destroy`.
     plans: std.ArrayListUnmanaged(*Plan) = .empty,
-    /// First plan that may hold unclaimed jobs; owned by the scheduler mutex.
-    plan_cursor: usize = 0,
-    /// No further plan will be published; owned by the scheduler mutex.
-    sealed: bool = false,
-    /// In the scheduler's queue; owned by the scheduler mutex.
-    queued: bool = false,
     /// Owned by the batch; their device state by the loader, released
     /// before `destroy`.
     items: []Item = &.{},
@@ -698,47 +695,6 @@ pub const Batch = struct {
             .diagnostics = diagnostics,
         };
         return self;
-    }
-
-    /// Scheduler mutex. Takes ownership of a prepared plan and adds one
-    /// completion unit per job; the caller reserved the list capacity, so
-    /// the plan and its units appear together.
-    fn appendPlanAssumeCapacity(self: *Batch, plan: *Plan) void {
-        self.plans.appendAssumeCapacity(plan);
-        _ = self.remaining.fetchAdd(plan.jobs.len, .acq_rel);
-    }
-
-    /// Scheduler mutex. The next unclaimed job in plan order, or null when
-    /// every published plan is exhausted.
-    fn claimJob(self: *Batch) ?Scheduler.Claim {
-        while (self.plan_cursor < self.plans.items.len) : (self.plan_cursor += 1) {
-            const plan = self.plans.items[self.plan_cursor];
-            if (plan.cursor == plan.jobs.len) continue;
-            const index = plan.cursor;
-            plan.cursor += 1;
-            return .{ .batch = self, .plan = plan, .index = index };
-        }
-        return null;
-    }
-
-    /// Scheduler mutex. Every published job is claimed or retired.
-    fn exhausted(self: *const Batch) bool {
-        for (self.plans.items[self.plan_cursor..]) |plan| {
-            if (plan.cursor != plan.jobs.len) return false;
-        }
-        return true;
-    }
-
-    /// Scheduler mutex. Marks every unclaimed job claimed and returns their
-    /// number; the caller releases their units.
-    fn retireUnclaimed(self: *Batch) usize {
-        var retired: usize = 0;
-        for (self.plans.items[self.plan_cursor..]) |plan| {
-            retired += plan.jobs.len - plan.cursor;
-            plan.cursor = plan.jobs.len;
-        }
-        self.plan_cursor = self.plans.items.len;
-        return retired;
     }
 
     /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
@@ -1410,26 +1366,25 @@ const Planner = struct {
     }
 };
 
-/// A strict FIFO of published batches. A batch holds one plan per source
-/// file, published as soon as that file is planned. Within a plan, jobs are
-/// handed out in the planned order (fair by destination-device bytes); plans
-/// in file order; a later batch's first job only after every job of the
-/// earlier ones. The queue holds only batches that
-/// are open (their submission is still planning) or have unclaimed jobs: a
-/// sealed batch is popped with its last claim, at its seal when already
-/// exhausted, or by `fail`, and a batch can only be freed after `done`,
-/// which needs the sentinel dropped after the seal and every job claimed or
-/// retired, so a queued batch is never freed. An open head whose published
-/// plans are exhausted keeps the head and the workers wait for its next
-/// plan, at most one file's planning time.
+/// A strict FIFO of published plans. A submission holds one plan per source
+/// file, published as soon as that file is planned, so a plan reaches the
+/// queue behind every earlier plan of its own submission and of every
+/// earlier one (submissions publish and seal on one task). Within a plan,
+/// jobs are handed out in the planned order (fair by destination-device
+/// bytes); a plan leaves the queue with its last claim or through `fail`.
+/// A plan is queued only with jobs left and its completion units are added
+/// in the same critical section, so a queued plan's batch still holds at
+/// least one unit and can never be freed under the scheduler.
 const Scheduler = struct {
-    /// A claimed job: its position in the plan and batch that own it. The
-    /// claim holds one of the batch's completion units until the request
-    /// releases it.
+    /// A claimed job: its position in the plan that owns it. The claim holds
+    /// one of the batch's completion units until the request releases it.
     const Claim = struct {
-        batch: *Batch,
         plan: *Batch.Plan,
         index: usize,
+
+        fn batch(self: Claim) *Batch {
+            return self.plan.batch;
+        }
 
         fn job(self: Claim) Batch.Plan.Job {
             return self.plan.jobs[self.index];
@@ -1452,9 +1407,8 @@ const Scheduler = struct {
     };
 
     allocator: std.mem.Allocator,
-    /// Open batches and batches with unclaimed jobs in publish order; `head`
-    /// is the first.
-    queue: std.ArrayListUnmanaged(*Batch) = .empty,
+    /// Plans with unclaimed jobs in publish order; `head` is the first.
+    queue: std.ArrayListUnmanaged(*Batch.Plan) = .empty,
     head: usize = 0,
     unclaimed_total: usize = 0,
     stopping: bool = false,
@@ -1472,18 +1426,17 @@ const Scheduler = struct {
         self.* = undefined;
     }
 
-    /// Publishes one plan of an open batch behind every earlier plan and
-    /// batch. The batch joins the queue with its first plan that has jobs;
-    /// a plan without jobs only counts in the diagnostics.
+    /// Publishes one plan of an open submission behind every earlier plan.
+    /// A plan without jobs never joins the queue; it only counts in the
+    /// diagnostics.
     fn publish(self: *Scheduler, io: std.Io, batch: *Batch, plan: *Batch.Plan) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.stopping) return error.LoaderShuttingDown;
-        std.debug.assert(!batch.sealed);
+        std.debug.assert(batch.diagnostics.sealed_at == null);
         const job_count = plan.jobs.len;
-        const joins_queue = !batch.queued and job_count != 0;
         try batch.plans.ensureUnusedCapacity(batch.allocator, 1);
-        if (joins_queue) try self.queue.ensureUnusedCapacity(self.allocator, 1);
+        if (job_count != 0) try self.queue.ensureUnusedCapacity(self.allocator, 1);
         // Nothing below fails: the plan, its units and the queue entry
         // appear together.
         const diagnostics = &batch.diagnostics;
@@ -1494,37 +1447,31 @@ const Scheduler = struct {
         diagnostics.source_jobs += job_count;
         diagnostics.planned_transfers += plan.transfers.len;
         diagnostics.planned_dma_submissions += plan.events.len;
-        batch.appendPlanAssumeCapacity(plan);
-        if (joins_queue) {
-            self.queue.appendAssumeCapacity(batch);
-            batch.queued = true;
+        plan.batch = batch;
+        batch.plans.appendAssumeCapacity(plan);
+        _ = batch.remaining.fetchAdd(job_count, .acq_rel);
+        if (job_count != 0) {
+            self.queue.appendAssumeCapacity(plan);
+            self.unclaimed_total += job_count;
+            self.condition.broadcast(io);
         }
-        self.unclaimed_total += job_count;
-        if (job_count != 0) self.condition.broadcast(io);
     }
 
-    /// No further plan for the batch. A batch whose published plans are
-    /// already exhausted leaves the queue here; otherwise its last claim
-    /// pops it. The publisher drops the sentinel only after this, so the
-    /// batch cannot complete while still queued.
+    /// No further plan for the submission: only a diagnostic stamp now that
+    /// plans leave the queue on their own. The publisher drops the sentinel
+    /// after this, so the batch cannot complete before its last plan is
+    /// visible.
     fn seal(self: *Scheduler, io: std.Io, batch: *Batch) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        std.debug.assert(!batch.sealed);
-        batch.sealed = true;
+        std.debug.assert(batch.diagnostics.sealed_at == null);
         const now: std.Io.Timestamp = .now(io, .awake);
         if (batch.diagnostics.published_at == null) batch.diagnostics.published_at = now;
         batch.diagnostics.sealed_at = now;
-        if (batch.queued and batch.exhausted()) {
-            // Only the head can have been claimed empty.
-            std.debug.assert(self.queue.items[self.head] == batch);
-            self.popHead();
-        }
     }
 
     /// Scheduler mutex.
     fn popHead(self: *Scheduler) void {
-        self.queue.items[self.head].queued = false;
         self.head += 1;
         if (self.head == self.queue.items.len) {
             self.queue.clearRetainingCapacity();
@@ -1539,43 +1486,42 @@ const Scheduler = struct {
         self.condition.broadcast(io);
     }
 
-    /// Stops claims and retires the unclaimed units of every plan of every
-    /// queued batch so each still reaches `done` through its claimed
-    /// requests (an open batch through its seal and sentinel as well).
-    /// Claims and this pass both move cursors under the mutex, so they
-    /// partition the jobs exactly: every claimed job keeps its unit with its
-    /// worker.
+    /// Stops claims and retires the unclaimed units of every queued plan so
+    /// its batch still reaches `done` through its claimed requests (an open
+    /// one through its seal and sentinel as well). Claims and this pass both
+    /// move cursors under the mutex, so they partition the jobs exactly:
+    /// every claimed job keeps its unit with its worker. A batch's queued
+    /// plans are contiguous here, so the retire that may complete it is the
+    /// last access to it and to anything it owns.
     fn fail(self: *Scheduler, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.stopping = true;
         self.condition.broadcast(io);
-        for (self.queue.items[self.head..]) |batch| {
-            batch.queued = false;
-            const unclaimed = batch.retireUnclaimed();
-            // Last access: the retired units may complete the batch.
-            batch.finishJobs(unclaimed);
+        for (self.queue.items[self.head..]) |plan| {
+            const unclaimed = plan.jobs.len - plan.cursor;
+            plan.cursor = plan.jobs.len;
+            plan.batch.finishJobs(unclaimed);
         }
         self.queue.clearRetainingCapacity();
         self.head = 0;
         self.unclaimed_total = 0;
     }
 
-    /// Hands out the head batch's next job; a sealed batch leaves the queue
-    /// with its last one. An open head whose published plans are exhausted
-    /// hands out nothing until its next plan is published.
+    /// Hands out the head plan's next job; the plan leaves the queue with
+    /// its last one. Null only when nothing is queued: a queued plan always
+    /// has a job left.
     fn claim(self: *Scheduler, io: std.Io) ?Claim {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.head == self.queue.items.len) return null;
-        const batch = self.queue.items[self.head];
-        const claimed = batch.claimJob() orelse {
-            std.debug.assert(!batch.sealed);
-            return null;
-        };
+        const plan = self.queue.items[self.head];
+        const index = plan.cursor;
+        std.debug.assert(index < plan.jobs.len);
+        plan.cursor += 1;
         self.unclaimed_total -= 1;
-        if (batch.sealed and batch.exhausted()) self.popHead();
-        return claimed;
+        if (plan.cursor == plan.jobs.len) self.popHead();
+        return .{ .plan = plan, .index = index };
     }
 
     fn waitForWork(self: *Scheduler, io: std.Io) bool {
@@ -1635,7 +1581,6 @@ const ReadRequest = struct {
     };
 
     pipeline: *Pipeline,
-    batch: *Batch,
     plan: *Batch.Plan,
     /// The job's block contexts; its worker registers them in order.
     blocks: []Pipeline.BlockContext,
@@ -1648,7 +1593,6 @@ const ReadRequest = struct {
     /// retirement checks hold.
     const idle: ReadRequest = .{
         .pipeline = undefined,
-        .batch = undefined,
         .plan = undefined,
         .blocks = &.{},
         .pending = .init(0),
@@ -1660,7 +1604,6 @@ const ReadRequest = struct {
         const self = claim.request();
         self.* = .{
             .pipeline = pipeline,
-            .batch = claim.batch,
             .plan = claim.plan,
             .blocks = claim.blocks(),
         };
@@ -1784,7 +1727,7 @@ const ReadRequest = struct {
         // Locals first: releasing the batch unit may complete the batch
         // that owns this request, so nothing is touched after it.
         const pipeline = self.pipeline;
-        const batch = self.batch;
+        const batch = self.plan.batch;
         if (self.enqueued_ns != 0) {
             _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
         }
@@ -2712,7 +2655,7 @@ fn discardTestBatch(scheduler: *Scheduler, batch: *Batch) void {
     const io = std.testing.io;
     var claimed: usize = 0;
     while (scheduler.claim(io)) |claim| {
-        std.debug.assert(claim.batch == batch);
+        std.debug.assert(claim.batch() == batch);
         claimed += 1;
     }
     scheduler.seal(io, batch);
@@ -2982,12 +2925,12 @@ test "scheduler publishes a submission one file at a time and claims the files i
     claim = scheduler.claim(io).?;
     try std.testing.expect(claim.plan.source_slot == &slots[1]);
     try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
-    // Open and exhausted: the batch keeps the head until it is sealed.
+    // Both plans left the queue with their last claim; the submission is
+    // still open and the seal only stamps it.
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 1), scheduler.queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
     scheduler.seal(io, batch);
     try std.testing.expect(batch.diagnostics.sealed_at != null);
-    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
     batch.finishJobs(1);
     try std.testing.expect(!batch.done.isSet());
     batch.finishJobs(3);
@@ -3054,15 +2997,15 @@ test "fifo scheduler claims batches in publish order" {
     try std.testing.expectEqual(@as(usize, 3), scheduler.remainingJobs(io));
 
     var claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.batch == first);
+    try std.testing.expect(claim.batch() == first);
     try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     try std.testing.expect(claim.request() == &first.plans.items[0].requests[0]);
     claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.batch == first);
+    try std.testing.expect(claim.batch() == first);
     try std.testing.expectEqual(@as(u64, 1), claim.job().file_offset);
     try std.testing.expectEqual(@as(usize, 1), scheduler.remainingJobs(io));
     claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.batch == second);
+    try std.testing.expect(claim.batch() == second);
     try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     try std.testing.expect(scheduler.claim(io) == null);
     try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
@@ -3082,7 +3025,7 @@ test "fifo scheduler completes a batch while a later batch has unclaimed jobs" {
     const first = try publishTestBatch(&scheduler, 1);
     const second = try publishTestBatch(&scheduler, 2);
 
-    try std.testing.expect(scheduler.claim(io).?.batch == first);
+    try std.testing.expect(scheduler.claim(io).?.batch() == first);
     first.finishJobs(1);
     try std.testing.expect(first.done.isSet());
     try std.testing.expect(!second.done.isSet());
@@ -3091,8 +3034,8 @@ test "fifo scheduler completes a batch while a later batch has unclaimed jobs" {
     // away while the other one is still being claimed.
     first.destroy();
 
-    try std.testing.expect(scheduler.claim(io).?.batch == second);
-    try std.testing.expect(scheduler.claim(io).?.batch == second);
+    try std.testing.expect(scheduler.claim(io).?.batch() == second);
+    try std.testing.expect(scheduler.claim(io).?.batch() == second);
     try std.testing.expect(scheduler.claim(io) == null);
     second.finishJobs(2);
     try std.testing.expect(second.done.isSet());
@@ -3111,7 +3054,7 @@ test "fifo scheduler failure retires the unclaimed units of every queued batch" 
     empty.destroy();
 
     // One claim in flight: its unit stays with the worker.
-    try std.testing.expect(scheduler.claim(io).?.batch == first);
+    try std.testing.expect(scheduler.claim(io).?.batch() == first);
     scheduler.fail(io);
     try std.testing.expect(!first.done.isSet());
     try std.testing.expectEqual(@as(usize, 1), first.remaining.load(.acquire));
@@ -3130,7 +3073,7 @@ test "fifo scheduler failure retires the unclaimed units of every queued batch" 
     var exhausted: Scheduler = .init(std.testing.allocator);
     defer exhausted.deinit();
     const claimed = try publishTestBatch(&exhausted, 1);
-    try std.testing.expect(exhausted.claim(io).?.batch == claimed);
+    try std.testing.expect(exhausted.claim(io).?.batch() == claimed);
     exhausted.fail(io);
     try std.testing.expect(!claimed.done.isSet());
     try std.testing.expectEqual(@as(usize, 1), claimed.remaining.load(.acquire));
@@ -3192,7 +3135,7 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
             duplicate_: *std.atomic.Value(bool),
         ) void {
             while (scheduler_.claim(std.testing.io)) |claim| {
-                const base: u64 = if (claim.batch == batches_[0]) 0 else 16;
+                const base: u64 = if (claim.batch() == batches_[0]) 0 else 16;
                 const mask = @as(u64, 1) << @intCast(base + claim.job().file_offset);
                 if (seen_.fetchOr(mask, .acq_rel) & mask != 0) duplicate_.store(true, .release);
                 _ = claim_count_.fetchAdd(1, .monotonic);
@@ -3211,7 +3154,7 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
     }
 }
 
-test "fifo scheduler keeps an open batch at the head until its next plan is published" {
+test "fifo scheduler queues plans, so an open submission holds no head" {
     const WaitResult = enum(u8) { waiting, work, stopped };
     const io = std.testing.io;
     var scheduler: Scheduler = .init(std.testing.allocator);
@@ -3219,12 +3162,12 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     const batch = try Batch.create(std.testing.allocator, io, .{});
     try publishTestPlan(&scheduler, batch, 1);
     var claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.batch == batch);
-    // The published plan is exhausted but the batch is open: nothing to
-    // claim, and the head is kept.
+    try std.testing.expect(claim.batch() == batch);
+    // The plan left the queue with its last claim; the submission is still
+    // open, and holds no place of its own.
     try std.testing.expect(scheduler.claim(io) == null);
     try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
-    try std.testing.expect(batch.queued);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
     try std.testing.expect(!batch.done.isSet());
 
     // A worker sleeps until the next plan is published.
@@ -3244,16 +3187,16 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     try std.testing.expectEqual(@as(usize, 2), batch.diagnostics.plans);
     try std.testing.expectEqual(@as(usize, 3), batch.diagnostics.source_jobs);
 
-    // The new plan's jobs follow within the same batch; sealed with a job
-    // left, the last claim pops it.
+    // The new plan's jobs follow within the same submission; the seal only
+    // stamps the diagnostics.
     claim = scheduler.claim(io).?;
-    try std.testing.expect(claim.batch == batch);
+    try std.testing.expect(claim.batch() == batch);
     try std.testing.expectEqual(@as(u64, 0), claim.job().file_offset);
     scheduler.seal(io, batch);
-    try std.testing.expect(batch.queued);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.queue.items.len - scheduler.head);
     claim = scheduler.claim(io).?;
     try std.testing.expectEqual(@as(u64, 1), claim.job().file_offset);
-    try std.testing.expect(!batch.queued);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
     try std.testing.expect(scheduler.claim(io) == null);
     batch.finishJobs(1);
     try std.testing.expect(!batch.done.isSet());
@@ -3261,17 +3204,6 @@ test "fifo scheduler keeps an open batch at the head until its next plan is publ
     batch.finishJobs(3);
     try std.testing.expect(batch.done.isSet());
     batch.destroy();
-
-    // A batch sealed while already exhausted leaves the queue at its seal.
-    const exhausted = try Batch.create(std.testing.allocator, io, .{});
-    try publishTestPlan(&scheduler, exhausted, 1);
-    try std.testing.expect(scheduler.claim(io).?.batch == exhausted);
-    scheduler.seal(io, exhausted);
-    try std.testing.expect(!exhausted.queued);
-    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
-    exhausted.finishJobs(2);
-    try std.testing.expect(exhausted.done.isSet());
-    exhausted.destroy();
 }
 
 test "fifo scheduler failure retires every published plan of an open batch" {
@@ -3283,13 +3215,13 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     try publishTestPlan(&scheduler, batch, 3);
     try std.testing.expectEqual(@as(usize, 5), scheduler.remainingJobs(io));
     try std.testing.expectEqual(@as(usize, 6), batch.remaining.load(.acquire));
-    try std.testing.expect(scheduler.claim(io).?.batch == batch);
+    try std.testing.expect(scheduler.claim(io).?.batch() == batch);
 
     // The claim keeps its unit; the four unclaimed jobs of both plans are
     // retired; the sentinel is still held.
     scheduler.fail(io);
     try std.testing.expect(!batch.done.isSet());
-    try std.testing.expect(!batch.queued);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.items.len);
     try std.testing.expectEqual(@as(usize, 2), batch.remaining.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     try std.testing.expect(scheduler.claim(io) == null);
