@@ -1156,6 +1156,122 @@ pub const Tensor = struct {
         });
     }
 
+    /// 3D convolution. Defaults are (B, C_in, T, H, W) input, (C_out, C_in, T, H, W) kernel.
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 },
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 },
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            window_reversal: []const bool = &.{ false, false, false },
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        });
+    }
+
+    test conv3d {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ 1, 1, 2, 2, 2 }, .f32);
+        const kernel: Tensor = .init(.{ 1, 1, 2, 2, 2 }, .f32);
+        const Local = struct {
+            fn fwd(x: Tensor, w: Tensor) Tensor {
+                return x.conv3d(w, .{});
+            }
+        };
+
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ input, kernel }, .{});
+        defer exe.deinit();
+
+        const xs = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+        const ws = [_]f32{ 8, 7, 6, 5, 4, 3, 2, 1 };
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
+        defer x_buf.deinit();
+        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&ws));
+        defer w_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ x_buf, w_buf });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(f32, 120), try res.getValue(f32, std.testing.io));
+    }
+
+    test "conv3d stride padding multi-channel" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ 1, 2, 3, 3, 4 }, .f32);
+        const kernel: Tensor = .init(.{ 2, 2, 2, 2, 2 }, .f32);
+        const Local = struct {
+            fn fwd(x: Tensor, w: Tensor) Tensor {
+                return x.conv3d(w, .{
+                    .window_strides = &.{ 1, 2, 1 },
+                    .padding = &.{ 1, 0, 0, 0, 0, 1 },
+                });
+            }
+        };
+
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.fwd, .{ input, kernel }, .{});
+        defer exe.deinit();
+
+        var xs: [72]f32 = undefined;
+        for (&xs, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+        var ws: [32]f32 = undefined;
+        for (&ws, 0..) |*v, i| v.* = @floatFromInt(32 - i);
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
+        defer x_buf.deinit();
+        var w_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, kernel.shape(), .replicated, std.mem.sliceAsBytes(&ws));
+        defer w_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.fwd, .{ x_buf, w_buf });
+        defer res.deinit();
+        try std.testing.expectEqualSlices(i64, &.{ 1, 2, 3, 1, 4 }, res.shape().dims());
+        const got = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer got.free(std.testing.allocator);
+        const want = [_]f32{
+            3276,  3456,  3636,  1912,
+            9400,  9792,  10184, 5312,
+            14104, 14496, 14888, 7712,
+            524,   576,   628,   376,
+            2360,  2496,  2632,  1472,
+            3992,  4128,  4264,  2336,
+        };
+        try std.testing.expectEqual(@as(usize, want.len), got.items(f32).len);
+        for (want, got.items(f32)) |w, g| {
+            try std.testing.expectApproxEqAbs(w, g, 1e-3);
+        }
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp("add", dialects.stablehlo.add)(self, other);
@@ -1698,6 +1814,60 @@ pub const Tensor = struct {
         const beta = std.math.sqrt(2.0 / std.math.pi);
         const tanh_ = x.add(scaled_x_cube).scale(beta).tanh();
         return tanh_.addConstant(1).mul(x).scale(0.5);
+    }
+
+    /// Erf-form GELU: `0.5 * x * (1 + erf(x / √2))`.
+    /// `erf` is the Abramowitz–Stegun approximation (StableHLO has no erf).
+    pub fn geluErf(x: Tensor) Tensor {
+        return x.mul(x.scale(std.math.sqrt(0.5)).erf().addConstant(1)).scale(0.5);
+    }
+
+    test geluErf {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ .d = 3 }, .f32);
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.geluErf, .{input}, .{});
+        defer exe.deinit();
+
+        const xs = [_]f32{ -1.0, 0.5, 2.0 };
+        var x_buf: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&xs));
+        defer x_buf.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.geluErf, .{x_buf});
+        defer res.deinit();
+        var actual: [3]f32 = undefined;
+        try res.toSlice(std.testing.io, zml.Slice.init(input.shape(), std.mem.sliceAsBytes(&actual)));
+
+        for (xs, actual) |x, got| {
+            const want = 0.5 * x * (1.0 + hostAbramowitzStegunErf(x / @sqrt(2.0)));
+            try std.testing.expectApproxEqRel(want, got, 1e-5);
+        }
+    }
+
+    fn hostAbramowitzStegunErf(x: f32) f32 {
+        const ax = @abs(x);
+        const t = 1.0 / (1.0 + 0.3275911 * ax);
+        var poly = t * 1.061405429 - 1.453152027;
+        poly = t * poly + 1.421413741;
+        poly = t * poly - 0.284496736;
+        poly = t * poly + 0.254829592;
+        poly *= t;
+        const erfc = poly * @exp(-ax * ax);
+        return std.math.sign(x) * (1.0 - erfc);
+    }
+
+    /// Abramowitz–Stegun erf (max error ~1.5e-7). StableHLO has no `erf`.
+    pub fn erf(self: Tensor) Tensor {
+        const ax = self.abs();
+        const t = ax.scale(0.3275911).addConstant(1).powByConst(-1);
+        var poly = t.scale(1.061405429).addConstant(-1.453152027);
+        poly = t.mul(poly).addConstant(1.421413741);
+        poly = t.mul(poly).addConstant(-0.284496736);
+        poly = t.mul(poly).addConstant(0.254829592);
+        poly = t.mul(poly);
+        const erfc = poly.mul(ax.mul(ax).negate().exp());
+        return self.sign().mul(erfc.negate().addConstant(1));
     }
 
     /// Returns a Tensor containing an approximation of the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
