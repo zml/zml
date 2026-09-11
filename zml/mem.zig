@@ -373,6 +373,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => {
+            for (model, bufferized_) |src, *dst| {
+                try bufferizeInner(allocator, src, dst);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -384,4 +389,18 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "bufferize walks arrays" {
+    const Layer = struct { weight: Tensor };
+    const Model = struct { layers: [2]Layer };
+    const model: Model = .{
+        .layers = .{
+            .{ .weight = .init(.{ 2, 3 }, .f32) },
+            .{ .weight = .init(.{ 4, 5 }, .f32) },
+        },
+    };
+    const buffers = try bufferize(std.testing.allocator, Model, &model);
+    try std.testing.expectEqual(@as(usize, 0), buffers.layers[0].weight._shards.len);
+    try std.testing.expectEqual(@as(usize, 0), buffers.layers[1].weight._shards.len);
 }
