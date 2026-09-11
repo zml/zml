@@ -165,36 +165,6 @@ with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
 
-- [ ] 25. Mock server and acceptance tests (`vfs/http_acceptance_test.zig`).
-  `MockServer.Options` gains `throttle: struct { first_gets: usize = 0,
-  status: std.http.Status = .too_many_requests, retry_after_s: ?u32 = null,
-  rate_limit_reset_s: ?u32 = null, window: ?struct { gets: usize, per_ms:
-  u64 } = null, first_heads: usize = 0 }`; the GET handler (`:105-150`)
-  answers the first `first_gets` GETs (and HEADs) with `status` and the
-  named headers, and under `window` answers with `status` once more than
-  `gets` GETs arrived in the last `per_ms` ms; it records
-  `first_throttle_at` and `first_get_after_throttle_at` (awake
-  timestamps) and offers `resetPeak()` since `peak_gets` is a monotone
-  `fetchMax` (`:110`). Serve a small path table instead of the single
-  `/object` (`:95-101`), task 27 needs `/model.safetensors` and a 404 for
-  `/model.safetensors.index.json`.
-  Tests, each with the existing eight-reader harness of `:338-434`:
-  one 429 with `Retry-After: 1` holds every reader (every GET after the
-  throttle is at least 1 s later, `holds == 1`, bytes correct, `retries`
-  unchanged); a window limiter (4 GETs per 200 ms) with sixteen readers
-  over a 64-range object completes, no `RetriesExhausted`, `holds > 0`;
-  `Retry-After: 0` produces a hold of at least `retry_initial_delay` and
-  `get_requests` stays below readers times (1 + elapsed / initial_delay);
-  a 503 with `unavailable = .throttle` holds and with `.server_failure`
-  retries per request without a hold (`holds == 0`); a throttled HEAD at
-  open waits and succeeds (`head_requests == 2`); a permanently throttling
-  server with `throttle_budget = 300 ms` fails with `RateLimited` within
-  about a second and the reader's `fileReadPositional` returns
-  `Unexpected` with the log line; a reader cancelled during a hold returns
-  `Canceled`. The four existing tests keep their assertions on the server
-  counters. `Retry-After` parses whole seconds, so the sub-second cases use
-  the window mode or the governor's unit tests.
-
 - [ ] 26. The loader keeps the width and drops the watch
   (`zml/io/direct_loader.zig`). Delete `ThrottleWatch` (`:2253-2300`),
   `ReadStatsCursor` (`:2432-2452`), `RequestGate.setLimit` (`:2338-2344`),

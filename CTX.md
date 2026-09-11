@@ -3681,6 +3681,22 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   untouched, but its reads go through this VFS, so those platforms gain the
   hold under throttling; on the happy path the loop adds one inert deadline
   check per attempt.
+- Task 25 (group D), the mock server and the acceptance tests. `MockServer`
+  gained throttle injection (`first_gets`, `first_heads`, `always`, the
+  status, `Retry-After` and `RateLimit` resets, and a rate window of N GETs
+  per M ms), the two timestamps that show how long the hold actually lasted,
+  a `resetPeak` for the monotone peak, and a small path table with paths
+  that answer 404 on purpose (task 27 needs both). Seven tests, each against
+  a real socket: eight concurrent readers throttled at once share one hold
+  and honour a one-second `Retry-After` without charging a retry; a 4-per-100
+  ms window with twelve readers completes with holds and no retries at all;
+  a `RateLimit; t=0` still holds for the initial delay, with two rounds of
+  GETs instead of a spin; a throttled HEAD at open waits and retries (two
+  HEADs, one hold); a 503 holds an object-store profile and only charges
+  retries on a plain HTTP one; a server that never lets up fails with
+  `error.RateLimited` inside its 300 ms budget; a reader cancelled while the
+  backend is held returns `Canceled`. The four existing tests keep their
+  assertions. Three consecutive runs of the suite pass (42 tests, 2.1 s).
 
 ## Open work
 
