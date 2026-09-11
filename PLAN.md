@@ -63,19 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 14. DispatchSpans in one pass (C16, 35 lines).
-  `zml/io/DispatchSpans.zig`: append with `try` in one recursion; delete
-  `placementSpanCount` (`:178-188`), `appendPlacementSpan` (`:129-135`), the
-  count pre-pass (`:31-46`) and the count assert; the two
-  `NonContiguousShardPlacement` returns (`:101`, `:126`) become
-  `std.debug.assert` with a comment that `Planner.appendTransfers`
-  (`direct_loader.zig:1287-1330`) already relies on the spans tiling
-  `[0, byteSize)`, and that `Placement.init` tiles by `@divExact`
-  (`zml/Sharding.zig:1811-1841`); delete the error and the gaps/overlaps test
-  (`:230-248`). `init`'s error set is `OutOfMemory` plus `Sharding.Error`.
-  Keep `deduplicateByRange`, the mirrored masks and the axis recursion
-  (llmd's column-parallel and the 2x4 MI300X mesh need them).
-
 - [ ] 15. Admission helpers without the boundary ceremony (C28 narrow, 30 lines).
   Keep `zml/io/execute_admission.zig` and the `Fit` enum (the `.unmeasured`
   path after init is real). Delete `DeviceStats` (`:13-17`): `room` takes

@@ -3515,6 +3515,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   after a refused `mbind` instead of calling a one-line helper, and the
   `.tpu, .neuron, .metal => error.DmaBenchmarkUnsupported` arm stays a
   recoverable error.
+- Task 14 (C16), DispatchSpans in one pass: the span count pre-pass,
+  `placementSpanCount`, `appendPlacementSpan` and the count assert are gone;
+  the recursion appends with `try` into an empty list.
+  `error.NonContiguousShardPlacement` became two `std.debug.assert`s with
+  the reason recorded in place: `Placement.init` divides a sharded axis with
+  `@divExact` (`zml/Sharding.zig:1827`), so the shards tile the axis, and
+  `Planner.appendTransfers` already relies on the spans tiling
+  `[0, byteSize)`. The gaps-and-overlaps test went with the error; mirrored
+  masks, `deduplicateByRange` and the axis recursion stay.
 
 ## Open work
 

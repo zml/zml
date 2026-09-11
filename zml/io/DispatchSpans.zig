@@ -29,21 +29,14 @@ pub fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !Dis
     const ordered_devices = sharding.devicesInCanonicalOrder();
     std.debug.assert(ordered_devices.len <= 64);
 
-    var placement_span_count: usize = 0;
-    for (ordered_devices) |device| {
-        placement_span_count += placementSpanCount(shape, placement.slices(device.coords).constSlice());
-    }
-
-    var placement_spans: std.ArrayList(PlacementSpan) = try .initCapacity(allocator, placement_span_count);
+    var placement_spans: std.ArrayList(PlacementSpan) = .empty;
     defer placement_spans.deinit(allocator);
 
     const byte_strides = shape.computeByteStrides();
 
     for (ordered_devices, 0..) |device, writer_index| {
-        appendShardPlacementSpans(&placement_spans, shape, placement.slices(device.coords).constSlice(), byte_strides.constSlice(), writer_index);
+        try appendShardPlacementSpans(allocator, &placement_spans, shape, placement.slices(device.coords).constSlice(), byte_strides.constSlice(), writer_index);
     }
-
-    std.debug.assert(placement_spans.items.len == placement_span_count);
 
     var spans: std.ArrayList(Span) = try .initCapacity(allocator, placement_spans.items.len);
     errdefer spans.deinit(allocator);
@@ -98,7 +91,12 @@ fn deduplicateByRange(
     var cursor: usize = 0;
     while (i < placement_spans.len) {
         const span = placement_spans[i];
-        if (span.start != cursor) return error.NonContiguousShardPlacement;
+        // The spans tile `[0, byteSize)`: `Placement.init` divides every
+        // sharded axis with `@divExact` (`zml/Sharding.zig`), so the shards
+        // of one axis cover it exactly, and `Planner.appendTransfers`
+        // already relies on that tiling when it maps a job's bytes to
+        // destinations.
+        std.debug.assert(span.start == cursor);
 
         // Record packed offsets in file order so request tasks can finish
         // out of order without mutating writer cursors.
@@ -123,33 +121,27 @@ fn deduplicateByRange(
         i = j;
     }
 
-    if (cursor != total_bytes) return error.NonContiguousShardPlacement;
-}
-
-fn appendPlacementSpan(placement_spans: *std.ArrayList(PlacementSpan), writer_index: usize, start: usize, len: usize) void {
-    placement_spans.appendAssumeCapacity(.{
-        .writer_index = writer_index,
-        .start = start,
-        .len = len,
-    });
+    std.debug.assert(cursor == total_bytes);
 }
 
 fn appendShardPlacementSpans(
+    allocator: std.mem.Allocator,
     placement_spans: *std.ArrayList(PlacementSpan),
     shape: Shape,
     slices: []const Placement.Slice1d,
     byte_strides: []const i64,
     writer_index: usize,
-) void {
+) !void {
     if (shape.rank() == 0) {
-        appendPlacementSpan(placement_spans, writer_index, 0, shape.byteSize());
+        try placement_spans.append(allocator, .{ .writer_index = writer_index, .start = 0, .len = shape.byteSize() });
         return;
     }
 
-    appendShardAxisPlacementSpans(placement_spans, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
+    try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
 }
 
 fn appendShardAxisPlacementSpans(
+    allocator: std.mem.Allocator,
     placement_spans: *std.ArrayList(PlacementSpan),
     slices: []const Placement.Slice1d,
     byte_strides: []const i64,
@@ -157,33 +149,24 @@ fn appendShardAxisPlacementSpans(
     axis: usize,
     contiguous_axis: usize,
     base_start: i64,
-) void {
+) !void {
     const slice = slices[axis];
     if (slice.size == 0) return;
 
     if (axis == contiguous_axis) {
-        const span_start: usize = @intCast(base_start + slice.start * byte_strides[axis]);
-        const span_len: usize = @intCast(slice.size * byte_strides[axis]);
-        appendPlacementSpan(placement_spans, writer_index, span_start, span_len);
+        try placement_spans.append(allocator, .{
+            .writer_index = writer_index,
+            .start = @intCast(base_start + slice.start * byte_strides[axis]),
+            .len = @intCast(slice.size * byte_strides[axis]),
+        });
         return;
     }
 
     var i: i64 = 0;
     while (i < slice.size) : (i += 1) {
         const child_start = base_start + (slice.start + i) * byte_strides[axis];
-        appendShardAxisPlacementSpans(placement_spans, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
+        try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
     }
-}
-
-fn placementSpanCount(shape: Shape, slices: []const Placement.Slice1d) usize {
-    if (shape.rank() == 0) return 1;
-
-    const contiguous_axis = contiguousSliceAxis(shape, slices);
-    var count: usize = 1;
-    for (slices[0..contiguous_axis]) |slice| {
-        count *= @intCast(slice.size);
-    }
-    return count;
 }
 
 fn contiguousSliceAxis(shape: Shape, slices: []const Placement.Slice1d) usize {
@@ -225,24 +208,4 @@ test "dispatch spans preserve mirrored ranges and packed writer offsets" {
     const dispatch: DispatchSpans = .{ .spans = spans.items };
     for (0..16) |offset| try std.testing.expectEqual(@as(?usize, offset / 4), dispatch.spanIndexAt(offset));
     try std.testing.expectEqual(@as(?usize, null), dispatch.spanIndexAt(16));
-}
-
-test "dispatch spans reject gaps overlaps and incomplete coverage" {
-    const allocator = std.testing.allocator;
-    for ([_]usize{ 3, 5, 4 }) |second_start| {
-        var placements = [_]DispatchSpans.PlacementSpan{
-            .{ .writer_index = 0, .start = 0, .len = 4 },
-            .{ .writer_index = 1, .start = second_start, .len = 4 },
-        };
-        var spans: std.ArrayList(DispatchSpans.Span) = .empty;
-        defer spans.deinit(allocator);
-        var offsets: [2]usize = @splat(0);
-        try std.testing.expectError(error.NonContiguousShardPlacement, DispatchSpans.deduplicateByRange(
-            allocator,
-            &placements,
-            9,
-            &spans,
-            &offsets,
-        ));
-    }
 }
