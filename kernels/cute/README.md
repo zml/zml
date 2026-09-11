@@ -84,23 +84,25 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 * **Scalars are `i32` and `f32` by default**, like `Int32`/`Float32`;
   `cst(dtype, v)` picks another type and `coerce` lifts literals to the other
   operand's type.
-* **`nvvm`, `gpu` and `cuda` are not linked into ZML.** Thread indices and
-  barriers are emitted as unregistered ops in generic form; `finish` wraps the
-  verified kernel in the `gpu.module` + host `@launch` function as text. The
-  compiler parses all of it.
+* **`nvvm` is not linked into ZML.** Thread indices and barriers are emitted
+  as unregistered ops in generic form; the compiler has the dialect.
+* **The module is just the kernel.** `finish` prints `module { func.func
+  @name(...) {...} }`; `cute-ir-compile` makes every public function a kernel
+  entry, so there is no `gpu.module` or host launch function to write.
 * **Not covered yet:** dynamic shapes, `local_tile`/`local_partition`, tiled
   copies and fragments (`TensorSSA`), TMA and MMA atoms.
 
 ## The custom call
 
 `ops.cute` emits `__gpu$xla.gpu.cute` with a printed dictionary: `name`,
-`kernel_type = "cute"`, `ir` (the textual module), optional `zeroed_outputs`.
-XLA runs `cute-ir-compile` (which dlopens `cutlass_ir.so` from the plugin
-archive), reads grid, block and dynamic shared memory from the module's host
-`cuda.launch_ex`, and launches the cubin. Every operand and result is one raw
-device pointer in the default layout, operands first; the compiler's
-`ir_argument_count` is checked against them. Cluster, cooperative and
-programmatic-dependent launches are refused.
+`kernel_type = "cute"`, `ir` (the textual module), `grid` and `block`
+(3-element arrays), optional `zeroed_outputs`. XLA runs `cute-ir-compile`
+(which dlopens `cutlass_ir.so` from the plugin archive), takes the kernel's
+dynamic shared memory requirement and argument count from the compiler's
+metadata, checks them, and launches the cubin over `grid` × `block`. Every
+operand and result is one raw device pointer in the default layout, operands
+first. A module that carries its own `gpu.module` and host launch still works;
+it then owns the launch configuration and `grid`/`block` must be left out.
 
 To see what XLA received, run with `--xla_dump_to=<dir>`: it writes
 `<instr>.cute.mlir`, `<instr>.cute.json` and `<instr>.cubin`.
