@@ -1157,6 +1157,131 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
     return outputs_;
 }
 
+pub const CuteOps = struct {
+    /// The `cuda.kernel` symbol; the module's host function must launch it.
+    name: []const u8,
+    /// Textual CuTe DSL module: kernel plus host launch function. Grid, block
+    /// and dynamic shared memory are read from the launch.
+    ir: []const u8,
+    zeroed_outputs: []const i32 = &.{},
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+/// A `__gpu$xla.gpu.cute` custom call: XLA compiles `ir` with cute-ir-compile
+/// and launches `name`. Every operand and result arrives as one raw device
+/// pointer, in order, in the default layout.
+pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tensor {
+    const mlir_ctx = Compiler.current().mlir_ctx;
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+    }
+
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
+        .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cute")),
+        .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
+    });
+    if (opts.zeroed_outputs.len > 0) {
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+        for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
+    }
+    const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "__gpu$xla.gpu.cute",
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = false,
+            .output_operand_aliases = opts.output_operand_aliases,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(Compiler.current().currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test "cute" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // out[i] = in[i] + 1 over 128 f32, in the CuTe DSL's frontend form.
+    const ir =
+        \\module attributes {gpu.container_module} {
+        \\  gpu.module @kernels {
+        \\    cuda.kernel @add_one(%arg0: !cute.ptr<f32, gmem, align<16>>, %arg1: !cute.ptr<f32, gmem, align<16>>) attributes {cute.kernel, gpu.kernel, nvvm.reqntid = array<i32: 128, 1, 1>} {
+        \\      %i = nvvm.read.ptx.sreg.tid.x : i32
+        \\      %shape = cute.make_shape() : () -> !cute.shape<"128">
+        \\      %lay = cute.make_layout(%shape) : !cute.layout<"128:1">
+        \\      %coord = cute.make_coord(%i) : (i32) -> !cute.coord<"?">
+        \\      %in = cute.make_view(%arg0, %lay) : !cute.memref<f32, gmem, align<16>, "128:1">
+        \\      %out = cute.make_view(%arg1, %lay) : !cute.memref<f32, gmem, align<16>, "128:1">
+        \\      %x = cute.memref.load(%in, %coord) : (!cute.memref<f32, gmem, align<16>, "128:1">, !cute.coord<"?">) -> f32
+        \\      %one = arith.constant 1.0 : f32
+        \\      %y = arith.addf %x, %one : f32
+        \\      cute.memref.store(%out, %coord, %y) : (!cute.memref<f32, gmem, align<16>, "128:1">, !cute.coord<"?">, f32) -> ()
+        \\      return
+        \\    }
+        \\  }
+        \\  func.func @launch(%arg0: !cute.ptr<f32, gmem, align<16>>, %arg1: !cute.ptr<f32, gmem, align<16>>) -> i32 attributes {llvm.emit_c_interface} {
+        \\    %smem = cute.kernel_smem_size @kernels::@add_one : i64
+        \\    %c0_i64 = arith.constant 0 : i64
+        \\    %stream = cuda.cast %c0_i64 : i64 -> !cuda.stream
+        \\    %c1 = arith.constant 1 : i32
+        \\    %c128 = arith.constant 128 : i32
+        \\    %cfg = cuda.launch_cfg.create<max_attrs = 17 : i32> (blockDim = (%c128, %c1, %c1), dynamicSmemBytes = %smem, gridDim = (%c1, %c1, %c1), stream = %stream) : i32, i32, i32, i64, i32, i32, i32, !cuda.stream -> !cuda.launch_cfg<max_attrs = 17>
+        \\    %r = cuda.launch_ex @kernels::@add_one<%cfg> (%arg0, %arg1) : !cuda.launch_cfg<max_attrs = 17>, (!cute.ptr<f32, gmem, align<16>>, !cute.ptr<f32, gmem, align<16>>) -> !cuda.result
+        \\    %status = cuda.cast %r : !cuda.result -> i32
+        \\    return %status : i32
+        \\  }
+        \\}
+    ;
+
+    const Mod = struct {
+        pub fn forward(a: Tensor) Tensor {
+            return cute(.{a}, .{a.shape()}, .{ .name = "add_one", .ir = ir })[0];
+        }
+    };
+
+    const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    defer exe.deinit();
+
+    var input: [128]f32 = undefined;
+    for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer a_buffer.deinit();
+
+    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    defer result.deinit();
+
+    var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer host.free(std.testing.allocator);
+
+    for (host.items(f32), 0..) |v, i| {
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), v);
+    }
+}
+
 test "cuda_tile" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
