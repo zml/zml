@@ -6,7 +6,7 @@ load("@zml//bazel:patchelf.bzl", "patchelf")
 
 patchelf(
     name = "libzml_rocm_so",
-    src = "libzml_rocm.so",
+    src = "lib/libzml_rocm.so",
     add_needed = [
         "libzmlxrocm.so.0",
     ],
