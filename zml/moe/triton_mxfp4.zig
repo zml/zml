@@ -27,7 +27,7 @@ pub const Parameters = struct {
 };
 
 /// Row-major MXFP4 E2M1 weights and linear E8M0 block32 scales.
-/// BF16 activations are quantized on the GPU to FP8 with per-128 E8M0 scales.
+/// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
 pub fn fusedExperts(
     input: zml.Tensor,
     ids: zml.Tensor,
