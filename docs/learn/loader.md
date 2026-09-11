@@ -102,9 +102,10 @@ backend. CPU's direct arenas are ordinary pages.
 
 ## Initialization and host memory
 
-`Loader.init` selects the transfer path with `Loader.backendFor(target)`.
-That decision describes validated loading behavior, independently of whether
-host memory is pinned or transfers use DMA.
+`Loader.init` selects the transfer path from the platform target, and the
+backend takes the same `Loader.Options` the caller passed. That decision
+describes validated loading behavior, independently of whether host memory is
+pinned or transfers use DMA.
 
 The direct backend owns its workspace for its entire lifetime. Initialization
 allocates that workspace, calibrates transfer sizing, and prepares the block

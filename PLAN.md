@@ -63,22 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 10. `backend.Config` becomes the one `Options` (C14, 18 lines).
-  Move the body of `Loader.Options` (five fields, defaults, `auto`, docs) to
-  `zml/io/backend.zig` as `pub const Options`, add
-  `pub fn readWidth(self: Options) usize { return self.read_parallelism
-  orelse limits.defaultReadParallelism(self.load_profile.high_latency); }`,
-  delete `Config` (`backend.zig:14-24`). In `loader.zig`: `pub const Options
-  = backend.Options;`, `init` passes `opts` through (`:139-145`), the fixture
-  at `:788` uses `opts.readWidth()`. `Backend.init`, `initBuffered` and
-  `direct_loader.Loader.create` / `Sizing.init` take `backend.Options`;
-  `direct_loader.zig:90` and `:324` call `opts.readWidth()`; the two
-  direct_loader tests (`:2611-2616`, `:2657-2662`) drop `.dma = .{}` if it
-  is now the default. `buffered_loader.Loader.create` keeps its
-  `(allocator, io, platform, read_parallelism: usize, profile)` signature and
-  receives `opts.readWidth(), opts.load_profile`: byte-identical values on
-  TPU. Fix the stale `Loader.backendFor(target)` in `docs/learn/loader.md:105`.
-
 - [ ] 11. Drop the `max_host_bytes` knob, keep the guard (C24, 18 lines).
   Delete `Loader.Options.max_host_bytes` (`loader.zig:101-102`, `:143`) and
   the backend option field; replace `Workspace.Options`

@@ -3482,6 +3482,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   when the profile is high latency, so TPU, neuron and metal loads are
   byte-identical. `llama_tests` and `lfm2_tests` dropped their explicit
   `.load_profile = .local` (built to check).
+- Task 10 (C14), one options type: `backend.Config` is gone. The five
+  fields, their defaults, `auto` and the long doc comments live in
+  `backend.Options`, which gained `readWidth()` (the option or
+  `limits.defaultReadParallelism` of the profile); `Loader.Options` is an
+  alias and `Loader.init` hands `opts` straight to `Backend.init`. The
+  buffered backend still takes `(read_parallelism, profile)` and receives
+  `opts.readWidth(), opts.load_profile`, so TPU, neuron and metal see the
+  same values. `docs/learn/loader.md` lost the stale
+  `Loader.backendFor(target)`.
 
 ## Open work
 

@@ -22,7 +22,7 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 
 const CreateOptions = platform_mod.CreateOptions;
-const BackendConfig = backend.Config;
+const BackendOptions = backend.Options;
 const LoadSpec = backend.LoadSpec;
 const Platform = platform_mod.Platform;
 
@@ -77,7 +77,7 @@ pub const Loader = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        opts: BackendConfig,
+        opts: BackendOptions,
     ) !*Loader {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
@@ -87,7 +87,7 @@ pub const Loader = struct {
         const sizing = try Sizing.init(allocator, io, platform, opts);
         const calibration = sizing.calibration;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
-        const width = @min(opts.read_parallelism, sizing.feasible_width);
+        const width = @min(opts.readWidth(), sizing.feasible_width);
         const limits_config: RequestGateLimits.Config = .{
             .feasible_width = sizing.feasible_width,
             .retained = sizing.retained_credits,
@@ -291,7 +291,7 @@ pub const Loader = struct {
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
-            opts: BackendConfig,
+            opts: BackendOptions,
         ) !Sizing {
             const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
                 var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
@@ -321,7 +321,7 @@ pub const Loader = struct {
                     &workspace,
                     calibration.block_size,
                     maximum_blocks_per_job,
-                    opts.read_parallelism,
+                    opts.readWidth(),
                     dma_reserve,
                 );
                 const pregrown_bytes = workspace.mapped_bytes - retained_before;
@@ -2598,7 +2598,6 @@ test "loader releases the calibrated pool when alignment validation fails" {
     const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
         .read_parallelism = 2,
         .load_profile = profile,
-        .dma = .{},
         .max_host_bytes = 64 * 1024 * 1024,
         .direct_io = .on,
     })) |loader| unexpected: {
@@ -2644,7 +2643,6 @@ test "loader failures clean up before publication, after publication and during 
         const loader = try Loader.create(allocator, io, platform, .{
             .read_parallelism = 2,
             .load_profile = .local,
-            .dma = .{},
             .max_host_bytes = 64 * 1024 * 1024,
             .direct_io = .off,
         });

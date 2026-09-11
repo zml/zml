@@ -81,43 +81,7 @@ pub const Loader = struct {
         placed: []u64,
     };
 
-    pub const Options = struct {
-        pub const auto: Options = .{};
-
-        /// Concurrent source reads, at most `limits.max_read_parallelism`.
-        /// Null takes the profile's default (`limits.defaultReadParallelism`:
-        /// 16 locally, 32 on a high-latency source), clipped to what the
-        /// host budget pins. The direct backend halves it when the source
-        /// throttles; nothing raises it during a load.
-        read_parallelism: ?usize = null,
-        /// Model-wide source tuning prepared from the VFS path. The default
-        /// is the no-VFS local profile; prepare one with `VFS.loadProfile`
-        /// for a VFS path.
-        load_profile: VFS.LoadProfile = .local,
-        /// Calibrate transfer sizing during initialization. Ignored by buffered
-        /// backends; CPU uses the default sizing without measurement.
-        dma: dma_calibration.Options = .{},
-        /// Upper bound for the direct backend's host arenas, not a growth target.
-        max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
-        /// Direct I/O for local source files, decided per file by the
-        /// VFS that opens it: `auto` reads a file past the page cache when it
-        /// is mostly not cached at the first decision, `on` whenever the
-        /// filesystem allows it, `off` never. The planner widens a direct file's
-        /// reads to the profile's alignment, at most two alignment units per
-        /// request. A direct read never fills the page cache, so under
-        /// `auto` a cold file stays cold and comes from the disk on every
-        /// load; on a host whose warm buffered reads beat its disk, a model
-        /// loaded repeatedly is better served by `off`. Nothing changes for
-        /// a profile without alignment.
-        /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but
-        /// ~4.53 s forced direct from a slow storage extent; on four GB300
-        /// with four NVMe drives in RAID0, direct took ~0.30 s versus ~0.32 s
-        /// warm buffered. These are loader times, not disk-only rates.
-        /// Residency alone cannot predict which path wins. The loader retains
-        /// each open file, so its decision is not remeasured on every submission
-        /// if cache residency changes.
-        direct_io: VFS.DirectIo = .auto,
-    };
+    pub const Options = backend.Options;
 
     /// One executable over a binding. `tensor`'s sources are loaded into
     /// fresh input buffers; when the submission is retired, `exe` runs over
@@ -135,13 +99,7 @@ pub const Loader = struct {
         opts: Options,
     ) !Loader {
         try validateOptions(opts);
-        const selected = try Backend.init(allocator, io, platform, .{
-            .read_parallelism = opts.read_parallelism orelse limits.defaultReadParallelism(opts.load_profile.high_latency),
-            .load_profile = opts.load_profile,
-            .dma = opts.dma,
-            .max_host_bytes = opts.max_host_bytes,
-            .direct_io = opts.direct_io,
-        });
+        const selected = try Backend.init(allocator, io, platform, opts);
         errdefer selected.destroy();
         return initWithBackend(allocator, io, platform, selected);
     }
@@ -776,7 +734,7 @@ const LoaderTestFixture = struct {
                     allocator,
                     io,
                     self.platform,
-                    opts.read_parallelism.?,
+                    opts.readWidth(),
                     opts.load_profile,
                 );
                 errdefer selected.destroy();
