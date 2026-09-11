@@ -122,7 +122,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
             else => null,
         },
         .fp8_block32 => switch (platform.target) {
-            .cuda => quantizeBlockFp8(input, axis, 32, .f8e4m3fn),
+            .cuda => if (supportsNativeMx(platform)) quantizeMxFp8(input, axis) else quantizeBlockFp8(input, axis, 32, .f8e4m3fn),
             .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
                 .cdna4, .rdna4 => quantizeBlockFp8(input, axis, 32, .f8e4m3fn),
                 .cdna3 => quantizeBlockFp8(input, axis, 32, .f8e4m3fnuz),
@@ -131,6 +131,30 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
             else => null,
         },
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
+    };
+}
+
+pub fn supportsNativeMx(platform: *const Platform) bool {
+    return if (platform_mod.cuda.computeCapability(platform)) |cc| cc.atLeast(.{ .major = 10, .minor = 0 }) else false;
+}
+
+/// DeepSeek block32 activations use the next power-of-two scale, not nearest rounding.
+/// E8M0 scales also allow Blackwell's native MXFP8 matrix multiplication.
+pub fn quantizeMxFp8(x: Tensor, axis: anytype) QuantizedInput {
+    stdx.debug.assert(@mod(x.dim(axis), 32) == 0, "MXFP8 activation width must be divisible by 32, got {f}", .{x.shape()});
+    const grouped = x.convert(.f32).splitAxis(axis, .{ .fp8_ks = -1, .fp8_block = 32 });
+    const raw_scale = grouped.abs().max(.fp8_block).maximum(.scalar(1e-4, .f32)).scale(1.0 / 448.0);
+    const bits = raw_scale.bitCast(.u32);
+    const exponent = bits.shiftRightLogical(.scalar(23, .u32));
+    const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
+    const scale = exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
+    return .{
+        .values = grouped.div(scale)
+            .clamp(.scalar(-448, .f32), .scalar(448, .f32))
+            .convert(.f8e4m3fn)
+            .reshape(x.shape().withDtype(.f8e4m3fn)),
+        .scales = scale.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), 32)).withDtype(.f32)).convert(.f8e8m0),
+        .global_scale = null,
     };
 }
 
@@ -391,5 +415,57 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
             const scale_index = (i / (256 * 3)) * 6 + ((i / 3) % 256) / 128 * 3 + i % 3;
             try std.testing.expectApproxEqAbs(host[i].toF32(), value * scales.constItems(f32)[scale_index], 1e-6);
         }
+    }
+}
+
+test "MXFP8 quantization rounds scales upward and preserves arbitrary contracting axes" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    const Local = struct {
+        const Outputs = struct { values: Tensor, scales: Tensor };
+        fn forward(x: Tensor) Outputs {
+            const q = quantizeMxFp8(x, .k);
+            return .{ .values = q.values.convert(.f32), .scales = q.scales.convert(.f32) };
+        }
+    };
+    const x: Tensor = .init(.{ .b = 2, .k = 64, .s = 3 }, .bf16);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{x}, .{});
+    defer exe.deinit();
+    try zml.testing.expectEqualShapes(x.shape().setDim(.k, 2).withDtype(.f32), exe.output_shapes[1]);
+    var host: [2 * 64 * 3]zml.floats.BFloat16 = undefined;
+    const magnitudes = [_]f32{ 0, 1e-6, 0.875, 0.8828125, 1.75, 1.765625, 3.5, 3.53125, 7, 7.0625, 448, 452 };
+    for (&host, 0..) |*value, i| {
+        const group = (i / (64 * 3)) * 6 + ((i / 3) % 64) / 32 * 3 + i % 3;
+        value.* = .fromF32(magnitudes[group] * @as(f32, @floatFromInt(@as(i32, @intCast((i / 3) % 32)) - 16)) / 16);
+    }
+    var buffer = try zml.Buffer.fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
+    defer buffer.deinit();
+    var output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.forward, .{buffer});
+    defer zml.Buffer.deinitAll(Local.Outputs, &output);
+    const values = try output.values.getValue([2 * 64 * 3]f32, std.testing.io);
+    const scales = try output.scales.getValue([12]f32, std.testing.io);
+    for (scales, magnitudes) |actual, amax| {
+        const expected = std.math.pow(f32, 2, @ceil(@log2(@max(amax, 1e-4) / 448)));
+        try std.testing.expectEqual(expected, actual);
+    }
+    for (values, 0..) |value, i| {
+        const group = (i / (64 * 3)) * 6 + ((i / 3) % 64) / 32 * 3 + i % 3;
+        // Enumerate E4M3 values so the reference uses round-to-nearest-even,
+        // independently of the host Float8 conversion helpers.
+        const input = host[i].toF32() / scales[group];
+        var magnitude: f32 = 0;
+        var distance = @abs(input);
+        for (1..127) |code| {
+            const exponent: i32 = @intCast(code >> 3);
+            const mantissa: f32 = @floatFromInt(code & 7);
+            const candidate = if (exponent == 0) mantissa / 512 else std.math.ldexp(@as(f32, 1) + mantissa / 8, exponent - 7);
+            const error_ = @abs(@abs(input) - candidate);
+            if (error_ < distance or (error_ == distance and code % 2 == 0)) {
+                magnitude = candidate;
+                distance = error_;
+            }
+        }
+        const expected = std.math.copysign(magnitude, input);
+        try std.testing.expectEqual(expected, value);
     }
 }

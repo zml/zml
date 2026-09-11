@@ -64,9 +64,40 @@ pub const Linear = struct {
 
     fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
         const q = self.quantization.?;
+        // Scaled-dot GPU kernels accept one non-contracting activation axis.
+        // Flatten the independent token axes and restore them after the projection.
+        const n_axis: u3 = if (self.weight.axis(self.tag) == 1) 0 else 1;
+        if (q.scheme == .fp8_block32 and self.weight.rank() == 2 and lhs.rank() != 2 and lhs.shape().hasTag(self.weight.shape().tag(n_axis)) == null) {
+            var permutation: [constants.MAX_RANK]i64 = undefined;
+            var next: usize = 0;
+            for (0..lhs.rank()) |axis| {
+                if (axis == lhs.axis(self.tag)) continue;
+                permutation[next] = @intCast(axis);
+                next += 1;
+            }
+            permutation[next] = lhs.axis(self.tag);
+            const flat_shape = Shape.init(.{ @divExact(lhs.count(), @as(usize, @intCast(lhs.dim(self.tag)))), lhs.dim(self.tag) }, lhs.dtype())
+                .withTags(.{ Shape.toTag(.linear_row), self.tag });
+            const flat_lhs = lhs.transpose(permutation[0..lhs.rank()]).reshape(flat_shape);
+            const flat_scale = if (lhs_scale) |scale| scale.transpose(permutation[0..scale.rank()])
+                .reshape(flat_shape.setDim(self.tag, scale.dim(lhs.axis(self.tag))).withDtype(scale.dtype())) else null;
+            return self.forwardScaled(flat_lhs, flat_scale, input_global_scale, output_dtype)
+                .reshape(lhs.shape().remove(self.tag).appendDim(self.weight.dim(n_axis), self.weight.shape().tag(n_axis)).withDtype(output_dtype));
+        }
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
+        var scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
+        if (q.scheme == .fp8_block32 and quantization.supportsNativeMx(zml.Compiler.current().platform)) {
+            // A 32x32 block shares its E8M0 scale across 32 output rows.
+            // Expand only this small grid; the FP8 weight stays packed throughout the dot.
+            scales = scales.convert(.f8e8m0);
+            const expanded_shape = scales.shape().insert(n_axis + 1, .{32});
+            const axes: []const i64 = if (n_axis == 0) &.{ 0, 2 } else &.{ 0, 1 };
+            scales = scales.broadcast(expanded_shape, axes)
+                .reshape(scales.shape().setDim(n_axis, weight.dim(n_axis)));
+        } else if (q.scheme == .fp8_block32) {
+            scales = scales.convert(.f32);
+        }
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
@@ -2296,4 +2327,104 @@ fn ShapeStruct(comptime dims: anytype) type {
     }
 
     return @Struct(.@"extern", null, &struct_field_names, &struct_field_types, &struct_field_attrs);
+}
+
+test "block32 Linear matches power-of-two FP8 reference across layouts and token counts" {
+    const platform = zml.testing.env();
+    if (!quantization.supportsNativeMx(platform)) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    inline for (.{ false, true }) |transpose_weight| {
+        const Local = struct {
+            fn forward(x: Tensor, w: Tensor, s: Tensor) Tensor {
+                const weight = w.convert(.f8e4m3fn);
+                const scales = s.convert(.f8e8m0);
+                const linear: Linear = .{
+                    .weight = if (transpose_weight) weight.transpose(.{ .k, .n }) else weight,
+                    .tag = Shape.toTag(.k),
+                    .quantization = .{
+                        .scheme = .fp8_block32,
+                        .scales = if (transpose_weight) scales.transpose(.{ .sk, .sn }) else scales,
+                    },
+                };
+                return linear.forward(x).convert(.f32);
+            }
+        };
+        for ([_]i64{ 1, 17, 256 }) |tokens| {
+            const x: Tensor = .init(.{ .b = 1, .m = tokens, .k = 128 }, .bf16);
+            const w: Tensor = .init(.{ .n = 128, .k = 128 }, .bf16);
+            const s: Tensor = .init(.{ .sn = 4, .sk = 4 }, .f32);
+            var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, s }, .{});
+            defer exe.deinit();
+            const x_host = try allocator.alloc(zml.floats.BFloat16, x.count());
+            defer allocator.free(x_host);
+            var w_host: [128 * 128]zml.floats.BFloat16 = undefined;
+            var s_host: [16]f32 = undefined;
+            for (x_host, 0..) |*v, i| v.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((i * 7 + i / 32) % 31)) - 15)) / 8);
+            for (&w_host, 0..) |*v, i| v.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((i * 3 + i / 128) % 17)) - 8)) / 4);
+            for (&s_host, 0..) |*v, i| v.* = std.math.pow(f32, 2, -@as(f32, @floatFromInt(1 + i % 5)));
+            var xb = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(x_host));
+            defer xb.deinit();
+            var wb = try zml.Buffer.fromBytes(io, platform, w.shape(), .replicated, std.mem.asBytes(&w_host));
+            defer wb.deinit();
+            var sb = try zml.Buffer.fromBytes(io, platform, s.shape(), .replicated, std.mem.asBytes(&s_host));
+            defer sb.deinit();
+            var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ xb, wb, sb });
+            defer output.deinit();
+            var actual = try output.toSliceAlloc(allocator, io);
+            defer actual.free(allocator);
+            for (0..@intCast(tokens)) |m| {
+                var quantized: [128]f32 = undefined;
+                for (0..4) |group| {
+                    var amax: f32 = 1e-4;
+                    for (x_host[m * 128 + group * 32 ..][0..32]) |v| amax = @max(amax, @abs(v.toF32()));
+                    const scale = std.math.pow(f32, 2, @ceil(@log2(amax / 448)));
+                    for (0..32) |i| quantized[group * 32 + i] = DataType.f8e4m3fn.toZigType().fromF32(x_host[m * 128 + group * 32 + i].toF32() / scale).toF32() * scale;
+                }
+                for (0..128) |n| {
+                    var expected: f32 = 0;
+                    for (0..128) |k| expected += quantized[k] * w_host[n * 128 + k].toF32() * s_host[(n / 32) * 4 + k / 32];
+                    const bits: u32 = @bitCast(expected);
+                    const rounded: f32 = @bitCast((bits + 0x7fff + ((bits >> 16) & 1)) & 0xffff0000);
+                    try std.testing.expectEqual(rounded, actual.constItems(f32)[m * 128 + n]);
+                }
+            }
+        }
+    }
+}
+
+test "block32 Linear shards output rows and reduces input partitions" {
+    const platform = zml.testing.env();
+    if (!quantization.supportsNativeMx(platform)) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const sharding = platform.shardings.get("model").?;
+    inline for (.{ false, true }) |split_k| {
+        const Local = struct {
+            fn forward(x: Tensor, weight: Tensor, scale: Tensor) Tensor {
+                const linear: Linear = .{
+                    .weight = weight.convert(.f8e4m3fn),
+                    .tag = Shape.toTag(.k),
+                    .quantization = .{ .scheme = .fp8_block32, .scales = scale.convert(.f8e8m0) },
+                };
+                return linear.forward(x).convert(.f32);
+            }
+        };
+        const x = Tensor.init(.{ .b = 1, .k = 64 }, .bf16).withPartitioning(if (split_k) .{ .k = .model } else .{ .k = .replicated });
+        const w = Tensor.init(.{ .n = 64, .k = 64 }, .bf16).withPartitioning(if (split_k) .{ .k = .model, .n = .replicated } else .{ .k = .replicated, .n = .model });
+        const s = Tensor.init(.{ .sn = 2, .sk = 2 }, .f32).withPartitioning(.{ .sn = .replicated, .sk = .replicated });
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, s }, .{ .shardings = &.{sharding} });
+        defer exe.deinit();
+        const one = zml.floats.BFloat16.fromF32(1);
+        var xb = try zml.Buffer.fromBytes(io, platform, x.shape(), sharding, std.mem.asBytes(&([_]zml.floats.BFloat16{one} ** 64)));
+        defer xb.deinit();
+        var wb = try zml.Buffer.fromBytes(io, platform, w.shape(), sharding, std.mem.asBytes(&([_]zml.floats.BFloat16{one} ** 4096)));
+        defer wb.deinit();
+        var sb = try zml.Buffer.fromBytes(io, platform, s.shape(), sharding, std.mem.asBytes(&[4]f32{ 0.5, 0.25, 1, 2 }));
+        defer sb.deinit();
+        var result = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ xb, wb, sb });
+        defer result.deinit();
+        const actual = try result.getValue([64]f32, io);
+        for (actual, 0..) |value, n| try std.testing.expectEqual(@as(f32, if (n < 32) 24 else 96), value);
+    }
 }
