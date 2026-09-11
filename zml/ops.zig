@@ -861,6 +861,8 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
+    is_tma_allowed: bool = false,
+    global_scratch_memory_size: i32 = 0,
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
@@ -888,6 +890,8 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
         .named(mlir_ctx, "num_stages", .int(mlir_ctx, .i32, opts.num_stages)),
         .named(mlir_ctx, "num_warps", .int(mlir_ctx, .i32, opts.num_warps)),
+        .named(mlir_ctx, "is_tma_allowed", .boolean(mlir_ctx, opts.is_tma_allowed)),
+        .named(mlir_ctx, "global_scratch_memory_size", .int(mlir_ctx, .i32, opts.global_scratch_memory_size)),
     });
 
     var operands_layouts: [inputs.len][]const usize = undefined;

@@ -113,6 +113,8 @@ pub const triton = struct {
                 num_warps: i32,
                 output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
                 debug: bool = false,
+                /// Bytes for Triton's implicit global scratch argument, across all CTAs.
+                global_scratch_memory_size: i32 = 0,
             };
 
             pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
@@ -142,7 +144,7 @@ pub const triton = struct {
 
                 const aliases = resolveOutputOperandAliases(opts.output_operand_aliases, 0);
 
-                const tensor_results = ops.triton(inputs_arr, outputs_arr, .{
+                const call_opts: ops.TritonOps = .{
                     .debug = opts.debug,
                     .name = name,
                     .ir = ttir,
@@ -150,10 +152,20 @@ pub const triton = struct {
                     .num_stages = opts.num_stages,
                     .num_warps = opts.num_warps,
                     .output_operand_aliases = aliases.constSlice(),
-                });
+                    .is_tma_allowed = opts.global_scratch_memory_size > 0,
+                    .global_scratch_memory_size = opts.global_scratch_memory_size,
+                };
+
+                const triton_results = if (opts.global_scratch_memory_size > 0) blk: {
+                    // XLA maps the final custom-call result to Triton's implicit
+                    // scratch pointer; it must not appear in the TTIR signature.
+                    const extended = outputs_arr ++ [_]Shape{.init(.{opts.global_scratch_memory_size}, .u8)};
+                    const res = ops.triton(inputs_arr, extended, call_opts);
+                    break :blk res[0..spec.outputs.len].*;
+                } else ops.triton(inputs_arr, outputs_arr, call_opts);
 
                 var results: Results = undefined;
-                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
+                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = triton_results[i];
                 return results;
             }
         };
