@@ -291,6 +291,8 @@ pub const Loader = struct {
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     delivered: std.AutoHashMapUnmanaged(Tensor.Id, void) = .empty,
+    // Parallel callbacks retain the first failure for await after every task has joined.
+    first_error: std.atomic.Value(u16) = .init(0),
 
     pub const Opts = struct {
         pub const default: Opts = .{
@@ -337,8 +339,11 @@ pub const Loader = struct {
         self.allocator.free(self.dma_allocators);
     }
 
-    pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
-        return self.group.await(io);
+    pub const AwaitError = std.Io.Cancelable || error{LoadFailed};
+
+    pub fn await(self: *Loader, io: std.Io) AwaitError!void {
+        try self.group.await(io);
+        if (self.first_error.load(.acquire) != 0) return error.LoadFailed;
     }
 
     pub const LoadOpts = struct {
@@ -418,9 +423,12 @@ pub const Loader = struct {
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
         self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, shardings, opts) catch |e| {
-            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
-            unreachable;
+            self.recordFailure(e);
         };
+    }
+
+    fn recordFailure(self: *Loader, err: anyerror) void {
+        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
     }
 
     fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
@@ -1546,6 +1554,67 @@ const DirectMemoryWriterDeviceTest = struct {
         try std.testing.expectEqualSlices(u8, slice.constData(), written_slice.constData());
     }
 };
+
+test "Loader.await returns LoadFailed after a VFS read failure" {
+    const FailingVFS = struct {
+        base: VFS.VFSBase,
+
+        fn init(inner: std.Io) @This() {
+            return .{ .base = .init(inner) };
+        }
+
+        fn io(self: *@This()) std.Io {
+            return .{
+                .userdata = &self.base,
+                .vtable = &comptime VFS.VFSBase.vtable(.{
+                    .dirOpenFile = dirOpenFile,
+                    .fileClose = fileClose,
+                    .fileReadPositional = fileReadPositional,
+                }),
+            };
+        }
+
+        fn dirOpenFile(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+            return .{ .handle = 0, .flags = .{ .nonblocking = false } };
+        }
+
+        fn fileClose(_: ?*anyopaque, _: []const std.Io.File) void {}
+
+        fn fileReadPositional(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+            return error.InputOutput;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const platform = Platform.auto(allocator, std.testing.io, .{}) catch return error.SkipZigTest;
+    defer platform.deinit(allocator, std.testing.io);
+
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{
+        .file_uri = "fail://weights",
+        .name = "weight",
+        .shape = Shape.init(.{1}, .u8),
+        .offset = 0,
+    });
+
+    var store: TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+    const Model = struct { weight: Tensor };
+    const model: Model = .{ .weight = store.view().createTensor("weight", null, .replicated) };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+
+    var failing_vfs: FailingVFS = .init(std.testing.io);
+    const io = failing_vfs.io();
+
+    var loader: Loader = try .init(allocator, platform, .default);
+    defer loader.deinit();
+
+    try loader.load(io, Model, &model, &buffers, &store, &.{}, .{});
+
+    try std.testing.expectError(error.LoadFailed, loader.await(io));
+    try std.testing.expectEqual(error.ReadFailed, @errorFromInt(loader.first_error.load(.acquire)));
+}
 
 test "DirectMemoryWriter: replicated with auto topology" {
     const case: DirectMemoryWriterDeviceTest = .{
