@@ -170,7 +170,6 @@ pub fn main(init: std.process.Init) !void {
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
             var loader = try zml.io.Loader.init(allocator, io, platform, .{
-                .max_host_bytes = try envMib(init.environ_map, "ZML_DMA_BENCH_MAX_MAPPED_MIB", 16384),
                 .dma = .{
                     .block_sizes = block_sizes,
                     .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
@@ -690,10 +689,6 @@ fn envF64(environ_map: *const std.process.Environ.Map, name: []const u8, default
 fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
     const value = environ_map.get(name) orelse return null;
     return try std.fmt.parseInt(usize, value, 10);
-}
-
-fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
-    return std.math.mul(usize, try envUsize(environ_map, name, default), zml.MiB);
 }
 
 fn envMibList(

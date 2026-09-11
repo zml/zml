@@ -3491,6 +3491,14 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `opts.readWidth(), opts.load_profile`, so TPU, neuron and metal see the
   same values. `docs/learn/loader.md` lost the stale
   `Loader.backendFor(target)`.
+- Task 11 (C24), the host-budget knob: `Options.max_host_bytes`,
+  `Workspace.Options` and `minimum_mapped_bytes` are gone. The guard stays
+  as `Workspace.mapped_bytes_ceiling`, a fixed 16 GiB that `init(allocator,
+  io, platform)` applies; `initForTesting` still takes its own ceiling. The
+  playground loses `ZML_DMA_BENCH_MAX_MAPPED_MIB` (never used in a
+  recording) and the front-end test that covered the post-sizing errdefer
+  path now does it with an invalid alignment (`.local` with
+  `direct_io_alignment = 3` and `direct_io = .on`, `InvalidLoadProfile`).
 
 ## Open work
 

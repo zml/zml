@@ -63,24 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 11. Drop the `max_host_bytes` knob, keep the guard (C24, 18 lines).
-  Delete `Loader.Options.max_host_bytes` (`loader.zig:101-102`, `:143`) and
-  the backend option field; replace `Workspace.Options`
-  (`zml/io/host_memory.zig:313-317`) with a constant 16 GiB ceiling on
-  `Workspace` (keep the "safety guard, not an allocation target" comment on
-  the field at `:322`) and make `Workspace.init(allocator, io, platform)` use
-  it; delete `minimum_mapped_bytes` (`:16`) and its check (`:339-340`).
-  `direct_loader.zig:296-298` calls the three-argument init; remove the
-  `.max_host_bytes = 64 MiB` lines from the tests at `:2615` and `:2661`
-  (56 MiB of pre-growth fits either ceiling; width, credits and workers are
-  unchanged). Drop `ZML_DMA_BENCH_MAX_MAPPED_MIB` (`examples/io/main.zig:173`;
-  never used in a recording). Retarget the test at `loader.zig:1030-1044`
-  to an invalid profile (`.local` with `direct_io_alignment = 3`,
-  `.direct_io = .on`, expect `error.InvalidLoadProfile`) so the post-Sizing
-  errdefer path stays covered. `docs/learn/loader.md:115-117`: the direct
-  backend caps its pinned arenas at a fixed 16 GiB. Task 16 (C04) later
-  documents that a budget below the pre-grown set narrows the width.
-
 - [ ] 12. Dead Workspace and BlockPool surface (C10, 27 lines).
   `zml/io/host_memory.zig`: delete `newly_mapped_bytes` and
   `unused_tail_bytes` (`:464-465`, increments `:605` and `:624`, assertions

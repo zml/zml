@@ -294,9 +294,7 @@ pub const Loader = struct {
             opts: BackendOptions,
         ) !Sizing {
             const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
-                var workspace = try host_memory.Workspace.init(allocator, io, platform, .{
-                    .max_mapped_bytes = opts.max_host_bytes,
-                });
+                var workspace = try host_memory.Workspace.init(allocator, io, platform);
                 errdefer workspace.deinit();
                 const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
 
@@ -2598,7 +2596,6 @@ test "loader releases the calibrated pool when alignment validation fails" {
     const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
         .read_parallelism = 2,
         .load_profile = profile,
-        .max_host_bytes = 64 * 1024 * 1024,
         .direct_io = .on,
     })) |loader| unexpected: {
         loader.destroy();
@@ -2643,7 +2640,6 @@ test "loader failures clean up before publication, after publication and during 
         const loader = try Loader.create(allocator, io, platform, .{
             .read_parallelism = 2,
             .load_profile = .local,
-            .max_host_bytes = 64 * 1024 * 1024,
             .direct_io = .off,
         });
         defer loader.destroy();

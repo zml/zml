@@ -12,9 +12,6 @@ const Platform = @import("../platform.zig").Platform;
 
 const log = std.log.scoped(.@"zml/mem");
 
-// The largest supported calibration block must fit.
-const minimum_mapped_bytes = 32 * 1024 * 1024;
-
 /// One ROCm host-memory allocation path and its bytes allocated so far.
 const HostNode = struct {
     any_device_index: usize,
@@ -310,15 +307,16 @@ const Backend = union(enum) {
 /// arena set during initialization; loading reuses and grows it. Deinitialize
 /// after all transfers finish and before the platform.
 pub const Workspace = struct {
-    pub const Options = struct {
-        /// Safety guard on the arenas' total host memory (pinned on the DMA
-        /// targets), not an allocation target.
-        max_mapped_bytes: usize = 16 * 1024 * 1024 * 1024,
-    };
+    /// Safety guard on the arenas' total host memory (pinned on the DMA
+    /// targets), not an allocation target: calibration and the load's
+    /// pre-growth decide what is actually mapped. Fixed, because no caller
+    /// ever had a reason to choose another value.
+    pub const mapped_bytes_ceiling: usize = 16 * 1024 * 1024 * 1024;
 
     allocator: std.mem.Allocator,
     io: std.Io,
     backend: Backend,
+    /// `mapped_bytes_ceiling`, or a test's own ceiling.
     max_mapped_bytes: usize,
     mapped_bytes: usize = 0,
 
@@ -326,7 +324,6 @@ pub const Workspace = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        opts: Workspace.Options,
     ) !Workspace {
         if (platform.devices.len == 0 or platform.devices.len > 64)
             return error.DmaDeviceMismatch;
@@ -336,13 +333,11 @@ pub const Workspace = struct {
                 return error.HeterogeneousDmaUnsupported;
         }
 
-        if (opts.max_mapped_bytes < minimum_mapped_bytes)
-            return error.InvalidDmaLoadConfig;
         return .{
             .allocator = allocator,
             .io = io,
             .backend = try .init(allocator, io, platform),
-            .max_mapped_bytes = opts.max_mapped_bytes,
+            .max_mapped_bytes = mapped_bytes_ceiling,
         };
     }
 

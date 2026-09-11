@@ -113,9 +113,10 @@ pool before returning. Calibration arenas become the load's initial capacity;
 all arenas are released by `Loader.deinit`. Workspace and block-pool types
 are internal to `io/host_memory.zig`.
 
-Callers configure calibration through `Loader.Options.dma` and host memory
-limits through `.max_host_bytes`. They never supply a workspace, NUMA policy,
-or calibration result. Page-backed arenas automatically interleave across the
+Callers configure calibration through `Loader.Options.dma`. The direct
+backend caps its pinned arenas at a fixed 16 GiB, a safety guard rather than
+an allocation target; callers never supply a workspace, a budget, a NUMA
+policy or a calibration result. Page-backed arenas automatically interleave across the
 host's memory-bearing NUMA nodes when more than one is discoverable.
 `Loader.calibration()` reports the sizing selected during initialization, or
 null for buffered loading. There is no separate public benchmark or

@@ -976,18 +976,23 @@ test "submitted bytes match the backend's allocations once everything landed" {
     try std.testing.expectEqual(loader.submitted_bytes[0], allocated[0]);
 }
 
-test "loader initialization releases its workspace on invalid host budget" {
+test "loader initialization releases its workspace on an invalid profile" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit(allocator, io);
+    // The alignment is checked after the pool is calibrated, so this covers
+    // the backend's post-sizing errdefer path through the front end.
+    var profile: VFS.LoadProfile = .local;
+    profile.direct_io_alignment = 3;
     const result: anyerror!void = if (Loader.init(allocator, io, fixture.platform, .{
-        .max_host_bytes = 0,
+        .load_profile = profile,
+        .direct_io = .on,
     })) |value| unexpected: {
         var loader = value;
         loader.deinit();
         break :unexpected {};
     } else |err| err;
-    try std.testing.expectError(error.InvalidDmaLoadConfig, result);
+    try std.testing.expectError(error.InvalidLoadProfile, result);
 }

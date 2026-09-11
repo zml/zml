@@ -28,8 +28,6 @@ pub const Options = struct {
     /// Calibrate transfer sizing during initialization. Ignored by buffered
     /// backends; CPU uses the default sizing without measurement.
     dma: dma_calibration.Options = .{},
-    /// Upper bound for the direct backend's host arenas, not a growth target.
-    max_host_bytes: usize = 16 * 1024 * 1024 * 1024,
     /// Direct I/O for local source files, decided per file by the
     /// VFS that opens it: `auto` reads a file past the page cache when it
     /// is mostly not cached at the first decision, `on` whenever the
