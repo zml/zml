@@ -1,9 +1,8 @@
 const std = @import("std");
 const Nvml = @import("nvml.zig");
 const pi = @import("zml-smi/info").process_info;
-const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 
-pub const List = ProcessDoubleBuffer;
+pub const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 
 pub fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u16, device_count: u32, last_seen_ts: []u64) void {
     const back = list.back();

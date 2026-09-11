@@ -2,6 +2,7 @@ const std = @import("std");
 const Nvml = @import("nvml.zig");
 const device_info = @import("zml-smi/info").device_info;
 const GpuInfo = device_info.GpuInfo;
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
 const process = @import("process.zig");
@@ -17,7 +18,7 @@ const Ctx = struct {
     gpa: std.mem.Allocator,
     nvml: *const Nvml,
     slots: []Slot,
-    processes: *process.List,
+    processes: *process.ProcessDoubleBuffer,
     last_seen_ts: []u64,
     dev_offset: u16,
     device_count: u32,
@@ -31,8 +32,7 @@ pub fn start(collector: *Collector) !void {
     const count = try nvml.deviceCount();
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
-    const slots = try collector.arena.alloc(Slot, count);
-    var n: usize = 0;
+    var slots: std.ArrayList(Slot) = try .initCapacity(collector.arena, count);
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
         const initial: GpuInfo = .{
@@ -41,8 +41,7 @@ pub fn start(collector: *Collector) !void {
             .cuda_driver_version = dev.cudaDriverVersion(collector.arena) catch null,
         };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        slots[n] = .{ .info = &info.cuda, .dev = dev };
-        n += 1;
+        slots.appendAssumeCapacity(.{ .info = &info.cuda, .dev = dev });
     }
 
     const last_seen_ts = try collector.arena.alloc(u64, count);
@@ -52,7 +51,7 @@ pub fn start(collector: *Collector) !void {
     ctx.* = .{
         .gpa = collector.gpa,
         .nvml = nvml,
-        .slots = slots[0..n],
+        .slots = slots.items,
         .processes = try collector.createProcessList(),
         .last_seen_ts = last_seen_ts,
         .dev_offset = dev_offset,
@@ -74,15 +73,8 @@ fn pollOnce(ctx: *Ctx) void {
 fn pollDevice(db: *DoubleBuffer(GpuInfo), dev: Device, pcie: bool) void {
     const back = db.back();
     back.* = db.front().*;
-
-    inline for (metrics) |m| {
-        @field(back, m.field) = m.query(dev) catch null;
-    }
-    if (pcie) {
-        back.pcie_tx_kbps = Device.pcieTx(dev) catch null;
-        back.pcie_rx_kbps = Device.pcieRx(dev) catch null;
-    }
-
+    poll_metrics.apply(metrics, back, dev);
+    if (pcie) poll_metrics.apply(pcie_metrics, back, dev);
     db.swap();
 }
 
@@ -222,4 +214,9 @@ const metrics = .{
     .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
     .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
+};
+
+const pcie_metrics = .{
+    .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
+    .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
 };
