@@ -812,4 +812,3 @@ fn blendRgbFrames(
         }
     }
 }
-
