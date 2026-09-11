@@ -443,42 +443,37 @@ pub const BlockPool = struct {
     workspace: Workspace,
     free_blocks: std.ArrayListUnmanaged(Block) = .empty,
     block_size: usize,
-    /// Blocks kept mapped as the growth floor: the DMA stage of every device.
-    reserve: usize,
+    /// Blocks carved from the arenas, fixed for the pool's life.
     capacity: usize = 0,
-    slab_blocks: usize,
     in_use: usize = 0,
     high_water: usize = 0,
     closed: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
 
-    /// Builds a fresh free-list view from every retained arena. Arena tails
-    /// smaller than one selected block remain mapped and unused.
+    /// Builds the free list from every retained arena, once: the caller has
+    /// already grown the workspace to the whole set the load may use, so the
+    /// pool never maps anything again (a slab mapped inside a load cost 146
+    /// to 230 ms of hipHostMalloc on MI300X). Arena tails smaller than one
+    /// selected block remain mapped and unused.
     /// Consumes and invalidates workspace on success; on failure the caller
     /// retains ownership. Calibration borrows must have ended before this call.
     pub fn init(
         allocator: std.mem.Allocator,
         workspace: *Workspace,
         block_size: usize,
-        reserve: usize,
     ) !BlockPool {
-        const mapped_bytes = workspace.mapped_bytes;
-        if (block_size == 0 or mapped_bytes > workspace.max_mapped_bytes)
+        if (block_size == 0 or workspace.mapped_bytes > workspace.max_mapped_bytes)
             return error.RequestExceedsCapacity;
         var self: BlockPool = .{
             .allocator = allocator,
             .workspace = workspace.*,
             .block_size = block_size,
-            .reserve = reserve,
-            .slab_blocks = @max(@as(usize, 1), default_slab_size / block_size),
         };
         errdefer self.free_blocks.deinit(allocator);
         for (0..workspace.backend.arenaCount()) |index| {
             try self.attachArena(workspace.backend.arenaAt(index));
         }
-        if (self.reservedGrowthBlocks() > self.remainingBlockBudget())
-            return error.RequestExceedsCapacity;
         workspace.* = undefined;
         return self;
     }
@@ -490,20 +485,17 @@ pub const BlockPool = struct {
         self.* = undefined;
     }
 
-    /// Leases `output.len` blocks atomically, mapping a slab when the free
-    /// list is short and the budget allows, otherwise waiting for releases.
-    /// Allocates nothing once its arenas are attached.
+    /// Leases `output.len` blocks atomically, waiting for releases when the
+    /// free list is short. Allocates nothing, ever.
     pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) !void {
         if (output.len == 0) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (self.closed) return error.Closed;
-        if (!self.canEverAcquire(output.len)) return error.RequestExceedsCapacity;
+        if (output.len > self.capacity) return error.RequestExceedsCapacity;
         while (self.free_blocks.items.len < output.len) {
-            if (self.closed) return error.Closed;
-            if (try self.grow()) continue;
-            if (self.in_use == 0) return error.RequestExceedsCapacity;
             self.condition.waitUncancelable(io, &self.mutex);
+            if (self.closed) return error.Closed;
         }
         for (output) |*block| block.* = self.free_blocks.pop().?;
         self.in_use += output.len;
@@ -541,52 +533,12 @@ pub const BlockPool = struct {
         return self.capacity / blocks_per_request;
     }
 
-    /// Independent 2 MiB mapped allocations were slower and multiplied
-    /// registration/pool overhead; retain arenas and subdivide them instead.
-    const default_slab_size = 64 * 1024 * 1024;
-
-    fn canEverAcquire(self: *const BlockPool, blocks: usize) bool {
-        const remaining_blocks = self.remainingBlockBudget();
-        const reserved_growth = self.reservedGrowthBlocks();
-        if (reserved_growth > remaining_blocks) return false;
-        return blocks <= @max(self.capacity, self.reserve) + (remaining_blocks - reserved_growth);
-    }
-
-    fn remainingBlockBudget(self: *const BlockPool) usize {
-        return (self.workspace.max_mapped_bytes -| self.workspace.mapped_bytes) / self.block_size;
-    }
-
-    fn reservedGrowthBlocks(self: *const BlockPool) usize {
-        return self.reserve -| self.capacity;
-    }
-
-    fn grow(self: *BlockPool) !bool {
-        const block_count = @min(self.slab_blocks, self.remainingBlockBudget());
-        if (block_count == 0) return false;
-        try self.allocateSlab(block_count);
-        return true;
-    }
-
-    fn allocateSlab(self: *BlockPool, block_count: usize) !void {
-        const slab_len = block_count * self.block_size;
-        try self.free_blocks.ensureTotalCapacity(self.allocator, self.capacity + block_count);
-        const slab = try self.workspace.allocate(slab_len);
-        std.debug.assert(slab.len == slab_len);
-        self.attachArenaAssumeCapacity(slab);
-    }
-
     fn attachArena(self: *BlockPool, arena: []u8) !void {
         if (arena.len == 0) return error.InvalidDmaWorkspace;
         const block_count = arena.len / self.block_size;
-        // Leased blocks are absent from `free_blocks`, so reserving relative to
-        // its current length can leave too little space to return them after a
-        // slab is attached under load. Keep storage sized for total capacity.
+        // Leased blocks are absent from `free_blocks`, so the storage is
+        // sized for the total capacity, not for what is free.
         try self.free_blocks.ensureTotalCapacity(self.allocator, self.capacity + block_count);
-        self.attachArenaAssumeCapacity(arena);
-    }
-
-    fn attachArenaAssumeCapacity(self: *BlockPool, arena: []u8) void {
-        const block_count = arena.len / self.block_size;
         for (0..block_count) |index| {
             self.free_blocks.appendAssumeCapacity(arena[index * self.block_size ..][0..self.block_size]);
         }
@@ -758,7 +710,7 @@ test "Workspace growth maps missing blocks as one arena" {
     try std.testing.expectEqual(@as(usize, 3), workspace.backend.arenaCount());
 }
 
-test "BlockPool ownership transfer and growth clean up allocation failures" {
+test "BlockPool ownership transfer cleans up allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
             var arena: []u8 = undefined;
@@ -766,7 +718,7 @@ test "BlockPool ownership transfer and growth clean up allocation failures" {
                 var workspace = try Workspace.initForTesting(allocator, std.testing.io, 256);
                 errdefer workspace.deinit();
                 arena = try workspace.allocate(64);
-                break :pool_init BlockPool.init(allocator, &workspace, 64, 0) catch |err| {
+                break :pool_init BlockPool.init(allocator, &workspace, 64) catch |err| {
                     try std.testing.expectEqual(@as(usize, 64), workspace.mapped_bytes);
                     try std.testing.expectEqual(arena.ptr, workspace.findArena(64).?.ptr);
                     return err;
@@ -774,33 +726,12 @@ test "BlockPool ownership transfer and growth clean up allocation failures" {
             };
             defer pool.deinit();
             try std.testing.expectEqual(arena.ptr, pool.workspace.findArena(64).?.ptr);
-            var blocks: [4]BlockPool.Block = undefined;
-            pool.acquireMany(std.testing.io, &blocks) catch |err| {
-                try std.testing.expectEqual(@as(usize, 64), pool.workspace.mapped_bytes);
-                try std.testing.expectEqual(@as(usize, 1), pool.capacity);
-                return err;
-            };
+            try std.testing.expectEqual(@as(usize, 1), pool.capacity);
+            var blocks: [1]BlockPool.Block = undefined;
+            try pool.acquireMany(std.testing.io, &blocks);
             pool.releaseMany(std.testing.io, &blocks);
         }
     }.run, .{});
-}
-
-test "BlockPool metadata failure leaves growth retryable" {
-    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(std.testing.allocator, std.testing.io, 256);
-        errdefer workspace.deinit();
-        break :pool_init try BlockPool.init(failing.allocator(), &workspace, 64, 0);
-    };
-    defer pool.deinit();
-    failing.fail_index = failing.alloc_index;
-    var blocks: [4]BlockPool.Block = undefined;
-    try std.testing.expectError(error.OutOfMemory, pool.acquireMany(std.testing.io, &blocks));
-    try std.testing.expectEqual(@as(usize, 0), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 0), pool.workspace.backend.arenaCount());
-    failing.fail_index = std.math.maxInt(usize);
-    try pool.acquireMany(std.testing.io, &blocks);
-    pool.releaseMany(std.testing.io, &blocks);
 }
 
 test "BlockPool acquires request blocks atomically" {
@@ -810,7 +741,8 @@ test "BlockPool acquires request blocks atomically" {
         var workspace = try Workspace.initForTesting(allocator, std.testing.io, 4 * 64);
         errdefer workspace.deinit();
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 0);
+        _ = try workspace.allocate(4 * 64);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
 
@@ -842,24 +774,6 @@ test "BlockPool acquires request blocks atomically" {
     try std.testing.expect(acquired.isSet());
 }
 
-test "BlockPool retains free-list capacity when growing with blocks leased" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 9 * 64);
-        errdefer workspace.deinit();
-
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 0);
-    };
-    defer pool.deinit();
-    pool.slab_blocks = 1;
-
-    var held: [9]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &held);
-    try std.testing.expect(pool.free_blocks.capacity >= pool.capacity);
-    pool.releaseMany(io, &held);
-}
-
 test "BlockPool acquisition allocates nothing once its arenas are attached" {
     const io = std.testing.io;
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
@@ -867,7 +781,8 @@ test "BlockPool acquisition allocates nothing once its arenas are attached" {
         var workspace = try Workspace.initForTesting(std.testing.allocator, io, 4 * 64);
         errdefer workspace.deinit();
 
-        break :pool_init try BlockPool.init(failing.allocator(), &workspace, 64, 0);
+        _ = try workspace.allocate(4 * 64);
+        break :pool_init try BlockPool.init(failing.allocator(), &workspace, 64);
     };
     defer pool.deinit();
 
@@ -888,7 +803,8 @@ test "BlockPool close wakes blocked bulk acquisitions" {
         var workspace = try Workspace.initForTesting(allocator, std.testing.io, 2 * 64);
         errdefer workspace.deinit();
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 0);
+        _ = try workspace.allocate(2 * 64);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
 
@@ -923,7 +839,8 @@ test "BlockPool lease returns a block after out-of-order callbacks" {
         var workspace = try Workspace.initForTesting(allocator, std.testing.io, 64);
         errdefer workspace.deinit();
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 0);
+        _ = try workspace.allocate(64);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
 
@@ -948,7 +865,7 @@ test "BlockPool lease returns a block after out-of-order callbacks" {
     pool.releaseMany(io, &reacquired);
 }
 
-test "BlockPool reblocks retained arenas and grows on demand" {
+test "BlockPool reblocks retained arenas of unequal size" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var pool = pool_init: {
@@ -959,21 +876,26 @@ test "BlockPool reblocks retained arenas and grows on demand" {
         _ = try workspace.allocate(70);
         _ = try workspace.allocate(65);
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 5);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
     try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
+    // Two blocks from the first arena, one from each of the others.
+    try std.testing.expectEqual(@as(usize, 4), pool.capacity);
     try std.testing.expectEqual(@as(usize, 4), try pool.retainedRequestWidth(1));
 
-    var blocks: [5]BlockPool.Block = undefined;
+    var blocks: [4]BlockPool.Block = undefined;
     try pool.acquireMany(io, &blocks);
-    try std.testing.expectEqual(@as(usize, 4), pool.workspace.backend.arenaCount());
-    try std.testing.expectEqual(@as(usize, 349), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 5 * 64), pool.high_water * pool.block_size);
+    try std.testing.expectEqual(@as(usize, 3), pool.workspace.backend.arenaCount());
+    try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
+    try std.testing.expectEqual(@as(usize, 4 * 64), pool.high_water * pool.block_size);
+    // Nothing grows: a request beyond the capacity can never be served.
+    var oversized: [5]BlockPool.Block = undefined;
+    try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &oversized));
     pool.releaseMany(io, &blocks);
 }
 
-test "BlockPool refuses a reserve the budget cannot cover and counts retained requests" {
+test "BlockPool counts retained requests over arena tails" {
     const allocator = std.testing.allocator;
     var pool = pool_init: {
         var workspace = try Workspace.initForTesting(allocator, std.testing.io, 574);
@@ -982,21 +904,13 @@ test "BlockPool refuses a reserve the budget cannot cover and counts retained re
         _ = try workspace.allocate(127);
         _ = try workspace.allocate(127);
 
-        // A reserve the budget cannot cover is refused up front.
-        if (BlockPool.init(allocator, &workspace, 64, 8)) |result| {
-            // Transfer ownership out of this scope even on unexpected success.
-            break :pool_init result;
-        } else |err| {
-            try std.testing.expectEqual(error.RequestExceedsCapacity, err);
-        }
-
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 4);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
 
-    try std.testing.expectEqual(@as(usize, 4), pool.reserve);
     // Arena tails stay mapped without contributing a block: two 127-byte
     // arenas retain one 64-byte block each.
+    try std.testing.expectEqual(@as(usize, 2), pool.capacity);
     try std.testing.expectEqual(@as(usize, 2), try pool.retainedRequestWidth(1));
     try std.testing.expectEqual(@as(usize, 0), try pool.retainedRequestWidth(4));
     try std.testing.expectError(error.InvalidRequestBlockCount, pool.retainedRequestWidth(0));
@@ -1011,7 +925,7 @@ test "BlockPool rejects requests that can never fit without leasing" {
 
         _ = try workspace.allocate(2 * 64);
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64, 0);
+        break :pool_init try BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
 

@@ -65,41 +65,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group B: mechanism changes (CPU playground plus gb300-2 after each)
 
-- [ ] 17. Fixed-size pinned pool (C04 amended, about 190 lines). After task 16.
-  Size the pool once in `Sizing.init`: `fitted = @min(width, ((max_mapped -
-  mapped) / block + usable - reserve) / bpr - 1)`, `error.DmaMappedBudgetExceeded`
-  when it is 0 (no reserve-drop fallback, no "leave growth to the load");
-  pre-grow as two arenas exactly as today (`growToBlocks` to the reserve,
-  then to `(fitted + 1) * bpr + reserve`) so ROCm's per-node byte balance
-  (`host_memory.zig:175-181`, CTX 1999-2005) is unchanged; the loader's width
-  is `fitted` and the ready line logs it.
-  Delete in `host_memory.zig`: `reserve`, `slab_blocks`, `default_slab_size`,
-  `canEverAcquire`, `remainingBlockBudget`, `reservedGrowthBlocks`, `grow`,
-  `allocateSlab` (`:461-466`, `:481-503` reserve check, `:517-532` grow loop,
-  `:560-625`); merge `attachArena` and `attachArenaAssumeCapacity`;
-  `acquireMany` = `RequestExceedsCapacity` if `output.len > capacity`, else
-  wait on the condition until `free >= output.len` or closed (allocates
-  nothing). Keep `Workspace.allocate`, `usableBlocks`, `growToBlocks`,
-  `Lease`, `close`, `high_water`, the `DmaMappedBudgetExceeded` check in
-  `allocate`. Delete `ensureLoadBlockReserve` and `ensureSourceWorkingSet`
-  (`direct_loader.zig:2498-2549`) in favour of the two `growToBlocks` calls
-  in `Sizing.init`; reject a request size that is not a multiple of the
-  block size at init with `error.InvalidDmaLoadConfig` (task 16's constant
-  credit relies on it; every shipped profile satisfies it).
-  Tests: delete the metadata-retry (`:825-842`), free-list-capacity
-  (`:883-900`), allocates-nothing (`:901-921`) and grows-on-demand
-  (`:989-1016`) tests; rewrite the reblock test as reblock-only and the
-  ownership-transfer test (`:798-824`) without the 4-block acquire; keep the
-  never-fit (`:1045-1063`) and close (`:922-956`) tests; add "Sizing refuses
-  a budget below the reserve plus two requests". Document that a ceiling
-  below the pre-grown set narrows the width or refuses at init.
-  Evidence: "nothing maps a slab inside a load" is the recorded win (CTX
-  388-395, 419-425, 550-553, 955-957); every fifteenth-pass run shows
-  `pinned_mapped == high_water` (CTX 3300-3311). Risk: the ROCm 41/59 split
-  under sequential growth (commit `a2a0a9b8`) post-dates the last MI300X
-  runs; record it and re-check one 8x MI300X Llama load when the host is
-  available (`zml/io` CTX "mi300" rules: check the plugin first).
-
 - [ ] 18. Scheduler as a FIFO of plans (C25, about 55 lines).
   `Scheduler.queue` holds `*Plan` (`direct_loader.zig:1434-1438`); `publish`
   appends the plan under the mutex, sets `plan.batch` there (not in

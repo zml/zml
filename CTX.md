@@ -420,12 +420,17 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   and change nothing: they say nothing about the width, and nothing raises
   it again.
 - Pinned pre-growth happens at loader creation, before any load: the DMA
-  reserve (calibrated depth x devices) plus `width + 1` source requests,
-  clipped to the mapped ceiling with the reserve fitted first (264 MiB for
-  width 16 with 8 MiB requests on the CPU platform, against the 528 MiB the
-  former 32-wide set took). Nothing maps a slab inside a load (146-230 ms
-  of hipHostMalloc on MI300X when it did). A dedicated pregrowth line logs
-  `retained`, `pregrown` and `pregrowth_ms`.
+  reserve (calibrated depth x devices, at least one maximal request) plus
+  `width + 1` source requests, as two arenas, the reserve first (ROCm
+  balances bytes per allocation across its host nodes). The width itself is
+  what the mapped ceiling fits: `Sizing.init` computes it once from the
+  usable blocks plus the remaining budget and refuses below one request with
+  `DmaMappedBudgetExceeded` (264 MiB for width 16 with 8 MiB requests on the
+  CPU platform, against the 528 MiB the former 32-wide set took). The pool
+  is then sized once and never maps again, so nothing maps a slab inside a
+  load (146-230 ms of hipHostMalloc on MI300X when it did) and
+  `pinned_mapped == high_water` on every recorded run. A dedicated
+  pregrowth line logs `retained`, `pregrown` and `pregrowth_ms`.
 - `width + 1` worker tasks are spawned at creation and
   never retired or parked: a worker hands its request to the DMA stage and
   claims the next, so credits beyond the read width need no workers of
@@ -3569,6 +3574,36 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   389 / 368 / 368 ms; `pack check: ok` on every run and `load check: ok`
   with `ZML_LOAD_CHECK=16`. Scripts: `~/zml-groupb-run.sh`, logs
   `~/zml-directio-logs/b16_*.log`.
+- Task 17 (C04 amended), fixed-size pinned pool: the pool is sized once in
+  `Sizing.init` and never grows. The width is fitted there (`(usable +
+  remaining budget - reserve) / blocks_per_request - 1`, clipped to the
+  option) and zero is `DmaMappedBudgetExceeded`; the two `growToBlocks`
+  calls keep the recorded two-arena shape, reserve first, for ROCm's
+  per-node byte balance. A request size that is not a multiple of the block
+  size is refused at init (`InvalidDmaLoadConfig`), which is what makes the
+  credits an exact request count; every shipped profile satisfies it.
+  `BlockPool` lost `reserve`, `slab_blocks`, `default_slab_size`,
+  `canEverAcquire`, `remainingBlockBudget`, `reservedGrowthBlocks`, `grow`,
+  `allocateSlab` and the split `attachArena`; `acquireMany` refuses beyond
+  the capacity and otherwise waits. `ensureLoadBlockReserve` and
+  `ensureSourceWorkingSet` are gone with their reserve-drop fallback. Tests:
+  the metadata-retry and free-list-capacity tests went with growth, the
+  reblock test is reblock-only plus an over-capacity refusal, the reserve
+  test counts retained requests over arena tails; the
+  "allocates nothing once its arenas are attached" test is kept (the plan
+  proposed deleting it; it is the direct assertion that a load maps
+  nothing), with its arena mapped before the pool is built.
+  Verification. CPU playground: the same two arenas (128 MiB + 136 MiB),
+  `source_width=16, lifecycle_credits=33, workers=17`, `pregrown=264 MiB`,
+  both checks ok, 3.675 s. gb300-2 (same conditions as task 16):
+  `pregrown=144 MiB` into `retained=400 MiB`, width 16, credits 25, workers
+  17, loader `elapsed` 0.265 / 0.265 / 0.268 s, `pinned_high_water ==
+  pinned_mapped == 400 MiB`, `pack check: ok` and `load check: ok`. Logs
+  `~/zml-directio-logs/b17_*.log`.
+  Risk carried forward: the ROCm 41/59 per-node split under sequential
+  growth (commit `a2a0a9b8`) post-dates the last MI300X runs. The two-arena
+  pre-growth is unchanged, but one 8x MI300X Llama load should confirm it
+  when the host is free (check the stale ROCm plugin first).
 
 ## Open work
 

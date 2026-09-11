@@ -101,10 +101,10 @@ pub const Loader = struct {
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
         // Every credit the pinned set holds is granted: the pre-growth
         // fitted `width + 1` requests beside the DMA reserve, so the stage
-        // takes every block the reads leave free and nothing grows inside a
+        // takes every block the reads leave free and nothing maps inside a
         // load.
+        const width = sizing.source_width;
         const credits = sizing.retained_credits;
-        const width = @min(opts.readWidth(), credits - 1);
         const workers = width + 1;
         std.debug.assert(credits >= workers);
         self.* = .{
@@ -292,8 +292,11 @@ pub const Loader = struct {
         pool: host_memory.BlockPool,
         request_size: usize,
         maximum_blocks_per_job: usize,
+        /// The load's source width: the configured one, or what the mapped
+        /// ceiling fits.
+        source_width: usize,
         /// Requests the pre-grown pinned set holds: the loader's lifecycle
-        /// credits, and one more than its widest possible read width.
+        /// credits, at least `source_width + 1`.
         retained_credits: usize,
 
         fn init(
@@ -302,35 +305,55 @@ pub const Loader = struct {
             platform: *const Platform,
             opts: BackendOptions,
         ) !Sizing {
-            const calibration, const request_size, const maximum_blocks_per_job, var pool = pool: {
+            const calibration, const request_size, const maximum_blocks_per_job, const fitted_width, var pool = pool: {
                 var workspace = try host_memory.Workspace.init(allocator, io, platform);
                 errdefer workspace.deinit();
                 const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
+                const block_size = calibration.block_size;
 
                 const request_size = try load_limits.effectiveSourceRequestSize(
                     opts.load_profile.read_chunk_size,
-                    calibration.block_size,
+                    block_size,
                 );
+                // A request is a whole number of blocks, so the pinned set is
+                // an exact number of requests and the lifecycle credits are
+                // the capacity in requests. Every shipped profile satisfies
+                // it (8, 16 and 32 MiB chunks over power-of-two blocks).
+                if (request_size % block_size != 0) return error.InvalidDmaLoadConfig;
                 const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
                     request_size,
-                    calibration.block_size,
+                    block_size,
                 );
-                // The DMA stage of every device, kept mapped as the pool's growth floor.
-                const dma_reserve = calibration.max_in_flight_per_device * platform.devices.len;
-                // Grow the DMA stage reserve and the source working set of
-                // the configured width before reads begin (mapping a slab
-                // during a load cost 146 ms on one MI300X); calibration
-                // arenas become the load's initial capacity.
+                // The DMA stage of every device, kept mapped beside the
+                // source working set; at least one maximal source request,
+                // so a single request always fits beside it.
+                const dma_reserve = @max(
+                    calibration.max_in_flight_per_device * platform.devices.len,
+                    try load_limits.maximumCoalescedJobBlocks(load_limits.max_read_request_size, block_size),
+                );
+                // The pool is sized once, here: the width is what the mapped
+                // ceiling fits, and the whole set is mapped before the first
+                // read, so nothing maps inside a load (a slab mapped there
+                // cost 146 to 230 ms of hipHostMalloc on MI300X).
+                const available = workspace.usableBlocks(block_size) +
+                    (workspace.max_mapped_bytes - workspace.mapped_bytes) / block_size;
+                const fitted_width = @min(
+                    opts.readWidth(),
+                    (available -| dma_reserve) / maximum_blocks_per_job -| 1,
+                );
+                if (fitted_width == 0) return error.DmaMappedBudgetExceeded;
+                if (fitted_width < opts.readWidth()) {
+                    load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}", .{
+                        fitted_width,
+                        opts.readWidth(),
+                    });
+                }
+                // Two arenas, the reserve first: ROCm balances bytes across
+                // its host nodes per allocation, and that split is recorded.
                 const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
                 const retained_before = workspace.mapped_bytes;
-                try ensureLoadBlockReserve(&workspace, calibration.block_size, dma_reserve);
-                try ensureSourceWorkingSet(
-                    &workspace,
-                    calibration.block_size,
-                    maximum_blocks_per_job,
-                    opts.readWidth(),
-                    dma_reserve,
-                );
+                try workspace.growToBlocks(block_size, dma_reserve);
+                try workspace.growToBlocks(block_size, (fitted_width + 1) * maximum_blocks_per_job + dma_reserve);
                 const pregrown_bytes = workspace.mapped_bytes - retained_before;
                 const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
                 load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
@@ -338,20 +361,19 @@ pub const Loader = struct {
                     pregrown_bytes,
                     @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
                 });
-                const pool = try host_memory.BlockPool.init(allocator, &workspace, calibration.block_size, dma_reserve);
-                break :pool .{ calibration, request_size, maximum_blocks_per_job, pool };
+                const pool = try host_memory.BlockPool.init(allocator, &workspace, block_size);
+                break :pool .{ calibration, request_size, maximum_blocks_per_job, fitted_width, pool };
             };
             errdefer pool.deinit();
-            // One read and one request in the DMA stage is the narrowest
-            // pipeline there is; below that the budget cannot load anything.
             const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job);
-            if (retained_credits < 2) return error.DmaMappedBudgetExceeded;
+            std.debug.assert(retained_credits >= fitted_width + 1);
 
             return .{
                 .calibration = calibration,
                 .pool = pool,
                 .request_size = request_size,
                 .maximum_blocks_per_job = maximum_blocks_per_job,
+                .source_width = fitted_width,
                 .retained_credits = retained_credits,
             };
         }
@@ -2437,57 +2459,6 @@ fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anye
     };
 }
 
-/// Ensures the workspace can feed every calibrated device and hold one
-/// complete fixed-size source request; retained arenas are reused first.
-fn ensureLoadBlockReserve(
-    self: *host_memory.Workspace,
-    block_size: usize,
-    calibrated_reserve: usize,
-) !void {
-    if (block_size == 0) return error.InvalidDmaLoadConfig;
-    const request_blocks = try load_limits.maximumCoalescedJobBlocks(
-        load_limits.max_read_request_size,
-        block_size,
-    );
-    return self.growToBlocks(block_size, @max(calibrated_reserve, request_blocks));
-}
-
-/// Pre-grows `width + 1` source requests beside the DMA reserve.
-fn ensureSourceWorkingSet(
-    self: *host_memory.Workspace,
-    block_size: usize,
-    request_blocks: usize,
-    width: usize,
-    feed_reserve: usize,
-) !void {
-    if (block_size == 0 or request_blocks == 0) return error.InvalidDmaLoadConfig;
-    const usable = self.usableBlocks(block_size);
-    // Reserve first; when not even one request fits beside it the reserve
-    // stays non-materialized and the source set alone is fitted.
-    var with_reserve = true;
-    var fitted_width = width;
-    var target: usize = 0;
-    while (true) : (fitted_width -= 1) {
-        const source_blocks = (fitted_width + 1) * request_blocks;
-        target = source_blocks + if (with_reserve) feed_reserve else 0;
-        const growth_bytes = (target -| usable) * block_size;
-        if (self.mapped_bytes + growth_bytes <= self.max_mapped_bytes) break;
-        if (fitted_width == 0) {
-            if (!with_reserve) return; // Leave growth to the load.
-            with_reserve = false;
-            fitted_width = width + 1;
-        }
-    }
-    if (fitted_width < width or !with_reserve) {
-        load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}, reserve_materialized={}", .{
-            fitted_width,
-            width,
-            with_reserve,
-        });
-    }
-    return self.growToBlocks(block_size, target);
-}
-
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
 }
@@ -3598,7 +3569,7 @@ test "late vectored callback failure drains and signals completion" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(64);
-        break :pool_init try host_memory.BlockPool.init(allocator, &workspace, 64, 0);
+        break :pool_init try host_memory.BlockPool.init(allocator, &workspace, 64);
     };
     defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);
