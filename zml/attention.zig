@@ -45,6 +45,14 @@ pub const Backend = enum {
             .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
     }
+
+    /// Dense FA2 workspace: head dim 32..=128, multiple of 32. Matches `flashattn.fa2.dense`.
+    pub fn supportsDenseHeadDim(backend: Backend, head_dim: i64) bool {
+        return switch (backend) {
+            .cuda_fa2, .cuda_fa3 => head_dim >= 32 and head_dim <= 128 and @rem(head_dim, 32) == 0,
+            else => head_dim > 0,
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {
@@ -182,12 +190,11 @@ pub const DenseOpts = struct {
     is_causal: bool = false,
 };
 
-/// Dense (non-paged) attention. There is no FA3 dense kernel: `.cuda_fa2` and
-/// `.cuda_fa3` both call `flashattn.fa2.dense`.
+/// Dense (non-paged) attention. Flash when the kernel can run; otherwise SDPA.
+/// There is no FA3 dense kernel: `.cuda_fa2` and `.cuda_fa3` both call `flashattn.fa2.dense`.
 pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts: DenseOpts) zml.Tensor {
-    switch (backend) {
-        .cuda_fa2, .cuda_fa3 => return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal }),
-        .vanilla, .attnd, .nki, .metal_fa => {},
+    if (denseCanUseFlash(q, k, v, backend)) {
+        return flashattn.fa2.dense(q, k, v, .{ .is_causal = opts.is_causal });
     }
     if (opts.is_causal) {
         stdx.debug.assert(q.dim(.q) == k.dim(.k), "dense causal SDPA expects square q/k, got q={f} k={f}", .{ q, k });
@@ -197,6 +204,62 @@ pub fn dense(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend, opts
     else
         null;
     return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+}
+
+fn denseCanUseFlash(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, backend: Backend) bool {
+    switch (backend) {
+        .cuda_fa2, .cuda_fa3 => {},
+        else => return false,
+    }
+    if (!q.shape().hasTags(.{ .q, .h, .hd })) return false;
+    if (!k.shape().hasTags(.{ .k, .h, .hd })) return false;
+    if (!v.shape().hasTags(.{ .k, .h, .hd })) return false;
+
+    const q_b = q.shape().hasTag(.b) != null;
+    const k_b = k.shape().hasTag(.b) != null;
+    const v_b = v.shape().hasTag(.b) != null;
+    if (q_b != k_b or q_b != v_b) return false;
+    if (q_b and (q.dim(.b) != k.dim(.b) or q.dim(.b) != v.dim(.b) or q.dim(.b) <= 0)) return false;
+
+    if (q.dim(.q) <= 0 or k.dim(.k) <= 0 or v.dim(.k) != k.dim(.k)) return false;
+    // Dense FA2 varlen is only numerically validated for Q==K.
+    if (q.dim(.q) != k.dim(.k)) return false;
+    if (q.dim(.h) <= 0 or k.dim(.h) <= 0 or v.dim(.h) != k.dim(.h)) return false;
+    // `flashattn.fa2.dense` is MHA-only; GQA stays on SDPA.
+    if (q.dim(.h) != k.dim(.h)) return false;
+    if (q.dim(.hd) != k.dim(.hd) or q.dim(.hd) != v.dim(.hd)) return false;
+    if (!backend.supportsDenseHeadDim(q.dim(.hd))) return false;
+
+    if (q.dtype() != k.dtype() or q.dtype() != v.dtype()) return false;
+    if (q.dtype() != .f16 and q.dtype() != .bf16) return false;
+
+    const compiler = zml.Compiler.currentOrNull() orelse return false;
+    return backend.isAvailable(compiler.platform);
+}
+
+test "dense FA2 head dim" {
+    try std.testing.expect(Backend.supportsDenseHeadDim(.cuda_fa2, 32));
+    try std.testing.expect(Backend.supportsDenseHeadDim(.cuda_fa2, 64));
+    try std.testing.expect(Backend.supportsDenseHeadDim(.cuda_fa2, 96));
+    try std.testing.expect(Backend.supportsDenseHeadDim(.cuda_fa2, 128));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 48));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 80));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 144));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa2, 256));
+    try std.testing.expect(Backend.supportsDenseHeadDim(.cuda_fa3, 128));
+    try std.testing.expect(!Backend.supportsDenseHeadDim(.cuda_fa3, 256));
+}
+
+test "dense GQA and unequal Q/K stay on SDPA" {
+    const q_gqa = zml.Tensor.init(.{ .q = 16, .h = 64, .hd = 128 }, .bf16);
+    const k_gqa = zml.Tensor.init(.{ .k = 16, .h = 8, .hd = 128 }, .bf16);
+    const v_gqa = zml.Tensor.init(.{ .k = 16, .h = 8, .hd = 128 }, .bf16);
+    try std.testing.expect(!denseCanUseFlash(q_gqa, k_gqa, v_gqa, .cuda_fa2));
+
+    const q = zml.Tensor.init(.{ .q = 16, .h = 8, .hd = 64 }, .bf16);
+    const k = zml.Tensor.init(.{ .k = 32, .h = 8, .hd = 64 }, .bf16);
+    const v = zml.Tensor.init(.{ .k = 32, .h = 8, .hd = 64 }, .bf16);
+    try std.testing.expect(!denseCanUseFlash(q, k, v, .cuda_fa2));
 }
 
 test "attention: q=1,qh=64,kh=8" {

@@ -1,5 +1,5 @@
 //! Shared generation context, DMA load, and weight constructors.
-//! Model math lives in encoder / pack / dit / vae / audio.
+//! Model math lives in encoder / pack / dit / vae / audio / vision.
 
 const std = @import("std");
 const zml = @import("zml");
@@ -98,4 +98,38 @@ pub fn ropeCat3(pos: zml.Tensor, inv: zml.Tensor) zml.Tensor {
     const parts = pos.convert(.f32).withPartialTags(.{ .s, .ax }).outer(inv).chunkExact(.ax, 3);
     const cat3 = zml.Tensor.concatenate(&.{ parts[0].squeeze(.ax), parts[1].squeeze(.ax), parts[2].squeeze(.ax) }, .f);
     return zml.Tensor.concatenate(&.{ cat3, cat3 }, .f);
+}
+
+pub const TilePlan = struct {
+    starts: []u32,
+    overlaps: []u32,
+
+    pub fn deinit(self: TilePlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.starts);
+        allocator.free(self.overlaps);
+    }
+};
+
+/// Evenly spaced tile origins along one axis, overlaps aligned to `align_to`.
+pub fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_overlap: u32, align_to: u32) !TilePlan {
+    if (tile_size >= length) {
+        const starts = try allocator.alloc(u32, 1);
+        starts[0] = 0;
+        return .{ .starts = starts, .overlaps = try allocator.alloc(u32, 0) };
+    }
+    var num_tiles = std.math.divCeil(u32, length, tile_size) catch unreachable;
+    while (tile_size * num_tiles < min_overlap * (num_tiles - 1) + length) num_tiles += 1;
+    const overlaps = try allocator.alloc(u32, num_tiles - 1);
+    errdefer allocator.free(overlaps);
+    @memset(overlaps, min_overlap);
+    var remaining: i64 = @as(i64, tile_size) * num_tiles - @as(i64, min_overlap) * (num_tiles - 1) - length;
+    var i: usize = 0;
+    while (remaining >= align_to) : (i += 1) {
+        overlaps[i % overlaps.len] += align_to;
+        remaining -= align_to;
+    }
+    const starts = try allocator.alloc(u32, num_tiles);
+    starts[0] = 0;
+    for (1..num_tiles) |ti| starts[ti] = starts[ti - 1] + tile_size - overlaps[ti - 1];
+    return .{ .starts = starts, .overlaps = overlaps };
 }

@@ -1,4 +1,4 @@
-//! Audio VAE decoder.
+//! Audio VAE: decoder plus the encoder used for `--refs` audio.
 //!
 //!   1. reshape packed `(2·T, C)` left/right rows → `(2, C, T)`
 //!   2. denormalize latents (`x * std + mean`)
@@ -367,6 +367,386 @@ fn interleaveStereo(allocator: std.mem.Allocator, left: []const f32, right: []co
         out[i * 2 + 1] = r;
     }
     return out;
+}
+
+fn tensorRank(store: zml.io.TensorStore.View, name: []const u8) u8 {
+    var buffer: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ store.prefix() orelse "", name }) catch return 2;
+    return if (store.store.getShape(key)) |shape| shape.rank() else 2;
+}
+
+fn pickChannel(store: zml.io.TensorStore.View, name: []const u8) zml.Tensor {
+    return switch (tensorRank(store, name)) {
+        3 => store.createTensor(name, .{ .unused_a, .c, .unused_b }, .replicated),
+        2 => store.createTensor(name, .{ .unused_a, .c }, .replicated),
+        else => store.createTensor(name, .{.c}, .replicated),
+    };
+}
+
+fn squeezeToTag(t: zml.Tensor, comptime tag: anytype) zml.Tensor {
+    var out = t.convert(.f32);
+    var changed = true;
+    while (changed and out.rank() > 1) {
+        changed = false;
+        var ax: i8 = 0;
+        while (ax < @as(i8, @intCast(out.rank()))) : (ax += 1) {
+            if (out.dim(ax) == 1) {
+                out = out.squeeze(ax);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return out.withTags(.{tag});
+}
+
+fn encLinear(store: zml.io.TensorStore.View) zml.nn.Linear {
+    const weight = switch (tensorRank(store, "weight")) {
+        3 => store.createTensor("weight", .{ .dout, .d, .k }, .replicated),
+        else => store.createTensor("weight", .{ .dout, .d }, .replicated),
+    };
+    return .init(weight, store.maybeCreateTensor("bias", .{.dout}, .replicated), .d);
+}
+
+const Snake1d = struct {
+    alpha: zml.Tensor,
+
+    pub fn init(store: zml.io.TensorStore.View) Snake1d {
+        return .{ .alpha = pickChannel(store, "alpha") };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Snake1d)) void {
+        self.alpha.deinit();
+    }
+
+    pub fn forward(self: Snake1d, x: zml.Tensor) zml.Tensor {
+        const xf = x.convert(.f32).withPartialTags(.{ .b, .c, .t });
+        const a = squeezeToTag(self.alpha.convert(.f32), .c).broad(xf.shape());
+        const s = xf.mul(a).sin();
+        return xf.add(s.mul(s).div(a.addConstant(1e-9))).convert(x.dtype());
+    }
+};
+
+const ResidualUnit = struct {
+    snake0: Snake1d,
+    conv0: WNConv1d,
+    snake1: Snake1d,
+    conv1: WNConv1d,
+
+    pub fn init(store: zml.io.TensorStore.View, dilation: i64) ResidualUnit {
+        const inner = store.withPrefix("block");
+        const pad = @divFloor(6 * dilation, 2);
+        return .{
+            .snake0 = .init(inner.withLayer(0)),
+            .conv0 = .init(inner.withLayer(1), 1, dilation, pad),
+            .snake1 = .init(inner.withLayer(2)),
+            .conv1 = .init(inner.withLayer(3), 1, 1, 0),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(ResidualUnit)) void {
+        Snake1d.unloadBuffers(&self.snake0);
+        WNConv1d.unloadBuffers(&self.conv0);
+        Snake1d.unloadBuffers(&self.snake1);
+        WNConv1d.unloadBuffers(&self.conv1);
+    }
+
+    pub fn forward(self: ResidualUnit, x: zml.Tensor) zml.Tensor {
+        var y = self.conv1.forward(self.snake1.forward(self.conv0.forward(self.snake0.forward(x))));
+        const xt = x.withPartialTags(.{ .b, .c, .t });
+        const yt = y.withPartialTags(.{ .b, .c, .t });
+        if (xt.dim(.t) != yt.dim(.t)) {
+            const pad = @divFloor(xt.dim(.t) - yt.dim(.t), 2);
+            return yt.add(xt.slice(.t, .{ .start = pad, .end = xt.dim(.t) - pad }));
+        }
+        return yt.add(xt);
+    }
+};
+
+const EncoderBlock = struct {
+    unit0: ResidualUnit,
+    unit1: ResidualUnit,
+    unit2: ResidualUnit,
+    snake: Snake1d,
+    conv: WNConv1d,
+
+    pub fn init(store: zml.io.TensorStore.View, stride: i64) EncoderBlock {
+        const inner = store.withPrefix("block");
+        const pad = std.math.divCeil(i64, stride, 2) catch stride;
+        return .{
+            .unit0 = .init(inner.withLayer(0), 1),
+            .unit1 = .init(inner.withLayer(1), 3),
+            .unit2 = .init(inner.withLayer(2), 9),
+            .snake = .init(inner.withLayer(3)),
+            .conv = .init(inner.withLayer(4), stride, 1, pad),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(EncoderBlock)) void {
+        ResidualUnit.unloadBuffers(&self.unit0);
+        ResidualUnit.unloadBuffers(&self.unit1);
+        ResidualUnit.unloadBuffers(&self.unit2);
+        Snake1d.unloadBuffers(&self.snake);
+        WNConv1d.unloadBuffers(&self.conv);
+    }
+
+    pub fn forward(self: EncoderBlock, x: zml.Tensor) zml.Tensor {
+        return self.conv.forward(self.snake.forward(self.unit2.forward(self.unit1.forward(self.unit0.forward(x)))));
+    }
+};
+
+const GeGluMlp = struct {
+    norm: zml.nn.LayerNorm,
+    w0: zml.nn.Linear,
+    w1: zml.nn.Linear,
+    w2: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View) GeGluMlp {
+        return .{
+            .norm = ops.ln(store.withPrefix("norm"), 1e-5),
+            .w0 = encLinear(store.withPrefix("w0")),
+            .w1 = encLinear(store.withPrefix("w1")),
+            .w2 = encLinear(store.withPrefix("w2")),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(GeGluMlp)) void {
+        self.norm.weight.deinit();
+        if (self.norm.bias) |*b| b.deinit();
+        zml.nn.Linear.unloadBuffers(&self.w0);
+        zml.nn.Linear.unloadBuffers(&self.w1);
+        zml.nn.Linear.unloadBuffers(&self.w2);
+    }
+
+    pub fn forward(self: GeGluMlp, x: zml.Tensor) zml.Tensor {
+        const n = self.norm.forward(x);
+        return self.w2.forward(self.w0.forward(n).gelu().mul(self.w1.forward(n)).rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    }
+};
+
+const CausalAttn = struct {
+    qkv: zml.nn.Linear,
+    q_bias: zml.Tensor,
+    v_bias: zml.Tensor,
+    k_bias: zml.Tensor,
+    proj: zml.nn.Linear,
+    num_heads: i64,
+    head_dim: i64,
+    out_dim: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, in_dim: i64, out_dim: i64, num_heads: i64) CausalAttn {
+        return .{
+            .qkv = encLinear(store.withPrefix("qkv")),
+            .q_bias = store.createTensor("q_bias", .{.d}, .replicated),
+            .v_bias = store.createTensor("v_bias", .{.d}, .replicated),
+            .k_bias = store.createTensor("zero_k_bias", .{.d}, .replicated),
+            .proj = encLinear(store.withPrefix("proj")),
+            .num_heads = num_heads,
+            .head_dim = @divExact(in_dim, num_heads),
+            .out_dim = out_dim,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(CausalAttn)) void {
+        zml.nn.Linear.unloadBuffers(&self.qkv);
+        self.q_bias.deinit();
+        self.v_bias.deinit();
+        self.k_bias.deinit();
+        zml.nn.Linear.unloadBuffers(&self.proj);
+    }
+
+    pub fn forward(self: CausalAttn, x: zml.Tensor) zml.Tensor {
+        const xt = x.withPartialTags(.{ .b, .s, .d });
+        const seq = xt.dim(.s);
+        var qkv = self.qkv.forward(xt);
+        const bias = zml.Tensor.concatenate(&.{
+            self.q_bias.convert(xt.dtype()).withTags(.{.dout}),
+            self.k_bias.convert(xt.dtype()).withTags(.{.dout}),
+            self.v_bias.convert(xt.dtype()).withTags(.{.dout}),
+        }, .dout);
+        qkv = qkv.add(bias.broad(qkv.shape()));
+        const parts = qkv.chunkExact(.dout, 3);
+        const q = parts[0].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .q });
+        const k = parts[1].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .k });
+        const v = parts[2].rename(.{ .dout = .d }).splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim }).rename(.{ .s = .k });
+        const mask = zml.nn.causalAttnMask(.{ .q = seq, .k = seq }, .f32, null);
+        var attn = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask }).rename(.{ .q = .s });
+        attn = attn.mean(.h).squeeze(.h);
+        const pool = @divExact(self.head_dim, self.out_dim);
+        attn = attn.splitAxis(.hd, .{ .d = self.out_dim, .k = pool }).mean(.k).squeeze(.k);
+        return self.proj.forward(attn).rename(.{ .dout = .d });
+    }
+};
+
+const AttnProjection = struct {
+    norm1: zml.nn.LayerNorm,
+    attn: CausalAttn,
+    proj: zml.nn.Linear,
+    norm3: zml.nn.LayerNorm,
+    norm2: zml.nn.LayerNorm,
+    mlp: GeGluMlp,
+
+    pub fn init(store: zml.io.TensorStore.View, in_dim: i64, out_dim: i64) AttnProjection {
+        return .{
+            .norm1 = ops.ln(store.withPrefix("norm1"), 1e-5),
+            .attn = .init(store.withPrefix("attn"), in_dim, out_dim, 8),
+            .proj = encLinear(store.withPrefix("proj")),
+            .norm3 = ops.ln(store.withPrefix("norm3"), 1e-5),
+            .norm2 = ops.ln(store.withPrefix("norm2"), 1e-5),
+            .mlp = .init(store.withPrefix("mlp")),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AttnProjection)) void {
+        self.norm1.weight.deinit();
+        if (self.norm1.bias) |*b| b.deinit();
+        CausalAttn.unloadBuffers(&self.attn);
+        zml.nn.Linear.unloadBuffers(&self.proj);
+        self.norm3.weight.deinit();
+        if (self.norm3.bias) |*b| b.deinit();
+        self.norm2.weight.deinit();
+        if (self.norm2.bias) |*b| b.deinit();
+        GeGluMlp.unloadBuffers(&self.mlp);
+    }
+
+    pub fn forward(self: AttnProjection, x: zml.Tensor) zml.Tensor {
+        const xt = x.withPartialTags(.{ .b, .s, .d });
+        var y = self.proj.forward(self.norm3.forward(xt)).rename(.{ .dout = .d });
+        y = y.add(self.attn.forward(self.norm1.forward(xt)));
+        return y.add(self.mlp.forward(self.norm2.forward(y)));
+    }
+};
+
+pub const EncoderModel = struct {
+    conv_in: WNConv1d,
+    blocks: [5]EncoderBlock,
+    snake: Snake1d,
+    conv_out: WNConv1d,
+    pre_block: AttnProjection,
+    mean_proj: zml.nn.Linear,
+    cfg: AudioConfig,
+
+    pub fn init(store: zml.io.TensorStore.View, cfg: AudioConfig) EncoderModel {
+        const enc = store.withPrefix("encoder.block");
+        const latent_dim: i64 = 2048;
+        return .{
+            .conv_in = .init(enc.withLayer(0), 1, 1, 3),
+            .blocks = .{
+                .init(enc.withLayer(1), cfg.encoder_rates[0]),
+                .init(enc.withLayer(2), cfg.encoder_rates[1]),
+                .init(enc.withLayer(3), cfg.encoder_rates[2]),
+                .init(enc.withLayer(4), cfg.encoder_rates[3]),
+                .init(enc.withLayer(5), cfg.encoder_rates[4]),
+            },
+            .snake = .init(enc.withLayer(6)),
+            .conv_out = .init(enc.withLayer(7), 1, 1, 1),
+            .pre_block = .init(store.withPrefix("pre_block"), latent_dim, cfg.latent_channels),
+            .mean_proj = encLinear(store.withPrefix("mean_proj")),
+            .cfg = cfg,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(EncoderModel)) void {
+        WNConv1d.unloadBuffers(&self.conv_in);
+        for (&self.blocks) |*block| EncoderBlock.unloadBuffers(block);
+        Snake1d.unloadBuffers(&self.snake);
+        WNConv1d.unloadBuffers(&self.conv_out);
+        AttnProjection.unloadBuffers(&self.pre_block);
+        zml.nn.Linear.unloadBuffers(&self.mean_proj);
+    }
+};
+
+const EncodeInput = struct { model: EncoderModel, wav: zml.Tensor };
+const EncodeOutput = struct { latents: zml.Tensor };
+
+pub fn encode(input: EncodeInput) EncodeOutput {
+    const self = input.model;
+    var x = input.wav.withPartialTags(.{ .b, .c, .t }).convert(.f32);
+    x = self.conv_in.forward(x);
+    for (self.blocks) |block| x = block.forward(x);
+    x = self.conv_out.forward(self.snake.forward(x));
+    x = x.transpose(.{ .b, .t, .c }).rename(.{ .c = .d, .t = .s });
+    x = self.pre_block.forward(x);
+    x = self.mean_proj.forward(x).rename(.{ .dout = .c });
+    if (x.shape().hasTag(.k) != null) x = x.squeeze(.k);
+    return .{ .latents = x.transpose(.{ .b, .c, .s }).rename(.{ .s = .t }) };
+}
+
+fn audioBctToRows(dst: []f32, bct: []const f32, channels: u32, t: u32) void {
+    var ear: usize = 0;
+    while (ear < 2) : (ear += 1) {
+        const src = bct[ear * channels * t ..][0 .. channels * t];
+        const out = dst[ear * t * channels ..][0 .. t * channels];
+        var c: usize = 0;
+        while (c < channels) : (c += 1) {
+            var ti: usize = 0;
+            while (ti < t) : (ti += 1) {
+                out[ti * channels + c] = src[c * t + ti];
+            }
+        }
+    }
+}
+
+pub const AudioEncoded = struct {
+    values: []f32,
+    latent_t: u32,
+};
+
+pub fn encodeAudio(
+    run: *const Run,
+    exe: *const zml.FnExe(encode),
+    bufs: *const zml.Bufferized(EncoderModel),
+    cfg: AudioConfig,
+    stereo: []const f32,
+) !AudioEncoded {
+    const allocator = run.allocator;
+    const hop = cfg.hop();
+    const frames: u32 = @intCast(stereo.len / 2);
+    const pad = (hop - (frames % hop)) % hop;
+    const samples = frames + pad;
+    const batch = try allocator.alloc(f32, 2 * samples);
+    defer allocator.free(batch);
+    @memset(batch, 0);
+    var i: usize = 0;
+    while (i < frames) : (i += 1) {
+        batch[i] = stereo[i * 2];
+        batch[samples + i] = stereo[i * 2 + 1];
+    }
+    var runner = try zml.FnExe(encode).Runner(.{.model}).init(exe, allocator, .{ .model = bufs.* });
+    defer runner.deinit(allocator);
+    var wav = try zml.Buffer.fromBytes(run.io, run.platform, .init(.{ .b = 2, .c = 1, .t = samples }, .f32), .replicated, std.mem.sliceAsBytes(batch));
+    defer wav.deinit();
+    var latents: zml.Buffer = undefined;
+    runner.run(run.io, .{
+        .inputs = .{ .wav = wav },
+        .outputs = .{ .latents = &latents },
+        .opts = .{ .wait = true },
+    });
+    defer latents.deinit();
+    const latent_t = samples / hop;
+    const channels: usize = @intCast(cfg.latent_channels);
+    const host = try allocator.alloc(f32, 2 * channels * latent_t);
+    defer allocator.free(host);
+    try latents.toSlice(run.io, .init(zml.Shape.init(.{ .b = 2, .c = cfg.latent_channels, .t = latent_t }, .f32), std.mem.sliceAsBytes(host)));
+    const packed_latents = try allocator.alloc(f32, host.len);
+    audioBctToRows(packed_latents, host, @intCast(channels), latent_t);
+    var n: usize = 0;
+    while (n < packed_latents.len) : (n += 1) {
+        const c = n % channels;
+        packed_latents[n] = (packed_latents[n] - cfg.latents_mean[c]) / cfg.latents_std[c];
+    }
+    log.info("audio encode samples={d} latent_t={d}", .{ samples, latent_t });
+    return .{ .values = packed_latents, .latent_t = latent_t };
+}
+
+pub fn compileAudioEncode(run: *const Run, model: EncoderModel, samples: u32) !zml.FnExe(encode) {
+    return zml.FnExe(encode).compile(run.allocator, run.io, run.platform, .{
+        .shardings = &run.mesh,
+        .program_name = "minimax_h3_audio_encode",
+    }, .{.{
+        .model = model,
+        .wav = .init(.{ .b = 2, .c = 1, .t = samples }, .f32),
+    }});
 }
 
 pub const Loaded = struct {

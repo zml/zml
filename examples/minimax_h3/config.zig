@@ -15,13 +15,33 @@ const zml = @import("zml");
 const log = std.log.scoped(.minimax_h3);
 
 pub const video_fps: f32 = 24.0;
+pub const qwen_video_fps: f32 = 2.0;
 pub const audio_hz: f32 = 40.0;
 /// VAE clip: `clip_length·n + latents_per_chunk` pixel frames, `5n+2` latent frames.
 pub const visual_latents_per_chunk: u32 = 5;
 pub const canvas_multiple: u32 = 32;
 pub const canvas_max_pixels: u32 = 768 * 1344;
+/// Official `reference_image_short_edge`. Upscale allowed, no area cap.
+pub const reference_image_short_edge: u32 = 2048;
+pub const min_aspect: f32 = 0.25;
+pub const max_aspect: f32 = 4.0;
 pub const min_duration_s: f32 = 5.0;
 pub const max_duration_s: f32 = 15.0;
+
+pub const Size = struct { w: u32, h: u32 };
+
+/// Official ref2va image geometry: short edge 2048, snap-32, upscale allowed.
+pub fn refImageSize(src_w: u32, src_h: u32) error{InvalidAspect}!Size {
+    if (src_w == 0 or src_h == 0) return error.InvalidAspect;
+    const ratio = @as(f32, @floatFromInt(src_w)) / @as(f32, @floatFromInt(src_h));
+    if (ratio < min_aspect or ratio > max_aspect) return error.InvalidAspect;
+    const short = @min(src_w, src_h);
+    const scale = @as(f32, @floatFromInt(reference_image_short_edge)) / @as(f32, @floatFromInt(short));
+    const multiple = canvas_multiple;
+    const w = @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(src_w)) * scale / @as(f32, @floatFromInt(multiple))))) * multiple);
+    const h = @max(multiple, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(src_h)) * scale / @as(f32, @floatFromInt(multiple))))) * multiple);
+    return .{ .w = w, .h = h };
+}
 /// Packed-sequence modalities. Integer values are AdaLN table columns.
 pub const Modality = enum(u8) { video = 0, text = 1, audio = 2 };
 pub const modality_count: i64 = @intCast(std.meta.fields(Modality).len);
@@ -256,6 +276,26 @@ fn audioLatentFromFrames(frames: u32) u32 {
     return @intFromFloat(@round(@as(f32, @floatFromInt(frames)) / video_fps * audio_hz));
 }
 
+/// Latent frames after last-clip pad and one tail `token_drop`.
+pub fn encodeVideoLatentT(vae: VisualConfig, frames: u32) u32 {
+    const clip: u32 = @intCast(vae.clip_length);
+    const chunk = visual_latents_per_chunk;
+    const drop: u32 = @intCast(vae.token_drop);
+    const padded = frames + (clip - (frames % clip)) % clip;
+    const tokens = (padded / clip) * chunk;
+    if (drop >= tokens) return 0;
+    return tokens - drop;
+}
+
+/// Snap a reference clip to the largest `clip_length * n + tokens_chunk` prefix.
+pub fn referenceVideoFrameCount(vae: VisualConfig, frames: u32) u32 {
+    const clip: u32 = @intCast(vae.clip_length);
+    const tail = visual_latents_per_chunk;
+    const minimum = clip + tail;
+    if (frames < minimum) return frames;
+    return ((frames - tail) / clip) * clip + tail;
+}
+
 /// Head-wise tensor-parallel mesh on `.model`.
 /// DiT and the text encoder shard `.h = .model`; the VAE and audio decoder stay replicated.
 pub const Shardings = struct {
@@ -289,6 +329,9 @@ pub const Shardings = struct {
         };
     }
 };
+
+pub const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
+pub const imagenet_std = [_]f32{ 0.229, 0.224, 0.225 };
 
 /// Visual VAE decode tiling (official recipe). Default 1344×768 is 4×7 = 28 tiles.
 pub const vae_tile_px: u32 = 256;

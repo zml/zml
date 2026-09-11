@@ -1156,6 +1156,49 @@ pub const Tensor = struct {
         });
     }
 
+    /// 3D convolution. Defaults are (B, C_in, T, H, W) input, (C_out, C_in, T, H, W) kernel.
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 },
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 },
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            window_reversal: []const bool = &.{ false, false, false },
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        });
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp("add", dialects.stablehlo.add)(self, other);
@@ -1698,6 +1741,25 @@ pub const Tensor = struct {
         const beta = std.math.sqrt(2.0 / std.math.pi);
         const tanh_ = x.add(scaled_x_cube).scale(beta).tanh();
         return tanh_.addConstant(1).mul(x).scale(0.5);
+    }
+
+    /// Erf-form GELU: `0.5 * x * (1 + erf(x / √2))`.
+    /// `erf` is the Abramowitz–Stegun approximation (StableHLO has no erf).
+    pub fn geluErf(x: Tensor) Tensor {
+        return x.mul(x.scale(std.math.sqrt(0.5)).erf().addConstant(1)).scale(0.5);
+    }
+
+    /// Abramowitz–Stegun erf (max error ~1.5e-7). StableHLO has no `erf`.
+    pub fn erf(self: Tensor) Tensor {
+        const ax = self.abs();
+        const t = ax.scale(0.3275911).addConstant(1).powByConst(-1);
+        var poly = t.scale(1.061405429).addConstant(-1.453152027);
+        poly = t.mul(poly).addConstant(1.421413741);
+        poly = t.mul(poly).addConstant(-0.284496736);
+        poly = t.mul(poly).addConstant(0.254829592);
+        poly = t.mul(poly);
+        const erfc = poly.mul(ax.mul(ax).negate().exp());
+        return self.sign().mul(erfc.negate().addConstant(1));
     }
 
     /// Returns a Tensor containing an approximation of the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.

@@ -38,3 +38,6 @@ ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 1344x768 -r 24 -i out/video.rgb \
 - `--width=<pixels>`: Optional. Canvas width, multiple of 32. Defaults to `1344`.
 - `--height=<pixels>`: Optional. Canvas height, multiple of 32. Defaults to `768`. Area must be at most `768×1344`.
 - `--duration=<seconds>`: Optional. Clip length 5–15. Defaults to `5`. Frame count is snapped to a VAE-legal `17n+5`.
+- `--first-frame=<path>`: Optional. First-frame image for image-to-video / first-and-last.
+- `--last-frame=<path>`: Optional. Last-frame image.
+- `--refs=<paths>`: Optional. Comma-separated reference images, videos (`.mp4`), or audio (`.mp3`/`.wav`). Uses `transformer_ref/` weights.

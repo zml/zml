@@ -25,6 +25,30 @@ fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     return lin.forward(x.convert(lin.weight.dtype())).convert(x.dtype());
 }
 
+/// Official visual VAE `post_quant_conv` is a 1×1×1 conv stored with trailing 1s.
+fn conv1x1(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    var weight = lin.weight;
+    while (weight.rank() > 2) {
+        weight = weight.squeeze(-1);
+    }
+    const dt = weight.dtype();
+    return (zml.nn.Linear.init(weight.withTags(.{ .dout, .d }), lin.bias, .d))
+        .forward(x.convert(dt))
+        .convert(x.dtype());
+}
+
+fn withModelBatch(like: zml.Tensor, t: zml.Tensor) zml.Tensor {
+    return if (like.shape().partition(.b).eql(.init(.model)))
+        t.withPartitioning(.{ .b = .model })
+    else
+        t;
+}
+
+fn vaeBatch(tags: anytype, dt: zml.DataType, partition_b: bool) zml.Tensor {
+    const t = zml.Tensor.init(tags, dt);
+    return if (partition_b) t.withPartitioning(.{ .b = .model }) else t;
+}
+
 // =============================================================================
 // Decoder  (embed → 36 blocks → finish)
 // =============================================================================
@@ -125,22 +149,23 @@ const EmbedModel = struct {
     pub fn forward(input: Input) Output {
         const self = input.model;
         const x = input.latents.withPartialTags(.{ .b, .s, .d });
-        const post_w = self.post_quant.weight.merge(.{ .d = .{ .d, .kt, .kh, .kw } });
-        const quantized = (zml.nn.Linear.init(post_w, self.post_quant.bias, .d))
-            .forward(x.convert(post_w.dtype()))
-            .convert(x.dtype())
-            .rename(.{ .dout = .d });
-        const tokens = applyLinear(self.proj, quantized).rename(.{ .dout = .d });
-        const hidden = zml.Tensor.concatenate(&.{
+        const quantized = conv1x1(self.post_quant, x).rename(.{ .dout = .d });
+        const tokens = withModelBatch(x, applyLinear(self.proj, quantized).rename(.{ .dout = .d }));
+        const registers = self.register_tokens.convert(tokens.dtype()).broad(tokens.shape().setDim(.s, self.register_tokens.dim(.s)));
+        const hidden = withModelBatch(x, zml.Tensor.concatenate(&.{
             tokens,
-            self.register_tokens.convert(tokens.dtype()).broad(tokens.shape().setDim(.s, self.register_tokens.dim(.s))),
+            registers,
             zml.Tensor.zeroes(tokens.shape().setDim(.s, 1)),
-        }, .s);
+        }, .s));
         const rotary_dim = self.cfg.rotaryDim();
         const inv = zml.Tensor.scalar(self.cfg.decoder_rope_theta, .f32)
             .pow(zml.Tensor.arange(.{ .end = @divExact(rotary_dim, 6) }, .f32).withTags(.{.f}).scale(-@as(f32, 6) / @as(f32, @floatFromInt(rotary_dim))));
-        const emb = ropeCat3(input.position_ids, inv).scale(2.0 * std.math.pi);
-        return .{ .hidden = hidden, .cos = emb.cos().convert(tokens.dtype()), .sin = emb.sin().convert(tokens.dtype()) };
+        const freqs = ropeCat3(input.position_ids, inv).scale(2.0 * std.math.pi);
+        return .{
+            .hidden = hidden,
+            .cos = freqs.cos().convert(tokens.dtype()),
+            .sin = freqs.sin().convert(tokens.dtype()),
+        };
     }
 };
 
@@ -248,28 +273,18 @@ fn unpackNchw(patches: zml.Tensor, temporal: u32, spatial: u32, channels: i64) z
         .merge(.{ .t = .{ .lt, .pt }, .h = .{ .lh, .ph }, .w = .{ .lw, .pw } });
 }
 
-const Decode = struct {
-    embed: EmbedModel,
-    blocks: []VitBlock,
-    finish: FinishModel,
+/// GPU tile windows from the padded latent canvas.
+const Extract = struct {
     y_starts: []const u32,
     x_starts: []const u32,
+    channels: i64,
+    spatial: u32,
     partition_b: bool,
-    pub const Input = struct { model: Decode, thwc: zml.Tensor, start_t: zml.Tensor, position_ids: zml.Tensor };
-    pub const Output = struct { tiles: zml.Tensor };
-
-    pub fn unload(self: *zml.Bufferized(Decode), allocator: std.mem.Allocator) void {
-        zml.Buffer.deinitAll(EmbedModel, &self.embed);
-        for (self.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
-        allocator.free(self.blocks);
-        zml.Buffer.deinitAll(FinishModel, &self.finish);
-    }
+    pub const Input = struct { model: Extract, thwc: zml.Tensor, start_t: zml.Tensor };
+    pub const Output = struct { latents: zml.Tensor };
 
     pub fn forward(input: Input) Output {
         const self = input.model;
-        const channels = self.embed.cfg.latent_channels;
-        const temporal: u32 = self.embed.cfg.temporal();
-        const spatial: u32 = self.embed.cfg.spatial();
         const thwc = input.thwc.withPartialTags(.{ .t, .h, .w, .c });
         const padded = thwc.pad(0, .{
             .t = zml.Tensor.Pad{ .high = @as(i64, config.vae_latent_t) },
@@ -282,27 +297,35 @@ const Decode = struct {
             for (self.x_starts) |x0| {
                 const window = padded.slices(.{ .t, .h, .w }, &.{
                     .dyn(input.start_t, @as(i64, config.vae_latent_t)),
-                    .{ .start = @as(i64, @intCast(y0 / spatial)), .len = @as(i64, config.vae_latent_h) },
-                    .{ .start = @as(i64, @intCast(x0 / spatial)), .len = @as(i64, config.vae_latent_w) },
+                    .{ .start = @as(i64, @intCast(y0 / self.spatial)), .len = @as(i64, config.vae_latent_h) },
+                    .{ .start = @as(i64, @intCast(x0 / self.spatial)), .len = @as(i64, config.vae_latent_w) },
                 });
-                parts[n] = window.reshape(.{ .b = 1, .s = vaeTokens(), .d = channels });
+                parts[n] = window.reshape(.{ .b = 1, .s = vaeTokens(), .d = self.channels });
                 n += 1;
             }
         }
         var latents = zml.Tensor.concatenate(parts[0..n], .b);
         if (self.partition_b) latents = latents.withPartitioning(.{ .b = .model });
-        const emb = EmbedModel.forward(.{ .model = self.embed, .latents = latents, .position_ids = input.position_ids });
-        var hidden = emb.hidden;
-        for (self.blocks) |block| {
-            hidden = VitBlock.forward(.{ .layer = block, .hidden = hidden, .cos = emb.cos, .sin = emb.sin }).hidden;
-        }
-        const patches = FinishModel.forward(.{ .model = self.finish, .hidden = hidden }).patches;
-        return .{ .tiles = unpackNchw(patches, temporal, spatial, self.embed.cfg.out_channels) };
+        return .{ .latents = latents };
+    }
+};
+
+const FinishTiles = struct {
+    finish: FinishModel,
+    pub const Input = struct { model: FinishTiles, hidden: zml.Tensor };
+    pub const Output = struct { tiles: zml.Tensor };
+
+    pub fn forward(input: Input) Output {
+        const patches = FinishModel.forward(.{ .model = input.model.finish, .hidden = input.hidden }).patches;
+        const cfg = input.model.finish.cfg;
+        return .{ .tiles = unpackNchw(patches, cfg.temporal(), cfg.spatial(), cfg.out_channels) };
     }
 };
 
 pub const Loaded = struct {
-    decode: zml.Bufferized(Decode),
+    embed: zml.Bufferized(EmbedModel),
+    blocks: []zml.Bufferized(VitBlock),
+    finish: zml.Bufferized(FinishModel),
     loader: ?zml.io.Loader = null,
 
     pub fn wait(self: *Loaded, io: std.Io) !void {
@@ -315,7 +338,10 @@ pub const Loaded = struct {
 
     pub fn deinit(self: *Loaded, allocator: std.mem.Allocator, io: std.Io) void {
         self.wait(io) catch {};
-        Decode.unload(&self.decode, allocator);
+        zml.Buffer.deinitAll(EmbedModel, &self.embed);
+        for (self.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
+        allocator.free(self.blocks);
+        zml.Buffer.deinitAll(FinishModel, &self.finish);
         allocator.destroy(self);
     }
 };
@@ -329,13 +355,20 @@ pub const Vae = struct {
 
     const Compiled = struct {
         unpatch: zml.FnExe(Unpatch.forward),
-        decode: zml.FnExe(Decode.forward),
-        y_plan: TilePlan,
-        x_plan: TilePlan,
+        extract: zml.FnExe(Extract.forward),
+        embed: zml.FnExe(EmbedModel.forward),
+        block: zml.FnExe(VitBlock.forward),
+        finish: zml.FnExe(FinishTiles.forward),
+        y_plan: ops.TilePlan,
+        x_plan: ops.TilePlan,
+        partition_b: bool,
 
         fn deinit(self: *Compiled, allocator: std.mem.Allocator) void {
             self.unpatch.deinit();
-            self.decode.deinit();
+            self.extract.deinit();
+            self.embed.deinit();
+            self.block.deinit();
+            self.finish.deinit();
             self.y_plan.deinit(allocator);
             self.x_plan.deinit(allocator);
         }
@@ -371,17 +404,25 @@ pub const Vae = struct {
 
     pub fn compile(self: *Vae, run: *const Run, geo: config.Geometry, patch: [3]i64) !void {
         const spatial = self.cfg.spatial();
-        var y_plan = try splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
+        var y_plan = try ops.splitTiles(run.allocator, geo.pixel_h, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
         errdefer y_plan.deinit(run.allocator);
-        var x_plan = try splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
+        var x_plan = try ops.splitTiles(run.allocator, geo.pixel_w, config.vae_tile_px, config.vae_tile_overlap_px, spatial);
         errdefer x_plan.deinit(run.allocator);
         const n_tiles: u32 = @intCast(y_plan.starts.len * x_plan.starts.len);
         if (n_tiles > config.vae_tile_batch) return error.TooManyVaeTiles;
         const tp: u32 = @intCast(run.shardings.model.numPartitionsForLogicalAxis(.model));
         const partition_b = tp > 1 and n_tiles % tp == 0;
         const seq_len = vaeSeq(@intCast(self.cfg.decoder_num_register_tokens));
-        var node = run.progress.start("Compiling MiniMax-H3 VAE", 2);
+        const dt = self.embed.proj.weight.dtype();
+        var node = run.progress.start("Compiling MiniMax-H3 VAE", 5);
         defer node.end();
+        log.info("compile VAE: start tile={d}x{d}x{d} batch={d} shard_b={}", .{
+            config.vae_latent_t,
+            config.vae_latent_h,
+            config.vae_latent_w,
+            n_tiles,
+            partition_b,
+        });
         const unpatch_exe = try zml.FnExe(Unpatch.forward).compile(run.allocator, run.io, run.platform, .{
             .shardings = &run.mesh,
             .program_name = "minimax_h3_vae_unpatch",
@@ -398,28 +439,56 @@ pub const Vae = struct {
             .tokens = .init(.{ .b = 1, .s = geo.video_tokens, .d = geo.video_patch_dim }, .f32),
         }});
         errdefer unpatch_exe.deinit();
-        const decode_model = Decode{
-            .embed = self.embed,
-            .blocks = self.blocks,
-            .finish = self.finish,
-            .y_starts = y_plan.starts,
-            .x_starts = x_plan.starts,
-            .partition_b = partition_b,
-        };
-        const decode_exe = try zml.FnExe(Decode.forward).compile(run.allocator, run.io, run.platform, .{
+        const extract_exe = try zml.FnExe(Extract.forward).compile(run.allocator, run.io, run.platform, .{
             .shardings = &run.mesh,
-            .program_name = "minimax_h3_vae_decode",
+            .program_name = "minimax_h3_vae_extract",
         }, .{.{
-            .model = decode_model,
+            .model = Extract{
+                .y_starts = y_plan.starts,
+                .x_starts = x_plan.starts,
+                .channels = self.cfg.latent_channels,
+                .spatial = spatial,
+                .partition_b = partition_b,
+            },
             .thwc = .init(.{ .t = geo.latent_t, .h = geo.latent_h, .w = geo.latent_w, .c = self.cfg.latent_channels }, .f32),
             .start_t = .init(.{}, .i32),
+        }});
+        errdefer extract_exe.deinit();
+        const embed_exe = try zml.FnExe(EmbedModel.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = &run.mesh,
+            .program_name = "minimax_h3_vae_embed",
+        }, .{.{
+            .model = self.embed,
+            .latents = vaeBatch(.{ .b = n_tiles, .s = vaeTokens(), .d = self.cfg.latent_channels }, .f32, partition_b),
             .position_ids = .init(.{ .s = seq_len, .ax = 3 }, .f32),
+        }});
+        errdefer embed_exe.deinit();
+        const block_exe = try zml.FnExe(VitBlock.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = &run.mesh,
+            .program_name = "minimax_h3_vae_block",
+        }, .{.{
+            .layer = self.blocks[0],
+            .hidden = vaeBatch(.{ .b = n_tiles, .s = seq_len, .d = self.cfg.dim() }, dt, partition_b),
+            .cos = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, dt),
+            .sin = .init(.{ .s = seq_len, .f = self.cfg.rotaryDim() }, dt),
+        }});
+        errdefer block_exe.deinit();
+        const finish_exe = try zml.FnExe(FinishTiles.forward).compile(run.allocator, run.io, run.platform, .{
+            .shardings = &run.mesh,
+            .program_name = "minimax_h3_vae_finish",
+        }, .{.{
+            .model = .{ .finish = self.finish },
+            .hidden = vaeBatch(.{ .b = n_tiles, .s = seq_len, .d = self.cfg.dim() }, dt, partition_b),
         }});
         self.compiled = .{
             .unpatch = unpatch_exe,
-            .decode = decode_exe,
+            .extract = extract_exe,
+            .embed = embed_exe,
+            .block = block_exe,
+            .finish = finish_exe,
             .y_plan = y_plan,
             .x_plan = x_plan,
+            .partition_b = partition_b,
         };
     }
 
@@ -433,22 +502,25 @@ pub const Vae = struct {
             dst.* = try zml.mem.bufferize(run.allocator, VitBlock, src);
         }
         loaded.* = .{
-            .decode = .{
-                .embed = try zml.mem.bufferize(run.allocator, EmbedModel, &self.embed),
-                .blocks = blocks_buf,
-                .finish = try zml.mem.bufferize(run.allocator, FinishModel, &self.finish),
-            },
+            .embed = try zml.mem.bufferize(run.allocator, EmbedModel, &self.embed),
+            .blocks = blocks_buf,
+            .finish = try zml.mem.bufferize(run.allocator, FinishModel, &self.finish),
             .loader = try .init(run.allocator, run.platform, ops.loader_opts),
         };
         blocks_owned = true;
-        errdefer Decode.unload(&loaded.decode, run.allocator);
-        errdefer loaded.loader.?.deinit();
+        errdefer {
+            zml.Buffer.deinitAll(EmbedModel, &loaded.embed);
+            for (loaded.blocks) |*block| zml.Buffer.deinitAll(VitBlock, block);
+            run.allocator.free(loaded.blocks);
+            zml.Buffer.deinitAll(FinishModel, &loaded.finish);
+            if (loaded.loader) |*loader| loader.deinit();
+        }
         if (loaded.loader) |*loader| {
-            try loader.load(run.io, EmbedModel, &self.embed, &loaded.decode.embed, store, &run.mesh, .{ .progress = run.progress });
-            for (self.blocks, loaded.decode.blocks) |*src, *dst| {
+            try loader.load(run.io, EmbedModel, &self.embed, &loaded.embed, store, &run.mesh, .{ .progress = run.progress });
+            for (self.blocks, loaded.blocks) |*src, *dst| {
                 try loader.load(run.io, VitBlock, src, dst, store, &run.mesh, .{ .progress = run.progress });
             }
-            try loader.load(run.io, FinishModel, &self.finish, &loaded.decode.finish, store, &run.mesh, .{ .progress = run.progress });
+            try loader.load(run.io, FinishModel, &self.finish, &loaded.finish, store, &run.mesh, .{ .progress = run.progress });
         }
         return loaded;
     }
@@ -493,8 +565,25 @@ pub const Vae = struct {
         });
         defer thwc.deinit();
 
-        var decode_runner = try zml.FnExe(Decode.forward).Runner(.{.model}).init(&compiled.decode, run.allocator, .{ .model = loaded.decode });
-        defer decode_runner.deinit(run.allocator);
+        var extract_runner = try zml.FnExe(Extract.forward).Runner(.{}).init(&compiled.extract, run.allocator, .{});
+        defer extract_runner.deinit(run.allocator);
+        var embed_runner = try zml.FnExe(EmbedModel.forward).Runner(.{.model}).init(&compiled.embed, run.allocator, .{ .model = loaded.embed });
+        defer embed_runner.deinit(run.allocator);
+        var finish_runner = try zml.FnExe(FinishTiles.forward).Runner(.{.model}).init(&compiled.finish, run.allocator, .{
+            .model = .{ .finish = loaded.finish },
+        });
+        defer finish_runner.deinit(run.allocator);
+        const BlockRunner = zml.FnExe(VitBlock.forward).Runner(.{.layer});
+        const block_runners = try run.allocator.alloc(BlockRunner, loaded.blocks.len);
+        var n_block_runners: usize = 0;
+        defer {
+            for (block_runners[0..n_block_runners]) |*r| r.deinit(run.allocator);
+            run.allocator.free(block_runners);
+        }
+        for (loaded.blocks, block_runners) |block, *runner| {
+            runner.* = try BlockRunner.init(&compiled.block, run.allocator, .{ .layer = block });
+            n_block_runners += 1;
+        }
 
         const clip_t = config.vae_latent_t * temporal;
         const tile_h = config.vae_latent_h * spatial;
@@ -514,12 +603,40 @@ pub const Vae = struct {
             const start_t: i32 = @intCast(@as(u32, @intCast(chunk_i)) * config.visual_latents_per_chunk);
             var start_buf = try zml.Buffer.scalar(run.io, run.platform, start_t, .i32);
             defer start_buf.deinit();
+            var latents: zml.Buffer = undefined;
+            extract_runner.run(run.io, .{
+                .inputs = .{ .thwc = thwc, .start_t = start_buf },
+                .outputs = .{ .latents = &latents },
+                .opts = .{ .wait = true },
+            });
+            defer latents.deinit();
+            var hidden: zml.Buffer = undefined;
+            var cos: zml.Buffer = undefined;
+            var sin: zml.Buffer = undefined;
+            embed_runner.run(run.io, .{
+                .inputs = .{ .latents = latents, .position_ids = pos },
+                .outputs = .{ .hidden = &hidden, .cos = &cos, .sin = &sin },
+                .opts = .{ .wait = true },
+            });
+            defer cos.deinit();
+            defer sin.deinit();
+            for (block_runners) |*block_runner| {
+                var next: zml.Buffer = undefined;
+                block_runner.run(run.io, .{
+                    .inputs = .{ .hidden = hidden, .cos = cos, .sin = sin },
+                    .outputs = .{ .hidden = &next },
+                    .opts = .{ .wait = true },
+                });
+                hidden.deinit();
+                hidden = next;
+            }
             var tiles: zml.Buffer = undefined;
-            decode_runner.run(run.io, .{
-                .inputs = .{ .thwc = thwc, .start_t = start_buf, .position_ids = pos },
+            finish_runner.run(run.io, .{
+                .inputs = .{ .hidden = hidden },
                 .outputs = .{ .tiles = &tiles },
                 .opts = .{ .wait = true },
             });
+            hidden.deinit();
             defer tiles.deinit();
             try tiles.toSlice(run.io, .init(tiles.shape(), std.mem.sliceAsBytes(host)));
 
@@ -567,7 +684,7 @@ pub const Vae = struct {
         const rgb_plane = out.len / 3;
         for (0..3) |c| {
             for (0..rgb_plane) |pi| {
-                out[c * rgb_plane + pi] = std.math.clamp(out[c * rgb_plane + pi] * imagenet_std[c] + imagenet_mean[c], 0.0, 1.0);
+                out[c * rgb_plane + pi] = std.math.clamp(out[c * rgb_plane + pi] * config.imagenet_std[c] + config.imagenet_mean[c], 0.0, 1.0);
             }
         }
         log.info("decode video: ok [{f}]", .{decode_start.untilNow(run.io, .awake)});
@@ -578,43 +695,6 @@ pub const Vae = struct {
 // =============================================================================
 // Tile / stitch  (256 px tiles, 64 px overlap)
 // =============================================================================
-
-const imagenet_mean = [_]f32{ 0.485, 0.456, 0.406 };
-const imagenet_std = [_]f32{ 0.229, 0.224, 0.225 };
-
-const TilePlan = struct {
-    starts: []u32,
-    overlaps: []u32,
-
-    pub fn deinit(self: TilePlan, allocator: std.mem.Allocator) void {
-        allocator.free(self.starts);
-        allocator.free(self.overlaps);
-    }
-};
-
-/// Evenly spaced tile origins along one axis, overlaps aligned to `align_to`.
-fn splitTiles(allocator: std.mem.Allocator, length: u32, tile_size: u32, min_overlap: u32, align_to: u32) !TilePlan {
-    if (tile_size >= length) {
-        const starts = try allocator.alloc(u32, 1);
-        starts[0] = 0;
-        return .{ .starts = starts, .overlaps = try allocator.alloc(u32, 0) };
-    }
-    var num_tiles = std.math.divCeil(u32, length, tile_size) catch unreachable;
-    while (tile_size * num_tiles < min_overlap * (num_tiles - 1) + length) num_tiles += 1;
-    const overlaps = try allocator.alloc(u32, num_tiles - 1);
-    errdefer allocator.free(overlaps);
-    @memset(overlaps, min_overlap);
-    var remaining: i64 = @as(i64, tile_size) * num_tiles - @as(i64, min_overlap) * (num_tiles - 1) - length;
-    var i: usize = 0;
-    while (remaining >= align_to) : (i += 1) {
-        overlaps[i % overlaps.len] += align_to;
-        remaining -= align_to;
-    }
-    const starts = try allocator.alloc(u32, num_tiles);
-    starts[0] = 0;
-    for (1..num_tiles) |ti| starts[ti] = starts[ti - 1] + tile_size - overlaps[ti - 1];
-    return .{ .starts = starts, .overlaps = overlaps };
-}
 
 fn nchwIndex(c: usize, t: usize, y: usize, x: usize, tt: usize, h: usize, w: usize) usize {
     return ((((c * tt + t) * h) + y) * w) + x;
@@ -712,8 +792,8 @@ const NchwStitcher = struct {
         acc_w: u32,
         tile_h: u32,
         tile_w: u32,
-        y: TilePlan,
-        x: TilePlan,
+        y: ops.TilePlan,
+        x: ops.TilePlan,
     ) !NchwStitcher {
         const n_y: u32 = @intCast(y.starts.len);
         const n_x: u32 = @intCast(x.starts.len);
