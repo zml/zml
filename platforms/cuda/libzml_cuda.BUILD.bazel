@@ -5,7 +5,7 @@ load("@zml//platforms/cuda:cuda.bzl", "CUDA_COMPAT_FILES")
 
 patchelf(
     name = "libzml_cuda_so",
-    src = "libzml_cuda.so",
+    src = "lib/libzml_cuda.so",
     add_needed = [
         "libzmlxcuda.so.0",
     ],
@@ -18,6 +18,8 @@ patchelf(
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        "bin/cute-ir-compile",
+        "lib/cutlass_ir.so",
         ":libzml_cuda_so",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
