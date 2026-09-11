@@ -20,8 +20,7 @@ pub const ExactPositionalError = std.Io.File.ReadPositionalError || error{
 };
 
 /// Completes an exact absolute positional scatter read, resuming short reads
-/// and respecting the platform iovec limit. `call_count` is optional
-/// diagnostic accounting for physical file calls.
+/// and respecting the platform iovec limit.
 /// Scatters `[file_offset, file_offset + total)` into `buffers`, where
 /// `total` is their combined length. The file may end early only past
 /// `minimum` bytes: the bytes after it are padding a caller added to align
@@ -32,7 +31,6 @@ pub fn readFilePositionalAllV(
     buffers: []const []u8,
     file_offset: u64,
     minimum: u64,
-    call_count: ?*std.atomic.Value(u64),
 ) ExactPositionalError!u64 {
     var read_size: u64 = 0;
     for (buffers) |buffer| {
@@ -65,7 +63,6 @@ pub fn readFilePositionalAllV(
         }
         if (batch_len == 0) return error.UnexpectedEndOfFile;
 
-        if (call_count) |count| _ = count.fetchAdd(1, .monotonic);
         const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
         const bytes_read = try file.readPositional(io, batch[0..batch_len], absolute_offset);
         if (bytes_read == 0) {
@@ -293,7 +290,6 @@ pub const TensorReader = struct {
             buffers,
             file_offset,
             read_size,
-            null,
         );
     }
 

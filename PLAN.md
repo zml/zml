@@ -63,19 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 6. Log-only metrics and the `call_count` parameter (C18, 10 lines).
-  Remove `Metrics.source_calls` and `Metrics.transfer_pieces`
-  (`zml/io/direct_loader.zig:2404-2405`), the `fetchAdd` at `:2069`, the
-  `physical_source_calls` and `tensor_transfer_pieces` fields of the summary
-  lines (`:493-499`, `:513-514`). Then delete the
-  `call_count: ?*std.atomic.Value(u64)` parameter of
-  `safetensors.readFilePositionalAllV` (`zml/safetensors.zig:23-24` doc,
-  `:35`, `:68`) and its arguments at `safetensors.zig:295` and
-  `direct_loader.zig:1716`. Keep `read_operations`, `read_bytes`,
-  `dma_submissions` and every timer and pump counter. CTX 235-236: physical
-  request counts for remote sources come from the VFS `batch source` line;
-  local profiles have none.
-
 - [ ] 7. Derivable pipeline state (C06, 12 lines).
   `zml/io/direct_loader.zig`: remove `ReadRequest.completed` (`:1623`, the
   `idle` constant `:1635`, the store at `:1773`) and assert

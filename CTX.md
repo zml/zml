@@ -233,7 +233,9 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   counters.
 - One source job performs one exact absolute scatter read into pinned blocks.
   Extra physical calls occur only for short reads/retries or `IOV_MAX` limits.
-  Diagnostics distinguish planned jobs from physical calls.
+  The loader counts read operations, not physical calls: a remote source's
+  physical request count comes from the VFS `batch source` line, and a local
+  profile has none.
 
 ### Coalesced source planner
 
@@ -3450,6 +3452,14 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   zml, the examples, the tests or llmd at monorepo `master`, which uses
   `withPrefix`, `withLayer`, `createTensor`, `maybeCreate*`, `hasKey`,
   `count`, `prefix`, `getShape`, `getSourcesById` and `getReader`.
+- Task 6 (C18), log-only metrics and `call_count`: `Metrics.source_calls`
+  and `Metrics.transfer_pieces` are gone with the
+  `physical_source_calls=` and `tensor_transfer_pieces=` fields of the two
+  summary lines, and with them the `call_count` parameter of
+  `safetensors.readFilePositionalAllV`. `read_operations`, `read_bytes`,
+  `dma_submissions` and every timer and pump counter stay. Physical request
+  counts for a remote source come from the VFS `batch source` line; a local
+  profile has none.
 
 ## Open work
 

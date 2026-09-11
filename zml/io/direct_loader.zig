@@ -490,13 +490,12 @@ pub const Loader = struct {
 
     fn logSummary(self: *Loader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, physical_source_calls={d}, source_width={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, source_width={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.metrics.read_bytes.load(.acquire),
             secondsBetween(self.created_at, .now(self.io, .awake)),
             reads,
-            self.metrics.source_calls.load(.acquire),
             self.width,
             self.plan_config.request_size,
             self.pool.high_water * self.pool.block_size,
@@ -510,8 +509,7 @@ pub const Loader = struct {
             millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
         });
         const submissions = self.metrics.dma_submissions.load(.acquire);
-        load_log.debug("loader DMA: tensor_transfer_pieces={d}, dma_submissions={d}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
-            self.metrics.transfer_pieces.load(.acquire),
+        load_log.debug("loader DMA: dma_submissions={d}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
             submissions,
             millisecondsPer(self.metrics.dma_submit_ns.load(.acquire), submissions) * 1000,
             millisecondsPer(self.metrics.dma_piece_ns.load(.acquire), submissions),
@@ -1713,7 +1711,6 @@ const ReadRequest = struct {
                     iovecs,
                     job.file_offset,
                     job.minimum_len,
-                    &pipeline.metrics.source_calls,
                 );
                 _ = pipeline.metrics.read_ns.fetchAdd(awakeNs(io) -| read_started, .monotonic);
                 const bytes_read = try read_result;
@@ -2066,7 +2063,6 @@ const Pipeline = struct {
                 });
                 device_pump.ready_entries += 1;
             }
-            _ = self.metrics.transfer_pieces.fetchAdd(1, .monotonic);
         }
         self.unlockAllPumps();
         for (queue_counts, 0..) |count, device_index| {
@@ -2401,8 +2397,6 @@ const RequestGateLimits = struct {
 
 const Metrics = struct {
     read_operations: std.atomic.Value(u64) = .init(0),
-    source_calls: std.atomic.Value(u64) = .init(0),
-    transfer_pieces: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
     /// Time workers spend waiting for a lifecycle credit, for pinned
