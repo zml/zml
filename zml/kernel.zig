@@ -13,6 +13,7 @@ const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
+const platform_ = @import("platform.zig");
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -510,6 +511,26 @@ pub const cuda_tile = struct {
 };
 
 pub const fly = struct {
+    /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
+    pub fn waveSize(p: *const platform_.Platform) i32 {
+        const cc = platform_.rocm.computeCapability(p) orelse return 64;
+        return switch (cc.architecture()) {
+            .cdna1, .cdna2, .cdna3, .cdna4 => 64,
+            .rdna2, .rdna3, .rdna3_5, .rdna4 => 32,
+        };
+    }
+
+    /// The plugin sizes a block in wavefronts, so a thread count has to divide
+    /// evenly: a kernel's layouts are built for an exact number of threads and
+    /// spare ones would partition out of range.
+    fn warpsFor(p: *const platform_.Platform, threads: i32) i32 {
+        const wave = waveSize(p);
+        if (@rem(threads, wave) != 0) {
+            std.debug.panic("zml.kernel.fly: {d} threads is not a multiple of the {d}-wide wavefront", .{ threads, wave });
+        }
+        return @divExact(threads, wave);
+    }
+
     pub const Builder = fly_builder.Builder;
     pub const Value = fly_builder.Value;
     pub const DType = fly_builder.DType;
@@ -517,6 +538,19 @@ pub const fly = struct {
     pub const TiledCopy = fly_builder.TiledCopy;
     pub const TiledMma = fly_builder.TiledMma;
     pub const Arch = fly_builder.Arch;
+    pub const MmaFlavor = fly_builder.MmaFlavor;
+
+    /// The matrix atom this device provides, or null when it has none: WMMA
+    /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.
+    pub fn mmaFlavor(p: *const platform_.Platform) ?MmaFlavor {
+        const cc = platform_.rocm.computeCapability(p) orelse return .cdna3_mfma;
+        return switch (cc.architecture()) {
+            .cdna1, .cdna2, .cdna3, .cdna4 => .cdna3_mfma,
+            .rdna3, .rdna3_5 => .gfx11_wmma,
+            .rdna4 => .gfx120x_wmma,
+            .rdna2 => null,
+        };
+    }
     pub const layout = fly_builder.layout;
     pub const Layout = fly_builder.Layout;
     pub const Tile = fly_builder.Tile;
@@ -577,9 +611,11 @@ pub const fly = struct {
             pub const CallOpts = struct {
                 cfg: ConfigT,
                 grid: [3]i32,
-                /// Threads per block = num_warps * 64 on CDNA; the only
-                /// block-size control the plugin reads.
-                num_warps: i32,
+                /// Threads per block. Converted to the wavefronts the plugin
+                /// wants using the device's wave size, which is 64 on CDNA and
+                /// 32 on RDNA, so a kernel states the thread count its layouts
+                /// were built for and runs on both.
+                threads: i32,
                 /// > 0 sets `amdgpu-waves-per-eu = "N, N"`: a hard occupancy clamp.
                 waves_per_eu: i32 = 0,
                 /// Required when the body uses `fly.get_dyn_shared`.
@@ -650,7 +686,7 @@ pub const fly = struct {
                     .name = name,
                     .ir = ir,
                     .grid = opts.grid,
-                    .num_warps = opts.num_warps,
+                    .num_warps = warpsFor(cur.platform, opts.threads),
                     .waves_per_eu = opts.waves_per_eu,
                     .shared_mem_bytes = opts.shared_mem_bytes,
                     .zeroed_args = opts.zeroed_args,
@@ -696,7 +732,7 @@ test "fly kernel emits a module XLA can parse" {
 
 /// C = A @ B^T with one MFMA-tiled block.
 const FlyTiledMma = struct {
-    const Cfg = struct {};
+    const Cfg = struct { flavor: fly.MmaFlavor };
     const K = fly.Kernel(Cfg, .{
         .name = "tiled_mma",
         .inputs = &.{ "a", "b" },
@@ -704,9 +740,9 @@ const FlyTiledMma = struct {
         .run = run,
     });
 
-    fn run(b: *fly.Builder, _: Cfg) fly.FinishError!void {
+    fn run(b: *fly.Builder, cfg: Cfg) fly.FinishError!void {
         const a = K.args(b);
-        fly_builder.emitTiledMma(b, a.a, a.b, a.c);
+        fly_builder.emitTiledMma(b, cfg.flavor, a.a, a.b, a.c);
     }
 };
 
@@ -719,7 +755,7 @@ test "fly kernels run on rocm" {
 
     // Compile `forward`, upload both inputs, run, and bring the result back.
     const call = struct {
-        fn f(comptime forward: anytype, p: *const zml.Platform, ta: Tensor, ha: []const f32, tb: Tensor, hb: []const f32) !zml.Slice {
+        fn f(comptime forward: anytype, p: *const zml.Platform, ta: Tensor, ha: anytype, tb: Tensor, hb: anytype) !zml.Slice {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ ta, tb }, p, .{});
             defer exe.deinit();
             var ba: zml.Buffer = try .fromBytes(std.testing.io, p, ta.shape(), .replicated, std.mem.sliceAsBytes(ha));
@@ -740,7 +776,7 @@ test "fly kernels run on rocm" {
                 return FlyVectorAdd.K.call(.{ .a = a, .b = b }, .{ .c = a.shape() }, .{
                     .cfg = .{},
                     .grid = .{ (M + 8 - 1) / 8, (N + 64 - 1) / 64, 1 },
-                    .num_warps = 2, // 8 * 16 threads
+                    .threads = 8 * 16,
                 }).c;
             }
         };
@@ -759,34 +795,54 @@ test "fly kernels run on rocm" {
         for (host.items(f32), 0..) |v, i| try std.testing.expectEqual(ha[i] + hb[i], v);
     }
 
-    // tiled mma: C = A @ B^T through one MFMA-tiled block of 256 threads.
-    {
-        const M, const N, const Kd = .{ 64, 64, 8 };
-        const Mod = struct {
-            pub fn forward(a: Tensor, b: Tensor) Tensor {
-                return FlyTiledMma.K.call(.{ .a = a, .b = b }, .{ .c = Shape.init(.{ M, N }, .f32) }, .{
-                    .cfg = .{},
-                    .grid = .{ 1, 1, 1 },
-                    .num_warps = 4, // 256 threads
-                }).c;
-            }
-        };
+    // tiled mma: C = A @ B^T in one block of 256 threads, over whatever matrix
+    // atom this device has. CDNA multiplies f32 through MFMA; RDNA3+ has WMMA,
+    // whose verifier rejects f32 operands, so the operand type and K come from
+    // the flavour rather than being written into the test.
+    if (fly.mmaFlavor(platform)) |flavor| switch (flavor) {
+        inline else => |f| {
+            const Elem = switch (comptime f.operandDType()) {
+                .f32 => f32,
+                .f16 => f16,
+                else => @compileError("unhandled MMA operand type"),
+            };
+            const M, const N = .{ 64, 64 };
+            const Kd = comptime f.blockK();
+            const operand_dtype: DataType = switch (comptime f.operandDType()) {
+                .f32 => .f32,
+                .f16 => .f16,
+                else => unreachable,
+            };
 
-        var ha: [M * Kd]f32 = undefined;
-        var hb: [N * Kd]f32 = undefined;
-        for (&ha, 0..) |*v, i| v.* = @as(f32, @floatFromInt((i * 7) % 13)) - 6;
-        for (&hb, 0..) |*v, i| v.* = @as(f32, @floatFromInt((i * 5) % 11)) - 5;
+            const Mod = struct {
+                pub fn forward(a: Tensor, b: Tensor) Tensor {
+                    return FlyTiledMma.K.call(.{ .a = a, .b = b }, .{ .c = Shape.init(.{ M, N }, .f32) }, .{
+                        .cfg = .{ .flavor = f },
+                        .grid = .{ 1, 1, 1 },
+                        .threads = comptime f.blockThreads(),
+                    }).c;
+                }
+            };
 
-        var host = try call(Mod.forward, platform, .init(.{ M, Kd }, .f32), &ha, .init(.{ N, Kd }, .f32), &hb);
-        defer host.free(allocator);
+            var ha: [M * Kd]Elem = undefined;
+            var hb: [N * Kd]Elem = undefined;
+            for (&ha, 0..) |*v, i| v.* = @as(Elem, @floatFromInt((i * 7) % 13)) - 6;
+            for (&hb, 0..) |*v, i| v.* = @as(Elem, @floatFromInt((i * 5) % 11)) - 5;
 
-        const out = host.items(f32);
-        for (0..M) |m| for (0..N) |n| {
-            var acc: f32 = 0;
-            for (0..Kd) |k| acc += ha[m * Kd + k] * hb[n * Kd + k];
-            try std.testing.expectApproxEqAbs(acc, out[m * N + n], 1e-3);
-        };
-    }
+            var host = try call(Mod.forward, platform, .init(.{ M, Kd }, operand_dtype), &ha, .init(.{ N, Kd }, operand_dtype), &hb);
+            defer host.free(allocator);
+
+            // f16 operands accumulate in f32, so the error is set by the input
+            // rounding rather than the sum.
+            const tol: f32 = if (Elem == f16) 1e-2 else 1e-3;
+            const out = host.items(f32);
+            for (0..M) |m| for (0..N) |n| {
+                var acc: f32 = 0;
+                for (0..Kd) |k| acc += @as(f32, ha[m * Kd + k]) * @as(f32, hb[n * Kd + k]);
+                try std.testing.expectApproxEqAbs(acc, out[m * N + n], tol);
+            };
+        },
+    };
 }
 
 test "cuda_tile kernel emits a module XLA can parse" {

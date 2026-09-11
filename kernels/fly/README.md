@@ -76,7 +76,7 @@ fn run(b: *fly.Builder, cfg: Cfg) fly.FinishError!void {
 const c = VectorAdd.call(.{ .a = a, .b = bt }, .{ .c = a.shape() }, .{
     .cfg = .{},
     .grid = .{ grid_m, grid_n, 1 },
-    .num_warps = 2, // 2 * 64 threads on CDNA
+    .threads = 128,
 }).c;
 ```
 
@@ -102,8 +102,10 @@ maps predicates to `i8` because that is how XLA stores them. Static DSL values
 arguments. `Kernel.call` bridges each pointer to a row-major `!fly.memref`
 view of the actual `zml.Shape`, so `K.args(b)` gives tensors.
 
-Launch geometry lives in `CallOpts`: `grid`, `num_warps` (threads per block =
-`num_warps * 64`), optional `waves_per_eu` (a hard occupancy clamp),
+Launch geometry lives in `CallOpts`: `grid`, `threads` (threads per block,
+converted to wavefronts using the device's wave size — 64 on CDNA, 32 on
+RDNA — so it must be a multiple of that), optional `waves_per_eu` (a hard
+occupancy clamp),
 `shared_mem_bytes` (only for `fly.get_dyn_shared`; static LDS from
 `sharedArray` needs none) and `zeroed_args` (indices into inputs-then-outputs;
 ignored inside HIP graphs, so zero what you need yourself).

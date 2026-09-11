@@ -1362,31 +1362,97 @@ test "vectorAdd builds, verifies and re-parses" {
     try std.testing.expect(reparsed.operation().verify());
 }
 
-/// C = A @ B^T, one block of 256 threads, MFMA 16x16x4 f32 tiled (2,2,1),
-/// buffer copies.
-pub fn emitTiledMma(b: *Builder, a_in: Value, b_in: Value, c_out: Value) void {
+/// The matrix atom a device family provides. CDNA has MFMA over f32; RDNA has
+/// WMMA, whose verifier requires M=N=K=16 and rejects f32 operands, so the
+/// operand type and the K tile change with the family, not just the mnemonic.
+pub const MmaFlavor = enum {
+    cdna3_mfma,
+    gfx11_wmma,
+    gfx120x_wmma,
+
+    pub fn atomType(self: MmaFlavor) []const u8 {
+        return switch (self) {
+            .cdna3_mfma => "!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>",
+            .gfx11_wmma => "!fly_rocdl.gfx11.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>",
+            .gfx120x_wmma => "!fly_rocdl.gfx120x.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>",
+        };
+    }
+
+    /// A and B operand type. The accumulator is f32 either way.
+    pub fn operandDType(self: MmaFlavor) DType {
+        return switch (self) {
+            .cdna3_mfma => .f32,
+            .gfx11_wmma, .gfx120x_wmma => .f16,
+        };
+    }
+
+    /// Threads one atom occupies: MFMA runs on a wave64, WMMA on a wave32.
+    /// Checked against the dialect's own `mma_atom.thr_layout` below.
+    pub fn atomThreads(self: MmaFlavor) i32 {
+        return switch (self) {
+            .cdna3_mfma => 64,
+            .gfx11_wmma, .gfx120x_wmma => 32,
+        };
+    }
+
+    /// `emitTiledMma` lays the atom out (2,2,1), so a block is four of them.
+    pub fn blockThreads(self: MmaFlavor) i32 {
+        return 4 * self.atomThreads();
+    }
+
+    /// The block tile's K, a multiple of the atom's K.
+    pub fn blockK(self: MmaFlavor) i64 {
+        return switch (self) {
+            .cdna3_mfma => 8,
+            .gfx11_wmma, .gfx120x_wmma => 16,
+        };
+    }
+
+    /// Buffer copies are CDNA-only: FlyROCDL declares no RDNA copy atom, so
+    /// RDNA moves through the core universal copy over plain tensors.
+    fn hasBufferCopy(self: MmaFlavor) bool {
+        return self == .cdna3_mfma;
+    }
+};
+
+/// A two-mode tile from extents known only at emit time.
+fn tile2(b: *Builder, x: i64, y: i64) Tile {
+    const modes = b.alloc(Tile, 2);
+    modes[0] = .{ .leaf = .{ .s = x } };
+    modes[1] = .{ .leaf = .{ .s = y } };
+    return .{ .modes = modes };
+}
+
+/// C = A @ B^T in one block of 256 threads, tiled (2,2,1) over the family's
+/// matrix atom.
+pub fn emitTiledMma(b: *Builder, flavor: MmaFlavor, a_in: Value, b_in: Value, c_out: Value) void {
     const block_m = 64;
     const block_n = 64;
-    const block_k = 8;
+    const block_k = flavor.blockK();
 
     const tid = b.threadId(.x);
     const bid = b.blockId(.x);
 
-    const A = b.bufferTensor(a_in);
-    const B = b.bufferTensor(b_in);
-    const C = b.bufferTensor(c_out);
+    const A = if (flavor.hasBufferCopy()) b.bufferTensor(a_in) else a_in;
+    const B = if (flavor.hasBufferCopy()) b.bufferTensor(b_in) else b_in;
+    const C = if (flavor.hasBufferCopy()) b.bufferTensor(c_out) else c_out;
 
-    const bA = A.zippedDivide(.{ block_m, block_k }).slice(.{ null, bid });
-    const bB = B.zippedDivide(.{ block_n, block_k }).slice(.{ null, bid });
-    const bC = C.zippedDivide(.{ block_m, block_n }).slice(.{ null, bid });
+    const bA = A.zippedDivide(tile2(b, block_m, block_k)).slice(.{ null, bid });
+    const bB = B.zippedDivide(tile2(b, block_n, block_k)).slice(.{ null, bid });
+    const bC = C.zippedDivide(tile2(b, block_m, block_n)).slice(.{ null, bid });
 
-    const mma_atom = b.mmaAtom("!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>");
+    const mma_atom = b.mmaAtom(flavor.atomType());
     const tiled_mma = b.tiledMma(mma_atom, L(.{ 2, 2, 1 }, .{ 1, 2, 0 }), null);
 
-    const copy_atom = b.copyAtom(.{ .buffer_copy = 32 }, .f32);
-    const tiled_copy_a = b.tiledCopyA(copy_atom, tiled_mma);
-    const tiled_copy_b = b.tiledCopyB(copy_atom, tiled_mma);
-    const tiled_copy_c = b.tiledCopyC(copy_atom, tiled_mma);
+    // A and B move at the operand type, C at the f32 accumulator type.
+    const copy_ab: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = 128 };
+    const copy_c: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = 128 };
+    const atom_ab = b.copyAtom(copy_ab, flavor.operandDType());
+    const atom_c = b.copyAtom(copy_c, c_out.elemDType());
+
+    const tiled_copy_a = b.tiledCopyA(atom_ab, tiled_mma);
+    const tiled_copy_b = b.tiledCopyB(atom_ab, tiled_mma);
+    const tiled_copy_c = b.tiledCopyC(atom_c, tiled_mma);
 
     const thr_copy_a = tiled_copy_a.getSlice(tid);
     const thr_copy_b = tiled_copy_b.getSlice(tid);
@@ -1404,13 +1470,13 @@ pub fn emitTiledMma(b: *Builder, a_in: Value, b_in: Value, c_out: Value) void {
     const copy_frag_b = thr_copy_b.retile(frag_b);
     const copy_frag_c = thr_copy_c.retile(frag_c);
 
-    b.copy(copy_atom, copy_src_a, copy_frag_a, .{});
-    b.copy(copy_atom, copy_src_b, copy_frag_b, .{});
+    b.copy(atom_ab, copy_src_a, copy_frag_a, .{});
+    b.copy(atom_ab, copy_src_b, copy_frag_b, .{});
 
     frag_c.fill(0);
     b.gemm(mma_atom, frag_c, frag_a, frag_b, frag_c);
 
-    b.copy(copy_atom, copy_frag_c, copy_dst_c, .{});
+    b.copy(atom_c, copy_frag_c, copy_dst_c, .{});
 }
 
 test "tiledMma builds, verifies and re-parses" {
@@ -1424,7 +1490,7 @@ test "tiledMma builds, verifies and re-parses" {
         .b = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 8 } } },
         .c = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 64 } } },
     });
-    emitTiledMma(&b, a.a, a.b, a.c);
+    emitTiledMma(&b, .cdna3_mfma, a.a, a.b, a.c);
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
 
@@ -1444,6 +1510,60 @@ test "tiledMma builds, verifies and re-parses" {
             return error.TestUnexpectedResult;
         }
     }
+    const reparsed = try mlir.Module.parse(ctx, ir);
+    defer reparsed.deinit();
+    try std.testing.expect(reparsed.operation().verify());
+}
+
+test "MmaFlavor.atomThreads matches the dialect" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    inline for (std.meta.fields(MmaFlavor)) |field| {
+        const flavor: MmaFlavor = @enumFromInt(field.value);
+        const atom = fly.parseType(ctx, "!fly.mma_atom<" ++ comptime flavor.atomType() ++ ">");
+        // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
+        // geometry is derived from it, so a wrong table silently corrupts C.
+        const threads = switch (fly.intTupleLeaf(fly.layoutShape(fly.derived(.mma_atom_thr_layout, atom)))) {
+            .static => |v| v,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(i64, flavor.atomThreads()), threads);
+    }
+}
+
+test "tiledMma builds for the RDNA WMMA atom" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "tiled_mma_wmma");
+    defer b.deinit();
+    const k = MmaFlavor.gfx11_wmma.blockK();
+    const a = try b.declareArgs(.{
+        .a = .{ .tensor = .{ .dtype = .f16, .dims = &.{ 64, k } } },
+        .b = .{ .tensor = .{ .dtype = .f16, .dims = &.{ 64, k } } },
+        .c = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 64 } } },
+    });
+    emitTiledMma(&b, .gfx11_wmma, a.a, a.b, a.c);
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+
+    // No buffer descriptor: FlyROCDL declares no RDNA copy atom, so this path
+    // moves through the core universal copy over plain tensors.
+    if (std.mem.indexOf(u8, ir, "buffer_desc") != null) {
+        std.debug.print("unexpected buffer descriptor on the WMMA path:\n{s}\n", .{ir});
+        return error.TestUnexpectedResult;
+    }
+    for ([_][]const u8{
+        "!fly_rocdl.gfx11.wmma<16x16x16, (f16, f16) -> f32",
+        "!fly.copy_atom<!fly.universal_copy<128>, 16>",
+        "fly.gemm(",
+    }) |needle| {
+        if (std.mem.indexOf(u8, ir, needle) == null) {
+            std.debug.print("missing `{s}` in:\n{s}\n", .{ needle, ir });
+            return error.TestUnexpectedResult;
+        }
+    }
+
     const reparsed = try mlir.Module.parse(ctx, ir);
     defer reparsed.deinit();
     try std.testing.expect(reparsed.operation().verify());

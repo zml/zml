@@ -58,7 +58,7 @@ FlyDSL HEAD: the plugin only parses what the pin prints.
 | `if tid == 0: ...` | `var s = b.openIf(tid.cmp(.eq, 0)); ...; s.yieldThen(.{});` |
 | `for i in range_constexpr(n)` | a plain Zig `for (0..n)` (unrolled at emit time) |
 | `for i in range(lo, hi)` with carried values | `b.openFor(lo, hi, 1, .{ init })` + `.yield(.{ ... })` |
-| `launch(grid=..., block=(256,1,1))` | `K.call(inputs, outputs, .{ .grid = ..., .num_warps = 4 })` |
+| `launch(grid=..., block=(256,1,1))` | `K.call(inputs, outputs, .{ .grid = ..., .threads = 256 })` |
 
 ## Method
 
