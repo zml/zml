@@ -108,7 +108,7 @@ test "unpackFp4 expands the requested axis" {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - **Block FP8**: E4M3FN / E4M3FNUZ / E8M0 values, BF16 or F32 128x128 scales
+/// - **Block FP8**: E4M3FN / E4M3FNUZ / E8M0 values, BF16 or F32 128x128 scales or F32 32x32 scales
 /// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
@@ -224,7 +224,7 @@ test "block128 scaled dot layouts" {
 
         fn forward(x: Tensor, w: Tensor, scales: Tensor, fp8: DataType, prequantized: bool) Outputs {
             const weight = w.convert(fp8);
-            const input = quantization.quantizeBlockFp8(x, .k, fp8);
+            const input = quantization.quantizeBlockFp8(x, .k, 128, fp8);
             const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
             return .{
                 .linear = linear.forward(x),

@@ -71,12 +71,14 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) !Tensor {
     if (gate_up_scheme) |scheme| switch (scheme) {
         .nvfp4 => return error.UnsupportedQuantization,
         .fp8_block128 => launch_config.block_size_k = 128,
+        .fp8_block32 => launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
         .fp8_block128 => down_launch_config.block_size_k = 128,
+        .fp8_block32 => down_launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
         .nvfp4 => return error.UnsupportedQuantization,
     };
@@ -301,6 +303,7 @@ fn callFusedMoe(opts: struct {
             .mxfp4, .mxfp8 => scale.bitCast(.u8),
             .fp8_per_channel => scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }),
             .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
+            .fp8_block32 => scale.convert(.f32),
             .fp8_block128, .nvfp4 => scale,
         };
     } else null;
@@ -403,8 +406,9 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
             const weight_scale = if (scheme == .mxfp8) blk: {
                 const native = scales.convert(.f8e8m0);
                 break :blk if (mx_native) native else native.bitCast(.u8);
-            } else scales;
-            const config = launchConfigForTokens(8);
+            } else if (scheme == .fp8_block32) scales.convert(.f8e8m0) else scales;
+            var config = launchConfigForTokens(8);
+            if (scheme == .fp8_block32) config.block_size_k = 32;
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = callFusedMoe(.{
                 .input = input,
@@ -433,15 +437,16 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
         }
     };
 
-    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
+    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 }) |scheme| {
         for ([_]bool{ false, true }) |quantize_input| {
             for ([_]i64{ 1, 17 }) |tokens| {
-                const n: i64 = if (scheme == .fp8_block128) 256 else 48;
+                const n: i64 = if (scheme == .fp8_block128 or scheme == .fp8_block32) 256 else 48;
                 const scale_dims: [3]i64 = switch (scheme) {
                     .mxfp8 => .{ 8, n, 8 },
                     .fp8_per_tensor => if (tokens == 1) .{ 1, 1, 1 } else .{ 8, 1, 1 },
                     .fp8_per_channel => .{ 8, n, 1 },
                     .fp8_block128 => .{ 8, 2, 2 },
+                    .fp8_block32 => .{ 8, 8, 8 },
                     else => unreachable,
                 };
                 const x: Tensor = .init(.{ .token = tokens, .in = 256 }, .bf16);
@@ -719,6 +724,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
         .mxfp8 => .{ 32, .u8, 1e-10 },
         .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
         .fp8_block128 => .{ 128, .f32, 1e-10 },
+        .fp8_block32 => .{ 32, .f32, 1e-10 },
         .mxfp4, .nvfp4 => unreachable,
     };
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
