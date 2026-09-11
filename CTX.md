@@ -3506,6 +3506,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   zero-length arena and the block-size and ceiling checks stay. `findArena`
   and `initForTesting` stay (two production callers in
   `dma_calibration.zig`).
+- Task 13 (C09), host-memory backend union: `dma_map` and `pageable` were
+  the same `Pages` payload distinguished by whether the allocator holds a
+  platform, so they merged into one `pages` variant;
+  `HugePageAllocator.init` takes `?*const Platform` and `initPageable` is
+  gone. The arena log keeps the exact `kind=dma_map` and `kind=pageable`
+  strings, now chosen from `allocator.platform`. `place` clears its own mask
+  after a refused `mbind` instead of calling a one-line helper, and the
+  `.tpu, .neuron, .metal => error.DmaBenchmarkUnsupported` arm stays a
+  recoverable error.
 
 ## Open work
 

@@ -63,19 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 13. host_memory backend union (C09, 20 lines).
-  `Backend = union(enum) { pjrt_host: PjrtHost, pages: Pages }`
-  (`zml/io/host_memory.zig:25-28`); `HugePageAllocator.init` takes
-  `?*const Platform` and `initPageable` (`:216-230`) goes; `Backend.init`
-  maps cuda/oneapi to a platform and cpu to null; the four per-variant
-  switches (`:113-139`, `:179-199`) fold; `place()` sets `self.numa_mask =
-  0` after the warning and `leaveUnplaced` (`:275-277`) and its test
-  (`:724-728`) go; `initForTesting` becomes `.pages` with a null platform.
-  Keep the arena log's `kind=` string byte-identical ("dma_map" when
-  `pages.allocator.platform != null`, else "pageable"; CTX 2105-2106) and
-  keep the `.tpu, .neuron, .metal => error.DmaBenchmarkUnsupported` arm at
-  `:109` (a recoverable error, not `unreachable`).
-
 - [ ] 14. DispatchSpans in one pass (C16, 35 lines).
   `zml/io/DispatchSpans.zig`: append with `try` in one recursion; delete
   `placementSpanCount` (`:178-188`), `appendPlacementSpan` (`:129-135`), the

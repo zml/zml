@@ -21,8 +21,10 @@ const HostNode = struct {
 /// Each allocation strategy keeps only the state it uses.
 const Backend = union(enum) {
     pjrt_host: PjrtHost,
-    dma_map: Pages,
-    pageable: Pages,
+    /// Page-backed arenas, registered with the platform's PJRT client when
+    /// the allocator has one (`dma_map` in the arena log) and left pageable
+    /// for CPU transfers when it does not (`pageable`).
+    pages: Pages,
 
     /// With eight MI300X visible, hipHostRegister took ~6.3 s for 1 GiB
     /// versus 0.6-0.7 s through hipHostMalloc. KFD/IOMMU registration maps
@@ -66,11 +68,11 @@ const Backend = union(enum) {
         // Interleaving over one node is that node; leave it to the kernel.
         const numa_mask = interleaveMask(memoryNodeMask(allocator, io));
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .dma_map = .{
+            .cuda, .oneapi => .{ .pages = .{
                 .allocator = .init(allocator, platform, numa_mask),
             } },
-            .cpu => .{ .pageable = .{
-                .allocator = .initPageable(allocator, numa_mask),
+            .cpu => .{ .pages = .{
+                .allocator = .init(allocator, null, numa_mask),
             } },
             .rocm => {
                 // PJRT-pinned allocations choose placement through the device's
@@ -114,7 +116,7 @@ const Backend = union(enum) {
                 host.allocations.deinit(allocator);
                 allocator.free(host.host_nodes);
             },
-            .dma_map, .pageable => |*pages| {
+            .pages => |*pages| {
                 for (pages.allocations.items) |allocation| pages.allocator.free(allocation);
                 pages.allocations.deinit(allocator);
             },
@@ -124,14 +126,14 @@ const Backend = union(enum) {
     fn arenaCount(self: *const Backend) usize {
         return switch (self.*) {
             .pjrt_host => |host| host.allocations.items.len,
-            .dma_map, .pageable => |pages| pages.allocations.items.len,
+            .pages => |pages| pages.allocations.items.len,
         };
     }
 
     fn arenaAt(self: *const Backend, index: usize) []u8 {
         return switch (self.*) {
             .pjrt_host => |host| host.allocations.items[index].data,
-            .dma_map, .pageable => |pages| pages.allocations.items[index],
+            .pages => |pages| pages.allocations.items[index],
         };
     }
 
@@ -173,7 +175,7 @@ const Backend = union(enum) {
                 });
                 return allocation.data;
             },
-            .dma_map, .pageable => |*pages| {
+            .pages => |*pages| {
                 const started: std.Io.Timestamp = .now(io, .awake);
                 const allocation = try pages.allocator.alloc(bytes);
                 const mapped_at: std.Io.Timestamp = .now(io, .awake);
@@ -182,8 +184,9 @@ const Backend = union(enum) {
                 const finished: std.Io.Timestamp = .now(io, .awake);
                 const numa_mask = pages.allocator.numa_mask;
                 const placement = if (numa_mask == 0) "unplaced" else "interleave";
+                const kind = if (pages.allocator.platform != null) "dma_map" else "pageable";
                 log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3} map_ms={d:.3}", .{
-                    @tagName(self.*),
+                    kind,
                     placement,
                     numa_mask,
                     @intFromPtr(allocation.ptr),
@@ -210,18 +213,10 @@ const Backend = union(enum) {
         /// fall back to zero if the kernel refuses it.
         numa_mask: u64,
 
-        fn init(parent: std.mem.Allocator, platform: *const Platform, numa_mask: u64) HugePageAllocator {
+        fn init(parent: std.mem.Allocator, platform: ?*const Platform, numa_mask: u64) HugePageAllocator {
             return .{
                 .parent = parent,
                 .platform = platform,
-                .numa_mask = numa_mask,
-            };
-        }
-
-        fn initPageable(parent: std.mem.Allocator, numa_mask: u64) HugePageAllocator {
-            return .{
-                .parent = parent,
-                .platform = null,
                 .numa_mask = numa_mask,
             };
         }
@@ -266,11 +261,8 @@ const Backend = union(enum) {
                 mask,
                 @tagName(std.os.linux.errno(rc)),
             });
-            self.leaveUnplaced(mask);
-        }
-
-        fn leaveUnplaced(self: *HugePageAllocator, attempted_mask: u64) void {
-            if (self.numa_mask == attempted_mask) self.numa_mask = 0;
+            // Automatic placement is not retried: the arenas stay unplaced.
+            self.numa_mask = 0;
         }
 
         fn free(self: *const HugePageAllocator, buf: []align(std.heap.page_size_min) u8) void {
@@ -403,8 +395,8 @@ pub const Workspace = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .backend = .{ .pageable = .{
-                .allocator = .initPageable(allocator, 0),
+            .backend = .{ .pages = .{
+                .allocator = .init(allocator, null, 0),
             } },
             .max_mapped_bytes = max_mapped_bytes,
         };
@@ -704,12 +696,6 @@ fn parseNodeList(text: []const u8) u64 {
 
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
-}
-
-test "HugePageAllocator retains automatic NUMA fallback state" {
-    var allocator: Backend.HugePageAllocator = .initPageable(std.testing.allocator, 0b11);
-    allocator.leaveUnplaced(0b11);
-    try std.testing.expectEqual(@as(u64, 0), allocator.numa_mask);
 }
 
 test "automatic NUMA placement interleaves only multiple memory nodes" {
