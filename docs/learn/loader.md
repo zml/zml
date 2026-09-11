@@ -20,11 +20,11 @@ try loader.load(Model, &model, &buffers, &store, shardings, null);
 try loader.awaitAll();
 ```
 
-`load` and `loadBuffer` accept shardings for each submission; an empty slice
+`load` accepts shardings for each submission; an empty slice
 selects replicated placement. `loadExecute` uses the executable’s input and
 output shardings. The loader does not retain the shardings slice.
 
-The store is passed to each `load`, `loadBuffer`, or `loadExecute` submission.
+The store is passed to each `load` or `loadExecute` submission.
 Initialization needs no store. These submission calls also accept an optional
 progress node as their final argument (`null` disables reporting). Keep it
 alive until `awaitAll` or `deinit` returns.

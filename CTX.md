@@ -3442,6 +3442,9 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `loader admission` debug line keeps `submissions`,
   `execute_admission_retires`, `memory_supported`, `min_room_seen` and the
   reserve.
+- Task 4 (C19), `Loader.loadBuffer`: the one-tensor alias of `load` is gone
+  (its four callers were the loader's own tests); `docs/learn/loader.md` no
+  longer names it. The dated CTX entries above stay as history.
 
 ## Open work
 

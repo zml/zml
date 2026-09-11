@@ -226,11 +226,6 @@ pub const Loader = struct {
         try self.submit(specs, &.{}, &.{}, progress);
     }
 
-    /// Submits one tensor through the same validation as load.
-    pub fn loadBuffer(self: *Loader, tensor: Tensor, output: *Buffer, store: *const TensorStore, shardings: []const Sharding, progress: ?*std.Progress.Node) !void {
-        return self.load(Tensor, &tensor, output, store, shardings, progress);
-    }
-
     /// Submits the sources of every binding as one planned submission, so
     /// adjacent sources of different bindings coalesce into shared reads.
     /// Before publishing, retires the oldest pending submissions (running
@@ -878,8 +873,8 @@ test "one loader accepts pending submissions from different stores" {
         var second: Buffer = undefined;
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
-        try loader.loadBuffer(fixture.value, &first, &fixture.store, &.{}, null);
-        try loader.loadBuffer(other, &second, &other_store, &.{}, null);
+        try loader.load(Tensor, &fixture.value, &first, &fixture.store, &.{}, null);
+        try loader.load(Tensor, &other, &second, &other_store, &.{}, null);
         try loader.awaitAll();
         defer first.deinit();
         defer second.deinit();
@@ -906,7 +901,7 @@ test "bulk loading queues behind a submitted loadExecute of a transformed tensor
         try std.testing.expect(loader.delivered.contains(transformed.id));
         // Delivered at submission: the bulk skips the tensor and queues
         // behind the pack instead of waiting for it.
-        try loader.loadBuffer(transformed, &output, &fixture.store, &.{}, null);
+        try loader.load(Tensor, &transformed, &output, &fixture.store, &.{}, null);
         try std.testing.expectEqual(2, loader.pending.len);
         try loader.awaitAll();
         defer output.deinit();
@@ -919,7 +914,7 @@ test "bulk loading queues behind a submitted loadExecute of a transformed tensor
         var loader = try fixture.loader(allocator, io, kind);
         defer loader.deinit();
         var never_written: Buffer = undefined;
-        try LoaderTestFixture.expectLoadError(&loader, error.TransformedTensorNotDelivered, loader.loadBuffer(transformed, &never_written, &fixture.store, &.{}, null));
+        try LoaderTestFixture.expectLoadError(&loader, error.TransformedTensorNotDelivered, loader.load(Tensor, &transformed, &never_written, &fixture.store, &.{}, null));
     }
 }
 

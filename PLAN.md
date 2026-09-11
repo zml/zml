@@ -63,15 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 4. Remove `Loader.loadBuffer` (C19, 5 lines).
-  Delete `zml/io/loader.zig:232-235`. Rewrite the four test calls as
-  `loader.load(Tensor, &tensor, &output, store, &.{}, null)`: `:886`
-  (`&fixture.value, &first, &fixture.store`), `:887` (`&other, &second,
-  &other_store`), `:914` and `:927` (`&transformed`, `&output` /
-  `&never_written`, `&fixture.store`). Drop the name from
-  `docs/learn/loader.md:23` and `:27`. Leave the dated CTX notes (59, 72, 79,
-  3087) as history.
-
 - [ ] 5. Dead TensorStore accessors (C03, 35 lines).
   Delete `getReaderById` (`zml/io/TensorStore.zig:40-45`), `View.parent`
   (`:72-82`), `View.getShapeOpts` (`:170-178`), `getPtrFromId` (`:262-266`).
