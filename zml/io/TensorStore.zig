@@ -37,13 +37,6 @@ pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: 
     return self.registry.reader(io, key, buffer);
 }
 
-pub fn getReaderById(self: *const TensorStore, id: Tensor.Id, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-    const sources = self.id_to_sources.get(id) orelse return error.NotFound;
-    stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
-
-    return sources.tensors[0].reader(io, buffer, .{});
-}
-
 pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
 }
@@ -66,18 +59,6 @@ pub const View = struct {
     pub fn root(self: *const View) View {
         return .{
             .store = self.store,
-        };
-    }
-
-    pub fn parent(self: *const View) View {
-        const slice = self.prefix() orelse unreachable;
-        const index = std.mem.lastIndexOfScalar(u8, slice[0 .. slice.len - 1], '.') orelse return self.root();
-        var buffer: [256]u8 = undefined;
-        @memcpy(buffer[0 .. index + 1], slice[0 .. index + 1]);
-        return .{
-            .store = self.store,
-            .prefix_buffer = buffer,
-            .prefix_length = index + 1,
         };
     }
 
@@ -167,16 +148,6 @@ pub const View = struct {
         return self.store.getShape(key);
     }
 
-    pub fn getShapeOpts(self: View, subkey: []const u8, opts: struct { no_prefix: bool = false }) ?Shape {
-        var buffer: [256]u8 = undefined;
-        const key = if (opts.no_prefix)
-            subkey
-        else b: {
-            break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        };
-        return self.store.getShape(key);
-    }
-
     pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         var key_buffer: [256]u8 = undefined;
         const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
@@ -257,10 +228,4 @@ fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
     copy.* = entry.*;
 
     return copy;
-}
-
-fn getPtrFromId(self: *const TensorStore, id: Tensor.Id) ?*safetensors.Tensor {
-    const sources = self.id_to_sources.get(id) orelse return null;
-    stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
-    return sources.tensors[0];
 }

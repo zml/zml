@@ -63,14 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 5. Dead TensorStore accessors (C03, 35 lines).
-  Delete `getReaderById` (`zml/io/TensorStore.zig:40-45`), `View.parent`
-  (`:72-82`), `View.getShapeOpts` (`:170-178`), `getPtrFromId` (`:262-266`).
-  No caller in zml, examples, tests or llmd (llmd uses `withPrefix`,
-  `withLayer`, `createTensor`, `maybeCreate*`, `hasKey`, `count`, `prefix`,
-  `getShape`, `getSourcesById`, `getReader`). Keep `pub const limits` in
-  `zml/io.zig` (cited by `loader.zig:89-90` and `loader.md:131`).
-
 - [ ] 6. Log-only metrics and the `call_count` parameter (C18, 10 lines).
   Remove `Metrics.source_calls` and `Metrics.transfer_pieces`
   (`zml/io/direct_loader.zig:2404-2405`), the `fetchAdd` at `:2069`, the

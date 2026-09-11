@@ -3445,6 +3445,11 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
 - Task 4 (C19), `Loader.loadBuffer`: the one-tensor alias of `load` is gone
   (its four callers were the loader's own tests); `docs/learn/loader.md` no
   longer names it. The dated CTX entries above stay as history.
+- Task 5 (C03), dead TensorStore accessors: `getReaderById`, `View.parent`,
+  `View.getShapeOpts` and `getPtrFromId` are gone (35 lines). No caller in
+  zml, the examples, the tests or llmd at monorepo `master`, which uses
+  `withPrefix`, `withLayer`, `createTensor`, `maybeCreate*`, `hasKey`,
+  `count`, `prefix`, `getShape`, `getSourcesById` and `getReader`.
 
 ## Open work
 
