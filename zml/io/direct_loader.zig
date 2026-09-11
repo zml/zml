@@ -1618,7 +1618,6 @@ const ReadRequest = struct {
     blocks: []Pipeline.BlockContext,
     blocks_registered: usize = 0,
     pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
-    completed: std.atomic.Value(bool) = .init(false),
     /// Awake-clock nanoseconds of the enqueue; 0 until then.
     enqueued_ns: u64 = 0,
 
@@ -1630,7 +1629,6 @@ const ReadRequest = struct {
         .plan = undefined,
         .blocks = &.{},
         .pending = .init(0),
-        .completed = .init(true),
     };
 
     /// Takes the claimed job's request context. The claim holds the batch's
@@ -1767,7 +1765,6 @@ const ReadRequest = struct {
         if (self.enqueued_ns != 0) {
             _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
         }
-        self.completed.store(true, .release);
         pipeline.request_gate.release(pipeline.io);
         batch.finishJobs(1);
     }
@@ -1831,7 +1828,6 @@ const Pipeline = struct {
         active_bytes: usize = 0,
         active_pieces: usize = 0,
         pumping: bool = false,
-        ready_entries: usize = 0,
         /// Contexts whose callback fired, for the next pump to destroy: an
         /// intrusive stack through `EventContext.next_retired`, owned by
         /// `mutex`. Destroying an event from the next pump instead of at
@@ -1869,7 +1865,6 @@ const Pipeline = struct {
     };
 
     const EventContext = struct {
-        pipeline: *Pipeline,
         block: *BlockContext,
         /// Null once destroyed, by a pump or by the batch's retirement.
         pjrt_event: ?*pjrt.Event,
@@ -1882,10 +1877,13 @@ const Pipeline = struct {
         next_retired: ?*EventContext = null,
 
         /// Pump mutex. Destroys the event and its error, once.
+        /// The platform is reached through the block, and only when there
+        /// is something to destroy: a context whose event and error are both
+        /// null never touches it.
         fn destroyEvent(self: *EventContext) void {
-            if (self.pjrt_event) |event| event.deinit(self.pipeline.platform.pjrt_api);
+            if (self.pjrt_event) |event| event.deinit(self.block.pipeline.platform.pjrt_api);
             self.pjrt_event = null;
-            if (self.err) |err| err.deinit(self.pipeline.platform.pjrt_api);
+            if (self.err) |err| err.deinit(self.block.pipeline.platform.pjrt_api);
             self.err = null;
         }
     };
@@ -1945,7 +1943,7 @@ const Pipeline = struct {
         std.debug.assert(self.request_gate.inUse(self.io) == 0);
         for (self.pumps) |*device_pump| {
             std.debug.assert(device_pump.active_pieces == 0);
-            std.debug.assert(device_pump.ready_entries == 0);
+            std.debug.assert(device_pump.queue.len == 0);
             std.debug.assert(device_pump.retired == null);
             device_pump.queue.deinit(self.allocator);
         }
@@ -1998,7 +1996,7 @@ const Pipeline = struct {
         for (batch.plans.items) |plan| {
             for (plan.events[0..plan.events_used.load(.acquire)]) |*ctx| ctx.destroyEvent();
             for (plan.requests) |*request| {
-                std.debug.assert(request.completed.load(.acquire));
+                std.debug.assert(request.pending.load(.acquire) == 0);
                 for (request.blocks[0..request.blocks_registered]) |*block| {
                     std.debug.assert(block.lease.remaining.load(.acquire) == 0);
                 }
@@ -2061,7 +2059,6 @@ const Pipeline = struct {
                     .destination_offset = transfer.destination_offset,
                     .len = transfer.len,
                 });
-                device_pump.ready_entries += 1;
             }
         }
         self.unlockAllPumps();
@@ -2111,7 +2108,6 @@ const Pipeline = struct {
                 } else if (device_pump.queue.popFront()) |transfer| {
                     device_pump.active_bytes += transfer.len;
                     device_pump.active_pieces += 1;
-                    device_pump.ready_entries -= 1;
                     selected = transfer;
                 } else {
                     _ = self.metrics.pump_stops_empty.fetchAdd(1, .monotonic);
@@ -2163,7 +2159,6 @@ const Pipeline = struct {
         std.debug.assert(event_index < plan.events.len);
         const ctx = &plan.events[event_index];
         ctx.* = .{
-            .pipeline = self,
             .block = transfer.block,
             .pjrt_event = event,
             .device_index = target.device_index,
@@ -2180,10 +2175,10 @@ const Pipeline = struct {
                 // Load every field first, store the error, retire the DMA
                 // slot (which may pump on this thread), hand the context to
                 // the next pump, and complete the block last.
-                const pipeline = ctx_.pipeline;
+                const block = ctx_.block;
+                const pipeline = block.pipeline;
                 const device_index = ctx_.device_index;
                 const len = ctx_.len;
-                const block = ctx_.block;
                 _ = pipeline.metrics.dma_piece_ns.fetchAdd(awakeNs(pipeline.io) -| ctx_.submitted_ns, .monotonic);
                 ctx_.err = err;
                 // The shipped plugins resolve this event without an error
@@ -2234,7 +2229,6 @@ const Pipeline = struct {
             device_pump.mutex.lockUncancelable(self.io);
             while (device_pump.queue.popFront()) |transfer| {
                 transfer.block.complete();
-                device_pump.ready_entries -= 1;
             }
             device_pump.mutex.unlock(self.io);
         }
@@ -2586,7 +2580,6 @@ test "plan construction releases allocations and takes transfers only on success
             // The replicated piece needs two callbacks; the other needs one.
             try std.testing.expectEqual(@as(usize, 3), plan.events.len);
             for (plan.requests) |request| {
-                try std.testing.expect(request.completed.load(.acquire));
                 try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
             }
         }
@@ -2917,7 +2910,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[1].block_start);
     try std.testing.expectEqual(@as(usize, 1), plans[1].jobs[1].block_len);
     for (plans) |plan| {
-        for (plan.requests) |*request| try std.testing.expect(request.completed.load(.acquire));
+        for (plan.requests) |*request| try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
     }
     discardTestBatch(&scheduler, batch);
 
@@ -3718,7 +3711,6 @@ test "late vectored callback failure drains and signals completion" {
         .destination_offset = 0,
         .len = 64,
     });
-    fixture.pumps[0].ready_entries = 1;
     fixture.pumps[0].active_bytes = 64;
     fixture.pumps[0].active_pieces = 1;
     request.finishScheduling();
@@ -3727,9 +3719,8 @@ test "late vectored callback failure drains and signals completion" {
 
     pipeline.eventCompleted(0, 64);
     try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_pieces);
-    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].ready_entries);
     try std.testing.expect(block.lease.remaining.load(.acquire) == 0);
-    try std.testing.expect(request.completed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
     try std.testing.expect(batch.done.isSet());
 
@@ -3814,7 +3805,6 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     const plan = batch.plans.items[0];
     plan.events_used.store(2, .release);
     for (plan.events, requests) |*ctx, request| ctx.* = .{
-        .pipeline = pipeline,
         .block = &request.blocks[0],
         .pjrt_event = null,
         .device_index = 0,

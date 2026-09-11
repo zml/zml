@@ -63,21 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 7. Derivable pipeline state (C06, 12 lines).
-  `zml/io/direct_loader.zig`: remove `ReadRequest.completed` (`:1623`, the
-  `idle` constant `:1635`, the store at `:1773`) and assert
-  `request.pending.load(.acquire) == 0` at `:2004`; remove
-  `EventContext.pipeline` (`:1875`, init `:2169`) and read
-  `ctx_.block.pipeline` in the callback (`:2187`) and
-  `self.block.pipeline.platform.pjrt_api` in `destroyEvent` (`:1889`,
-  `:1891`); remove `DevicePump.ready_entries` (`:1837`, `:2067`, `:2118`,
-  `:2241`) and assert `device_pump.queue.len == 0` at `:1951`. Tests: delete
-  `:2595` (the pending check at `:2596` stays), `:2926` becomes `pending ==
-  0`, delete `:3727`, `:3736` becomes `queue.len == 0`, `:3738` becomes
-  `pending == 0`, drop `.pipeline = pipeline,` at `:3823`. CTX 356: drop
-  "completed". If task 18 (C15) lands later, only the `completed` removal of
-  this task remains relevant.
-
 - [ ] 8. `allocatedBytesPerDevice` without the bool (C23, 6 lines).
   `zml/io/backend.zig:85-96` becomes a `void` method reading the direct
   payload: `for (out, self.direct.allocated_bytes) |*bytes, *counter| bytes.*

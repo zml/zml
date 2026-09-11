@@ -356,7 +356,7 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   events, events_used, planning_ns, cursor}`, one per file in file order)
   and its items from creation. The planner preallocates every context a
   plan's jobs can need: one `RequestContext` per job (initialised idle:
-  nothing pending, completed), one `BlockContext` per job block (exact
+  nothing pending), one `BlockContext` per job block (exact
   `divCeil(len, block_size)`; `Job.blocks` is the job's slice) and one
   `EventContext` per planned DMA submission (the transfers' writer count,
   `planned_dma_submissions` on the batch line), handed out in submission
@@ -3460,6 +3460,14 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `dma_submissions` and every timer and pump counter stay. Physical request
   counts for a remote source come from the VFS `batch source` line; a local
   profile has none.
+- Task 7 (C06), derivable pipeline state: `ReadRequest.completed`,
+  `EventContext.pipeline` and `DevicePump.ready_entries` are gone. The
+  retirement checks assert `pending == 0` instead of the flag, the pump's
+  `deinit` asserts `queue.len == 0`, and an event reaches the platform
+  through `block.pipeline`, lazily: `destroyEvent` touches it only when
+  there is an event or an error to destroy, which is what the fixture with
+  an undefined platform relies on (the first attempt read the api eagerly
+  and faulted that test).
 
 ## Open work
 
