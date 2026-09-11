@@ -1047,14 +1047,18 @@ test "fly custom call, both entry ABIs" {
                 \\  gpu.module @zml_fly_kernels {
                 \\    gpu.func @add_one(%a: !fly.ptr<f32, global>, %c: !fly.ptr<f32, global>) kernel {
                 \\      %tid = gpu.thread_id x
-                \\      %t = arith.index_cast %tid : index to i32
-                \\      %off = fly.make_int_tuple(%t) : (i32) -> !fly.int_tuple<?>
-                \\      %pa = fly.add_offset(%a, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
-                \\      %pc = fly.add_offset(%c, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
-                \\      %va = fly.ptr.load(%pa) : (!fly.ptr<f32, global>) -> f32
-                \\      %one = arith.constant 1.0 : f32
-                \\      %vc = arith.addf %va, %one : f32
-                \\      fly.ptr.store(%vc, %pc) : (f32, !fly.ptr<f32, global>) -> ()
+                \\      %step = gpu.block_dim x
+                \\      %n = arith.constant 128 : index
+                \\      scf.for %i = %tid to %n step %step {
+                \\        %t = arith.index_cast %i : index to i32
+                \\        %off = fly.make_int_tuple(%t) : (i32) -> !fly.int_tuple<?>
+                \\        %pa = fly.add_offset(%a, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
+                \\        %pc = fly.add_offset(%c, %off) : (!fly.ptr<f32, global>, !fly.int_tuple<?>) -> !fly.ptr<f32, global>
+                \\        %va = fly.ptr.load(%pa) : (!fly.ptr<f32, global>) -> f32
+                \\        %one = arith.constant 1.0 : f32
+                \\        %vc = arith.addf %va, %one : f32
+                \\        fly.ptr.store(%vc, %pc) : (f32, !fly.ptr<f32, global>) -> ()
+                \\      }
                 \\      gpu.return
                 \\    }
                 \\  }
@@ -1079,16 +1083,18 @@ test "fly custom call, both entry ABIs" {
                 \\module {
                 \\  func.func @add_one(%input: tensor<64xf32>, %output: tensor<64xf32>) -> tensor<64xf32> {
                 \\    %thread = gpu.thread_id x
-                \\    %value = tensor.extract %input[%thread] : tensor<64xf32>
+                \\    %last = arith.constant 63 : index
+                \\    %i = arith.minui %thread, %last : index
+                \\    %value = tensor.extract %input[%i] : tensor<64xf32>
                 \\    %one = arith.constant 1.0 : f32
                 \\    %sum = arith.addf %value, %one : f32
-                \\    %updated = tensor.insert %sum into %output[%thread] : tensor<64xf32>
+                \\    %updated = tensor.insert %sum into %output[%i] : tensor<64xf32>
                 \\    return %updated : tensor<64xf32>
                 \\  }
                 \\}
             ;
             pub fn forward(a: Tensor) Tensor {
-                return fly(.{a}, .{a.shape()}, .{ .name = "add_one", .ir = ir, .grid = .{ 1, 1, 1 }, .num_warps = 1 })[0];
+                return fly(.{a}, .{a.shape()}, .{ .name = "add_one", .ir = ir, .grid = .{ 1, 1, 1 }, .num_warps = 2 })[0];
             }
         };
 
