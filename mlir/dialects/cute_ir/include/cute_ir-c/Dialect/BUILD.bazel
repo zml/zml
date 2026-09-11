@@ -4,12 +4,21 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "cute",
-    hdrs = ["Cute.h"],
-    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    hdrs = [
+        "Cute.h",
+        "CuteAttributes.h",
+        "CuteTypes.h",
+    ],
+    includes = ["../.."],
+    deps = ["@llvm-project//mlir:CAPIIR"],
 )
 
 cc_library(
     name = "cute_nvgpu",
-    hdrs = ["CuteNVGPU.h"],
-    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    hdrs = [
+        "CuteNVGPU.h",
+        "CuteNVGPUTypes.h",
+    ],
+    includes = ["../.."],
+    deps = ["@llvm-project//mlir:CAPIIR"],
 )

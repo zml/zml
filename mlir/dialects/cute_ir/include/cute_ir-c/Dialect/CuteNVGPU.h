@@ -3,6 +3,7 @@
 #ifndef CUTE_IR_C_DIALECT_CUTENVGPU_H
 #define CUTE_IR_C_DIALECT_CUTENVGPU_H
 
+#include "cute_ir-c/Dialect/CuteNVGPUTypes.h"
 #include "mlir-c/IR.h"
 
 #ifdef __cplusplus
@@ -11,8 +12,6 @@ extern "C" {
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(CuteNVGPU, cute_nvgpu);
 
-MLIR_CAPI_EXPORTED MlirType mlirCuteNVGPUTypeParse(MlirContext context,
-                                                   MlirStringRef assembly);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACuteNVGPUType(MlirType type);
 
 #ifdef __cplusplus
@@ -20,4 +19,3 @@ MLIR_CAPI_EXPORTED bool mlirTypeIsACuteNVGPUType(MlirType type);
 #endif
 
 #endif // CUTE_IR_C_DIALECT_CUTENVGPU_H
-

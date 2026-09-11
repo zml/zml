@@ -4,7 +4,11 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "cute",
-    srcs = ["Cute.cpp"],
+    srcs = [
+        "Cute.cpp",
+        "CuteAttributes.cpp",
+        "CuteTypes.cpp",
+    ],
     deps = [
         "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute",
         "//mlir/dialects/cute_ir/lib/Dialect/IR:dialect",
@@ -15,7 +19,10 @@ cc_library(
 
 cc_library(
     name = "cute_nvgpu",
-    srcs = ["CuteNVGPU.cpp"],
+    srcs = [
+        "CuteNVGPU.cpp",
+        "CuteNVGPUTypes.cpp",
+    ],
     deps = [
         "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute_nvgpu",
         "//mlir/dialects/cute_ir/lib/Dialect/CuteNVGPU/IR:dialect",

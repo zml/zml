@@ -12,21 +12,21 @@ td_library(
 
 gentbl_cc_library(
     name = "dialect_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             [
                 "-gen-dialect-decls",
                 "-dialect=cute_nvgpu",
             ],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUDialect.h.inc",
+            "CuteNVGPUDialect.h.inc",
         ),
         (
             [
                 "-gen-dialect-defs",
                 "-dialect=cute_nvgpu",
             ],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUDialect.cpp.inc",
+            "CuteNVGPUDialect.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -36,21 +36,21 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "types_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             [
                 "-gen-typedef-decls",
                 "-typedefs-dialect=cute_nvgpu",
             ],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUTypes.h.inc",
+            "CuteNVGPUTypes.h.inc",
         ),
         (
             [
                 "-gen-typedef-defs",
                 "-typedefs-dialect=cute_nvgpu",
             ],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUTypes.cpp.inc",
+            "CuteNVGPUTypes.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -60,15 +60,15 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "ops_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             ["-gen-op-decls"],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUOps.h.inc",
+            "CuteNVGPUOps.h.inc",
         ),
         (
             ["-gen-op-defs"],
-            "cute_ir/Dialect/CuteNVGPU/IR/CuteNVGPUOps.cpp.inc",
+            "CuteNVGPUOps.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -79,7 +79,7 @@ gentbl_cc_library(
 cc_library(
     name = "headers",
     hdrs = ["CuteNVGPUDialect.h"],
-    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    includes = ["../../../.."],
     deps = [
         ":dialect_inc_gen",
         ":ops_inc_gen",

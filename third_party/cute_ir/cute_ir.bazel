@@ -112,7 +112,7 @@ gentbl_cc_library(
 
 # gentbl_cc_library(
 #     name = "ops_inc_gen",
-#     strip_include_prefix = ".",
+#     includes = ["cute_ir/include"],
 #     tbl_outs = [
 #         (
 #             ["-gen-op-decls"],
@@ -130,11 +130,11 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "types_decl_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["cute_ir/include"],
     tbl_outs = [
         (
             ["-gen-typedef-decls", "-typedefs-dialect=cute"],
-            "cute_ir/Dialect/Cute/IR/CuteTypes.h.inc",
+            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.h.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -144,11 +144,11 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "types_defs_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["cute_ir/include"],
     tbl_outs = [
         (
             ["-gen-typedef-defs", "-typedefs-dialect=cute"],
-            "cute_ir/Dialect/Cute/IR/CuteTypes.cpp.inc",
+            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
