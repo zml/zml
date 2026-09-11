@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const stdx = @import("stdx");
 
 const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const ReadFailure = @import("base.zig").ReadFailure;
@@ -190,7 +191,7 @@ pub const GCS = struct {
     client: *std.http.Client,
     config: Config,
     token: Token,
-    retry: range_read.RetryConfig,
+    governor: request.Governor,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -204,9 +205,16 @@ pub const GCS = struct {
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
         region: []const u8 = "auto",
+        /// Retries per request for failures that are not rate limiting.
         max_retries: usize = 5,
         retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
         retry_max_delay: std.Io.Duration = .fromSeconds(30),
+        /// Longest hold one throttle may arm over every request of this
+        /// backend, a server-named delay included.
+        max_hold: std.Io.Duration = .fromSeconds(120),
+        /// Continuous rate limiting for longer than this fails the requests
+        /// with `error.RateLimited`.
+        throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
     pub const InitError = error{
@@ -248,7 +256,7 @@ pub const GCS = struct {
             .client = http_client,
             .config = config,
             .token = token,
-            .retry = .fromOptions(opts),
+            .governor = .init(.fromOptions(opts)),
         };
     }
 
@@ -957,13 +965,26 @@ pub const GCS = struct {
         return size;
     }
 
+    /// Everything a governed request needs from this backend.
+    fn requestContext(self: *GCS) request.Context {
+        return .{
+            .io = self.base.inner,
+            .client = self.client,
+            .governor = &self.governor,
+            .stats = &self.read_stats,
+        };
+    }
+
     fn performRead(self: *GCS, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        var request: BearerRequest = .{ .gcs = self, .uri = self.gcsUri(handle.uri) };
-        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
-            .backend = "gcs",
-            .target = handle.uri,
-            .unavailable = unavailable,
-            .context = &request,
+        var bearer: BearerRequest = .{ .gcs = self, .uri = self.gcsUri(handle.uri) };
+        return range_read.performRangeRead(self.requestContext(), .{
+            .request = .{
+                .backend = "gcs",
+                .target = handle.uri,
+                .unavailable = unavailable,
+                .key = request.authorityOf(bearer.uri),
+            },
+            .context = &bearer,
             .prepare = BearerRequest.prepare,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }
@@ -978,7 +999,7 @@ pub const GCS = struct {
         uri: std.Uri,
         authorization: [authorization_header_size]u8 = undefined,
 
-        fn prepare(context: *anyopaque, _: range_read.Attempt) anyerror!range_read.PreparedRequest {
+        fn prepare(context: *anyopaque, _: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
             const self: *BearerRequest = @ptrCast(@alignCast(context));
             return .{ .uri = self.uri, .authorization = try self.gcs.getOrRefreshToken(&self.authorization) };
         }
@@ -986,9 +1007,9 @@ pub const GCS = struct {
 };
 
 test "GCS classifies 503 as throttling" {
-    try std.testing.expectEqual(ReadFailure.throttle, range_read.classifyStatus(.service_unavailable, GCS.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.server_failure, range_read.classifyStatus(.bad_gateway, GCS.unavailable).?);
-    try std.testing.expect(range_read.classifyStatus(.forbidden, GCS.unavailable) == null);
+    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.service_unavailable, GCS.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, request.classifyStatus(.bad_gateway, GCS.unavailable).?);
+    try std.testing.expect(request.classifyStatus(.forbidden, GCS.unavailable) == null);
 }
 
 test "GCS parses XML bucket listing objects and common prefixes" {

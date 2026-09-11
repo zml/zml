@@ -3640,6 +3640,26 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   no longer claims the planner orders across devices. CPU playground after
   the deletion: 3.521 / 3.521 / 3.537 s packed (no read-back), `pack check:
   ok`, unchanged width, credits, workers and pre-growth.
+- Task 23 (group D), the governed request loop: `vfs/request.zig` holds the
+  `Governor` (one per backend instance, a `Hold` keyed by
+  `Governor.holdFor`, which ignores the key today so a per-authority map is
+  a local change), `admit`, `reportThrottle`, `refresh`, the `perform` loop
+  and the shared `exchange`, plus `classifyStatus`, `serverRetryDelay`,
+  `fullJitterDelay`, `RequestSpec`, `Attempt` and `authorityOf`.
+  `range_read.zig` keeps only the Range specifics (`RangeSpec` with its
+  per-attempt `prepare` hook, `Content-Range`, the scatter). A throttle arms
+  a backend-wide hold instead of charging a retry; every other retryable
+  failure keeps `max_retries` and the per-request backoff; the hold is
+  floored at `retry_initial_delay` (`Retry-After: 0` parses to zero),
+  capped at `max_hold`, waited out with a per-waiter jitter, and an episode
+  longer than `throttle_budget` fails with `error.RateLimited`.
+  `AtomicReadStats` gained `holds` and `hold_wait_ns`. The four backends
+  hold a `Governor` instead of a `RetryConfig` and their `InitOpts` gained
+  `max_hold = 2 min` and `throttle_budget = 5 min`. Sixteen unit tests in
+  `request.zig` drive the governor and the loop without a server (a named
+  zero still holds, extension but never shortening, the doubling base, the
+  clean window, the budget, cancellation, and that a timeout or a server
+  failure never holds); the four HTTP acceptance tests still pass.
 
 ## Open work
 

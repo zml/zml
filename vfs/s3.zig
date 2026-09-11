@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const ReadFailure = @import("base.zig").ReadFailure;
@@ -145,9 +146,16 @@ const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const S3 = struct {
     pub const InitOpts = struct {
+        /// Retries per request for failures that are not rate limiting.
         max_retries: usize = 5,
         retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
         retry_max_delay: std.Io.Duration = .fromSeconds(30),
+        /// Longest hold one throttle may arm over every request of this
+        /// backend, a server-named delay included.
+        max_hold: std.Io.Duration = .fromSeconds(120),
+        /// Continuous rate limiting for longer than this fails the requests
+        /// with `error.RateLimited`.
+        throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
     pub const Config = struct {
@@ -184,7 +192,7 @@ pub const S3 = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     config: Config,
-    retry: range_read.RetryConfig,
+    governor: request.Governor,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -202,7 +210,7 @@ pub const S3 = struct {
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .retry = .fromOptions(opts),
+            .governor = .init(.fromOptions(opts)),
             .config = .{
                 .access_key = if (config.access_key) |k| try allocator.dupe(u8, k) else null,
                 .secret_key = if (config.secret_key) |k| try allocator.dupe(u8, k) else null,
@@ -795,15 +803,28 @@ pub const S3 = struct {
         };
     }
 
+    /// Everything a governed request needs from this backend.
+    fn requestContext(self: *S3) request.Context {
+        return .{
+            .io = self.base.inner,
+            .client = self.client,
+            .governor = &self.governor,
+            .stats = &self.read_stats,
+        };
+    }
+
     fn performRead(self: *S3, handle: *Handle, data: []const []u8, offset: u64) !usize {
         var url_buf: [8 * 1024]u8 = undefined;
         const url = try self.s3Url(handle.uri, &url_buf);
-        var request: SignedRequest = .{ .s3 = self, .uri = std.Uri.parse(url) catch return error.BadPathName };
-        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
-            .backend = "s3",
-            .target = url,
-            .unavailable = unavailable,
-            .context = &request,
+        var signed: SignedRequest = .{ .s3 = self, .uri = std.Uri.parse(url) catch return error.BadPathName };
+        return range_read.performRangeRead(self.requestContext(), .{
+            .request = .{
+                .backend = "s3",
+                .target = url,
+                .unavailable = unavailable,
+                .key = request.authorityOf(signed.uri),
+            },
+            .context = &signed,
             .prepare = SignedRequest.prepare,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }
@@ -820,7 +841,7 @@ pub const S3 = struct {
         authorization: [512]u8 = undefined,
         headers: [2]std.http.Header = undefined,
 
-        fn prepare(context: *anyopaque, attempt: range_read.Attempt) anyerror!range_read.PreparedRequest {
+        fn prepare(context: *anyopaque, _: request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
             const self: *SignedRequest = @ptrCast(@alignCast(context));
             const timestamp = try self.s3.getTimestamp(&self.timestamp);
             const signer: AwsSigV4 = .{
@@ -829,7 +850,7 @@ pub const S3 = struct {
                 .region = self.s3.config.region,
                 .service = self.s3.config.auth_service,
             };
-            const authorization = try signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{attempt.range});
+            const authorization = try signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{range});
             self.headers = .{
                 .{ .name = "x-amz-date", .value = timestamp },
                 .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
@@ -844,9 +865,9 @@ pub const S3 = struct {
 };
 
 test "S3 classifies 503 SlowDown as throttling" {
-    try std.testing.expectEqual(ReadFailure.throttle, range_read.classifyStatus(.service_unavailable, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.throttle, range_read.classifyStatus(.too_many_requests, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.server_failure, range_read.classifyStatus(.internal_server_error, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.timeout, range_read.classifyStatus(.request_timeout, S3.unavailable).?);
-    try std.testing.expect(range_read.classifyStatus(.not_found, S3.unavailable) == null);
+    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.service_unavailable, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.too_many_requests, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, request.classifyStatus(.internal_server_error, S3.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.timeout, request.classifyStatus(.request_timeout, S3.unavailable).?);
+    try std.testing.expect(request.classifyStatus(.not_found, S3.unavailable) == null);
 }

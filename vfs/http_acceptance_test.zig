@@ -3,6 +3,19 @@ const std = @import("std");
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 const HTTP = @import("http.zig").HTTP;
 const range_read = @import("range_read.zig");
+const vfs_request = @import("request.zig");
+
+/// A retry configuration that never sleeps, for the tests that count
+/// attempts rather than time.
+fn instantRetries(max_retries: usize) vfs_request.RetryConfig {
+    return .{
+        .max_retries = max_retries,
+        .initial_delay = .fromNanoseconds(0),
+        .max_delay = .fromNanoseconds(0),
+        .max_hold = .fromNanoseconds(0),
+        .throttle_budget = .fromSeconds(300),
+    };
+}
 
 const MockServer = struct {
     const Options = struct {
@@ -458,10 +471,10 @@ test "the shared range loop prepares the request once per attempt" {
         attempt_value: [8]u8 = undefined,
         headers: [1]std.http.Header = undefined,
 
-        fn prepare(context: *anyopaque, attempt: range_read.Attempt) anyerror!range_read.PreparedRequest {
+        fn prepare(context: *anyopaque, attempt: vfs_request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
             const self: *@This() = @ptrCast(@alignCast(context));
             try std.testing.expectEqual(self.prepared, attempt.ordinal);
-            try std.testing.expectEqualStrings("Range", attempt.range.name);
+            try std.testing.expectEqualStrings("Range", range.name);
             self.prepared += 1;
             self.headers = .{.{
                 .name = "x-attempt",
@@ -473,10 +486,13 @@ test "the shared range loop prepares the request once per attempt" {
     var url_buffer: [160]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
     var signed: Signed = .{ .uri = try .parse(url) };
-    const spec: range_read.RequestSpec = .{
-        .backend = "test",
-        .target = url,
-        .unavailable = .throttle,
+    const spec: range_read.RangeSpec = .{
+        .request = .{
+            .backend = "test",
+            .target = url,
+            .unavailable = .throttle,
+            .key = vfs_request.authorityOf(signed.uri),
+        },
         .context = &signed,
         .prepare = Signed.prepare,
     };
@@ -485,16 +501,26 @@ test "the shared range loop prepares the request once per attempt" {
     const size = range_read.readSize(object.len, 0, &buffers);
 
     // No retry budget: one attempt, one hook call, the failure is counted.
-    const no_retry: range_read.RetryConfig = .{ .max_retries = 0, .initial_delay = .fromNanoseconds(0), .max_delay = .fromNanoseconds(0) };
+    var no_retry: vfs_request.Governor = .init(instantRetries(0));
     try std.testing.expectError(
         error.RetriesExhausted,
-        range_read.performRangeRead(io, &client, &stats, no_retry, spec, &buffers, 0, size),
+        range_read.performRangeRead(.{
+            .io = io,
+            .client = &client,
+            .governor = &no_retry,
+            .stats = &stats,
+        }, spec, &buffers, 0, size),
     );
     try std.testing.expectEqual(@as(usize, 1), signed.prepared);
 
     signed.prepared = 0;
-    const one_retry: range_read.RetryConfig = .{ .max_retries = 1, .initial_delay = .fromNanoseconds(0), .max_delay = .fromNanoseconds(0) };
-    try std.testing.expectEqual(size, try range_read.performRangeRead(io, &client, &stats, one_retry, spec, &buffers, 0, size));
+    var one_retry: vfs_request.Governor = .init(instantRetries(1));
+    try std.testing.expectEqual(size, try range_read.performRangeRead(.{
+        .io = io,
+        .client = &client,
+        .governor = &one_retry,
+        .stats = &stats,
+    }, spec, &buffers, 0, size));
     try std.testing.expectEqual(@as(usize, 2), signed.prepared);
     try std.testing.expectEqualSlices(u8, &object, &output);
 

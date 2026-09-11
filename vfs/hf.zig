@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
@@ -54,9 +55,16 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
+        /// Retries per request for failures that are not rate limiting.
         max_retries: usize = 5,
         retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
         retry_max_delay: std.Io.Duration = .fromSeconds(30),
+        /// Longest hold one throttle may arm over every request of this
+        /// backend, a server-named delay included.
+        max_hold: std.Io.Duration = .fromSeconds(120),
+        /// Continuous rate limiting for longer than this fails the requests
+        /// with `error.RateLimited`.
+        throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
     pub const Repo = struct {
@@ -122,7 +130,7 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
-    retry: range_read.RetryConfig,
+    governor: request.Governor,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -142,7 +150,7 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .retry = .fromOptions(opts),
+            .governor = .init(.fromOptions(opts)),
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -784,19 +792,33 @@ pub const HF = struct {
         return path.len;
     }
 
+    /// Everything a governed request needs from this backend.
+    fn requestContext(self: *HF) request.Context {
+        return .{
+            .io = self.base.inner,
+            .client = self.client,
+            .governor = &self.governor,
+            .stats = &self.read_stats,
+        };
+    }
+
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (range_read.readSize(handle.size, offset, data) == 0) return 0;
 
         const url = handle.download_url orelse return error.InvalidHandle;
-        var request: range_read.PreparedRequest = .{
-            .uri = try .parse(url),
+        const uri: std.Uri = try .parse(url);
+        var prepared: range_read.PreparedRequest = .{
+            .uri = uri,
             .authorization = if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit,
         };
-        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
-            .backend = "hf",
-            .target = url,
-            .unavailable = .server_failure,
-            .context = &request,
+        return range_read.performRangeRead(self.requestContext(), .{
+            .request = .{
+                .backend = "hf",
+                .target = url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(uri),
+            },
+            .context = &prepared,
             .prepare = range_read.prepareStatic,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }

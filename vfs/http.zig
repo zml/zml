@@ -6,14 +6,22 @@ const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 
 const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
     pub const InitOpts = struct {
+        /// Retries per request for failures that are not rate limiting.
         max_retries: usize = 5,
         retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
         retry_max_delay: std.Io.Duration = .fromSeconds(30),
+        /// Longest hold one throttle may arm over every request of this
+        /// backend, a server-named delay included.
+        max_hold: std.Io.Duration = .fromSeconds(120),
+        /// Continuous rate limiting for longer than this fails the requests
+        /// with `error.RateLimited`.
+        throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
     const Handle = struct {
@@ -50,7 +58,7 @@ pub const HTTP = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     protocol: Protocol,
-    retry: range_read.RetryConfig,
+    governor: request.Governor,
     read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
@@ -72,7 +80,7 @@ pub const HTTP = struct {
             .base = .init(inner),
             .client = http_client,
             .protocol = protocol,
-            .retry = .fromOptions(opts),
+            .governor = .init(.fromOptions(opts)),
         };
     }
 
@@ -380,15 +388,29 @@ pub const HTTP = struct {
         }
     }
 
+    /// Everything a governed request needs from this backend.
+    fn requestContext(self: *HTTP) request.Context {
+        return .{
+            .io = self.base.inner,
+            .client = self.client,
+            .governor = &self.governor,
+            .stats = &self.read_stats,
+        };
+    }
+
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
-        var request: range_read.PreparedRequest = .{ .uri = try .parse(url) };
-        return range_read.performRangeRead(self.base.inner, self.client, &self.read_stats, self.retry, .{
-            .backend = "http",
-            .target = url,
-            .unavailable = .server_failure,
-            .context = &request,
+        const uri: std.Uri = try .parse(url);
+        var prepared: range_read.PreparedRequest = .{ .uri = uri };
+        return range_read.performRangeRead(self.requestContext(), .{
+            .request = .{
+                .backend = "http",
+                .target = url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(uri),
+            },
+            .context = &prepared,
             .prepare = range_read.prepareStatic,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }

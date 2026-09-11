@@ -21,6 +21,10 @@ pub const ReadStats = struct {
     server_failures: u64 = 0,
     throttles: u64 = 0,
     retry_delay_ns: u64 = 0,
+    /// Backend-wide holds armed by rate limiting, and the time requests
+    /// spent waiting them out.
+    holds: u64 = 0,
+    hold_wait_ns: u64 = 0,
 
     pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
         return .{
@@ -32,6 +36,8 @@ pub const ReadStats = struct {
             .server_failures = self.server_failures -| previous.server_failures,
             .throttles = self.throttles -| previous.throttles,
             .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+            .holds = self.holds -| previous.holds,
+            .hold_wait_ns = self.hold_wait_ns -| previous.hold_wait_ns,
         };
     }
 };
@@ -52,6 +58,8 @@ pub const AtomicReadStats = struct {
     server_failures: std.atomic.Value(u64) = .init(0),
     throttles: std.atomic.Value(u64) = .init(0),
     retry_delay_ns: std.atomic.Value(u64) = .init(0),
+    holds: std.atomic.Value(u64) = .init(0),
+    hold_wait_ns: std.atomic.Value(u64) = .init(0),
 
     pub fn recordAttempt(self: *AtomicReadStats) void {
         _ = self.physical_requests.fetchAdd(1, .monotonic);
@@ -79,6 +87,16 @@ pub const AtomicReadStats = struct {
         _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
     }
 
+    /// One rate-limit hold armed over every request of this backend.
+    pub fn recordHold(self: *AtomicReadStats) void {
+        _ = self.holds.fetchAdd(1, .monotonic);
+    }
+
+    /// Time one request spent waiting a hold out.
+    pub fn recordHoldWait(self: *AtomicReadStats, waited: std.Io.Duration) void {
+        _ = self.hold_wait_ns.fetchAdd(@intCast(@max(waited.nanoseconds, 0)), .monotonic);
+    }
+
     pub fn snapshot(self: *const AtomicReadStats) ReadStats {
         return .{
             .physical_requests = self.physical_requests.load(.acquire),
@@ -89,6 +107,8 @@ pub const AtomicReadStats = struct {
             .server_failures = self.server_failures.load(.acquire),
             .throttles = self.throttles.load(.acquire),
             .retry_delay_ns = self.retry_delay_ns.load(.acquire),
+            .holds = self.holds.load(.acquire),
+            .hold_wait_ns = self.hold_wait_ns.load(.acquire),
         };
     }
 
@@ -109,6 +129,8 @@ test "atomic read stats retain aggregate retry feedback" {
     stats.recordFailure(.timeout);
     stats.recordRetry();
     stats.recordRetryDelay(.fromMilliseconds(25));
+    stats.recordHold();
+    stats.recordHoldWait(.fromMilliseconds(40));
     stats.recordAttempt();
     stats.recordSuccess(request_size);
 
@@ -118,6 +140,8 @@ test "atomic read stats retain aggregate retry feedback" {
     try std.testing.expectEqual(@as(u64, 1), snapshot.retries);
     try std.testing.expectEqual(@as(u64, 1), snapshot.timeouts);
     try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), snapshot.retry_delay_ns);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.holds);
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), snapshot.hold_wait_ns);
 }
 
 pub const ReadStatsProvider = struct {

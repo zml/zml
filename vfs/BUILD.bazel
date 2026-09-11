@@ -8,6 +8,7 @@ VFS_SRCS = [
     "http.zig",
     "http_acceptance_test.zig",
     "range_read.zig",
+    "request.zig",
     "s3.zig",
 ]
 
