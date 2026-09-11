@@ -63,17 +63,9 @@ const Handle = struct {
 /// throughput gain. Profiles supply minima; the loader also respects its
 /// independently calibrated DMA block and the supported request-size limit.
 pub const LoadProfile = struct {
-    /// Generic fallback used by callers that do not prepare a profile from a
-    /// VFS path. This value is borrowed and does not require deinitialization.
-    pub const default: LoadProfile = .{
-        .name = "default",
-        .read_chunk_size = 16 * 1024 * 1024,
-        .high_latency = false,
-        .direct_io_alignment = null,
-        .stats = null,
-    };
-
-    /// Local files read without a VFS: buffered, exact reads.
+    /// Local files read without a VFS: buffered, exact reads. Also the
+    /// fallback of a caller that prepares no profile. This value is borrowed
+    /// and does not require deinitialization.
     pub const local: LoadProfile = .{
         .name = "local",
         .read_chunk_size = 8 * 1024 * 1024,

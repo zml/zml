@@ -2544,8 +2544,9 @@ The answers led to a smaller design with the same read path.
   the inner `Io` (`schemeRoot`, `localRoot`; registering a `file` backend
   is asserted against). `loadProfile` returns the local profile for them:
   8 MiB requests, `direct_io_alignment = 4096` on Linux, `vfs = self`.
-  `LoadProfile.default` and `.local` (no VFS) keep a null alignment, so a
-  loader without a VFS reads exact ranges as before.
+  `LoadProfile.local` (the one no-VFS profile, and the loader's default)
+  keeps a null alignment, so a loader without a VFS reads exact ranges as
+  before.
 - One descriptor per local handle, with a state on the VFS's existing
   handle entry: `undecided`, `buffered`, `direct`. `VFS.useDirectIo(file,
   policy)` is the planner's one call per file: it applies the policy,
@@ -3472,6 +3473,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   the direct payload and returns `void`; `probeMemory` refuses a buffered
   backend before any `memoryStats` call, so the CPU and TPU stats
   behaviour is unchanged, and `readRoom` calls it plainly.
+- Task 9 (C21), one no-VFS load profile: `LoadProfile.default` is gone and
+  `.local` (8 MiB, not high latency, no alignment, no stats) is the
+  `Loader.Options` default, so a caller without a VFS profile now asks for
+  8 MiB requests instead of 16 MiB. Evidence for the size: B70 local
+  8/16/32 MiB measured 27.05 / 24.21 / 21.33 GiB/s with twice the pinned
+  high-water at 16 MiB. The buffered backend reads `read_chunk_size` only
+  when the profile is high latency, so TPU, neuron and metal loads are
+  byte-identical. `llama_tests` and `lfm2_tests` dropped their explicit
+  `.load_profile = .local` (built to check).
 
 ## Open work
 

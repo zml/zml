@@ -90,9 +90,10 @@ pub const Loader = struct {
         /// host budget pins. The direct backend halves it when the source
         /// throttles; nothing raises it during a load.
         read_parallelism: ?usize = null,
-        /// Model-wide source tuning prepared from the VFS path. The default is
-        /// generic for callers that do not have an explicit VFS profile.
-        load_profile: VFS.LoadProfile = .default,
+        /// Model-wide source tuning prepared from the VFS path. The default
+        /// is the no-VFS local profile; prepare one with `VFS.loadProfile`
+        /// for a VFS path.
+        load_profile: VFS.LoadProfile = .local,
         /// Calibrate transfer sizing during initialization. Ignored by buffered
         /// backends; CPU uses the default sizing without measurement.
         dma: dma_calibration.Options = .{},

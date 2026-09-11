@@ -63,20 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 9. One no-VFS load profile (C21, 12 lines).
-  Delete `LoadProfile.default` (`vfs/vfs.zig:66-75`) and make
-  `LoadProfile.local` (8 MiB, not high latency, null alignment, null stats)
-  the `Loader.Options.load_profile` default (`zml/io/loader.zig:97`; reword
-  the comment: the no-VFS local profile, prepare one with `VFS.loadProfile`
-  for a VFS path). Leave `vfs.loadProfile` as it is (it already patches
-  `.local`). `examples/llm/models/llama_tests.zig:54-56` and
-  `lfm2_tests.zig:56-58` may drop their explicit `.load_profile = .local`.
-  CTX 2545: name the one constant. Evidence: B70 local 8/16/32 MiB = 27.05 /
-  24.21 / 21.33 GiB/s with 2x pinned high-water at 16 (CTX 546-549). TPU: the
-  buffered backend reads `read_chunk_size` only when `high_latency` is true
-  (`buffered_loader.zig:65`, `:157-162`, `:352-358`), so profile-less loads
-  there are byte-identical.
-
 - [ ] 10. `backend.Config` becomes the one `Options` (C14, 18 lines).
   Move the body of `Loader.Options` (five fields, defaults, `auto`, docs) to
   `zml/io/backend.zig` as `pub const Options`, add

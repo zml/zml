@@ -51,9 +51,7 @@ pub fn main(init: std.process.Init) !void {
     const shardings: common.Shardings = try .init(platform);
 
     const all_shardings = shardings.all();
-    var loader = try zml.io.Loader.init(allocator, io, platform, .{
-        .load_profile = .local,
-    });
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{});
     defer loader.deinit();
     var model_buffers = try repo_model.loadBuffers(allocator, io, &loader, &progress, &store, &all_shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
