@@ -3,6 +3,16 @@ load("@rules_cc//cc:defs.bzl", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_test(
+    name = "type_constructors_test",
+    srcs = ["TypeConstructorsTest.c"],
+    deps = [
+        "//mlir/dialects/cute_ir/lib/CAPI:cute",
+        "//mlir/dialects/cute_ir/lib/CAPI:cute_nvgpu",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+cc_test(
     name = "capi_registration_test",
     srcs = ["CAPIRegistrationTest.cpp"],
     deps = [

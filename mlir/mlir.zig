@@ -9,6 +9,39 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+test "variadic operation groups preserve order and dense array segment sizes" {
+    const ctx = try Context.init(.{});
+    defer ctx.deinit();
+    ctx.setAllowUnregisteredDialects(true);
+    const loc = Location.unknown(ctx);
+    const i32_type = Type.int(ctx, .i32);
+    const i64_type = Type.int(ctx, .i64);
+    const block = Block.init(&.{ i32_type, i64_type, i32_type }, &.{ loc, loc, loc });
+    defer block.deinit();
+    const op = Operation.make(ctx, "test.segmented", .{
+        .operands = .{ .variadic = &.{
+            &.{block.argument(0)},
+            &.{},
+            &.{ block.argument(1), block.argument(2) },
+        } },
+        .results = .{ .variadic = &.{
+            &.{},
+            &.{ i64_type, i32_type },
+            &.{i64_type},
+        } },
+        .location = loc,
+    });
+    defer op.deinit();
+    try std.testing.expectEqual(@as(usize, 3), op.numOperands());
+    for (0..3) |i| try std.testing.expect(op.operand(i).eql(block.argument(i)));
+    try std.testing.expectEqual(@as(usize, 3), op.numResults());
+    try std.testing.expect(op.result(0).type_().eql(i64_type));
+    try std.testing.expect(op.result(1).type_().eql(i32_type));
+    try std.testing.expect(op.result(2).type_().eql(i64_type));
+    try std.testing.expect(op.attributeByName("operandSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 1, 0, 2 })));
+    try std.testing.expect(op.attributeByName("resultSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 0, 2, 1 })));
+}
+
 pub const Error = error{
     /// Invalid Mlir was created.
     InvalidMlir,
@@ -1280,7 +1313,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, sizes.constSlice())),
                 });
             },
         };
@@ -1293,7 +1326,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", .denseArray(ctx, .i32, sizes.constSlice())),
                 });
             },
         };

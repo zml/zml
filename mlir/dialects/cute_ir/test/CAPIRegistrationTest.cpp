@@ -34,23 +34,19 @@ int main() {
   if (mlirDialectIsNull(mlirDialectHandleLoadDialect(cuteNVGPU, context)))
     return fail(context, "failed to load the cute_nvgpu dialect");
 
-  MlirType cutePublicType =
-      mlirCuteTypeParse(context, mlirStringRefCreateFromCString(
-                                     "!cute.int_tuple<\"1\">"));
-  if (mlirTypeIsNull(cutePublicType) ||
-      !mlirTypeIsACuteType(cutePublicType))
+  MlirType cutePublicType = mlirTypeParseGet(
+      context, mlirStringRefCreateFromCString("!cute.int_tuple<\"1\">"));
+  if (mlirTypeIsNull(cutePublicType) || !mlirTypeIsACuteType(cutePublicType))
     return fail(context, "failed to parse an OSS cute type");
 
-  MlirType cutePrivateType = mlirCuteTypeParse(
-      context, mlirStringRefCreateFromCString("!cute.i32"));
-  if (mlirTypeIsNull(cutePrivateType) ||
-      !mlirTypeIsACuteType(cutePrivateType))
+  MlirType cutePrivateType =
+      mlirTypeParseGet(context, mlirStringRefCreateFromCString("!cute.i32"));
+  if (mlirTypeIsNull(cutePrivateType) || !mlirTypeIsACuteType(cutePrivateType))
     return fail(context, "failed to parse a recovered cute type");
 
-  MlirType cuteNVGPUType = mlirCuteNVGPUTypeParse(
+  MlirType cuteNVGPUType = mlirTypeParseGet(
       context, mlirStringRefCreateFromCString("!cute_nvgpu.smem_desc"));
-  if (mlirTypeIsNull(cuteNVGPUType) ||
-      !mlirTypeIsACuteNVGPUType(cuteNVGPUType))
+  if (mlirTypeIsNull(cuteNVGPUType) || !mlirTypeIsACuteNVGPUType(cuteNVGPUType))
     return fail(context, "failed to parse a cute_nvgpu type");
 
   if (!mlirContextIsRegisteredOperation(
@@ -92,7 +88,8 @@ module {
   bool bytecodeIsValid = mlirOperationVerify(roundTripped);
   mlirOperationDestroy(roundTripped);
   if (!bytecodeIsValid)
-    return fail(context, "recovered operations failed after bytecode round trip");
+    return fail(context,
+                "recovered operations failed after bytecode round trip");
 
   mlirContextDestroy(context);
   return 0;

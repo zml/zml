@@ -6,12 +6,8 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
-    Cute, cute, mlir::cutlass_compiler::cute::CuteDialect)
-
-MlirType mlirCuteTypeParse(MlirContext context, MlirStringRef assembly) {
-  return mlirTypeParseGet(context, assembly);
-}
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Cute, cute,
+                                      mlir::cutlass_compiler::cute::CuteDialect)
 
 bool mlirTypeIsACuteType(MlirType type) {
   mlir::Type cppType = unwrap(type);

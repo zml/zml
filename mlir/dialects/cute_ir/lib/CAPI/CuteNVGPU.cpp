@@ -7,12 +7,7 @@
 #include "mlir/CAPI/Registration.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
-    CuteNVGPU, cute_nvgpu,
-    mlir::cutlass_compiler::cute_nvgpu::CuteNVGPUDialect)
-
-MlirType mlirCuteNVGPUTypeParse(MlirContext context, MlirStringRef assembly) {
-  return mlirTypeParseGet(context, assembly);
-}
+    CuteNVGPU, cute_nvgpu, mlir::cutlass_compiler::cute_nvgpu::CuteNVGPUDialect)
 
 bool mlirTypeIsACuteNVGPUType(MlirType type) {
   mlir::Type cppType = unwrap(type);
@@ -22,4 +17,3 @@ bool mlirTypeIsACuteNVGPUType(MlirType type) {
     return opaque.getDialectNamespace() == "cute_nvgpu";
   return cppType.getDialect().getNamespace() == "cute_nvgpu";
 }
-

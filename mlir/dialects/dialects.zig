@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const cuda_tile = @import("mlir/dialects/cuda_tile");
+pub const cute = @import("mlir/dialects/cute_ir");
 pub const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 pub const stablehlo = @import("mlir/dialects/stablehlo");
 pub const ttir = @import("mlir/dialects/ttir");

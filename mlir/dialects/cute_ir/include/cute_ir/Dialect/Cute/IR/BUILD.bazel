@@ -23,15 +23,15 @@ td_library(
 
 gentbl_cc_library(
     name = "ops_private_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             ["-gen-op-decls"],
-            "cute_ir/Dialect/Cute/IR/CuteOpsPrivate.h.inc",
+            "CuteOpsPrivate.h.inc",
         ),
         (
             ["-gen-op-defs"],
-            "cute_ir/Dialect/Cute/IR/CuteOpsPrivate.cpp.inc",
+            "CuteOpsPrivate.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -41,14 +41,14 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "types_private_decl_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             [
                 "-gen-typedef-decls",
                 "-typedefs-dialect=cute",
             ],
-            "cute_ir/Dialect/Cute/IR/CuteTypesPrivate.h.inc",
+            "CuteTypesPrivate.h.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -58,14 +58,14 @@ gentbl_cc_library(
 
 gentbl_cc_library(
     name = "types_all_defs_inc_gen",
-    strip_include_prefix = ".",
+    includes = ["../../../.."],
     tbl_outs = [
         (
             [
                 "-gen-typedef-defs",
                 "-typedefs-dialect=cute",
             ],
-            "cute_ir/Dialect/Cute/IR/CuteTypes.cpp.inc",
+            "CuteTypes.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
@@ -78,7 +78,7 @@ cc_library(
     hdrs = [
         "CuteDialectPrivate.h",
     ],
-    strip_include_prefix = "/mlir/dialects/cute_ir/include",
+    includes = ["../../../.."],
     deps = [
         ":ops_private_inc_gen",
         ":types_private_decl_inc_gen",
