@@ -176,6 +176,15 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
+    // Preserve borrowed configuration pointers when there is nothing to map.
+    if (comptime FromStruct == ToStruct and @typeInfo(FromStruct) == .pointer and
+        @typeInfo(FromStruct).pointer.size == .one and @typeInfo(FromStruct).pointer.is_const and
+        !Contains(FromStruct, From))
+    {
+        to.* = from;
+        return;
+    }
+
     if (@sizeOf(ToStruct) == 0) return;
 
     switch (type_info_to) {
@@ -966,4 +975,21 @@ pub fn forEachVisit(v: anytype, comptime T: type, f: anytype, args: stdx.meta.Tu
             ctx_.i += 1;
         }
     }.cb, &ctx, v);
+}
+
+test "mapAlloc preserves borrowed configuration pointers" {
+    const Item = struct { value: u32 };
+    const Config = struct { name: []const u8 };
+    const Inputs = struct { item: Item, config: *const Config };
+    const Mapper = struct {
+        fn item(_: void, value: Item) Item {
+            return .{ .value = value.value + 1 };
+        }
+    };
+    const config: Config = .{ .name = "borrowed" };
+    const input: Inputs = .{ .item = .{ .value = 1 }, .config = &config };
+    var output: Inputs = undefined;
+    try mapAlloc(Mapper.item, std.testing.allocator, {}, input, &output);
+    try std.testing.expectEqual(@as(u32, 2), output.item.value);
+    try std.testing.expectEqual(&config, output.config);
 }

@@ -336,92 +336,90 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        const output = zml.ops.manualComputation(
-            (struct {
-                q: zml.Tensor,
-                k_cache: zml.Tensor,
-                v_cache: zml.Tensor,
-                block_table: zml.Tensor,
-                seq_lens: zml.Tensor,
-                query_start_len: zml.Tensor,
-                opts: AttentionOptions,
-                options: Options,
+        const Local = struct {
+            q: zml.Tensor,
+            k_cache: zml.Tensor,
+            v_cache: zml.Tensor,
+            block_table: zml.Tensor,
+            seq_lens: zml.Tensor,
+            query_start_len: zml.Tensor,
+            opts: AttentionOptions,
+            options: Options,
 
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const parameters_: Parameters = .{
-                        .block_table = self.block_table,
-                        .seq_lens = self.seq_lens,
-                        .query_start_len = self.query_start_len,
-                        .options_ = self.options,
-                    };
+            fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                const parameters_: Parameters = .{
+                    .block_table = self.block_table,
+                    .seq_lens = self.seq_lens,
+                    .query_start_len = self.query_start_len,
+                    .options_ = self.options,
+                };
 
-                    const cu_count = getCuCount();
-                    const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
-                    const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
-                    const num_queries_per_kv: usize = num_heads / num_kv_heads;
-                    // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
-                    // single decode query token doesn't carry masked-out fp32 acc lanes.
-                    // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
-                        std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
-                    else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
-                    const block_q: usize = block_m / num_queries_per_kv;
-                    const num_tokens: usize = @intCast(self.q.dim(.b));
-                    const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
-                    const total_q_blocks: usize = num_tokens / block_q + num_seqs;
-                    const target_num_prgms: usize = cu_count * 4;
-                    const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
+                const cu_count = getCuCount();
+                const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
+                const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
+                const num_queries_per_kv: usize = num_heads / num_kv_heads;
+                // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
+                // single decode query token doesn't carry masked-out fp32 acc lanes.
+                // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
+                const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
+                    std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
+                else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+                const block_q: usize = block_m / num_queries_per_kv;
+                const num_tokens: usize = @intCast(self.q.dim(.b));
+                const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
+                const total_q_blocks: usize = num_tokens / block_q + num_seqs;
+                const target_num_prgms: usize = cu_count * 4;
+                const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
 
-                    const paged_attention_opts: PagedAttentionOptions = .{
-                        .cu_count = getCuCount(),
-                        .all_decode = !self.options.is_prefill,
-                        .num_tokens = num_tokens,
-                        .num_heads = num_heads,
-                        .num_kv_heads = num_kv_heads,
-                        .head_dim = @intCast(self.q.dim(.hd)),
-                        .batch_size = @intCast(parameters_.block_table.dim(.b)),
-                        .block_size = @intCast(self.k_cache.dim(.k_chunk)),
-                        .num_blocks = @intCast(self.k_cache.dim(.page)),
-                        .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
-                        .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
-                        .block_m = block_m,
-                        .block_q = block_q,
-                        .total_q_blocks = total_q_blocks,
-                        .target_num_prgms = target_num_prgms,
-                        .num_2d_prgms = num_2d_prgms,
-                        .max_seqlen_q = self.options.max_seqlen_q,
-                        .scale = self.opts.scale,
-                    };
+                const paged_attention_opts: PagedAttentionOptions = .{
+                    .cu_count = getCuCount(),
+                    .all_decode = !self.options.is_prefill,
+                    .num_tokens = num_tokens,
+                    .num_heads = num_heads,
+                    .num_kv_heads = num_kv_heads,
+                    .head_dim = @intCast(self.q.dim(.hd)),
+                    .batch_size = @intCast(parameters_.block_table.dim(.b)),
+                    .block_size = @intCast(self.k_cache.dim(.k_chunk)),
+                    .num_blocks = @intCast(self.k_cache.dim(.page)),
+                    .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
+                    .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
+                    .block_m = block_m,
+                    .block_q = block_q,
+                    .total_q_blocks = total_q_blocks,
+                    .target_num_prgms = target_num_prgms,
+                    .num_2d_prgms = num_2d_prgms,
+                    .max_seqlen_q = self.options.max_seqlen_q,
+                    .scale = self.opts.scale,
+                };
 
-                    const use_2d_kernel = use2dKernel(
-                        paged_attention_opts.all_decode,
-                        paged_attention_opts.batch_size,
-                        paged_attention_opts.num_kv_heads,
-                    );
-                    const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else if (isOneapiTarget())
-                        pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else
-                        pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
+                const use_2d_kernel = use2dKernel(
+                    paged_attention_opts.all_decode,
+                    paged_attention_opts.batch_size,
+                    paged_attention_opts.num_kv_heads,
+                );
+                const output = if (use_2d_kernel)
+                    pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
+                else if (isOneapiTarget())
+                    pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
+                else
+                    pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
 
-                    return output;
-                }
-            }).body,
-            .{
-                .q = q,
-                .k_cache = k_cache,
-                .v_cache = v_cache,
-                .block_table = parameters.block_table,
-                .seq_lens = parameters.seq_lens,
-                .query_start_len = parameters.query_start_len,
-                .opts = opts,
-                .options = parameters.options_,
-            },
-            q.shape(),
-        );
-
-        return output;
+                return output;
+            }
+        };
+        const args: Local = .{
+            .q = q,
+            .k_cache = k_cache,
+            .v_cache = v_cache,
+            .block_table = parameters.block_table,
+            .seq_lens = parameters.seq_lens,
+            .query_start_len = parameters.query_start_len,
+            .opts = opts,
+            .options = parameters.options_,
+        };
+        // An enclosing shard-local model graph already owns the partitioning.
+        if (zml.Compiler.current().manual_computation_depth > 0) return Local.body(args, q.shape());
+        return zml.ops.manualComputation(Local.body, args, q.shape());
     }
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {

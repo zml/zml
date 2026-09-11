@@ -162,6 +162,14 @@ pub const Tensor = struct {
             return res;
         };
 
+        // manualComputation binds the mesh axes and exposes local shard shapes.
+        // Emitting another constraint here would bind those axes a second time.
+        if (ctx.manual_computation_depth > 0) {
+            var res = self;
+            res._shape = partitioned_shape;
+            return res;
+        }
+
         const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
             error.NoSuitableSharding => std.debug.panic(
                 "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
