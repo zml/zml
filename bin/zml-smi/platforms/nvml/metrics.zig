@@ -1,12 +1,29 @@
 const std = @import("std");
 const Nvml = @import("nvml.zig");
 const device_info = @import("zml-smi/info").device_info;
-const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
-const poll_metrics = @import("zml-smi/info").poll_metrics;
 const process = @import("process.zig");
+
+const pcie_every: u8 = 4;
+
+const Slot = struct {
+    info: *DoubleBuffer(GpuInfo),
+    dev: Device,
+};
+
+const Ctx = struct {
+    gpa: std.mem.Allocator,
+    nvml: *const Nvml,
+    slots: []Slot,
+    processes: *process.ProcessDoubleBuffer,
+    last_seen_ts: []u64,
+    dev_offset: u16,
+    device_count: u32,
+    tick: u8 = 0,
+};
 
 pub fn start(collector: *Collector) !void {
     const nvml = try collector.arena.create(Nvml);
@@ -15,6 +32,7 @@ pub fn start(collector: *Collector) !void {
     const count = try nvml.deviceCount();
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
+    var slots: std.ArrayList(Slot) = try .initCapacity(collector.arena, count);
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
         const initial: GpuInfo = .{
@@ -23,14 +41,42 @@ pub fn start(collector: *Collector) !void {
             .cuda_driver_version = dev.cudaDriverVersion(collector.arena) catch null,
         };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev });
+        slots.appendAssumeCapacity(.{ .info = &info.cuda, .dev = dev });
     }
 
-    const processes = try collector.createProcessList();
-    try process.init(collector, processes, nvml, dev_offset);
+    const last_seen_ts = try collector.arena.alloc(u64, count);
+    @memset(last_seen_ts, 0);
+
+    const ctx = try collector.arena.create(Ctx);
+    ctx.* = .{
+        .gpa = collector.gpa,
+        .nvml = nvml,
+        .slots = slots.items,
+        .processes = try collector.createProcessList(),
+        .last_seen_ts = last_seen_ts,
+        .dev_offset = dev_offset,
+        .device_count = count,
+    };
+    try collector.spawnPoll(pollOnce, .{ctx});
 }
 
-const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
+fn pollOnce(ctx: *Ctx) void {
+    const pcie = ctx.tick % pcie_every == 0;
+    ctx.tick +%= 1;
+
+    for (ctx.slots) |slot| {
+        pollDevice(slot.info, slot.dev, pcie);
+    }
+    process.pollOnce(ctx.gpa, ctx.processes, ctx.nvml, ctx.dev_offset, ctx.device_count, ctx.last_seen_ts);
+}
+
+fn pollDevice(db: *DoubleBuffer(GpuInfo), dev: Device, pcie: bool) void {
+    const back = db.back();
+    back.* = db.front().*;
+    poll_metrics.apply(metrics, back, dev);
+    if (pcie) poll_metrics.apply(pcie_metrics, back, dev);
+    db.swap();
+}
 
 const Device = struct {
     nvml: *const Nvml,
@@ -165,9 +211,12 @@ const metrics = .{
     .{ .field = "mem_used_bytes", .query = Device.memUsed },
     .{ .field = "mem_total_bytes", .query = Device.memTotal },
     .{ .field = "mem_bus_width", .query = Device.memBusWidth },
-    .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
-    .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
     .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
     .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
+};
+
+const pcie_metrics = .{
+    .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
+    .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
 };
