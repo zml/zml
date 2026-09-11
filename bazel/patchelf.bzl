@@ -4,10 +4,12 @@ def _patchelf_impl(ctx):
         output_name = ctx.attr.soname
     output = ctx.actions.declare_file("{}/{}".format(ctx.attr.name, output_name))
 
+    coreutils = ctx.toolchains["@bazel_lib//lib:coreutils_toolchain_type"].coreutils_info.bin
+
     commands = [
         "set -e",
-        'cp -f "$2" "$3"',
-        'chmod +w "$3"',
+        '"$4" cp -f "$2" "$3"',
+        '"$4" chmod +w "$3"',
     ]
 
     if ctx.attr.soname:
@@ -45,9 +47,9 @@ def _patchelf_impl(ctx):
     ctx.actions.run_shell(
         inputs = [ctx.file.src, renamed_syms],
         outputs = [output],
-        arguments = [ctx.executable._patchelf.path, ctx.file.src.path, output.path],
+        arguments = [ctx.executable._patchelf.path, ctx.file.src.path, output.path, coreutils.path],
         command = "\n".join(commands),
-        tools = [ctx.executable._patchelf],
+        tools = [ctx.executable._patchelf, coreutils],
     )
 
     return [
@@ -75,4 +77,5 @@ patchelf = rule(
             cfg = "exec",
         ),
     },
+    toolchains = ["@bazel_lib//lib:coreutils_toolchain_type"],
 )

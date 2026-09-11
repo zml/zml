@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 BAZELISK_VERSION=v1.25.0
 
 case $OSTYPE in
