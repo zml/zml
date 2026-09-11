@@ -151,8 +151,9 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   There is no caller-side window and no memory knob.
 - `VFS.loadProfile(path)` is prepared once for a model load and passed as a
   borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
-  `high_latency`, and optional aggregate retry/throttle feedback. It assumes
-  the load is the backend's only material user; feedback is not load-tagged.
+  `high_latency`, and optional aggregate retry/throttle statistics. Those
+  statistics are observability, not control (sixteenth pass): nothing in the
+  loader reacts to them, and they are backend-wide rather than load-tagged.
 - Profile minima are local/file 8 MiB, HTTP/S3/GCS 16 MiB, and HF 32 MiB.
   Effective source request size is the greater of the profile minimum and
   calibrated DMA block size, capped at the supported 32 MiB maximum.
@@ -236,6 +237,23 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   on HF; the HTTP-date form is not parsed) sleeps that long instead of the
   jittered delay. The backends expose aggregate request, retry, timeout,
   server-failure, throttle, byte, delay, hold and hold-wait counters.
+- Rate limiting is a hold, in `vfs/request.zig`. One `Governor` per backend
+  instance (keyed by URI authority, so a per-authority scope is a change to
+  one function) holds a deadline: a throttle arms it at
+  `max(server delay, full-jitter backoff)` clamped to `[retry_initial_delay,
+  max_hold]`, extends it when a later answer names something longer, and
+  never shortens it. Every request of that backend waits the deadline out,
+  each with its own jitter, and re-checks, since it may have been extended.
+  A clean window as long as the last hold ends the episode and resets the
+  backoff; an episode with no such window for longer than `throttle_budget`
+  fails the backend's requests with `error.RateLimited` until one comes.
+  Timeouts never hold. Two budgets, not one: a throttle is not charged to
+  `max_retries`, so a limited server cannot exhaust a reader, and everything
+  else keeps the per-request backoff. Defaults: five retries, 500 ms to 30 s
+  of backoff, a 2 minute hold cap, a 5 minute episode budget, all
+  `InitOpts` fields of the four backends. The hold is a deadline rather
+  than a permit, so it composes with the loader's fixed width instead of
+  competing with it, and a request holding a source credit simply waits.
 - One source job performs one exact absolute scatter read into pinned blocks.
   Extra physical calls occur only for short reads/retries or `IOV_MAX` limits.
   The loader counts read operations, not physical calls: a remote source's
@@ -3719,6 +3737,27 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   after `awaitAll`. The simpler route than the plan's `fromRepo`: the
   loader's registry takes `file_uri` directly, so no entrypoint resolution
   is involved.
+- Task 28 (group D), the record. The "Current design" bullets now describe
+  the governed loop, the hold and the two budgets (CTX 240), the statistics
+  side channel as observability rather than control (154), the loader
+  without a throttle watch (177) and the immutable width (408).
+  `docs/learn/loader.md` carries the `vfs/request.zig` row and the same
+  statement about the width. Group D validation, all on 2026-09-11: `zig fmt
+  --check` clean, `bazel test //zml:test //vfs:test` (237 and 42 tests) and
+  the three example builds pass; `ls` and `cat` over hf://, s3:// and
+  https:// against the real services; and one `hf://Qwen/Qwen3.5-4B sharded`
+  load on the CPU playground at parity with the recorded profile:
+  `source_width=32, request_size=32 MiB`, 278 reads and 282 physical
+  requests for 8.68 GiB, `pinned_high_water=1.06 GiB` of 1.16 GiB mapped,
+  `source_retries=0, source_throttles=0, source_holds=0, hold_wait_ms=0`,
+  11.6 s (the fourteenth-pass direct arm measured 10.9 and 16.3 s; hf://
+  varies about twofold day to day).
+  Open decisions left for the user: the TPU, neuron and metal sign-off (the
+  buffered loader is untouched but its reads gain the hold), whether to
+  revisit `max_hold` once the pipeline's cancellation points allow
+  `worker_group.cancel` at teardown, and when to flip the governor key to
+  per-authority (one generic `HTTP` instance serves every host of its
+  scheme and one `S3` spans buckets, so per-instance over-reaches there).
 
 ## Open work
 

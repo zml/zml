@@ -63,7 +63,12 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
+All fifteen tasks landed. See CTX.md "Sixteenth pass" for what each one
+removed and how it was validated.
+
 ## Group B: mechanism changes (CPU playground plus gb300-2 after each)
+
+All three tasks landed, each with a CPU playground run and a gb300-2 run.
 
 ## Group C: sound, but needs a measurement or a decision first
 
@@ -102,6 +107,10 @@ which includes calibration. Tasks that touch admission add the
   remote files on the submit task (`direct_loader.zig:977-984`).
 
 ## Group D: rate limits and retries move into the VFS
+
+All six tasks landed (`vfs/request.zig` and its callers). The design below
+is kept as the record of what was decided and why; the open decisions at the
+end of it are the ones still on the user.
 
 Decided with the user on 2026-09-11: the VFS owns rate-limit handling; the
 scope is one governor per backend instance for now, keyed so that a
@@ -164,15 +173,6 @@ Qwen3.5-4B load on the CPU playground (`bazel run --config=release
 with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
-
-- [ ] 28. Record: CTX.md "Current design" bullets at 154 (the side channel
-  is observability, not control), 177 (no throttle watch), 218-240 (the
-  governed loop, the two budgets, the hold), 404-432 (the width is
-  immutable; a throttled source holds in the VFS), and the "Sixteenth
-  pass" section (the design, the defaults, the tests that exercised the
-  hold, the hf:// parity number, the open decisions: per-authority key,
-  teardown cancellation, the TPU sign-off); `docs/learn/loader.md`
-  implementation map (`request.zig` row); the memory file.
 
 ## Withdrawn or judged not worth it after verification
 
