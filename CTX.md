@@ -395,24 +395,25 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
 - The source width is fixed for the load (fifteenth pass): the profile's
   default (`limits.defaultReadParallelism`: 16 for local files, 32 for a
   high-latency source, from the sweeps recorded in that pass) or the
-  caller's `Options.read_parallelism`, clipped to what the host budget pins
-  (`feasible_width`). The adaptive controller, its measurement windows,
+  caller's `Options.read_parallelism`, clipped to one less than the requests
+  the pre-grown pinned set holds. The adaptive controller, its measurement windows,
   generations and fences, the warm-up rule, the blind bootstrap, worker
   parking and `source_concurrency.zig` are gone; the evidence is in the
   fifteenth pass.
-- Two gates bound the pipeline. All workers compete for lifecycle capacity
-  (`RequestGateLimits`): `min(feasible, max(retained, width + dma_stage))`,
-  where `retained` is the pre-grown pinned capacity in requests and
-  `dma_stage` the calibrated per-device DMA depth in requests, so the DMA
-  stage keeps its depth whatever the read width (fourth pass); the read gate
-  alone limits source calls, at the width. A request returns its lifecycle
-  credit only after all its DMA children finish.
+- Two gates bound the pipeline, both constant for the load (sixteenth pass).
+  All workers compete for lifecycle capacity: the pre-grown pinned capacity
+  in requests (`pool.capacity / blocks_per_request`), which is the source
+  working set of `width + 1` requests plus the calibrated per-device DMA
+  depth, so the DMA stage keeps its depth whatever the read width (fourth
+  pass) and no credit can want a block the pre-growth did not map. The read
+  gate alone limits source calls, at the width. A request returns its
+  lifecycle credit only after all its DMA children finish.
 - The one width change during a load is a step down (`ThrottleWatch`): a
   profile with a statistics side channel (the remote VFS backends; the local
   backend has none and runs no watch) is sampled every 25 ms, also while
   the workers sleep in the backend's retries, and a throttle or timeout
-  halves the width; both gates take the new limits and requests admitted
-  under the old width keep their permits. The next step waits until as many
+  halves the width; only the read gate narrows (the credits are the pinned
+  capacity) and requests admitted under the old width keep their permits. The next step waits until as many
   reads have completed as were in flight at the previous one, so the old
   width's delayed feedback cannot ratchet through several steps. Retries,
   connection failures and other 5xx are the backend retry loop's business
@@ -425,7 +426,7 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   former 32-wide set took). Nothing maps a slab inside a load (146-230 ms
   of hipHostMalloc on MI300X when it did). A dedicated pregrowth line logs
   `retained`, `pregrown` and `pregrowth_ms`.
-- `min(lifecycle, width + 1)` worker tasks are spawned at creation and
+- `width + 1` worker tasks are spawned at creation and
   never retired or parked: a worker hands its request to the DMA stage and
   claims the next, so credits beyond the read width need no workers of
   their own, and after a throttle step the surplus workers wait at the read
@@ -3540,6 +3541,22 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   the second shard was uncached on this run and read direct). Every group A
   task also passed `bazel test //zml:test //vfs:test` and the three example
   builds.
+- Task 16 (C07), the lifecycle credits are a constant: after pre-growth the
+  retained capacity always satisfied `min(feasible, max(read + dma_stage,
+  retained)) == retained`, so the gates are now `read_gate = width`,
+  `request_gate = pool.capacity / blocks_per_request` and `workers = width +
+  1`, with the width clipped to `credits - 1` and `credits < 2` refused at
+  sizing as `DmaMappedBudgetExceeded`. `RequestGateLimits` (with `Config` and
+  `at`), the write-only `Loader.limits`, `Sizing.feasible_width`,
+  `Sizing.dma_stage_requests`, `dmaStageRequests`,
+  `BlockPool.potentialRequestWidth`, the lifecycle-gate test and the DMA
+  stage test are gone; the fourth-pass measurement that justifies credits
+  beyond the width (24.3 against 43.8 GiB/s on a GB300) is now the doc
+  comment of the gate field. The throttle watch keeps only the read gate
+  (narrowing the credits would not reduce source traffic) and the rider C26
+  landed with it: the watch runs in `worker_group` and `throttle_group` is
+  gone. The ready line prints `lifecycle_credits` and no longer prints
+  `feasible_width`.
 
 ## Open work
 

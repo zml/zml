@@ -65,44 +65,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group B: mechanism changes (CPU playground plus gb300-2 after each)
 
-- [ ] 16. Lifecycle credits become a constant (C07, about 100 lines).
-  After pre-growth, `retained = capacity / blocks_per_request >= width + 1 +
-  floor(reserve / bpr) >= width + dma_stage`, so
-  `RequestGateLimits.init` (`direct_loader.zig:2388-2399`) always yields
-  `read = width`, `lifecycle = retained`, `workers = width + 1`; both
-  recorded ready lines confirm it (CTX 3302: 33 = 17 + 16; CTX 3308: 25 =
-  17 + 8) and the throttle test pins the lifecycle limit at 41 across
-  halvings (`:3495`, `:3507`).
-  In `create`: `width = @min(opts.readWidth(), retained - 1)` with `if
-  (retained < 2) return error.DmaMappedBudgetExceeded` replacing the dead
-  `feasible_width == 0` check (`:339`; `retained = pool.capacity /
-  maximum_blocks_per_job`, already computed at `:347`); `read_gate =
-  .init(width)`, `request_gate = .init(retained)`, `workers = width + 1`;
-  `std.debug.assert(retained >= width + 1)`.
-  Delete `RequestGateLimits` with `Config` and `at` (`:2373-2400`), the
-  write-only `Loader.limits` (`:70`, `:91-95`, `:111`), `Sizing.feasible_width`
-  and `dma_stage_requests` (`:286`, `:338-339`, `:348-353`), `dmaStageRequests`
-  (`:2551-2557`) and its test (`:2714-2723`), `BlockPool.potentialRequestWidth`
-  (`host_memory.zig:568-571`) and its three test lines (`:1040-1042`; keep the
-  test's reserve-refusal and tail assertions), the lifecycle-gate test
-  (`:3565-3583`).
-  The throttle watch keeps `cursor`, `metrics`, `read_gate` and `width`;
-  `tick` becomes `read_gate.setLimit(io, narrower)`; its `limits` and
-  `request_gate` fields go; the "source throttled" log drops
-  `lifecycle_credits`; the watch test (`:3469-3510`) checks the read gate and
-  the width only. Rider (C26): spawn the watch into `worker_group` and delete
-  `throttle_group` (`:58`, `:152`, `:437`), one await in `stopWorkers`.
-  Keep the fourth-pass measurement (one credit beyond the width: 24.3 vs
-  43.8 GiB/s, CTX 1050-1054) as the doc comment of the lifecycle gate field,
-  with one sentence that the credits are the pre-grown capacity, which
-  exceeds the width plus the calibrated DMA depth whenever the request size
-  is a multiple of the block size. Ready line: print `lifecycle_credits` and
-  drop `feasible_width`. `docs/learn/loader.md:132-133`: "clipped to what the
-  pre-grown set holds". CTX "Current design" 396-414.
-  Behaviour differs only in the clipped host-budget regime, unreachable with
-  the 16 GiB ceiling; the gb300-2 numbers must reproduce (0.27 to 0.33 s,
-  pinned 400 MiB). TPU: the buffered backend has no gates.
-
 - [ ] 17. Fixed-size pinned pool (C04 amended, about 190 lines). After task 16.
   Size the pool once in `Sizing.init`: `fitted = @min(width, ((max_mapped -
   mapped) / block + usable - reserve) / bpr - 1)`, `error.DmaMappedBudgetExceeded`

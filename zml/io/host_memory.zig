@@ -541,14 +541,6 @@ pub const BlockPool = struct {
         return self.capacity / blocks_per_request;
     }
 
-    /// The largest request width the pool could support if each request
-    /// consumes `blocks_per_request` blocks. Arena tails count against the
-    /// mapped-byte cap but do not contribute usable blocks.
-    pub fn potentialRequestWidth(self: *const BlockPool, blocks_per_request: usize) !usize {
-        if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
-        return (self.capacity + self.remainingBlockBudget()) / blocks_per_request;
-    }
-
     /// Independent 2 MiB mapped allocations were slower and multiplied
     /// registration/pool overhead; retain arenas and subdivide them instead.
     const default_slab_size = 64 * 1024 * 1024;
@@ -981,7 +973,7 @@ test "BlockPool reblocks retained arenas and grows on demand" {
     pool.releaseMany(io, &blocks);
 }
 
-test "BlockPool potential request width accounts for retained arena tails" {
+test "BlockPool refuses a reserve the budget cannot cover and counts retained requests" {
     const allocator = std.testing.allocator;
     var pool = pool_init: {
         var workspace = try Workspace.initForTesting(allocator, std.testing.io, 574);
@@ -1003,9 +995,11 @@ test "BlockPool potential request width accounts for retained arena tails" {
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), pool.reserve);
-    try std.testing.expectEqual(@as(usize, 3), try pool.potentialRequestWidth(2));
-    try std.testing.expectEqual(@as(usize, 0), try pool.potentialRequestWidth(8));
-    try std.testing.expectError(error.InvalidRequestBlockCount, pool.potentialRequestWidth(0));
+    // Arena tails stay mapped without contributing a block: two 127-byte
+    // arenas retain one 64-byte block each.
+    try std.testing.expectEqual(@as(usize, 2), try pool.retainedRequestWidth(1));
+    try std.testing.expectEqual(@as(usize, 0), try pool.retainedRequestWidth(4));
+    try std.testing.expectError(error.InvalidRequestBlockCount, pool.retainedRequestWidth(0));
 }
 
 test "BlockPool rejects requests that can never fit without leasing" {

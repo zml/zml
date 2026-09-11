@@ -17,9 +17,9 @@ pub const Options = struct {
 
     /// Concurrent source reads, at most `limits.max_read_parallelism`.
     /// Null takes the profile's default (`limits.defaultReadParallelism`:
-    /// 16 locally, 32 on a high-latency source), clipped to what the
-    /// host budget pins. The direct backend halves it when the source
-    /// throttles; nothing raises it during a load.
+    /// 16 locally, 32 on a high-latency source), clipped to one less than
+    /// what the pre-grown pinned set holds. The direct backend halves it
+    /// when the source throttles; nothing raises it during a load.
     read_parallelism: ?usize = null,
     /// Model-wide source tuning prepared from the VFS path. The default
     /// is the no-VFS local profile; prepare one with `VFS.loadProfile`

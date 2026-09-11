@@ -131,10 +131,11 @@ The source profile supplies a minimum read size. The effective request size
 is the larger of that minimum and the selected DMA block, within the supported
 limit. The source width is fixed for the load: `Options.read_parallelism`, or
 the profile's default when null (`limits.defaultReadParallelism`: 16 reads for
-local files, 32 for a high-latency source), clipped to what the host budget
-pins. The direct backend pre-grows that many requests plus the DMA reserve
-before the first read, so nothing maps during a load. A read gate enforces
-the width; request lifecycle credits separately cover transfers that still
-hold host blocks. The one change during a load is a step down: when a remote
+local files, 32 for a high-latency source), clipped to what the pre-grown
+pinned set holds. The direct backend pre-grows that many requests plus the
+DMA reserve before the first read, so nothing maps during a load. A read gate
+enforces the width; the lifecycle credits are the whole pre-grown capacity, so
+transfers that still hold host blocks keep the DMA stage fed without ever
+needing a block the reads did not leave free. The one change during a load is a step down: when a remote
 source reports a throttle or timeout, the width is halved once the reads in
 flight at the previous step have returned. Nothing raises it again.

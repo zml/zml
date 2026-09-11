@@ -48,14 +48,27 @@ pub const Loader = struct {
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
+    /// Source reads in flight: the width, for the whole load except a
+    /// throttle step down.
     read_gate: RequestGate,
+    /// Lifecycle credits, the pre-grown pinned capacity in requests. A
+    /// request holds one from its claim to its last DMA callback, so the
+    /// credits beyond the read width are the requests the DMA stage may
+    /// hold and, with the pinned blocks each of them holds, bound the
+    /// pinned memory in use. The capacity is the source working set of
+    /// `width + 1` requests plus the calibrated DMA depth of every device,
+    /// which is at least the width plus that depth because a request is a
+    /// whole number of blocks. One credit beyond the width fed the DMA
+    /// engines one request at a time: on a GB300 loading DeepSeek-V4
+    /// (pieces of 4 MiB and 256 KiB) that was 24.3 GiB/s at width 16
+    /// against 43.8 GiB/s with eight requests queued, and the workers spent
+    /// 9 ms per request waiting for a credit against 3 ms reading.
     request_gate: RequestGate,
     pipeline: Pipeline,
     /// Present when the profile reports read statistics (the remote VFS
     /// backends): the one thing that changes the width during a load.
     throttle: ?ThrottleWatch = null,
     worker_group: std.Io.Group = .init,
-    throttle_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     /// Device bytes allocated for outputs so far, per `platform.devices`
     /// index, cumulative: the front end subtracts it from what it submitted
@@ -67,7 +80,6 @@ pub const Loader = struct {
     /// Concurrent source reads: the configured width clipped to what the
     /// pinned budget holds, halved by the throttle watch while it runs.
     width: usize,
-    limits: RequestGateLimits.Config,
     plan_config: Planner.Config,
     /// See `Config.direct_io`.
     direct_io: VFS.DirectIo,
@@ -87,13 +99,14 @@ pub const Loader = struct {
         const sizing = try Sizing.init(allocator, io, platform, opts);
         const calibration = sizing.calibration;
         const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
-        const width = @min(opts.readWidth(), sizing.feasible_width);
-        const limits_config: RequestGateLimits.Config = .{
-            .feasible_width = sizing.feasible_width,
-            .retained = sizing.retained_credits,
-            .dma_stage = sizing.dma_stage_requests,
-        };
-        const limits = limits_config.at(width);
+        // Every credit the pinned set holds is granted: the pre-growth
+        // fitted `width + 1` requests beside the DMA reserve, so the stage
+        // takes every block the reads leave free and nothing grows inside a
+        // load.
+        const credits = sizing.retained_credits;
+        const width = @min(opts.readWidth(), credits - 1);
+        const workers = width + 1;
+        std.debug.assert(credits >= workers);
         self.* = .{
             .allocator = allocator,
             .io = io,
@@ -102,13 +115,12 @@ pub const Loader = struct {
             .calibration = calibration,
             .pool = sizing.pool,
             .scheduler = .init(allocator),
-            .read_gate = .init(limits.read),
-            .request_gate = .init(limits.lifecycle),
+            .read_gate = .init(width),
+            .request_gate = .init(credits),
             .pipeline = undefined,
             .allocated_bytes = allocated_bytes,
             .created_at = .now(io, .awake),
             .width = width,
-            .limits = limits_config,
             .plan_config = .{
                 .device_count = platform.devices.len,
                 .block_size = calibration.block_size,
@@ -142,15 +154,13 @@ pub const Loader = struct {
                 .cursor = .{ .provider = provider, .previous = provider.snapshot() },
                 .metrics = &self.metrics,
                 .read_gate = &self.read_gate,
-                .request_gate = &self.request_gate,
-                .limits = limits_config,
                 .width = &self.width,
             };
         }
         errdefer self.stopWorkers();
-        for (0..limits.workers()) |_| try self.worker_group.concurrent(io, workerMain, .{self});
-        if (self.throttle) |*watch| try self.throttle_group.concurrent(io, ThrottleWatch.run, .{ watch, io });
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, feasible_width={d}, retained={Bi:.2}", .{
+        for (0..workers) |_| try self.worker_group.concurrent(io, workerMain, .{self});
+        if (self.throttle) |*watch| try self.worker_group.concurrent(io, ThrottleWatch.run, .{ watch, io });
+        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,
             sizing.request_size,
@@ -159,9 +169,8 @@ pub const Loader = struct {
             calibration.block_size,
             self.pipeline.dma_budget_bytes,
             width,
-            limits.lifecycle,
-            limits.workers(),
-            sizing.feasible_width,
+            credits,
+            workers,
             self.pool.workspace.mapped_bytes,
         });
         return self;
@@ -283,9 +292,9 @@ pub const Loader = struct {
         pool: host_memory.BlockPool,
         request_size: usize,
         maximum_blocks_per_job: usize,
-        feasible_width: usize,
+        /// Requests the pre-grown pinned set holds: the loader's lifecycle
+        /// credits, and one more than its widest possible read width.
         retained_credits: usize,
-        dma_stage_requests: usize,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -333,22 +342,17 @@ pub const Loader = struct {
                 break :pool .{ calibration, request_size, maximum_blocks_per_job, pool };
             };
             errdefer pool.deinit();
-            const feasible_width = try pool.potentialRequestWidth(maximum_blocks_per_job);
-            if (feasible_width == 0) return error.DmaMappedBudgetExceeded;
+            // One read and one request in the DMA stage is the narrowest
+            // pipeline there is; below that the budget cannot load anything.
+            const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job);
+            if (retained_credits < 2) return error.DmaMappedBudgetExceeded;
 
             return .{
                 .calibration = calibration,
                 .pool = pool,
                 .request_size = request_size,
                 .maximum_blocks_per_job = maximum_blocks_per_job,
-                .feasible_width = feasible_width,
-                .retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job),
-                .dma_stage_requests = dmaStageRequests(
-                    calibration.max_in_flight_per_device,
-                    platform.devices.len,
-                    calibration.block_size,
-                    request_size,
-                ),
+                .retained_credits = retained_credits,
             };
         }
     };
@@ -432,7 +436,6 @@ pub const Loader = struct {
         self.request_gate.close(self.io);
         if (self.throttle) |*watch| watch.done.set(self.io);
         self.worker_group.await(self.io) catch {};
-        self.throttle_group.await(self.io) catch {};
     }
 
     fn logBatch(self: *Loader, batch: *const Batch, done_at: std.Io.Timestamp, successful: bool) void {
@@ -2242,8 +2245,6 @@ const ThrottleWatch = struct {
     cursor: ReadStatsCursor,
     metrics: *const Metrics,
     read_gate: *RequestGate,
-    request_gate: *RequestGate,
-    limits: RequestGateLimits.Config,
     /// The loader's width; this task is its only writer while it runs.
     width: *usize,
     /// Reads completed at the last step and the width in flight then: the
@@ -2277,13 +2278,13 @@ const ThrottleWatch = struct {
         const width = self.width.*;
         if (width == 1) return;
         const narrower = width / 2;
-        const limits = self.limits.at(narrower);
-        self.read_gate.setLimit(io, limits.read);
-        self.request_gate.setLimit(io, limits.lifecycle);
+        // Only the read gate narrows: the lifecycle credits are the pinned
+        // capacity, and holding blocks back would not reduce source traffic.
+        self.read_gate.setLimit(io, narrower);
         self.width.* = narrower;
         self.reads_at_step = completed;
         self.settle_reads = width;
-        load_log.debug("source throttled: width {d} -> {d}, lifecycle_credits={d}", .{ width, narrower, limits.lifecycle });
+        load_log.debug("source throttled: width {d} -> {d}", .{ width, narrower });
     }
 };
 
@@ -2341,49 +2342,6 @@ const RequestGate = struct {
         defer self.mutex.unlock(io);
         self.closed = true;
         self.condition.broadcast(io);
-    }
-};
-
-/// Read permits and lifecycle credits at one width. A request holds a
-/// lifecycle credit from its claim to its last DMA callback, so the credits
-/// beyond the read width are the requests the DMA stage can hold and, with
-/// the pinned blocks each holds, bound the pinned memory in use. They are
-/// the pre-grown capacity (`retained`: the source working set plus the
-/// calibrated DMA depth per device), so the DMA stage takes every block
-/// the reads leave free and nothing grows during a load; above that width
-/// the stage keeps `dma_stage` requests, the calibrated in-flight bytes.
-/// One credit beyond the width fed the DMA engines one request at a time:
-/// on a GB300 loading DeepSeek-V4 (pieces of 4 MiB and 256 KiB) that was
-/// 24 GiB/s at width 16 against 44 GiB/s with eight requests queued, and
-/// the workers spent 9 ms per request waiting for a credit against 3 ms
-/// reading. Workers stay at `read + 1`: a worker hands its request to the
-/// DMA stage and claims the next, so credits need no workers of their own.
-const RequestGateLimits = struct {
-    /// What the limits at any width derive from, fixed at creation.
-    const Config = struct {
-        feasible_width: usize,
-        retained: usize,
-        dma_stage: usize,
-
-        fn at(self: Config, width: usize) RequestGateLimits {
-            return .init(width, self.feasible_width, self.retained, self.dma_stage);
-        }
-    };
-
-    read: usize,
-    lifecycle: usize,
-
-    fn init(read: usize, feasible_width: usize, retained: usize, dma_stage: usize) RequestGateLimits {
-        std.debug.assert(feasible_width > 0 and dma_stage > 0);
-        const effective_read = @min(read, feasible_width);
-        return .{
-            .read = effective_read,
-            .lifecycle = @min(feasible_width, @max(effective_read +| dma_stage, retained)),
-        };
-    }
-
-    fn workers(self: RequestGateLimits) usize {
-        return @min(self.lifecycle, self.read +| 1);
     }
 };
 
@@ -2528,16 +2486,6 @@ fn ensureSourceWorkingSet(
         });
     }
     return self.growToBlocks(block_size, target);
-}
-
-/// Requests whose pieces fill the DMA stage: `per_device` blocks of
-/// in-flight bytes on every device, counted in requests of `request_size`.
-/// Calibration pre-grows the same blocks per device as the stage's floor;
-/// the lifecycle credits bound what the stage holds beyond it.
-fn dmaStageRequests(per_device: usize, devices: usize, block_size: usize, request_size: usize) usize {
-    std.debug.assert(request_size > 0);
-    const bytes = per_device * devices * block_size;
-    return @max(@as(usize, 1), bytes / request_size + @intFromBool(bytes % request_size != 0));
 }
 
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
@@ -2692,15 +2640,6 @@ test "loader failures clean up before publication, after publication and during 
             try std.testing.expectError(expected, result);
         }
     }
-}
-
-test "DMA stage requests cover the per-device in-flight bytes" {
-    const mib = 1024 * 1024;
-    try std.testing.expectEqual(@as(usize, 8), dmaStageRequests(8, 1, 16 * mib, 16 * mib));
-    try std.testing.expectEqual(@as(usize, 32), dmaStageRequests(8, 4, 16 * mib, 16 * mib));
-    // A 32 MiB HF request holds two blocks: half as many requests.
-    try std.testing.expectEqual(@as(usize, 4), dmaStageRequests(8, 1, 16 * mib, 32 * mib));
-    try std.testing.expectEqual(@as(usize, 1), dmaStageRequests(1, 1, 16 * mib, 64 * mib));
 }
 
 /// Planning input for the fair-order tests: one job per entry, charged to
@@ -3447,16 +3386,15 @@ test "throttle watch halves the width once the reads in flight at the last step 
     const io = std.testing.io;
     var fake: FakeStatsProvider = .{};
     var metrics: Metrics = .{};
-    const limits: RequestGateLimits.Config = .{ .feasible_width = 64, .retained = 41, .dma_stage = 8 };
     var width: usize = 32;
-    var read_gate: RequestGate = .init(limits.at(width).read);
-    var request_gate: RequestGate = .init(limits.at(width).lifecycle);
+    var read_gate: RequestGate = .init(width);
+    // The lifecycle credits are the pinned capacity and the watch never
+    // touches them.
+    const request_gate: RequestGate = .init(41);
     var watch: ThrottleWatch = .{
         .cursor = .{ .provider = fake.provider(), .previous = fake.provider().snapshot() },
         .metrics = &metrics,
         .read_gate = &read_gate,
-        .request_gate = &request_gate,
-        .limits = limits,
         .width = &width,
     };
 
@@ -3541,25 +3479,6 @@ test "coalesced job block bound is independent of device count" {
         @as(usize, 3),
         try load_limits.maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
     );
-}
-
-test "request lifecycle gate holds the DMA stage beyond the read width" {
-    const config: RequestGateLimits.Config = .{ .feasible_width = 64, .retained = 41, .dma_stage = 8 };
-    const normal = config.at(12);
-    try std.testing.expectEqual(@as(usize, 12), normal.read);
-    try std.testing.expectEqual(@as(usize, 41), normal.lifecycle);
-    try std.testing.expectEqual(@as(usize, 13), normal.workers());
-
-    // Above the retained capacity the stage keeps its calibrated depth.
-    const wide: RequestGateLimits = .init(48, 128, 41, 8);
-    try std.testing.expectEqual(@as(usize, 48), wide.read);
-    try std.testing.expectEqual(@as(usize, 56), wide.lifecycle);
-    try std.testing.expectEqual(@as(usize, 49), wide.workers());
-    // The pinned ceiling clips everything.
-    const clipped: RequestGateLimits = .init(32, 32, 41, 8);
-    try std.testing.expectEqual(@as(usize, 32), clipped.read);
-    try std.testing.expectEqual(@as(usize, 32), clipped.lifecycle);
-    try std.testing.expectEqual(@as(usize, 32), clipped.workers());
 }
 
 fn buildMesh2x2(
