@@ -177,6 +177,9 @@ pub fn forwardMoe(
             stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
             stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
         },
+        .triton_mxfp4 => {
+            stdx.debug.assert(opts.gate_up_layout == .interleaved, "Triton MXFP4 MoE backends require interleaved gate/up columns", .{});
+        },
     }
 
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;

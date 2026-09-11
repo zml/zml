@@ -17,6 +17,8 @@ pub const Config = struct {
     expert_offset: i64 = 0,
     // Swiglu clamping. Set to 0 to disable.
     swiglu_limit: f32,
+    /// Scale SwiGLU before FP8 quantization, or scale the down result before reduction.
+    routing_weight_placement: zml.moe.triton.RoutingWeightPlacement = .before_down,
 
     pub fn validate(c: Config) !void {
         if (c.tokens <= 0 or
@@ -113,7 +115,10 @@ const Route = tri.Kernel(Config, .{ .name = "mxfp4_triton_route", .inputs = &.{"
 const Schedule = tri.Kernel(Config, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = schedule });
 const GateUp = tri.Kernel(Config, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
 const Down = tri.Kernel(Config, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
-const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm" }, .outputs = &.{"y"}, .run = combine });
+const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = combine });
+
+const NarrowUp = tri.Kernel(Config, .{ .name = "mxfp4_triton_narrow_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{"partial"}, .run = narrowUp });
+const FinishUp = tri.Kernel(Config, .{ .name = "mxfp4_triton_finish_up", .inputs = &.{ "partial", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = finishUp });
 
 pub fn forward(c: Config, a: Inputs) zml.Tensor {
     c.validate() catch @panic("Invalid MXFP4 MoE configuration");
@@ -164,7 +169,21 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
         sched = s.sched;
     }
 
-    const m = GateUp.call(
+    // Small batches benefit from twice as many up-projection CTAs and a
+    // smaller shared-memory tile. Keep the per-128 FP8 scale reduction in
+    // a separate epilogue so narrowing the GEMM does not change quantization.
+    const m = if (c.tokens <= 8) blk: {
+        const partial = NarrowUp.call(
+            .{ .q = q.q, .s = q.s, .w = a.w1, .ws = a.s1.bitCast(.u8), .ids = a.ids, .rw = a.scales, .map = map, .sched = sched },
+            .{ .partial = .init(.{ tile_count * bn, 2 * c.intermediate }, .f32) },
+            .{ .cfg = c, .grid = .{ @intCast(@divTrunc(c.intermediate, 64)), @intCast(tile_count), 1 }, .num_warps = 4, .num_stages = 2, .global_scratch_memory_size = @intCast(128 * @divTrunc(c.intermediate, 64) * tile_count) },
+        );
+        break :blk FinishUp.call(
+            .{ .partial = partial.partial, .ids = a.ids, .rw = a.scales, .map = map, .sched = sched },
+            .{ .mid = .init(.{ tile_count * bn, c.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(c.intermediate, 128) }, .u8) },
+            .{ .cfg = c, .grid = .{ @intCast(@divTrunc(c.intermediate, 128)), @intCast(tile_count), 1 }, .num_warps = 4, .num_stages = 1 },
+        );
+    } else GateUp.call(
         .{ .q = q.q, .s = q.s, .w = a.w1, .ws = a.s1.bitCast(.u8), .ids = a.ids, .rw = a.scales, .map = map, .sched = sched },
         .{ .mid = .init(.{ tile_count * bn, c.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(c.intermediate, 128) }, .u8) },
         .{
@@ -182,14 +201,14 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
         .{
             .cfg = c,
             .grid = .{ @intCast(@divTrunc(c.hidden, 128)), @intCast(tile_count), 1 },
-            .num_warps = 8,
+            .num_warps = if (c.tokens <= 8) 4 else 8,
             .num_stages = 2,
             .global_scratch_memory_size = @intCast(128 * @divTrunc(c.hidden, 128) * tile_count),
         },
     );
 
     return Combine.call(
-        .{ .d = d.d, .ids = a.ids, .perm = perm },
+        .{ .d = d.d, .ids = a.ids, .perm = perm, .rw = a.scales },
         .{ .y = a.x.shape() },
         .{
             .cfg = c,
@@ -264,15 +283,22 @@ fn schedule(b: *B, c: Config) tri.FinishError!void {
 }
 
 fn gateUp(b: *B, c: Config) tri.FinishError!void {
-    return gemm(b, c, true);
+    return gemm(b, c, .gate_up);
 }
 
 fn down(b: *B, c: Config) tri.FinishError!void {
-    return gemm(b, c, false);
+    return gemm(b, c, .down);
 }
 
-fn gemm(b: *B, c: Config, comptime is_up: bool) tri.FinishError!void {
-    const a = if (is_up) try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .mid = .{ .ptr = .f8e4m3fn }, .ms = .{ .ptr = .i8 } }) else try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .d = .{ .ptr = .bf16 } });
+fn narrowUp(b: *B, c: Config) tri.FinishError!void {
+    return gemm(b, c, .narrow_up);
+}
+
+const Projection = enum { gate_up, narrow_up, down };
+
+fn gemm(b: *B, c: Config, comptime projection: Projection) tri.FinishError!void {
+    const is_up = projection != .down;
+    const a = if (projection == .narrow_up) try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .partial = .{ .ptr = .f32 } }) else if (is_up) try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .mid = .{ .ptr = .f8e4m3fn }, .ms = .{ .ptr = .i8 } }) else try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .d = .{ .ptr = .bf16 } });
     const block = b.programId(.x);
     const tile = b.programId(.y);
     const n = ar(b, bn);
@@ -282,7 +308,7 @@ fn gemm(b: *B, c: Config, comptime is_up: bool) tri.FinishError!void {
     var live = b.openIf(valid);
     const count = if (c.tokens == 1) ci(b, 1) else b.load(a.sched.addPtr(nt).addPtr(tile));
     const pair = if (c.tokens == 1) b.full(&.{bn}, 0, .i32).add(tile) else if (is_up) ld(b, a.map.addPtr(tile.mul(bn).add(n)), n.lt(count), .i32, 0) else n;
-    const width = if (is_up) 256 else 128;
+    const width = if (projection == .gate_up) 256 else 128;
     const ksize = if (is_up) c.hidden else c.intermediate;
     const rows = if (is_up) 2 * c.intermediate else c.hidden;
     const m = block.mul(width).add(ar(b, width));
@@ -298,41 +324,52 @@ fn gemm(b: *B, c: Config, comptime is_up: bool) tri.FinishError!void {
     const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * ss(ksize))).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
     var mask = kk.expandDims(0).lt(ksize);
     var smask = sk.expandDims(0).lt(@divTrunc(ksize, 32));
-    if (is_up or c.tokens == 1) {
+    // The small-batch epilogue leaves padded rows unwritten.
+    if (is_up or c.tokens <= 8) {
         mask = mask.bitAnd(n.lt(count).expandDims(1));
         smask = smask.bitAnd(n.lt(count).expandDims(1));
     }
     const x = ld(b, a.q.addPtr(row.expandDims(1).mul(ksize).add(kk.expandDims(0))), mask, .f8e4m3fn, 0);
     const xs = ld(b, a.s.addPtr(row.expandDims(1).mul(@divTrunc(ksize, 128)).add(sk.div(4).expandDims(0))), smask, .i8, 127);
     loop.yield(.{b.dotScaled(w, b.permute(x, &.{ 1, 0 }), loop.carried[0], ws, xs, .e2m1, .e4m3)});
-    const epilogue_n: i64 = if (c.tokens == 1) 1 else bn;
-    const out_n = ar(b, epilogue_n);
-    const acc = if (c.tokens == 1) live_row: {
-        // The remaining MMA columns are padding during single-token decode.
-        // Extract column zero before activation/reduction and output stores.
-        var v = loop.results[0];
-        var cols: i64 = bn;
-        while (cols > 1) : (cols = @divTrunc(cols, 2)) {
-            v = b.split(b.reshape(v, &.{ width, @divTrunc(cols, 2), 2 }))[0];
-        }
-        break :live_row b.reshape(v, &.{ 1, width }).to(.bf16);
-    } else b.permute(loop.results[0], &.{ 1, 0 }).to(.bf16);
-    if (is_up) {
-        const halves = b.split(b.reshape(acc.to(.f32), &.{ epilogue_n, 128, 2 }));
-        var g = halves[0];
-        var u = halves[1];
-        if (c.swiglu_limit > 0) {
-            g = g.minimum(c.swiglu_limit);
-            u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
-        }
-        const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, 128 }, .f32, "libdevice", "", "__nv_expf");
-        const mid = u.mul(b.divRn(g, ex.add(1.0)));
-        const rw = if (c.tokens == 1) b.load(a.rw.addPtr(tile)) else ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
-        const q = quant128(b, mid.mul(rw).to(.bf16).to(.f32));
-        const col = block.mul(128).add(ar(b, 128));
-        b.store(a.mid.addPtr(tile.mul(bn).add(out_n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
-        b.store(a.ms.addPtr(tile.mul(bn).add(out_n).mul(@divTrunc(c.intermediate, 128)).add(block)), q.s);
-    } else b.store(a.d.addPtr(tile.mul(bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
+    if (projection == .narrow_up) {
+        // Store only live rows; the separate epilogue joins adjacent 128-row
+        // GEMM tiles before computing each per-128 activation scale.
+        const acc = b.permute(loop.results[0], &.{ 1, 0 });
+        b.storeOpts(a.partial.addPtr(tile.mul(bn).add(n).expandDims(1).mul(rows).add(m.expandDims(0))), acc, .{ .mask = n.lt(count).expandDims(1) });
+    } else {
+        const epilogue_n: i64 = if (c.tokens == 1) 1 else bn;
+        const out_n = ar(b, epilogue_n);
+        const acc = if (c.tokens == 1) live_row: {
+            // The remaining MMA columns are padding during single-token decode.
+            // Extract column zero before activation/reduction and output stores.
+            var v = loop.results[0];
+            var cols: i64 = bn;
+            while (cols > 1) : (cols = @divTrunc(cols, 2)) {
+                v = b.split(b.reshape(v, &.{ width, @divTrunc(cols, 2), 2 }))[0];
+            }
+            break :live_row b.reshape(v, &.{ 1, width }).to(.bf16);
+        } else b.permute(loop.results[0], &.{ 1, 0 }).to(.bf16);
+        if (is_up) {
+            const halves = b.split(b.reshape(acc.to(.f32), &.{ epilogue_n, 128, 2 }));
+            var g = halves[0];
+            var u = halves[1];
+            if (c.swiglu_limit > 0) {
+                g = g.minimum(c.swiglu_limit);
+                u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
+            }
+            const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, 128 }, .f32, "libdevice", "", "__nv_expf");
+            var mid = u.mul(b.divRn(g, ex.add(1.0)));
+            if (c.routing_weight_placement == .before_down) {
+                const rw = if (c.tokens == 1) b.load(a.rw.addPtr(tile)) else ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
+                mid = mid.mul(rw);
+            }
+            const q = quant128(b, mid.to(.bf16).to(.f32));
+            const col = block.mul(128).add(ar(b, 128));
+            b.store(a.mid.addPtr(tile.mul(bn).add(out_n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
+            b.store(a.ms.addPtr(tile.mul(bn).add(out_n).mul(@divTrunc(c.intermediate, 128)).add(block)), q.s);
+        } else b.store(a.d.addPtr(tile.mul(bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
+    }
     live.yieldThen(.{});
 }
 
@@ -341,7 +378,7 @@ fn combine(b: *B, c: Config) tri.FinishError!void {
 }
 
 fn combineWithBn(b: *B, c: Config, tile_n: i64) tri.FinishError!void {
-    const a = try b.declareArgs(.{ .d = .{ .ptr = .bf16 }, .ids = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .y = .{ .ptr = .bf16 } });
+    const a = try b.declareArgs(.{ .d = .{ .ptr = .bf16 }, .ids = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .y = .{ .ptr = .bf16 } });
     const t = b.programId(.x);
     const block = combineBlock(c);
     const h = b.programId(.y).mul(block).add(ar(b, block));
@@ -353,7 +390,45 @@ fn combineWithBn(b: *B, c: Config, tile_n: i64) tri.FinishError!void {
             const e = b.load(a.ids.addPtr(pair)).sub(ci(b, c.expert_offset));
             break :v e.ge(0).bitAnd(e.lt(c.experts));
         } else row.ge(0);
-        acc = acc.add(ld(b, a.d.addPtr(row.mul(c.hidden).add(h)), valid.bitAnd(h.lt(c.hidden)), .bf16, 0).to(.f32));
+        var value = ld(b, a.d.addPtr(row.mul(c.hidden).add(h)), valid.bitAnd(h.lt(c.hidden)), .bf16, 0).to(.f32);
+        if (c.routing_weight_placement == .after_down) {
+            value = value.mul(ld(b, a.rw.addPtr(pair), valid, .f32, 0));
+        }
+        acc = acc.add(value);
     }
     b.storeOpts(a.y.addPtr(t.mul(c.hidden).add(h)), acc.to(.bf16), .{ .mask = h.lt(c.hidden) });
+}
+
+fn finishUp(b: *B, c: Config) tri.FinishError!void {
+    const a = try b.declareArgs(.{ .partial = .{ .ptr = .f32 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .mid = .{ .ptr = .f8e4m3fn }, .ms = .{ .ptr = .i8 } });
+    const block = b.programId(.x);
+    const tile = b.programId(.y);
+    const nt = tiles(c);
+    const expert = if (c.tokens == 1) b.load(a.ids.addPtr(tile)).sub(ci(b, c.expert_offset)) else ld(b, a.sched.addPtr(tile), tile.lt(b.load(a.sched.addPtr(2 * nt))), .i32, 0);
+    const valid = if (c.tokens == 1) expert.ge(0).bitAnd(expert.lt(c.experts)) else tile.lt(b.load(a.sched.addPtr(2 * nt)));
+    var live = b.openIf(valid);
+    const count = if (c.tokens == 1) ci(b, 1) else b.load(a.sched.addPtr(nt).addPtr(tile));
+    const epilogue_n = pow2(c.tokens);
+    const n = ar(b, epilogue_n);
+    const m = block.mul(256).add(ar(b, 256));
+    const acc = ld(b, a.partial.addPtr(tile.mul(bn).add(n).expandDims(1).mul(2 * c.intermediate).add(m.expandDims(0))), n.lt(count).expandDims(1), .f32, 0).to(.bf16).to(.f32);
+    const halves = b.split(b.reshape(acc, &.{ epilogue_n, 128, 2 }));
+    var g = halves[0];
+    var u = halves[1];
+    if (c.swiglu_limit > 0) {
+        g = g.minimum(c.swiglu_limit);
+        u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
+    }
+    const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, 128 }, .f32, "libdevice", "", "__nv_expf");
+    var mid = u.mul(b.divRn(g, ex.add(1.0)));
+    if (c.routing_weight_placement == .before_down) {
+        const pair = if (c.tokens == 1) b.full(&.{epilogue_n}, 0, .i32).add(tile) else ld(b, a.map.addPtr(tile.mul(bn).add(n)), n.lt(count), .i32, 0);
+        const rw = ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
+        mid = mid.mul(rw);
+    }
+    const q = quant128(b, mid.to(.bf16).to(.f32));
+    const col = block.mul(128).add(ar(b, 128));
+    b.store(a.mid.addPtr(tile.mul(bn).add(n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
+    b.store(a.ms.addPtr(tile.mul(bn).add(n).mul(@divTrunc(c.intermediate, 128)).add(block)), q.s);
+    live.yieldThen(.{});
 }

@@ -58,6 +58,7 @@ pub fn fusedExperts(
         .global_experts = gate_up.weight.dim(.expert),
         .topk = parameters.num_experts_per_tok,
         .limit = options.activation_threshold orelse 0,
+        .routing_weight_placement = options.routing_weight_placement,
         .expert_parallel = expert_parallelism,
     };
 
@@ -78,6 +79,7 @@ const Context = struct {
     global_experts: i64,
     topk: i64,
     limit: f32,
+    routing_weight_placement: zml.moe.triton.RoutingWeightPlacement,
     expert_parallel: bool,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
@@ -100,6 +102,7 @@ const Context = struct {
             .global_experts = self.global_experts,
             .topk = self.topk,
             .swiglu_limit = self.limit,
+            .routing_weight_placement = self.routing_weight_placement,
         };
 
         const result = kernels.forward(cfg, .{
