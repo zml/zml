@@ -50,6 +50,7 @@ pub fn call(opts: shared.GemmOptions) Tensor {
             .mxfp4, .mxfp8 => scale.bitCast(.u8),
             .fp8_per_channel => scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }),
             .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
+            .fp8_block32 => scale.convert(.f32),
             .fp8_block128, .nvfp4 => scale,
         };
     } else null;
@@ -262,6 +263,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
         .mxfp8 => .{ 32, .u8, 1e-10 },
         .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
         .fp8_block128 => .{ 128, .f32, 1e-10 },
+        .fp8_block32 => .{ 32, .f32, 1e-10 },
         .mxfp4, .nvfp4 => unreachable,
     };
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
