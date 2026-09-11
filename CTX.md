@@ -3433,6 +3433,10 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   initialiser are gone; `create` still derives `group`, `staging_slots`,
   `tensor_workers` and `permits` from the parameter, so the TPU, neuron and
   metal values are identical. Nothing read the field.
+- Task 2 (C02), dead `Scratch.execution`: the admission scratch is four
+  `u64` slices in one allocation (room, allocated, inputs, placed); the
+  unread fifth is gone. `admit` still fills `inputs` and `submit` still
+  fills `placed`.
 
 ## Open work
 

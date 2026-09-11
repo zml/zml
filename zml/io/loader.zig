@@ -73,13 +73,12 @@ pub const Loader = struct {
     scratch: Scratch,
 
     const Scratch = struct {
-        /// The five `u64` slices below, one allocation.
+        /// The four `u64` slices below, one allocation.
         words: []u64,
         stats: []admission.DeviceStats,
         room: []u64,
         allocated: []u64,
         inputs: []u64,
-        execution: []u64,
         placed: []u64,
     };
 
@@ -158,7 +157,7 @@ pub const Loader = struct {
         @memset(pending_execution, 0);
         const stats = try allocator.alloc(admission.DeviceStats, devices);
         errdefer allocator.free(stats);
-        const words = try allocator.alloc(u64, 5 * devices);
+        const words = try allocator.alloc(u64, 4 * devices);
         errdefer allocator.free(words);
         var self: Loader = .{
             .allocator = allocator,
@@ -174,8 +173,7 @@ pub const Loader = struct {
                 .room = words[0..devices],
                 .allocated = words[devices .. 2 * devices],
                 .inputs = words[2 * devices .. 3 * devices],
-                .execution = words[3 * devices .. 4 * devices],
-                .placed = words[4 * devices .. 5 * devices],
+                .placed = words[3 * devices .. 4 * devices],
             },
         };
         self.memory_supported = self.probeMemory();

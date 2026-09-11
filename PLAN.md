@@ -63,13 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 2. Dead `Scratch.execution` slice (C02, 3 lines).
-  `zml/io/loader.zig`: drop the field at `:82` and the slice at `:177`,
-  re-index `placed` to `words[3 * devices .. 4 * devices]`, change
-  `5 * devices` to `4 * devices` at `:161`, fix the comment at `:77` ("five"
-  to "four"). Leave `admit`'s `inputs` loop and `submit`'s `placed` loop as
-  they are (the bulk path's only placement computation).
-
 - [ ] 3. Drop `execute_submissions` (C30, 3 lines).
   `zml/io/loader.zig`: the field at `:67`, its increment at `:438`, the
   `execute_submissions={d}` field and argument in `logAdmission` (`:473-475`).
