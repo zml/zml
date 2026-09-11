@@ -182,7 +182,7 @@ pub const Loader = struct {
     /// Decided once: the CPU plugin logs an unimplemented warning on every
     /// stats call, so admission never asks a device that answered nothing.
     fn probeMemory(self: *Loader) bool {
-        if (!self.backend.allocatedBytesPerDevice(self.scratch.allocated)) return false;
+        if (self.backend != .direct) return false;
         for (self.platform.devices) |device| {
             if (device.memoryStats().bytes_limit == null) return false;
         }
@@ -377,7 +377,7 @@ pub const Loader = struct {
             const reported = device.memoryStats();
             stats.* = .{ .bytes_limit = reported.bytes_limit, .bytes_in_use = reported.bytes_in_use };
         }
-        if (!self.backend.allocatedBytesPerDevice(self.scratch.allocated)) return false;
+        self.backend.allocatedBytesPerDevice(self.scratch.allocated);
         if (!admission.roomPerDevice(self.scratch.room, self.scratch.stats, self.submitted_bytes, self.scratch.allocated, admission.reserve_bytes)) return false;
         for (self.scratch.room) |room| self.min_room_seen = @min(self.min_room_seen orelse room, room);
         return true;
@@ -1011,7 +1011,7 @@ test "submitted bytes match the backend's allocations once everything landed" {
     try loader.awaitAll();
     defer first.deinit();
     var allocated = [_]u64{0};
-    try std.testing.expect(loader.backend.allocatedBytesPerDevice(&allocated));
+    loader.backend.allocatedBytesPerDevice(&allocated);
     // The executable's input shell and the bulk output, on the one device.
     try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, allocated[0]);
     try std.testing.expectEqual(loader.submitted_bytes[0], allocated[0]);

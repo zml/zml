@@ -3468,6 +3468,10 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   there is an event or an error to destroy, which is what the fixture with
   an undefined platform relies on (the first attempt read the api eagerly
   and faulted that test).
+- Task 8 (C23), `allocatedBytesPerDevice` without the bool: the seam reads
+  the direct payload and returns `void`; `probeMemory` refuses a buffered
+  backend before any `memoryStats` call, so the CPU and TPU stats
+  behaviour is unchanged, and `readRoom` calls it plainly.
 
 ## Open work
 

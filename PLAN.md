@@ -63,17 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 8. `allocatedBytesPerDevice` without the bool (C23, 6 lines).
-  `zml/io/backend.zig:85-96` becomes a `void` method reading the direct
-  payload: `for (out, self.direct.allocated_bytes) |*bytes, *counter| bytes.*
-  = counter.load(.acquire);`, doc: only the direct backend counts and the
-  front end never asks the buffered one. `zml/io/loader.zig:188` becomes
-  `if (self.backend != .direct) return false;` (before any
-  `device.memoryStats()` call, so CPU/TPU stats behaviour is unchanged);
-  `:388` becomes the plain call; test `:1024` becomes a plain call before its
-  two `expectEqual`s. The per-device atomic counters and their refresh in
-  `readRoom` stay (fourteenth-pass room numbers).
-
 - [ ] 9. One no-VFS load profile (C21, 12 lines).
   Delete `LoadProfile.default` (`vfs/vfs.zig:66-75`) and make
   `LoadProfile.local` (8 MiB, not high latency, null alignment, null stats)
