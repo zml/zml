@@ -3499,6 +3499,13 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   recording) and the front-end test that covered the post-sizing errdefer
   path now does it with an invalid alignment (`.local` with
   `direct_io_alignment = 3` and `direct_io = .on`, `InvalidLoadProfile`).
+- Task 12 (C10), dead pool surface: `BlockPool.newly_mapped_bytes`,
+  `unused_tail_bytes` and `pub const Error = anyerror` are gone
+  (`acquireMany` returns `!void`), and `init` no longer re-sums the arenas
+  to compare against `workspace.mapped_bytes`: `attachArena` still refuses a
+  zero-length arena and the block-size and ceiling checks stay. `findArena`
+  and `initForTesting` stay (two production callers in
+  `dma_calibration.zig`).
 
 ## Open work
 

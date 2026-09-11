@@ -63,18 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 12. Dead Workspace and BlockPool surface (C10, 27 lines).
-  `zml/io/host_memory.zig`: delete `newly_mapped_bytes` and
-  `unused_tail_bytes` (`:464-465`, increments `:605` and `:624`, assertions
-  `:858`, `:1004`, `:1011-1012`, `:1039`, the "reported unused" clause in the
-  `BlockPool.init` doc `:470-471`); delete `pub const Error = anyerror`
-  (`:428`) and make `acquireMany` return `!void`; remove the
-  `enumerated_bytes` accumulator and its `!= mapped_bytes` return in
-  `BlockPool.init` (`:494-500`), keeping the `block_size == 0 /
-  max_mapped_bytes` check and the zero-length arena check in `attachArena`.
-  Keep `findArena` (two production callers: `dma_calibration.zig:169`,
-  `:520`) and `initForTesting`. `Workspace.Options` went with task 11.
-
 - [ ] 13. host_memory backend union (C09, 20 lines).
   `Backend = union(enum) { pjrt_host: PjrtHost, pages: Pages }`
   (`zml/io/host_memory.zig:25-28`); `HugePageAllocator.init` takes

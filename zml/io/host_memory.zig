@@ -420,8 +420,6 @@ pub const Workspace = struct {
 /// raw local/remote H2D both reached ~49-50 GiB/s per GPU, while a single
 /// CPU thread copied across sockets at only 5-10 GiB/s.
 pub const BlockPool = struct {
-    pub const Error = anyerror;
-
     pub const Block = []u8;
 
     pub const Lease = struct {
@@ -456,8 +454,6 @@ pub const BlockPool = struct {
     /// Blocks kept mapped as the growth floor: the DMA stage of every device.
     reserve: usize,
     capacity: usize = 0,
-    newly_mapped_bytes: usize = 0,
-    unused_tail_bytes: usize = 0,
     slab_blocks: usize,
     in_use: usize = 0,
     high_water: usize = 0,
@@ -466,7 +462,7 @@ pub const BlockPool = struct {
     condition: std.Io.Condition = .init,
 
     /// Builds a fresh free-list view from every retained arena. Arena tails
-    /// smaller than one selected block remain mapped and are reported unused.
+    /// smaller than one selected block remain mapped and unused.
     /// Consumes and invalidates workspace on success; on failure the caller
     /// retains ownership. Calibration borrows must have ended before this call.
     pub fn init(
@@ -486,13 +482,9 @@ pub const BlockPool = struct {
             .slab_blocks = @max(@as(usize, 1), default_slab_size / block_size),
         };
         errdefer self.free_blocks.deinit(allocator);
-        var enumerated_bytes: usize = 0;
         for (0..workspace.backend.arenaCount()) |index| {
-            const arena = workspace.backend.arenaAt(index);
-            enumerated_bytes += arena.len;
-            try self.attachArena(arena);
+            try self.attachArena(workspace.backend.arenaAt(index));
         }
-        if (enumerated_bytes != mapped_bytes) return error.InvalidDmaWorkspace;
         if (self.reservedGrowthBlocks() > self.remainingBlockBudget())
             return error.RequestExceedsCapacity;
         workspace.* = undefined;
@@ -509,7 +501,7 @@ pub const BlockPool = struct {
     /// Leases `output.len` blocks atomically, mapping a slab when the free
     /// list is short and the budget allows, otherwise waiting for releases.
     /// Allocates nothing once its arenas are attached.
-    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) Error!void {
+    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) !void {
         if (output.len == 0) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -597,7 +589,6 @@ pub const BlockPool = struct {
         const slab = try self.workspace.allocate(slab_len);
         std.debug.assert(slab.len == slab_len);
         self.attachArenaAssumeCapacity(slab);
-        self.newly_mapped_bytes += slab.len;
     }
 
     fn attachArena(self: *BlockPool, arena: []u8) !void {
@@ -616,7 +607,6 @@ pub const BlockPool = struct {
             self.free_blocks.appendAssumeCapacity(arena[index * self.block_size ..][0..self.block_size]);
         }
         self.capacity += block_count;
-        self.unused_tail_bytes += arena.len % self.block_size;
     }
 };
 
@@ -850,7 +840,6 @@ test "BlockPool acquires request blocks atomically" {
     try pool.acquireMany(io, &first);
     try std.testing.expectEqual(@as(usize, 3 * 64), pool.high_water * pool.block_size);
     try std.testing.expectEqual(@as(usize, 4 * 64), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 4 * 64), pool.newly_mapped_bytes);
     var oversized: [5]BlockPool.Block = undefined;
     try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &oversized));
 
@@ -996,15 +985,12 @@ test "BlockPool reblocks retained arenas and grows on demand" {
     };
     defer pool.deinit();
     try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 29), pool.unused_tail_bytes);
     try std.testing.expectEqual(@as(usize, 4), try pool.retainedRequestWidth(1));
 
     var blocks: [5]BlockPool.Block = undefined;
     try pool.acquireMany(io, &blocks);
     try std.testing.expectEqual(@as(usize, 4), pool.workspace.backend.arenaCount());
     try std.testing.expectEqual(@as(usize, 349), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 64), pool.newly_mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 29), pool.unused_tail_bytes);
     try std.testing.expectEqual(@as(usize, 5 * 64), pool.high_water * pool.block_size);
     pool.releaseMany(io, &blocks);
 }
@@ -1031,7 +1017,6 @@ test "BlockPool potential request width accounts for retained arena tails" {
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(usize, 4), pool.reserve);
-    try std.testing.expectEqual(@as(usize, 126), pool.unused_tail_bytes);
     try std.testing.expectEqual(@as(usize, 3), try pool.potentialRequestWidth(2));
     try std.testing.expectEqual(@as(usize, 0), try pool.potentialRequestWidth(8));
     try std.testing.expectError(error.InvalidRequestBlockCount, pool.potentialRequestWidth(0));
