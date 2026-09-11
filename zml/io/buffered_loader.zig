@@ -27,9 +27,6 @@ pub const Loader = struct {
     /// The load profile's minimum read size: one tensor becomes this many
     /// bytes per positional read.
     read_chunk_size: usize,
-    /// Reads the source may carry at once, across tensors and across one
-    /// tensor's chunks.
-    read_parallelism: usize,
     /// The widest fan-out one tensor may take. One on a source whose reads
     /// are bandwidth-bound rather than round-trip bound: splitting there only
     /// spends tasks, and measurably so -- a replicated local load, whose long
@@ -59,7 +56,6 @@ pub const Loader = struct {
             .group = .init(read_parallelism),
             .staging_slots = @min(read_parallelism, staging_tensors),
             .read_chunk_size = profile.read_chunk_size,
-            .read_parallelism = read_parallelism,
             // A high-latency source may use spare read permits to split a
             // tensor already staging: more concurrency without more host memory.
             .tensor_workers = if (profile.high_latency) read_parallelism else 1,

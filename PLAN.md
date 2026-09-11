@@ -63,12 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 1. `buffered_loader.Loader.read_parallelism` (C01, 4 lines).
-  Delete the field and its doc at `zml/io/buffered_loader.zig:30-32` and the
-  initialiser at `:62`. `create()` keeps deriving `group`, `staging_slots`,
-  `tensor_workers` and `permits` from the parameter (`:59-66`); nothing reads
-  the field (grep `self.read_parallelism`: no hits). TPU: identical values.
-
 - [ ] 2. Dead `Scratch.execution` slice (C02, 3 lines).
   `zml/io/loader.zig`: drop the field at `:82` and the slice at `:177`,
   re-index `placed` to `words[3 * devices .. 4 * devices]`, change

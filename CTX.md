@@ -3423,6 +3423,17 @@ must pass `vfs.loadProfile(model)`.
   ledger and `Item` reshapes (net zero lines); folding `stop` into `fail`;
   inlining `initBuffered`; a `Batch` union for `Submission`.
 
+### Implementation log
+
+Landed in order, each as its own commit, validated with `zig fmt --check`,
+`bazel test //zml:test //vfs:test` and the three example builds unless the
+entry says otherwise. `PLAN.md` loses a task as it lands.
+
+- Task 1 (C01), `buffered_loader.Loader.read_parallelism`: the field and its
+  initialiser are gone; `create` still derives `group`, `staging_slots`,
+  `tensor_workers` and `permits` from the parameter, so the TPU, neuron and
+  metal values are identical. Nothing read the field.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
