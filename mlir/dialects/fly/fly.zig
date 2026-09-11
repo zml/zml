@@ -4,6 +4,14 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const attributes = @import("attributes.zig");
+pub const rocdl = @import("rocdl.zig");
+pub const types = @import("types.zig");
+
+pub const AddressSpace = attributes.AddressSpace;
+pub const GemmTraversalOrder = attributes.GemmTraversalOrder;
+pub const MmaOperand = attributes.MmaOperand;
+
 /// `gpu`/`rocdl` for `gpu.func` kernels and the ROCDL escape hatches; `ub`
 /// because fly ops may fold to `ub.poison`.
 pub const dialects_needed = [_][]const u8{ "func", "arith", "scf", "math", "vector", "memref", "llvm", "gpu", "rocdl", "ub", "fly", "fly_rocdl" };
@@ -52,30 +60,30 @@ pub fn make(ctx: *mlir.Context, name: []const u8, args: mlir.Operation.MakeArgs)
 }
 
 /// Result type inferred by FlyDSL.
-pub fn inferred(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes: Attrs, location: *const mlir.Location) *mlir.Operation {
+pub fn inferred(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
     return make(ctx, opName(mnemonic), .{
         .operands = .{ .flat = operands },
         .result_type_inference = true,
-        .attributes = attributes.constSlice(),
+        .attributes = attributes_.constSlice(),
         .location = location,
     });
 }
 
 /// Explicit result types.
-pub fn typed(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, results: []const *const mlir.Type, attributes: Attrs, location: *const mlir.Location) *mlir.Operation {
+pub fn typed(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, results: []const *const mlir.Type, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
     return make(ctx, opName(mnemonic), .{
         .operands = .{ .flat = operands },
         .results = .{ .flat = results },
-        .attributes = attributes.constSlice(),
+        .attributes = attributes_.constSlice(),
         .location = location,
     });
 }
 
 /// No results.
-pub fn effect(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes: Attrs, location: *const mlir.Location) *mlir.Operation {
+pub fn effect(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
     return make(ctx, opName(mnemonic), .{
         .operands = .{ .flat = operands },
-        .attributes = attributes.constSlice(),
+        .attributes = attributes_.constSlice(),
         .location = location,
     });
 }
@@ -89,168 +97,84 @@ pub fn parseAttr(ctx: *mlir.Context, text: []const u8) *const mlir.Attribute {
     return mlir.Attribute.parse(ctx, text) catch std.debug.panic("fly: cannot parse attribute `{s}`", .{text});
 }
 
-pub const MmaOperand = enum { a, b, c, d };
-
-pub fn mmaOperandAttr(ctx: *mlir.Context, operand: MmaOperand) *const mlir.Attribute {
-    return switch (operand) {
-        inline else => |o| parseAttr(ctx, "#fly<mma_operand " ++ @tagName(o) ++ ">"),
-    };
-}
-
-pub const GemmTraversalOrder = enum { kmn, knm, mkn, mnk, nkm, nmk, kmn_serpentine, knm_serpentine, mkn_serpentine, mnk_serpentine, nkm_serpentine, nmk_serpentine };
-
-pub fn gemmTraversalOrderAttr(ctx: *mlir.Context, order: GemmTraversalOrder) *const mlir.Attribute {
-    return switch (order) {
-        inline else => |o| parseAttr(ctx, "#fly<gemm_traversal_order " ++ @tagName(o) ++ ">"),
-    };
-}
-
-/// Layouts FlyDSL computes from an atom's traits; each yields a
-/// `!fly.layout` or `!fly.int_tuple` type.
-pub const Derived = enum {
-    copy_atom_thr_layout,
-    copy_atom_tv_layout_src,
-    copy_atom_tv_layout_dst,
-    copy_atom_tv_layout_ref,
-    mma_atom_thr_layout,
-    mma_atom_shape_mnk,
-    mma_atom_tv_layout_a,
-    mma_atom_tv_layout_b,
-    mma_atom_tv_layout_c,
-    tiled_copy_tiled_tv_layout_src,
-    tiled_copy_tiled_tv_layout_dst,
-    tiled_mma_tile_size_mnk,
-    tiled_mma_thr_layout_vmnk,
-    tiled_mma_tiled_tv_layout_a,
-    tiled_mma_tiled_tv_layout_b,
-    tiled_mma_tiled_tv_layout_c,
+pub const TypeKind = enum {
+    memref,
+    coord_tensor,
+    ptr,
+    int_tuple,
+    layout,
+    composed_layout,
+    tile,
+    swizzle,
+    copy_atom,
+    mma_atom,
+    tiled_copy,
+    tiled_mma,
+    other,
 };
 
-/// Panics if `ty` is not the kind the accessor expects.
-pub fn derived(which: Derived, ty: *const mlir.Type) *const mlir.Type {
-    const raw = switch (which) {
-        .copy_atom_thr_layout => c.zmlFlyCopyAtomThrLayout(ty.ptr()),
-        .copy_atom_tv_layout_src => c.zmlFlyCopyAtomTvLayoutSrc(ty.ptr()),
-        .copy_atom_tv_layout_dst => c.zmlFlyCopyAtomTvLayoutDst(ty.ptr()),
-        .copy_atom_tv_layout_ref => c.zmlFlyCopyAtomTvLayoutRef(ty.ptr()),
-        .mma_atom_thr_layout => c.zmlFlyMmaAtomThrLayout(ty.ptr()),
-        .mma_atom_shape_mnk => c.zmlFlyMmaAtomShapeMNK(ty.ptr()),
-        .mma_atom_tv_layout_a => c.zmlFlyMmaAtomTvLayoutA(ty.ptr()),
-        .mma_atom_tv_layout_b => c.zmlFlyMmaAtomTvLayoutB(ty.ptr()),
-        .mma_atom_tv_layout_c => c.zmlFlyMmaAtomTvLayoutC(ty.ptr()),
-        .tiled_copy_tiled_tv_layout_src => c.zmlFlyTiledCopyTiledTvLayoutSrc(ty.ptr()),
-        .tiled_copy_tiled_tv_layout_dst => c.zmlFlyTiledCopyTiledTvLayoutDst(ty.ptr()),
-        .tiled_mma_tile_size_mnk => c.zmlFlyTiledMmaTileSizeMNK(ty.ptr()),
-        .tiled_mma_thr_layout_vmnk => c.zmlFlyTiledMmaThrLayoutVMNK(ty.ptr()),
-        .tiled_mma_tiled_tv_layout_a => c.zmlFlyTiledMmaTiledTvLayoutA(ty.ptr()),
-        .tiled_mma_tiled_tv_layout_b => c.zmlFlyTiledMmaTiledTvLayoutB(ty.ptr()),
-        .tiled_mma_tiled_tv_layout_c => c.zmlFlyTiledMmaTiledTvLayoutC(ty.ptr()),
+pub fn KindType(comptime kind: TypeKind) type {
+    return switch (kind) {
+        .memref => types.MemRefType,
+        .coord_tensor => types.CoordTensorType,
+        .ptr => types.PointerType,
+        .int_tuple => types.IntTupleType,
+        .layout => types.LayoutType,
+        .composed_layout => types.ComposedLayoutType,
+        .tile => types.TileType,
+        .swizzle => types.SwizzleType,
+        .copy_atom => types.CopyAtomType,
+        .mma_atom => types.MmaAtomType,
+        .tiled_copy => types.TiledCopyType,
+        .tiled_mma => types.TiledMmaType,
+        .other => @compileError("fly.KindType: `.other` is not a fly type"),
     };
-    const out: ?*const mlir.Type = @ptrCast(raw.ptr);
-    return out orelse std.debug.panic("fly.derived({s}): `{f}` is not the expected atom/tiled type", .{ @tagName(which), ty });
 }
-
-// -----------------------------------------------------------------------------
-// Structural readers: the accessors behind Python's `IntTuple.unpack()`.
-// -----------------------------------------------------------------------------
-
-fn typeFromC(raw: c.MlirType) ?*const mlir.Type {
-    return @ptrCast(raw.ptr);
-}
-
-fn attrFromC(raw: c.MlirAttribute) ?*const mlir.Attribute {
-    return @ptrCast(raw.ptr);
-}
-
-/// Which `fly` type a value has. The tags mirror `zmlFlyTypeKind`, which is a
-/// `TypeSwitch` over the dialect: a type renamed at a pin bump fails to
-/// compile there instead of silently reading as `.other` here.
-pub const TypeKind = enum(i32) {
-    memref = 0,
-    coord_tensor = 1,
-    ptr = 2,
-    int_tuple = 3,
-    layout = 4,
-    composed_layout = 5,
-    tile = 6,
-    swizzle = 7,
-    copy_atom = 8,
-    mma_atom = 9,
-    tiled_copy = 10,
-    tiled_mma = 11,
-    other = -1,
-};
 
 pub fn typeKind(ty: *const mlir.Type) TypeKind {
-    return std.enums.fromInt(TypeKind, c.zmlFlyTypeKind(ty.ptr())) orelse .other;
+    inline for (comptime std.meta.tags(TypeKind)) |kind| {
+        if (kind != .other and ty.isA(KindType(kind)) != null) return kind;
+    }
+    return .other;
 }
 
-/// 1 for a leaf.
-pub fn intTupleRank(ty: *const mlir.Type) usize {
-    const r = c.zmlFlyIntTupleRank(ty.ptr());
-    if (r < 0) std.debug.panic("fly: `{f}` is not a !fly.int_tuple", .{ty});
-    return @intCast(r);
+/// Panics if `ty` is not a `!fly.<kind>`.
+pub fn expect(ty: *const mlir.Type, comptime kind: TypeKind) *const KindType(kind) {
+    return ty.isA(KindType(kind)) orelse
+        std.debug.panic("fly: `{f}` is not a !fly.{s}", .{ ty, @tagName(kind) });
 }
 
-pub fn intTupleIsLeaf(ty: *const mlir.Type) bool {
-    return c.zmlFlyIntTupleIsLeaf(ty.ptr());
-}
-
-pub fn intTupleIsStatic(ty: *const mlir.Type) bool {
-    return c.zmlFlyIntTupleIsStatic(ty.ptr());
-}
-
-pub fn intTupleAt(ty: *const mlir.Type, i: usize) *const mlir.Type {
-    return typeFromC(c.zmlFlyIntTupleAt(ty.ptr(), @intCast(i))) orelse std.debug.panic("fly: no mode {d} in `{f}`", .{ i, ty });
-}
-
-pub const Leaf = union(enum) { static: i64, dynamic, none, basis };
-
-pub fn intTupleLeaf(ty: *const mlir.Type) Leaf {
-    var v: i64 = 0;
-    return switch (c.zmlFlyIntTupleLeafKind(ty.ptr(), &v)) {
-        0 => .{ .static = v },
-        1 => .dynamic,
-        2 => .none,
-        3 => .basis,
-        else => std.debug.panic("fly: `{f}` is not a leaf !fly.int_tuple", .{ty}),
-    };
-}
-
-/// The shape of the outermost plain layout of any layout-like type.
-pub fn layoutLikeShape(ty: *const mlir.Type) *const mlir.Type {
-    return typeFromC(c.zmlFlyLayoutLikeShape(ty.ptr())) orelse std.debug.panic("fly: `{f}` carries no layout", .{ty});
-}
-
-pub fn layoutShape(ty: *const mlir.Type) *const mlir.Type {
-    return typeFromC(c.zmlFlyLayoutShape(ty.ptr())) orelse std.debug.panic("fly: `{f}` is not a !fly.layout", .{ty});
-}
-
-pub fn layoutStride(ty: *const mlir.Type) *const mlir.Type {
-    return typeFromC(c.zmlFlyLayoutStride(ty.ptr())) orelse std.debug.panic("fly: `{f}` is not a !fly.layout", .{ty});
+/// The shape of the outermost plain layout of any layout-carrying type.
+pub fn layoutLikeShape(ty: *const mlir.Type) *const types.IntTupleType {
+    if (ty.isA(types.LayoutType) == null and ty.isA(types.ComposedLayoutType) == null and
+        ty.isA(types.MemRefType) == null and ty.isA(types.CoordTensorType) == null)
+    {
+        std.debug.panic("fly: `{f}` carries no layout", .{ty});
+    }
+    return @ptrCast(c.mlirFlyLayoutLikeTypeGetShape(ty.ptr()).ptr.?);
 }
 
 pub fn elemType(ty: *const mlir.Type) *const mlir.Type {
-    if (typeFromC(c.zmlFlyMemRefElemType(ty.ptr()))) |t| return t;
-    if (typeFromC(c.zmlFlyPtrElemType(ty.ptr()))) |t| return t;
+    if (ty.isA(types.MemRefType)) |m| return m.getElemTy();
+    if (ty.isA(types.PointerType)) |p| return p.getElemTy();
     std.debug.panic("fly: `{f}` has no element type", .{ty});
 }
 
 pub fn addressSpace(ty: *const mlir.Type) *const mlir.Attribute {
-    if (attrFromC(c.zmlFlyMemRefAddressSpace(ty.ptr()))) |a| return a;
-    if (attrFromC(c.zmlFlyPtrAddressSpace(ty.ptr()))) |a| return a;
+    if (ty.isA(types.MemRefType)) |m| return m.getAddressSpace();
+    if (ty.isA(types.PointerType)) |p| return p.getAddressSpace();
     std.debug.panic("fly: `{f}` has no address space", .{ty});
 }
 
-pub fn ptrType(elem: *const mlir.Type, space: *const mlir.Attribute, alignment: i32, swizzle: ?*const mlir.Attribute) *const mlir.Type {
-    return typeFromC(c.zmlFlyPtrTypeGet(elem.ptr(), space.ptr(), alignment, if (swizzle) |sw| sw.ptr() else .{ .ptr = null })) orelse @panic("fly: cannot build pointer type");
-}
-
 /// Keeps the address space, alignment and swizzle.
-pub fn ptrWithElem(ptr: *const mlir.Type, elem: *const mlir.Type) *const mlir.Type {
-    const raw_sw = c.zmlFlyPtrSwizzle(ptr.ptr());
-    if (raw_sw.ptr == null) std.debug.panic("fly: `{f}` is not a !fly.ptr", .{ptr});
-    return ptrType(elem, addressSpace(ptr), c.zmlFlyPtrAlignment(ptr.ptr()), attrFromC(raw_sw));
+pub fn ptrWithElem(ctx: *mlir.Context, ptr: *const mlir.Type, elem: *const mlir.Type) mlir.Error!*const types.PointerType {
+    const p = expect(ptr, .ptr);
+    return types.PointerType.get(ctx, .{
+        .elemTy = elem,
+        .addressSpace = p.getAddressSpace(),
+        .alignment = p.getAlignment(),
+        .swizzle = p.getSwizzle(),
+    });
 }
 
 /// A value whose whole content lives in its type.
@@ -293,7 +217,10 @@ pub const GemmOpts = struct {
 
 pub fn gemm(ctx: *mlir.Context, atom: *const mlir.Value, d: *const mlir.Value, a: *const mlir.Value, b: *const mlir.Value, cc: *const mlir.Value, opts: GemmOpts, location: *const mlir.Location) *mlir.Operation {
     var at: Attrs = .empty;
-    if (opts.traversal_order) |o| at.appendAssumeCapacity(.named(ctx, "traversalOrder", gemmTraversalOrderAttr(ctx, o)));
+    if (opts.traversal_order) |o| {
+        const attr = attributes.gemmTraversalOrderAttr(ctx, o) catch @panic("fly.gemm: invalid traversal order");
+        at.appendAssumeCapacity(.named(ctx, "traversalOrder", attr));
+    }
     if (opts.traversal_layout) |l| return effect(ctx, "gemm", &.{ atom, d, a, b, cc, l }, at, location);
     return effect(ctx, "gemm", &.{ atom, d, a, b, cc }, at, location);
 }
@@ -322,6 +249,13 @@ pub fn makePtr(ctx: *mlir.Context, operands: []const *const mlir.Value, ty: *con
 
 test {
     std.testing.refAllDecls(@This());
+    inline for (.{ types, attributes, rocdl }) |module| {
+        std.testing.refAllDecls(module);
+        inline for (comptime std.meta.declarations(module)) |decl| {
+            const value = @field(module, decl.name);
+            if (@TypeOf(value) == type and @typeInfo(value) == .@"opaque") std.testing.refAllDecls(value);
+        }
+    }
 }
 
 fn testContext() !*mlir.Context {
@@ -331,6 +265,13 @@ fn testContext() !*mlir.Context {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
+}
+
+fn expectPrints(expected: []const u8, value: anytype) !void {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{value});
+    try std.testing.expectEqualStrings(expected, w.buffered());
 }
 
 test "fly dialects register" {
@@ -375,19 +316,69 @@ test "fly types parse and print round-trip" {
         var buf: [512]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         try w.print("{f}", .{ty});
-        const printed = w.buffered();
-        const ty2 = try mlir.Type.parse(ctx, printed);
+        const ty2 = try mlir.Type.parse(ctx, w.buffered());
         try std.testing.expect(ty.eql(ty2));
     }
 }
 
-test "fly enum and gpu attributes parse" {
+test "types and attributes are built through the C API" {
     const ctx = try testContext();
     defer ctx.deinit();
-    _ = mmaOperandAttr(ctx, .a);
-    _ = gemmTraversalOrderAttr(ctx, .kmn);
+
+    const two = try attributes.IntTupleAttr.getStatic(ctx, 2);
+    const four = try attributes.IntTupleAttr.getStatic(ctx, 4);
+    const one = try attributes.IntTupleAttr.getStatic(ctx, 1);
+    const shape = try attributes.IntTupleAttr.getTuple(ctx, &.{ two, four });
+    const stride = try attributes.IntTupleAttr.getTuple(ctx, &.{ four, one });
+    const layout = try types.LayoutType.get(ctx, .{ .attr = try .get(ctx, .{ .shape = shape, .stride = stride }) });
+    try expectPrints("!fly.layout<(2,4):(4,1)>", layout);
+    try expectPrints("!fly.int_tuple<(2,4)>", layout.getShape());
+    try std.testing.expectEqual(@as(usize, 2), layout.getShape().getNumElements());
+    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, layout.getShape().getElement(1).getLeaf());
+
+    const global = try attributes.AddressSpaceAttr.get(ctx, .{ .addressSpace = .global });
+    const memref = try types.MemRefType.get(ctx, .{
+        .elemTy = .float(ctx, .f16),
+        .addressSpace = global.attribute(),
+        .layout = layout.getAttr().attribute(),
+    });
+    try expectPrints("!fly.memref<f16, global, (2,4):(4,1)>", memref);
+    try expectPrints("!fly.int_tuple<(2,4)>", layoutLikeShape(memref.type_()));
+
+    const shared = try attributes.AddressSpaceAttr.get(ctx, .{ .addressSpace = .shared });
+    const ptr = try types.PointerType.get(ctx, .{
+        .elemTy = .int(ctx, .i8),
+        .addressSpace = shared.attribute(),
+        .alignment = try .get(ctx, .{ .alignment = 16 }),
+    });
+    try expectPrints("!fly.ptr<i8, shared, align<16>>", ptr);
+    try expectPrints("!fly.ptr<f32, shared, align<16>>", try ptrWithElem(ctx, ptr.type_(), .float(ctx, .f32)));
+
+    const tile = try types.TileType.get(ctx, .{ .attr = try .getModes(ctx, &.{
+        (try attributes.IntAttr.getStatic(ctx, 8)).attribute(),
+        (try attributes.IntAttr.getStatic(ctx, 64)).attribute(),
+    }) });
+    try expectPrints("!fly.tile<[8|64]>", tile);
+
+    const copy_atom = try types.CopyAtomType.get(ctx, .{
+        .copyOp = (try types.CopyOpUniversalCopyType.get(ctx, .{ .bitSize = 128 })).type_(),
+        .valBits = 32,
+    });
+    try expectPrints("!fly.copy_atom<!fly.universal_copy<128>, 32>", copy_atom);
+
+    const buffer_desc = try rocdl.BufferDescAddressAttr.get(ctx);
+    try expectPrints("!fly.ptr<f16, #fly_rocdl.buffer_desc>", try types.PointerType.get(ctx, .{
+        .elemTy = .float(ctx, .f16),
+        .addressSpace = buffer_desc.attribute(),
+    }));
+}
+
+test "fly enum and gpu attributes" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    _ = try attributes.mmaOperandAttr(ctx, .a);
+    _ = try attributes.gemmTraversalOrderAttr(ctx, .kmn);
     _ = parseAttr(ctx, "#gpu<dim x>");
-    _ = parseAttr(ctx, "#fly_rocdl.buffer_desc");
 }
 
 test "inferred fly ops compute layout algebra" {
@@ -400,41 +391,49 @@ test "inferred fly ops compute layout algebra" {
 
     // raked_product((8,16):(16,1), (1,4):(1,1)) — the vectorAdd TV layout.
     const thr = static(ctx, parseType(ctx, "!fly.layout<(8,16):(16,1)>"), loc).appendTo(block);
-    const val = static(ctx, parseType(
-        ctx,
-        "!fly.layout<(1,4):(1,1)>",
-    ), loc).appendTo(block);
+    const val = static(ctx, parseType(ctx, "!fly.layout<(1,4):(1,1)>"), loc).appendTo(block);
     const mn = inferred(ctx, "raked_product", &.{ thr.result(0), val.result(0) }, .empty, loc).appendTo(block);
     const shape = inferred(ctx, "get_shape", &.{mn.result(0)}, .empty, loc).appendTo(block);
     const tiler = inferred(ctx, "int_tuple_product_each", &.{shape.result(0)}, .empty, loc).appendTo(block);
 
-    var buf: [256]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{tiler.result(0).type_()});
-    try std.testing.expectEqualStrings("!fly.int_tuple<(8,64)>", w.buffered());
+    try expectPrints("!fly.int_tuple<(8,64)>", tiler.result(0).type_());
     try std.testing.expect(module.operation().verify());
 }
 
-test "derived atom layouts" {
+test "atom traits" {
     const ctx = try testContext();
     defer ctx.deinit();
 
     // MFMA 16x16x4 f32 tiled over a (2,2,1) atom layout.
-    const tm = parseType(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>");
-    var buf: [512]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{derived(.tiled_mma_tile_size_mnk, tm)});
-    try std.testing.expectEqualStrings("!fly.int_tuple<(32,32,4)>", w.buffered());
+    const tm = expect(parseType(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
+    try expectPrints("!fly.int_tuple<(32,32,4)>", tm.getTileSizeMNK());
+    _ = tm.getTiledThrValLayoutA();
+    _ = tm.getThrLayoutVMNK();
 
-    const atom = parseType(ctx, "!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>");
-    w = .fixed(&buf);
-    try w.print("{f}", .{derived(.mma_atom_shape_mnk, atom)});
-    try std.testing.expectEqualStrings("!fly.int_tuple<(16,16,4)>", w.buffered());
+    const atom = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+        .m = 16,
+        .n = 16,
+        .k = 4,
+        .elemTyA = .float(ctx, .f32),
+        .elemTyB = .float(ctx, .f32),
+        .elemTyAcc = .float(ctx, .f32),
+    })).type_() });
+    try expectPrints("!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>", atom);
+    try expectPrints("!fly.int_tuple<(16,16,4)>", atom.getShapeMNK());
+    try expectPrints("!fly.layout<64:1>", atom.getThrLayout());
 
-    _ = derived(.tiled_mma_tiled_tv_layout_a, tm);
-    _ = derived(.tiled_mma_thr_layout_vmnk, tm);
-    const ca = parseType(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>");
-    _ = derived(.copy_atom_tv_layout_src, ca);
+    const wmma = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try rocdl.MmaOpGFX11WMMAType.get(ctx, .{
+        .m = 16,
+        .n = 16,
+        .k = 16,
+        .elemTyA = .float(ctx, .f16),
+        .elemTyB = .float(ctx, .f16),
+        .elemTyAcc = .float(ctx, .f32),
+    })).type_() });
+    try expectPrints("!fly.layout<32:1>", wmma.getThrLayout());
+
+    const ca = expect(parseType(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
+    _ = ca.getThrValLayoutSrc();
 }
 
 test "type kinds" {
@@ -458,26 +457,16 @@ test "type kinds" {
 test "structural readers" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const it = parseType(ctx, "!fly.int_tuple<((2,4),?)>");
-    try std.testing.expectEqual(@as(usize, 2), intTupleRank(it));
-    try std.testing.expect(!intTupleIsLeaf(it));
-    try std.testing.expect(!intTupleIsStatic(it));
-    const inner = intTupleAt(it, 0);
-    try std.testing.expectEqual(@as(usize, 2), intTupleRank(inner));
-    try std.testing.expectEqual(Leaf{ .static = 4 }, intTupleLeaf(intTupleAt(inner, 1)));
-    try std.testing.expectEqual(Leaf.dynamic, intTupleLeaf(intTupleAt(it, 1)));
+    const it = expect(parseType(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
+    try std.testing.expectEqual(@as(usize, 2), it.getNumElements());
+    try std.testing.expect(!it.isLeaf());
+    try std.testing.expect(!it.isStatic());
+    const inner = it.getElement(0);
+    try std.testing.expectEqual(@as(usize, 2), inner.getNumElements());
+    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, inner.getElement(1).getLeaf());
+    try std.testing.expectEqual(types.IntTupleType.Leaf.dynamic, it.getElement(1).getLeaf());
 
     const m = parseType(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
-    var buf: [256]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{layoutLikeShape(m)});
-    try std.testing.expectEqualStrings("!fly.int_tuple<(64,32)>", w.buffered());
-    w = .fixed(&buf);
-    try w.print("{f}", .{elemType(m)});
-    try std.testing.expectEqualStrings("bf16", w.buffered());
-
-    const p = parseType(ctx, "!fly.ptr<i8, shared, align<16>>");
-    w = .fixed(&buf);
-    try w.print("{f}", .{ptrWithElem(p, .float(ctx, .f32))});
-    try std.testing.expectEqualStrings("!fly.ptr<f32, shared, align<16>>", w.buffered());
+    try expectPrints("!fly.int_tuple<(64,32)>", layoutLikeShape(m));
+    try expectPrints("bf16", elemType(m));
 }

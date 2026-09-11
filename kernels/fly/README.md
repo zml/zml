@@ -112,9 +112,9 @@ ignored inside HIP graphs, so zero what you need yourself).
 
 ## Layouts, tiles, coordinates
 
-`layout.zig` holds comptime literals that print exactly like the dialect
-(reading a type back goes through the dialect's own accessors in
-`mlir/dialects/fly`, never through text):
+`layout.zig` holds comptime literals. `toAttr` turns one into the matching
+fly attribute through the dialect's own constructors, and reading a type back
+goes through its accessors — neither direction goes through text:
 
 | Zig | MLIR |
 |---|---|
@@ -134,8 +134,9 @@ inferred type back on the host; `v.emitShape()` / `v.emitSize()` emit ops.
 ## Atoms and tiled ops
 
 - `b.copyAtom(.{ .universal = 128 }, .f32)`, `.{ .buffer_copy = 32 }`,
-  `.{ .buffer_copy_lds = 128 }`, or `.{ .text = "..." }` for anything else.
-- `b.mmaAtom("!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>")`.
+  `.{ .buffer_copy_lds = 128 }`.
+- `b.mmaAtom(mma_op)`, where `mma_op` is an MMA op type such as
+  `fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{ .m = 16, .n = 16, .k = 16, ... })`.
 - `b.tiledCopyTV(atom, thr, val)`, `b.tiledCopy(atom, layout_tv, tile)`,
   `b.tiledCopyA/B/C(copy_atom, tiled_mma)`; `tc.getSlice(tid).partitionS/D`,
   `.retile`.
@@ -145,8 +146,8 @@ inferred type back on the host; `v.emitShape()` / `v.emitSize()` emit ops.
   `b.gemm(atom, d, a, b, c)`.
 - `b.bufferTensor(t)` is `fx.rocdl.make_buffer_tensor`: the same tensor over
   a CDNA raw-buffer descriptor, for bounds-checked `buffer_copy` atoms.
-- Derived layouts (`tiled_mma.tile_size_mnk`, `tv_layout_A_tiled`, ...) come
-  from `b.derivedStatic(.tiled_mma_tile_size_mnk, tm.value)`.
+- Derived layouts come off the type: `fly.expect(tm.value.type_(), .tiled_mma)`
+  then `.getTileSizeMNK()`, `.getTiledThrValLayoutA()`, ...
 
 ## Memory and scalars
 
@@ -185,10 +186,3 @@ passes, as FlyDSL's own pipeline does).
 - `Kernel.emit` returns the module text; `bazel test //kernels/fly:test`
   builds the example kernels on any host, no GPU needed.
 - On the device side, `--xla_dump_to=<dir>` dumps the module the plugin saw.
-
-## Pins
-
-The `@flydsl` commit in `third_party/flydsl/repo.bzl` must match the one the
-ROCm PJRT plugin was built with. The plugin parses the text this dialect
-prints, so an atom or type syntax added after the pin fails inside the
-plugin, not here.

@@ -1,5 +1,14 @@
 const std = @import("std");
 
+const fly = @import("mlir/dialects/fly");
+const mlir = @import("mlir");
+const stdx = @import("stdx");
+
+const attributes = fly.attributes;
+
+/// Enough for any tuple or tile a kernel writes by hand.
+const max_modes = 32;
+
 /// A dynamic integer leaf: `?`, `?{i64}`, `?{div=8}`, `?{i64 div=8}`.
 pub const Dyn = struct {
     width: u8 = 32,
@@ -31,6 +40,14 @@ pub const Leaf = union(enum) {
         }
     }
 };
+
+fn leafAttr(leaf: Leaf, ctx: *mlir.Context) mlir.Error!*const attributes.IntAttr {
+    return switch (leaf) {
+        .s => |v| .getStatic(ctx, @intCast(v)),
+        .d => |dy| .getDynamic(ctx, dy.width, @intCast(dy.div)),
+        .none => .getNone(ctx),
+    };
+}
 
 /// A scaled basis element: `vE0`, `2E1E2`.
 pub const Basis = struct {
@@ -133,6 +150,18 @@ pub const IntTuple = union(enum) {
         try self.print(w);
     }
 
+    pub fn toAttr(self: IntTuple, ctx: *mlir.Context) mlir.Error!*const attributes.IntTupleAttr {
+        return switch (self) {
+            .leaf => |l| .get(ctx, .{ .value = (try leafAttr(l, ctx)).attribute() }),
+            .basis => |b| .getBasis(ctx, try leafAttr(b.value, ctx), b.modes),
+            .tup => |elems| blk: {
+                var buf: stdx.BoundedArray(*const attributes.IntTupleAttr, max_modes) = .empty;
+                for (elems) |e| buf.appendAssumeCapacity(try e.toAttr(ctx));
+                break :blk .getTuple(ctx, buf.constSlice());
+            },
+        };
+    }
+
     pub fn eql(a: IntTuple, b: IntTuple) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
@@ -191,6 +220,10 @@ pub const Layout = struct {
 
     pub fn format(self: Layout, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try self.print(w);
+    }
+
+    pub fn toAttr(self: Layout, ctx: *mlir.Context) mlir.Error!*const attributes.LayoutAttr {
+        return .get(ctx, .{ .shape = try self.shape.toAttr(ctx), .stride = try self.stride.toAttr(ctx) });
     }
 
     pub fn eql(a: Layout, b: Layout) bool {
@@ -344,6 +377,25 @@ pub const Tile = union(enum) {
     pub fn format(self: Tile, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try self.print(w);
     }
+
+    /// One mode: an int, a layout, or a nested tile.
+    fn modeAttr(self: Tile, ctx: *mlir.Context) mlir.Error!*const mlir.Attribute {
+        return switch (self) {
+            .leaf => |l| (try leafAttr(l, ctx)).attribute(),
+            .layout => |l| (try l.toAttr(ctx)).attribute(),
+            .modes => (try self.toAttr(ctx)).attribute(),
+        };
+    }
+
+    pub fn toAttr(self: Tile, ctx: *mlir.Context) mlir.Error!*const attributes.TileAttr {
+        const modes = switch (self) {
+            .modes => |m| m,
+            else => return .get(ctx, .{ .value = try self.modeAttr(ctx) }),
+        };
+        var buf: stdx.BoundedArray(*const mlir.Attribute, max_modes) = .empty;
+        for (modes) |m| buf.appendAssumeCapacity(try m.modeAttr(ctx));
+        return .getModes(ctx, buf.constSlice());
+    }
 };
 
 /// `tile(.{ 128, 64 })` is `[128|64]`; `tile(.{ null, 8 })` is `[*|8]`.
@@ -389,34 +441,9 @@ pub const Swizzle = struct {
     pub fn format(self: Swizzle, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try self.print(w);
     }
-};
 
-/// A fly address space, or a dialect attribute such as
-/// `#fly_rocdl.buffer_desc` kept verbatim.
-pub const AddressSpace = union(enum) {
-    generic,
-    global,
-    shared,
-    register,
-    attr: []const u8,
-
-    pub fn print(self: AddressSpace, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (self) {
-            .attr => |a| try w.writeAll(a),
-            inline else => |_, tag| try w.writeAll(@tagName(tag)),
-        }
-    }
-
-    pub fn format(self: AddressSpace, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try self.print(w);
-    }
-
-    pub fn eql(a: AddressSpace, b: AddressSpace) bool {
-        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
-        return switch (a) {
-            .attr => |x| std.mem.eql(u8, x, b.attr),
-            else => true,
-        };
+    pub fn toAttr(self: Swizzle, ctx: *mlir.Context) mlir.Error!*const attributes.SwizzleAttr {
+        return .get(ctx, .{ .mask = self.mask, .base = self.base, .shift = self.shift });
     }
 };
 
@@ -468,4 +495,50 @@ test "static queries" {
     try std.testing.expectEqual(@as(usize, 3), it(.{ .{ 2, 4 }, 8 }).leafCount());
     try std.testing.expect(it(.{ 2, 4 }).eql(it(.{ 2, 4 })));
     try std.testing.expect(!it(.{ 2, 4 }).eql(it(.{ 4, 2 })));
+}
+
+fn testContext() !*mlir.Context {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    fly.insertDialects(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    ctx.loadAllAvailableDialects();
+    return ctx;
+}
+
+/// The type built from the host model must be the type the printed literal
+/// parses to: the two paths may never drift.
+fn expectBuilt(ctx: *mlir.Context, comptime T: type, comptime fmt: []const u8, value: anytype) !void {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print(fmt, .{value});
+    const parsed = try mlir.Type.parse(ctx, w.buffered());
+    const built = try T.get(ctx, .{ .attr = try value.toAttr(ctx) });
+    if (!parsed.eql(built.type_())) {
+        std.debug.print("parsed `{f}` but built `{f}`\n", .{ parsed, built });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "the host model builds the types its literals print" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const IntTupleType = fly.types.IntTupleType;
+    const LayoutType = fly.types.LayoutType;
+    const TileType = fly.types.TileType;
+
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", it(42));
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", it(.{ .{ 2, 4 }, 8 }));
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", it(.{ IntTuple.dyn, 8 }));
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", IntTuple.dynamic(64, 8));
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", it(.{ null, 8 }));
+    try expectBuilt(ctx, IntTupleType, "!fly.int_tuple<{f}>", IntTuple{ .basis = .{ .value = .{ .s = 2 }, .modes = &.{ 1, 2 } } });
+
+    try expectBuilt(ctx, LayoutType, "!fly.layout<{f}>", L(.{ 4, 8 }, .{ 1, 4 }));
+    try expectBuilt(ctx, LayoutType, "!fly.layout<{f}>", rowMajor(.{ .{ 2, 4 }, 8 }));
+
+    try expectBuilt(ctx, TileType, "!fly.tile<{f}>", tile(.{ 128, 64 }));
+    try expectBuilt(ctx, TileType, "!fly.tile<{f}>", tile(.{ null, 8 }));
+    try expectBuilt(ctx, TileType, "!fly.tile<{f}>", tile(.{ L(.{ 4, 8 }, .{ 1, 4 }), 16 }));
+    try expectBuilt(ctx, TileType, "!fly.tile<{f}>", tile(.{ .{ 2, 3 }, 4 }));
 }

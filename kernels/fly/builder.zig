@@ -74,7 +74,7 @@ pub const Value = struct {
     }
 
     pub fn intTupleStatic(self: Value) IntTuple {
-        return self.kern().readIntTuple(self.type_());
+        return self.kern().readIntTuple(fly.expect(self.type_(), .int_tuple));
     }
 
     pub fn elemDType(self: Value) DType {
@@ -261,7 +261,7 @@ pub const Value = struct {
         const n = self.sizeStatic();
         const dt = self.elemDType();
         const cst = k.constant(dt, value);
-        const vec_ty = k.ty("vector<{d}x{s}>", .{ n, dt.mlirName() });
+        const vec_ty = mlir.Type.vector(&.{n}, dt.toMlir(k.ctx));
         const vec = k.emit(dialects.vector.broadcast(k.ctx, cst.inner, vec_ty, k.loc()));
         self.store(vec);
     }
@@ -512,7 +512,7 @@ pub const TiledMma = struct {
     fn makeFragment(self: TiledMma, operand: fly.MmaOperand, input: Value, opts: FragmentOpts) Value {
         const k = self.value.kern();
         var a: fly.Attrs = .empty;
-        a.appendAssumeCapacity(.named(k.ctx, "operand_id", fly.mmaOperandAttr(k.ctx, operand)));
+        a.appendAssumeCapacity(.named(k.ctx, "operand_id", Builder.must(fly.attributes.mmaOperandAttr(k.ctx, operand))));
         if (opts.stages) |st| a.appendAssumeCapacity(.named(k.ctx, "stages", .int(k.ctx, .i32, st)));
         return k.emit(fly.inferred(k.ctx, "mma.make_fragment", &.{ self.value.inner, input.inner }, a, k.loc()));
     }
@@ -573,7 +573,6 @@ pub const Builder = struct {
     func_op: ?*mlir.Operation = null,
     entry_block: ?*mlir.Block = null,
     block_stack: std.ArrayList(*mlir.Block) = .empty,
-    type_memo: std.StringHashMapUnmanaged(*const mlir.Type) = .empty,
     arg_specs: []const ArgSpec = &.{},
     /// The `!fly.memref` view for tensor arguments, the raw `!fly.ptr` otherwise.
     arg_values: []Value = &.{},
@@ -583,7 +582,7 @@ pub const Builder = struct {
     pub const ArgSpec = struct {
         name: []const u8,
         dtype: DType,
-        space: layout.AddressSpace = .global,
+        space: fly.AddressSpace = .global,
         /// Row-major tensor argument; null for a bare pointer.
         dims: ?[]const i64 = null,
     };
@@ -651,7 +650,7 @@ pub const Builder = struct {
         const arg_types = try scratch.alloc(*const mlir.Type, specs.len);
         const arg_locs = try scratch.alloc(*const mlir.Location, specs.len);
         for (arg_types, arg_locs, specs) |*ty_, *a_loc, a| {
-            ty_.* = self.ty("!fly.ptr<{s}, {f}>", .{ a.dtype.storageElem().mlirName(), a.space });
+            ty_.* = self.ptrType(a.dtype.storageElem(), self.addressSpaceAttr(a.space));
             a_loc.* = self.loc().named(ctx, a.name);
         }
 
@@ -717,17 +716,17 @@ pub const Builder = struct {
     // ---------------------------------------------------------------- types
 
     /// Arena-allocated.
-    pub fn readIntTuple(self: *Builder, tuple_ty: *const mlir.Type) IntTuple {
-        if (fly.intTupleIsLeaf(tuple_ty)) {
-            return switch (fly.intTupleLeaf(tuple_ty)) {
+    pub fn readIntTuple(self: *Builder, tuple_ty: *const fly.types.IntTupleType) IntTuple {
+        if (tuple_ty.isLeaf()) {
+            return switch (tuple_ty.getLeaf()) {
                 .static => |v| IntTuple.static(v),
                 .dynamic, .basis => IntTuple.dyn,
                 .none => IntTuple.star,
             };
         }
-        const n = fly.intTupleRank(tuple_ty);
+        const n = tuple_ty.getNumElements();
         const elems = self.alloc(IntTuple, n);
-        for (0..n) |i| elems[i] = self.readIntTuple(fly.intTupleAt(tuple_ty, i));
+        for (0..n) |i| elems[i] = self.readIntTuple(tuple_ty.getElement(i));
         return .{ .tup = elems };
     }
 
@@ -737,29 +736,48 @@ pub const Builder = struct {
 
     /// The shape and stride of a static `!fly.layout`, as host literals.
     pub fn readLayout(self: *Builder, layout_ty: *const mlir.Type) Layout {
-        const shape = fly.layoutShape(layout_ty);
-        const stride = fly.layoutStride(layout_ty);
-        if (!fly.intTupleIsStatic(shape) or !fly.intTupleIsStatic(stride)) {
+        const lay = fly.expect(layout_ty, .layout);
+        const shape = lay.getShape();
+        const stride = lay.getStride();
+        if (!shape.isStatic() or !stride.isStatic()) {
             std.debug.panic("fly: `{f}` is not static", .{layout_ty});
         }
         return .{ .shape = self.readIntTuple(shape), .stride = self.readIntTuple(stride) };
     }
 
-    /// Parse a type from formatted fly assembly, memoized on the text.
-    pub fn ty(self: *Builder, comptime fmt: []const u8, args: anytype) *const mlir.Type {
-        const arena = self.arena.allocator();
-        const text = std.fmt.allocPrint(arena, fmt, args) catch @panic("fly: OOM");
-        if (self.type_memo.get(text)) |t| {
-            arena.free(text);
-            return t;
-        }
-        const t = fly.parseType(self.ctx, text);
-        self.type_memo.put(arena, text, t) catch @panic("fly: OOM");
-        return t;
+    /// A fly type or attribute is rejected only on malformed input, which is
+    /// a bug in the kernel, not a runtime condition.
+    pub fn must(result: anytype) @typeInfo(@TypeOf(result)).error_union.payload {
+        return result catch |err| std.debug.panic("fly: cannot build type ({})", .{err});
     }
 
-    pub fn tyText(self: *Builder, text: []const u8) *const mlir.Type {
-        return self.ty("{s}", .{text});
+    pub fn intTupleType(self: *Builder, t: IntTuple) *const mlir.Type {
+        return must(fly.types.IntTupleType.get(self.ctx, .{ .attr = must(t.toAttr(self.ctx)) })).type_();
+    }
+
+    pub fn layoutType(self: *Builder, lay: Layout) *const mlir.Type {
+        return must(fly.types.LayoutType.get(self.ctx, .{ .attr = must(lay.toAttr(self.ctx)) })).type_();
+    }
+
+    pub fn tileType(self: *Builder, t: Tile) *const mlir.Type {
+        return must(fly.types.TileType.get(self.ctx, .{ .attr = must(t.toAttr(self.ctx)) })).type_();
+    }
+
+    pub fn ptrType(self: *Builder, dtype: DType, space: *const mlir.Attribute) *const mlir.Type {
+        return must(fly.types.PointerType.get(self.ctx, .{ .elemTy = dtype.toMlir(self.ctx), .addressSpace = space })).type_();
+    }
+
+    fn addressSpaceAttr(self: *Builder, space: fly.AddressSpace) *const mlir.Attribute {
+        return must(fly.attributes.AddressSpaceAttr.get(self.ctx, .{ .addressSpace = space })).attribute();
+    }
+
+    /// `!fly.memref<dtype, space, lay>`.
+    pub fn memRefType(self: *Builder, dtype: DType, space: fly.AddressSpace, lay: Layout) *const mlir.Type {
+        return must(fly.types.MemRefType.get(self.ctx, .{
+            .elemTy = dtype.toMlir(self.ctx),
+            .addressSpace = self.addressSpaceAttr(space),
+            .layout = must(lay.toAttr(self.ctx)).attribute(),
+        })).type_();
     }
 
     // ---------------------------------------------------------------- statics
@@ -769,18 +787,14 @@ pub const Builder = struct {
         return self.emit(fly.static(self.ctx, t, self.loc()));
     }
 
-    pub fn staticText(self: *Builder, text: []const u8) Value {
-        return self.staticTy(self.tyText(text));
-    }
-
     pub fn static(self: *Builder, v: anytype) Value {
         const T = @TypeOf(v);
         return self.staticTy(if (T == Layout)
-            self.ty("!fly.layout<{f}>", .{v})
+            self.layoutType(v)
         else if (T == Tile)
-            self.ty("!fly.tile<{f}>", .{v})
+            self.tileType(v)
         else if (T == IntTuple)
-            self.ty("!fly.int_tuple<{f}>", .{v})
+            self.intTupleType(v)
         else
             @compileError("fly.static: expected a Layout, Tile or IntTuple, got " ++ @typeName(T)));
     }
@@ -809,12 +823,6 @@ pub const Builder = struct {
         @compileError("fly: expected a Value, Layout, Tile, IntTuple or tuple literal, got " ++ @typeName(T));
     }
 
-    /// A layout FlyDSL derives from an atom or tiled type
-    /// (`tile_size_mnk`, `tv_layout_A_tiled`, ...).
-    pub fn derivedStatic(self: *Builder, which: fly.Derived, of: Value) Value {
-        return self.emit(fly.static(self.ctx, fly.derived(which, of.type_()), self.loc()));
-    }
-
     /// A (possibly nested) int tuple from integers (static leaves), `null`
     /// (`*`), `IntTuple` literals and `Value`s (dynamic leaves, passed as
     /// operands). An `!fly.int_tuple` Value passes through.
@@ -822,7 +830,7 @@ pub const Builder = struct {
         if (@TypeOf(elems) == Value and elems.kind() == .int_tuple) return elems;
         var operands: stdx.BoundedArray(*const mlir.Value, 32) = .empty;
         const spec = self.intTupleSpec(&operands, elems);
-        const t = self.ty("!fly.int_tuple<{f}>", .{spec});
+        const t = self.intTupleType(spec);
         return self.emit(fly.makeIntTuple(self.ctx, operands.constSlice(), t, self.loc()));
     }
 
@@ -934,14 +942,18 @@ pub const Builder = struct {
     /// to one LLVM global, so `shared_mem_bytes` may stay 0.
     pub fn sharedArray(self: *Builder, dtype: DType, n: i64, alignment: i32) Value {
         const bytes: i64 = @divExact(@as(i64, dtype.bitWidth()) * n, 8);
-        const raw_ty = self.ty("!fly.ptr<i8, shared, align<{d}>>", .{alignment});
+        const raw_ty = must(fly.types.PointerType.get(self.ctx, .{
+            .elemTy = .int(self.ctx, .i8),
+            .addressSpace = self.addressSpaceAttr(.shared),
+            .alignment = must(fly.attributes.AlignAttr.get(self.ctx, .{ .alignment = alignment })),
+        })).type_();
         const dict: *const mlir.Attribute = .dict(self.ctx, &.{
             .named(self.ctx, "allocBytes", .int(self.ctx, .i64, bytes)),
             .named(self.ctx, "allocAlign", .int(self.ctx, .i64, alignment)),
         });
         const raw = self.emit(fly.makePtr(self.ctx, &.{}, raw_ty, dict, self.loc()));
         const typed = self.recast(raw, dtype);
-        return typed.view(self.staticTy(self.ty("!fly.layout<{d}:1>", .{n})));
+        return typed.view(self.static(Layout{ .shape = .static(n), .stride = .static(1) }));
     }
 
     /// A single atom-sized copy.
@@ -994,7 +1006,7 @@ pub const Builder = struct {
             for (zeros) |*z| z.* = .static(0);
             break :blk .{ .tup = zeros };
         };
-        const base_ty = self.ty("!fly.int_tuple<{f}>", .{zero});
+        const base_ty = self.intTupleType(zero);
         const base = self.emit(fly.makeIntTuple(self.ctx, &.{}, base_ty, self.loc()));
         return base.view(lay);
     }
@@ -1003,49 +1015,50 @@ pub const Builder = struct {
     /// with control flow.
     pub fn rmemTensor(self: *Builder, comptime lay: Layout, dtype: DType) Value {
         const lay_v = self.static(lay);
-        const t = self.ty("!fly.memref<{s}, register, {f}>", .{ dtype.mlirName(), lay });
+        const t = self.memRefType(dtype, .register, lay);
         return self.emit(fly.typed(self.ctx, "memref.alloca", &.{lay_v.inner}, &.{t}, .empty, self.loc()));
     }
 
     /// `rmemTensor` with a runtime `Layout`.
     pub fn rmemTensorRuntime(self: *Builder, lay: Layout, dtype: DType) Value {
         const lay_v = self.static(lay);
-        const t = self.ty("!fly.memref<{s}, register, {f}>", .{ dtype.mlirName(), lay });
+        const t = self.memRefType(dtype, .register, lay);
         return self.emit(fly.typed(self.ctx, "memref.alloca", &.{lay_v.inner}, &.{t}, .empty, self.loc()));
     }
 
     /// Reinterpret a pointer as another element type, keeping the address
     /// space, alignment and swizzle.
     pub fn recast(self: *Builder, ptr: Value, dtype: DType) Value {
-        const t = fly.ptrWithElem(ptr.type_(), dtype.toMlir(self.ctx));
+        const t = must(fly.ptrWithElem(self.ctx, ptr.type_(), dtype.toMlir(self.ctx))).type_();
         return self.emit(fly.typed(self.ctx, "recast_iter", &.{ptr.inner}, &.{t}, .empty, self.loc()));
     }
 
     // ---------------------------------------------------------------- atoms
 
+    /// The copy-op type an atom wraps, by bit size.
     pub const CopyOp = union(enum) {
-        universal: u32,
-        buffer_copy: u32,
-        buffer_copy_lds: u32,
-        /// Any copy-op type, verbatim.
-        text: []const u8,
+        universal: i32,
+        buffer_copy: i32,
+        buffer_copy_lds: i32,
+
+        fn type_(self: CopyOp, ctx: *mlir.Context) *const mlir.Type {
+            return switch (self) {
+                .universal => |b| must(fly.types.CopyOpUniversalCopyType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy => |b| must(fly.rocdl.CopyOpCDNA3BufferCopyType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy_lds => |b| must(fly.rocdl.CopyOpCDNA3BufferCopyLDSType.get(ctx, .{ .bitSize = b })).type_(),
+            };
+        }
     };
 
     pub fn copyAtom(self: *Builder, op: CopyOp, dtype: DType) Value {
         const bits: i32 = @intCast(dtype.bitWidth());
-        const t = switch (op) {
-            .universal => |b| self.ty("!fly.copy_atom<!fly.universal_copy<{d}>, {d}>", .{ b, bits }),
-            .buffer_copy => |b| self.ty("!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<{d}>, {d}>", .{ b, bits }),
-            .buffer_copy_lds => |b| self.ty("!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<{d}>, {d}>", .{ b, bits }),
-            .text => |s| self.ty("!fly.copy_atom<{s}, {d}>", .{ s, bits }),
-        };
+        const t = must(fly.types.CopyAtomType.get(self.ctx, .{ .copyOp = op.type_(self.ctx), .valBits = bits })).type_();
         return self.emit(fly.makeCopyAtom(self.ctx, t, bits, self.loc()));
     }
 
-    /// `op` is the MMA op type text, e.g.
-    /// `!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>`.
-    pub fn mmaAtom(self: *Builder, op: []const u8) Value {
-        const t = self.ty("!fly.mma_atom<{s}>", .{op});
+    /// `op` is an MMA op type, such as a `fly.rocdl.MmaOpCDNA3MFMAType`.
+    pub fn mmaAtom(self: *Builder, op: *const mlir.Type) Value {
+        const t = must(fly.types.MmaAtomType.get(self.ctx, .{ .mmaOp = op })).type_();
         return self.emit(fly.makeMmaAtom(self.ctx, t, self.loc()));
     }
 
@@ -1062,7 +1075,10 @@ pub const Builder = struct {
         const thr_size = thr.size() orelse @panic("fly.tiledCopyTV: thr_layout must be static");
         const val_size = val.size() orelse @panic("fly.tiledCopyTV: val_layout must be static");
         const layout_mn = self.static(thr).rakedProduct(self.static(val));
-        const tmp = self.staticTy(self.ty("!fly.layout<({d},{d}):(1,{d})>", .{ thr_size, val_size, thr_size }));
+        const tmp = self.static(Layout{
+            .shape = .{ .tup = &.{ .static(thr_size), .static(val_size) } },
+            .stride = .{ .tup = &.{ .static(1), .static(thr_size) } },
+        });
         const layout_tv = layout_mn.rightInverse().composition(tmp);
         const tiler = layout_mn.emitShape().productEach();
         // The tiler as a tile literal: one leaf per mode, `[a|b]`.
@@ -1078,13 +1094,14 @@ pub const Builder = struct {
     /// A TiledCopy matched to an MMA operand: the TV layout and tile size
     /// come off the `!fly.tiled_mma` type.
     pub fn tiledCopyFor(self: *Builder, operand: fly.MmaOperand, copy_atom: Value, tm: TiledMma) TiledCopy {
-        const layout_tv = self.derivedStatic(switch (operand) {
-            .a => .tiled_mma_tiled_tv_layout_a,
-            .b => .tiled_mma_tiled_tv_layout_b,
-            .c => .tiled_mma_tiled_tv_layout_c,
+        const tm_ty = fly.expect(tm.value.type_(), .tiled_mma);
+        const layout_tv = self.staticTy((switch (operand) {
+            .a => tm_ty.getTiledThrValLayoutA(),
+            .b => tm_ty.getTiledThrValLayoutB(),
+            .c => tm_ty.getTiledThrValLayoutC(),
             .d => @panic("fly.tiledCopyFor: no D operand copy"),
-        }, tm.value);
-        const tile_size = self.derivedStatic(.tiled_mma_tile_size_mnk, tm.value);
+        }).type_());
+        const tile_size = self.staticTy(tm_ty.getTileSizeMNK().type_());
         const modes: [2]i32 = switch (operand) {
             .a => .{ 0, 2 },
             .b => .{ 1, 2 },
@@ -1121,7 +1138,7 @@ pub const Builder = struct {
         // (7 << 12) | (4 << 15): the CDNA descriptor flags FlyDSL and XLA use.
         const flags = self.constant(.i32, 0x27000);
         const elem = t.elemDType();
-        const buf_ty = self.ty("!fly.ptr<{s}, #fly_rocdl.buffer_desc>", .{elem.mlirName()});
+        const buf_ty = self.ptrType(elem, (must(fly.rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
         const buf_ptr = self.emit(fly.makePtr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, null, self.loc()));
         return buf_ptr.view(lay);
     }
@@ -1370,11 +1387,30 @@ pub const MmaFlavor = enum {
     gfx11_wmma,
     gfx120x_wmma,
 
-    pub fn atomType(self: MmaFlavor) []const u8 {
+    /// MFMA takes f32 operands at 16x16x4; both WMMAs take f16 at 16x16x16.
+    pub fn atomType(self: MmaFlavor, ctx: *mlir.Context) *const mlir.Type {
+        const operand = self.operandDType().toMlir(ctx);
+        const acc: *const mlir.Type = .float(ctx, .f32);
         return switch (self) {
-            .cdna3_mfma => "!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>",
-            .gfx11_wmma => "!fly_rocdl.gfx11.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>",
-            .gfx120x_wmma => "!fly_rocdl.gfx120x.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>",
+            .cdna3_mfma => (fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+                .m = 16,
+                .n = 16,
+                .k = 4,
+                .elemTyA = operand,
+                .elemTyB = operand,
+                .elemTyAcc = acc,
+            }) catch unreachable).type_(),
+            inline .gfx11_wmma, .gfx120x_wmma => |f| blk: {
+                const T = if (f == .gfx11_wmma) fly.rocdl.MmaOpGFX11WMMAType else fly.rocdl.MmaOpGFX120XWMMAType;
+                break :blk (T.get(ctx, .{
+                    .m = 16,
+                    .n = 16,
+                    .k = 16,
+                    .elemTyA = operand,
+                    .elemTyB = operand,
+                    .elemTyAcc = acc,
+                }) catch unreachable).type_();
+            },
         };
     }
 
@@ -1441,12 +1477,14 @@ pub fn emitTiledMma(b: *Builder, flavor: MmaFlavor, a_in: Value, b_in: Value, c_
     const bB = B.zippedDivide(tile2(b, block_n, block_k)).slice(.{ null, bid });
     const bC = C.zippedDivide(tile2(b, block_m, block_n)).slice(.{ null, bid });
 
-    const mma_atom = b.mmaAtom(flavor.atomType());
+    const mma_atom = b.mmaAtom(flavor.atomType(b.ctx));
     const tiled_mma = b.tiledMma(mma_atom, L(.{ 2, 2, 1 }, .{ 1, 2, 0 }), null);
 
-    // A and B move at the operand type, C at the f32 accumulator type.
-    const copy_ab: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = 128 };
-    const copy_c: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = 128 };
+    // A and B move at the operand type, C at the f32 accumulator type. One
+    // element per instruction: a WMMA fragment's values are strided in memory,
+    // so a wider copy would move the wrong neighbours.
+    const copy_ab: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = @intCast(flavor.operandDType().bitWidth()) };
+    const copy_c: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = @intCast(c_out.elemDType().bitWidth()) };
     const atom_ab = b.copyAtom(copy_ab, flavor.operandDType());
     const atom_c = b.copyAtom(copy_c, c_out.elemDType());
 
@@ -1520,10 +1558,10 @@ test "MmaFlavor.atomThreads matches the dialect" {
     defer ctx.deinit();
     inline for (std.meta.fields(MmaFlavor)) |field| {
         const flavor: MmaFlavor = @enumFromInt(field.value);
-        const atom = fly.parseType(ctx, "!fly.mma_atom<" ++ comptime flavor.atomType() ++ ">");
+        const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = flavor.atomType(ctx) });
         // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
         // geometry is derived from it, so a wrong table silently corrupts C.
-        const threads = switch (fly.intTupleLeaf(fly.layoutShape(fly.derived(.mma_atom_thr_layout, atom)))) {
+        const threads = switch (atom.getThrLayout().getShape().getLeaf()) {
             .static => |v| v,
             else => return error.TestUnexpectedResult,
         };
@@ -1555,7 +1593,7 @@ test "tiledMma builds for the RDNA WMMA atom" {
     }
     for ([_][]const u8{
         "!fly_rocdl.gfx11.wmma<16x16x16, (f16, f16) -> f32",
-        "!fly.copy_atom<!fly.universal_copy<128>, 16>",
+        "!fly.copy_atom<!fly.universal_copy<16>, 16>",
         "fly.gemm(",
     }) |needle| {
         if (std.mem.indexOf(u8, ir, needle) == null) {

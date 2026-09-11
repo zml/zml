@@ -22,6 +22,11 @@ cc_library(
 zig_library(
     name = "fly",
     tags = ["manual"],
+    srcs = [
+        "attributes.zig",
+        "rocdl.zig",
+        "types.zig",
+    ],
     import_name = "mlir/dialects/fly",
     main = "fly.zig",
     visibility = ["//visibility:public"],

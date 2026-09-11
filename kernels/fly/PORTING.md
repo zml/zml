@@ -30,12 +30,12 @@ FlyDSL HEAD: the plugin only parses what the pin prints.
 | `fx.make_view(ptr, layout)` | `ptr.view(layout)` |
 | `fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)` | `b.copyAtom(.{ .universal = 128 }, .f32)` |
 | `fx.rocdl.BufferCopy32b()` / `BufferCopyLDS128b()` | `.{ .buffer_copy = 32 }` / `.{ .buffer_copy_lds = 128 }` |
-| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom("!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>")` |
+| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom(try fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{ .m = 16, .n = 16, .k = 4, ... }))` |
 | `fx.make_tiled_mma(atom, layout)` | `b.tiledMma(atom, layout, null)` |
 | `fx.make_tiled_copy_tv(atom, thr, val)` | `b.tiledCopyTV(atom, thr, val)` |
 | `fx.make_tiled_copy_A(atom, tiled_mma)` | `b.tiledCopyA(atom, tiled_mma)` |
 | `tiled_copy.tile_mn` | `tc.tileMN()` |
-| `tiled_mma.tile_size_mnk` etc. | `b.derivedStatic(.tiled_mma_tile_size_mnk, tm.value)` |
+| `tiled_mma.tile_size_mnk` etc. | `fly.expect(tm.value.type_(), .tiled_mma).getTileSizeMNK()` |
 | `tiled_copy.get_slice(tid).partition_S(t)` | `tc.getSlice(tid).partitionS(t)` |
 | `thr_copy.retile(t)` | `thr.retile(t)` |
 | `tiled_mma.make_fragment_A(t)` | `tm.makeFragmentA(t)` |
