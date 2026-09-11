@@ -1,10 +1,3 @@
-//! Native Cute bindings backed by the typed C API.
-//! Operation builders follow the ODS schemas: results have a _type/_types
-//! suffix, dots become underscores unless that collides with an existing name,
-//! and verification is on by default.
-//! Recovered operations share the cute namespace with the public operations.
-//! Their schemas do not implement NVIDIA's private lowering pipeline.
-
 const std = @import("std");
 
 const c = @import("c");

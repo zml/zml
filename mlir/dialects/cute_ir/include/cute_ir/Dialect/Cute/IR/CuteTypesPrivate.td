@@ -1,9 +1,3 @@
-//===- CutePrivateCompatTypes.td - proprietary schemas -------*- tablegen -*-===//
-
-// Type contracts recovered from nvidia-cutlass-dsl 4.6.2. The declarations
-// intentionally cover the syntax needed by native emitters; the proprietary
-// compiler remains authoritative for semantic verification and lowering.
-
 #ifndef CUTE_IR_DIALECT_CUTE_IR_CUTE_PRIVATE_COMPAT_TYPES_TD
 #define CUTE_IR_DIALECT_CUTE_IR_CUTE_PRIVATE_COMPAT_TYPES_TD
 

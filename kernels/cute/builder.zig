@@ -1,7 +1,3 @@
-//! A Zig front end for the CuTe DSL, shaped after `cutlass.cute`: a kernel
-//! takes tensors, indexes them with coordinates, reads `thread_idx()` and
-//! friends from `cute.arch`. `finish` prints the kernel as a public
-//! `func.func`; cute-ir-compile makes it the kernel entry.
 const std = @import("std");
 
 const cute = @import("mlir/dialects/cute_ir");

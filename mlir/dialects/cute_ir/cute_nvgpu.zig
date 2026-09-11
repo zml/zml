@@ -1,7 +1,3 @@
-//! Native CuteNVGPU bindings backed by the typed C API.
-//! Payload-backed types take a StringAttr containing the complete payload,
-//! including angle brackets (for example <f32>).
-
 const std = @import("std");
 
 const c = @import("c");

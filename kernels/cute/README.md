@@ -98,10 +98,11 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 `kernel_type = "cute"`, `ir` (the textual module), `grid` and `block`
 (3-element arrays), optional `zeroed_outputs`. XLA runs `cute-ir-compile`
 (which dlopens `cutlass_ir.so` from the plugin archive), takes the kernel's
-dynamic shared memory requirement and argument count from the compiler's
-metadata, checks them, and launches the cubin over `grid` × `block`. Every
-operand and result is one raw device pointer in the default layout, operands
-first. A module that carries its own `gpu.module` and host launch still works;
+dynamic shared memory requirement from the compiler's metadata, and launches
+the cubin over `grid` × `block`. Every operand and result is one raw device
+pointer in the default layout, operands first; the count is not checked
+against the kernel signature, so `inputs`/`outputs` must match `declareArgs`.
+A module that carries its own `gpu.module` and host launch still works;
 it then owns the launch configuration and `grid`/`block` must be left out.
 
 To see what XLA received, run with `--xla_dump_to=<dir>`: it writes
@@ -122,6 +123,4 @@ grep -n '^pub fn ' mlir/dialects/cute_ir/cute_ir.zig mlir/dialects/cute_ir/cute_
 ```
 
 `grep -n '^test "' kernels/cute/builder.zig` lists the tests; each prints a
-kernel that round-trips through the verifier. A runnable example
-(`naive_elementwise_add`, a shared-memory block reverse) lives in
-`examples/cute`.
+kernel that round-trips through the verifier.
