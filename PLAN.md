@@ -63,21 +63,6 @@ which includes calibration. Tasks that touch admission add the
 
 ## Group A: surface trims (no device run needed between tasks)
 
-- [ ] 15. Admission helpers without the boundary ceremony (C28 narrow, 30 lines).
-  Keep `zml/io/execute_admission.zig` and the `Fit` enum (the `.unmeasured`
-  path after init is real). Delete `DeviceStats` (`:13-17`): `room` takes
-  `(limit: ?u64, in_use: u64, submitted: u64, allocated: u64, reserve: u64)
-  ?u64` and its test's literals become positional; delete `roomPerDevice`
-  and its test (`:38-44`, `:63-71`): `readRoom` in `loader.zig` computes the
-  room per device inline from `device.memoryStats()` (replacing the copy
-  loop at `:384-387` and the call at `:389`, returning false on a null
-  limit); delete `scratch.stats` (field `:78`, alloc and errdefer `:159-160`,
-  init `:174`, free `:311`); delete `Cost` (`:19-27`): `admits(rooms,
-  pending, inputs, execution)` takes the slices positionally (calls at
-  `:344`, `:379`). `min_room_seen` keeps updating only from devices with a
-  limit. Validation adds the `ZML_GPU_MEMORY_FRACTION=0.08` gb300-2 run
-  (CTX 3161-3165: expect retires, no OOM, `pack check: ok`).
-
 ## Group B: mechanism changes (CPU playground plus gb300-2 after each)
 
 - [ ] 16. Lifecycle credits become a constant (C07, about 100 lines).

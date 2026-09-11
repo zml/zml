@@ -3524,6 +3524,13 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `Planner.appendTransfers` already relies on the spans tiling
   `[0, byteSize)`. The gaps-and-overlaps test went with the error; mirrored
   masks, `deduplicateByRange` and the axis recursion stay.
+- Task 15 (C28 narrow), admission without the boundary types:
+  `DeviceStats`, `roomPerDevice` and `Cost` are gone. `room` takes five
+  positional numbers, `admits` takes the four slices, and `readRoom` reads
+  `device.memoryStats()` straight into `scratch.room` (one loop, no stats
+  scratch), still refusing a device without a limit and still tracking
+  `min_room_seen` from the devices that have one. The module and the `Fit`
+  enum stay: the `.unmeasured` path is real on CPU.
 
 ## Open work
 

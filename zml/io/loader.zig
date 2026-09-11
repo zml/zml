@@ -74,7 +74,6 @@ pub const Loader = struct {
     const Scratch = struct {
         /// The four `u64` slices below, one allocation.
         words: []u64,
-        stats: []admission.DeviceStats,
         room: []u64,
         allocated: []u64,
         inputs: []u64,
@@ -113,8 +112,6 @@ pub const Loader = struct {
         const pending_execution = try allocator.alloc(u64, devices);
         errdefer allocator.free(pending_execution);
         @memset(pending_execution, 0);
-        const stats = try allocator.alloc(admission.DeviceStats, devices);
-        errdefer allocator.free(stats);
         const words = try allocator.alloc(u64, 4 * devices);
         errdefer allocator.free(words);
         var self: Loader = .{
@@ -127,7 +124,6 @@ pub const Loader = struct {
             .pending_execution = pending_execution,
             .scratch = .{
                 .words = words,
-                .stats = stats,
                 .room = words[0..devices],
                 .allocated = words[devices .. 2 * devices],
                 .inputs = words[2 * devices .. 3 * devices],
@@ -259,7 +255,6 @@ pub const Loader = struct {
         self.delivered.deinit(self.allocator);
         self.allocator.free(self.submitted_bytes);
         self.allocator.free(self.pending_execution);
-        self.allocator.free(self.scratch.stats);
         self.allocator.free(self.scratch.words);
         self.backend.destroy();
         self.* = undefined;
@@ -292,12 +287,11 @@ pub const Loader = struct {
             const temp = self.compiledTempBytes(exe);
             for (output_sharding.devicesInCanonicalOrder()) |device| execution[device.id] +|= temp;
         }
-        const cost: admission.Cost = .{ .inputs = inputs, .execution = execution };
         var retired: usize = 0;
-        var fit = self.measureFit(cost);
+        var fit = self.measureFit(inputs, execution);
         while (fit != .fits and self.pending_executes != 0) : (retired += 1) {
             try self.retireOldest(true);
-            fit = self.measureFit(cost);
+            fit = self.measureFit(inputs, execution);
         }
         if (fit == .exceeds and !self.oversized_logged) {
             self.oversized_logged = true;
@@ -323,22 +317,21 @@ pub const Loader = struct {
 
     const Fit = enum { unmeasured, fits, exceeds };
 
-    /// Whether `cost` fits beside the pending executions in the room the
-    /// devices report now.
-    fn measureFit(self: *Loader, cost: admission.Cost) Fit {
+    /// Whether the submission fits beside the pending executions in the room
+    /// the devices report now.
+    fn measureFit(self: *Loader, inputs: []const u64, execution: []const u64) Fit {
         if (!self.memory_supported or !self.readRoom()) return .unmeasured;
-        return if (admission.admits(self.scratch.room, self.pending_execution, cost)) .fits else .exceeds;
+        return if (admission.admits(self.scratch.room, self.pending_execution, inputs, execution)) .fits else .exceeds;
     }
 
     /// Refreshes the per-device room; false when a device stopped answering.
     fn readRoom(self: *Loader) bool {
-        for (self.scratch.stats, self.platform.devices) |*stats, device| {
-            const reported = device.memoryStats();
-            stats.* = .{ .bytes_limit = reported.bytes_limit, .bytes_in_use = reported.bytes_in_use };
-        }
         self.backend.allocatedBytesPerDevice(self.scratch.allocated);
-        if (!admission.roomPerDevice(self.scratch.room, self.scratch.stats, self.submitted_bytes, self.scratch.allocated, admission.reserve_bytes)) return false;
-        for (self.scratch.room) |room| self.min_room_seen = @min(self.min_room_seen orelse room, room);
+        for (self.scratch.room, self.platform.devices, self.submitted_bytes, self.scratch.allocated) |*out, device, submitted, allocated| {
+            const reported = device.memoryStats();
+            out.* = admission.room(reported.bytes_limit, reported.bytes_in_use, submitted, allocated, admission.reserve_bytes) orelse return false;
+            self.min_room_seen = @min(self.min_room_seen orelse out.*, out.*);
+        }
         return true;
     }
 
