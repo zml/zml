@@ -920,7 +920,6 @@ const Planner = struct {
     const TensorPlan = struct {
         item: *Item,
         dispatch_spans: DispatchSpans,
-        device_indices: []usize,
         total: usize,
     };
 
@@ -995,10 +994,7 @@ const Planner = struct {
         const tensor_plans = try allocator.alloc(TensorPlan, order.len);
         var initialized_plans: usize = 0;
         defer {
-            for (tensor_plans[0..initialized_plans]) |*plan| {
-                plan.dispatch_spans.deinit(allocator);
-                allocator.free(plan.device_indices);
-            }
+            for (tensor_plans[0..initialized_plans]) |*plan| plan.dispatch_spans.deinit(allocator);
             allocator.free(tensor_plans);
         }
         for (order, tensor_plans) |item_index, *plan| {
@@ -1008,32 +1004,22 @@ const Planner = struct {
             plan.* = .{
                 .item = item,
                 .dispatch_spans = try .init(allocator, packed_shape, item.sharding),
-                .device_indices = &.{},
                 .total = packed_shape.byteSize(),
             };
             initialized_plans += 1;
             if (plan.total != item.source.byteSize()) return error.InvalidLoaderJob;
-            const ordered_devices = item.sharding.devicesInCanonicalOrder();
-            plan.device_indices = try allocator.alloc(usize, ordered_devices.len);
-            for (ordered_devices, plan.device_indices) |device, *device_index| {
-                device_index.* = @intCast(device.id);
-                if (device_index.* >= device_count) return error.DmaDeviceMismatch;
+            // Every later use of a device id indexes a per-device array (the
+            // pumps, the transfer targets); check them once, here.
+            for (item.sharding.devicesInCanonicalOrder()) |device| {
+                if (device.id >= device_count) return error.DmaDeviceMismatch;
             }
         }
         var jobs_list: std.ArrayList(Batch.Plan.Job) = .empty;
         defer jobs_list.deinit(allocator);
         var transfers_list: std.ArrayList(Batch.Plan.Transfer) = .empty;
         defer transfers_list.deinit(allocator);
-        var physical_list: std.ArrayList(usize) = .empty;
-        defer physical_list.deinit(allocator);
         var safe_boundaries: std.ArrayList(u64) = .empty;
         defer safe_boundaries.deinit(allocator);
-        // One device is charged every job, so the fair order is the planning
-        // order and the queues stay empty.
-        const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
-        defer allocator.free(queues);
-        @memset(queues, .empty);
-        defer for (queues) |*queue| queue.deinit(allocator);
         var source_bytes: u64 = 0;
         var block_total: usize = 0;
         var run_cursor: usize = 0;
@@ -1117,10 +1103,7 @@ const Planner = struct {
                     alignment,
                 );
                 const read_len: usize = @intCast(read_end - read_start);
-                const job_index = jobs_list.items.len;
                 const transfer_start = transfers_list.items.len;
-                try physical_list.appendNTimes(allocator, 0, device_count);
-                const row = physical_list.items[job_index * device_count ..][0..device_count];
                 while (candidate_start < run_item_end) {
                     const candidate = items[order[candidate_start]].source;
                     const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
@@ -1145,7 +1128,6 @@ const Planner = struct {
                         @intCast(intersection_end - intersection_start),
                         read_start,
                         block_size,
-                        row,
                     );
                 }
                 std.debug.assert(transfers_list.items.len > transfer_start);
@@ -1161,11 +1143,6 @@ const Planner = struct {
                 });
                 block_total += block_len;
                 source_bytes +|= @intCast(job_len);
-                if (device_count > 1) {
-                    for (row, queues) |bytes, *queue| {
-                        if (bytes != 0) try queue.append(allocator, job_index);
-                    }
-                }
                 job_start = job_end;
                 jobs_remaining -= 1;
             }
@@ -1173,27 +1150,24 @@ const Planner = struct {
             run_cursor = run_item_end;
         }
 
-        const planning_jobs = jobs_list.items;
         const plan = plan: {
             const transfers = try transfers_list.toOwnedSlice(allocator);
             errdefer allocator.free(transfers);
             break :plan try Batch.Plan.create(
                 allocator,
                 items[order[0]].source_slot,
-                planning_jobs.len,
+                jobs_list.items.len,
                 block_total,
                 transfers,
                 source_bytes,
             );
         };
         errdefer plan.destroy();
-        if (device_count == 1) {
-            @memcpy(plan.jobs, planning_jobs);
-        } else {
-            const fair_order = try fairOrder(allocator, planning_jobs.len, physical_list.items, queues);
-            defer allocator.free(fair_order);
-            for (plan.jobs, fair_order) |*job, planning_index| job.* = planning_jobs[planning_index];
-        }
+        // Jobs are claimed in planning order, which is file order. A
+        // byte-fair order across destination devices was measured against it
+        // on the two hosts where the DMA pump is not the ceiling and made no
+        // difference (sixteenth pass).
+        @memcpy(plan.jobs, jobs_list.items);
         return plan;
     }
 
@@ -1244,8 +1218,7 @@ const Planner = struct {
 
     /// Appends the transfers of `len` bytes of `tensor` from `tensor_offset`
     /// read by the job at `job_file_offset`, merging with the previous
-    /// transfer where contiguous, and charges the bytes to each destination
-    /// device in `physical_bytes`.
+    /// transfer where contiguous.
     fn appendTransfers(
         allocator: std.mem.Allocator,
         output: *std.ArrayList(Batch.Plan.Transfer),
@@ -1255,7 +1228,6 @@ const Planner = struct {
         len: usize,
         job_file_offset: u64,
         block_size: usize,
-        physical_bytes: []usize,
     ) !void {
         const item = tensor.item;
         const spans = tensor.dispatch_spans;
@@ -1296,73 +1268,9 @@ const Planner = struct {
                 .destination_offset = destination_offset,
                 .len = take,
             });
-            var mask = writer_mask;
-            while (mask != 0) {
-                const writer_index: usize = @intCast(@ctz(mask));
-                mask &= mask - 1;
-                if (writer_index >= tensor.device_indices.len) return error.InvalidLoaderJob;
-                physical_bytes[tensor.device_indices[writer_index]] += take;
-            }
             cursor += take;
             if (cursor == span.end) span_index += 1;
         }
-    }
-
-    /// The claim order of `job_count` jobs: each turn goes to the device
-    /// with the fewest scheduled bytes that still has a queued job, ties
-    /// rotating, so every device's DMA engine is fed early.
-    fn fairOrder(
-        allocator: std.mem.Allocator,
-        job_count: usize,
-        physical_bytes: []const usize,
-        queues: []const std.ArrayListUnmanaged(usize),
-    ) ![]usize {
-        const device_count = queues.len;
-        if (device_count == 0 or device_count > 64) return error.DmaDeviceMismatch;
-        if (physical_bytes.len != job_count * device_count) return error.InvalidLoaderJob;
-
-        const order = try allocator.alloc(usize, job_count);
-        errdefer allocator.free(order);
-        const cursors = try allocator.alloc(usize, device_count);
-        defer allocator.free(cursors);
-        @memset(cursors, 0);
-        const scheduled = try allocator.alloc(u64, device_count);
-        defer allocator.free(scheduled);
-        @memset(scheduled, 0);
-        const claimed = try allocator.alloc(bool, job_count);
-        defer allocator.free(claimed);
-        @memset(claimed, false);
-
-        var next_device: usize = 0;
-        for (order) |*ordered_job| {
-            var selected_device: ?usize = null;
-            var selected_job: ?usize = null;
-            for (0..device_count) |offset| {
-                const device_index = (next_device + offset) % device_count;
-                const queue = queues[device_index];
-                while (cursors[device_index] < queue.items.len and
-                    claimed[queue.items[cursors[device_index]]])
-                {
-                    cursors[device_index] += 1;
-                }
-                if (cursors[device_index] == queue.items.len) continue;
-                const candidate = queue.items[cursors[device_index]];
-                if (selected_device == null or
-                    scheduled[device_index] < scheduled[selected_device.?])
-                {
-                    selected_device = device_index;
-                    selected_job = candidate;
-                }
-            }
-            const device_index = selected_device orelse return error.InvalidLoaderJob;
-            const job_index = selected_job.?;
-            claimed[job_index] = true;
-            ordered_job.* = job_index;
-            const row = physical_bytes[job_index * device_count ..][0..device_count];
-            for (row, scheduled) |bytes, *total| total.* +|= @intCast(bytes);
-            next_device = (device_index + 1) % device_count;
-        }
-        return order;
     }
 };
 
@@ -2556,43 +2464,6 @@ test "loader failures clean up before publication, after publication and during 
     }
 }
 
-/// Planning input for the fair-order tests: one job per entry, charged to
-/// the devices its `physical_bytes` names.
-const FairOrderJob = struct {
-    physical_bytes: []const usize,
-};
-
-fn testFairOrder(
-    allocator: std.mem.Allocator,
-    device_count: usize,
-    jobs: []const FairOrderJob,
-) ![]usize {
-    const queues = try allocator.alloc(std.ArrayListUnmanaged(usize), device_count);
-    defer allocator.free(queues);
-    @memset(queues, .empty);
-    defer for (queues) |*queue| queue.deinit(allocator);
-    const physical_bytes = try allocator.alloc(usize, jobs.len * device_count);
-    defer allocator.free(physical_bytes);
-    for (jobs, 0..) |job, job_index| {
-        if (job.physical_bytes.len != device_count) return error.InvalidTestJob;
-        for (job.physical_bytes, queues, 0..) |bytes, *queue, device_index| {
-            physical_bytes[job_index * device_count + device_index] = bytes;
-            if (bytes != 0) try queue.append(allocator, job_index);
-        }
-    }
-    return Planner.fairOrder(allocator, jobs.len, physical_bytes, queues);
-}
-
-fn expectFairOrder(
-    device_count: usize,
-    jobs: []const FairOrderJob,
-    expected: []const usize,
-) !void {
-    const order = try testFairOrder(std.testing.allocator, device_count, jobs);
-    defer std.testing.allocator.free(order);
-    try std.testing.expectEqualSlices(usize, expected, order);
-}
-
 /// A plan of `job_count` unit jobs (`file_offset` = index), each with one
 /// block slot and one event slot, and no transfers.
 fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
@@ -2662,15 +2533,6 @@ fn discardTestBatch(scheduler: *Scheduler, batch: *Batch) void {
     batch.finishJobs(1 + claimed);
     std.debug.assert(batch.done.isSet());
     batch.destroy();
-}
-
-test "fair order rotates sharded devices by scheduled bytes" {
-    try expectFairOrder(2, &.{
-        .{ .physical_bytes = &.{ 10, 0 } },
-        .{ .physical_bytes = &.{ 10, 0 } },
-        .{ .physical_bytes = &.{ 0, 10 } },
-        .{ .physical_bytes = &.{ 0, 10 } },
-    }, &.{ 0, 2, 1, 3 });
 }
 
 test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
@@ -2938,56 +2800,6 @@ test "scheduler publishes a submission one file at a time and claims the files i
     batch.destroy();
 }
 
-test "fair order places a replicated job once and credits every replica" {
-    // The replicated entry is skipped in device 1's queue; tie rotation gives
-    // that device the next scheduling turn.
-    try expectFairOrder(2, &.{
-        .{ .physical_bytes = &.{ 20, 20 } },
-        .{ .physical_bytes = &.{ 10, 0 } },
-        .{ .physical_bytes = &.{ 0, 10 } },
-    }, &.{ 0, 2, 1 });
-}
-
-test "fair order compares physical bytes rather than scheduling turns" {
-    // Device 0 receives a third turn because it has 8 scheduled bytes while
-    // device 1 has 10; a turn-count scheduler would alternate.
-    try expectFairOrder(2, &.{
-        .{ .physical_bytes = &.{ 4, 0 } },
-        .{ .physical_bytes = &.{ 4, 0 } },
-        .{ .physical_bytes = &.{ 4, 0 } },
-        .{ .physical_bytes = &.{ 0, 10 } },
-        .{ .physical_bytes = &.{ 0, 10 } },
-    }, &.{ 0, 3, 1, 2, 4 });
-}
-
-test "fair order validates jobs and cleans up allocation failures" {
-    const allocator = std.testing.allocator;
-    try std.testing.expectError(error.InvalidTestJob, testFairOrder(allocator, 2, &.{
-        .{ .physical_bytes = &.{1} },
-    }));
-    // A job that no device queue lists can never be selected.
-    try std.testing.expectError(error.InvalidLoaderJob, testFairOrder(allocator, 2, &.{
-        .{ .physical_bytes = &.{ 0, 0 } },
-    }));
-    try std.testing.expectError(error.DmaDeviceMismatch, testFairOrder(allocator, 0, &.{}));
-    const queues = [_]std.ArrayListUnmanaged(usize){ .empty, .empty };
-    try std.testing.expectError(
-        error.InvalidLoaderJob,
-        Planner.fairOrder(allocator, 1, &.{1}, &queues),
-    );
-
-    const AllocationTest = struct {
-        fn run(allocator_: std.mem.Allocator) !void {
-            const order = try testFairOrder(allocator_, 2, &.{
-                .{ .physical_bytes = &.{ 1, 1 } },
-                .{ .physical_bytes = &.{ 1, 0 } },
-            });
-            allocator_.free(order);
-        }
-    };
-    try std.testing.checkAllAllocationFailures(allocator, AllocationTest.run, .{});
-}
-
 test "fifo scheduler claims batches in publish order" {
     const io = std.testing.io;
     var scheduler: Scheduler = .init(std.testing.allocator);
@@ -3234,19 +3046,6 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     batch.finishJobs(1);
     try std.testing.expect(batch.done.isSet());
     batch.destroy();
-}
-
-test "fair order is the identity for one device" {
-    // Every job charges the one device, so `preparePlan` skips the fair
-    // order and keeps the planning order for `device_count == 1`.
-    try expectFairOrder(1, &.{
-        .{ .physical_bytes = &.{10} },
-        .{ .physical_bytes = &.{5} },
-        .{ .physical_bytes = &.{1} },
-        .{ .physical_bytes = &.{20} },
-        .{ .physical_bytes = &.{20} },
-        .{ .physical_bytes = &.{2} },
-    }, &.{ 0, 1, 2, 3, 4, 5 });
 }
 
 /// A read statistics provider the tests move by hand.
@@ -3779,15 +3578,7 @@ const DispatchTest = struct {
         const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
         defer dispatch_spans.deinit(allocator);
 
-        const ordered_devices = sharding.devicesInCanonicalOrder();
-        const writer_count = ordered_devices.len;
-        const device_indices = try allocator.alloc(usize, writer_count);
-        defer allocator.free(device_indices);
-        var device_count: usize = 0;
-        for (ordered_devices, device_indices) |device, *device_index| {
-            device_index.* = @intCast(device.id);
-            device_count = @max(device_count, device_index.* + 1);
-        }
+        const writer_count = sharding.devicesInCanonicalOrder().len;
         const placement = try sharding.placement(shape);
         const writer_size = placement.shape.byteSize();
         const source = try allocator.alloc(u8, shape.byteSize());
@@ -3826,13 +3617,10 @@ const DispatchTest = struct {
         const tensor_plan: Planner.TensorPlan = .{
             .item = &item,
             .dispatch_spans = dispatch_spans,
-            .device_indices = device_indices,
             .total = shape.byteSize(),
         };
         var transfers: std.ArrayList(Batch.Plan.Transfer) = .empty;
         defer transfers.deinit(allocator);
-        const physical_bytes = try allocator.alloc(usize, device_count);
-        defer allocator.free(physical_bytes);
         // The pump flags a target's last transfer when its pieces reach the
         // placement's bytes, so every writer's pieces must sum to it.
         const written_bytes = try allocator.alloc(usize, writer_count);
@@ -3846,7 +3634,6 @@ const DispatchTest = struct {
             const source_offset = reverse_index * request_size;
             const request_len = @min(request_size, source.len - source_offset);
             transfers.clearRetainingCapacity();
-            @memset(physical_bytes, 0);
             try Planner.appendTransfers(
                 allocator,
                 &transfers,
@@ -3856,7 +3643,6 @@ const DispatchTest = struct {
                 request_len,
                 source_offset,
                 block_size,
-                physical_bytes,
             );
             for (transfers.items) |transfer| {
                 try std.testing.expect(transfer.item == &item);

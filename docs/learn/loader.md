@@ -84,7 +84,7 @@ executable bindings.
 The direct backend reads coalesced source ranges into reusable host blocks.
 Its `Planner` produces immutable jobs and transfer records, one plan per file.
 Touching or overlapping source ranges share reads; gaps and file boundaries
-remain separate. The planner also determines fair job order across devices.
+remain separate. Jobs keep their planning order, which is file order.
 The `Scheduler` publishes and claims those jobs in submission/file order.
 Workers read them, and per-device pumps submit the preplanned transfer pieces.
 

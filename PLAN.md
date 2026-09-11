@@ -85,19 +85,6 @@ which includes calibration. Tasks that touch admission add the
   1595-1610) and a `ZML_LOAD_CHECK` read-back on a multi-device fixture;
   tests `:3706-3745`, `:3804-3850` rewritten on the node.
 
-- [ ] 20. Drop `Planner.fairOrder` and the per-device charge queues (C27,
-  about 225 lines). No recording justifies the byte-fair order either way:
-  every multi-device number used axis-0 sharding where it is active, and the
-  CPU pump is saturated (CTX 2185-2190). Measure first: force the planning
-  order with a two-line local patch (take the `@memcpy(plan.jobs,
-  planning_jobs)` branch unconditionally in `preparePlan`) and run
-  interleaved warm A/Bs on the B70 four-CPU sharded Qwen3.5-4B and on
-  four-B70 Llama (0.640 s anchor); gb300-2 and MI300X are not diagnostic.
-  Delete only if the A/B is flat: `fairOrder` (`:1337-1403`), the queues and
-  the per-job physical row in `preparePlan`, the charging loop and parameter
-  of `appendTransfers`, `TensorPlan.device_indices`, the five fair-order
-  tests and two helpers; `loader.md:87`.
-
 - [ ] 21. DMA block override instead of the screen (C31 amended, decision).
   A per-target block table is refuted (CUDA hosts disagree: 2 MiB on the
   RTX 5090 host, 16 MiB on gb300-2, CTX 878-884, 1041). What the record

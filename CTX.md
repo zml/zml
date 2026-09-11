@@ -261,18 +261,16 @@ workers read the first file while the later ones are planned. Each plan:
    and duplicate coverage.
 
 Coalescing is plan-local: one plan per source file within a submission, and
-a submission's plans are claimed in file order. Planning uses per-device
-physical-byte charges to compute a deterministic fair job order per plan
-(`fairOrder`), then discards the temporary queues and charges; for one
-device the fair order is the identity (every job charges that device;
-asserted by a test), so the planner keeps the planning order and skips the
-queues. No job depends on another: every DMA piece is submitted as soon as
+a submission's plans are claimed in file order. A plan's jobs keep their
+planning order, which is file order (sixteenth pass: the byte-fair order
+across destination devices was measured against it and made no difference,
+see the ledger below). No job depends on another: every DMA piece is submitted as soon as
 its block is read (fifth pass), so the request carrying a tensor's tail may
 be planned, claimed and read before the tensor's earlier requests. While
 those spans are available, the planner also emits the final item, block
 index/offset, writer mask, destination offset, and length records. The
-published plan owns source jobs physically arranged in final fair order and
-their final transfer records; runtime tensor state does not own another
+published plan owns its source jobs in planning order with their final
+transfer records; runtime tensor state does not own another
 dispatch plan. Order indirection and remaining-work suffix arrays are
 discarded. Physical source bytes are distinct from logical tensor
 bytes so duplication and replication do not distort diagnostics or fairness.
@@ -314,10 +312,8 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
 
 ### Scheduling and concurrency
 
-- Planning charges a coalesced job's physical bytes to every destination device
-  and simulates the fairness policy once per plan (one source file of a
-  submission); the plan's jobs are stored in that immutable order and a
-  submission's plans are claimed in file order. Reads and DMA complete in
+- A plan's jobs are immutable and claimed in planning (file) order, and a
+  submission's plans in file order. Reads and DMA complete in
   any order: PJRT makes a buffer ready once every transfer submitted to it
   has completed and one of them carried the last-transfer flag, so the pump
   flags the submission that completes the target's placement bytes
@@ -2248,8 +2244,8 @@ boundaries and ownership in the code's structure.
   backend defines the other one's input contract. Sharding is resolved once
   by shared preparation.
 - `direct_loader.Loader` now precedes its implementation. `Planner` owns
-  coalescing, transfer planning, and fair ordering; `Scheduler` owns FIFO
-  publication and claims. Immutable `Job` and `Transfer` descriptors belong
+  coalescing and transfer planning; `Scheduler` owns FIFO publication and
+  claims. Immutable `Job` and `Transfer` descriptors belong
   to `Batch.Plan`. Runtime names are `Pipeline`, `ReadRequest`, `Metrics`,
   `TensorTransfer`, and `SourceSlot`, without obsolete Fair/Vectored/Loader
   prefixes. The ineffective `cleaned` flag is removed: `destroy` frees self.
@@ -3622,6 +3618,28 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `elapsed` 0.251 / 0.259 / 0.249 s against 0.265 to 0.268 s before the
   task, `pinned_high_water == pinned_mapped == 400 MiB`, `pack check: ok`,
   `load check: ok`. Logs `~/zml-directio-logs/b18_*.log`.
+- Task 20 (C27), the byte-fair job order is gone (about 230 lines). It was
+  measured first, as the plan required, with two binaries from this tree
+  (the arm taking the planning order unconditionally logs
+  `job_order=planning`), interleaved warm runs after a warm-up, on the two
+  hosts where the DMA pump is not the ceiling:
+
+  | fixture | fair order | planning order |
+  |---|---|---|
+  | four B70, Llama-3.1-8B sharded (4) | 0.661 / 0.658 / 0.661 / 0.660 s | 0.662 / 0.659 / 0.661 / 0.663 s |
+  | four CPU devices, Qwen3.5-4B sharded (4) | 1.293 / 1.222 / 1.221 / 1.195 s | 1.291 / 1.224 / 1.230 / 1.228 s |
+  | four B70, Qwen3.5-4B sharded (3) | 1.238 / 1.224 / 1.229 s | 1.243 / 1.225 / 1.243 s |
+
+  Flat everywhere (under 0.5%, inside the run-to-run spread), so `fairOrder`,
+  the per-device charge queues, the per-job physical row, the charging loop
+  and parameter of `appendTransfers`, `TensorPlan.device_indices` and the
+  five fair-order tests with their two helpers are deleted; the jobs keep
+  their planning order, which is file order. The device-id bound check that
+  the charge loop carried is kept where the plans are built, since every
+  later use of a device id indexes a per-device array. `docs/learn/loader.md`
+  no longer claims the planner orders across devices. CPU playground after
+  the deletion: 3.521 / 3.521 / 3.537 s packed (no read-back), `pack check:
+  ok`, unchanged width, credits, workers and pre-growth.
 
 ## Open work
 
