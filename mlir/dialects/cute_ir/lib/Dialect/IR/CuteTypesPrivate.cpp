@@ -1,5 +1,3 @@
-//===- CutePrivateCompatTypes.cpp - recovered CuTe types ------------------===//
-
 #include "cute_ir/Dialect/Cute/IR/CuteDialectPrivate.h"
 
 #include "mlir/IR/DialectImplementation.h"

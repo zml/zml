@@ -575,6 +575,13 @@ pub const cute = struct {
 
                 try spec.run(&b, cfg);
 
+                // XLA passes one pointer per input then per output; it does
+                // not check the count against the kernel.
+                const expected = spec.inputs.len + spec.outputs.len;
+                if (b.args.len != expected) {
+                    std.debug.panic("zml.kernel.cute.Kernel({s}): declareArgs declared {d} arguments, inputs + outputs are {d}", .{ name, b.args.len, expected });
+                }
+
                 return b.finish(block);
             }
 

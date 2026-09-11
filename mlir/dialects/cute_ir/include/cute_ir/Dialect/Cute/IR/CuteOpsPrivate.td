@@ -1,11 +1,5 @@
 //===- CutePrivateCompatOps.td - proprietary CuTe op schemas -*- tablegen -*-===//
 
-// Operation contracts recovered from the generated bindings distributed with
-// nvidia-cutlass-dsl 4.6.2. These declarations intentionally encode only facts
-// present in that registry: operand/result group structure, attribute names,
-// and builtin type constraints. The proprietary compiler remains the authority
-// for semantic verification and lowering.
-
 #ifndef CUTE_IR_DIALECT_CUTE_IR_CUTE_PRIVATE_COMPAT_OPS_TD
 #define CUTE_IR_DIALECT_CUTE_IR_CUTE_PRIVATE_COMPAT_OPS_TD
 
