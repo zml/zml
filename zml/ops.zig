@@ -861,6 +861,8 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
+    is_tma_allowed: bool = false,
+    global_scratch_memory_size: i32 = 0,
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
@@ -888,6 +890,8 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
         .named(mlir_ctx, "num_stages", .int(mlir_ctx, .i32, opts.num_stages)),
         .named(mlir_ctx, "num_warps", .int(mlir_ctx, .i32, opts.num_warps)),
+        .named(mlir_ctx, "is_tma_allowed", .boolean(mlir_ctx, opts.is_tma_allowed)),
+        .named(mlir_ctx, "global_scratch_memory_size", .int(mlir_ctx, .i32, opts.global_scratch_memory_size)),
     });
 
     var operands_layouts: [inputs.len][]const usize = undefined;
@@ -1084,6 +1088,260 @@ test "triton" {
 
     try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
     try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
+}
+
+pub const CudaTileOps = struct {
+    name: [:0]const u8,
+    ir: [:0]const u8,
+    grid: [3]i32,
+    /// The Tile IR bytecode version XLA serializes at, "MAJOR.MINOR"; XLA's
+    /// default is 13.3.
+    ir_version: ?[]const u8 = null,
+    /// Result indices XLA zeroes before the launch, ascending. For a kernel
+    /// that accumulates, or writes less than the whole output.
+    zeroed_outputs: []const i32 = &.{},
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+/// A `__gpu$xla.gpu.cuda_tile` custom call: XLA assembles `ir` with tileiras
+/// and launches `name` over `grid` tile blocks. Every operand and result
+/// arrives as one raw device pointer, in order, in the default layout.
+pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.len]Tensor {
+    const mlir_ctx = Compiler.current().mlir_ctx;
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+    }
+
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 10) = .empty;
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
+        .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cuda_tile")),
+        .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
+        .named(mlir_ctx, "grid_x", .int(mlir_ctx, .i32, opts.grid[0])),
+        .named(mlir_ctx, "grid_y", .int(mlir_ctx, .i32, opts.grid[1])),
+        .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
+    });
+    if (opts.ir_version) |v| attrs.appendAssumeCapacity(.named(mlir_ctx, "ir_version", .string(mlir_ctx, v)));
+    if (opts.zeroed_outputs.len > 0) {
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+        for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
+    }
+    const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "__gpu$xla.gpu.cuda_tile",
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = false,
+            .output_operand_aliases = opts.output_operand_aliases,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(Compiler.current().currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+test "cuda_tile" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // out[i] = in[i] + 1 over 128 f32; the XLA milestone kernel.
+    const ir =
+        \\cuda_tile.module @m {
+        \\  entry @add_one(%in : tile<ptr<f32>>, %out : tile<ptr<f32>>) {
+        \\    %offsets = iota : tile<128xi32>
+        \\    %in_r = reshape %in : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %in_b = broadcast %in_r : tile<1xptr<f32>> -> tile<128xptr<f32>>
+        \\    %in_p = offset %in_b, %offsets : tile<128xptr<f32>>, tile<128xi32> -> tile<128xptr<f32>>
+        \\    %v, %t0 = load_ptr_tko weak %in_p : tile<128xptr<f32>> -> tile<128xf32>, token
+        \\    %one = constant <f32: 1.000000e+00> : tile<f32>
+        \\    %one_r = reshape %one : tile<f32> -> tile<1xf32>
+        \\    %one_b = broadcast %one_r : tile<1xf32> -> tile<128xf32>
+        \\    %sum = addf %v, %one_b rounding<nearest_even> : tile<128xf32>
+        \\    %out_r = reshape %out : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %out_b = broadcast %out_r : tile<1xptr<f32>> -> tile<128xptr<f32>>
+        \\    %out_p = offset %out_b, %offsets : tile<128xptr<f32>>, tile<128xi32> -> tile<128xptr<f32>>
+        \\    %t1 = store_ptr_tko weak %out_p, %sum : tile<128xptr<f32>>, tile<128xf32> -> token
+        \\    return
+        \\  }
+        \\}
+    ;
+
+    const Mod = struct {
+        pub fn forward(a: Tensor) Tensor {
+            return cudaTile(.{a}, .{a.shape()}, .{
+                .name = "add_one",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+            })[0];
+        }
+    };
+
+    const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    defer exe.deinit();
+
+    var input: [128]f32 = undefined;
+    for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer a_buffer.deinit();
+
+    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    defer result.deinit();
+
+    var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer host.free(std.testing.allocator);
+
+    for (host.items(f32), 0..) |v, i| {
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), v);
+    }
+}
+
+test "cuda_tile grid" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // Each of the 2x3x4 tile blocks writes its linear id t = x + 2y + 6z
+    // over out[128*t .. 128*t+128); the input is unused.
+    const ir =
+        \\cuda_tile.module @m {
+        \\  entry @grid(%in : tile<ptr<f32>>, %out : tile<ptr<f32>>) {
+        \\    %bx, %by, %bz = get_tile_block_id : tile<i32>
+        \\    %c2 = constant <i32: 2> : tile<i32>
+        \\    %c6 = constant <i32: 6> : tile<i32>
+        \\    %c128 = constant <i32: 128> : tile<i32>
+        \\    %y2 = muli %by, %c2 : tile<i32>
+        \\    %z6 = muli %bz, %c6 : tile<i32>
+        \\    %xy = addi %bx, %y2 : tile<i32>
+        \\    %t = addi %xy, %z6 : tile<i32>
+        \\    %base = muli %t, %c128 : tile<i32>
+        \\    %offsets = iota : tile<128xi32>
+        \\    %base_r = reshape %base : tile<i32> -> tile<1xi32>
+        \\    %base_b = broadcast %base_r : tile<1xi32> -> tile<128xi32>
+        \\    %idx = addi %offsets, %base_b : tile<128xi32>
+        \\    %out_r = reshape %out : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %out_b = broadcast %out_r : tile<1xptr<f32>> -> tile<128xptr<f32>>
+        \\    %out_p = offset %out_b, %idx : tile<128xptr<f32>>, tile<128xi32> -> tile<128xptr<f32>>
+        \\    %tf = itof %t signed rounding<nearest_even> : tile<i32> -> tile<f32>
+        \\    %tf_r = reshape %tf : tile<f32> -> tile<1xf32>
+        \\    %tf_b = broadcast %tf_r : tile<1xf32> -> tile<128xf32>
+        \\    %tok = store_ptr_tko weak %out_p, %tf_b : tile<128xptr<f32>>, tile<128xf32> -> token
+        \\    return
+        \\  }
+        \\}
+    ;
+
+    const Mod = struct {
+        pub fn forward(a: Tensor) Tensor {
+            return cudaTile(.{a}, .{a.shape()}, .{
+                .name = "grid",
+                .ir = ir,
+                .grid = .{ 2, 3, 4 },
+            })[0];
+        }
+    };
+
+    const n = 24 * 128;
+    const a: zml.Tensor = .init(.{ .n = n }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    defer exe.deinit();
+
+    const input = [_]f32{0} ** n;
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer a_buffer.deinit();
+
+    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    defer result.deinit();
+
+    var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer host.free(std.testing.allocator);
+
+    for (host.items(f32), 0..) |v, i| {
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i / 128)), v);
+    }
+}
+
+test "cuda_tile zeroed_outputs" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    if (platform.target != .cuda) return error.SkipZigTest;
+
+    // Writes only the first 64 of 128; `zeroed_outputs` owns the rest.
+    const ir =
+        \\cuda_tile.module @m {
+        \\  entry @half(%in : tile<ptr<f32>>, %out : tile<ptr<f32>>) {
+        \\    %offsets = iota : tile<64xi32>
+        \\    %in_r = reshape %in : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %in_b = broadcast %in_r : tile<1xptr<f32>> -> tile<64xptr<f32>>
+        \\    %in_p = offset %in_b, %offsets : tile<64xptr<f32>>, tile<64xi32> -> tile<64xptr<f32>>
+        \\    %v, %t0 = load_ptr_tko weak %in_p : tile<64xptr<f32>> -> tile<64xf32>, token
+        \\    %one = constant <f32: 1.000000e+00> : tile<f32>
+        \\    %one_r = reshape %one : tile<f32> -> tile<1xf32>
+        \\    %one_b = broadcast %one_r : tile<1xf32> -> tile<64xf32>
+        \\    %sum = addf %v, %one_b rounding<nearest_even> : tile<64xf32>
+        \\    %out_r = reshape %out : tile<ptr<f32>> -> tile<1xptr<f32>>
+        \\    %out_b = broadcast %out_r : tile<1xptr<f32>> -> tile<64xptr<f32>>
+        \\    %out_p = offset %out_b, %offsets : tile<64xptr<f32>>, tile<64xi32> -> tile<64xptr<f32>>
+        \\    %tok = store_ptr_tko weak %out_p, %sum : tile<64xptr<f32>>, tile<64xf32> -> token
+        \\    return
+        \\  }
+        \\}
+    ;
+
+    const Mod = struct {
+        pub fn forward(a: Tensor) Tensor {
+            return cudaTile(.{a}, .{a.shape()}, .{
+                .name = "half",
+                .ir = ir,
+                .grid = .{ 1, 1, 1 },
+                .zeroed_outputs = &.{0},
+            })[0];
+        }
+    };
+
+    const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    defer exe.deinit();
+
+    var input: [128]f32 = undefined;
+    for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer a_buffer.deinit();
+
+    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    defer result.deinit();
+
+    var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer host.free(std.testing.allocator);
+
+    for (host.items(f32), 0..) |v, i| {
+        const want: f32 = if (i < 64) @floatFromInt(i + 1) else 0;
+        try std.testing.expectEqual(want, v);
+    }
 }
 
 pub const ScatterArgs = struct {

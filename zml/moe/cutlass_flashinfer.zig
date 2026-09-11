@@ -70,31 +70,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    variant: Variant = .bf16xbf16,
-
-    pub const InitOptions = struct {
-        variant: Variant = .bf16xbf16,
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return .{
-            .variant = opts.variant,
-        };
-    }
-
-    pub fn initBuffer(
-        _: Metadata,
-        _: std.Io,
-        _: *const zml.Platform,
-    ) !zml.Bufferized(Metadata) {
-        return {};
-    }
-};
-
-/// NVFP4 scale buffers are borrowed from the model and are not owned by Metadata.
-pub fn deinitBuffer(_: *zml.Bufferized(Metadata)) void {}
-
 const Input = struct {
     hidden_states: zml.Tensor,
     fc1_weights: zml.Tensor,
@@ -357,18 +332,11 @@ const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCall
 });
 
 fn computeCapability(platform: *const zml.Platform) !u16 {
-    if (platform.target != .cuda) return error.UnsupportedPlatform;
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    if (devices.len == 0) return error.NoDevices;
-
-    const compute_capability = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
-        return error.UnknownComputeCapability;
-
-    if (std.mem.eql(u8, compute_capability, "9.0")) return 90;
-    if (std.mem.eql(u8, compute_capability, "10.0")) return 100;
-    if (std.mem.eql(u8, compute_capability, "10.3")) return 103;
-    if (std.mem.eql(u8, compute_capability, "12.0")) return 120;
-    return error.UnsupportedArchitecture;
+    const cc = zml.platform.cuda.computeCapability(platform) orelse return error.UnsupportedPlatform;
+    return switch (cc.sm()) {
+        90, 100, 103, 120 => |sm| sm,
+        else => error.UnsupportedArchitecture,
+    };
 }
 
 pub fn load(

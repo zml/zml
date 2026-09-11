@@ -686,6 +686,23 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, true);
             c.xla_ExecutableBuildOptionsProto_set_use_shardy_partitioner(exec_build_options, use_shardy_partitioner);
 
+            // Tell XLA how much device memory PJRT actually made available.
+            // Without this, the GPU scheduler falls back to 80% of physical
+            // memory. Programs whose donated inputs and outputs exceed that
+            // artificial limit get a zero-byte temporary-memory budget and
+            // can trigger excessive rematerialization.
+            var device_memory_size: ?u64 = null;
+            for (platform.devices) |device| {
+                const bytes_limit = device.memoryStats().bytes_limit orelse {
+                    device_memory_size = null;
+                    break;
+                };
+                device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
+            }
+            if (device_memory_size) |bytes_limit| {
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+            }
+
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
@@ -719,15 +736,13 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // NVIDIA recommends these settings
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_scaled_dot_with_tile_ir", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_subchannel_dequantisation_fusion", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
             },
-            .rocm => {
-                // Use lld from libllvm instead of invoking the ld.lld binary.
-                // This saves us from having to sandbox it.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
-
-                // Do not enable the FUSION command buffer to avoid some weird crashes.
-                // This is what AMD recommendeds in the meantime.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
+            .rocm => {},
+            .metal => {
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
             },
             .oneapi => {
                 // More efficient for the allgather/broadcast implementation of the collective permute.
@@ -758,8 +773,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         }
 
         switch (platform.target) {
-            .rocm, .cuda => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_autotuner_cache_dir", std.mem.span(path), upb_arena);
+            .rocm, .cuda, .oneapi => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_per_fusion_autotune_cache_dir", std.mem.span(path), upb_arena);
             },
             else => {},
         }

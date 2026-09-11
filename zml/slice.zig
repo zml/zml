@@ -286,7 +286,6 @@ pub const Slice = struct {
 
                     // The formatter consumes this physical tail using `stride`, so this
                     // rank-1 path can read raw items without requiring contiguity.
-                    std.log.warn("Printing {} elems from offset {} out of {} total elems @ {}", .{ n, slice.offset_bytes, needed_len, stride });
                     const raw_values: []const T = @ptrCast(@alignCast(slice.bytes[slice.offset_bytes..]));
                     const values = raw_values[0..needed_len];
 

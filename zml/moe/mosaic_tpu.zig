@@ -46,26 +46,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    pub const InitOptions = struct {};
-
-    pub fn init(opts: InitOptions) Metadata {
-        _ = opts;
-        return .{};
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        _ = self;
-        _ = io;
-        _ = platform;
-        return {};
-    }
-};
-
-pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
-    _ = bufferized;
-}
-
 fn validateOptions(opts: Options) !void {
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
@@ -290,10 +270,8 @@ pub fn fusedExpertsImpl(
     w2: Tensor,
     topk_weights: Tensor,
     topk_ids: Tensor,
-    metadata: Metadata,
     opts: Options,
 ) !Tensor {
-    _ = metadata;
     try validateOptions(opts);
 
     const b = hidden_states.dim(.b);

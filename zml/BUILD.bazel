@@ -123,9 +123,7 @@ zig_library(
         "zml.zig",
         "//zml/attention/nki:attention",
     ],
-    data = [
-        "moe/triton_kernels/config.json",
-    ] + select({
+    data = select({
         "//platforms:neuron.enabled": [
             "//zml/attention/nki:attention_kernel",
         ],
@@ -146,10 +144,12 @@ zig_library(
         ":xla_data_upb",
         "//bazel",
         "//ffi:zig",
+        "//kernels/cuda_tile:cuda_tile_builder",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//kernels/triton:triton_builder",
         "//mlir",
         "//mlir/dialects",
+        "//mlir/dialects/cuda_tile",
         "//mlir/dialects/mosaic_tpu",
         "//pjrt",
         "//platforms",

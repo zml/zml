@@ -114,7 +114,7 @@ pub const Exe = struct {
         baked_count: usize = 0,
         shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) !Arguments {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) error{OutOfMemory}!Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 

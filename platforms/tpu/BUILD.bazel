@@ -8,10 +8,10 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_tpu",
+    name = "libzml_tpu",
     tags = ["manual"],
     defines = ["ZML_RUNTIME_TPU"],
-    deps = ["@libpjrt_tpu"],
+    deps = ["@libzml_tpu"],
 )
 
 zig_library(
@@ -26,7 +26,7 @@ zig_library(
         "//stdx",
     ] + select({
         "//platforms:tpu.enabled": [
-            ":libpjrt_tpu",
+            ":libzml_tpu",
         ],
         "//conditions:default": [":empty"],
     }),

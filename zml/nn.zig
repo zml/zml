@@ -35,35 +35,41 @@ pub const Linear = struct {
         zml.Buffer.deinitAll(Linear, self);
     }
 
+    pub fn quantizationScheme(self: Linear) ?Quantization.Scheme {
+        return if (self.quantization) |q| q.scheme else null;
+    }
+
+    pub fn quantizationScales(self: Linear) ?Tensor {
+        return if (self.quantization) |q| q.scales else null;
+    }
+
     pub fn forward(self: Linear, x: Tensor) Tensor {
-        const y = self.forwardWeight(x);
+        if (self.quantization) |q| {
+            const lhs = x.convert(.bf16);
+            if (quantization.quantizeInput(q, lhs, self.tag, zml.Compiler.current().platform)) |input| {
+                return self.forwardQuantized(input, x.dtype());
+            }
+            return self.forwardScaled(lhs, null, null, x.dtype());
+        }
+        const y = x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 
-    fn forwardWeight(self: Linear, x: Tensor) Tensor {
-        const q = self.quantization orelse return x.dot(self.weight, self.tag);
+    /// Apply this layer to reusable quantized activation values and scales.
+    /// Convert to output_dtype before adding bias, which must have the same dtype.
+    pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput, output_dtype: DataType) Tensor {
+        stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
+        return self.forwardScaled(input.values, input.scales, input.global_scale, output_dtype);
+    }
 
+    fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
+        const q = self.quantization.?;
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
-
-        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8)
-            q.scales.bitCast(.f8e8m0)
-        else
-            q.scales;
-
-        var lhs = x.convert(.bf16);
-        var lhs_scale: ?Tensor = null;
-        var undo_input_scale: ?Tensor = null;
-
-        const platform = zml.Compiler.current().platform;
-        if (quantization.quantizeInput(q, lhs, self.tag, platform)) |quantized_input| {
-            lhs = quantized_input.values;
-            lhs_scale = quantized_input.scales;
-            undo_input_scale = quantized_input.global_scale;
-        }
-
+        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
+        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
-        return applyGlobalScale(acc, undo_input_scale, weight_global_scale).convert(x.dtype());
+        const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
 
@@ -71,14 +77,30 @@ pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
     return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
 }
 
-/// Unpacks two f4e2m1 values per byte. `w` must be tagged with `.kw` on the packed axis,
-/// which is merged with the unpacked pair and renamed to `k_tag`. Group-size agnostic:
-/// NVFP4 (16) and MXFP4 (32) share this packing.
-pub fn unpackFp4(w: Tensor, k_tag: anytype) Tensor {
+/// Unpacks two f4e2m1 values per byte along `packed_tag` and names the expanded
+/// axis `k_tag`. Group-size agnostic: NVFP4 (16) and MXFP4 (32) share this packing.
+pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tensor {
     stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
+    const source_tag = Shape.toTag(packed_tag);
+    const result_tag = Shape.toTag(contracting_tag);
     return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
-        .merge(.{ .kb = .{ .kw, .bitcast } })
-        .renameTag(.kb, Shape.toTag(k_tag));
+        .merge(.{ .kb = .{ source_tag, .bitcast } })
+        .renameTag(.kb, result_tag);
+}
+
+test "unpackFp4 expands the requested axis" {
+    const platform = zml.testing.env();
+    const packed_weight: Tensor = .init(.{ .out = 2, .stored = 4 }, .u8);
+    const Local = struct {
+        fn call(w: Tensor) Tensor {
+            return unpackFp4(w, .stored, .contracted);
+        }
+    };
+
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{packed_weight}, .{});
+    defer exe.deinit();
+
+    try zml.testing.expectEqualShapes(.init(.{ .out = 2, .contracted = 8 }, .f4e2m1), exe.output_shapes[0]);
 }
 
 /// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
@@ -86,12 +108,16 @@ pub fn unpackFp4(w: Tensor, k_tag: anytype) Tensor {
 /// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
 /// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
 /// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
-/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+/// - **Block FP8**: E4M3FN / E4M3FNUZ / E8M0 values, BF16 or F32 128x128 scales
+/// - TODO: INT4/8 and FP8 per tensor
 ///
 /// Backends:
-/// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
-/// 2. Triton otherwise
-/// 3. Unsupported combos fall back to dequant + Dot
+/// XLA selects specialized GPU kernels (TileIR, Triton, or block-128 W8A8),
+/// with dequant + Dot as the fallback.
+///
+/// Axes follow `Tensor.dot`; XLA currently accepts one contracting axis and at
+/// most one batch axis. Scales preserve operand axis order, and each scale
+/// dimension must divide its corresponding value dimension.
 ///
 /// CPU has no specialized path.
 pub fn scaledDot(
@@ -106,7 +132,7 @@ pub fn scaledDot(
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
     const result_dtype: DataType = switch (lhs.dtype()) {
-        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz => .bf16,
+        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0 => .bf16,
         else => lhs.dtype(),
     };
     var res_shape: Shape = .{ ._dtype = result_dtype };
@@ -170,14 +196,94 @@ pub fn scaledDot(
             .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
         }),
     });
-
-    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand };
-
-    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+    return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
-    });
+    })[0];
+}
 
-    return outs[0];
+test "block128 scaled dot layouts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    // FIXME: Add rocm when we have a PJRT plugin with native fp8 dot support (by the end of Sept 2026)
+    if (platform.target != .cuda) return error.SkipZigTest;
+    const dtype: DataType = if (platform.target == .rocm and @import("platform.zig").rocm.computeCapability(platform) == .gfx942) .f8e4m3fnuz else .f8e4m3fn;
+    const Local = struct {
+        const Outputs = struct { actual: Tensor, expected: Tensor, linear: Tensor, linear_expected: Tensor };
+
+        fn dequantize(values: Tensor, scales: Tensor) Tensor {
+            var expanded = scales.convert(.bf16);
+            for (0..values.rank()) |axis| {
+                const factor = @divExact(values.dim(axis), scales.dim(axis));
+                const shape = expanded.shape().insert(axis + 1, .{factor});
+                const axes = Shape.range(shape.rank(), .i64).remove(axis + 1);
+                expanded = expanded.broadcast(shape, axes.dims()).reshape(expanded.shape().setDim(axis, values.dim(axis)));
+            }
+            return values.convert(.bf16).mul(expanded);
+        }
+
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, fp8: DataType, prequantized: bool) Outputs {
+            const weight = w.convert(fp8);
+            const input = quantization.quantizeBlockFp8(x, .k, fp8);
+            const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
+            return .{
+                .linear = linear.forward(x),
+                .linear_expected = dequantize(input.values, input.scales).dot(dequantize(weight, scales), .k),
+                .actual = if (prequantized)
+                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .k)
+                else
+                    scaledDot(x, weight, null, scales, .k),
+                .expected = (if (prequantized) dequantize(input.values, input.scales.convert(scales.dtype())) else x)
+                    .dot(dequantize(weight, scales), .k),
+            };
+        }
+    };
+    inline for (.{
+        .{ .{ .m = 16, .k = 256 }, .{ .n = 256, .k = 256 } },
+        .{ .{ .b = 2, .m = 16, .k = 256 }, .{ .b = 2, .n = 256, .k = 256 } },
+        .{ .{ .k = 256, .b = 2, .m = 3 }, .{ .n = 256, .k = 256, .b = 2 } },
+        .{ .{ .b = 2, .k = 256, .s = 2, .m = 3 }, .{ .n = 128, .b = 2, .k = 256 } },
+        .{ .{ .b = 2, .m = 3, .k = 256 }, .{ .k = 256, .n = 128 } },
+        .{ .{ .k = 128 }, .{ .n = 128, .k = 128 } },
+        .{ .{ .m = 3, .k = 256 }, .{ .p = 2, .k = 256, .n = 128 } },
+        .{ .{ .m = 3, .k = 128 }, .{ .n = 64, .k = 128 } },
+    }) |layout| {
+        inline for (.{ DataType.f32, DataType.bf16 }) |scale_dtype| {
+            inline for (.{ false, true }) |prequantized| {
+                const x: Tensor = .init(layout[0], .bf16);
+                const w: Tensor = .init(layout[1], .bf16);
+                const scales: Tensor = .init(w.shape().setDim(.n, std.math.divCeil(i64, w.dim(.n), 128) catch unreachable).setDim(.k, @divExact(w.dim(.k), 128)).withDtype(scale_dtype), scale_dtype);
+                var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, dtype, prequantized }, .{});
+                defer exe.deinit();
+                try zml.testing.expectEqualShapes(exe.output_shapes[1], exe.output_shapes[0]);
+                var buffers: [3]zml.Buffer = undefined;
+                var initialized: usize = 0;
+                defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
+                for ([_]Shape{ x.shape(), w.shape(), scales.shape() }, 0..) |shape, i| {
+                    const slice = try Slice.alloc(allocator, shape);
+                    defer slice.free(allocator);
+                    for (0..shape.count()) |j| {
+                        const value: f32 = if (i == 2) @as(f32, @floatFromInt(1 + (j * 3 + j / 4) % 7)) / 16 else @as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / 256) % 13)) - 6)) / 4;
+                        if (shape.dtype() == .f32) {
+                            slice.items(f32)[j] = value;
+                        } else {
+                            slice.items(zml.floats.BFloat16)[j] = .fromF32(value);
+                        }
+                    }
+                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
+                    initialized += 1;
+                }
+                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ buffers[0], buffers[1], buffers[2] });
+                defer zml.Buffer.deinitAll(Local.Outputs, &output);
+                var expected = try output.expected.toSliceAlloc(allocator, io);
+                defer expected.free(allocator);
+                try zml.testing.expectClose(io, expected, output.actual, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
+                var linear_expected = try output.linear_expected.toSliceAlloc(allocator, io);
+                defer linear_expected.free(allocator);
+                try zml.testing.expectClose(io, linear_expected, output.linear, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
+            }
+        }
+    }
 }
 
 /// `shape` with every dimension collapsed to 1
@@ -1542,6 +1648,8 @@ pub const GatedDeltaNet = struct {
     alphas: Tensor,
     /// Delta gate .{ .s, .h }.
     betas: Tensor,
+    /// Number of sequence positions to process, clamped to the input length.
+    active_length: Tensor,
 
     pub const State = struct {
         /// Per-head recurrent state with shape .{ .h, .v, .k }.
@@ -1565,7 +1673,11 @@ pub const GatedDeltaNet = struct {
     };
 
     pub fn cond(gdn: GatedDeltaNet, state: State) Tensor {
-        return state.step.cmp(.LT, .scalar(gdn.queries.dim(.s), .i32));
+        const active_length = gdn.active_length
+            .convert(.i32)
+            .maximum(.scalar(0, .i32))
+            .minimum(.scalar(gdn.queries.dim(.s), .i32));
+        return state.step.cmp(.LT, active_length);
     }
 
     /// Single-step recurrent update for Gated Delta Net.
@@ -1609,6 +1721,7 @@ pub const GatedDeltaNet = struct {
         stdx.debug.assert(gdn.values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
         stdx.debug.assert(gdn.alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tag {{.h}}", err_args);
         stdx.debug.assert(gdn.betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.active_length.rank() == 0 and gdn.active_length.dtype().isInteger(), err_template ++ "active_length must be an integer scalar", err_args);
 
         _ = collectDims(.{.h}, &.{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas }, .strict) catch {
             stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
@@ -1628,6 +1741,7 @@ pub const GatedDeltaNet = struct {
     /// - `values`, `outputs`: .{ .s, .h, .v }
     /// - `alphas`, `betas`: .{ .s, .h }
     /// - `initial_state.s`: .{ .h, .v, .k }
+    /// - `active_length`: integer scalar
     pub fn forward(
         queries: Tensor,
         keys: Tensor,
@@ -1635,6 +1749,7 @@ pub const GatedDeltaNet = struct {
         alphas: Tensor,
         betas: Tensor,
         initial_state: Input,
+        active_length: Tensor,
     ) Output {
         const gdn: GatedDeltaNet = .{
             .queries = queries,
@@ -1642,6 +1757,7 @@ pub const GatedDeltaNet = struct {
             .values = values,
             .alphas = alphas,
             .betas = betas,
+            .active_length = active_length,
         };
         const state: GatedDeltaNet.State = .{
             .step = .scalar(0, .i32),
@@ -1667,12 +1783,13 @@ test "gated delta net" {
     const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
     const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+    const active_length: zml.Tensor = .init(.{}, .u32);
 
     var exe = try platform.compileFn(
         std.testing.allocator,
         std.testing.io,
         GatedDeltaNet.forward,
-        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s }, active_length },
         .{},
     );
     defer exe.deinit();
@@ -1743,13 +1860,15 @@ test "gated delta net" {
         }),
     );
     defer initial_s_buffer.deinit();
+    var oversized_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 3), .u32);
+    defer oversized_length_buffer.deinit();
 
     var result = try zml.testing.autoCall(
         std.testing.allocator,
         std.testing.io,
         &exe,
         GatedDeltaNet.forward,
-        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, oversized_length_buffer },
     );
     defer result.outputs.deinit();
     defer result.state.s.deinit();
@@ -1774,6 +1893,41 @@ test "gated delta net" {
         .relative_tolerance = 1e-4,
     });
     try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+
+    var prefix_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 1), .u32);
+    defer prefix_length_buffer.deinit();
+    var prefix_result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        GatedDeltaNet.forward,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, prefix_length_buffer },
+    );
+    defer prefix_result.outputs.deinit();
+    defer prefix_result.state.s.deinit();
+
+    const expected_prefix_outputs: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
+            .{ .{ 0.0, 0.0 }, .{ 0.0, 0.0 } },
+        }),
+    );
+    const expected_prefix_final_s: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 5.0 }, .{ 0.0, 0.5 } },
+            .{ .{ 0.5, 1.125 }, .{ 0.25, 2.0 } },
+        }),
+    );
+    try zml.testing.expectClose(std.testing.io, expected_prefix_outputs, prefix_result.outputs, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, expected_prefix_final_s, prefix_result.state.s, .{
         .absolute_tolerance = 1e-4,
         .relative_tolerance = 1e-4,
     });

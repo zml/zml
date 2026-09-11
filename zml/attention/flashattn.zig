@@ -900,6 +900,7 @@ pub const paged_fa2 = struct {
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
         const ctx = zml.Compiler.current();
+        const window_size_left = windowSizeLeft(opts.sliding_window);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -979,7 +980,7 @@ pub const paged_fa2 = struct {
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
@@ -1066,7 +1067,7 @@ pub const paged_fa2 = struct {
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
@@ -1140,7 +1141,7 @@ pub const paged_fa2 = struct {
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                             .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
@@ -1551,6 +1552,7 @@ pub const paged_fa3 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
+        const window_size_left = windowSizeLeft(opts.sliding_window);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -1616,7 +1618,7 @@ pub const paged_fa3 = struct {
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
@@ -1694,7 +1696,7 @@ pub const paged_fa3 = struct {
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                         },
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
@@ -1758,7 +1760,7 @@ pub const paged_fa3 = struct {
                         .metadata = .{
                             .is_causal = opts.is_causal,
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
-                            .window_size_left = opts.sliding_window,
+                            .window_size_left = window_size_left,
                         },
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
@@ -1774,3 +1776,13 @@ pub const paged_fa3 = struct {
         return o;
     }
 };
+
+fn windowSizeLeft(sliding_window: i32) i32 {
+    return if (sliding_window > 0) sliding_window - 1 else sliding_window;
+}
+
+test "FlashAttention sliding window uses an inclusive offset" {
+    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(2048));
+    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(1));
+    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(-1));
+}

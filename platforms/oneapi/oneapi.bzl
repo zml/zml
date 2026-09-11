@@ -280,7 +280,7 @@ filegroup(
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
 }
 
-_ROOT_MODULE_DIRECT_DEPS = ["libpjrt_oneapi"]
+_ROOT_MODULE_DIRECT_DEPS = ["libzml_oneapi"]
 
 def _oneapi_impl(mctx):
     loaded_packages = _read_packages(mctx, [
@@ -288,8 +288,8 @@ def _oneapi_impl(mctx):
     ])
 
     http_archive(
-        name = "libpjrt_oneapi",
-        build_file = "libpjrt_oneapi.BUILD.bazel",
+        name = "libzml_oneapi",
+        build_file = "libzml_oneapi.BUILD.bazel",
         sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
         url = PJRT_ONEAPI_ARTIFACT_URL,
     )

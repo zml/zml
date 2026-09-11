@@ -118,11 +118,14 @@ pub const Session = struct {
 
         var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer prefill_token_index_buffer.deinit();
+        var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
+        defer active_length_buffer.deinit();
 
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
             .token_index_buf = &prefill_token_index_buffer,
+            .active_length_buf = &active_length_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
         }, self.layer_index_buffers);
@@ -145,6 +148,8 @@ pub const Session = struct {
 
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
         defer token_index_buffer.deinit();
+        var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 1), .u32);
+        defer active_length_buffer.deinit();
 
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
@@ -167,6 +172,7 @@ pub const Session = struct {
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .token_index_buf = &token_index_buffer,
+                .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
             }, self.layer_index_buffers);

@@ -25,10 +25,10 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_cuda_repo",
+    name = "libzml_cuda_repo",
     deps = select({
-        "@llvm//platforms/config:linux_x86_64": ["@libpjrt_cuda_linux_amd64//:libpjrt_cuda"],
-        "@llvm//platforms/config:linux_aarch64": ["@libpjrt_cuda_linux_arm64//:libpjrt_cuda"],
+        "@llvm//platforms/config:linux_x86_64": ["@libzml_cuda_linux_amd64//:libzml_cuda"],
+        "@llvm//platforms/config:linux_aarch64": ["@libzml_cuda_linux_arm64//:libzml_cuda"],
     }),
 )
 
@@ -42,11 +42,11 @@ cc_library(
 )
 
 cc_library(
-    name = "libpjrt_cuda",
+    name = "libzml_cuda",
     tags = ["manual"],
-    hdrs = ["libpjrt_cuda.h"],
+    hdrs = ["libzml_cuda.h"],
     defines = ["ZML_RUNTIME_CUDA"],
-    deps = [":libpjrt_cuda_repo"],
+    deps = [":libzml_cuda_repo"],
 )
 
 zig_library(
@@ -60,7 +60,7 @@ zig_library(
         "//pjrt",
     ] + select({
         "//platforms:cuda.enabled": [
-            ":libpjrt_cuda",
+            ":libzml_cuda",
             "//bazel",
             "//stdx",
             "@rules_zig//zig/runfiles",

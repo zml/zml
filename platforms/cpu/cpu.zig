@@ -37,7 +37,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         };
 
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libzml_cpu" ++ ext });
         break :blk .loadFrom(path);
     };
 }

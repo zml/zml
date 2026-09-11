@@ -10,8 +10,6 @@ const log = std.log.scoped(.qwen3_5_moe);
 pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    prefill_moe_metadata: zml.moe.Metadata,
-    decode_moe_metadata: zml.moe.Metadata,
     moe_parameters: zml.moe.Parameters,
     seqlen: u32,
     shardings: common.Shardings,
@@ -22,8 +20,6 @@ pub const CompilationParameters = struct {
         return .{
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
             .rng = .init(),
-            .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
-            .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
             .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.ActivationMode.silu)),
             .seqlen = seqlen,
             .shardings = shardings,
@@ -42,10 +38,9 @@ pub const LayerIndexBuffer = union(enum) {
 pub const RunArgs = struct {
     io: std.Io,
     tokens_buffer: *zml.Buffer,
-    full_attention_token_index_buffer: *zml.Buffer,
-    linear_attention_token_index_buffer: *zml.Buffer,
+    token_index_buffer: *zml.Buffer,
+    active_length_buffer: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
-    moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     layer_index_buffers: []const LayerIndexBuffer,
 };
@@ -65,9 +60,9 @@ pub const CompiledModel = struct {
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, qwen_model, parameters, parameters.seqlen, parameters.prefill_moe_metadata, "prefill", progress);
+        const prefill = try compileKernel(allocator, io, platform, qwen_model, parameters, parameters.seqlen, "prefill", progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, qwen_model, parameters, 1, parameters.decode_moe_metadata, "decode", progress);
+        const decode = try compileKernel(allocator, io, platform, qwen_model, parameters, 1, "decode", progress);
         return .{
             .loaded_model = loaded_model,
             .prefill = prefill,
@@ -184,9 +179,8 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.full_attention_token_index_buffer.*,
+                        .token_index = args.token_index_buffer.*,
                         .cache = layer_cache,
-                        .moe_metadata = args.moe_metadata_buffers,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
                 });
@@ -206,9 +200,8 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 layer.run(args.io, .{
                     .inputs = .{
                         .hidden = hidden_buffer,
-                        .token_index = args.linear_attention_token_index_buffer.*,
+                        .active_length = args.active_length_buffer.*,
                         .cache = layer_cache,
-                        .moe_metadata = args.moe_metadata_buffers,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
                 });
@@ -222,12 +215,12 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
         .inputs = .{
             .hidden = hidden_buffer,
             .rng = args.rng_buffers.*,
-            .token_index = args.full_attention_token_index_buffer.*,
+            .token_index = args.token_index_buffer.*,
         },
         .outputs = .{
             .tokens = args.tokens_buffer,
             .rng = args.rng_buffers,
-            .token_index = args.full_attention_token_index_buffer,
+            .token_index = args.token_index_buffer,
         },
     });
 }
@@ -239,7 +232,6 @@ fn compileKernel(
     mdl: model.Model,
     parameters: CompilationParameters,
     seqlen: usize,
-    moe_metadata: zml.moe.Metadata,
     phase: []const u8,
     progress: *std.Progress.Node,
 ) !KernelExe {
@@ -248,9 +240,9 @@ fn compileKernel(
 
     var embed_future = try io.concurrent(compileEmbed, .{ allocator, io, platform, mdl, parameters, seqlen, phase, progress });
     errdefer if (embed_future.cancel(io)) |exe| exe.deinit() else |_| {};
-    var full_attention_future = try io.concurrent(compileFullAttention, .{ allocator, io, platform, mdl, parameters, seqlen, full_index, moe_metadata, phase, progress });
+    var full_attention_future = try io.concurrent(compileFullAttention, .{ allocator, io, platform, mdl, parameters, seqlen, full_index, phase, progress });
     errdefer if (full_attention_future.cancel(io)) |exe| exe.deinit() else |_| {};
-    var linear_attention_future = try io.concurrent(compileLinearAttention, .{ allocator, io, platform, mdl, parameters, seqlen, linear_index, moe_metadata, phase, progress });
+    var linear_attention_future = try io.concurrent(compileLinearAttention, .{ allocator, io, platform, mdl, parameters, seqlen, linear_index, phase, progress });
     errdefer if (linear_attention_future.cancel(io)) |exe| exe.deinit() else |_| {};
     var sample_future = try io.concurrent(compileSample, .{ allocator, io, platform, mdl, parameters, seqlen, phase, progress });
     errdefer if (sample_future.cancel(io)) |exe| exe.deinit() else |_| {};
@@ -279,7 +271,7 @@ fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     }}, parameters, progress, phase, "embedding");
 }
 
-fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
+fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardSelfAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
@@ -290,23 +282,21 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_metadata = moe_metadata,
         .moe_parameters = parameters.moe_parameters,
     }}, parameters, progress, phase, "full-attention layer");
 }
 
-fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, moe_metadata: zml.moe.Metadata, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
+fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen),
-        .token_index = zml.Tensor.init(.{}, .u32),
+        .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
             .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_metadata = moe_metadata,
         .moe_parameters = parameters.moe_parameters,
     }}, parameters, progress, phase, "linear-attention layer");
 }
@@ -354,57 +344,4 @@ fn hiddenTensor(mdl: model.Model, seqlen: usize) zml.Tensor {
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {
     for (layer_types, 0..) |layer_type, index| if (layer_type == target) return index;
     return null;
-}
-
-fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, backend: zml.moe.Backend) zml.moe.Metadata {
-    var w1_zero_bias_shape: ?zml.Shape = null;
-    var w2_zero_bias_shape: ?zml.Shape = null;
-    var first_out_shape: ?zml.Shape = null;
-    var second_out_shape: ?zml.Shape = null;
-
-    const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok;
-    const num_experts = qwen_model.config.text_config.num_experts;
-
-    for (qwen_model.text_model.layers) |layer| {
-        const gate_up_shape = zml.Shape.init(.{
-            .expert = num_experts,
-            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout),
-        }, .bf16);
-        const down_shape = zml.Shape.init(.{
-            .expert = num_experts,
-            .out = layer.moe.shared_expert.gate_proj.weight.dim(.d),
-        }, .bf16);
-        const first_out = zml.Shape.init(.{
-            .total_tokens = batch_size * token_len * num_experts_per_tok,
-            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout) * 2,
-        }, .bf16);
-        const second_out = zml.Shape.init(.{
-            .token = batch_size * token_len,
-            .topk = num_experts_per_tok,
-            .out = layer.moe.shared_expert.down_proj.weight.dim(.d),
-        }, .bf16);
-
-        if (w1_zero_bias_shape == null) {
-            w1_zero_bias_shape = gate_up_shape;
-            w2_zero_bias_shape = down_shape;
-            first_out_shape = first_out;
-            second_out_shape = second_out;
-            continue;
-        }
-
-        if (!w1_zero_bias_shape.?.eql(gate_up_shape) or !w2_zero_bias_shape.?.eql(down_shape) or !first_out_shape.?.eql(first_out) or !second_out_shape.?.eql(second_out)) {
-            log.warn("MoE bias shapes differ across layers; using shapes from the first layer", .{});
-            break;
-        }
-    }
-
-    return switch (backend) {
-        .triton => .init(.{
-            .triton = .{
-                .w1_zero_bias_shape = w1_zero_bias_shape,
-                .w2_zero_bias_shape = w2_zero_bias_shape,
-            },
-        }),
-        .flashinfer_cutlass, .mosaic_tpu, .metal => .init(.fromBackend(backend)),
-    };
 }
