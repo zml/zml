@@ -3531,6 +3531,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   scratch), still refusing a device without a limit and still tracking
   `min_room_seen` from the devices that have one. The module and the `Fit`
   enum stay: the `.unmeasured` path is real on CPU.
+- Group A validation (2026-09-11, CPU playground, Qwen3.5-4B sharded over
+  four CPU devices, `ZML_LOAD_PACKS=2 ZML_LOAD_PACK_WIDTH=16
+  ZML_LOAD_CHECK=64`): `source_width=16, lifecycle_credits=33, workers=17`,
+  `pregrown=264 MiB`, `execute_admission_retires=1`, `pinned_high_water=252
+  MiB` of `pinned_mapped=264 MiB`, `pack check: ok`, `load check: ok`,
+  `Loaded weights [8.68GiB, 3.545s, 2.45GiB/s]` (fifteenth pass: 3.64 s;
+  the second shard was uncached on this run and read direct). Every group A
+  task also passed `bazel test //zml:test //vfs:test` and the three example
+  builds.
 
 ## Open work
 
