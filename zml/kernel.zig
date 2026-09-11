@@ -514,7 +514,6 @@ pub const cute = struct {
     pub const Value = cute_builder.Value;
     pub const DType = cute_builder.DType;
     pub const FinishError = cute_builder.FinishError;
-    pub const Launch = cute_builder.Launch;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
         return makeKernelContext(&cute_builder.dialects_needed);
@@ -567,7 +566,7 @@ pub const cute = struct {
                 output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
             };
 
-            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT, launch: Launch) ![:0]const u8 {
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT, block: [3]i32) ![:0]const u8 {
                 const ctx = try newContext();
                 defer ctx.deinit();
 
@@ -576,13 +575,13 @@ pub const cute = struct {
 
                 try spec.run(&b, cfg);
 
-                return b.finish(launch);
+                return b.finish(block);
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
                 const cur = Compiler.current();
 
-                const ir = emit(cur.allocator, opts.cfg, .{ .grid = opts.grid, .block = opts.block }) catch |err|
+                const ir = emit(cur.allocator, opts.cfg, opts.block) catch |err|
                     std.debug.panic("zml.kernel.cute.Kernel({s}).call: emit failed: {}", .{ name, err });
                 defer cur.allocator.free(ir);
 
@@ -597,6 +596,8 @@ pub const cute = struct {
                 const tensor_results = ops.cute(inputs_arr, outputs_arr, .{
                     .name = name,
                     .ir = ir,
+                    .grid = opts.grid,
+                    .block = opts.block,
                     .zeroed_outputs = opts.zeroed_outputs,
                     .output_operand_aliases = aliases.constSlice(),
                 });
@@ -629,13 +630,12 @@ test "cute kernel emits the module cute-ir-compile takes" {
         }.run,
     });
 
-    const ir = try AddOne.emit(std.testing.allocator, .{ .n = 1000 }, .{ .grid = .{ 8, 1, 1 }, .block = .{ 128, 1, 1 } });
+    const ir = try AddOne.emit(std.testing.allocator, .{ .n = 1000 }, .{ 128, 1, 1 });
     defer std.testing.allocator.free(ir);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cuda.kernel @add_one(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "module {\n  func.func @add_one(") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "nvvm.reqntid = array<i32: 128, 1, 1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "cute.memref.load") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "%gx = arith.constant 8 : i32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cuda.launch_ex @kernels::@add_one<%cfg> (%arg0, %arg1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);
 }
 
 test "cuda_tile kernel emits a module XLA can parse" {

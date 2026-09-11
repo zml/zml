@@ -1158,11 +1158,14 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
 }
 
 pub const CuteOps = struct {
-    /// The `cuda.kernel` symbol; the module's host function must launch it.
+    /// The kernel symbol.
     name: []const u8,
-    /// Textual CuTe DSL module: kernel plus host launch function. Grid, block
-    /// and dynamic shared memory are read from the launch.
+    /// Textual CuTe DSL module: either public `func.func` kernels, launched
+    /// with `grid`/`block`, or a `gpu.module` plus a host launch function
+    /// that owns the launch configuration.
     ir: []const u8,
+    grid: ?[3]i32 = null,
+    block: ?[3]i32 = null,
     zeroed_outputs: []const i32 = &.{},
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
@@ -1183,12 +1186,19 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
     }
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 6) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
         .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cute")),
         .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
     });
+    inline for (.{ "grid", "block" }) |key| {
+        if (@field(opts, key)) |dims| {
+            var elems: [3]*const mlir.Attribute = undefined;
+            for (&elems, dims) |*e, d| e.* = .int(mlir_ctx, .i32, d);
+            attrs.appendAssumeCapacity(.named(mlir_ctx, key, .array(mlir_ctx, &elems)));
+        }
+    }
     if (opts.zeroed_outputs.len > 0) {
         var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
         for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));

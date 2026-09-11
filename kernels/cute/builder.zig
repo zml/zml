@@ -1,7 +1,7 @@
 //! A Zig front end for the CuTe DSL, shaped after `cutlass.cute`: a kernel
 //! takes tensors, indexes them with coordinates, reads `thread_idx()` and
-//! friends from `cute.arch`. `finish` wraps the kernel in the module the
-//! Python DSL emits (a `gpu.module` plus a host launch function) as text.
+//! friends from `cute.arch`. `finish` prints the kernel as a public
+//! `func.func`; cute-ir-compile makes it the kernel entry.
 const std = @import("std");
 
 const cute = @import("mlir/dialects/cute_ir");
@@ -27,8 +27,8 @@ test {
     std.testing.refAllDecls(Tensor);
 }
 
-/// `nvvm`, `gpu` and `cuda` are not linked into ZML: their ops are emitted
-/// unregistered (generic form) or as text by `finish`; cute-ir-compile has them.
+/// `nvvm` is not linked into ZML: its ops are emitted unregistered, in
+/// generic form; cute-ir-compile has the dialect.
 pub const dialects_needed = [_][]const u8{ "func", "cute", "cute_nvgpu", "arith", "scf", "math", "cf" };
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -325,11 +325,6 @@ pub const LayoutOpts = struct {
     stride: ?[]const i64 = null,
 };
 
-pub const Launch = struct {
-    grid: [3]i32 = .{ 1, 1, 1 },
-    block: [3]i32 = .{ 1, 1, 1 },
-};
-
 pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
@@ -535,9 +530,9 @@ pub const Builder = struct {
 
     /// `cute.make_layout(shape, stride=...)`, static only.
     pub fn makeLayout(self: *Builder, shape: []const i64, opts: LayoutOpts) Layout {
-        std.debug.assert(shape.len > 0 and shape.len <= MAX_RANK);
+        if (shape.len == 0 or shape.len > MAX_RANK) std.debug.panic("makeLayout: rank {d} not in 1..{d}", .{ shape.len, MAX_RANK });
         const stride = opts.stride orelse self.leftMost(shape);
-        std.debug.assert(stride.len == shape.len);
+        if (stride.len != shape.len) std.debug.panic("makeLayout: stride rank {d} != shape rank {d}", .{ stride.len, shape.len });
         const ctx = self.ctx;
         const text = std.fmt.allocPrint(self.arena.allocator(), "{s}:{s}", .{ self.algebra(shape), self.algebra(stride) }) catch @panic("OOM");
         const layout_ty = cute.algebraType(ctx, .layout, text) catch @panic("bad layout");
@@ -560,6 +555,7 @@ pub const Builder = struct {
         const T = @TypeOf(coord);
         if (T == Value) return self.makeCoord(.{coord});
         const fields = @typeInfo(T).@"struct".fields;
+        if (fields.len == 0 or fields.len > MAX_RANK) @compileError("makeCoord: rank must be 1..MAX_RANK");
         var text: std.Io.Writer.Allocating = .init(self.arena.allocator());
         var dyn: stdx.BoundedArray(*const mlir.Value, MAX_RANK) = .empty;
         if (fields.len > 1) text.writer.writeByte('(') catch @panic("OOM");
@@ -647,17 +643,32 @@ pub const Builder = struct {
             .comptime_float, .float => @intFromFloat(value),
             else => @compileError("Builder.cst: unsupported value type " ++ @typeName(T)),
         };
+        if (!fitsInt(i, dt)) std.debug.panic("Builder.cst: {d} does not fit {s}", .{ i, @tagName(dt) });
         return self.emit(arith.constant_int(ctx, i, dt.toMlir(ctx), self.loc()));
     }
 
-    /// A Zig scalar as a constant: ints become `i32`, floats `f32`, like the
-    /// Python DSL's `Int32`/`Float32` defaults.
+    fn fitsInt(i: i64, dt: DType) bool {
+        const bits = dtypeBitwidth(dt);
+        if (bits >= 64) return true;
+        const shift: u6 = @intCast(bits - 1);
+        return i >= -(@as(i64, 1) << shift) and i < (@as(i64, 1) << shift);
+    }
+
+    fn literalFits(value: anytype, dt: DType) bool {
+        return switch (@typeInfo(@TypeOf(value))) {
+            .comptime_int, .int => fitsInt(@intCast(value), dt),
+            .bool => !isFloatDtype(dt),
+            else => isFloatDtype(dt),
+        };
+    }
+
+    /// A Zig scalar as a constant: ints become `i32` when they fit, `i64`
+    /// otherwise; floats `f32`, like the Python DSL's `Int32`/`Float32`.
     pub fn lift(self: *Builder, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
-            .comptime_int => if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) self.cst(.i32, value) else self.cst(.i64, value),
-            .int => |info| if (info.bits > 32) self.cst(.i64, value) else self.cst(.i32, value),
+            .comptime_int, .int => if (literalFits(value, .i32)) self.cst(.i32, value) else self.cst(.i64, value),
             .bool => self.cst(.i1, value),
             .comptime_float => self.cst(.f32, value),
             .float => |info| switch (info.bits) {
@@ -675,10 +686,16 @@ pub const Builder = struct {
         return self.cst(dt, value);
     }
 
-    /// Lift literals to the other operand's dtype; widen the narrower integer.
+    fn liftLike(self: *Builder, value: anytype, ref: Value) Value {
+        const dt = ref.dtype();
+        return if (literalFits(value, dt)) self.cst(dt, value) else self.lift(value);
+    }
+
+    /// Lift a literal to the other operand's dtype when it fits, else to its
+    /// own width; then widen the narrower integer.
     pub fn coerce(self: *Builder, a: anytype, b: anytype) struct { Value, Value } {
-        var av: Value = if (@TypeOf(a) == Value) a else if (@TypeOf(b) == Value) self.liftAs(a, b.dtype()) else self.lift(a);
-        var bv: Value = if (@TypeOf(b) == Value) b else self.liftAs(b, av.dtype());
+        var av: Value = if (@TypeOf(a) == Value) a else if (@TypeOf(b) == Value) self.liftLike(a, b) else self.lift(a);
+        var bv: Value = if (@TypeOf(b) == Value) b else self.liftLike(b, av);
         if (av.isInt() and bv.isInt()) {
             const aw = dtypeBitwidth(av.dtype());
             const bw = dtypeBitwidth(bv.dtype());
@@ -754,79 +771,22 @@ pub const Builder = struct {
 
     // ==================== module ====================
 
-    /// The kernel as text, `func.func` form; the module verifies here.
-    fn kernelText(self: *Builder, launch: Launch) FinishError![]const u8 {
+    /// The module cute-ir-compile takes: the verified kernel as a public
+    /// `func.func`, which the compiler turns into the kernel entry. Grid and
+    /// block travel in the custom call; `block` is also pinned as
+    /// `nvvm.reqntid`.
+    pub fn finish(self: *Builder, block: [3]i32) FinishError![:0]const u8 {
         const current = self.currentBlock();
         if (current.terminator() == null) {
             _ = func.returns(self.ctx, &.{}, self.loc()).appendTo(current);
         }
         const func_op = self.func_op orelse return error.InvalidMlir;
-        func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &launch.block));
+        func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &block));
         if (!self.module.operation().verify()) return error.InvalidMlir;
-
-        var al: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        try al.writer.print("{f}", .{func_op});
-        return al.written();
-    }
-
-    /// The module cute-ir-compile takes: `gpu.module` with the kernel (a
-    /// `cuda.kernel`, spelled by renaming the verified `func.func`) and the host
-    /// `@launch` XLA reads the grid, block and dynamic smem from.
-    pub fn finish(self: *Builder, launch: Launch) FinishError![:0]const u8 {
-        const kernel = try self.kernelText(launch);
-        const prefix = "func.func";
-        if (!std.mem.startsWith(u8, kernel, prefix)) return error.InvalidMlir;
 
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();
-        const w = &al.writer;
-
-        try w.writeAll("module attributes {gpu.container_module} {\n  gpu.module @kernels {\n    cuda.kernel");
-        try w.writeAll(std.mem.trimEnd(u8, kernel[prefix.len..], "\n"));
-        try w.writeAll("\n  }\n  func.func @launch(");
-        for (self.args, 0..) |_, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.print("%arg{d}: {f}", .{ i, self.arg(i).type_() });
-        }
-        try w.print(
-            \\) -> i32 attributes {{llvm.emit_c_interface}} {{
-            \\    %smem = cute.kernel_smem_size @kernels::@{[name]s} : i64
-            \\    %c0_i64 = arith.constant 0 : i64
-            \\    %stream = cuda.cast %c0_i64 : i64 -> !cuda.stream
-            \\    %bx = arith.constant {[bx]d} : i32
-            \\    %by = arith.constant {[by]d} : i32
-            \\    %bz = arith.constant {[bz]d} : i32
-            \\    %gx = arith.constant {[gx]d} : i32
-            \\    %gy = arith.constant {[gy]d} : i32
-            \\    %gz = arith.constant {[gz]d} : i32
-            \\    %cfg = cuda.launch_cfg.create<max_attrs = 17 : i32> (blockDim = (%bx, %by, %bz), dynamicSmemBytes = %smem, gridDim = (%gx, %gy, %gz), stream = %stream) : i32, i32, i32, i64, i32, i32, i32, !cuda.stream -> !cuda.launch_cfg<max_attrs = 17>
-            \\    %r = cuda.launch_ex @kernels::@{[name]s}<%cfg> (
-        , .{
-            .name = self.name,
-            .bx = launch.block[0],
-            .by = launch.block[1],
-            .bz = launch.block[2],
-            .gx = launch.grid[0],
-            .gy = launch.grid[1],
-            .gz = launch.grid[2],
-        });
-        for (self.args, 0..) |_, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.print("%arg{d}", .{i});
-        }
-        try w.writeAll(") : !cuda.launch_cfg<max_attrs = 17>, (");
-        for (self.args, 0..) |_, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.print("{f}", .{self.arg(i).type_()});
-        }
-        try w.writeAll(
-            \\) -> !cuda.result
-            \\    %status = cuda.cast %r : !cuda.result -> i32
-            \\    return %status : i32
-            \\  }
-            \\}
-            \\
-        );
+        try al.writer.print("{f}", .{self.module.operation()});
         return try self.allocator.dupeZ(u8, al.written());
     }
 };
@@ -869,28 +829,22 @@ test "naive elementwise add matches the Python notebook kernel" {
     const mi = thread_idx.div(n);
     a.gC.set(.{ mi, ni }, a.gA.get(.{ mi, ni }).add(a.gB.get(.{ mi, ni })));
 
-    // The func.func form round-trips through the local dialects.
-    const kernel = try b.kernelText(.{ .block = .{ 128, 1, 1 } });
-    try expectContains(kernel, "func.func @naive_elementwise_add_kernel(%arg0: !cute.ptr<f16, gmem, align<16>>");
-    try expectContains(kernel, "attributes {cute.kernel, gpu.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}");
-    try expectContains(kernel, "\"nvvm.read.ptx.sreg.tid.x\"() : () -> i32");
-    try expectContains(kernel, "!cute.layout<\"(16,8):(8,1)\">");
-    try expectContains(kernel, "!cute.coord<\"(?,?)\">");
-    try expectContains(kernel, "cute.memref.load");
-    try expectContains(kernel, "cute.memref.store");
-    try expectContains(kernel, "arith.addf");
-    const parsed = try mlir.Module.parse(ctx, kernel);
+    // The module round-trips through the local dialects.
+    const ir = try b.finish(.{ 128, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "module {\n  func.func @naive_elementwise_add_kernel(%arg0: !cute.ptr<f16, gmem, align<16>>, %arg1: !cute.ptr<f16, gmem, align<16>>, %arg2: !cute.ptr<f16, gmem, align<16>>)");
+    try expectContains(ir, "attributes {cute.kernel, gpu.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}");
+    try expectContains(ir, "\"nvvm.read.ptx.sreg.tid.x\"() : () -> i32");
+    try expectContains(ir, "!cute.layout<\"(16,8):(8,1)\">");
+    try expectContains(ir, "!cute.coord<\"(?,?)\">");
+    try expectContains(ir, "cute.memref.load");
+    try expectContains(ir, "cute.memref.store");
+    try expectContains(ir, "arith.addf");
+    try expectContains(ir, "    return\n  }\n}\n");
+    try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);
+    const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
-
-    const ir = try b.finish(.{ .grid = .{ 1, 1, 1 }, .block = .{ 128, 1, 1 } });
-    defer std.testing.allocator.free(ir);
-    try expectContains(ir, "module attributes {gpu.container_module}");
-    try expectContains(ir, "gpu.module @kernels {\n    cuda.kernel @naive_elementwise_add_kernel(");
-    try expectContains(ir, "func.func @launch(%arg0: !cute.ptr<f16, gmem, align<16>>, %arg1: !cute.ptr<f16, gmem, align<16>>, %arg2: !cute.ptr<f16, gmem, align<16>>) -> i32");
-    try expectContains(ir, "cute.kernel_smem_size @kernels::@naive_elementwise_add_kernel : i64");
-    try expectContains(ir, "blockDim = (%bx, %by, %bz)");
-    try expectContains(ir, "cuda.launch_ex @kernels::@naive_elementwise_add_kernel<%cfg> (%arg0, %arg1, %arg2)");
 }
 
 test "guard, shared memory, sync, layouts, for loop" {
@@ -917,7 +871,8 @@ test "guard, shared memory, sync, layouts, for loop" {
     a.out.set(.{i}, acc.results[0]);
     guard.yieldThen(.{});
 
-    const kernel = try b.kernelText(.{ .block = .{ 128, 1, 1 } });
+    const kernel = try b.finish(.{ 128, 1, 1 });
+    defer std.testing.allocator.free(kernel);
     try expectContains(kernel, "cute_nvgpu.arch.alloc_smem");
     try expectContains(kernel, "!cute.ptr<f32, smem, align<16>>");
     try expectContains(kernel, "\"nvvm.barrier\"() {operandSegmentSizes = array<i32: 0, 0>} : () -> ()");
@@ -927,10 +882,6 @@ test "guard, shared memory, sync, layouts, for loop" {
     const parsed = try mlir.Module.parse(ctx, kernel);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
-
-    const ir = try b.finish(.{ .grid = .{ 32, 1, 1 }, .block = .{ 128, 1, 1 } });
-    defer std.testing.allocator.free(ir);
-    try expectContains(ir, "%gx = arith.constant 32 : i32");
 }
 
 test "left-most default stride and static coordinate leaves" {
@@ -945,7 +896,59 @@ test "left-most default stride and static coordinate leaves" {
     try std.testing.expectEqual(@as(i64, 16), t.size());
     const v = t.get(.{ b.threadIdx().x, 3 });
     try std.testing.expect(v.isFloat());
-    const kernel = try b.kernelText(.{});
+    const kernel = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(kernel);
     try expectContains(kernel, "!cute.layout<\"(4,4):(1,4)\">");
     try expectContains(kernel, "!cute.coord<\"(?,3)\">");
+    const parsed = try mlir.Module.parse(ctx, kernel);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
+}
+
+test "casts, select, if-else, integer widening" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "k");
+    defer b.deinit();
+    const a = try b.declareArgs(.{ .p = .{ .tensor = .{ .dtype = .f16, .shape = &.{8} } } });
+    const tid = b.threadIdx().x;
+
+    // A literal that does not fit i32 widens the i32 Value instead of truncating.
+    const big: u32 = 3_000_000_000;
+    const wide = tid.add(big);
+    try std.testing.expectEqual(DType.i64, wide.dtype());
+    const bound = tid.lt(@as(i64, 5_000_000_000));
+    try std.testing.expectEqual(DType.i1, bound.dtype());
+
+    const f = tid.to(.f32);
+    try std.testing.expectEqual(DType.f16, f.to(.f16).dtype());
+    try std.testing.expectEqual(DType.f64, f.to(.f64).dtype());
+    try std.testing.expectEqual(DType.bf16, f.to(.f16).to(.bf16).dtype());
+    try std.testing.expectEqual(DType.i32, f.to(.i32).dtype());
+    try std.testing.expectEqual(DType.i8, tid.to(.i8).dtype());
+    try std.testing.expectEqual(DType.i32, bound.to(.i32).dtype());
+
+    const picked = b.select(bound, f, 2.0);
+    var scope = b.openIfElse(tid.lt(4), .{DType.f16.toMlir(ctx)});
+    scope.yieldThen(.{picked.to(.f16)});
+    scope.yieldElse(.{b.cst(.f16, 1)});
+    a.p.set(.{tid}, scope.results[0]);
+
+    const kernel = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(kernel);
+    try expectContains(kernel, "arith.extsi");
+    try expectContains(kernel, "arith.constant 3000000000 : i64");
+    try expectContains(kernel, "arith.sitofp");
+    try expectContains(kernel, "arith.truncf");
+    try expectContains(kernel, "arith.extf");
+    try expectContains(kernel, "arith.convertf");
+    try expectContains(kernel, "arith.fptosi");
+    try expectContains(kernel, "arith.trunci");
+    try expectContains(kernel, "arith.extui");
+    try expectContains(kernel, "arith.select");
+    try expectContains(kernel, "} else {");
+    const parsed = try mlir.Module.parse(ctx, kernel);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
 }
