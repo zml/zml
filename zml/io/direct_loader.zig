@@ -1,7 +1,8 @@
 //! Direct loading follows a batch from per-file planning through FIFO claims,
-//! source reads and DMA completion. The source width is fixed per load
-//! profile (`limits.defaultReadParallelism`) and only steps down when the
-//! source throttles; runtime ownership and synchronization live here.
+//! source reads and DMA completion. The source width is fixed for the load,
+//! per load profile (`limits.defaultReadParallelism`); a source that rate
+//! limits is handled by the VFS, which holds every request of that backend
+//! (`vfs/request.zig`). Runtime ownership and synchronization live here.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,8 +38,7 @@ const load_log = std.log.scoped(.@"zml/io/load");
 const max_dma_pieces_per_device: usize = 64;
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
-/// time; the workers, the pumps and the throttle watch run concurrently
-/// with them.
+/// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -48,8 +48,7 @@ pub const Loader = struct {
     pool: host_memory.BlockPool,
     scheduler: Scheduler,
     metrics: Metrics = .{},
-    /// Source reads in flight: the width, for the whole load except a
-    /// throttle step down.
+    /// Source reads in flight: the width, for the whole load.
     read_gate: RequestGate,
     /// Lifecycle credits, the pre-grown pinned capacity in requests. A
     /// request holds one from its claim to its last DMA callback, so the
@@ -65,9 +64,6 @@ pub const Loader = struct {
     /// 9 ms per request waiting for a credit against 3 ms reading.
     request_gate: RequestGate,
     pipeline: Pipeline,
-    /// Present when the profile reports read statistics (the remote VFS
-    /// backends): the one thing that changes the width during a load.
-    throttle: ?ThrottleWatch = null,
     worker_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     /// Device bytes allocated for outputs so far, per `platform.devices`
@@ -77,8 +73,10 @@ pub const Loader = struct {
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
-    /// Concurrent source reads: the configured width clipped to what the
-    /// pinned budget holds, halved by the throttle watch while it runs.
+    /// Concurrent source reads for the whole load: the configured width
+    /// clipped to what the pinned budget holds. A throttled source is the
+    /// VFS's business, which holds every request of that backend
+    /// (`vfs/request.zig`); the loader never changes its width.
     width: usize,
     plan_config: Planner.Config,
     /// See `Config.direct_io`.
@@ -149,17 +147,8 @@ pub const Loader = struct {
             calibration.max_in_flight_per_device * calibration.block_size,
         );
         errdefer self.pipeline.deinit();
-        if (opts.load_profile.stats) |provider| {
-            self.throttle = .{
-                .cursor = .{ .provider = provider, .previous = provider.snapshot() },
-                .metrics = &self.metrics,
-                .read_gate = &self.read_gate,
-                .width = &self.width,
-            };
-        }
         errdefer self.stopWorkers();
         for (0..workers) |_| try self.worker_group.concurrent(io, workerMain, .{self});
-        if (self.throttle) |*watch| try self.worker_group.concurrent(io, ThrottleWatch.run, .{ watch, io });
         load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,
@@ -450,13 +439,12 @@ pub const Loader = struct {
         }
     }
 
-    /// Stops the workers and the throttle watch; awaiting a group that never
-    /// spawned returns at once, so this also cleans up a failed `create`.
+    /// Stops the workers; awaiting a group that never spawned returns at
+    /// once, so this also cleans up a failed `create`.
     fn stopWorkers(self: *Loader) void {
         self.scheduler.stop(self.io);
         self.read_gate.close(self.io);
         self.request_gate.close(self.io);
-        if (self.throttle) |*watch| watch.done.set(self.io);
         self.worker_group.await(self.io) catch {};
     }
 
@@ -500,12 +488,14 @@ pub const Loader = struct {
         if (self.load_profile.stats) |provider| {
             if (diagnostics.source_stats) |previous| {
                 const delta = provider.snapshot().sub(previous);
-                load_log.debug("batch source: batch={d}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}", .{
+                load_log.debug("batch source: batch={d}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_holds={d}, hold_wait_ms={d:.3}", .{
                     diagnostics.sequence,
                     delta.physical_requests,
                     delta.physical_bytes,
                     delta.retries,
                     delta.throttles,
+                    delta.holds,
+                    @as(f64, @floatFromInt(delta.hold_wait_ns)) / std.time.ns_per_ms,
                 });
             }
         }
@@ -2109,58 +2099,6 @@ const Pipeline = struct {
     }
 };
 
-/// Halves the source width when the source throttles: the one width change
-/// left after the adaptive controller went (CTX.md, fifteenth pass). Runs as
-/// a task only when the profile has a statistics side channel, which the
-/// local backend has not, and samples it every 25 ms so a throttle is seen
-/// while the workers sleep in the backend's retries.
-const ThrottleWatch = struct {
-    cursor: ReadStatsCursor,
-    metrics: *const Metrics,
-    read_gate: *RequestGate,
-    /// The loader's width; this task is its only writer while it runs.
-    width: *usize,
-    /// Reads completed at the last step and the width in flight then: the
-    /// next step waits until that many reads have completed since, so the
-    /// delayed feedback of the old width cannot ratchet through several
-    /// steps.
-    reads_at_step: u64 = 0,
-    settle_reads: u64 = 0,
-    done: std.Io.Event = .unset,
-
-    fn run(self: *ThrottleWatch, io: std.Io) std.Io.Cancelable!void {
-        while (true) {
-            self.done.waitTimeout(io, .{ .duration = .{
-                .raw = .fromMilliseconds(25),
-                .clock = .awake,
-            } }) catch |err| switch (err) {
-                error.Timeout => {},
-                error.Canceled => return error.Canceled,
-            };
-            if (self.done.isSet()) return;
-            self.tick(io);
-        }
-    }
-
-    /// One sample: on a throttle, halve the width once everything in flight
-    /// at the previous step has returned.
-    fn tick(self: *ThrottleWatch, io: std.Io) void {
-        if (!self.cursor.takeThrottle()) return;
-        const completed = self.metrics.read_operations.load(.acquire);
-        if (completed -| self.reads_at_step < self.settle_reads) return;
-        const width = self.width.*;
-        if (width == 1) return;
-        const narrower = width / 2;
-        // Only the read gate narrows: the lifecycle credits are the pinned
-        // capacity, and holding blocks back would not reduce source traffic.
-        self.read_gate.setLimit(io, narrower);
-        self.width.* = narrower;
-        self.reads_at_step = completed;
-        self.settle_reads = width;
-        load_log.debug("source throttled: width {d} -> {d}", .{ width, narrower });
-    }
-};
-
 const RequestGate = struct {
     limit: usize,
     in_use: usize = 0,
@@ -2193,15 +2131,6 @@ const RequestGate = struct {
         // turns a wide gate into a thundering herd even when the active
         // limit is small.
         self.condition.signal(io);
-    }
-
-    /// Requests admitted under the old limit keep their permits; a lower
-    /// limit only holds back new admissions.
-    fn setLimit(self: *RequestGate, io: std.Io, new_limit: usize) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.limit = new_limit;
-        self.condition.broadcast(io);
     }
 
     fn inUse(self: *RequestGate, io: std.Io) usize {
@@ -2244,25 +2173,6 @@ const Metrics = struct {
     /// touch a tensor creates its PJRT buffers and transfer managers there,
     /// and the other workers of the same tensor wait for it.
     tensor_init_ns: std.atomic.Value(u64) = .init(0),
-};
-
-const ReadStatsCursor = struct {
-    /// Backend-wide, not tagged by loader or submission: the watch assumes
-    /// this load is the backend's only material user. Concurrent unrelated
-    /// traffic can otherwise look like this loader's throttling.
-    provider: VFS.ReadStatsProvider,
-    previous: VFS.ReadStats,
-
-    /// Whether the source throttled or timed out a request since the last
-    /// call. Retries, connection failures and other 5xx are the backend's
-    /// retry loop's business: they say nothing about the width, and the
-    /// width cannot climb back.
-    fn takeThrottle(self: *ReadStatsCursor) bool {
-        const current = self.provider.snapshot();
-        const delta = current.sub(self.previous);
-        self.previous = current;
-        return delta.throttles != 0 or delta.timeouts != 0;
-    }
 };
 
 /// A value initialized at most once by whichever task touches it first.
@@ -3048,94 +2958,6 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     batch.destroy();
 }
 
-/// A read statistics provider the tests move by hand.
-const FakeStatsProvider = struct {
-    stats: VFS.ReadStats = .{},
-
-    fn snapshot(userdata: *anyopaque) VFS.ReadStats {
-        const self: *@This() = @ptrCast(@alignCast(userdata));
-        return self.stats;
-    }
-
-    fn provider(self: *FakeStatsProvider) VFS.ReadStatsProvider {
-        return .{ .userdata = self, .snapshotFn = snapshot };
-    }
-};
-
-test "one load-profile feedback cursor reports only new throttles" {
-    var fake: FakeStatsProvider = .{};
-    var cursor: ReadStatsCursor = .{
-        .provider = fake.provider(),
-        .previous = fake.provider().snapshot(),
-    };
-
-    try std.testing.expect(!cursor.takeThrottle());
-    // Retries and failures are the backend's retry loop's business.
-    fake.stats.retries = 2;
-    fake.stats.server_failures = 1;
-    fake.stats.transient_retries = 1;
-    try std.testing.expect(!cursor.takeThrottle());
-    fake.stats.throttles = 1;
-    try std.testing.expect(cursor.takeThrottle());
-    // Only what moved since the last call.
-    try std.testing.expect(!cursor.takeThrottle());
-    fake.stats.timeouts = 1;
-    try std.testing.expect(cursor.takeThrottle());
-    try std.testing.expect(!cursor.takeThrottle());
-}
-
-test "throttle watch halves the width once the reads in flight at the last step returned" {
-    const io = std.testing.io;
-    var fake: FakeStatsProvider = .{};
-    var metrics: Metrics = .{};
-    var width: usize = 32;
-    var read_gate: RequestGate = .init(width);
-    // The lifecycle credits are the pinned capacity and the watch never
-    // touches them.
-    const request_gate: RequestGate = .init(41);
-    var watch: ThrottleWatch = .{
-        .cursor = .{ .provider = fake.provider(), .previous = fake.provider().snapshot() },
-        .metrics = &metrics,
-        .read_gate = &read_gate,
-        .width = &width,
-    };
-
-    // Nothing moved, then retries alone: the width stays.
-    watch.tick(io);
-    fake.stats.retries = 3;
-    fake.stats.server_failures = 1;
-    watch.tick(io);
-    try std.testing.expectEqual(@as(usize, 32), width);
-    try std.testing.expectEqual(@as(usize, 32), read_gate.limit);
-
-    // A throttle halves the width; both gates follow.
-    fake.stats.throttles = 1;
-    watch.tick(io);
-    try std.testing.expectEqual(@as(usize, 16), width);
-    try std.testing.expectEqual(@as(usize, 16), read_gate.limit);
-    try std.testing.expectEqual(@as(usize, 41), request_gate.limit);
-
-    // A throttle before the 32 reads in flight at the step have returned is
-    // the old width's feedback.
-    fake.stats.throttles = 2;
-    watch.tick(io);
-    try std.testing.expectEqual(@as(usize, 16), width);
-    metrics.read_operations.store(32, .release);
-    fake.stats.timeouts = 1;
-    watch.tick(io);
-    try std.testing.expectEqual(@as(usize, 8), width);
-    try std.testing.expectEqual(@as(usize, 8), read_gate.limit);
-    try std.testing.expectEqual(@as(usize, 41), request_gate.limit);
-
-    // One read at a time is the floor.
-    width = 1;
-    watch.settle_reads = 0;
-    fake.stats.throttles = 3;
-    watch.tick(io);
-    try std.testing.expectEqual(@as(usize, 1), width);
-    try std.testing.expectEqual(@as(usize, 8), read_gate.limit);
-}
-
 test "device pump admits by bytes and by pieces" {
     var pump: Pipeline.DevicePump = .{};
     try std.testing.expect(pump.hasRoom(8));
@@ -3201,34 +3023,6 @@ fn buildMesh2x2(
     });
 
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
-}
-
-test "request gate reductions drain without cancelling active requests" {
-    const io = std.testing.io;
-    var gate: RequestGate = .init(2);
-    try std.testing.expect(gate.acquire(io));
-    try std.testing.expect(gate.acquire(io));
-
-    gate.setLimit(io, 1);
-    var admitted: std.Io.Event = .unset;
-    var group: std.Io.Group = .init;
-    try group.concurrent(io, struct {
-        fn run(gate_: *RequestGate, io_: std.Io, admitted_: *std.Io.Event) void {
-            if (!gate_.acquire(io_)) return;
-            admitted_.set(io_);
-            gate_.release(io_);
-        }
-    }.run, .{ &gate, io, &admitted });
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!admitted.isSet());
-
-    gate.release(io);
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!admitted.isSet());
-    gate.release(io);
-    try group.await(io);
-    try std.testing.expect(admitted.isSet());
-    try std.testing.expectEqual(@as(usize, 0), gate.inUse(io));
 }
 
 test "the submission that completes a target's bytes carries the last flag" {

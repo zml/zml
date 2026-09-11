@@ -174,7 +174,7 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 - `zml/io.zig` is the public facade. The shared loader front end is in
   `zml/io/loader.zig`, while `zml/io/backend.zig` owns backend selection,
   submission dispatch, and the `LoadSpec` contract. Direct planning,
-  scheduling, the throttle watch, transfer lifecycle, and their tests are in
+  scheduling, transfer lifecycle, and their tests are in
   `zml/io/direct_loader.zig`; platform-owned DMA settings, retained arenas,
   and calibration are in `zml/io/dma_calibration.zig`; pure sharding-to-byte-span
   expansion is in `zml/io/DispatchSpans.zig`.
@@ -202,13 +202,17 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   range validation and borrowed readers over a shared open file. Each distinct
   safetensor object is opened once per model-wide load.
 - HTTP, S3, GCS, and HF share one range read loop,
-  `range_read.performRangeRead`: one whole Range request per admitted
-  positional call, retries serial inside that caller's source credit (the
-  retired backend-local `parallel_read` pools must not return). A backend
+  `range_read.performRangeRead` over the governed loop of
+  `vfs/request.zig`: one whole Range request per admitted positional call,
+  retries and holds serial inside that caller's source credit (the retired
+  backend-local `parallel_read` pools must not return). Every other request
+  a backend makes (the HF tree and redirect chain, the S3 and GCS listings
+  and HEADs, the GCS token exchanges, the HTTP HEAD chain) goes through the
+  same loop, so one governor covers a backend's whole quota. A backend
   contributes a `RequestSpec`: its name and the object for log lines, what a
-  503 means, and a `prepare` hook called for every attempt that returns the
-  URI, the authorization value and its extra headers; the loop appends
-  `Range`. S3 recomputes the SigV4 timestamp and signature in the hook per
+  503 means, and the rate-limit scope; a range read adds a `prepare` hook
+  called for every attempt that returns the URI, the authorization value and
+  its extra headers; the loop appends `Range`. S3 recomputes the SigV4 timestamp and signature in the hook per
   attempt, GCS copies (refreshing when expired) its bearer per attempt, HTTP
   and HF return a static request. The backends keep URL construction,
   credential assembly and their `backend()` profile; retry settings are one
@@ -223,14 +227,15 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   prefix, then scatters into caller buffers; there is no response timing (the
   one-byte first-body probe and `ResponseTiming` were dead and are gone).
   Retry classification is
-  one function (`range_read.classifyStatus`): 408 is a timeout, 429 a
+  one function (`request.classifyStatus`): 408 is a timeout, 429 a
   throttle, other 5xx a server failure, and 503 is a throttle on S3
-  (`SlowDown`) and GCS but a server failure on generic HTTP and HF. A retried
-  status whose response names a delay (`Retry-After` delta-seconds, or the
-  `RateLimit` header's `t=` reset on HF; the HTTP-date form is not parsed)
-  sleeps that long instead of the jittered delay. The backends expose
-  aggregate request, retry, timeout, server-failure, throttle, byte and delay
-  counters.
+  (`SlowDown`) and GCS but a server failure on generic HTTP and HF. A
+  throttle arms the backend's hold instead of charging the request's retry
+  budget (sixteenth pass); any other retried status whose response names a
+  delay (`Retry-After` delta-seconds, or the `RateLimit` header's `t=` reset
+  on HF; the HTTP-date form is not parsed) sleeps that long instead of the
+  jittered delay. The backends expose aggregate request, retry, timeout,
+  server-failure, throttle, byte, delay, hold and hold-wait counters.
 - One source job performs one exact absolute scatter read into pinned blocks.
   Extra physical calls occur only for short reads/retries or `IOV_MAX` limits.
   The loader counts read operations, not physical calls: a remote source's
@@ -405,17 +410,11 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   pass) and no credit can want a block the pre-growth did not map. The read
   gate alone limits source calls, at the width. A request returns its
   lifecycle credit only after all its DMA children finish.
-- The one width change during a load is a step down (`ThrottleWatch`): a
-  profile with a statistics side channel (the remote VFS backends; the local
-  backend has none and runs no watch) is sampled every 25 ms, also while
-  the workers sleep in the backend's retries, and a throttle or timeout
-  halves the width; only the read gate narrows (the credits are the pinned
-  capacity) and requests admitted under the old width keep their permits. The next step waits until as many
-  reads have completed as were in flight at the previous one, so the old
-  width's delayed feedback cannot ratchet through several steps. Retries,
-  connection failures and other 5xx are the backend retry loop's business
-  and change nothing: they say nothing about the width, and nothing raises
-  it again.
+- The width never changes during a load (sixteenth pass): rate limiting is
+  handled one layer down, by the VFS governor, which holds every request of
+  the throttled backend. The loader keeps the statistics side channel for
+  observability only: the `batch source` line reports the submission's
+  requests, bytes, retries, throttles, holds and hold wait.
 - Pinned pre-growth happens at loader creation, before any load: the DMA
   reserve (calibrated depth x devices, at least one maximal request) plus
   `width + 1` source requests, as two arenas, the reserve first (ROCm
@@ -3697,6 +3696,15 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   `error.RateLimited` inside its 300 ms budget; a reader cancelled while the
   backend is held returns `Canceled`. The four existing tests keep their
   assertions. Three consecutive runs of the suite pass (42 tests, 2.1 s).
+- Task 26 (group D), the loader drops the throttle watch. `ThrottleWatch`,
+  `ReadStatsCursor`, `RequestGate.setLimit`, the `throttle` field, the watch
+  construction and spawn and their three tests are gone; `Loader.width` is
+  written once at create and never again. The statistics side channel stays
+  for observability: the `batch source` line gained `source_holds` and
+  `hold_wait_ms` beside the requests, bytes, retries and throttles. The
+  loader header, the `read_parallelism` doc, `docs/learn/loader.md` (the
+  implementation map gained a `vfs/request.zig` row) and the CTX design
+  bullets now say that a rate-limited source is handled one layer down.
 
 ## Open work
 

@@ -69,7 +69,8 @@ per-submission handle and no memory knob.
 | `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind `loadExecute` admission |
 | `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
-| `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers, transfer completion and the throttle watch |
+| `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
+| `vfs/request.zig` | The governed request loop: retries and the backend-wide hold on rate limiting |
 | `zml/io/DispatchSpans.zig` | Pure expansion of sharding into source ranges and destination offsets |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
@@ -136,6 +137,8 @@ pinned set holds. The direct backend pre-grows that many requests plus the
 DMA reserve before the first read, so nothing maps during a load. A read gate
 enforces the width; the lifecycle credits are the whole pre-grown capacity, so
 transfers that still hold host blocks keep the DMA stage fed without ever
-needing a block the reads did not leave free. The one change during a load is a step down: when a remote
-source reports a throttle or timeout, the width is halved once the reads in
-flight at the previous step have returned. Nothing raises it again.
+needing a block the reads did not leave free. The width never changes during
+a load: a source that answers 429 (or 503 on the object stores) is handled
+one layer down, where the VFS holds every request of that backend until the
+delay it named has passed, so the traffic falls without the loader's memory
+bounds moving.

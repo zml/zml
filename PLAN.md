@@ -165,24 +165,6 @@ with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
 
-- [ ] 26. The loader keeps the width and drops the watch
-  (`zml/io/direct_loader.zig`). Delete `ThrottleWatch` (`:2253-2300`),
-  `ReadStatsCursor` (`:2432-2452`), `RequestGate.setLimit` (`:2338-2344`),
-  the `throttle` and `throttle_group` fields (`:53-58`), the watch
-  construction and spawn (`:140-152`), the two `stopWorkers` lines
-  (`:435`, `:437`), the tests at `:3429-3520` (`FakeStatsProvider` and the
-  two watch tests) and `:3604-3630` (gate reduction). `Loader.width` is
-  written once at create. Keep `Metrics.read_operations` (the summary
-  uses it), `LoadProfile.stats`, `Diagnostics.source_stats` and the batch
-  source line (`:476-489`), which gains `source_holds` and
-  `hold_wait_ms` from the two new counters. Docs: `loader.zig:89-94` ("The
-  direct backend halves it when the source throttles" becomes "fixed for
-  the load; a throttled source holds the VFS, see `VFS.request`"),
-  `docs/learn/loader.md:72` and `:130-138`, the header of
-  `direct_loader.zig:1-4` and the comments at `:40`, `:55`, `:67-68`.
-  Task 16 drops its throttle-watch rider (no `throttle_group`, no watch
-  fields to trim) if this lands first; either order works.
-
 - [ ] 27. One end-to-end test through the loader. Move `MockServer` to
   `vfs/mock_server.zig`, exported as `VFS.MockServer` behind
   `builtin.is_test`, so `zml/io/loader.zig`'s test section can serve the
