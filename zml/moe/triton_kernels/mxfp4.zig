@@ -52,14 +52,17 @@ pub const Inputs = struct {
 };
 
 pub fn validateInputs(c: Config, a: Inputs) !void {
+    if (a.s1.rank() != 3 or a.s2.rank() != 3) return error.InvalidInputShape;
+    if (a.s1.dim(2) < @divTrunc(c.hidden, 32) or
+        a.s2.dim(2) < @divTrunc(c.intermediate, 32)) return error.InvalidInputShape;
     const shapes = .{
         .x = zml.Shape.init(.{ c.tokens, c.hidden }, .bf16),
         .ids = zml.Shape.init(.{ c.tokens, c.topk }, .i32),
         .scales = zml.Shape.init(.{ c.tokens, c.topk }, .f32),
         .w1 = zml.Shape.init(.{ c.experts, 2 * c.intermediate, @divTrunc(c.hidden, 2) }, .u8),
-        .s1 = zml.Shape.init(.{ c.experts, 2 * c.intermediate, ss(c.hidden) }, .f8e8m0),
+        .s1 = zml.Shape.init(.{ c.experts, 2 * c.intermediate, a.s1.dim(2) }, .f8e8m0),
         .w2 = zml.Shape.init(.{ c.experts, c.hidden, @divTrunc(c.intermediate, 2) }, .u8),
-        .s2 = zml.Shape.init(.{ c.experts, c.hidden, ss(c.intermediate) }, .f8e8m0),
+        .s2 = zml.Shape.init(.{ c.experts, c.hidden, a.s2.dim(2) }, .f8e8m0),
     };
     inline for (std.meta.fields(Inputs)) |field| {
         if (!@field(a, field.name).shape().eql(@field(shapes, field.name))) return error.InvalidInputShape;
@@ -79,11 +82,6 @@ fn tiles(c: Config) i64 {
 /// Returns the next power of two.
 fn pow2(x: i64) i64 {
     return @intCast(std.math.ceilPowerOfTwo(u64, @intCast(x)) catch unreachable);
-}
-
-/// Returns the weight scale stride in bytes assuming one scale per 32 weights, padded to a multiple of 16 bytes.
-fn ss(k: i64) i64 {
-    return @divTrunc(k + 511, 512) * 16;
 }
 
 fn quantRows(c: Config) i64 {
@@ -110,11 +108,18 @@ fn ld(b: *B, p: V, mask: V, dt: tri.DType, other: i64) V {
     return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.liftAs(other, dt) });
 }
 
+// Scale rows can be tightly packed or padded. Specialize the GEMM on their
+// physical width without imposing an alignment requirement on the tensor.
+const GemmConfig = struct {
+    moe: Config,
+    scale_stride: i64,
+};
+
 const Quant = tri.Kernel(Config, .{ .name = "mxfp4_triton_quant", .inputs = &.{"x"}, .outputs = &.{ "q", "s" }, .run = quantInput });
 const Route = tri.Kernel(Config, .{ .name = "mxfp4_triton_route", .inputs = &.{"ids"}, .outputs = &.{ "counts", "pos" }, .run = route });
 const Schedule = tri.Kernel(Config, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = schedule });
-const GateUp = tri.Kernel(Config, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
-const Down = tri.Kernel(Config, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
+const GateUp = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
+const Down = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
 const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = combine });
 
 pub fn forward(c: Config, a: Inputs) zml.Tensor {
@@ -172,7 +177,7 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
         .{ .q = q.q, .s = q.s, .w = a.w1, .ws = a.s1.bitCast(.u8), .ids = a.ids, .rw = a.scales, .map = map, .sched = sched },
         .{ .mid = .init(.{ tile_count * bn, c.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(c.intermediate, 32) }, .u8) },
         .{
-            .cfg = c,
+            .cfg = .{ .moe = c, .scale_stride = a.s1.dim(2) },
             .grid = .{ @intCast(@divTrunc(c.intermediate, up_columns)), @intCast(tile_count), 1 },
             .num_warps = if (c.tokens <= 8) 4 else 8,
             .num_stages = 2,
@@ -184,7 +189,7 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
         .{ .mid = m.mid, .ms = m.ms, .w = a.w2, .ws = a.s2.bitCast(.u8), .ids = a.ids, .sched = sched },
         .{ .d = .init(.{ tile_count * bn, c.hidden }, .bf16) },
         .{
-            .cfg = c,
+            .cfg = .{ .moe = c, .scale_stride = a.s2.dim(2) },
             .grid = .{ @intCast(@divTrunc(c.hidden, 128)), @intCast(tile_count), 1 },
             .num_warps = if (c.tokens <= 8) 4 else 8,
             .num_stages = 2,
@@ -263,17 +268,17 @@ fn schedule(b: *B, c: Config) tri.FinishError!void {
     b.storeOpts(a.sched.addPtr(nt).addPtr(tile), counts.gather(safe, 0).sub(pos).minimum(bn), .{ .mask = live.bitAnd(row.eq(0)) });
 }
 
-fn gateUp(b: *B, c: Config) tri.FinishError!void {
-    return gemm(b, c, .gate_up);
+fn gateUp(b: *B, c: GemmConfig) tri.FinishError!void {
+    return gemm(b, c.moe, .gate_up, c.scale_stride);
 }
 
-fn down(b: *B, c: Config) tri.FinishError!void {
-    return gemm(b, c, .down);
+fn down(b: *B, c: GemmConfig) tri.FinishError!void {
+    return gemm(b, c.moe, .down, c.scale_stride);
 }
 
 const Projection = enum { gate_up, down };
 
-fn gemm(b: *B, c: Config, comptime projection: Projection) tri.FinishError!void {
+fn gemm(b: *B, c: Config, comptime projection: Projection, scale_stride: i64) tri.FinishError!void {
     const is_up = projection == .gate_up;
     const a = if (is_up) try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .mid = .{ .ptr = .f8e4m3fn }, .ms = .{ .ptr = .i8 } }) else try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .d = .{ .ptr = .bf16 } });
     const block = b.programId(.x);
@@ -297,8 +302,8 @@ fn gemm(b: *B, c: Config, comptime projection: Projection) tri.FinishError!void 
     const sk = loop.iv.mul(bk / 32).add(ks);
     const kk = loop.iv.mul(bk).add(k);
     const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(bk / 2) }, &.{ width, bk / 2 }, .i8);
-    const scale_offset = m.expandDims(1).mul(ss(ksize)).add(sk.expandDims(0));
-    const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * ss(ksize))).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
+    const scale_offset = m.expandDims(1).mul(scale_stride).add(sk.expandDims(0));
+    const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * scale_stride)).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
     var mask = kk.expandDims(0).lt(ksize);
     var smask = sk.expandDims(0).lt(@divTrunc(ksize, 32));
     // The small-batch epilogue leaves padded rows unwritten.
