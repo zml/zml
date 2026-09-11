@@ -139,7 +139,9 @@ pub const Partitioning = struct {
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) error{NoSuitableSharding}!Sharding {
-        return pickSharding(self.shardings, shape, .any_covering) orelse error.NoSuitableSharding;
+        const sharding = pickSharding(self.shardings, shape, .any_covering) orelse return error.NoSuitableSharding;
+        // std.log.warn("{f} -> {f}", .{ shape, sharding });
+        return sharding;
     }
 
     fn primarySharding(self: Partitioning) Sharding {
@@ -250,6 +252,7 @@ pub fn sdyManualAxesAttr(
             }
         }
     }
+    std.log.warn("manualComputation manual_axes: {f}", .{stdx.fmt.strings(axis_names.items)});
 
     const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
     for (axis_names.items, 0..) |axis_name, i| {
@@ -503,6 +506,58 @@ pub const PhysicalMesh = struct {
             std.debug.assert(device.hasValidCoords());
         }
         return mesh;
+    }
+
+    pub fn torus2x2(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const PlatformDevice,
+    ) !Sharding.PhysicalMesh {
+        if (devices.len < 4) return error.NotEnoughDevices;
+        const topology: Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .device(devices[0]),
+                .device(devices[1]),
+            }),
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .device(devices[2]),
+                .device(devices[3]),
+            }),
+        });
+
+        return .fromTree(allocator, target, topology);
+    }
+
+    pub fn torus2x2x2(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const PlatformDevice,
+    ) !Sharding.PhysicalMesh {
+        if (devices.len < 8) return error.NotEnoughDevices;
+        const topology: Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[0]),
+                    .device(devices[1]),
+                }),
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[2]),
+                    .device(devices[3]),
+                }),
+            }),
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[4]),
+                    .device(devices[5]),
+                }),
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[6]),
+                    .device(devices[7]),
+                }),
+            }),
+        });
+
+        return .fromTree(allocator, target, topology);
     }
 
     fn populateDevicesInCanonicalOrder(self: *PhysicalMesh, allocator: std.mem.Allocator) !void {

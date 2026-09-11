@@ -1381,58 +1381,6 @@ pub const DirectMemoryWriter = struct {
     }
 };
 
-fn buildMesh2x2(
-    allocator: std.mem.Allocator,
-    target: @import("platform.zig").Target,
-    devices: []const @import("platform.zig").Device,
-) !Sharding.PhysicalMesh {
-    if (devices.len < 4) return error.NotEnoughDevices;
-    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[0]),
-            .device(devices[1]),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[2]),
-            .device(devices[3]),
-        }),
-    });
-
-    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
-}
-
-fn buildMesh2x2x2(
-    allocator: std.mem.Allocator,
-    target: @import("platform.zig").Target,
-    devices: []const @import("platform.zig").Device,
-) !Sharding.PhysicalMesh {
-    if (devices.len < 8) return error.NotEnoughDevices;
-    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[0]),
-                .device(devices[1]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[2]),
-                .device(devices[3]),
-            }),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[4]),
-                .device(devices[5]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[6]),
-                .device(devices[7]),
-            }),
-        }),
-    });
-
-    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
-}
-
 const DirectMemoryWriterDeviceTest = struct {
     const WriteMode = enum {
         stream_remaining,
@@ -1575,7 +1523,7 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
     try case.run(.{
         .name = "model_auto",
         .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
@@ -1594,7 +1542,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
     try case.run(.{
         .name = "batch_model_2d_torus",
         .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
@@ -1616,7 +1564,7 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
     try case.run(.{
         .name = "model_folded_2d_torus",
         .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
+            .physical_mesh = .{Sharding.PhysicalMesh.torus2x2},
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
@@ -1638,7 +1586,7 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
     try case.run(.{
         .name = "model_auto_writable_slice",
         .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
@@ -1660,7 +1608,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
     try case.run(.{
         .name = "topology_3d_folded_model",
         .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2x2 },
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2x2x2 },
             .cpu = .{ .device_count = 8 },
         },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
