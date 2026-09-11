@@ -3557,6 +3557,18 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   landed with it: the watch runs in `worker_group` and `throttle_group` is
   gone. The ready line prints `lifecycle_credits` and no longer prints
   `feasible_width`.
+- Task 16 gb300-2 verification (2026-09-11, GPU 1 with
+  `CUDA_VISIBLE_DEVICES=1`; GPUs 0 to 2 held other jobs, load average 7 to
+  15; Llama-3.1-8B-Instruct replicated, 14 packs of 16 then the bulk, the
+  `zml-directio` worktree overlaid with every file changed since
+  `b59c41b7`): `source_width=16, lifecycle_credits=25, workers=17` and
+  `pinned_high_water == pinned_mapped == 400 MiB`, all three identical to
+  the fifteenth pass; `memory_supported=true`, `bytes_limit` 248.96 GiB,
+  `min_room_seen=237.64 GiB`, `execute_admission_retires=0`; loader
+  `elapsed` 0.291 / 0.271 / 0.272 s against 0.26 to 0.33 s recorded, walls
+  389 / 368 / 368 ms; `pack check: ok` on every run and `load check: ok`
+  with `ZML_LOAD_CHECK=16`. Scripts: `~/zml-groupb-run.sh`, logs
+  `~/zml-directio-logs/b16_*.log`.
 
 ## Open work
 
