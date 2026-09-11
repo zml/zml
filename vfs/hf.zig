@@ -327,10 +327,12 @@ pub const HF = struct {
         return gop.value_ptr;
     }
 
+    /// The repository listing, through the governed loop like every other
+    /// request. It runs under `self.mutex` from `getOrFetchTree`, which is
+    /// fine: the hold is a deadline, not a permit, so a concurrent open
+    /// waits on the mutex for the hold it would have waited on anyway.
     fn fetchTreeFromAPI(self: *HF, repo: Repo) !std.ArrayList(TreeNode) {
         var url_buffer: [8 * 1024]u8 = undefined;
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-
         const url = try std.fmt.bufPrint(&url_buffer, API.TREE_URL_TEMPLATE, .{
             .repo = repo.repo,
             .model = repo.model,
@@ -340,41 +342,61 @@ pub const HF = struct {
         const uri = try std.Uri.parse(url);
         log.info("Fetching from HF: {s}", .{url});
 
-        var req = try self.client.request(.GET, uri, .{
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = self.authorization,
-            },
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .ok) {
-            log.err("Failed to fetch tree: status={}", .{res.head.status});
-            return error.RequestFailed;
-        }
-
-        const body = try res.reader(&.{}).readAlloc(self.allocator, res.head.content_length.?);
-        defer self.allocator.free(body);
-
-        const parsed = try std.json.parseFromSlice(
-            []API.Tree,
-            self.allocator,
-            body,
-            .{ .ignore_unknown_fields = true },
-        );
-        defer parsed.deinit();
-
-        var tree_root: std.ArrayList(TreeNode) = .empty;
-        for (parsed.value) |item| {
-            try insertTreeNode(self.allocator, &tree_root, item);
-        }
-
-        return tree_root;
+        var fetch: TreeFetch = .{ .hf = self, .uri = uri, .url = url };
+        return request.perform(std.ArrayList(TreeNode), self.requestContext(), .{
+            .backend = "hf",
+            .target = url,
+            .unavailable = .server_failure,
+            .key = request.authorityOf(uri),
+        }, &fetch, TreeFetch.attempt);
     }
+
+    const TreeFetch = struct {
+        hf: *HF,
+        uri: std.Uri,
+        url: []const u8,
+
+        fn attempt(self: *TreeFetch, _: request.Attempt) anyerror!request.Outcome(std.ArrayList(TreeNode)) {
+            var head_buffer: [8 * 1024]u8 = undefined;
+            return request.exchange(std.ArrayList(TreeNode), self.hf.requestContext(), self.uri, .{
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = self.hf.authorization,
+                },
+                .redirects = .follow,
+                .head_buffer = &head_buffer,
+            }, .{
+                .backend = "hf",
+                .target = self.url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(self.uri),
+            }, self, TreeFetch.consume);
+        }
+
+        fn consume(self: *TreeFetch, res: *std.http.Client.Response) anyerror!std.ArrayList(TreeNode) {
+            const allocator = self.hf.allocator;
+            const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse return error.MissingContentLength);
+            defer allocator.free(body);
+
+            const parsed = try std.json.parseFromSlice(
+                []API.Tree,
+                allocator,
+                body,
+                .{ .ignore_unknown_fields = true },
+            );
+            defer parsed.deinit();
+
+            var tree_root: std.ArrayList(TreeNode) = .empty;
+            errdefer {
+                for (tree_root.items) |*node| node.deinit(allocator);
+                tree_root.deinit(allocator);
+            }
+            for (parsed.value) |item| {
+                try insertTreeNode(allocator, &tree_root, item);
+            }
+            return tree_root;
+        }
+    };
 
     fn resolveDownloadUrl(self: *HF, repo: Repo, out_buffer: []u8) ![]const u8 {
         // `std.http.Client.Request.receiveHead` returns every HEAD response
@@ -383,45 +405,71 @@ pub const HF = struct {
         // Three rotating buffers: the current URL string, the redirect
         // location being resolved against it, and the formatted result.
         var url_buffers: [3][8 * 1024]u8 = undefined;
-        var redirect_buffer: [16 * 1024]u8 = undefined;
         var url: []const u8 = try std.fmt.bufPrint(&url_buffers[0], API.LFS_FILE_URL_TEMPLATE, repo);
         var current: usize = 0;
         var remaining_redirects: usize = 8;
         while (true) {
             const uri: std.Uri = try .parse(url);
-            var req = try self.client.request(.HEAD, uri, .{
-                .redirect_behavior = .unhandled,
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit,
-                },
-            });
-            defer req.deinit();
+            var hop: ResolveHop = .{ .hf = self, .uri = uri, .url = url };
+            // Each hop is one governed request: a CDN that rate limits the
+            // HEAD holds the backend exactly as a throttled GET does.
+            const location = try request.perform(?[]const u8, self.requestContext(), .{
+                .backend = "hf",
+                .target = url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(uri),
+            }, &hop, ResolveHop.attempt) orelse
+                return std.fmt.bufPrint(out_buffer, "{s}", .{url});
 
-            try req.sendBodiless();
-            const res = try req.receiveHead(&redirect_buffer);
-            switch (res.head.status.class()) {
-                .success => return std.fmt.bufPrint(out_buffer, "{s}", .{url}),
-                .redirect => {
-                    const location = res.head.location orelse return error.HttpRedirectLocationMissing;
-                    if (remaining_redirects == 0) return error.TooManyHttpRedirects;
-                    remaining_redirects -= 1;
-                    const scratch = (current + 1) % url_buffers.len;
-                    const output = (current + 2) % url_buffers.len;
-                    if (location.len > url_buffers[scratch].len) return error.HttpRedirectLocationOversize;
-                    @memcpy(url_buffers[scratch][0..location.len], location);
-                    var aux: []u8 = url_buffers[scratch][0..];
-                    const resolved = try uri.resolveInPlace(location.len, &aux);
-                    url = try std.fmt.bufPrint(&url_buffers[output], "{f}", .{resolved});
-                    current = output;
-                },
-                else => {
-                    log.err("Failed to resolve download URL for {s}: status={}", .{ url, res.head.status });
-                    return error.RequestFailed;
-                },
-            }
+            if (remaining_redirects == 0) return error.TooManyHttpRedirects;
+            remaining_redirects -= 1;
+            const scratch = (current + 1) % url_buffers.len;
+            const output = (current + 2) % url_buffers.len;
+            if (location.len > url_buffers[scratch].len) return error.HttpRedirectLocationOversize;
+            @memcpy(url_buffers[scratch][0..location.len], location);
+            var aux: []u8 = url_buffers[scratch][0..];
+            const resolved = try uri.resolveInPlace(location.len, &aux);
+            url = try std.fmt.bufPrint(&url_buffers[output], "{f}", .{resolved});
+            current = output;
         }
     }
+
+    /// One HEAD of the redirect chain: null when this URL is the file,
+    /// otherwise the `Location` it names, copied into the hop's own storage
+    /// because the head buffer dies with the response.
+    const ResolveHop = struct {
+        hf: *HF,
+        uri: std.Uri,
+        url: []const u8,
+        location: [8 * 1024]u8 = undefined,
+
+        fn attempt(self: *ResolveHop, _: request.Attempt) anyerror!request.Outcome(?[]const u8) {
+            var head_buffer: [16 * 1024]u8 = undefined;
+            return request.exchange(?[]const u8, self.hf.requestContext(), self.uri, .{
+                .method = .HEAD,
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    // Credentials only travel to the Hub itself.
+                    .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
+                },
+                .redirects = .surface,
+                .head_buffer = &head_buffer,
+            }, .{
+                .backend = "hf",
+                .target = self.url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(self.uri),
+            }, self, ResolveHop.consume);
+        }
+
+        fn consume(self: *ResolveHop, res: *std.http.Client.Response) anyerror!?[]const u8 {
+            if (res.head.status.class() == .success) return null;
+            const location = res.head.location orelse return error.HttpRedirectLocationMissing;
+            if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
+            @memcpy(self.location[0..location.len], location);
+            return self.location[0..location.len];
+        }
+    };
 
     fn findDirChildren(tree_items: []const TreeNode, dir_path: []const u8) ?[]const TreeNode {
         if (dir_path.len == 0) {
@@ -614,7 +662,10 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.StatFileError.Unexpected;
-        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.StatFileError.Unexpected;
+        const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.Io.Dir.StatFileError.Unexpected,
+        };
         const node = findNode(tree.items, repo.path) orelse return std.Io.Dir.StatFileError.IsDir;
 
         if (node.kind == .directory) return std.Io.Dir.StatFileError.IsDir;
@@ -655,11 +706,17 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.File.OpenError.BadPathName;
-        const tree = self.getOrFetchTree(repo) catch return std.Io.File.OpenError.Unexpected;
+        const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.Io.File.OpenError.Unexpected,
+        };
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
 
         var download_url_buffer: [16 * 1024]u8 = undefined;
-        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch return std.Io.File.OpenError.Unexpected;
+        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.Io.File.OpenError.Unexpected,
+        };
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, download_url, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -683,7 +740,10 @@ pub const HF = struct {
 
             const handle = self.getDirHandle(reader.dir);
             const repo = Repo.parse(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
-            const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.Reader.Error.Unexpected;
+            const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return std.Io.Dir.Reader.Error.Unexpected,
+            };
 
             const children = findDirChildren(tree.items, repo.path) orelse &.{};
 
@@ -763,9 +823,14 @@ pub const HF = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.ReadPositionalError.Unexpected;
+        return self.performRead(handle, data, offset) catch |err| switch (err) {
+            // A cancelled task must not surface as an I/O failure: every
+            // wait in the governed loop is a cancellation point.
+            error.Canceled => return error.Canceled,
+            else => {
+                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+                return std.Io.File.ReadPositionalError.Unexpected;
+            },
         };
     }
 
@@ -806,20 +871,63 @@ pub const HF = struct {
         if (range_read.readSize(handle.size, offset, data) == 0) return 0;
 
         const url = handle.download_url orelse return error.InvalidHandle;
-        const uri: std.Uri = try .parse(url);
-        var prepared: range_read.PreparedRequest = .{
-            .uri = uri,
-            .authorization = if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit,
-        };
+        var download: DataRequest = .{ .hf = self, .handle = handle, .uri = try .parse(url), .url = url };
         return range_read.performRangeRead(self.requestContext(), .{
             .request = .{
                 .backend = "hf",
                 .target = url,
                 .unavailable = .server_failure,
-                .key = request.authorityOf(uri),
+                .key = request.authorityOf(download.uri),
+                // A signed CDN URL can expire while the backend is held;
+                // the Hub then answers 401 or 403, which is not retryable in
+                // general but is here, once, after re-resolving it.
+                .retry_once = &.{ .unauthorized, .forbidden },
             },
-            .context = &prepared,
-            .prepare = range_read.prepareStatic,
+            .context = &download,
+            .prepare = DataRequest.prepare,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }
+
+    const DataRequest = struct {
+        hf: *HF,
+        handle: *Handle,
+        uri: std.Uri,
+        url: []const u8,
+        re_resolved: bool = false,
+
+        fn prepare(context: *anyopaque, attempt: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
+            const self: *DataRequest = @ptrCast(@alignCast(context));
+            if (attempt.previous_status) |status| switch (status) {
+                .unauthorized, .forbidden => {
+                    if (self.re_resolved) return error.RequestFailed;
+                    self.re_resolved = true;
+                    try self.reresolve();
+                },
+                else => {},
+            };
+            return .{
+                .uri = self.uri,
+                .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
+            };
+        }
+
+        /// Resolves the download URL again through the governed HEAD chain
+        /// and stores it on the handle, so later reads of the same file use
+        /// the fresh one too.
+        fn reresolve(self: *DataRequest) !void {
+            const repo = try Repo.parse(self.handle.uri);
+            var url_buffer: [16 * 1024]u8 = undefined;
+            const resolved = try self.hf.resolveDownloadUrl(repo, &url_buffer);
+            const owned = try self.hf.allocator.dupe(u8, resolved);
+            {
+                self.hf.mutex.lockUncancelable(self.hf.base.inner);
+                defer self.hf.mutex.unlock(self.hf.base.inner);
+                if (self.handle.download_url) |previous| self.hf.allocator.free(previous);
+                self.handle.download_url = owned;
+            }
+            self.url = owned;
+            self.uri = try .parse(owned);
+            log.warn("hf: re-resolved the download URL of {s}", .{self.handle.uri});
+        }
+    };
 };

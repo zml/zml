@@ -427,6 +427,7 @@ pub const S3 = struct {
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
             error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
             error.BadPathName => return std.Io.File.OpenError.BadPathName,
             else => return std.Io.File.OpenError.Unexpected,
@@ -450,6 +451,7 @@ pub const S3 = struct {
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
             error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
             error.BadPathName => return std.Io.File.OpenError.BadPathName,
             else => return std.Io.File.OpenError.Unexpected,
@@ -482,7 +484,10 @@ pub const S3 = struct {
             }
 
             const handle = self.getDirHandle(reader.dir);
-            const objects = self.listObjects(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
+            const objects = self.listObjects(handle.uri) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return std.Io.Dir.Reader.Error.Unexpected,
+            };
 
             self.dir_read_states.put(self.allocator, reader, .{
                 .index = 0,
@@ -567,9 +572,14 @@ pub const S3 = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.ReadPositionalError.Unexpected;
+        return self.performRead(handle, data, offset) catch |err| switch (err) {
+            // A cancelled task must not surface as an I/O failure: every
+            // wait in the governed loop is a cancellation point.
+            error.Canceled => return error.Canceled,
+            else => {
+                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+                return std.Io.File.ReadPositionalError.Unexpected;
+            },
         };
     }
 
@@ -666,9 +676,6 @@ pub const S3 = struct {
             .fragment = null,
         };
 
-        var timestamp_buf: [16]u8 = undefined;
-        const timestamp = try self.getTimestamp(&timestamp_buf);
-
         const signer: AwsSigV4 = .{
             .access_key = self.config.access_key,
             .secret_key = self.config.secret_key,
@@ -676,39 +683,58 @@ pub const S3 = struct {
             .service = self.config.auth_service,
         };
 
-        var authorization_buffer: [512]u8 = undefined;
-        const authorization = try signer.generateAuthHeader(&authorization_buffer, .GET, uri, timestamp, &.{});
+        var listing: Listing = .{ .s3 = self, .uri = uri, .signer = signer };
+        var target_buffer: [256]u8 = undefined;
+        return request.perform([]u8, self.requestContext(), .{
+            .backend = "s3",
+            .target = std.fmt.bufPrint(&target_buffer, "{s}/{s}", .{ bucket, key_prefix }) catch bucket,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &listing, Listing.attempt);
+    }
 
-        var req = try self.client.request(.GET, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
-            },
-            .extra_headers = &.{
+    /// The bucket listing, signed again on every attempt like every other
+    /// S3 request.
+    const Listing = struct {
+        s3: *S3,
+        uri: std.Uri,
+        signer: AwsSigV4,
+        timestamp: [16]u8 = undefined,
+        authorization: [512]u8 = undefined,
+        headers: [2]std.http.Header = undefined,
+
+        fn attempt(self: *Listing, _: request.Attempt) anyerror!request.Outcome([]u8) {
+            const timestamp = try self.s3.getTimestamp(&self.timestamp);
+            const authorization = try self.signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{});
+            self.headers = .{
                 .{ .name = "x-amz-date", .value = timestamp },
                 .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-            },
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [2 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .ok) {
-            log.err("Failed to list object {f}", .{uri});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
+            };
+            var head_buffer: [2 * 1024]u8 = undefined;
+            return request.exchange([]u8, self.s3.requestContext(), self.uri, .{
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
+                },
+                .extra_headers = &self.headers,
+                .head_buffer = &head_buffer,
+            }, .{
+                .backend = "s3",
+                .target = "listing",
+                .unavailable = unavailable,
+                .key = request.authorityOf(self.uri),
+            }, self, Listing.consume);
         }
 
-        return if (res.head.content_length) |content_len|
-            try res.reader(&.{}).readAlloc(self.allocator, content_len)
-        else
-            // When we don't have a content length, put a reasonable limit
-            try res.reader(&.{}).allocRemaining(self.allocator, .limited(1024 * 1024));
-    }
+        fn consume(self: *Listing, res: *std.http.Client.Response) anyerror![]u8 {
+            const allocator = self.s3.allocator;
+            return if (res.head.content_length) |content_len|
+                try res.reader(&.{}).readAlloc(allocator, content_len)
+            else
+                // When we don't have a content length, put a reasonable limit
+                try res.reader(&.{}).allocRemaining(allocator, .limited(1024 * 1024));
+        }
+    };
 
     fn listObjects(self: *S3, prefix: []const u8) ![][]const u8 {
         const endpoint, const bucket, const key_prefix = self.pathComponents(prefix);
@@ -760,9 +786,6 @@ pub const S3 = struct {
 
         const uri = std.Uri.parse(url) catch return error.BadPathName;
 
-        var timestamp_buf: [16]u8 = undefined;
-        const timestamp = try self.getTimestamp(&timestamp_buf);
-
         const signer: AwsSigV4 = .{
             .access_key = self.config.access_key,
             .secret_key = self.config.secret_key,
@@ -770,38 +793,55 @@ pub const S3 = struct {
             .service = self.config.auth_service,
         };
 
-        var authorization_buffer: [512]u8 = undefined;
-        const authorization = try signer.generateAuthHeader(&authorization_buffer, .HEAD, uri, timestamp, &.{});
+        var head: SizeRequest = .{ .s3 = self, .uri = uri, .url = url, .signer = signer };
+        return request.perform(u64, self.requestContext(), .{
+            .backend = "s3",
+            .target = url,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &head, SizeRequest.attempt);
+    }
 
-        var req = try self.client.request(.HEAD, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
-            },
-            .extra_headers = &.{
+    /// The object's size: one signed HEAD, with 404 kept as `FileNotFound`.
+    const SizeRequest = struct {
+        s3: *S3,
+        uri: std.Uri,
+        url: []const u8,
+        signer: AwsSigV4,
+        timestamp: [16]u8 = undefined,
+        authorization: [512]u8 = undefined,
+        headers: [2]std.http.Header = undefined,
+
+        fn attempt(self: *SizeRequest, _: request.Attempt) anyerror!request.Outcome(u64) {
+            const timestamp = try self.s3.getTimestamp(&self.timestamp);
+            const authorization = try self.signer.generateAuthHeader(&self.authorization, .HEAD, self.uri, timestamp, &.{});
+            self.headers = .{
                 .{ .name = "x-amz-date", .value = timestamp },
                 .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-            },
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        const res = try req.receiveHead(&redirect_buffer);
-
-        return switch (res.head.status.class()) {
-            .success => res.head.content_length.?,
-            else => switch (res.head.status) {
-                .not_found => return error.FileNotFound,
-                else => blk: {
-                    log.err("Failed to fetch size for {s}: {s}", .{ url, res.head.bytes });
-                    break :blk error.ServerError;
+            };
+            var head_buffer: [8 * 1024]u8 = undefined;
+            return request.exchange(u64, self.s3.requestContext(), self.uri, .{
+                .method = .HEAD,
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
                 },
-            },
-        };
-    }
+                .extra_headers = &self.headers,
+                .accept = .{ .statuses = &.{.not_found} },
+                .head_buffer = &head_buffer,
+            }, .{
+                .backend = "s3",
+                .target = self.url,
+                .unavailable = unavailable,
+                .key = request.authorityOf(self.uri),
+            }, self, SizeRequest.consume);
+        }
+
+        fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {
+            if (res.head.status == .not_found) return error.FileNotFound;
+            return res.head.content_length orelse error.MissingContentLength;
+        }
+    };
 
     /// Everything a governed request needs from this backend.
     fn requestContext(self: *S3) request.Context {

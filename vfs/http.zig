@@ -231,7 +231,10 @@ pub const HTTP = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
+        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.Io.Dir.StatFileError.Unexpected,
+        };
 
         return .{
             .inode = @intCast(0),
@@ -251,7 +254,10 @@ pub const HTTP = struct {
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
+        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.Io.File.OpenError.Unexpected,
+        };
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
@@ -320,9 +326,14 @@ pub const HTTP = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.ReadPositionalError.Unexpected;
+        return self.performRead(handle, data, offset) catch |err| switch (err) {
+            // A cancelled task must not surface as an I/O failure: every
+            // wait in the governed loop is a cancellation point.
+            error.Canceled => return error.Canceled,
+            else => {
+                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+                return std.Io.File.ReadPositionalError.Unexpected;
+            },
         };
     }
 
@@ -360,33 +371,65 @@ pub const HTTP = struct {
 
         var uri = std.Uri.parse(full_url) catch return std.Io.File.OpenError.BadPathName;
         while (true) {
-            var req = try self.client.request(.HEAD, uri, .{
-                .redirect_behavior = .not_allowed,
-                .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            });
-            defer req.deinit();
-
-            try req.sendBodiless();
-
-            var res = try req.receiveHead(&redirect_buffer);
-
-            switch (res.head.status.class()) {
-                .server_error, .client_error => {
-                    log.err("Failed to fetch tree size for {s}", .{url});
-                    log.err("{s}", .{res.head.bytes});
-                    return error.ServerError;
-                },
-                .informational => return error.UnexpectedStatus,
-                .success => return res.head.content_length.?,
-                .redirect => {
-                    const location = res.head.location.?;
+            // Each hop is one governed request: a server that rate limits
+            // the HEAD holds this backend as a throttled GET would.
+            var hop: SizeHop = .{ .http = self, .uri = uri, .url = url };
+            const outcome = try request.perform(SizeHop.Result, self.requestContext(), .{
+                .backend = "http",
+                .target = url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(uri),
+            }, &hop, SizeHop.attempt);
+            switch (outcome) {
+                .size => |size| return size,
+                .redirect => |location| {
+                    if (location.len > aux_buffer.len) return error.HttpRedirectLocationOversize;
                     @memcpy(aux_buffer[0..location.len], location);
                     uri = uri.resolveInPlace(location.len, &aux_buffer) catch unreachable;
-                    continue;
                 },
             }
         }
     }
+
+    /// One HEAD of the redirect chain: the size, or the `Location` to
+    /// follow, copied into the hop's own storage because the head buffer
+    /// dies with the response.
+    const SizeHop = struct {
+        const Result = union(enum) { size: u64, redirect: []const u8 };
+
+        http: *HTTP,
+        uri: std.Uri,
+        url: []const u8,
+        location: [8 * 1024]u8 = undefined,
+
+        fn attempt(self: *SizeHop, _: request.Attempt) anyerror!request.Outcome(Result) {
+            var head_buffer: [8 * 1024]u8 = undefined;
+            return request.exchange(Result, self.http.requestContext(), self.uri, .{
+                .method = .HEAD,
+                .headers = .{ .accept_encoding = .{ .override = "identity" } },
+                .redirects = .surface,
+                .head_buffer = &head_buffer,
+            }, .{
+                .backend = "http",
+                .target = self.url,
+                .unavailable = .server_failure,
+                .key = request.authorityOf(self.uri),
+            }, self, SizeHop.consume);
+        }
+
+        fn consume(self: *SizeHop, res: *std.http.Client.Response) anyerror!Result {
+            switch (res.head.status.class()) {
+                .success => return .{ .size = res.head.content_length orelse return error.MissingContentLength },
+                .redirect => {
+                    const location = res.head.location orelse return error.HttpRedirectLocationMissing;
+                    if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
+                    @memcpy(self.location[0..location.len], location);
+                    return .{ .redirect = self.location[0..location.len] };
+                },
+                else => return error.UnexpectedStatus,
+            }
+        }
+    };
 
     /// Everything a governed request needs from this backend.
     fn requestContext(self: *HTTP) request.Context {

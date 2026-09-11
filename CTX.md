@@ -3660,6 +3660,27 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   zero still holds, extension but never shortening, the doubling base, the
   clean window, the budget, cancellation, and that a timeout or a server
   failure never holds); the four HTTP acceptance tests still pass.
+- Task 24 (group D), every backend request through the loop. The eleven
+  sites now run inside `request.perform`: HF's tree GET (client-followed
+  redirects, as before), each hop of its HEAD redirect chain and its data
+  GET; S3's listing, HEAD and GET; GCS's metadata-server and ADC token
+  requests, its listing, HEAD and GET; HTTP's HEAD chain and GET. Redirect
+  handling became explicit (`follow`, `surface`, `forbid`) after the first
+  attempt broke the HF tree fetch, which had relied on the std client's
+  three-hop default. The HF data GET retries one 401 or 403 after
+  re-resolving its download URL through the governed HEAD chain and storing
+  the fresh one on the handle (a signed CDN URL can expire during a long
+  hold); `RequestSpec.retry_once` carries that. The 404 of an S3 or GCS HEAD
+  and GCS's 401/403 are accepted statuses mapped in `consume`, so they stay
+  `FileNotFound` and `PermissionDenied`. The four backends' read, open, stat
+  and read-dir wrappers pass `error.Canceled` through instead of flattening
+  it to `Unexpected`. Smoke-tested against the real services: `ls` and `cat`
+  on `hf://Qwen/Qwen3.5-4B` (tree, redirect chain, range GET), `ls`, `stat`
+  and a listing on a public `s3://` bucket, and `cat https://iprs.fly.dev`.
+  Note for the TPU, neuron and metal sign-off: `buffered_loader.zig` is
+  untouched, but its reads go through this VFS, so those platforms gain the
+  hold under throttling; on the happy path the loop adds one inert deadline
+  check per attempt.
 
 ## Open work
 

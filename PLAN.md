@@ -165,49 +165,6 @@ with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
 
-- [ ] 24. Every backend request through the loop. Per site, the request is
-  one `perform` over `exchange` with the site's `consume`; redirect chains
-  stay in the backend as a loop of governed hops with `accept =
-  .success_or_redirect` and `redirect_behavior = .unhandled`. Sites:
-  HF (`vfs/hf.zig`): the tree GET `fetchTreeFromAPI` (`:322-369`; runs
-  under `self.mutex` from `getOrFetchTree` `:305-318`, which is fine because
-  the hold is a deadline, not a permit: other opens wait on the mutex for
-  the hold they would wait on anyway); each hop of `resolveDownloadUrl`
-  (`:371-415`); the data GET `performRead` (`:787-803`) with a
-  `DataRequest.prepare` hook replacing `prepareStatic`: when
-  `attempt.previous_status` is 401 or 403 it re-resolves the download URL
-  through the governed HEAD chain and stores it on the handle under
-  `self.mutex` (a signed CDN URL can expire during a long hold; today a 403
-  is unclassified and sticky); the data GET's `RequestSpec` accepts one
-  401/403 as a charged retry (`spec.retry_forbidden_once`) and every other
-  site keeps them fatal. `unavailable` stays `.server_failure`.
-  S3 (`vfs/s3.zig`): `listObjectsBody` (`:632-704`), `fetchSize` (`:746-796`,
-  404 stays `FileNotFound` in `consume`), `performRead` (`:798-815`) with
-  `SignedRequest.prepare` unchanged (it re-signs per attempt, `:823-838`).
-  GCS (`vfs/gcs.zig`): `refreshMetadataServerToken` (`:296`),
-  `refreshAuthorizedUserToken` (`:317`), `refreshServiceAccountToken`
-  (`:340`) as governed POSTs with a payload (they run under `self.mutex`
-  from `getOrRefreshToken` `:404-416`, the same argument as HF's tree);
-  `listObjectsBody` (`:825-875`); `fetchSize` (`:926-958`, 404 and 401/403
-  mapped in `consume` as today); `performRead` (`:960-968`) with
-  `BearerRequest.prepare` unchanged.
-  HTTP (`vfs/http.zig`): each hop of `fetchSize` (`:344-381`, switch to
-  `.unhandled` and `.success_or_redirect`); `performRead` (`:383-395`).
-  Keys: every site passes the request URI's authority (`uri.host` and
-  port) as `spec.key`; unused today.
-  Wrappers: `fileReadPositional` and the open, stat and read-dir entry
-  points of the four backends (`hf.zig:755-761`, `http.zig:312-318`,
-  `s3.zig:559-565`, `gcs.zig:721-727` and their `dirOpenFile`,
-  `dirStatFile`, `dirRead` counterparts) pass `error.Canceled` through
-  (every `std.Io` error set includes `Cancelable`) and keep mapping the
-  rest to `Unexpected` with the existing log line, so a cancelled task no
-  longer surfaces as `Unexpected`.
-  Behaviour that must not change: the S3 and GCS `503 => .throttle` and the
-  HF and HTTP `503 => .server_failure` classification (tests at
-  `s3.zig:846`, `gcs.zig:988`); one exact scatter read per source job; the
-  per-attempt re-signing. The buffered backend's read path is untouched
-  in `buffered_loader.zig`.
-
 - [ ] 25. Mock server and acceptance tests (`vfs/http_acceptance_test.zig`).
   `MockServer.Options` gains `throttle: struct { first_gets: usize = 0,
   status: std.http.Status = .too_many_requests, retry_after_s: ?u32 = null,

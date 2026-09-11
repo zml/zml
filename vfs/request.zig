@@ -128,6 +128,11 @@ pub const RequestSpec = struct {
     unavailable: ReadFailure,
     /// The rate-limit scope: the request URI's authority.
     key: Key = "",
+    /// Statuses this request retries although they are not retryable in
+    /// general, because its hook can do something about them: a signed
+    /// download URL that expired during a hold answers 401 or 403, and the
+    /// hook re-resolves it. Charged to the retry budget.
+    retry_once: []const std.http.Status = &.{},
 };
 
 pub const Failure = struct {
@@ -282,19 +287,34 @@ fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duratio
 /// Statuses an attempt accepts beyond the 2xx class; anything else is
 /// classified as a retry or fails the request.
 pub const Accept = struct {
-    /// Redirects reach `consume` (the caller follows the chain itself).
-    redirect: bool = false,
     /// Individual statuses the caller maps itself (404 to `FileNotFound`, a
     /// 401 it re-authenticates).
     statuses: []const std.http.Status = &.{},
 
-    fn allows(self: Accept, status: std.http.Status) bool {
+    fn allows(self: Accept, status: std.http.Status, redirects: Redirects) bool {
         if (status.class() == .success) return true;
-        if (self.redirect and status.class() == .redirect) return true;
+        if (redirects == .surface and status.class() == .redirect) return true;
         for (self.statuses) |accepted| {
             if (accepted == status) return true;
         }
         return false;
+    }
+};
+
+/// What happens to a redirect: the client chases it (the std default of
+/// three hops), `consume` receives it because the caller walks the chain
+/// itself, or it fails the request.
+pub const Redirects = enum {
+    follow,
+    surface,
+    forbid,
+
+    fn behavior(self: Redirects) std.http.Client.Request.RedirectBehavior {
+        return switch (self) {
+            .follow => @enumFromInt(3),
+            .surface => .unhandled,
+            .forbid => .not_allowed,
+        };
     }
 };
 
@@ -306,6 +326,7 @@ pub const ExchangeOptions = struct {
     /// writer uses it as its own buffer, so it must be mutable.
     payload: ?[]u8 = null,
     accept: Accept = .{},
+    redirects: Redirects = .forbid,
     /// The buffer `receiveHead` parses into; the head bytes, and any
     /// `location`, live in it while `consume` runs.
     head_buffer: []u8,
@@ -325,7 +346,7 @@ pub fn exchange(
     comptime consume: fn (@TypeOf(context), *std.http.Client.Response) anyerror!T,
 ) anyerror!Outcome(T) {
     var req = ctx.client.request(options.method, uri, .{
-        .redirect_behavior = if (options.accept.redirect) .unhandled else .not_allowed,
+        .redirect_behavior = options.redirects.behavior(),
         .headers = options.headers,
         .extra_headers = options.extra_headers,
     }) catch |err| switch (err) {
@@ -367,7 +388,16 @@ pub fn exchange(
         else => return fatal(spec, "receive headers", err),
     };
 
-    if (!options.accept.allows(res.head.status)) {
+    if (!options.accept.allows(res.head.status, options.redirects)) {
+        for (spec.retry_once) |status| {
+            if (status != res.head.status) continue;
+            log.warn("{s}: {s} answered {d}; retrying once with a fresh request", .{
+                spec.backend,
+                spec.target,
+                @intFromEnum(res.head.status),
+            });
+            return .{ .retry = .{ .failure = .transient, .status = res.head.status } };
+        }
         const failure = classifyStatus(res.head.status, spec.unavailable) orelse {
             log.err("{s}: {s} failed: {s}", .{ spec.backend, spec.target, res.head.bytes });
             return error.RequestFailed;
