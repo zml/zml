@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-pub const Target = @import("platforms").Platform;
 const stdx = @import("stdx");
+pub const Target = @import("platforms").Platform;
 
 const attention = @import("attention.zig");
 const constants = @import("constants.zig");
@@ -437,7 +437,7 @@ pub const Platform = struct {
     /// pools for subsequent allocations. Calling this more than once is safe.
     /// Devices are warmed concurrently: a serial pass over eight GPUs costs
     /// measurable milliseconds ahead of a load.
-    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) (pjrt.ApiError || std.Io.ConcurrentError || std.Io.Cancelable)!void {
+    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
         const Worker = struct {
             platform: *const Platform,
             device_index: usize,

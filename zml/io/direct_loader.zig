@@ -5,7 +5,6 @@
 //! (`vfs/request.zig`). Runtime ownership and synchronization live here.
 
 const std = @import("std");
-
 const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
@@ -26,7 +25,6 @@ const DispatchSpans = @import("DispatchSpans.zig");
 const dma_calibration = @import("dma_calibration.zig");
 const host_memory = @import("host_memory.zig");
 const load_limits = @import("limits.zig");
-
 const load_log = @import("log.zig").load;
 
 /// Creating a tensor's device state; `LazyOnce` replays it to every later
@@ -47,7 +45,7 @@ const max_dma_pieces_per_device: usize = 64;
 /// The direct DMA backend. Submissions and awaits come from one task at a
 /// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
-    pub const InitError = host_memory.InitError || host_memory.GrowError || dma_calibration.CalibrationError || std.Io.ConcurrentError || error{InvalidOptions};
+    pub const InitError = std.mem.Allocator.Error || dma_calibration.CalibrationError || std.Io.ConcurrentError || error{InvalidOptions};
     pub const AwaitError = PipelineError;
     pub const SubmitError = PipelineError || error{EmptyTensor};
 
@@ -312,7 +310,17 @@ pub const Loader = struct {
             const calibration, const request_size, const maximum_blocks_per_job, const fitted_width, var pool = pool: {
                 var workspace = try host_memory.Workspace.init(allocator, io, platform);
                 errdefer workspace.deinit();
-                const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
+                const calibration = dma_calibration.calibrate(&workspace, platform, opts.dma) catch |err| {
+                    load_log.err("calibrate DMA: target={t}, block_sizes={any}, parallelism={d}, mapped_ceiling={d}: {s}", .{
+                        platform.target,
+                        opts.block_sizes,
+                        opts.block_parallelism,
+                        workspace.max_mapped_bytes,
+                        @errorName(err),
+                    });
+                    return err;
+                };
+
                 const block_size = calibration.block_size;
 
                 const request_size = load_limits.effectiveSourceRequestSize(
@@ -352,8 +360,8 @@ pub const Loader = struct {
                     (available -| dma_reserve) / maximum_blocks_per_job -| 1,
                 );
                 if (fitted_width == 0) {
-                    load_log.err("host memory ceiling {Bi:.2} fits no source request beside the DMA reserve: available_blocks={d}, reserve_blocks={d}, blocks_per_request={d}: HostMemoryBudgetExceeded", .{ workspace.max_mapped_bytes, available, dma_reserve, maximum_blocks_per_job });
-                    return error.HostMemoryBudgetExceeded;
+                    load_log.err("host memory ceiling {Bi:.2} fits no source request beside the DMA reserve: available_blocks={d}, reserve_blocks={d}, blocks_per_request={d}: OutOfMemory", .{ workspace.max_mapped_bytes, available, dma_reserve, maximum_blocks_per_job });
+                    return error.OutOfMemory;
                 }
                 if (fitted_width < opts.readWidth()) {
                     load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}", .{

@@ -2,14 +2,11 @@ const std = @import("std");
 
 const pjrt = @import("pjrt");
 
+const Platform = @import("../platform.zig").Platform;
+const Target = @import("../platform.zig").Target;
 const host_memory = @import("host_memory.zig");
-const platform_mod = @import("../platform.zig");
-const Platform = platform_mod.Platform;
 const limits = @import("limits.zig");
-
 const log = @import("log.zig").io;
-
-pub const CalibrationError = host_memory.GrowError || std.Io.ConcurrentError || std.Io.Cancelable || error{ InvalidOptions, Internal };
 
 /// Immutable result shared by every device participating in one load.
 pub const Result = struct {
@@ -50,7 +47,7 @@ pub const Options = struct {
     /// eight MI300X from 4.834 to 0.956 s while still selecting 16 MiB and
     /// width eight. Short screens sometimes selected the wrong block under
     /// noise, hence the longer borderline confirmation below.
-    duration_ns: u64 = 2 * std.time.ns_per_ms,
+    minimum_duration_ns: u64 = 2 * std.time.ns_per_ms,
     minimum_transfers: u64 = 32,
     /// Borderline block candidates receive longer alternating paired windows.
     confirmation_duration_ns: u64 = 25 * std.time.ns_per_ms,
@@ -65,9 +62,9 @@ pub const Options = struct {
 /// device into the loader-owned workspace; CPU returns defaults without measuring.
 pub fn calibrate(
     workspace: *host_memory.Workspace,
-    platform: *const platform_mod.Platform,
+    platform: *const Platform,
     opts: Options,
-) CalibrationError!Result {
+) !Result {
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread. With four PJRT CPU devices, warm sharded Llama took
     // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the defaults stand and the
@@ -78,10 +75,32 @@ pub fn calibrate(
     // page-size/THP configurations were not measured.
     if (platform.target == .cpu) return .default;
 
-    try validateOptions(opts, workspace.max_mapped_bytes);
-    errdefer |err| log.err("calibrate DMA: target={t}, block_sizes={any}, parallelism={d}, mapped_ceiling={d}: {s}", .{ platform.target, opts.block_sizes, opts.block_parallelism, workspace.max_mapped_bytes, @errorName(err) });
+    std.debug.assert(opts.block_sizes.len > 0);
+    std.debug.assert(opts.minimum_duration_ns > 0);
+    std.debug.assert(opts.confirmation_duration_ns > 0);
+    std.debug.assert(opts.block_parallelism > 0 and opts.block_parallelism <= limits.max_dma_parallelism);
+    std.debug.assert(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1);
+    std.debug.assert(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1);
+    for (opts.block_sizes) |block_size| {
+        std.debug.assert(block_size > 0 and block_size <= limits.max_read_request_size);
+        std.debug.assert(block_size <= workspace.max_mapped_bytes / opts.block_parallelism);
+    }
+
     const result = try measureTransfer(workspace, platform, opts);
-    logReport(platform, &result);
+
+    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d}", .{
+        @tagName(platform.target),
+        platform.devices.len,
+        platform.devices[0].kind(),
+        result.calibration.block_size,
+        result.calibration.max_in_flight_per_device,
+        result.measured_bytes_per_second / (1024 * 1024 * 1024),
+        @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
+        @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
+        result.retained_mapped_bytes,
+    });
+
     return result.calibration;
 }
 
@@ -108,7 +127,7 @@ const Report = struct {
 /// warm-up and retained capacity do not turn this into an all-device sample.
 fn measureTransfer(
     workspace: *host_memory.Workspace,
-    platform: *const platform_mod.Platform,
+    platform: *const Platform,
     opts: Options,
 ) !Report {
     const allocator = workspace.allocator;
@@ -122,14 +141,10 @@ fn measureTransfer(
         calibration_started,
     );
     const representative = selection: {
-        var session: Session = .{
-            .allocator = allocator,
-            .io = io,
-            .platform = platform,
-        };
+        var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
         // Release the cohorts' device buffers before measuring calibration
         // cost; the mapped host ring remains in the workspace for loading.
-        defer session.deinit(workspace);
+        defer session.deinit();
         break :selection try selectBlockSize(&session, opts, workspace);
     };
     const calibration_ns = elapsedNanoseconds(
@@ -159,12 +174,8 @@ fn selectBlockSize(
     opts: Options,
     workspace: *host_memory.Workspace,
 ) !Selection {
-    var block_count: usize = 0;
     var block_source_bytes: usize = 0;
     for (opts.block_sizes) |block_size| {
-        if (!fitsWorkspace(workspace.max_mapped_bytes, block_size, opts.block_parallelism))
-            continue;
-        block_count += 1;
         block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
     }
     // Map one ring for the largest candidate at the fixed transfer width;
@@ -172,24 +183,16 @@ fn selectBlockSize(
     const calibration_source = workspace.findArena(block_source_bytes) orelse
         try workspace.allocate(block_source_bytes);
 
-    const block_candidates = try session.allocator.alloc(Candidate, block_count);
+    const block_candidates = try session.allocator.alloc(Candidate, opts.block_sizes.len);
     defer session.allocator.free(block_candidates);
-    var block_index: usize = 0;
-    for (opts.block_sizes) |block_size| {
-        if (!fitsWorkspace(workspace.max_mapped_bytes, block_size, opts.block_parallelism))
-            continue;
-        block_candidates[block_index] = .{
+    for (block_candidates, opts.block_sizes, session.cohorts) |*candidate, block_size, *cohort| {
+        candidate.* = .{
             .block_size = block_size,
-            .cohort = try session.createCohort(0, block_size),
+            .cohort = cohort,
         };
-        block_index += 1;
     }
     try measureCandidates(session, opts, block_candidates, calibration_source);
     return selectCandidate(session, opts, block_candidates, calibration_source);
-}
-
-fn fitsWorkspace(max_mapped_bytes: usize, block_size: usize, parallelism: usize) bool {
-    return parallelism != 0 and block_size <= max_mapped_bytes / parallelism;
 }
 
 fn measureCandidates(
@@ -207,7 +210,7 @@ fn measureCandidates(
                 candidate.cohort,
                 source[0 .. candidate.block_size * opts.block_parallelism],
                 opts.block_parallelism,
-                opts.duration_ns,
+                opts.minimum_duration_ns,
                 opts.minimum_transfers,
             );
             candidate.appendMetric(metrics);
@@ -360,7 +363,7 @@ fn runWindow(
     cohort: *Cohort,
     source: []const u8,
     parallelism: usize,
-    duration_ns: u64,
+    minimum_duration_ns: u64,
     minimum_transfers: u64,
 ) !Measurement {
     var metrics: Counters = .{};
@@ -413,12 +416,8 @@ fn runWindow(
     while (true) {
         const elapsed_ns = elapsedNanoseconds(measured_at, .now(io, .awake));
         if (cohort.firstError()) |err| return err;
-        if (windowComplete(
-            elapsed_ns,
-            duration_ns,
-            metrics.transfers.load(.acquire),
-            minimum_transfers,
-        )) break;
+        // is window complete
+        if (elapsed_ns >= minimum_duration_ns and metrics.transfers.load(.acquire) >= minimum_transfers) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     stop.store(true, .release);
@@ -430,32 +429,6 @@ fn runWindow(
         .transfers = metrics.transfers.load(.acquire),
         .elapsed_ns = elapsed_ns,
     };
-}
-
-fn windowComplete(
-    elapsed_ns: u64,
-    minimum_duration_ns: u64,
-    completed_transfers: u64,
-    minimum_transfers: u64,
-) bool {
-    return elapsed_ns >= minimum_duration_ns and completed_transfers >= minimum_transfers;
-}
-
-/// One line per calibration: what was selected, at what rate, and what it
-/// cost. Per-arena mapping is logged where each arena is mapped.
-fn logReport(platform: *const platform_mod.Platform, result: *const Report) void {
-    log.info("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d}", .{
-        @tagName(platform.target),
-        platform.devices.len,
-        platform.devices[0].kind(),
-        result.calibration.block_size,
-        result.calibration.max_in_flight_per_device,
-        result.measured_bytes_per_second / (1024 * 1024 * 1024),
-        @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
-        @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
-        @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
-        result.retained_mapped_bytes,
-    });
 }
 
 const Candidate = struct {
@@ -496,61 +469,85 @@ const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    cohorts: std.ArrayListUnmanaged(*Cohort) = .empty,
+    manager: *pjrt.AsyncHostToDeviceTransferManager,
+    buffers: []*pjrt.Buffer,
+    cohorts: []Cohort,
 
-    fn createCohort(
-        self: *Session,
-        device_index: usize,
-        block_size: usize,
-    ) !*Cohort {
-        const cohort = try self.allocator.create(Cohort);
-        errdefer self.allocator.destroy(cohort);
-        cohort.* = .init(
-            self.allocator,
-            self.io,
-            self.platform,
-            device_index,
-            block_size,
-        );
-        try self.cohorts.append(self.allocator, cohort);
-        return cohort;
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        block_sizes: []const usize,
+        parallelism: usize,
+    ) !Session {
+        const buffer_count = std.math.mul(usize, block_sizes.len, parallelism) catch return error.OutOfMemory;
+        const dims = try allocator.alloc([1]i64, block_sizes.len);
+        defer allocator.free(dims);
+        const specs = try allocator.alloc(pjrt.ShapeSpec, buffer_count);
+        defer allocator.free(specs);
+        for (block_sizes, dims, 0..) |block_size, *dim, index| {
+            dim.* = .{@intCast(block_size)};
+            @memset(specs[index * parallelism ..][0..parallelism], pjrt.ShapeSpec.init(dim, .u8));
+        }
+        const cohorts = try allocator.alloc(Cohort, block_sizes.len);
+        errdefer allocator.free(cohorts);
+        const buffers = try allocator.alloc(*pjrt.Buffer, buffer_count);
+        errdefer allocator.free(buffers);
+        const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+            .shape_specs = specs,
+            .memory = platform.devices[0].memory(.default).?.pjrt_memory,
+        });
+        var retrieved: usize = 0;
+        errdefer {
+            manager.deinit(platform.pjrt_api);
+            for (buffers[0..retrieved]) |buffer| buffer.deinit(platform.pjrt_api);
+        }
+        for (buffers, 0..) |*buffer, index| {
+            buffer.* = try manager.retrieveBuffer(platform.pjrt_api, index);
+            retrieved += 1;
+        }
+        for (cohorts, block_sizes, 0..) |*cohort, block_size, index| {
+            cohort.* = .{
+                .io = io,
+                .platform = platform,
+                .manager = manager,
+                .buffer_offset = index * parallelism,
+                .buffer_count = parallelism,
+                .block_size = block_size,
+            };
+        }
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .manager = manager,
+            .buffers = buffers,
+            .cohorts = cohorts,
+        };
     }
 
-    fn deinit(self: *Session, workspace: *const host_memory.Workspace) void {
-        for (self.cohorts.items) |cohort| {
-            cohort.deinit(workspace.findArena(cohort.block_size) orelse unreachable);
-            self.allocator.destroy(cohort);
-        }
-        self.cohorts.deinit(self.allocator);
+    fn deinit(self: *Session) void {
+        // XLA commit 1b19ae012aa67426658f7ca3c1503bb781c863a9 switched GPU
+        // transfers to CommonAsyncHostToDeviceTransferManager, whose destructor
+        // waits for outstanding transfers and marks unfinished buffers as errored.
+        // We discard these buffers, so no final is_last_transfer=true copy is needed.
+        self.manager.deinit(self.platform.pjrt_api);
+        for (self.buffers) |buffer| buffer.deinit(self.platform.pjrt_api);
+        self.allocator.free(self.buffers);
+        self.allocator.free(self.cohorts);
         self.* = undefined;
     }
 };
 
 const Cohort = struct {
-    allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const platform_mod.Platform,
-    device_index: usize,
+    platform: *const Platform,
+    manager: *pjrt.AsyncHostToDeviceTransferManager,
+    buffer_offset: usize,
+    buffer_count: usize,
     block_size: usize,
-    managers: std.ArrayListUnmanaged(TransferBuffer) = .empty,
-    warmed_managers: usize = 0,
+    warmed_buffers: usize = 0,
     first_error: std.atomic.Value(u16) = .init(0),
-
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const platform_mod.Platform,
-        device_index: usize,
-        block_size: usize,
-    ) Cohort {
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .platform = platform,
-            .device_index = device_index,
-            .block_size = block_size,
-        };
-    }
 
     fn recordError(self: *Cohort, err: pjrt.ApiError) void {
         _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
@@ -569,9 +566,9 @@ const Cohort = struct {
     ) void {
         const len = self.block_size;
         const source_offset = slot * self.block_size;
-        const event = self.managers.items[slot].manager.transferData(
+        const event = self.manager.transferData(
             self.platform.pjrt_api,
-            0,
+            self.buffer_offset + slot,
             source[source_offset..][0..len],
             0,
             false,
@@ -594,51 +591,14 @@ const Cohort = struct {
     fn ensureReady(self: *Cohort, source: []const u8, parallelism: usize) !void {
         const required_bytes = self.block_size * parallelism;
         if (required_bytes > source.len) return error.Internal;
-        var dims = [_]i64{@intCast(self.block_size)};
-        const shape_spec: pjrt.ShapeSpec = .init(&dims, .u8);
-        const memory = self.platform.devices[self.device_index].memory(.default).?;
-        while (self.managers.items.len < parallelism) {
-            try self.managers.ensureUnusedCapacity(self.allocator, 1);
-            const manager = try self.platform.pjrt_client.createBuffersForAsyncHostToDevice(self.platform.pjrt_api, .{
-                .shape_specs = &.{shape_spec},
-                .memory = memory.pjrt_memory,
-            });
-            errdefer manager.deinit(self.platform.pjrt_api);
-            const buffer = try manager.retrieveBuffer(self.platform.pjrt_api, 0);
-            self.managers.appendAssumeCapacity(.{ .manager = manager, .buffer = buffer });
-        }
-        while (self.warmed_managers < parallelism) : (self.warmed_managers += 1) {
-            const slot = self.warmed_managers;
+        std.debug.assert(parallelism <= self.buffer_count);
+        while (self.warmed_buffers < parallelism) : (self.warmed_buffers += 1) {
+            const slot = self.warmed_buffers;
             self.transfer(source, slot, null);
             self.transfer(source, slot, null);
             if (self.firstError()) |err| return err;
         }
     }
-
-    fn deinit(self: *Cohort, source: []const u8) void {
-        for (self.managers.items) |manager| {
-            const event = manager.manager.transferData(
-                self.platform.pjrt_api,
-                0,
-                source[0..self.block_size],
-                0,
-                true,
-            ) catch null;
-            if (event) |done| {
-                done.await(self.platform.pjrt_api, self.io) catch {};
-                done.deinit(self.platform.pjrt_api);
-            }
-            manager.manager.deinit(self.platform.pjrt_api);
-            manager.buffer.deinit(self.platform.pjrt_api);
-        }
-        self.managers.deinit(self.allocator);
-        self.* = undefined;
-    }
-};
-
-const TransferBuffer = struct {
-    manager: *pjrt.AsyncHostToDeviceTransferManager,
-    buffer: *pjrt.Buffer,
 };
 
 const Counters = struct {
@@ -658,69 +618,8 @@ const Measurement = struct {
     }
 };
 
-fn validateOptions(opts: Options, max_mapped_bytes: usize) error{ InvalidOptions, HostMemoryBudgetExceeded }!void {
-    errdefer |err| log.err("invalid DMA calibration options: block_sizes={any}, parallelism={d}, duration_ns={d}, confirmation_duration_ns={d}, tolerance={d}, margin={d}, mapped_ceiling={d}: {s}", .{ opts.block_sizes, opts.block_parallelism, opts.duration_ns, opts.confirmation_duration_ns, opts.block_selection_tolerance, opts.confirmation_margin, max_mapped_bytes, @errorName(err) });
-    if (opts.block_sizes.len == 0) return error.InvalidOptions;
-    if (opts.duration_ns == 0 or opts.confirmation_duration_ns == 0)
-        return error.InvalidOptions;
-    if (opts.block_parallelism == 0 or opts.block_parallelism > limits.max_dma_parallelism)
-        return error.InvalidOptions;
-    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
-        !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
-        return error.InvalidOptions;
-    var has_feasible_block = false;
-    for (opts.block_sizes) |block_size| {
-        if (block_size == 0 or block_size > limits.max_read_request_size)
-            return error.InvalidOptions;
-        if (fitsWorkspace(max_mapped_bytes, block_size, opts.block_parallelism))
-            has_feasible_block = true;
-    }
-    if (!has_feasible_block) return error.HostMemoryBudgetExceeded;
-}
-
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
-}
-
-/// A platform with only the fields the calibration decisions read.
-fn testPlatform(target: platform_mod.Target) platform_mod.Platform {
-    return .{
-        .arena = undefined,
-        .target = target,
-        .pjrt_api = undefined,
-        .pjrt_client = undefined,
-        .state = .init(target),
-        .devices = &.{},
-        .memories = &.{},
-        .physical_mesh = undefined,
-        .replicated_sharding = undefined,
-        .shardings = .empty,
-    };
-}
-
-test "DMA benchmark on CPU returns the defaults without mapping" {
-    const platform = testPlatform(.cpu);
-    var workspace = try host_memory.Workspace.initForTesting(std.testing.allocator, std.testing.io, 64);
-    defer workspace.deinit();
-    try std.testing.expectEqual(Result.default, try calibrate(&workspace, &platform, .{}));
-    try std.testing.expectEqual(0, workspace.mapped_bytes);
-}
-
-test "DMA benchmark validates options" {
-    const max_mapped_bytes = 16 * 1024 * 1024 * 1024;
-    try validateOptions(.{}, max_mapped_bytes);
-    try std.testing.expectError(
-        error.InvalidOptions,
-        validateOptions(.{ .block_parallelism = 0 }, max_mapped_bytes),
-    );
-}
-
-test "DMA benchmark completion target has no time cap" {
-    try std.testing.expect(!windowComplete(9, 10, 128, 128));
-    try std.testing.expect(!windowComplete(10, 10, 127, 128));
-    try std.testing.expect(windowComplete(10, 10, 128, 128));
-    try std.testing.expect(windowComplete(1_000, 10, 128, 128));
-    try std.testing.expect(windowComplete(10, 10, 0, 0));
 }
 
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
@@ -731,6 +630,9 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .allocator = std.testing.allocator,
         .io = undefined,
         .platform = undefined,
+        .manager = undefined,
+        .buffers = undefined,
+        .cohorts = undefined,
     };
     const opts: Options = .{ .block_selection_tolerance = 0.05 };
 
@@ -787,12 +689,6 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
     try std.testing.expectEqual(@as(f64, 100), bimodal_decision.metrics.bytesPerSecond());
 }
 
-test "DMA benchmark tuple feasibility rejects pinned budget overflow" {
-    try std.testing.expect(fitsWorkspace(128, 16, 8));
-    try std.testing.expect(!fitsWorkspace(127, 16, 8));
-    try std.testing.expect(!fitsWorkspace(std.math.maxInt(usize), std.math.maxInt(usize), 2));
-}
-
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
     var candidates = [_]Candidate{
         .{ .block_size = 4, .cohort = undefined },
@@ -818,16 +714,34 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
     ));
 }
 
+test "DMA benchmark shares one manager across candidate sizes and slots" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+
+    var session = try Session.init(allocator, io, platform, &.{ 8, 16 }, 2);
+    defer session.deinit();
+    const source: [32]u8 = @splat(0);
+    for (session.cohorts) |*cohort| {
+        try std.testing.expectEqual(session.manager, cohort.manager);
+        try cohort.ensureReady(&source, 2);
+        try std.testing.expectEqual(2, cohort.warmed_buffers);
+        try std.testing.expectEqual(null, cohort.firstError());
+    }
+}
+
 test "DMA benchmark cancellation drains transfer workers" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const platform = platform_mod.Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
+    const platform = Platform.auto(allocator, io, .{ .cpu = .{ .device_count = 1 } }) catch
         return error.SkipZigTest;
     defer platform.deinit(allocator, io);
 
     var source: [16]u8 = @splat(0);
-    var cohort: Cohort = .init(allocator, io, platform, 0, source.len);
-    defer cohort.deinit(&source);
+    var session = try Session.init(allocator, io, platform, &.{source.len}, 1);
+    defer session.deinit();
     var vtable = io.vtable.*;
     vtable.sleep = struct {
         fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
@@ -840,18 +754,10 @@ test "DMA benchmark cancellation drains transfer workers" {
     // while they transfer. In either case they must finish before teardown.
     try std.testing.expectError(error.Canceled, runWindow(
         canceled_io,
-        &cohort,
+        &session.cohorts[0],
         &source,
         1,
         std.math.maxInt(u64),
         0,
     ));
-}
-
-test "DMA validation distinguishes invalid options from exhausted capacity" {
-    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_sizes = &.{} }, 1024));
-    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_parallelism = 0 }, 1024));
-    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_sizes = &.{0} }, 1024));
-    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_selection_tolerance = std.math.nan(f64) }, 1024));
-    try std.testing.expectError(error.HostMemoryBudgetExceeded, validateOptions(.{ .block_sizes = &.{1024}, .block_parallelism = 2 }, 1024));
 }

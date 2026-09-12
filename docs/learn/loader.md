@@ -66,8 +66,10 @@ The public operations declare `Loader.InitError`, `Loader.LoadError`,
 `Loader.LoadExecuteError`, and `Loader.AwaitError`. Their finite error sets
 include the underlying file I/O, allocation, cancellation, sharding, and PJRT
 errors. For example, missing files still return `FileNotFound`, truncated
-reads return `UnexpectedEndOfFile`, and failed DMA registration returns its
-original PJRT error rather than replacing it with `OutOfMemory`.
+reads return `UnexpectedEndOfFile`. Host-memory allocation and DMA registration
+log the original PJRT failure and return `OutOfMemory`.
+Exceeding the host-memory mapped ceiling also logs the budget details at `err`
+and returns `OutOfMemory`.
 
 A failure is logged once, where it is detected. Validation and failures
 before publication leave the loader usable and log at `debug`; an
@@ -83,10 +85,8 @@ Loader-specific errors use these shared names:
 
 | Error | Meaning |
 | --- | --- |
-| `InvalidOptions` | Invalid profile, parallelism, alignment, or DMA calibration options |
+| `InvalidOptions` | Invalid profile, parallelism, or alignment |
 | `UnsupportedPlatform` | Unsupported host-memory target or device configuration |
-| `HostMemoryUnavailable` | Pinned host memory is missing or not host-visible |
-| `HostMemoryBudgetExceeded` | The mapped ceiling cannot fit the requested workspace or any calibration candidate |
 | `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
 | `InvalidTensorRange` | A source range cannot be represented |
 | `Internal` | A planning or transfer bookkeeping invariant failed |
@@ -163,7 +163,9 @@ pool before returning. Calibration arenas become the load's initial capacity;
 all arenas are released by `Loader.deinit`. Workspace and block-pool types
 are internal to `io/host_memory.zig`.
 
-Callers configure calibration through `Loader.Options.dma`. The direct
+Callers configure calibration through `Loader.Options.dma`. Calibration options
+are checked with assertions; every candidate block size at the configured
+parallelism must fit within the workspace mapped ceiling. The direct
 backend caps its pinned arenas at a fixed 16 GiB, a safety guard rather than
 an allocation target; callers never supply a workspace, a budget, a NUMA
 policy or a calibration result. Page-backed arenas automatically interleave across the
