@@ -11,21 +11,20 @@ const pjrt = @import("pjrt");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const backend = @import("backend.zig");
-const host_memory = @import("host_memory.zig");
-const dma_calibration = @import("dma_calibration.zig");
-const DispatchSpans = @import("DispatchSpans.zig");
-const load_limits = @import("limits.zig");
-const platform_mod = @import("../platform.zig");
 const pjrtx = @import("../pjrtx.zig");
+const platform_mod = @import("../platform.zig");
+const CreateOptions = platform_mod.CreateOptions;
+const Platform = platform_mod.Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
-
-const CreateOptions = platform_mod.CreateOptions;
+const backend = @import("backend.zig");
 const BackendOptions = backend.Options;
 const LoadSpec = backend.LoadSpec;
-const Platform = platform_mod.Platform;
+const DispatchSpans = @import("DispatchSpans.zig");
+const dma_calibration = @import("dma_calibration.zig");
+const host_memory = @import("host_memory.zig");
+const load_limits = @import("limits.zig");
 
 const load_log = std.log.scoped(.@"zml/io/load");
 
@@ -350,11 +349,11 @@ pub const Loader = struct {
                     pregrown_bytes,
                     @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
                 });
-                const pool = try host_memory.BlockPool.init(allocator, &workspace, block_size);
+                const pool = try host_memory.BlockPool.init(allocator, workspace, block_size);
                 break :pool .{ calibration, request_size, maximum_blocks_per_job, fitted_width, pool };
             };
             errdefer pool.deinit();
-            const retained_credits = try pool.retainedRequestWidth(maximum_blocks_per_job);
+            const retained_credits = pool.capacity / maximum_blocks_per_job;
             std.debug.assert(retained_credits >= fitted_width + 1);
 
             return .{
@@ -3094,7 +3093,7 @@ test "late vectored callback failure drains and signals completion" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(64);
-        break :pool_init try host_memory.BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try host_memory.BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);

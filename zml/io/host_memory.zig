@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Alignment = std.mem.Alignment;
+const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
@@ -112,7 +113,7 @@ const Backend = union(enum) {
     fn deinit(self: *Backend, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .pjrt_host => |*host| {
-                for (host.allocations.items) |allocation| allocation.deinit();
+                for (host.allocations.items) |allocation| allocation.destroy();
                 host.allocations.deinit(allocator);
                 allocator.free(host.host_nodes);
             },
@@ -161,8 +162,8 @@ const Backend = union(enum) {
                 const any_device_index = host.host_nodes[host_node_index].any_device_index;
                 const memory = host.platform.devices[any_device_index].memory(.host_pinned) orelse
                     return error.PinnedHostMemoryUnavailable;
-                const allocation: PinnedHostAllocation = try .init(memory, any_device_index, bytes);
-                errdefer allocation.deinit();
+                const allocation: PinnedHostAllocation = try .create(memory, any_device_index, bytes);
+                errdefer allocation.destroy();
                 try host.allocations.append(allocator, allocation);
                 // Only retained allocations count: failed allocation/publication
                 // must not bias the next node choice with nonexistent bytes.
@@ -178,21 +179,19 @@ const Backend = union(enum) {
             .pages => |*pages| {
                 const started: std.Io.Timestamp = .now(io, .awake);
                 const allocation = try pages.allocator.alloc(bytes);
-                const mapped_at: std.Io.Timestamp = .now(io, .awake);
                 errdefer pages.allocator.free(allocation);
                 try pages.allocations.append(allocator, allocation);
                 const finished: std.Io.Timestamp = .now(io, .awake);
                 const numa_mask = pages.allocator.numa_mask;
                 const placement = if (numa_mask == 0) "unplaced" else "interleave";
                 const kind = if (pages.allocator.platform != null) "dma_map" else "pageable";
-                log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3} map_ms={d:.3}", .{
+                log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     kind,
                     placement,
                     numa_mask,
                     @intFromPtr(allocation.ptr),
                     allocation.len,
                     @as(f64, @floatFromInt(elapsedNanoseconds(started, finished))) / std.time.ns_per_ms,
-                    @as(f64, @floatFromInt(elapsedNanoseconds(started, mapped_at))) / std.time.ns_per_ms,
                 });
                 return allocation;
             },
@@ -441,10 +440,10 @@ pub const BlockPool = struct {
 
     allocator: std.mem.Allocator,
     workspace: Workspace,
-    free_blocks: std.ArrayListUnmanaged(Block) = .empty,
+    free_blocks: std.ArrayListUnmanaged(Block),
     block_size: usize,
     /// Blocks carved from the arenas, fixed for the pool's life.
-    capacity: usize = 0,
+    capacity: usize,
     in_use: usize = 0,
     high_water: usize = 0,
     closed: bool = false,
@@ -460,22 +459,35 @@ pub const BlockPool = struct {
     /// retains ownership. Calibration borrows must have ended before this call.
     pub fn init(
         allocator: std.mem.Allocator,
-        workspace: *Workspace,
+        workspace: Workspace,
         block_size: usize,
     ) !BlockPool {
-        if (block_size == 0 or workspace.mapped_bytes > workspace.max_mapped_bytes)
+        if (block_size == 0)
             return error.RequestExceedsCapacity;
-        var self: BlockPool = .{
-            .allocator = allocator,
-            .workspace = workspace.*,
-            .block_size = block_size,
-        };
-        errdefer self.free_blocks.deinit(allocator);
-        for (0..workspace.backend.arenaCount()) |index| {
-            try self.attachArena(workspace.backend.arenaAt(index));
+
+        var capacity: usize = 0;
+        var free_blocks: std.ArrayListUnmanaged(Block) = .empty;
+        errdefer free_blocks.deinit(allocator);
+
+        for (0..workspace.backend.arenaCount()) |i| {
+            const arena = workspace.backend.arenaAt(i);
+            const block_count = arena.len / block_size;
+            // Leased blocks are absent from `free_blocks`, so the storage is
+            // sized for the total capacity, not for what is free.
+            try free_blocks.ensureTotalCapacity(allocator, capacity + block_count);
+            for (0..block_count) |j| {
+                free_blocks.appendAssumeCapacity(arena[j * block_size ..][0..block_size]);
+            }
+            capacity += block_count;
         }
-        workspace.* = undefined;
-        return self;
+
+        return .{
+            .allocator = allocator,
+            .workspace = workspace,
+            .block_size = block_size,
+            .free_blocks = free_blocks,
+            .capacity = capacity,
+        };
     }
 
     pub fn deinit(self: *BlockPool) void {
@@ -525,25 +537,6 @@ pub const BlockPool = struct {
         self.closed = true;
         self.condition.broadcast(io);
     }
-
-    /// Requests of `blocks_per_request` blocks the pool holds without
-    /// mapping anything.
-    pub fn retainedRequestWidth(self: *const BlockPool, blocks_per_request: usize) !usize {
-        if (blocks_per_request == 0) return error.InvalidRequestBlockCount;
-        return self.capacity / blocks_per_request;
-    }
-
-    fn attachArena(self: *BlockPool, arena: []u8) !void {
-        if (arena.len == 0) return error.InvalidDmaWorkspace;
-        const block_count = arena.len / self.block_size;
-        // Leased blocks are absent from `free_blocks`, so the storage is
-        // sized for the total capacity, not for what is free.
-        try self.free_blocks.ensureTotalCapacity(self.allocator, self.capacity + block_count);
-        for (0..block_count) |index| {
-            self.free_blocks.appendAssumeCapacity(arena[index * self.block_size ..][0..self.block_size]);
-        }
-        self.capacity += block_count;
-    }
 };
 
 /// PJRT is the sole owner of these hipHostMalloc-backed bytes. Never DmaMap
@@ -561,7 +554,7 @@ const PinnedHostAllocation = struct {
     data: []u8,
     device_index: usize,
 
-    fn init(memory: *const Memory, device_index: usize, size: usize) !PinnedHostAllocation {
+    fn create(memory: *const Memory, device_index: usize, size: usize) !PinnedHostAllocation {
         const api = memory.platform.pjrt_api;
         const buffer = try memory.platform.pjrt_client.createUninitializedBuffer(api, .{
             .dims = &.{@intCast(size)},
@@ -591,7 +584,7 @@ const PinnedHostAllocation = struct {
         };
     }
 
-    fn deinit(self: PinnedHostAllocation) void {
+    fn destroy(self: PinnedHostAllocation) void {
         self.buffer.decreaseExternalReferenceCount(self.api) catch unreachable;
         self.buffer.deinit(self.api);
     }
@@ -718,7 +711,7 @@ test "BlockPool ownership transfer cleans up allocation failures" {
                 var workspace = try Workspace.initForTesting(allocator, std.testing.io, 256);
                 errdefer workspace.deinit();
                 arena = try workspace.allocate(64);
-                break :pool_init BlockPool.init(allocator, &workspace, 64) catch |err| {
+                break :pool_init BlockPool.init(allocator, workspace, 64) catch |err| {
                     try std.testing.expectEqual(@as(usize, 64), workspace.mapped_bytes);
                     try std.testing.expectEqual(arena.ptr, workspace.findArena(64).?.ptr);
                     return err;
@@ -742,7 +735,7 @@ test "BlockPool acquires request blocks atomically" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(4 * 64);
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
 
@@ -782,7 +775,7 @@ test "BlockPool acquisition allocates nothing once its arenas are attached" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(4 * 64);
-        break :pool_init try BlockPool.init(failing.allocator(), &workspace, 64);
+        break :pool_init try BlockPool.init(failing.allocator(), workspace, 64);
     };
     defer pool.deinit();
 
@@ -804,7 +797,7 @@ test "BlockPool close wakes blocked bulk acquisitions" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(2 * 64);
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
 
@@ -840,7 +833,7 @@ test "BlockPool lease returns a block after out-of-order callbacks" {
         errdefer workspace.deinit();
 
         _ = try workspace.allocate(64);
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
 
@@ -876,13 +869,12 @@ test "BlockPool reblocks retained arenas of unequal size" {
         _ = try workspace.allocate(70);
         _ = try workspace.allocate(65);
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
     try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
     // Two blocks from the first arena, one from each of the others.
     try std.testing.expectEqual(@as(usize, 4), pool.capacity);
-    try std.testing.expectEqual(@as(usize, 4), try pool.retainedRequestWidth(1));
 
     var blocks: [4]BlockPool.Block = undefined;
     try pool.acquireMany(io, &blocks);
@@ -904,16 +896,13 @@ test "BlockPool counts retained requests over arena tails" {
         _ = try workspace.allocate(127);
         _ = try workspace.allocate(127);
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
 
     // Arena tails stay mapped without contributing a block: two 127-byte
     // arenas retain one 64-byte block each.
     try std.testing.expectEqual(@as(usize, 2), pool.capacity);
-    try std.testing.expectEqual(@as(usize, 2), try pool.retainedRequestWidth(1));
-    try std.testing.expectEqual(@as(usize, 0), try pool.retainedRequestWidth(4));
-    try std.testing.expectError(error.InvalidRequestBlockCount, pool.retainedRequestWidth(0));
 }
 
 test "BlockPool rejects requests that can never fit without leasing" {
@@ -925,7 +914,7 @@ test "BlockPool rejects requests that can never fit without leasing" {
 
         _ = try workspace.allocate(2 * 64);
 
-        break :pool_init try BlockPool.init(allocator, &workspace, 64);
+        break :pool_init try BlockPool.init(allocator, workspace, 64);
     };
     defer pool.deinit();
 
