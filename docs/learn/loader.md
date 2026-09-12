@@ -60,6 +60,54 @@ sticky: later submissions are refused and `awaitAll` keeps returning it.
 unwritten, inputs freed), then destroys the backend. There is no
 per-submission handle and no memory knob.
 
+## Errors and diagnostics
+
+The public operations declare `Loader.InitError`, `Loader.LoadError`,
+`Loader.LoadExecuteError`, and `Loader.AwaitError`. Their finite error sets
+include the underlying file I/O, allocation, cancellation, sharding, and PJRT
+errors. For example, missing files still return `FileNotFound`, truncated
+reads return `UnexpectedEndOfFile`, and failed DMA registration returns its
+original PJRT error rather than replacing it with `OutOfMemory`.
+
+A failure is logged once, where it is detected. Validation and failures
+before publication leave the loader usable and log at `debug`; an
+initialization failure and the first terminal failure log at `err` with the
+values that explain it. Frames that only propagate an error do not log it
+again, and subsequent calls return the stored error. Worker cancellation and
+normal shutdown use `debug`. A planning failure before the first file is
+published is recoverable; the same failure after partial publication is
+terminal. The direct backend validates source sizes before publication,
+while the buffered backend checks them in its workers.
+
+Loader-specific errors use these shared names:
+
+| Error | Meaning |
+| --- | --- |
+| `InvalidOptions` | Invalid profile, parallelism, alignment, or DMA calibration options |
+| `UnsupportedPlatform` | Unsupported host-memory target or device configuration |
+| `HostMemoryUnavailable` | Pinned host memory is missing or not host-visible |
+| `HostMemoryBudgetExceeded` | The mapped ceiling cannot fit the requested workspace or any calibration candidate |
+| `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
+| `InvalidTensorRange` | A source range cannot be represented |
+| `Internal` | A planning or transfer bookkeeping invariant failed |
+| `Closed` | An internal pool or scheduler has shut down |
+| `TensorNotFound` | A tensor has no checkpoint binding |
+
+`EmptyTensor`, `TransformedTensorNotDelivered`, and executable platform,
+shape, and placement mismatch errors remain distinct. Executable arity
+failures are `ExecutableInputCountMismatch` and
+`ExecutableOutputCountMismatch`. Internal pool requests that cannot fit
+still return `RequestExceedsCapacity`.
+
+These names replace the former loader-specific profile, DMA benchmark,
+DMA budget, loader-job, and shutdown names; callers matching those errors
+must update their switches. They do not change how submissions are admitted,
+retired, or cleaned up.
+
+Error-path tests assert returned errors and cleanup rather than capturing logs.
+The loader's log scopes (`zml/io/log.zig`) demote `err` to `debug` in test
+builds because the Zig test runner counts logged errors as failures.
+
 ## Implementation map
 
 | Module | Responsibility |
@@ -75,6 +123,7 @@ per-submission handle and no memory knob.
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
 | `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
+| `zml/io/log.zig` | The loader's log scopes: one log per failure, `err` demoted in test builds |
 | `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
 
 The shared front end resolves sources and shardings once. Each `LoadSpec`

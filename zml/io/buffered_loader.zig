@@ -1,7 +1,9 @@
 //! Whole-tensor staging for platforms that use Buffer.from.
 //! The shared front end owns source lookup, executable bindings and admission.
 const std = @import("std");
+const log = @import("log.zig").load;
 const stdx = @import("stdx");
+const pjrt = @import("pjrt");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -20,6 +22,11 @@ const LoadSpec = backend.LoadSpec;
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
+    pub const InitError = std.mem.Allocator.Error;
+    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || std.Io.File.Reader.SeekError || safetensors.TensorReader.ReadPositionalError || error{SourceSizeMismatch};
+    /// A submission refuses on the sticky error, so it fails as an await does.
+    pub const SubmitError = AwaitError;
+
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
@@ -45,7 +52,7 @@ pub const Loader = struct {
         platform: *const Platform,
         read_parallelism: usize,
         profile: VFS.LoadProfile,
-    ) !*Loader {
+    ) InitError!*Loader {
         const self = try allocator.create(Loader);
         self.* = .{
             .allocator = allocator,
@@ -65,7 +72,7 @@ pub const Loader = struct {
     }
 
     /// Spawns one bounded read task per spec. Nothing runs when this fails.
-    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) !*Batch {
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         var largest: usize = 0;
         for (specs) |spec| largest = @max(largest, spec.shape.byteSize());
@@ -81,7 +88,7 @@ pub const Loader = struct {
     }
 
     /// Waits for the batch's tasks, frees it and returns the sticky error.
-    pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
+    pub fn awaitBatch(self: *Loader, batch: *Batch) AwaitError!void {
         batch.done.waitUncancelable(self.io);
         self.allocator.destroy(batch);
         try self.checkOpen();
@@ -94,13 +101,15 @@ pub const Loader = struct {
         self.allocator.destroy(self);
     }
 
-    fn recordError(self: *Loader, err: anyerror) void {
-        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+    fn recordError(self: *Loader, err: AwaitError, comptime fmt: []const u8, args: anytype) void {
+        if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
+            log.failure(err, fmt, args);
+        }
     }
 
-    fn checkOpen(self: *Loader) !void {
+    fn checkOpen(self: *Loader) AwaitError!void {
         const code = self.first_error.load(.acquire);
-        if (code != 0) return @errorFromInt(code);
+        if (code != 0) return @errorCast(@errorFromInt(code));
     }
 
     fn loadOne(
@@ -109,8 +118,10 @@ pub const Loader = struct {
         shape: Shape,
         sharding: Sharding,
         output: *Buffer,
-    ) !void {
+    ) AwaitError!void {
         if (self.first_error.load(.acquire) != 0) return;
+        var stage: []const u8 = "validate";
+        errdefer |err| self.recordError(err, "{s} tensor {s}: file={s}, offset={d}, source_bytes={d}, destination_bytes={d}", .{ stage, source.name, source.file_uri, source.offset, source.byteSize(), shape.byteSize() });
         const tensor_bytes = shape.byteSize();
         // The whole source becomes this tensor's bytes, so the two sizes are
         // the same thing. Staging is reused, so a source that does not fill
@@ -119,11 +130,15 @@ pub const Loader = struct {
         if (source.byteSize() != tensor_bytes) return error.SourceSizeMismatch;
         self.admission.reserve(self.io, tensor_bytes);
         defer self.admission.release(self.io, tensor_bytes);
+        stage = "open source for";
         var reader = try source.reader(self.io, &.{}, .{});
         defer reader.deinit();
+        stage = "allocate staging for";
         const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
         defer self.staging.release(self.allocator, self.io, staging);
+        stage = "read";
         try self.readInto(&reader, staging[0..tensor_bytes]);
+        stage = "transfer";
         output.* = try Buffer.from(
             self.io,
             self.platform,
@@ -142,7 +157,7 @@ pub const Loader = struct {
         self: *Loader,
         reader: *const safetensors.TensorReader,
         destination: []u8,
-    ) !void {
+    ) safetensors.TensorReader.ReadPositionalError!void {
         if (destination.len == 0) return;
         var work: ChunkedRead = .{
             .reader = reader,
@@ -181,7 +196,7 @@ pub const Loader = struct {
         self.permits.release(self.io, held);
 
         const code = work.failure.load(.acquire);
-        if (code != 0) return @errorFromInt(code);
+        if (code != 0) return @errorCast(@errorFromInt(code));
     }
 
     fn submitOne(
@@ -206,7 +221,7 @@ pub const Loader = struct {
                 defer batch_.finish(loader.io);
                 var node = if (progress_) |parent| parent.start(source_.name, 1) else null;
                 defer if (node) |*n| n.end();
-                loader.loadOne(source_, shape_, sharding_, output_) catch |err| loader.recordError(err);
+                loader.loadOne(source_, shape_, sharding_, output_) catch {};
             }
         }.run, .{ self, batch, source, shape, sharding, output, progress });
     }

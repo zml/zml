@@ -1,10 +1,14 @@
 //! Associates model tensors with checkpoint sources and prefixed views.
 const std = @import("std");
+const log = std.log.scoped(.@"zml/io/load");
+
 const stdx = @import("stdx");
 
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Tensor = @import("../tensor.zig").Tensor;
+
+pub const ReaderError = std.Io.File.OpenError || std.Io.File.Reader.SeekError || error{TensorNotFound};
 
 const TensorStore = @This();
 
@@ -33,8 +37,12 @@ pub fn deinit(self: *TensorStore) void {
     self.arena.deinit();
 }
 
-pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-    return self.registry.reader(io, key, buffer);
+pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) ReaderError!safetensors.TensorReader {
+    const tensor = self.getPtrFromKey(key) orelse {
+        log.debug("checkpoint has no tensor named {s}", .{key});
+        return error.TensorNotFound;
+    };
+    return tensor.reader(io, buffer, .{});
 }
 
 pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
@@ -148,7 +156,7 @@ pub const View = struct {
         return self.store.getShape(key);
     }
 
-    pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) ReaderError!safetensors.TensorReader {
         var key_buffer: [256]u8 = undefined;
         const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
         return self.store.getReader(key, io, buffer);
@@ -228,4 +236,13 @@ fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
     copy.* = entry.*;
 
     return copy;
+}
+
+test "missing reader keys return TensorNotFound" {
+    var registry = safetensors.TensorRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = TensorStore.fromRegistry(std.testing.allocator, &registry);
+    defer store.deinit();
+
+    try std.testing.expectError(error.TensorNotFound, store.view().withPrefix("layer").getReader("weights", std.testing.io, &.{}));
 }

@@ -437,7 +437,7 @@ pub const Platform = struct {
     /// pools for subsequent allocations. Calling this more than once is safe.
     /// Devices are warmed concurrently: a serial pass over eight GPUs costs
     /// measurable milliseconds ahead of a load.
-    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
+    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) (pjrt.ApiError || std.Io.ConcurrentError || std.Io.Cancelable)!void {
         const Worker = struct {
             platform: *const Platform,
             device_index: usize,
@@ -467,7 +467,7 @@ pub const Platform = struct {
         }});
         try group.await(io);
         const error_code = first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
+        if (error_code != 0) return @as(pjrt.ApiError, @errorCast(@errorFromInt(error_code)));
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {

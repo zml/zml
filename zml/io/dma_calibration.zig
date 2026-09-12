@@ -7,7 +7,9 @@ const platform_mod = @import("../platform.zig");
 const Platform = platform_mod.Platform;
 const limits = @import("limits.zig");
 
-const log = std.log.scoped(.@"zml/io");
+const log = @import("log.zig").io;
+
+pub const CalibrationError = host_memory.GrowError || std.Io.ConcurrentError || std.Io.Cancelable || error{ InvalidOptions, Internal };
 
 /// Immutable result shared by every device participating in one load.
 pub const Result = struct {
@@ -65,7 +67,7 @@ pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const platform_mod.Platform,
     opts: Options,
-) !Result {
+) CalibrationError!Result {
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread. With four PJRT CPU devices, warm sharded Llama took
     // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the defaults stand and the
@@ -77,6 +79,7 @@ pub fn calibrate(
     if (platform.target == .cpu) return .default;
 
     try validateOptions(opts, workspace.max_mapped_bytes);
+    errdefer |err| log.err("calibrate DMA: target={t}, block_sizes={any}, parallelism={d}, mapped_ceiling={d}: {s}", .{ platform.target, opts.block_sizes, opts.block_parallelism, workspace.max_mapped_bytes, @errorName(err) });
     const result = try measureTransfer(workspace, platform, opts);
     logReport(platform, &result);
     return result.calibration;
@@ -409,8 +412,7 @@ fn runWindow(
     start.set(io);
     while (true) {
         const elapsed_ns = elapsedNanoseconds(measured_at, .now(io, .awake));
-        const error_code = cohort.first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
+        if (cohort.firstError()) |err| return err;
         if (windowComplete(
             elapsed_ns,
             duration_ns,
@@ -422,8 +424,7 @@ fn runWindow(
     stop.store(true, .release);
     try group.await(io);
     const elapsed_ns: u64 = @intCast(@max(measured_at.untilNow(io, .awake).nanoseconds, 1));
-    const error_code = cohort.first_error.load(.acquire);
-    if (error_code != 0) return @errorFromInt(error_code);
+    if (cohort.firstError()) |err| return err;
     return .{
         .bytes = metrics.bytes.load(.acquire),
         .transfers = metrics.transfers.load(.acquire),
@@ -551,8 +552,13 @@ const Cohort = struct {
         };
     }
 
-    fn recordError(self: *Cohort, err: anyerror) void {
+    fn recordError(self: *Cohort, err: pjrt.ApiError) void {
         _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+    }
+
+    fn firstError(self: *const Cohort) ?pjrt.ApiError {
+        const code = self.first_error.load(.acquire);
+        return if (code == 0) null else @errorCast(@errorFromInt(code));
     }
 
     fn transfer(
@@ -587,7 +593,7 @@ const Cohort = struct {
 
     fn ensureReady(self: *Cohort, source: []const u8, parallelism: usize) !void {
         const required_bytes = self.block_size * parallelism;
-        if (required_bytes > source.len) return error.DmaBenchmarkPinnedBudgetExceeded;
+        if (required_bytes > source.len) return error.Internal;
         var dims = [_]i64{@intCast(self.block_size)};
         const shape_spec: pjrt.ShapeSpec = .init(&dims, .u8);
         const memory = self.platform.devices[self.device_index].memory(.default).?;
@@ -605,8 +611,7 @@ const Cohort = struct {
             const slot = self.warmed_managers;
             self.transfer(source, slot, null);
             self.transfer(source, slot, null);
-            const error_code = self.first_error.load(.acquire);
-            if (error_code != 0) return @errorFromInt(error_code);
+            if (self.firstError()) |err| return err;
         }
     }
 
@@ -653,23 +658,24 @@ const Measurement = struct {
     }
 };
 
-fn validateOptions(opts: Options, max_mapped_bytes: usize) !void {
-    if (opts.block_sizes.len == 0) return error.NoFeasibleDmaBenchmarkTuple;
+fn validateOptions(opts: Options, max_mapped_bytes: usize) error{ InvalidOptions, HostMemoryBudgetExceeded }!void {
+    errdefer |err| log.err("invalid DMA calibration options: block_sizes={any}, parallelism={d}, duration_ns={d}, confirmation_duration_ns={d}, tolerance={d}, margin={d}, mapped_ceiling={d}: {s}", .{ opts.block_sizes, opts.block_parallelism, opts.duration_ns, opts.confirmation_duration_ns, opts.block_selection_tolerance, opts.confirmation_margin, max_mapped_bytes, @errorName(err) });
+    if (opts.block_sizes.len == 0) return error.InvalidOptions;
     if (opts.duration_ns == 0 or opts.confirmation_duration_ns == 0)
-        return error.InvalidDmaBenchmarkOptions;
+        return error.InvalidOptions;
     if (opts.block_parallelism == 0 or opts.block_parallelism > limits.max_dma_parallelism)
-        return error.InvalidDmaBenchmarkOptions;
+        return error.InvalidOptions;
     if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or
         !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1))
-        return error.InvalidDmaBenchmarkOptions;
+        return error.InvalidOptions;
     var has_feasible_block = false;
     for (opts.block_sizes) |block_size| {
         if (block_size == 0 or block_size > limits.max_read_request_size)
-            return error.InvalidDmaBenchmarkOptions;
+            return error.InvalidOptions;
         if (fitsWorkspace(max_mapped_bytes, block_size, opts.block_parallelism))
             has_feasible_block = true;
     }
-    if (!has_feasible_block) return error.NoFeasibleDmaBenchmarkTuple;
+    if (!has_feasible_block) return error.HostMemoryBudgetExceeded;
 }
 
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
@@ -704,7 +710,7 @@ test "DMA benchmark validates options" {
     const max_mapped_bytes = 16 * 1024 * 1024 * 1024;
     try validateOptions(.{}, max_mapped_bytes);
     try std.testing.expectError(
-        error.InvalidDmaBenchmarkOptions,
+        error.InvalidOptions,
         validateOptions(.{ .block_parallelism = 0 }, max_mapped_bytes),
     );
 }
@@ -840,4 +846,12 @@ test "DMA benchmark cancellation drains transfer workers" {
         std.math.maxInt(u64),
         0,
     ));
+}
+
+test "DMA validation distinguishes invalid options from exhausted capacity" {
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_sizes = &.{} }, 1024));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_parallelism = 0 }, 1024));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_sizes = &.{0} }, 1024));
+    try std.testing.expectError(error.InvalidOptions, validateOptions(.{ .block_selection_tolerance = std.math.nan(f64) }, 1024));
+    try std.testing.expectError(error.HostMemoryBudgetExceeded, validateOptions(.{ .block_sizes = &.{1024}, .block_parallelism = 2 }, 1024));
 }

@@ -23,16 +23,16 @@ pub const max_positional_iovecs: usize = safetensors.max_positional_iovecs;
 
 /// The source request size is the larger of the profile's minimum read
 /// chunk and the calibrated DMA block, capped at the supported maximum.
-pub fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) !usize {
+pub fn effectiveSourceRequestSize(read_chunk_size: usize, dma_block_size: usize) error{InvalidOptions}!usize {
     if (read_chunk_size == 0 or read_chunk_size > max_read_request_size)
-        return error.InvalidLoadProfile;
+        return error.InvalidOptions;
     const selected = @max(read_chunk_size, dma_block_size);
-    if (selected > max_read_request_size) return error.InvalidLoadProfile;
+    if (selected > max_read_request_size) return error.InvalidOptions;
     return selected;
 }
 
-pub fn maximumCoalescedJobBlocks(request_size: usize, block_size: usize) !usize {
-    if (request_size == 0 or block_size == 0) return error.InvalidDmaLoadConfig;
+pub fn maximumCoalescedJobBlocks(request_size: usize, block_size: usize) error{InvalidOptions}!usize {
+    if (request_size == 0 or block_size == 0) return error.InvalidOptions;
     const scatter_limit = block_size *| max_positional_iovecs;
     const maximum_job_len = @min(request_size, scatter_limit);
     return maximum_job_len / block_size + @intFromBool(maximum_job_len % block_size != 0);

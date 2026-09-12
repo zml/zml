@@ -7,6 +7,8 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Placement = Sharding.Placement;
 
+pub const InitError = std.mem.Allocator.Error || Sharding.Error;
+
 const DispatchSpans = @This();
 
 const Span = struct {
@@ -24,7 +26,7 @@ const PlacementSpan = struct {
 
 spans: []Span,
 
-pub fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !DispatchSpans {
+pub fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) InitError!DispatchSpans {
     const placement = try sharding.placement(shape);
     const ordered_devices = sharding.devicesInCanonicalOrder();
     std.debug.assert(ordered_devices.len <= 64);
@@ -76,7 +78,7 @@ fn deduplicateByRange(
     total_bytes: usize,
     spans: *std.ArrayList(Span),
     writer_offsets: []usize,
-) !void {
+) std.mem.Allocator.Error!void {
     const SortContext = struct {
         fn lessThan(_: void, lhs: PlacementSpan, rhs: PlacementSpan) bool {
             if (lhs.start != rhs.start) return lhs.start < rhs.start;
@@ -131,7 +133,7 @@ fn appendShardPlacementSpans(
     slices: []const Placement.Slice1d,
     byte_strides: []const i64,
     writer_index: usize,
-) !void {
+) std.mem.Allocator.Error!void {
     if (shape.rank() == 0) {
         try placement_spans.append(allocator, .{ .writer_index = writer_index, .start = 0, .len = shape.byteSize() });
         return;
@@ -149,7 +151,7 @@ fn appendShardAxisPlacementSpans(
     axis: usize,
     contiguous_axis: usize,
     base_start: i64,
-) !void {
+) std.mem.Allocator.Error!void {
     const slice = slices[axis];
     if (slice.size == 0) return;
 

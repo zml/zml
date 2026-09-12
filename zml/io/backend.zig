@@ -12,6 +12,10 @@ const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
 const limits = @import("limits.zig");
 
+pub const InitError = direct_loader.Loader.InitError || buffered_loader.Loader.InitError;
+pub const SubmitError = direct_loader.Loader.SubmitError || buffered_loader.Loader.SubmitError;
+pub const AwaitError = direct_loader.Loader.AwaitError || buffered_loader.Loader.AwaitError;
+
 pub const Options = struct {
     pub const auto: Options = .{};
 
@@ -72,7 +76,7 @@ pub const Backend = union(enum) {
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) !Backend {
+    ) InitError!Backend {
         // Transfer-manager support and host pinning are independent. CPU
         // implements byte-range transfers from ordinary pages but not DmaMap,
         // so it can share coalescing and bounded blocks without DMA support.
@@ -95,7 +99,7 @@ pub const Backend = union(enum) {
         platform: *const Platform,
         read_parallelism: usize,
         load_profile: VFS.LoadProfile,
-    ) !Backend {
+    ) buffered_loader.Loader.InitError!Backend {
         return .{ .buffered = try buffered_loader.Loader.create(
             allocator,
             io,
@@ -119,7 +123,7 @@ pub const Backend = union(enum) {
         for (out, self.direct.allocated_bytes) |*bytes, *counter| bytes.* = counter.load(.acquire);
     }
 
-    pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) !Submission {
+    pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!Submission {
         return switch (self) {
             .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs, progress) } },
             .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs, progress) } },
@@ -139,7 +143,7 @@ pub const Submission = union(enum) {
     buffered: struct { loader: *buffered_loader.Loader, batch: *buffered_loader.Batch },
 
     /// Waits for and retires the batch. Its pointer is dangling afterwards.
-    pub fn await(self: Submission) !void {
+    pub fn await(self: Submission) AwaitError!void {
         return switch (self) {
             .direct => |direct| direct.loader.awaitBatch(direct.batch),
             .buffered => |buffered| buffered.loader.awaitBatch(buffered.batch),

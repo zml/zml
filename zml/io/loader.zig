@@ -5,6 +5,8 @@
 //! this shared front end.
 const std = @import("std");
 
+const pjrt = @import("pjrt");
+
 const VFS = @import("vfs");
 const backend = @import("backend.zig");
 const admission = @import("execute_admission.zig");
@@ -20,7 +22,7 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
 
-const load_log = std.log.scoped(.@"zml/io/load");
+const load_log = @import("log.zig").load;
 
 const dma_calibration = @import("dma_calibration.zig");
 const limits = @import("limits.zig");
@@ -28,6 +30,11 @@ const TensorStore = @import("TensorStore.zig");
 const Backend = backend.Backend;
 const LoadSpec = backend.LoadSpec;
 const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, void);
+
+const PrepareError = std.mem.Allocator.Error || error{ TensorNotFound, EmptyTensor, TransformedTensorNotDelivered };
+const BindingError = error{ ExecutablePlatformMismatch, ExecutableInputCountMismatch, ExecutableOutputCountMismatch, ExecutableInputShapeMismatch, ExecutableOutputShapeMismatch, ExecutablePlacementMismatch };
+/// Placing the sources on the devices, then the backend's own submission.
+const SubmitError = Sharding.Error || backend.SubmitError || error{Overflow};
 
 /// Loads checkpoint sources and optionally executes bindings over them.
 /// The platform and options' borrowed values must outlive the loader. Each
@@ -38,6 +45,11 @@ const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, void);
 /// publish order: `loadExecute` retires older ones when its own does not fit
 /// the room the devices report, and `awaitAll` retires the rest.
 pub const Loader = struct {
+    pub const InitError = backend.InitError || error{InvalidOptions};
+    pub const AwaitError = backend.AwaitError || std.mem.Allocator.Error;
+    pub const LoadError = PrepareError || SubmitError || AwaitError;
+    pub const LoadExecuteError = BindingError || SubmitError || AwaitError || error{ TensorNotFound, EmptyTensor };
+
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
@@ -49,7 +61,7 @@ pub const Loader = struct {
     /// retired, before any bulk submitted after it.
     delivered: DeliveryMap = .empty,
     /// The first error a retire returned; every later call reports it.
-    failure: ?anyerror = null,
+    failure: ?AwaitError = null,
     /// Logical bytes of every submission retired with execution.
     bytes_loaded: usize = 0,
     /// Whether admission can measure the room: the backend counts its
@@ -96,7 +108,7 @@ pub const Loader = struct {
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) !Loader {
+    ) InitError!Loader {
         try validateOptions(opts);
         const selected = try Backend.init(allocator, io, platform, opts);
         errdefer selected.destroy();
@@ -165,7 +177,7 @@ pub const Loader = struct {
         store: *const TensorStore,
         shardings: []const Sharding,
         progress: ?*std.Progress.Node,
-    ) !void {
+    ) LoadError!void {
         if (self.failure) |err| return err;
         const specs = try prepareModelLoad(
             self.allocator,
@@ -190,7 +202,7 @@ pub const Loader = struct {
     /// output and frees the inputs. Input and output placement come from
     /// each executable. Progress counts input sources across all bindings,
     /// before execution. The caller owns the estimated total.
-    pub fn loadExecute(self: *Loader, store: *const TensorStore, bindings: []const Binding, progress: ?*std.Progress.Node) !void {
+    pub fn loadExecute(self: *Loader, store: *const TensorStore, bindings: []const Binding, progress: ?*std.Progress.Node) LoadExecuteError!void {
         if (self.failure) |err| return err;
         const executables = try self.allocator.alloc(BoundExecutable, bindings.len);
         var prepared: usize = 0;
@@ -218,7 +230,10 @@ pub const Loader = struct {
                 executable.exe.input_shardings,
                 executable.inputs,
             ) |source, shape, sharding, *input| {
-                if (source.byteSize() == 0) return error.EmptyTensor;
+                if (source.byteSize() == 0) {
+                    load_log.debug("executable input {s} in {s} is empty", .{ source.name, source.file_uri });
+                    return error.EmptyTensor;
+                }
                 specs[next] = .{
                     .source = source,
                     .shape = shape,
@@ -235,7 +250,7 @@ pub const Loader = struct {
     /// Retires every pending submission in publish order, running their
     /// executables, and returns the first error seen by this loader.
     /// Idempotent.
-    pub fn awaitAll(self: *Loader) !void {
+    pub fn awaitAll(self: *Loader) AwaitError!void {
         while (self.pending.len != 0) self.retireOldest(true) catch {};
         if (self.failure) |err| return err;
     }
@@ -346,7 +361,7 @@ pub const Loader = struct {
         return stats.temp_size_in_bytes;
     }
 
-    fn tempUnavailable(self: *Loader, err: anyerror) u64 {
+    fn tempUnavailable(self: *Loader, err: pjrt.ApiError) u64 {
         if (!self.temp_unavailable_logged) {
             self.temp_unavailable_logged = true;
             load_log.debug("executable memory stats unavailable ({s}): temporaries counted as zero", .{@errorName(err)});
@@ -358,7 +373,7 @@ pub const Loader = struct {
     /// once the submission is published; on failure the caller still owns
     /// them. `execution` holds the output and temporary bytes per device of
     /// an executable submission, empty for a bulk one.
-    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable, execution: []u64, progress: ?*std.Progress.Node) !void {
+    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable, execution: []u64, progress: ?*std.Progress.Node) SubmitError!void {
         var logical_bytes: usize = 0;
         const placed = self.scratch.placed;
         @memset(placed, 0);
@@ -385,7 +400,7 @@ pub const Loader = struct {
     /// Retires the oldest pending submission: waits for its reads and DMA,
     /// runs its executables when `execute`, frees its inputs either way and
     /// counts its bytes once it ran. The first error is kept in `failure`.
-    fn retireOldest(self: *Loader, execute: bool) !void {
+    fn retireOldest(self: *Loader, execute: bool) AwaitError!void {
         var oldest = self.pending.popFront().?;
         defer self.release(&oldest);
         self.retire(&oldest, execute) catch |err| {
@@ -394,10 +409,15 @@ pub const Loader = struct {
         };
     }
 
-    fn retire(self: *Loader, oldest: *PendingSubmission, execute: bool) !void {
+    fn retire(self: *Loader, oldest: *PendingSubmission, execute: bool) AwaitError!void {
         try oldest.submission.await();
         if (!execute) return;
-        for (oldest.executables) |*executable| try executable.execute(self.allocator, self.io);
+        for (oldest.executables) |*executable| {
+            executable.execute(self.allocator, self.io) catch |err| {
+                if (self.failure == null) load_log.err("prepare executable arguments/results: inputs={d}, output={f}: {s}", .{ executable.inputs.len, executable.exe.output_shapes[0], @errorName(err) });
+                return err;
+            };
+        }
         self.bytes_loaded += oldest.logical_bytes;
     }
 
@@ -454,7 +474,7 @@ fn prepareModelLoad(
     comptime ModelType: type,
     model: *const ModelType,
     buffers: *Bufferized(ModelType),
-) ![]LoadSpec {
+) PrepareError![]LoadSpec {
     const tensor_count = meta.count(Tensor, model);
     const flattened = try allocator.alloc(*Buffer, tensor_count);
     defer allocator.free(flattened);
@@ -475,7 +495,7 @@ fn prepareModelLoad(
         allocator: std.mem.Allocator,
         buffers: []*Buffer,
         specs: *std.ArrayListUnmanaged(LoadSpec),
-        err: ?anyerror = null,
+        err: ?PrepareError = null,
     };
     var ctx: Ctx = .{
         .platform = platform,
@@ -490,7 +510,8 @@ fn prepareModelLoad(
         fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
             if (context.err != null) return;
             const sources = context.store.getSourcesById(tensor.id) orelse {
-                context.err = error.NotFound;
+                load_log.debug("tensor {} {f} has no checkpoint binding", .{ tensor.id, tensor.shape() });
+                context.err = error.TensorNotFound;
                 return;
             };
             if (sources.transformed) {
@@ -502,6 +523,7 @@ fn prepareModelLoad(
             }
             std.debug.assert(sources.tensors.len == 1);
             if (sources.tensors[0].byteSize() == 0) {
+                load_log.debug("tensor {} has empty source {s} in {s}", .{ tensor.id, sources.tensors[0].name, sources.tensors[0].file_uri });
                 context.err = error.EmptyTensor;
                 return;
             }
@@ -534,15 +556,20 @@ fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []c
         names.writer.print(" and {} more", .{sources.len - max_names}) catch {};
     }
 
-    // A warning, not an error: the call returns the error itself, and the
-    // test runner counts logged errors as failures.
-    load_log.warn("Transformed tensor {} {f} has no loadExecute submitted before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
+    load_log.debug("Transformed tensor {} {f} has no loadExecute submitted before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
 }
 
-fn validateOptions(opts: Loader.Options) !void {
-    _ = try limits.effectiveSourceRequestSize(opts.load_profile.read_chunk_size, 0);
+fn validateOptions(opts: Loader.Options) error{InvalidOptions}!void {
+    const read_chunk_size = opts.load_profile.read_chunk_size;
+    _ = limits.effectiveSourceRequestSize(read_chunk_size, 0) catch |err| {
+        load_log.err("invalid loader options: profile={s}, read_chunk_size={d}, expected 1..{d}: {s}", .{ opts.load_profile.name, read_chunk_size, limits.max_read_request_size, @errorName(err) });
+        return err;
+    };
     if (opts.read_parallelism) |width| {
-        if (width == 0 or width > limits.max_read_parallelism) return error.InvalidLoadParallelism;
+        if (width == 0 or width > limits.max_read_parallelism) {
+            load_log.err("invalid loader options: read_parallelism={d}, expected 1..{d}: InvalidOptions", .{ width, limits.max_read_parallelism });
+            return error.InvalidOptions;
+        }
     }
 }
 
@@ -560,7 +587,10 @@ const BoundExecutable = struct {
         store: *const TensorStore,
         binding: Loader.Binding,
     ) !BoundExecutable {
-        const sources = (store.getSourcesById(binding.tensor.id) orelse return error.NotFound).tensors;
+        const sources = (store.getSourcesById(binding.tensor.id) orelse {
+            load_log.debug("executable binding tensor {} {f} has no checkpoint sources", .{ binding.tensor.id, binding.tensor.shape() });
+            return error.TensorNotFound;
+        }).tensors;
         try validateExecutableBinding(platform, binding.tensor, sources, binding.exe);
         const inputs = try allocator.alloc(Buffer, sources.len);
         for (inputs, binding.exe.input_shapes, binding.exe.input_shardings) |*input, shape, sharding| {
@@ -602,15 +632,22 @@ fn validateExecutableBinding(
     tensor: Tensor,
     sources: []const *safetensors.Tensor,
     exe: *const Exe,
-) !void {
+) BindingError!void {
+    errdefer |err| load_log.debug("executable binding for tensor {} {f}: {s}; sources={d}, input_shapes={d}, input_shardings={d}, output_shapes={d}, output_shardings={d}, platform_matches={}", .{ tensor.id, tensor.shape(), @errorName(err), sources.len, exe.input_shapes.len, exe.input_shardings.len, exe.output_shapes.len, exe.output_shardings.len, exe.platform == platform });
     if (exe.platform != platform) return error.ExecutablePlatformMismatch;
     if (exe.output_shapes.len != 1 or exe.output_shardings.len != 1)
-        return error.InvalidExecutableOutputs;
+        return error.ExecutableOutputCountMismatch;
     if (exe.input_shapes.len != sources.len or exe.input_shardings.len != sources.len)
-        return error.InvalidExecutableInputs;
-    if (!tensor.shape().eql(exe.output_shapes[0])) return error.ExecutableOutputShapeMismatch;
+        return error.ExecutableInputCountMismatch;
+    if (!tensor.shape().eql(exe.output_shapes[0])) {
+        load_log.debug("executable output shape: expected {f}, actual {f}", .{ tensor.shape(), exe.output_shapes[0] });
+        return error.ExecutableOutputShapeMismatch;
+    }
     for (sources, exe.input_shapes, exe.input_shardings) |source, shape, sharding| {
-        if (!source.shape.eql(shape)) return error.ExecutableInputShapeMismatch;
+        if (!source.shape.eql(shape)) {
+            load_log.debug("executable input {s}: source shape {f}, executable shape {f}", .{ source.name, source.shape, shape });
+            return error.ExecutableInputShapeMismatch;
+        }
         try validateExecutableSharding(platform, sharding, exe.num_devices);
     }
     try validateExecutableSharding(platform, exe.output_shardings[0], exe.num_devices);
@@ -620,12 +657,18 @@ fn validateExecutableSharding(
     platform: *const Platform,
     unresolved: Sharding,
     expected_devices: usize,
-) !void {
+) error{ExecutablePlacementMismatch}!void {
     const sharding = unresolved.resolve(platform);
     const devices = sharding.devicesInCanonicalOrder();
-    if (devices.len != expected_devices) return error.ExecutablePlacementMismatch;
+    if (devices.len != expected_devices) {
+        load_log.debug("executable placement: expected {d} devices, actual {d}", .{ expected_devices, devices.len });
+        return error.ExecutablePlacementMismatch;
+    }
     for (devices) |device| {
-        if (device.id >= platform.devices.len) return error.ExecutablePlacementMismatch;
+        if (device.id >= platform.devices.len) {
+            load_log.debug("executable placement device {d} exceeds platform device count {d}", .{ device.id, platform.devices.len });
+            return error.ExecutablePlacementMismatch;
+        }
     }
 }
 
@@ -987,7 +1030,7 @@ test "loader initialization releases its workspace on an invalid profile" {
         loader.deinit();
         break :unexpected {};
     } else |err| err;
-    try std.testing.expectError(error.InvalidLoadProfile, result);
+    try std.testing.expectError(error.InvalidOptions, result);
 }
 
 test "a rate-limited HTTP source loads through the VFS hold" {
@@ -1092,4 +1135,78 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     try std.testing.expect(direct.pool.high_water <= 4);
     try std.testing.expectEqual(@as(usize, 0), direct.request_gate.in_use);
     try std.testing.expectEqual(@as(usize, direct.pool.capacity), direct.pool.free_blocks.items.len);
+}
+
+test "validation rejections leave the loader usable" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit(allocator, io);
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
+        var output: Buffer = undefined;
+        var foreign: Platform = undefined;
+        const different_shapes = [_]Shape{.init(.{8}, .u8)};
+        const failures = [_]BindingError{
+            error.ExecutablePlatformMismatch,
+            error.ExecutableInputCountMismatch,
+            error.ExecutableOutputCountMismatch,
+            error.ExecutableInputShapeMismatch,
+            error.ExecutableOutputShapeMismatch,
+            error.ExecutablePlacementMismatch,
+        };
+        for (failures) |expected| {
+            var exe = fixture.exe;
+            switch (expected) {
+                error.ExecutablePlatformMismatch => exe.platform = &foreign,
+                error.ExecutableInputCountMismatch => exe.input_shapes = &.{},
+                error.ExecutableOutputCountMismatch => exe.output_shapes = &.{},
+                error.ExecutableInputShapeMismatch => exe.input_shapes = &different_shapes,
+                error.ExecutableOutputShapeMismatch => exe.output_shapes = &different_shapes,
+                error.ExecutablePlacementMismatch => exe.num_devices += 1,
+            }
+            try std.testing.expectError(expected, loader.loadExecute(&fixture.store, &.{.{ .tensor = fixture.value, .output = &output, .exe = &exe }}, null));
+
+            try std.testing.expect(loader.failure == null);
+            try std.testing.expectEqual(0, loader.pending.len);
+        }
+        const missing = Tensor.fromShape(fixture.value.shape());
+        try std.testing.expectError(error.TensorNotFound, loader.load(Tensor, &missing, &output, &fixture.store, &.{}, null));
+        try std.testing.expectError(error.EmptyTensor, loader.load(Tensor, &fixture.empty, &output, &fixture.store, &.{}, null));
+        const transformed = fixture.store.view().maybeCreateBinding(&.{"value"}, fixture.value.shape()).?;
+        try std.testing.expectError(error.TransformedTensorNotDelivered, loader.load(Tensor, &transformed, &output, &fixture.store, &.{}, null));
+
+        try loader.load(Tensor, &fixture.value, &output, &fixture.store, &.{}, null);
+        try loader.awaitAll();
+        defer output.deinit();
+        try LoaderTestFixture.expectContents(allocator, io, &output, &LoaderTestFixture.contents);
+    }
+}
+
+test "both backends report source size mismatches without changing publication semantics" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit(allocator, io);
+    for (LoaderTestFixture.backends) |kind| {
+        var loader = try fixture.loader(allocator, io, kind);
+        defer loader.deinit();
+        var tensor = fixture.value;
+        tensor._shape = .init(.{8}, .u8);
+        var output: Buffer = undefined;
+        if (kind == .direct) {
+            try std.testing.expectError(error.SourceSizeMismatch, loader.load(Tensor, &tensor, &output, &fixture.store, &.{}, null));
+
+            try loader.load(Tensor, &fixture.value, &output, &fixture.store, &.{}, null);
+            try loader.awaitAll();
+            output.deinit();
+        } else {
+            try loader.load(Tensor, &tensor, &output, &fixture.store, &.{}, null);
+            try std.testing.expectError(error.SourceSizeMismatch, loader.awaitAll());
+            try std.testing.expectError(error.SourceSizeMismatch, loader.awaitAll());
+        }
+    }
 }

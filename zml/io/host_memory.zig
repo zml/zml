@@ -1,6 +1,7 @@
 //! Loader-owned host arenas and per-load block leases.
 
 const std = @import("std");
+
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
@@ -11,7 +12,11 @@ const Device = @import("../platform.zig").Device;
 const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 
-const log = std.log.scoped(.@"zml/mem");
+const log = @import("log.zig").mem;
+
+pub const InitError = std.mem.Allocator.Error || error{ UnsupportedPlatform, HostMemoryUnavailable };
+pub const GrowError = std.mem.Allocator.Error || pjrt.ApiError || error{ HostMemoryUnavailable, HostMemoryBudgetExceeded };
+pub const AcquireError = error{ Closed, RequestExceedsCapacity };
 
 /// One ROCm host-memory allocation path and its bytes allocated so far.
 const HostNode = struct {
@@ -54,7 +59,7 @@ const Backend = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-    ) !Backend {
+    ) InitError!Backend {
         // Interleave memory-bearing nodes, not just device-associated nodes.
         // On four GB300, per-device local H2D was ~176-184 GiB/s versus ~110
         // remote, yet strict locality could put page-cache copies and DMA on
@@ -85,7 +90,10 @@ const Backend = union(enum) {
                 }) = .empty;
                 defer discovered_nodes.deinit(allocator);
                 devices: for (platform.devices, 0..) |device, device_index| {
-                    if (device.memory(.host_pinned) == null) return error.PinnedHostMemoryUnavailable;
+                    if (device.memory(.host_pinned) == null) {
+                        log.err("device {d} ({s}) has no host-pinned memory space: HostMemoryUnavailable", .{ device_index, device.kind() });
+                        return error.HostMemoryUnavailable;
+                    }
                     const node = device.numaNode() orelse continue;
                     for (discovered_nodes.items) |existing| {
                         if (existing.node == node) continue :devices;
@@ -106,7 +114,7 @@ const Backend = union(enum) {
                     .host_nodes = host_nodes,
                 } };
             },
-            .tpu, .neuron, .metal => error.DmaBenchmarkUnsupported,
+            .tpu, .neuron, .metal => error.UnsupportedPlatform,
         };
     }
 
@@ -161,7 +169,7 @@ const Backend = union(enum) {
                 }
                 const any_device_index = host.host_nodes[host_node_index].any_device_index;
                 const memory = host.platform.devices[any_device_index].memory(.host_pinned) orelse
-                    return error.PinnedHostMemoryUnavailable;
+                    return error.HostMemoryUnavailable;
                 const allocation: PinnedHostAllocation = try .create(memory, any_device_index, bytes);
                 errdefer allocation.destroy();
                 try host.allocations.append(allocator, allocation);
@@ -220,7 +228,15 @@ const Backend = union(enum) {
             };
         }
 
-        fn alloc(self: *HugePageAllocator, len: usize) ![]align(std.heap.page_size_min) u8 {
+        fn alloc(self: *HugePageAllocator, len: usize) (std.mem.Allocator.Error || pjrt.ApiError)![]align(std.heap.page_size_min) u8 {
+            return self.allocWithMap(len, mapPages);
+        }
+
+        fn mapPages(platform: ?*const Platform, data: []const u8) pjrt.ApiError!void {
+            if (platform) |p| try p.pjrt_client.dmaMap(p.pjrt_api, data);
+        }
+
+        fn allocWithMap(self: *HugePageAllocator, len: usize, comptime map: fn (?*const Platform, []const u8) pjrt.ApiError!void) (std.mem.Allocator.Error || pjrt.ApiError)![]align(std.heap.page_size_min) u8 {
             const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
             const effective_alignment = effectiveAlignment(alignment, len);
             const ptr = self.parent.rawAlloc(len, effective_alignment, @returnAddress()) orelse
@@ -228,12 +244,10 @@ const Backend = union(enum) {
             const data: []align(std.heap.page_size_min) u8 = @alignCast(ptr[0..len]);
             self.place(data);
             adviseHugePages(data);
-            if (self.platform) |platform| {
-                platform.pjrt_client.dmaMap(platform.pjrt_api, @ptrCast(data)) catch {
-                    self.parent.rawFree(data, effective_alignment, @returnAddress());
-                    return error.OutOfMemory;
-                };
-            }
+            map(self.platform, data) catch |err| {
+                self.parent.rawFree(data, effective_alignment, @returnAddress());
+                return err;
+            };
             return data;
         }
 
@@ -315,13 +329,17 @@ pub const Workspace = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-    ) !Workspace {
-        if (platform.devices.len == 0 or platform.devices.len > 64)
-            return error.DmaDeviceMismatch;
+    ) InitError!Workspace {
+        if (platform.devices.len == 0 or platform.devices.len > 64) {
+            log.err("host workspace requires 1..64 devices, got {d}: UnsupportedPlatform", .{platform.devices.len});
+            return error.UnsupportedPlatform;
+        }
         const device_kind = platform.devices[0].kind();
         for (platform.devices[1..]) |device| {
-            if (!std.mem.eql(u8, device_kind, device.kind()))
-                return error.HeterogeneousDmaUnsupported;
+            if (!std.mem.eql(u8, device_kind, device.kind())) {
+                log.err("host workspace requires homogeneous devices: {s} differs from {s}: UnsupportedPlatform", .{ device_kind, device.kind() });
+                return error.UnsupportedPlatform;
+            }
         }
 
         return .{
@@ -357,9 +375,9 @@ pub const Workspace = struct {
     }
 
     /// Retains one new arena within the mapped-byte ceiling.
-    pub fn allocate(self: *Workspace, bytes: usize) ![]u8 {
+    pub fn allocate(self: *Workspace, bytes: usize) GrowError![]u8 {
         if (bytes > self.max_mapped_bytes - self.mapped_bytes)
-            return error.DmaMappedBudgetExceeded;
+            return error.HostMemoryBudgetExceeded;
         const allocation = try self.backend.allocate(self.allocator, self.io, bytes);
         self.mapped_bytes += allocation.len;
         return allocation;
@@ -374,12 +392,12 @@ pub const Workspace = struct {
 
     /// Maps the blocks missing below `target_blocks` as one arena. Requires a
     /// nonzero block_size; the workspace has one coordinating owner.
-    pub fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) !void {
+    pub fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) GrowError!void {
         const usable_blocks = self.usableBlocks(block_size);
         const missing_blocks = target_blocks -| usable_blocks;
         if (missing_blocks == 0) return;
         if (missing_blocks > (self.max_mapped_bytes - self.mapped_bytes) / block_size)
-            return error.DmaMappedBudgetExceeded;
+            return error.HostMemoryBudgetExceeded;
 
         _ = try self.allocate(missing_blocks * block_size);
     }
@@ -461,9 +479,9 @@ pub const BlockPool = struct {
         allocator: std.mem.Allocator,
         workspace: Workspace,
         block_size: usize,
-    ) !BlockPool {
+    ) (std.mem.Allocator.Error || error{InvalidOptions})!BlockPool {
         if (block_size == 0)
-            return error.RequestExceedsCapacity;
+            return error.InvalidOptions;
 
         var capacity: usize = 0;
         var free_blocks: std.ArrayListUnmanaged(Block) = .empty;
@@ -499,7 +517,7 @@ pub const BlockPool = struct {
 
     /// Leases `output.len` blocks atomically, waiting for releases when the
     /// free list is short. Allocates nothing, ever.
-    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) !void {
+    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) AcquireError!void {
         if (output.len == 0) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -569,7 +587,7 @@ const PinnedHostAllocation = struct {
             .dst = .{ .memory = memory.pjrt_memory },
         });
         errdefer buffer.deinit(api);
-        if (!buffer.isOnCpu(api)) return error.PinnedHostMemoryNotHostVisible;
+        if (!buffer.isOnCpu(api)) return error.HostMemoryUnavailable;
 
         // The writable pointer is borrowed from PJRT. Keep both the external
         // reference and its owning buffer alive for the arena's whole lifetime.
@@ -674,7 +692,7 @@ test "Workspace arena ownership cleans up allocation failures" {
             _ = try workspace.allocate(64);
             _ = try workspace.allocate(128);
             try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
-            try std.testing.expectError(error.DmaMappedBudgetExceeded, workspace.allocate(128));
+            try std.testing.expectError(error.HostMemoryBudgetExceeded, workspace.allocate(128));
             try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
             try std.testing.expectEqual(@as(usize, 128), workspace.findArena(100).?.len);
             try std.testing.expectEqual(@as(usize, 3), workspace.usableBlocks(64));
@@ -682,7 +700,7 @@ test "Workspace arena ownership cleans up allocation failures" {
             try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
             try workspace.growToBlocks(64, 4);
             try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
-            try std.testing.expectError(error.DmaMappedBudgetExceeded, workspace.growToBlocks(64, 5));
+            try std.testing.expectError(error.HostMemoryBudgetExceeded, workspace.growToBlocks(64, 5));
             try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
         }
     };
@@ -924,4 +942,18 @@ test "BlockPool rejects requests that can never fit without leasing" {
     var fits: [2]BlockPool.Block = undefined;
     try pool.acquireMany(io, &fits);
     pool.releaseMany(io, &fits);
+}
+
+test "DMA registration preserves the PJRT failure and frees the allocation" {
+    var allocator: Backend.HugePageAllocator = .init(std.testing.allocator, null, 0);
+    const RefusedMap = struct {
+        fn map(_: ?*const Platform, _: []const u8) pjrt.ApiError!void {
+            return error.PermissionDenied;
+        }
+    };
+    try std.testing.expectError(error.PermissionDenied, allocator.allocWithMap(4096, RefusedMap.map));
+    // An allocation after the failure still succeeds, and both paths are
+    // checked for leaks by the testing allocator.
+    const data = try allocator.alloc(4096);
+    allocator.free(data);
 }

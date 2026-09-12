@@ -5,6 +5,7 @@
 //! (`vfs/request.zig`). Runtime ownership and synchronization live here.
 
 const std = @import("std");
+
 const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
@@ -26,7 +27,14 @@ const dma_calibration = @import("dma_calibration.zig");
 const host_memory = @import("host_memory.zig");
 const load_limits = @import("limits.zig");
 
-const load_log = std.log.scoped(.@"zml/io/load");
+const load_log = @import("log.zig").load;
+
+/// Creating a tensor's device state; `LazyOnce` replays it to every later
+/// reader of the tensor.
+const TransferInitError = std.mem.Allocator.Error || Sharding.Error || pjrt.ApiError;
+/// Everything a worker, a pump callback or a partially published plan can
+/// record as the pipeline's sticky error.
+const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || host_memory.AcquireError || error{ InvalidOptions, SourceSizeMismatch, InvalidTensorRange, Internal, Closed };
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
@@ -39,6 +47,10 @@ const max_dma_pieces_per_device: usize = 64;
 /// The direct DMA backend. Submissions and awaits come from one task at a
 /// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
+    pub const InitError = host_memory.InitError || host_memory.GrowError || dma_calibration.CalibrationError || std.Io.ConcurrentError || error{InvalidOptions};
+    pub const AwaitError = PipelineError;
+    pub const SubmitError = PipelineError || error{EmptyTensor};
+
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
@@ -87,7 +99,7 @@ pub const Loader = struct {
         io: std.Io,
         platform: *const Platform,
         opts: BackendOptions,
-    ) !*Loader {
+    ) InitError!*Loader {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
         const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);
@@ -131,7 +143,10 @@ pub const Loader = struct {
             self.scheduler.deinit();
             self.pool.deinit();
         }
-        _ = Planner.maximumJobLen(self.plan_config) catch return error.InvalidLoadProfile;
+        _ = Planner.maximumJobLen(self.plan_config) catch |err| {
+            load_log.err("invalid read alignment: alignment={d}, request_size={d}, block_size={d}: {s}", .{ self.plan_config.alignment, self.plan_config.request_size, self.plan_config.block_size, @errorName(err) });
+            return err;
+        };
 
         self.pipeline = try Pipeline.init(
             allocator,
@@ -171,7 +186,7 @@ pub const Loader = struct {
     /// published when a failure precedes the first plan; a later planning
     /// failure fails the loader (a partial submission can never complete),
     /// the batch is awaited here and the caller sees only the error.
-    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) !*Batch {
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         const batch = batch: {
             const batch = try Batch.create(self.allocator, self.io, .{
@@ -185,13 +200,14 @@ pub const Loader = struct {
         };
         Planner.publishFiles(&self.scheduler, self.io, batch, batch.items, self.plan_config, self.direct_io) catch |err| {
             if (batch.plans.items.len == 0) {
+                load_log.debug("reject batch {d} before publication: source={s}: {s}", .{ batch.diagnostics.sequence, batch.planning_source, @errorName(err) });
                 self.destroyBatch(batch);
                 return err;
             }
             // Planning failed after part of the batch was published: fail
             // the pipeline, seal and await this batch, and return the sticky
             // error instead of a batch the caller could not complete.
-            self.pipeline.recordError(err);
+            self.pipeline.recordError(err, "plan partially published batch {d}, source={s}, published_plans={d}", .{ batch.diagnostics.sequence, batch.planning_source, batch.plans.items.len });
             self.scheduler.seal(self.io, batch);
             self.batch_count += 1;
             batch.finishJobs(1);
@@ -220,14 +236,14 @@ pub const Loader = struct {
     /// flagged the submission that completed its bytes); one that did not
     /// would leave a buffer that never becomes ready, so it fails the
     /// loader instead.
-    pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
+    pub fn awaitBatch(self: *Loader, batch: *Batch) AwaitError!void {
         batch.done.waitUncancelable(self.io);
         const done_at: std.Io.Timestamp = .now(self.io, .awake);
         // Every request of this batch has completed: no worker or callback
         // touches its managers or contexts any more.
         var load_error = self.pipeline.errorValue();
         if (load_error == null and !batch.fullySubmitted()) {
-            self.pipeline.recordError(error.IncompleteTransfer);
+            self.pipeline.recordError(error.Internal, "batch {d} completed without submitting every target's bytes", .{batch.diagnostics.sequence});
             load_error = self.pipeline.errorValue();
         }
         if (load_error != null) {
@@ -299,15 +315,21 @@ pub const Loader = struct {
                 const calibration = try dma_calibration.calibrate(&workspace, platform, opts.dma);
                 const block_size = calibration.block_size;
 
-                const request_size = try load_limits.effectiveSourceRequestSize(
+                const request_size = load_limits.effectiveSourceRequestSize(
                     opts.load_profile.read_chunk_size,
                     block_size,
-                );
+                ) catch |err| {
+                    load_log.err("source request size: profile={s}, read_chunk_size={d}, dma_block_size={d}, maximum={d}: {s}", .{ opts.load_profile.name, opts.load_profile.read_chunk_size, block_size, load_limits.max_read_request_size, @errorName(err) });
+                    return err;
+                };
                 // A request is a whole number of blocks, so the pinned set is
                 // an exact number of requests and the lifecycle credits are
                 // the capacity in requests. Every shipped profile satisfies
                 // it (8, 16 and 32 MiB chunks over power-of-two blocks).
-                if (request_size % block_size != 0) return error.InvalidDmaLoadConfig;
+                if (request_size % block_size != 0) {
+                    load_log.err("source request {d} is not a multiple of the DMA block size {d}: InvalidOptions", .{ request_size, block_size });
+                    return error.InvalidOptions;
+                }
                 const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
                     request_size,
                     block_size,
@@ -329,7 +351,10 @@ pub const Loader = struct {
                     opts.readWidth(),
                     (available -| dma_reserve) / maximum_blocks_per_job -| 1,
                 );
-                if (fitted_width == 0) return error.DmaMappedBudgetExceeded;
+                if (fitted_width == 0) {
+                    load_log.err("host memory ceiling {Bi:.2} fits no source request beside the DMA reserve: available_blocks={d}, reserve_blocks={d}, blocks_per_request={d}: HostMemoryBudgetExceeded", .{ workspace.max_mapped_bytes, available, dma_reserve, maximum_blocks_per_job });
+                    return error.HostMemoryBudgetExceeded;
+                }
                 if (fitted_width < opts.readWidth()) {
                     load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}", .{
                         fitted_width,
@@ -340,6 +365,7 @@ pub const Loader = struct {
                 // its host nodes per allocation, and that split is recorded.
                 const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
                 const retained_before = workspace.mapped_bytes;
+                errdefer |err| load_log.err("grow host workspace: block_size={d}, source_width={d}, reserve_blocks={d}, mapped={d}, ceiling={d}: {s}", .{ block_size, fitted_width, dma_reserve, workspace.mapped_bytes, workspace.max_mapped_bytes, @errorName(err) });
                 try workspace.growToBlocks(block_size, dma_reserve);
                 try workspace.growToBlocks(block_size, (fitted_width + 1) * maximum_blocks_per_job + dma_reserve);
                 const pregrown_bytes = workspace.mapped_bytes - retained_before;
@@ -381,7 +407,10 @@ pub const Loader = struct {
         for (specs, items) |spec, *item| {
             // An empty source has no transfer, so its output would never be
             // written; the front ends reject it too.
-            if (spec.source.byteSize() == 0) return error.EmptyTensor;
+            if (spec.source.byteSize() == 0) {
+                load_log.debug("source {s} in {s} is empty", .{ spec.source.name, spec.source.file_uri });
+                return error.EmptyTensor;
+            }
             item.* = .{
                 .source = spec.source,
                 .source_slot = try self.sourceSlot(spec.source.file_uri),
@@ -416,7 +445,7 @@ pub const Loader = struct {
             self.maximum_blocks_per_job,
             self.platform.devices.len,
         ) catch |err| {
-            self.pipeline.recordError(err);
+            self.pipeline.recordError(err, "allocate source worker scratch: blocks={d}, devices={d}", .{ self.maximum_blocks_per_job, self.platform.devices.len });
             return;
         };
         defer scratch.deinit();
@@ -434,7 +463,7 @@ pub const Loader = struct {
             // The scheduling sentinel keeps the batch, and with it the
             // claim's plan, alive through `run` and error reporting.
             defer request.finishScheduling();
-            request.run(self, claim, &scratch) catch |err| self.pipeline.recordError(err);
+            request.run(self, claim, &scratch) catch |err| self.pipeline.recordError(err, "source request: file={s}, offset={d}, bytes={d}", .{ claim.plan.source_slot.uri, claim.job().file_offset, claim.job().len });
         }
     }
 
@@ -658,6 +687,8 @@ pub const Batch = struct {
         source_stats: ?VFS.ReadStats = null,
     };
 
+    // Borrowed source URI of the file currently being planned.
+    planning_source: []const u8 = "",
     allocator: std.mem.Allocator,
     io: std.Io,
     /// Published plans in file order: appended by the submitting task under
@@ -723,7 +754,7 @@ pub const Batch = struct {
 const Item = struct {
     const InitContext = struct { item: *const Item, direct: *Loader };
 
-    fn initTransfer(ctx: InitContext) !TensorTransfer {
+    fn initTransfer(ctx: InitContext) TransferInitError!TensorTransfer {
         return TensorTransfer.init(ctx.direct, ctx.item);
     }
 
@@ -733,9 +764,9 @@ const Item = struct {
     sharding: Sharding,
     output: *Buffer,
     progress: ?*std.Progress.Node = null,
-    state: LazyOnce(TensorTransfer, InitContext, initTransfer) = .{},
+    state: LazyOnce(TensorTransfer, InitContext, TransferInitError, initTransfer) = .{},
 
-    fn ensureState(self: *Item, direct: *Loader) !*TensorTransfer {
+    fn ensureState(self: *Item, direct: *Loader) TransferInitError!*TensorTransfer {
         return self.state.ensure(direct.io, .{ .item = self, .direct = direct });
     }
 
@@ -747,14 +778,14 @@ const Item = struct {
 const SourceSlot = struct {
     const OpenContext = struct { io: std.Io, uri: []const u8 };
 
-    fn openFile(ctx: OpenContext) !std.Io.File {
+    fn openFile(ctx: OpenContext) std.Io.File.OpenError!std.Io.File {
         return std.Io.Dir.openFile(.cwd(), ctx.io, ctx.uri, .{ .mode = .read_only });
     }
 
     uri: []const u8,
-    file: LazyOnce(std.Io.File, OpenContext, openFile) = .{},
+    file: LazyOnce(std.Io.File, OpenContext, std.Io.File.OpenError, openFile) = .{},
 
-    fn ensure(self: *SourceSlot, io: std.Io) !std.Io.File {
+    fn ensure(self: *SourceSlot, io: std.Io) std.Io.File.OpenError!std.Io.File {
         const file = try self.file.ensure(io, .{ .io = io, .uri = self.uri });
         return file.*;
     }
@@ -817,7 +848,7 @@ const TensorTransfer = struct {
     /// Creates the item's device buffers and transfer managers and writes
     /// the output shell. Runs once per tensor (`LazyOnce`), on the worker
     /// that first reads for it, which also counts the allocation.
-    fn init(direct: *Loader, item: *const Item) !TensorTransfer {
+    fn init(direct: *Loader, item: *const Item) TransferInitError!TensorTransfer {
         const allocator = direct.allocator;
         const platform = direct.platform;
         const packed_shape = item.shape.packedShape();
@@ -943,6 +974,7 @@ const Planner = struct {
         var file_start: usize = 0;
         while (file_start < order.len) {
             const file_end = fileGroupEnd(items, order, file_start);
+            batch.planning_source = items[order[file_start]].source.file_uri;
             const planning_started: std.Io.Timestamp = .now(io, .awake);
             var file_config = config;
             if (vfs) |v| {
@@ -996,11 +1028,14 @@ const Planner = struct {
                 .total = packed_shape.byteSize(),
             };
             initialized_plans += 1;
-            if (plan.total != item.source.byteSize()) return error.InvalidLoaderJob;
+            if (plan.total != item.source.byteSize()) {
+                load_log.debug("source {s} in {s}: expected {d} bytes for {f}, actual {d}", .{ item.source.name, item.source.file_uri, plan.total, item.shape, item.source.byteSize() });
+                return error.SourceSizeMismatch;
+            }
             // Every later use of a device id indexes a per-device array (the
             // pumps, the transfer targets); check them once, here.
             for (item.sharding.devicesInCanonicalOrder()) |device| {
-                if (device.id >= device_count) return error.DmaDeviceMismatch;
+                if (device.id >= device_count) return error.IncompatibleSharding;
             }
         }
         var jobs_list: std.ArrayList(Batch.Plan.Job) = .empty;
@@ -1020,7 +1055,7 @@ const Planner = struct {
                 u64,
                 first_offset,
                 items[first_index].source.byteSize(),
-            ) catch return error.InvalidLoaderJob;
+            ) catch return error.InvalidTensorRange;
             if (run_end == first_offset) {
                 run_cursor += 1;
                 continue;
@@ -1030,7 +1065,7 @@ const Planner = struct {
                 const candidate = items[order[run_item_end]].source;
                 if (candidate.offset > run_end) break;
                 const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
-                    return error.InvalidLoaderJob;
+                    return error.InvalidTensorRange;
                 // A touching range starts where every preceding range has
                 // ended. Unlike an arbitrary tensor end, this is safe even
                 // when the batch contains overlapping or duplicate ranges.
@@ -1062,7 +1097,7 @@ const Planner = struct {
                         u64,
                         @intCast(jobs_remaining - 1),
                         @intCast(maximum_job_len),
-                    ) catch return error.InvalidLoaderJob;
+                    ) catch return error.Internal;
                     const minimum_end = @max(job_start + 1, run_end - remaining_capacity);
                     const maximum_end = @min(
                         hard_end,
@@ -1088,7 +1123,7 @@ const Planner = struct {
                 const read_start = if (alignment == 0) job_start else std.mem.alignBackward(u64, job_start, alignment);
                 const read_end = if (alignment == 0) job_end else std.mem.alignBackward(
                     u64,
-                    std.math.add(u64, job_end, alignment - 1) catch return error.InvalidLoaderJob,
+                    std.math.add(u64, job_end, alignment - 1) catch return error.InvalidTensorRange,
                     alignment,
                 );
                 const read_len: usize = @intCast(read_end - read_start);
@@ -1096,7 +1131,7 @@ const Planner = struct {
                 while (candidate_start < run_item_end) {
                     const candidate = items[order[candidate_start]].source;
                     const candidate_end = std.math.add(u64, candidate.offset, candidate.byteSize()) catch
-                        return error.InvalidLoaderJob;
+                        return error.InvalidTensorRange;
                     if (candidate_end > job_start) break;
                     candidate_start += 1;
                 }
@@ -1104,7 +1139,7 @@ const Planner = struct {
                     const item = &items[item_index];
                     if (item.source.offset >= job_end) break;
                     const item_end = std.math.add(u64, item.source.offset, item.source.byteSize()) catch
-                        return error.InvalidLoaderJob;
+                        return error.InvalidTensorRange;
                     const intersection_start = @max(job_start, item.source.offset);
                     const intersection_end = @min(job_end, item_end);
                     if (intersection_start >= intersection_end) continue;
@@ -1163,12 +1198,12 @@ const Planner = struct {
     /// The longest tensor range one job may cover: the request size within
     /// the scatter limit, less the two alignment units its widened read
     /// can add, so a widened job still fits `maximumCoalescedJobBlocks`.
-    fn maximumJobLen(config: Config) !usize {
+    fn maximumJobLen(config: Config) error{InvalidOptions}!usize {
         const scatter_limit = config.block_size *| load_limits.max_positional_iovecs;
         const unpadded = @min(config.request_size, scatter_limit);
-        if (unpadded == 0) return error.InvalidLoaderJob;
+        if (unpadded == 0) return error.InvalidOptions;
         if (config.alignment == 0) return unpadded;
-        if (!std.math.isPowerOfTwo(config.alignment) or 2 * config.alignment >= unpadded) return error.InvalidLoaderJob;
+        if (!std.math.isPowerOfTwo(config.alignment) or config.alignment > (unpadded - 1) / 2) return error.InvalidOptions;
         return unpadded - 2 * config.alignment;
     }
 
@@ -1222,13 +1257,13 @@ const Planner = struct {
         const spans = tensor.dispatch_spans;
         const piece_end = tensor_offset + len;
         var cursor = tensor_offset;
-        var span_index = spans.spanIndexAt(cursor) orelse return error.InvalidLoaderJob;
+        var span_index = spans.spanIndexAt(cursor) orelse return error.Internal;
         while (cursor < piece_end) {
             const span = spans.spans[span_index];
             const absolute = item.source.offset + @as(u64, @intCast(cursor));
-            if (absolute < job_file_offset) return error.InvalidLoaderJob;
+            if (absolute < job_file_offset) return error.Internal;
             const source_relative = std.math.cast(usize, absolute - job_file_offset) orelse
-                return error.InvalidLoaderJob;
+                return error.Internal;
             const block_index = source_relative / block_size;
             const block_offset = source_relative % block_size;
             const take = @min(
@@ -1329,7 +1364,7 @@ const Scheduler = struct {
     fn publish(self: *Scheduler, io: std.Io, batch: *Batch, plan: *Batch.Plan) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        if (self.stopping) return error.LoaderShuttingDown;
+        if (self.stopping) return error.Closed;
         std.debug.assert(batch.diagnostics.sealed_at == null);
         const job_count = plan.jobs.len;
         try batch.plans.ensureUnusedCapacity(batch.allocator, 1);
@@ -1532,7 +1567,10 @@ const ReadRequest = struct {
         // sharding's canonical device order), so these are invariants.
         for (transfers) |transfer| {
             const init_started = awakeNs(io);
-            const tensor = try transfer.item.ensureState(loader);
+            const tensor = transfer.item.ensureState(loader) catch |err| {
+                pipeline.recordError(err, "initialize tensor {s} from {s}, shape={f}", .{ transfer.item.source.name, transfer.item.source.file_uri, transfer.item.shape });
+                return err;
+            };
             _ = pipeline.metrics.tensor_init_ns.fetchAdd(awakeNs(io) -| init_started, .monotonic);
             std.debug.assert(transfer.block_index < block_count and
                 transfer.block_offset < pipeline.block_size and
@@ -1563,7 +1601,7 @@ const ReadRequest = struct {
             }
 
             {
-                if (!pipeline.read_gate.acquire(io)) return error.LoaderShuttingDown;
+                if (!pipeline.read_gate.acquire(io)) return error.Closed;
                 defer pipeline.read_gate.release(io);
                 const read_started = awakeNs(io);
                 const read_result = safetensors.readFilePositionalAllV(
@@ -1829,13 +1867,14 @@ const Pipeline = struct {
         return self.first_error.load(.acquire) != 0;
     }
 
-    fn errorValue(self: *const Pipeline) ?anyerror {
+    fn errorValue(self: *const Pipeline) ?PipelineError {
         const value = self.first_error.load(.acquire);
-        return if (value == 0) null else @errorFromInt(value);
+        return if (value == 0) null else @errorCast(@errorFromInt(value));
     }
 
-    fn recordError(self: *Pipeline, err: anyerror) void {
+    fn recordError(self: *Pipeline, err: PipelineError, comptime fmt: []const u8, args: anytype) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
+            load_log.failure(err, fmt, args);
             self.scheduler.fail(self.io);
             self.pool.close(self.io);
             self.read_gate.close(self.io);
@@ -1992,7 +2031,7 @@ const Pipeline = struct {
         const len = transfer.len;
         const block = transfer.block;
         self.submitTransfer(transfer) catch |err| {
-            self.recordError(err);
+            self.recordError(err, "submit DMA transfer: device={d}, destination_offset={d}, bytes={d}", .{ device_index, transfer.destination_offset, len });
             self.eventCompleted(device_index, len);
             block.complete();
         };
@@ -2048,7 +2087,7 @@ const Pipeline = struct {
                 // whatever happened to the copy (the C API wrapper sets the
                 // promise with an OK status); kept for a plugin that reports.
                 if (err) |pjrt_error| {
-                    pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError());
+                    pipeline.recordError(pjrt_error.getCode(pipeline.platform.pjrt_api).toApiError(), "complete DMA transfer: device={d}, bytes={d}, message={s}", .{ device_index, len, pjrt_error.getMessage(pipeline.platform.pjrt_api) });
                 }
                 pipeline.eventCompleted(device_index, len);
                 // After the pump this callback may have run, so the event is
@@ -2177,7 +2216,7 @@ const Metrics = struct {
 /// A value initialized at most once by whichever task touches it first.
 /// Concurrent callers wait on the event; a failed initialization keeps its
 /// error code and re-materializes the same error for every later caller.
-fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anyerror!T) type {
+fn LazyOnce(comptime T: type, comptime Ctx: type, comptime ErrorSet: type, comptime initFn: fn (Ctx) ErrorSet!T) type {
     return struct {
         const Self = @This();
         const Status = enum(u8) {
@@ -2192,7 +2231,7 @@ fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anye
         error_code: std.atomic.Value(u16) = .init(0),
         initialized: std.Io.Event = .unset,
 
-        fn ensure(self: *Self, io: std.Io, ctx: Ctx) !*T {
+        fn ensure(self: *Self, io: std.Io, ctx: Ctx) ErrorSet!*T {
             while (true) switch (self.status.load(.acquire)) {
                 .uninitialized => {
                     if (self.status.cmpxchgStrong(.uninitialized, .initializing, .acq_rel, .acquire) != null) continue;
@@ -2208,7 +2247,7 @@ fn LazyOnce(comptime T: type, comptime Ctx: type, comptime initFn: fn (Ctx) anye
                 },
                 .initializing => self.initialized.waitUncancelable(io),
                 .ready => return &self.value,
-                .failed => return @errorFromInt(self.error_code.load(.acquire)),
+                .failed => return @errorCast(@errorFromInt(self.error_code.load(.acquire))),
             };
         }
 
@@ -2280,7 +2319,7 @@ test "loader releases the calibrated pool when alignment validation fails" {
         loader.destroy();
         break :unexpected {};
     } else |err| err;
-    try std.testing.expectError(error.InvalidLoadProfile, result);
+    try std.testing.expectError(error.InvalidOptions, result);
 }
 
 test "loader failures clean up before publication, after publication and during reading" {
@@ -2336,7 +2375,7 @@ test "loader failures clean up before publication, after publication and during 
                     loader.awaitBatch(batch) catch {};
                     break :unexpected {};
                 } else |err| err;
-                try std.testing.expectError(error.InvalidLoaderJob, result);
+                try std.testing.expectError(error.SourceSizeMismatch, result);
             },
             .reading => {
                 // Planning succeeds, but the source ends after four of five bytes.
@@ -2362,7 +2401,7 @@ test "loader failures clean up before publication, after publication and during 
             try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
         } else {
             try std.testing.expectEqual(@as(usize, 1), loader.batch_count);
-            const expected = if (failure == .reading) error.UnexpectedEndOfFile else error.InvalidLoaderJob;
+            const expected = if (failure == .reading) error.UnexpectedEndOfFile else error.SourceSizeMismatch;
             try std.testing.expectError(expected, loader.checkOpen());
             const result: anyerror!void = if (loader.submit(specs[0..1], null)) |batch| unexpected: {
                 loader.awaitBatch(batch) catch {};
@@ -2626,8 +2665,8 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
         plan.destroy();
         break :unexpected {};
     } else |err| err;
-    try std.testing.expectError(error.InvalidLoaderJob, invalid_plan);
-    try std.testing.expectError(error.InvalidLoaderJob, Planner.maximumJobLen(.{
+    try std.testing.expectError(error.InvalidOptions, invalid_plan);
+    try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
         .device_count = 1,
         .block_size = 4,
         .request_size = 16,
@@ -2784,7 +2823,7 @@ test "fifo scheduler failure retires the unclaimed units of every queued batch" 
     try std.testing.expectEqual(@as(usize, 0), scheduler.remainingJobs(io));
     try std.testing.expect(!scheduler.waitForWork(io));
     const publish_result: anyerror!void = if (publishTestBatch(&scheduler, 1)) |_| {} else |err| err;
-    try std.testing.expectError(error.LoaderShuttingDown, publish_result);
+    try std.testing.expectError(error.Closed, publish_result);
     first.finishJobs(1);
     try std.testing.expect(first.done.isSet());
     first.destroy();
@@ -2948,7 +2987,7 @@ test "fifo scheduler failure retires every published plan of an open batch" {
     try std.testing.expect(scheduler.claim(io) == null);
     // The submission goes on: its next plan is refused, and the seal with
     // the sentinel drop leaves only the claim to complete it.
-    try std.testing.expectError(error.LoaderShuttingDown, publishTestPlan(&scheduler, batch, 1));
+    try std.testing.expectError(error.Closed, publishTestPlan(&scheduler, batch, 1));
     scheduler.seal(io, batch);
     batch.finishJobs(1);
     try std.testing.expect(!batch.done.isSet());
@@ -2986,9 +3025,9 @@ test "source request size combines the VFS floor with DMA granularity" {
         load_limits.max_read_request_size,
         try load_limits.effectiveSourceRequestSize(32 * 1024 * 1024, 16 * 1024 * 1024),
     );
-    try std.testing.expectError(error.InvalidLoadProfile, load_limits.effectiveSourceRequestSize(0, 8 * 1024 * 1024));
+    try std.testing.expectError(error.InvalidOptions, load_limits.effectiveSourceRequestSize(0, 8 * 1024 * 1024));
     try std.testing.expectError(
-        error.InvalidLoadProfile,
+        error.InvalidOptions,
         load_limits.effectiveSourceRequestSize(load_limits.max_read_request_size + 1, 8 * 1024 * 1024),
     );
 }
@@ -3543,4 +3582,56 @@ test "dispatch spans handle 2D and 3D sharding" {
         .request_size = 8191,
         .block_size = 2039,
     });
+}
+
+test "concurrent pipeline failures preserve the first error" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
+    var pool = host_memory.BlockPool.init(allocator, workspace, 64) catch |err| {
+        workspace.deinit();
+        return err;
+    };
+    defer pool.deinit();
+    var scheduler: Scheduler = .init(allocator);
+    defer scheduler.deinit();
+    var fixture: TestPipeline = undefined;
+    fixture.init(1, &pool, &scheduler);
+    defer fixture.deinit();
+    fixture.pipeline.read_gate = &fixture.gate;
+    var group: std.Io.Group = .init;
+    defer group.await(io) catch {};
+    const Worker = struct {
+        fn run(pipeline: *Pipeline, err: PipelineError) void {
+            pipeline.recordError(err, "concurrent source failure", .{});
+        }
+    };
+    for (0..8) |i| try group.concurrent(io, Worker.run, .{ &fixture.pipeline, @as(PipelineError, if (i % 2 == 0) error.FileNotFound else error.UnexpectedEndOfFile) });
+    try group.await(io);
+    const first = fixture.pipeline.errorValue().?;
+    fixture.pipeline.recordError(error.Internal, "later failure", .{});
+    try std.testing.expectEqual(first, fixture.pipeline.errorValue().?);
+}
+
+test "read alignment overflow is an invalid option" {
+    try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
+        .device_count = 1,
+        .block_size = 4096,
+        .request_size = 4096,
+        .alignment = @as(usize, 1) << (@bitSizeOf(usize) - 1),
+    }));
+}
+
+test "lazy initialization preserves its finite error across repeated callers" {
+    const Context = struct {
+        fn init(calls: *usize) error{FileNotFound}!u32 {
+            calls.* += 1;
+            return error.FileNotFound;
+        }
+    };
+    var once: LazyOnce(u32, *usize, error{FileNotFound}, Context.init) = .{};
+    var calls: usize = 0;
+    try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, &calls));
+    try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, &calls));
+    try std.testing.expectEqual(1, calls);
 }
