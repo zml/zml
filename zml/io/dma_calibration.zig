@@ -97,7 +97,6 @@ pub fn calibrate(
         result.measured_bytes_per_second / (1024 * 1024 * 1024),
         @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
         @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
-        @as(f64, @floatFromInt(result.device_allocator_warmup_ns)) / std.time.ns_per_ms,
         result.retained_mapped_bytes,
     });
 
@@ -116,7 +115,6 @@ const Report = struct {
     /// End of the device allocator warm-up to the selected block size: the
     /// calibration ring, screening, confirmation and cohort teardown.
     calibration_ns: u64,
-    device_allocator_warmup_ns: u64,
 };
 
 /// Measures synthetic PJRT transfers on one representative device.
@@ -133,13 +131,7 @@ fn measureTransfer(
     const allocator = workspace.allocator;
     const io = workspace.io;
     const benchmark_started: std.Io.Timestamp = .now(io, .awake);
-    const device_warmup_started: std.Io.Timestamp = .now(io, .awake);
-    try platform.warmupDeviceAllocators(io);
     const calibration_started: std.Io.Timestamp = .now(io, .awake);
-    const device_allocator_warmup_ns = elapsedNanoseconds(
-        device_warmup_started,
-        calibration_started,
-    );
     const representative = selection: {
         var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
         // Release the cohorts' device buffers before measuring calibration
@@ -165,7 +157,6 @@ fn measureTransfer(
             .now(io, .awake),
         ),
         .calibration_ns = calibration_ns,
-        .device_allocator_warmup_ns = device_allocator_warmup_ns,
     };
 }
 

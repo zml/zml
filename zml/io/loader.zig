@@ -6,29 +6,28 @@
 const std = @import("std");
 
 const pjrt = @import("pjrt");
-
 const VFS = @import("vfs");
-const backend = @import("backend.zig");
-const admission = @import("execute_admission.zig");
+
 const Buffer = @import("../buffer.zig").Buffer;
-const Bufferized = mem.Bufferized;
-const platform_mod = @import("../platform.zig");
 const Exe = @import("../exe.zig").Exe;
 const mem = @import("../mem.zig");
+const Bufferized = mem.Bufferized;
 const meta = @import("../meta.zig");
+const platform_mod = @import("../platform.zig");
 const Platform = platform_mod.Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
-
-const load_log = @import("log.zig").load;
-
-const dma_calibration = @import("dma_calibration.zig");
-const limits = @import("limits.zig");
-const TensorStore = @import("TensorStore.zig");
+const admission = @import("execute_admission.zig");
+const backend = @import("backend.zig");
 const Backend = backend.Backend;
 const LoadSpec = backend.LoadSpec;
+const dma_calibration = @import("dma_calibration.zig");
+const limits = @import("limits.zig");
+const load_log = @import("log.zig").load;
+const TensorStore = @import("TensorStore.zig");
+
 const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, void);
 
 const PrepareError = std.mem.Allocator.Error || error{ TensorNotFound, EmptyTensor, TransformedTensorNotDelivered };
@@ -45,7 +44,6 @@ const SubmitError = Sharding.Error || backend.SubmitError || error{Overflow};
 /// publish order: `loadExecute` retires older ones when its own does not fit
 /// the room the devices report, and `awaitAll` retires the rest.
 pub const Loader = struct {
-    pub const InitError = backend.InitError || error{InvalidOptions};
     pub const AwaitError = backend.AwaitError || std.mem.Allocator.Error;
     pub const LoadError = PrepareError || SubmitError || AwaitError;
     pub const LoadExecuteError = BindingError || SubmitError || AwaitError || error{ TensorNotFound, EmptyTensor };
@@ -108,8 +106,9 @@ pub const Loader = struct {
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) InitError!Loader {
+    ) !Loader {
         try validateOptions(opts);
+        try platform.warmupDeviceAllocators(io);
         const selected = try Backend.init(allocator, io, platform, opts);
         errdefer selected.destroy();
         return initWithBackend(allocator, io, platform, selected);
