@@ -173,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
                 .dma = .{
                     .block_sizes = block_sizes,
                     .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                    .duration_ns = try std.math.mul(u64, window_ms, std.time.ns_per_ms),
+                    .minimum_duration = .fromMilliseconds(std.math.cast(i64, window_ms) orelse return error.Overflow),
                     .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
                     .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
                 },

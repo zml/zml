@@ -47,10 +47,10 @@ pub const Options = struct {
     /// eight MI300X from 4.834 to 0.956 s while still selecting 16 MiB and
     /// width eight. Short screens sometimes selected the wrong block under
     /// noise, hence the longer borderline confirmation below.
-    minimum_duration_ns: u64 = 2 * std.time.ns_per_ms,
+    minimum_duration: std.Io.Duration = .fromMilliseconds(2),
     minimum_transfers: u64 = 32,
     /// Borderline block candidates receive longer alternating paired windows.
-    confirmation_duration_ns: u64 = 25 * std.time.ns_per_ms,
+    confirmation_duration: std.Io.Duration = .fromMilliseconds(25),
     confirmation_minimum_transfers: u64 = 256,
     confirmation_margin: f64 = 0.02,
     /// Prefer the smallest block within this tolerance of the measured peak
@@ -76,8 +76,8 @@ pub fn calibrate(
     if (platform.target == .cpu) return .default;
 
     std.debug.assert(opts.block_sizes.len > 0);
-    std.debug.assert(opts.minimum_duration_ns > 0);
-    std.debug.assert(opts.confirmation_duration_ns > 0);
+    std.debug.assert(opts.minimum_duration.nanoseconds > 0);
+    std.debug.assert(opts.confirmation_duration.nanoseconds > 0);
     std.debug.assert(opts.block_parallelism > 0 and opts.block_parallelism <= limits.max_dma_parallelism);
     std.debug.assert(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1);
     std.debug.assert(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1);
@@ -88,15 +88,14 @@ pub fn calibrate(
 
     const result = try measureTransfer(workspace, platform, opts);
 
-    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} elapsed_ms={d:.3} calibration_ms={d:.3} allocator_warmup_ms={d:.3} retained_mapped_bytes={d}", .{
+    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
         @tagName(platform.target),
         platform.devices.len,
         platform.devices[0].kind(),
         result.calibration.block_size,
         result.calibration.max_in_flight_per_device,
         result.measured_bytes_per_second / (1024 * 1024 * 1024),
-        @as(f64, @floatFromInt(result.elapsed_ns)) / std.time.ns_per_ms,
-        @as(f64, @floatFromInt(result.calibration_ns)) / std.time.ns_per_ms,
+        result.duration,
         result.retained_mapped_bytes,
     });
 
@@ -110,11 +109,7 @@ const Report = struct {
     calibration: Result,
     retained_mapped_bytes: usize,
     measured_bytes_per_second: f64,
-    /// Whole measurement, including arena mapping.
-    elapsed_ns: u64,
-    /// End of the device allocator warm-up to the selected block size: the
-    /// calibration ring, screening, confirmation and cohort teardown.
-    calibration_ns: u64,
+    duration: std.Io.Duration,
 };
 
 /// Measures synthetic PJRT transfers on one representative device.
@@ -130,33 +125,20 @@ fn measureTransfer(
 ) !Report {
     const allocator = workspace.allocator;
     const io = workspace.io;
-    const benchmark_started: std.Io.Timestamp = .now(io, .awake);
-    const calibration_started: std.Io.Timestamp = .now(io, .awake);
-    const representative = selection: {
-        var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
-        // Release the cohorts' device buffers before measuring calibration
-        // cost; the mapped host ring remains in the workspace for loading.
-        defer session.deinit();
-        break :selection try selectBlockSize(&session, opts, workspace);
-    };
-    const calibration_ns = elapsedNanoseconds(
-        calibration_started,
-        .now(io, .awake),
-    );
+    const start: std.Io.Timestamp = .now(io, .awake);
 
-    const calibration: Result = .{
-        .block_size = representative.block_size,
-        .max_in_flight_per_device = opts.block_parallelism,
-    };
+    var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
+    defer session.deinit();
+    const representative = try selectBlockSize(&session, opts, workspace);
+
     return .{
-        .calibration = calibration,
+        .calibration = .{
+            .block_size = representative.block_size,
+            .max_in_flight_per_device = opts.block_parallelism,
+        },
         .retained_mapped_bytes = workspace.mapped_bytes,
         .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
-        .elapsed_ns = elapsedNanoseconds(
-            benchmark_started,
-            .now(io, .awake),
-        ),
-        .calibration_ns = calibration_ns,
+        .duration = start.durationTo(.now(io, .awake)),
     };
 }
 
@@ -201,7 +183,7 @@ fn measureCandidates(
                 candidate.cohort,
                 source[0 .. candidate.block_size * opts.block_parallelism],
                 opts.block_parallelism,
-                opts.minimum_duration_ns,
+                opts.minimum_duration,
                 opts.minimum_transfers,
             );
             candidate.appendMetric(metrics);
@@ -259,7 +241,7 @@ fn selectCandidate(
                     measured.cohort,
                     source[0 .. measured.block_size * opts.block_parallelism],
                     opts.block_parallelism,
-                    opts.confirmation_duration_ns,
+                    opts.confirmation_duration,
                     opts.confirmation_minimum_transfers,
                 );
                 if (measured_index == candidate_index)
@@ -354,7 +336,7 @@ fn runWindow(
     cohort: *Cohort,
     source: []const u8,
     parallelism: usize,
-    minimum_duration_ns: u64,
+    minimum_duration: std.Io.Duration,
     minimum_transfers: u64,
 ) !Measurement {
     var metrics: Counters = .{};
@@ -405,20 +387,20 @@ fn runWindow(
     const measured_at: std.Io.Timestamp = .now(io, .awake);
     start.set(io);
     while (true) {
-        const elapsed_ns = elapsedNanoseconds(measured_at, .now(io, .awake));
+        const elapsed = measured_at.durationTo(.now(io, .awake));
         if (cohort.firstError()) |err| return err;
         // is window complete
-        if (elapsed_ns >= minimum_duration_ns and metrics.transfers.load(.acquire) >= minimum_transfers) break;
+        if (elapsed.nanoseconds >= minimum_duration.nanoseconds and metrics.transfers.load(.acquire) >= minimum_transfers) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     stop.store(true, .release);
     try group.await(io);
-    const elapsed_ns: u64 = @intCast(@max(measured_at.untilNow(io, .awake).nanoseconds, 1));
+    const elapsed = measured_at.durationTo(.now(io, .awake));
     if (cohort.firstError()) |err| return err;
     return .{
         .bytes = metrics.bytes.load(.acquire),
         .transfers = metrics.transfers.load(.acquire),
-        .elapsed_ns = elapsed_ns,
+        .elapsed = elapsed,
     };
 }
 
@@ -600,18 +582,14 @@ const Counters = struct {
 const Measurement = struct {
     bytes: u64,
     transfers: u64,
-    elapsed_ns: u64,
+    elapsed: std.Io.Duration,
 
     fn bytesPerSecond(self: Measurement) f64 {
-        if (self.elapsed_ns == 0) return 0;
+        if (self.elapsed.nanoseconds <= 0) return 0;
         return @as(f64, @floatFromInt(self.bytes)) * std.time.ns_per_s /
-            @as(f64, @floatFromInt(self.elapsed_ns));
+            @as(f64, @floatFromInt(self.elapsed.nanoseconds));
     }
 };
-
-fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
-    return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
-}
 
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
     // No candidate below is borderline, so the production selector never
@@ -642,7 +620,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
             candidate.appendMetric(.{
                 .bytes = rate,
                 .transfers = 1,
-                .elapsed_ns = std.time.ns_per_s,
+                .elapsed = .fromSeconds(1),
             });
         }
     }
@@ -667,7 +645,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         candidate.appendMetric(.{
             .bytes = rate,
             .transfers = 1,
-            .elapsed_ns = std.time.ns_per_s,
+            .elapsed = .fromSeconds(1),
         });
     }
     const bimodal_decision = try selectCandidate(
@@ -693,7 +671,7 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
         for (candidate_rates) |rate| candidate.appendMetric(.{
             .bytes = rate,
             .transfers = 1,
-            .elapsed_ns = std.time.ns_per_s,
+            .elapsed = .fromSeconds(1),
         });
     }
     try std.testing.expect(needsConfirmation(
@@ -748,7 +726,7 @@ test "DMA benchmark cancellation drains transfer workers" {
         &session.cohorts[0],
         &source,
         1,
-        std.math.maxInt(u64),
+        .max,
         0,
     ));
 }
