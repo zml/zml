@@ -108,13 +108,6 @@ pub const Backend = union(enum) {
         };
     }
 
-    /// Device bytes the direct backend allocated for outputs so far, per
-    /// `platform.devices` index. Only that backend counts; the front end
-    /// never asks the buffered one, which it keeps serial.
-    pub fn allocatedBytesPerDevice(self: Backend, out: []u64) void {
-        for (out, self.direct.allocated_bytes) |*bytes, *counter| bytes.* = counter.load(.acquire);
-    }
-
     pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!Submission {
         return switch (self) {
             .direct => |direct| .{ .direct = .{

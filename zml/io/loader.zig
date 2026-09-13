@@ -329,9 +329,13 @@ pub const Loader = struct {
         return if (admission.admits(self.scratch.room, self.pending_execution, inputs, execution)) .fits else .exceeds;
     }
 
-    /// Refreshes the per-device room; false when a device stopped answering.
+    /// Refreshes the per-device room; false when backend accounting or device
+    /// memory statistics are unavailable.
     fn readRoom(self: *Loader) bool {
-        self.backend.allocatedBytesPerDevice(self.scratch.allocated);
+        switch (self.backend) {
+            .direct => |direct| direct.allocatedBytesPerDevice(self.scratch.allocated),
+            .buffered => return false,
+        }
         for (self.scratch.room, self.platform.devices, self.submitted_bytes, self.scratch.allocated) |*out, device, submitted, allocated| {
             const reported = device.memoryStats();
             out.* = admission.room(reported.bytes_limit, reported.bytes_in_use, submitted, allocated, admission.reserve_bytes) orelse return false;
@@ -956,7 +960,7 @@ test "submitted bytes match the backend's allocations once everything landed" {
     defer first.deinit();
     const allocated = try allocator.alloc(u64, fixture.platform.devices.len);
     defer allocator.free(allocated);
-    loader.backend.allocatedBytesPerDevice(allocated);
+    loader.backend.direct.allocatedBytesPerDevice(allocated);
     // Replicated executable inputs and bulk outputs occupy every device.
     for (allocated) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, bytes);
     try std.testing.expectEqualSlices(u64, loader.submitted_bytes, allocated);

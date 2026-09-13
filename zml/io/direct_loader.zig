@@ -283,6 +283,12 @@ pub const Loader = struct {
         allocator.destroy(self);
     }
 
+    /// Cumulative output bytes allocated since creation, per `platform.devices`
+    /// index. Freeing an output does not decrease these counters.
+    pub fn allocatedBytesPerDevice(self: *const Loader, out: []u64) void {
+        for (out, self.allocated_bytes) |*bytes, *counter| bytes.* = counter.load(.acquire);
+    }
+
     fn checkOpen(self: *Loader) !void {
         if (self.pipeline.errorValue()) |err| return err;
     }
