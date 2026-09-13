@@ -1275,9 +1275,9 @@ const Planner = struct {
                 @min(piece_end - cursor, span.end - cursor),
                 block_size - block_offset,
             );
-            const writer_mask = span.writer_mask;
+            const writer_mask = span.device_mask;
             std.debug.assert(writer_mask != 0);
-            const destination_offset = span.writer_offset + cursor - span.start;
+            const destination_offset = span.device_offset + cursor - span.start;
             var merged = false;
             if (output.items.len > transfer_start) merge: {
                 const previous = &output.items[output.items.len - 1];
@@ -3426,12 +3426,12 @@ const DispatchTest = struct {
         defer allocator.free(expected);
         @memset(expected, 0);
         for (dispatch_spans.spans) |span| {
-            var mask = span.writer_mask;
+            var mask = span.device_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
                 mask &= mask - 1;
                 const len = span.end - span.start;
-                @memcpy(expected[writer_index * writer_size + span.writer_offset ..][0..len], source[span.start..span.end]);
+                @memcpy(expected[writer_index * writer_size + span.device_offset ..][0..len], source[span.start..span.end]);
             }
         }
 
