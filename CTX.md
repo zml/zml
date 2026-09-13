@@ -3759,6 +3759,85 @@ entry says otherwise. `PLAN.md` loses a task as it lands.
   per-authority (one generic `HTTP` instance serves every host of its
   scheme and one `S3` spans buckets, so per-instance over-reaches there).
 
+## Seventeenth pass: validating the DMA calibration rework (2026-09-13)
+
+`61641ff5..f759af76` reworked the calibration and its neighbours: one shared
+`AsyncHostToDeviceTransferManager` whose buffers are sliced per candidate
+instead of one manager per slot per candidate, `warmupDeviceAllocators` moved
+from the measurement into `Loader.init`, `std.Io.Duration`/`Timestamp` in
+place of raw nanoseconds, finite error sets with a single log per failure,
+`BlockPool.init` taking the workspace by value, and `validateOptions`
+replaced by assertions. This pass only asks whether calibration still
+measures and selects what it did.
+
+Method: `99cff7bf` (the last commit before the four calibration commits
+`2fc4d9fc`, `4f18b622`, `88a2e262`, `f759af76`) and `f759af76` built side
+by side on `gb300-2` (`~/numa-bench/zml-base` and `~/numa-bench/zml`) and run
+interleaved, one binary after the other, on an otherwise idle host. Both
+bench trees add `.{ .scope = .@"zml/io", .level = .debug }` to the example's
+`std_options`, because the new code logs the calibration line at `debug` on a
+scope the example does not enable (see the defects below).
+
+Selection and measured rate, `io dma-bench`, five runs per tree:
+
+| tree | block chosen | measured GiB/s |
+| --- | --- | --- |
+| gb300-2 `99cff7bf` | 16 MiB x4, 8 MiB x1 | 175.3-185.3 |
+| gb300-2 `f759af76` | 16 MiB x5 (10/10 across the session) | 178.0-184.3 |
+| mi300 `f759af76` | 16 MiB x5 | 43.6-45.3 (calibration 0.39-1.25 s) |
+
+Both bands sit inside the recorded per-device H2D history (GB300 176-184,
+MI300X 44-47 with the pinned-range-aware plugin), so sharing one manager
+across the eight in-flight transfers does not serialize them. The one 8 MiB
+pick came from the *old* tree; the smallest-near-peak rule remains the noisy
+part, and nothing in this pass made it worse.
+
+Interleaved loads on gb300-2, warm, loader `elapsed`:
+
+| round | Llama repl. `99cff7bf` | Llama `f759af76` | DeepSeek repl. `99cff7bf` | DeepSeek `f759af76` |
+| --- | --- | --- | --- | --- |
+| 1 | 0.293 | 0.293 | 6.684 | 6.537 |
+| 2 | 0.294 | 0.291 | 6.717 | 6.501 |
+| 3 | 0.295 | 0.292 | 6.648 | 6.002 |
+| 4 | 0.291 | 0.288 | - | - |
+
+Llama-3.1-8B-Instruct is 14.96 GiB over 291 tensors, DeepSeek-V4-Flash-NVFP4
+156.75 GiB over 135235; both replicated on four GB300 and both warm. Every
+round of both trees selected 16 MiB. The new tree is at parity or a little
+ahead on both, which is what "still works" should look like.
+
+mi300 (8 x MI300X, replicated, `f759af76` only): Llama cold 4.53 s twice
+(14.96 GiB at 3.30 GiB/s -- `cat` of the same files takes 6.2 s, this
+checkpoint is on the volume's slow extent), warm 0.980/1.031/1.075 s, inside
+the 0.84-1.10 s history. DeepSeek-V4-Flash replicated 18.16 s, storage-bound.
+
+Correctness: `ZML_LOAD_CHECK` passes on both hosts with the new tree --
+gb300-2 DeepSeek-NVFP4 `ok tensors_checked=500 of 135235`, mi300 Llama
+`ok tensors_checked=16 of 291`. `bazel test //zml:test //vfs:test` passes.
+
+Three defects, none of them in what calibration measures:
+
+- The `dma_bench version=13 ... measured_gib_s=...` line moved from
+  `log.info` to `log.debug` on scope `zml/io`. `examples/io` enables
+  `zml/io/load` and `zml/vfs` only, so the one line this file tells you to
+  check first is invisible in the shipped example. Log it at `info`, or add
+  the scope to `examples/io/main.zig`.
+- `validateOptions` became `std.debug.assert`, and the example feeds
+  environment values straight into `Options`. Measured on gb300-2 with
+  `--config=release` (which is `release_safe`, so the assertions stand):
+  `ZML_DMA_BENCH_BLOCK_MIB=64`, `ZML_DMA_BENCH_BLOCK_PARALLELISM=64` and
+  `ZML_DMA_BENCH_BLOCK_PARALLELISM=0` each panic with "reached unreachable
+  code" where they used to return `InvalidDmaBenchmarkOptions` or
+  `NoFeasibleDmaBenchmarkTuple`. `docs/learn/loader.md` states the assertion
+  contract, so the gap is in the caller: `examples/io` should range-check
+  what it reads. (Under `release_fast` the same inputs would instead spin
+  forever in `runWindow` with zero workers, or index `candidates[0]` of an
+  empty slice.)
+- `docs/learn/loader.md` lists `UnsupportedPlatform` among the loader's
+  errors, but nothing returns it: `host_memory.Workspace.init` logs a message
+  containing the name and then hits `unreachable`, and `host_memory.Backend.init`
+  `@panic`s for tpu/neuron/metal. Either the table row or the code should move.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
