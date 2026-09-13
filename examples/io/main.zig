@@ -179,7 +179,10 @@ pub fn main(init: std.process.Init) !void {
                 },
             });
             defer loader.deinit();
-            const calibration = loader.calibration() orelse return error.DmaBenchmarkUnsupported;
+            const calibration = switch (loader.backend) {
+                .direct => |backend| backend.calibration,
+                else => @panic("Current platform didn't calibrate DMA."),
+            };
             try stdout_writer.interface.print(
                 "dma_benchmark block_bytes={d} parallelism={d}\n",
                 .{ calibration.block_size, calibration.max_in_flight_per_device },

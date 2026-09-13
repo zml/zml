@@ -88,31 +88,23 @@ pub const Backend = union(enum) {
         // TPU symbols alone did not prove a working transfer implementation;
         // TPU, neuron and metal keep the buffered path pending runtime checks.
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi, .cpu => .{ .direct = try direct_loader.Loader.create(allocator, io, platform, opts) },
-            .tpu, .neuron, .metal => initBuffered(allocator, io, platform, opts.readWidth(), opts.load_profile),
-        };
-    }
-
-    pub fn initBuffered(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        read_parallelism: usize,
-        load_profile: VFS.LoadProfile,
-    ) !Backend {
-        return .{ .buffered = try buffered_loader.Loader.create(
-            allocator,
-            io,
-            platform,
-            read_parallelism,
-            load_profile,
-        ) };
-    }
-
-    pub fn calibration(self: Backend) ?dma_calibration.Result {
-        return switch (self) {
-            .direct => |direct| direct.calibration,
-            .buffered => null,
+            .cuda, .rocm, .oneapi, .cpu => .{
+                .direct = try direct_loader.Loader.create(
+                    allocator,
+                    io,
+                    platform,
+                    opts,
+                ),
+            },
+            .tpu, .neuron, .metal => .{
+                .buffered = try buffered_loader.Loader.create(
+                    allocator,
+                    io,
+                    platform,
+                    opts.readWidth(),
+                    opts.load_profile,
+                ),
+            },
         };
     }
 
@@ -125,8 +117,14 @@ pub const Backend = union(enum) {
 
     pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!Submission {
         return switch (self) {
-            .direct => |direct| .{ .direct = .{ .loader = direct, .batch = try direct.submit(specs, progress) } },
-            .buffered => |buffered| .{ .buffered = .{ .loader = buffered, .batch = try buffered.submit(specs, progress) } },
+            .direct => |direct| .{ .direct = .{
+                .loader = direct,
+                .batch = try direct.submit(specs, progress),
+            } },
+            .buffered => |buffered| .{ .buffered = .{
+                .loader = buffered,
+                .batch = try buffered.submit(specs, progress),
+            } },
         };
     }
 
