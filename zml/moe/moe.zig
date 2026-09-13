@@ -9,6 +9,8 @@ pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
+pub const fly = @import("fly_kernels/moe.zig");
+const fused_experts = @import("fused_experts.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 
 test {
@@ -25,6 +27,7 @@ pub const Backend = enum {
     triton_mxfp4,
     flashinfer_cutlass,
     triton,
+    fly,
     mosaic_tpu,
     metal,
 
@@ -62,10 +65,44 @@ pub const Backend = enum {
         };
     }
 
+    pub fn autoMxfp4(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
+        return switch (platform.target) {
+            .cuda => switch (if (zml.platform.cuda.computeCapability(platform)) |cc| cc.major else 0) {
+                10 => switch (weights_dtype) {
+                    .u8, .i8 => .triton_mxfp4,
+                    .f4e2m1 => .triton,
+                    else => error.UnsupportedDataType,
+                },
+                else => switch (weights_dtype) {
+                    .u8, .i8, .f4e2m1 => .triton,
+                    else => error.UnsupportedDataType,
+                },
+            },
+            .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
+                .gfx942 => switch (weights_dtype) {
+                    .u8, .i8, .f4e2m1 => .fly,
+                    else => error.UnsupportedDataType,
+                },
+                else => switch (weights_dtype) {
+                    .u8, .i8, .f4e2m1 => .triton,
+                    else => error.UnsupportedDataType,
+                },
+            },
+            else => switch (weights_dtype) {
+                .u8, .i8, .f4e2m1 => .triton,
+                else => error.UnsupportedDataType,
+            },
+        };
+    }
+
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
+            .fly => switch (platform.target) {
+                .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
+                else => false,
+            },
             .triton => switch (platform.target) {
                 .cuda, .rocm, .oneapi => true,
                 else => false,
@@ -79,7 +116,7 @@ pub const Backend = enum {
         return switch (backend) {
             .triton_mxfp4 => {},
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),
-            .triton => {},
+            .triton, .fly => {},
             .mosaic_tpu => {},
             .metal => {},
         };
@@ -90,6 +127,7 @@ pub const Parameters = union(Backend) {
     triton_mxfp4: triton_mxfp4.Parameters,
     flashinfer_cutlass: cutlass_flashinfer.Parameters,
     triton: triton.Parameters,
+    fly: fly.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
     metal: metal.Parameters,
 
@@ -97,6 +135,7 @@ pub const Parameters = union(Backend) {
         triton_mxfp4: triton_mxfp4.Parameters.InitOptions,
         flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
         triton: triton.Parameters.InitOptions,
+        fly: fly.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
         metal: metal.Parameters.InitOptions,
 
@@ -111,14 +150,14 @@ pub const Parameters = union(Backend) {
                         .gelu => .gelu,
                     },
                 } },
-                .triton => .{ .triton = .{
+                inline .triton, .fly => |backend_tag| @unionInit(InitOptions, @tagName(backend_tag), .{
                     .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
                         .gelu => .gelu,
                     },
-                } },
+                }),
                 .mosaic_tpu => .{ .mosaic_tpu = .{
                     .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
@@ -143,7 +182,7 @@ pub const Parameters = union(Backend) {
         return switch (opts) {
             .triton_mxfp4 => |v| .{ .triton_mxfp4 = triton_mxfp4.Parameters.init(v) },
             .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
-            .triton => |v| .{ .triton = triton.Parameters.init(v) },
+            inline .triton, .fly => |v, backend_tag| @unionInit(Parameters, @tagName(backend_tag), fused_experts.Parameters.init(v)),
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
             .metal => |v| .{ .metal = metal.Parameters.init(v) },
         };
@@ -154,10 +193,10 @@ pub const Options = struct {
     activation_threshold: ?f32 = null,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
-    /// Gate/up layout; non-Triton backends require split columns.
-    gate_up_layout: triton.GateUpLayout,
-    /// Where routing weights are applied; non-Triton backends require after_down.
-    routing_weight_placement: triton.RoutingWeightPlacement,
+    /// Gate/up layout; FlashInfer, Mosaic and Metal require split columns.
+    gate_up_layout: fused_experts.GateUpLayout,
+    /// Where routing weights are applied; FlashInfer, Mosaic and Metal require after_down.
+    routing_weight_placement: fused_experts.RoutingWeightPlacement,
 };
 
 pub fn forwardMoe(
@@ -170,7 +209,7 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     switch (parameters) {
-        .triton => {},
+        .triton, .fly => {},
         .flashinfer_cutlass, .mosaic_tpu, .metal => {
             stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
             stdx.debug.assert(opts.gate_up_layout == .split, "Non-Triton MoE backends require split gate/up columns", .{});
@@ -402,14 +441,14 @@ pub fn forwardMoe(
                 runner_options,
             );
         },
-        .triton => b: {
-            const args: triton.FusedExpertsArgs = .{
+        inline .triton, .fly => |p, backend| b: {
+            const args: fused_experts.FusedExpertsArgs = .{
                 .hidden_states = input,
                 .gate_up = gate_up,
                 .down = down,
                 .topk_weights = topk_weights,
                 .topk_ids = topk_ids,
-                .activation = parameters.triton.activation,
+                .activation = p.activation,
                 .activation_threshold = opts.activation_threshold,
                 .quantize_input = opts.quantize_input,
                 .gate_up_layout = opts.gate_up_layout,
@@ -418,12 +457,12 @@ pub fn forwardMoe(
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
             if (!expert_partition.eql(.init(.experts))) {
-                break :b try triton.fusedExpertsImpl(args);
+                break :b try fused_experts.fusedExperts(args, backend);
             }
 
             break :b zml.ops.manualComputation(
                 (struct {
-                    args: triton.FusedExpertsArgs,
+                    args: fused_experts.FusedExpertsArgs,
                     global_num_experts: i64,
 
                     fn call(self: @This(), _: zml.Shape) zml.Tensor {
@@ -442,7 +481,7 @@ pub fn forwardMoe(
                             zml.Tensor.scalar(-1, .i32),
                         );
 
-                        const local_output = triton.fusedExpertsImpl(mapped_args) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                        const local_output = fused_experts.fusedExperts(mapped_args, backend) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
                         const local_reshaped = local_output.reshape(local_args.hidden_states.shape().dims()).withTags(.{ .b, .s, .d });
                         return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                     }
