@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const VFS = @import("vfs");
+
 const Buffer = @import("../buffer.zig").Buffer;
 const mem = @import("../mem.zig");
 const Platform = @import("../platform.zig").Platform;
@@ -12,7 +13,6 @@ const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
 const limits = @import("limits.zig");
 
-pub const InitError = direct_loader.Loader.InitError || buffered_loader.Loader.InitError;
 pub const SubmitError = direct_loader.Loader.SubmitError || buffered_loader.Loader.SubmitError;
 pub const AwaitError = direct_loader.Loader.AwaitError || buffered_loader.Loader.AwaitError;
 
@@ -76,7 +76,7 @@ pub const Backend = union(enum) {
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) InitError!Backend {
+    ) !Backend {
         // Transfer-manager support and host pinning are independent. CPU
         // implements byte-range transfers from ordinary pages but not DmaMap,
         // so it can share coalescing and bounded blocks without DMA support.
@@ -99,7 +99,7 @@ pub const Backend = union(enum) {
         platform: *const Platform,
         read_parallelism: usize,
         load_profile: VFS.LoadProfile,
-    ) buffered_loader.Loader.InitError!Backend {
+    ) !Backend {
         return .{ .buffered = try buffered_loader.Loader.create(
             allocator,
             io,

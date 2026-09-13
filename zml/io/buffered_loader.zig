@@ -1,9 +1,9 @@
 //! Whole-tensor staging for platforms that use Buffer.from.
 //! The shared front end owns source lookup, executable bindings and admission.
 const std = @import("std");
-const log = @import("log.zig").load;
-const stdx = @import("stdx");
+
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -13,6 +13,7 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const backend = @import("backend.zig");
 const LoadSpec = backend.LoadSpec;
+const log = @import("log.zig").load;
 
 /// Concurrent whole tensors staged on the host: the byte budget is this
 /// many times the largest tensor submitted. Kept at the former start width
@@ -22,7 +23,6 @@ const LoadSpec = backend.LoadSpec;
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
-    pub const InitError = std.mem.Allocator.Error;
     pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || std.Io.File.Reader.SeekError || safetensors.TensorReader.ReadPositionalError || error{SourceSizeMismatch};
     /// A submission refuses on the sticky error, so it fails as an await does.
     pub const SubmitError = AwaitError;
@@ -52,7 +52,7 @@ pub const Loader = struct {
         platform: *const Platform,
         read_parallelism: usize,
         profile: VFS.LoadProfile,
-    ) InitError!*Loader {
+    ) !*Loader {
         const self = try allocator.create(Loader);
         self.* = .{
             .allocator = allocator,

@@ -49,7 +49,7 @@ pub const Options = struct {
     /// noise, hence the longer borderline confirmation below.
     minimum_duration: std.Io.Duration = .fromMilliseconds(2),
     minimum_transfers: u64 = 32,
-    /// Borderline block candidates receive longer alternating paired windows.
+    /// Borderline block candidates receive longer paired windows, alternating which runs first.
     confirmation_duration: std.Io.Duration = .fromMilliseconds(25),
     confirmation_minimum_transfers: u64 = 256,
     confirmation_margin: f64 = 0.02,
@@ -127,60 +127,57 @@ fn measureTransfer(
     const io = workspace.io;
     const start: std.Io.Timestamp = .now(io, .awake);
 
+    var max_total_bytes: usize = 0;
+    for (opts.block_sizes) |block_size| {
+        max_total_bytes = @max(max_total_bytes, block_size * opts.block_parallelism);
+    }
+    // Map one ring for the largest candidate at the fixed transfer width;
+    // every candidate reuses it.
+    const calibration_source = workspace.findArena(max_total_bytes) orelse
+        try workspace.allocate(max_total_bytes);
+
     var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
     defer session.deinit();
-    const representative = try selectBlockSize(&session, opts, workspace);
+
+    const candidates = try allocator.alloc(Candidate, opts.block_sizes.len);
+    defer allocator.free(candidates);
+    for (candidates, opts.block_sizes, 0..) |*candidate, block_size, index| {
+        candidate.* = .{
+            .io = io,
+            .platform = platform,
+            .manager = session.manager,
+            .buffer_offset = index * opts.block_parallelism,
+            .buffer_count = opts.block_parallelism,
+            .block_size = block_size,
+        };
+    }
+    try measureAllCandidates(&session, opts, candidates, calibration_source);
+    const winner = try selectCandidate(&session, opts, candidates, calibration_source);
 
     return .{
         .calibration = .{
-            .block_size = representative.block_size,
+            .block_size = winner.block_size,
             .max_in_flight_per_device = opts.block_parallelism,
         },
         .retained_mapped_bytes = workspace.mapped_bytes,
-        .measured_bytes_per_second = representative.metrics.bytesPerSecond(),
+        .measured_bytes_per_second = winner.metrics.bytesPerSecond(),
         .duration = start.durationTo(.now(io, .awake)),
     };
 }
 
-fn selectBlockSize(
-    session: *Session,
-    opts: Options,
-    workspace: *host_memory.Workspace,
-) !Selection {
-    var block_source_bytes: usize = 0;
-    for (opts.block_sizes) |block_size| {
-        block_source_bytes = @max(block_source_bytes, block_size * opts.block_parallelism);
-    }
-    // Map one ring for the largest candidate at the fixed transfer width;
-    // every candidate cohort reuses it.
-    const calibration_source = workspace.findArena(block_source_bytes) orelse
-        try workspace.allocate(block_source_bytes);
-
-    const block_candidates = try session.allocator.alloc(Candidate, opts.block_sizes.len);
-    defer session.allocator.free(block_candidates);
-    for (block_candidates, opts.block_sizes, session.cohorts) |*candidate, block_size, *cohort| {
-        candidate.* = .{
-            .block_size = block_size,
-            .cohort = cohort,
-        };
-    }
-    try measureCandidates(session, opts, block_candidates, calibration_source);
-    return selectCandidate(session, opts, block_candidates, calibration_source);
-}
-
-fn measureCandidates(
+fn measureAllCandidates(
     session: *Session,
     opts: Options,
     candidates: []Candidate,
     source: []const u8,
 ) !void {
-    for (0..sample_count) |repeat| {
-        for (0..candidates.len) |offset| {
-            const index = (offset + repeat) % candidates.len;
+    for (0..sample_count) |start_offset| {
+        for (0..candidates.len) |i| {
+            const index = (i + start_offset) % candidates.len;
             const candidate = &candidates[index];
             const metrics = try runWindow(
                 session.io,
-                candidate.cohort,
+                candidate,
                 source[0 .. candidate.block_size * opts.block_parallelism],
                 opts.block_parallelism,
                 opts.minimum_duration,
@@ -194,74 +191,57 @@ fn measureCandidates(
 fn selectCandidate(
     session: *Session,
     opts: Options,
-    candidates: []const Candidate,
+    candidates: []Candidate,
     source: []const u8,
-) !Selection {
-    const tolerance = opts.block_selection_tolerance;
-    const medians = try session.allocator.alloc(Measurement, candidates.len);
-    defer session.allocator.free(medians);
+) !struct {
+    block_size: usize,
+    metrics: Measurement,
+} {
     const ratios = try session.allocator.alloc(f64, candidates.len);
     defer session.allocator.free(ratios);
     const confirmed_metrics = try session.allocator.alloc(?Measurement, candidates.len);
     defer session.allocator.free(confirmed_metrics);
     @memset(confirmed_metrics, null);
 
-    for (candidates, medians) |candidate, *median| {
-        median.* = candidate.median();
-    }
+    // Compute peak_rate and ratios for all candidates.
     var peak_index: usize = 0;
-    for (medians[1..], 1..) |median, index| {
-        if (median.bytesPerSecond() > medians[peak_index].bytesPerSecond())
+    var peak_rate = candidates[0].median().bytesPerSecond();
+    for (candidates[1..], 1..) |candidate, index| {
+        const rate = candidate.median().bytesPerSecond();
+        if (rate > peak_rate) {
             peak_index = index;
+            peak_rate = rate;
+        }
     }
-    const peak_rate = medians[peak_index].bytesPerSecond();
-    for (medians, ratios) |median, *ratio| {
-        ratio.* = if (peak_rate == 0) 0 else median.bytesPerSecond() / peak_rate;
+    for (candidates, ratios) |candidate, *ratio| {
+        ratio.* = if (peak_rate == 0) 0 else candidate.median().bytesPerSecond() / peak_rate;
     }
 
+    // Confirm all candidates again against peak with a new run.
     for (candidates, 0..) |_, candidate_index| {
-        if (!needsConfirmation(
+        if (isCloseToPeak(
             candidates,
             candidate_index,
             peak_index,
-            tolerance,
+            opts.block_selection_tolerance,
             opts.confirmation_margin,
-        )) continue;
-        var candidate_runs: [sample_count]Measurement = undefined;
-        var baseline_runs: [sample_count]Measurement = undefined;
-        for (0..sample_count) |repeat| {
-            const order = if (repeat % 2 == 0)
-                [_]usize{ candidate_index, peak_index }
-            else
-                [_]usize{ peak_index, candidate_index };
-            for (order) |measured_index| {
-                const measured = candidates[measured_index];
-                const metrics = try runWindow(
-                    session.io,
-                    measured.cohort,
-                    source[0 .. measured.block_size * opts.block_parallelism],
-                    opts.block_parallelism,
-                    opts.confirmation_duration,
-                    opts.confirmation_minimum_transfers,
-                );
-                if (measured_index == candidate_index)
-                    candidate_runs[repeat] = metrics
-                else
-                    baseline_runs[repeat] = metrics;
-            }
+        )) {
+            const confirmation = try confirmCandidateAgainstPeak(
+                session.io,
+                opts,
+                &candidates[candidate_index],
+                &candidates[peak_index],
+                source,
+            );
+            ratios[candidate_index] = confirmation.ratio;
+            confirmed_metrics[candidate_index] = confirmation.metrics;
         }
-        const representative = medianRatioIndex(
-            &candidate_runs,
-            &baseline_runs,
-        );
-        const baseline_rate = baseline_runs[representative].bytesPerSecond();
-        ratios[candidate_index] = if (baseline_rate == 0) 0 else candidate_runs[representative].bytesPerSecond() / baseline_rate;
-        confirmed_metrics[candidate_index] = candidate_runs[representative];
     }
 
+    // Take the candidate with the highest throughput, in case of ties use the smallest block size.
     var maximum_ratio: f64 = 1;
     for (ratios) |ratio| maximum_ratio = @max(maximum_ratio, ratio);
-    const floor = maximum_ratio * (1.0 - tolerance);
+    const floor = maximum_ratio * (1.0 - opts.block_selection_tolerance);
     var selected_index = peak_index;
     for (candidates, ratios, 0..) |candidate, ratio, index| {
         if (ratio >= floor and candidate.block_size < candidates[selected_index].block_size)
@@ -269,11 +249,11 @@ fn selectCandidate(
     }
     return .{
         .block_size = candidates[selected_index].block_size,
-        .metrics = confirmed_metrics[selected_index] orelse medians[selected_index],
+        .metrics = confirmed_metrics[selected_index] orelse candidates[selected_index].median(),
     };
 }
 
-fn needsConfirmation(
+fn isCloseToPeak(
     candidates: []const Candidate,
     candidate_index: usize,
     peak_index: usize,
@@ -284,42 +264,83 @@ fn needsConfirmation(
     const candidate = candidates[candidate_index];
     const peak = candidates[peak_index];
     std.debug.assert(candidate.metrics_len == peak.metrics_len);
+
+    // Whether the candidate is near-peak in one round but fails in others.
     var qualified_once = false;
     var rejected_once = false;
-    for (candidate.metricSlice(), 0..) |metric, repeat| {
-        var peak_rate: f64 = 0;
+    for (candidate.metricSlice(), 0..) |metric, round| {
+        var round_peak_rate: f64 = 0;
         for (candidates) |round_candidate| {
             std.debug.assert(round_candidate.metrics_len == candidate.metrics_len);
-            peak_rate = @max(peak_rate, round_candidate.metrics[repeat].bytesPerSecond());
+            round_peak_rate = @max(round_peak_rate, round_candidate.metrics[round].bytesPerSecond());
         }
-        const ratio = if (peak_rate == 0) 0 else metric.bytesPerSecond() / peak_rate;
+        const ratio = if (round_peak_rate == 0) 0 else metric.bytesPerSecond() / round_peak_rate;
         if (ratio >= 1.0 - tolerance)
             qualified_once = true
         else
             rejected_once = true;
     }
     if (qualified_once and rejected_once) return true;
-    const candidate_median = candidate.median();
-    const peak_median = peak.median();
-    const peak_rate = peak_median.bytesPerSecond();
-    const ratio = if (peak_rate == 0) 0 else candidate_median.bytesPerSecond() / peak_rate;
+
+    // Whether the candiate's ratio is close enough overall.
+    const candidate_rate = candidate.median().bytesPerSecond();
+    const peak_rate = peak.median().bytesPerSecond();
+    const ratio = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
     return @abs(ratio - (1.0 - tolerance)) <= margin;
 }
 
-fn medianRatioIndex(
+fn confirmCandidateAgainstPeak(
+    io: std.Io,
+    opts: Options,
+    candidate: *Candidate,
+    peak: *Candidate,
+    source: []const u8,
+) !struct { ratio: f64, metrics: Measurement } {
+    var candidate_runs: [sample_count]Measurement = undefined;
+    var baseline_runs: [sample_count]Measurement = undefined;
+    for (0..sample_count) |repeat| {
+        const order = if (repeat % 2 == 0)
+            [_]*Candidate{ candidate, peak }
+        else
+            [_]*Candidate{ peak, candidate };
+        for (order) |measured| {
+            const metrics = try runWindow(
+                io,
+                measured,
+                source[0 .. measured.block_size * opts.block_parallelism],
+                opts.block_parallelism,
+                opts.confirmation_duration,
+                opts.confirmation_minimum_transfers,
+            );
+            if (measured == candidate)
+                candidate_runs[repeat] = metrics
+            else
+                baseline_runs[repeat] = metrics;
+        }
+    }
+    const index = medianThroughputRatioIndex(
+        &candidate_runs,
+        &baseline_runs,
+    );
+    const metrics = candidate_runs[index];
+    const baseline_rate = baseline_runs[index].bytesPerSecond();
+    return .{
+        .ratio = if (baseline_rate == 0) 0 else metrics.bytesPerSecond() / baseline_rate,
+        .metrics = metrics,
+    };
+}
+
+fn medianThroughputRatioIndex(
     candidates: []const Measurement,
     baselines: []const Measurement,
 ) usize {
-    std.debug.assert(candidates.len == baselines.len and candidates.len > 0);
-    std.debug.assert(candidates.len <= sample_count);
-    var order_storage: [sample_count]usize = undefined;
-    const order = order_storage[0..candidates.len];
-    for (order, 0..) |*index, i| index.* = i;
+    var ordered_indices: [sample_count]usize = undefined;
+    for (&ordered_indices, 0..) |*index, i| index.* = i;
     const Context = struct {
         candidates: []const Measurement,
         baselines: []const Measurement,
     };
-    std.mem.sort(usize, order, Context{ .candidates = candidates, .baselines = baselines }, struct {
+    std.mem.sort(usize, &ordered_indices, Context{ .candidates = candidates, .baselines = baselines }, struct {
         fn lessThan(context: Context, lhs: usize, rhs: usize) bool {
             const lhs_baseline = context.baselines[lhs].bytesPerSecond();
             const rhs_baseline = context.baselines[rhs].bytesPerSecond();
@@ -328,22 +349,19 @@ fn medianRatioIndex(
             return lhs_ratio < rhs_ratio;
         }
     }.lessThan);
-    return order[order.len / 2];
+    return ordered_indices[ordered_indices.len / 2];
 }
 
 fn runWindow(
     io: std.Io,
-    cohort: *Cohort,
+    candidate: *Candidate,
     source: []const u8,
     parallelism: usize,
     minimum_duration: std.Io.Duration,
     minimum_transfers: u64,
 ) !Measurement {
-    var metrics: Counters = .{};
-    try cohort.ensureReady(source, parallelism);
-
     const Worker = struct {
-        cohort: *Cohort,
+        candidate: *Candidate,
         source: []const u8,
         slot: usize,
         metrics: *Counters,
@@ -353,14 +371,15 @@ fn runWindow(
 
         fn run(self: @This()) void {
             _ = self.ready.fetchAdd(1, .release);
-            self.start.waitUncancelable(self.cohort.io);
+            self.start.waitUncancelable(self.candidate.io);
             while (!self.stop.load(.acquire)) {
-                self.cohort.transfer(self.source, self.slot, self.metrics);
-                if (self.cohort.first_error.load(.acquire) != 0) return;
+                self.candidate.transfer(self.source, self.slot, self.metrics);
+                if (self.candidate.first_error.load(.acquire) != 0) return;
             }
         }
     };
 
+    var metrics: Counters = .{};
     var ready: std.atomic.Value(usize) = .init(0);
     var start: std.Io.Event = .unset;
     var stop: std.atomic.Value(bool) = .init(false);
@@ -374,7 +393,7 @@ fn runWindow(
     }
     for (0..parallelism) |slot| {
         try group.concurrent(io, Worker.run, .{Worker{
-            .cohort = cohort,
+            .candidate = candidate,
             .source = source,
             .slot = slot,
             .metrics = &metrics,
@@ -383,20 +402,23 @@ fn runWindow(
             .stop = &stop,
         }});
     }
-    while (ready.load(.acquire) != parallelism) try io.sleep(.fromMilliseconds(1), .awake);
-    const measured_at: std.Io.Timestamp = .now(io, .awake);
+
+    try candidate.warmupBuffers(source, parallelism);
+
+    while (ready.load(.acquire) != parallelism) try io.sleep(.fromMicroseconds(100), .awake);
+    const start_at: std.Io.Timestamp = .now(io, .awake);
     start.set(io);
     while (true) {
-        const elapsed = measured_at.durationTo(.now(io, .awake));
-        if (cohort.firstError()) |err| return err;
+        const elapsed = start_at.durationTo(.now(io, .awake));
+        if (candidate.firstError()) |err| return err;
         // is window complete
         if (elapsed.nanoseconds >= minimum_duration.nanoseconds and metrics.transfers.load(.acquire) >= minimum_transfers) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
     stop.store(true, .release);
     try group.await(io);
-    const elapsed = measured_at.durationTo(.now(io, .awake));
-    if (cohort.firstError()) |err| return err;
+    const elapsed = start_at.durationTo(.now(io, .awake));
+    if (candidate.firstError()) |err| return err;
     return .{
         .bytes = metrics.bytes.load(.acquire),
         .transfers = metrics.transfers.load(.acquire),
@@ -406,7 +428,14 @@ fn runWindow(
 
 const Candidate = struct {
     block_size: usize,
-    cohort: *Cohort,
+    io: std.Io,
+    platform: *const Platform,
+    manager: *pjrt.AsyncHostToDeviceTransferManager,
+    buffer_offset: usize,
+    buffer_count: usize,
+    warmed_buffers: usize = 0,
+    first_error: std.atomic.Value(u16) = .init(0),
+
     metrics: [sample_count]Measurement = undefined,
     metrics_len: usize = 0,
 
@@ -431,108 +460,17 @@ const Candidate = struct {
         }.lessThan);
         return populated[populated.len / 2];
     }
-};
-
-const Selection = struct {
-    block_size: usize,
-    metrics: Measurement,
-};
-
-const Session = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    manager: *pjrt.AsyncHostToDeviceTransferManager,
-    buffers: []*pjrt.Buffer,
-    cohorts: []Cohort,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        block_sizes: []const usize,
-        parallelism: usize,
-    ) !Session {
-        const buffer_count = std.math.mul(usize, block_sizes.len, parallelism) catch return error.OutOfMemory;
-        const dims = try allocator.alloc([1]i64, block_sizes.len);
-        defer allocator.free(dims);
-        const specs = try allocator.alloc(pjrt.ShapeSpec, buffer_count);
-        defer allocator.free(specs);
-        for (block_sizes, dims, 0..) |block_size, *dim, index| {
-            dim.* = .{@intCast(block_size)};
-            @memset(specs[index * parallelism ..][0..parallelism], pjrt.ShapeSpec.init(dim, .u8));
-        }
-        const cohorts = try allocator.alloc(Cohort, block_sizes.len);
-        errdefer allocator.free(cohorts);
-        const buffers = try allocator.alloc(*pjrt.Buffer, buffer_count);
-        errdefer allocator.free(buffers);
-        const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
-            .shape_specs = specs,
-            .memory = platform.devices[0].memory(.default).?.pjrt_memory,
-        });
-        var retrieved: usize = 0;
-        errdefer {
-            manager.deinit(platform.pjrt_api);
-            for (buffers[0..retrieved]) |buffer| buffer.deinit(platform.pjrt_api);
-        }
-        for (buffers, 0..) |*buffer, index| {
-            buffer.* = try manager.retrieveBuffer(platform.pjrt_api, index);
-            retrieved += 1;
-        }
-        for (cohorts, block_sizes, 0..) |*cohort, block_size, index| {
-            cohort.* = .{
-                .io = io,
-                .platform = platform,
-                .manager = manager,
-                .buffer_offset = index * parallelism,
-                .buffer_count = parallelism,
-                .block_size = block_size,
-            };
-        }
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .platform = platform,
-            .manager = manager,
-            .buffers = buffers,
-            .cohorts = cohorts,
-        };
-    }
-
-    fn deinit(self: *Session) void {
-        // XLA commit 1b19ae012aa67426658f7ca3c1503bb781c863a9 switched GPU
-        // transfers to CommonAsyncHostToDeviceTransferManager, whose destructor
-        // waits for outstanding transfers and marks unfinished buffers as errored.
-        // We discard these buffers, so no final is_last_transfer=true copy is needed.
-        self.manager.deinit(self.platform.pjrt_api);
-        for (self.buffers) |buffer| buffer.deinit(self.platform.pjrt_api);
-        self.allocator.free(self.buffers);
-        self.allocator.free(self.cohorts);
-        self.* = undefined;
-    }
-};
-
-const Cohort = struct {
-    io: std.Io,
-    platform: *const Platform,
-    manager: *pjrt.AsyncHostToDeviceTransferManager,
-    buffer_offset: usize,
-    buffer_count: usize,
-    block_size: usize,
-    warmed_buffers: usize = 0,
-    first_error: std.atomic.Value(u16) = .init(0),
-
-    fn recordError(self: *Cohort, err: pjrt.ApiError) void {
+    fn recordError(self: *Candidate, err: pjrt.ApiError) void {
         _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
     }
 
-    fn firstError(self: *const Cohort) ?pjrt.ApiError {
+    fn firstError(self: *const Candidate) ?pjrt.ApiError {
         const code = self.first_error.load(.acquire);
         return if (code == 0) null else @errorCast(@errorFromInt(code));
     }
 
     fn transfer(
-        self: *Cohort,
+        self: *Candidate,
         source: []const u8,
         slot: usize,
         metrics: ?*Counters,
@@ -561,16 +499,72 @@ const Cohort = struct {
         }
     }
 
-    fn ensureReady(self: *Cohort, source: []const u8, parallelism: usize) !void {
-        const required_bytes = self.block_size * parallelism;
-        if (required_bytes > source.len) return error.Internal;
-        std.debug.assert(parallelism <= self.buffer_count);
+    fn warmupBuffers(self: *Candidate, source: []const u8, parallelism: usize) !void {
         while (self.warmed_buffers < parallelism) : (self.warmed_buffers += 1) {
             const slot = self.warmed_buffers;
             self.transfer(source, slot, null);
             self.transfer(source, slot, null);
             if (self.firstError()) |err| return err;
         }
+    }
+};
+
+const Session = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    manager: *pjrt.AsyncHostToDeviceTransferManager,
+    buffers: []*pjrt.Buffer,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        block_sizes: []const usize,
+        parallelism: usize,
+    ) !Session {
+        const buffer_count = std.math.mul(usize, block_sizes.len, parallelism) catch return error.OutOfMemory;
+        const dims = try allocator.alloc([1]i64, block_sizes.len);
+        defer allocator.free(dims);
+        const specs = try allocator.alloc(pjrt.ShapeSpec, buffer_count);
+        defer allocator.free(specs);
+        for (block_sizes, dims, 0..) |block_size, *dim, index| {
+            dim.* = .{@intCast(block_size)};
+            @memset(specs[index * parallelism ..][0..parallelism], pjrt.ShapeSpec.init(dim, .u8));
+        }
+        const buffers = try allocator.alloc(*pjrt.Buffer, buffer_count);
+        errdefer allocator.free(buffers);
+        const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+            .shape_specs = specs,
+            .memory = platform.devices[0].memory(.default).?.pjrt_memory,
+        });
+        var retrieved: usize = 0;
+        errdefer {
+            manager.deinit(platform.pjrt_api);
+            for (buffers[0..retrieved]) |buffer| buffer.deinit(platform.pjrt_api);
+        }
+        for (buffers, 0..) |*buffer, index| {
+            buffer.* = try manager.retrieveBuffer(platform.pjrt_api, index);
+            retrieved += 1;
+        }
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .manager = manager,
+            .buffers = buffers,
+        };
+    }
+
+    fn deinit(self: *Session) void {
+        // XLA commit 1b19ae012aa67426658f7ca3c1503bb781c863a9 switched GPU
+        // transfers to CommonAsyncHostToDeviceTransferManager, whose destructor
+        // waits for outstanding transfers and marks unfinished buffers as errored.
+        // We discard these buffers, so no final is_last_transfer=true copy is needed.
+        self.manager.deinit(self.platform.pjrt_api);
+        for (self.buffers) |buffer| buffer.deinit(self.platform.pjrt_api);
+        self.allocator.free(self.buffers);
+        self.* = undefined;
     }
 };
 
@@ -601,14 +595,13 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .platform = undefined,
         .manager = undefined,
         .buffers = undefined,
-        .cohorts = undefined,
     };
     const opts: Options = .{ .block_selection_tolerance = 0.05 };
 
     var candidates = [_]Candidate{
-        .{ .block_size = 2, .cohort = undefined },
-        .{ .block_size = 4, .cohort = undefined },
-        .{ .block_size = 8, .cohort = undefined },
+        .{ .block_size = 2, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
     };
     const rates = [_][3]u64{
         .{ 60, 10, 62 },
@@ -635,10 +628,10 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
 
     // A dip between two near-peak values must not end the scan early.
     var bimodal = [_]Candidate{
-        .{ .block_size = 2, .cohort = undefined },
-        .{ .block_size = 4, .cohort = undefined },
-        .{ .block_size = 8, .cohort = undefined },
-        .{ .block_size = 16, .cohort = undefined },
+        .{ .block_size = 2, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 16, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
     };
     const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
     for (&bimodal, bimodal_rates) |*candidate, rate| {
@@ -660,8 +653,8 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
 
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
     var candidates = [_]Candidate{
-        .{ .block_size = 4, .cohort = undefined },
-        .{ .block_size = 8, .cohort = undefined },
+        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
     };
     const rates = [_][3]u64{
         .{ 96, 80, 97 },
@@ -674,7 +667,7 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
             .elapsed = .fromSeconds(1),
         });
     }
-    try std.testing.expect(needsConfirmation(
+    try std.testing.expect(isCloseToPeak(
         &candidates,
         0,
         1,
@@ -693,11 +686,18 @@ test "DMA benchmark shares one manager across candidate sizes and slots" {
     var session = try Session.init(allocator, io, platform, &.{ 8, 16 }, 2);
     defer session.deinit();
     const source: [32]u8 = @splat(0);
-    for (session.cohorts) |*cohort| {
-        try std.testing.expectEqual(session.manager, cohort.manager);
-        try cohort.ensureReady(&source, 2);
-        try std.testing.expectEqual(2, cohort.warmed_buffers);
-        try std.testing.expectEqual(null, cohort.firstError());
+    for ([_]usize{ 8, 16 }, 0..) |block_size, index| {
+        var candidate: Candidate = .{
+            .io = io,
+            .platform = platform,
+            .manager = session.manager,
+            .buffer_offset = index * 2,
+            .buffer_count = 2,
+            .block_size = block_size,
+        };
+        try candidate.warmupBuffers(&source, 2);
+        try std.testing.expectEqual(2, candidate.warmed_buffers);
+        try std.testing.expectEqual(null, candidate.firstError());
     }
 }
 
@@ -711,6 +711,14 @@ test "DMA benchmark cancellation drains transfer workers" {
     var source: [16]u8 = @splat(0);
     var session = try Session.init(allocator, io, platform, &.{source.len}, 1);
     defer session.deinit();
+    var candidate: Candidate = .{
+        .io = io,
+        .platform = platform,
+        .manager = session.manager,
+        .buffer_offset = 0,
+        .buffer_count = 1,
+        .block_size = source.len,
+    };
     var vtable = io.vtable.*;
     vtable.sleep = struct {
         fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
@@ -723,7 +731,7 @@ test "DMA benchmark cancellation drains transfer workers" {
     // while they transfer. In either case they must finish before teardown.
     try std.testing.expectError(error.Canceled, runWindow(
         canceled_io,
-        &session.cohorts[0],
+        &candidate,
         &source,
         1,
         .max,

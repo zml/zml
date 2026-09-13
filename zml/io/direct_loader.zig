@@ -45,7 +45,6 @@ const max_dma_pieces_per_device: usize = 64;
 /// The direct DMA backend. Submissions and awaits come from one task at a
 /// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
-    pub const InitError = std.mem.Allocator.Error || dma_calibration.CalibrationError || std.Io.ConcurrentError || error{InvalidOptions};
     pub const AwaitError = PipelineError;
     pub const SubmitError = PipelineError || error{EmptyTensor};
 
@@ -97,7 +96,7 @@ pub const Loader = struct {
         io: std.Io,
         platform: *const Platform,
         opts: BackendOptions,
-    ) InitError!*Loader {
+    ) !*Loader {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
         const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);
@@ -311,10 +310,8 @@ pub const Loader = struct {
                 var workspace = try host_memory.Workspace.init(allocator, io, platform);
                 errdefer workspace.deinit();
                 const calibration = dma_calibration.calibrate(&workspace, platform, opts.dma) catch |err| {
-                    load_log.err("calibrate DMA: target={t}, block_sizes={any}, parallelism={d}, mapped_ceiling={d}: {s}", .{
+                    load_log.err("calibrate DMA: target={t}, mapped_ceiling={d}: {s}", .{
                         platform.target,
-                        opts.block_sizes,
-                        opts.block_parallelism,
                         workspace.max_mapped_bytes,
                         @errorName(err),
                     });
