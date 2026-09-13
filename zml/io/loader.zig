@@ -109,35 +109,43 @@ pub const Loader = struct {
         opts: Options,
     ) !Loader {
         try validateOptions(opts);
+
         try platform.warmupDeviceAllocators(io);
-        const selected = try Backend.init(allocator, io, platform, opts);
-        errdefer selected.destroy();
-        const devices = platform.devices.len;
-        const submitted_bytes = try allocator.alloc(u64, devices);
+
+        const backend_ = try Backend.init(allocator, io, platform, opts);
+        errdefer backend_.destroy();
+
+        const n = platform.devices.len;
+
+        const submitted_bytes = try allocator.alloc(u64, n);
         errdefer allocator.free(submitted_bytes);
         @memset(submitted_bytes, 0);
-        const pending_execution = try allocator.alloc(u64, devices);
+
+        const pending_execution = try allocator.alloc(u64, n);
         errdefer allocator.free(pending_execution);
         @memset(pending_execution, 0);
-        const words = try allocator.alloc(u64, 4 * devices);
+
+        const words = try allocator.alloc(u64, 4 * n);
         errdefer allocator.free(words);
         var self: Loader = .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .backend = selected,
+            .backend = backend_,
             .memory_supported = false,
             .submitted_bytes = submitted_bytes,
             .pending_execution = pending_execution,
             .scratch = .{
                 .words = words,
-                .room = words[0..devices],
-                .allocated = words[devices .. 2 * devices],
-                .inputs = words[2 * devices .. 3 * devices],
-                .placed = words[3 * devices .. 4 * devices],
+                .room = words[0..n],
+                .allocated = words[n .. 2 * n],
+                .inputs = words[2 * n .. 3 * n],
+                .placed = words[3 * n .. 4 * n],
             },
         };
+
         self.memory_supported = self.probeMemory();
+
         return self;
     }
 
