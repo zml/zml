@@ -1,17 +1,10 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
-
-copy_file(
-    name = "libzml_metal_dylib",
-    src = "libzml_metal.dylib",
-    out = "lib/libzml_metal.dylib",
-    allow_symlink = True,
-)
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":libzml_metal_dylib",
+        "lib/libzml_metal.dylib",
     ],
     add_directory_to_runfiles = False,
     include_external_repositories = ["**"],
