@@ -79,12 +79,14 @@ pub fn fusedExperts(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !
     if (gate_up_scheme) |scheme| switch (scheme) {
         .nvfp4 => return error.UnsupportedQuantization,
         .fp8_block128 => launch_config.block_size_k = 128,
+        .fp8_block32 => launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
         .fp8_block128 => down_launch_config.block_size_k = 128,
+        .fp8_block32 => launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
         .nvfp4 => return error.UnsupportedQuantization,
     };
