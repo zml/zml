@@ -44,10 +44,16 @@ pub fn main(init: std.process.Init) !void {
     var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    var progress = std.Progress.start(io, .{
+        .root_name = args.model,
+        .estimated_total_items = store.view().count(),
+    });
     const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    const all_shardings = shardings.all();
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+    defer loader.deinit();
+    var model_buffers = try repo_model.loadBuffers(allocator, io, &loader, &progress, &store, &all_shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 

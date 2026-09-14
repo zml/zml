@@ -680,11 +680,47 @@ pub const Client = opaque {
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;
 
+    pub const Attributes = struct {
+        values: []const NamedValue,
+        state: *c.PJRT_Device_Attributes,
+        deleter: *const fn (?*c.PJRT_Device_Attributes) callconv(.c) void,
+
+        pub fn deinit(self: Attributes) void {
+            self.deleter(self.state);
+        }
+
+        pub fn get(self: Attributes, name: []const u8) ?NamedValue.Value {
+            for (self.values) |attribute| {
+                if (std.mem.eql(u8, attribute.name(), name))
+                    return attribute.value();
+            }
+            return null;
+        }
+    };
+
     pub fn getDescription(self: *const Device, api: *const Api) *const DeviceDescription {
         const ret = api.call(.PJRT_Device_GetDescription, .{
             .device = self.inner(),
         }) catch unreachable;
         return @ptrCast(ret.device_description.?);
+    }
+
+    /// Returns runtime device attributes. The values remain valid until the
+    /// returned owner is deinitialized.
+    pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
+        const ret = try api.call(.PJRT_Device_GetAttributes, .{
+            .device = self.inner(),
+        });
+        const state = ret.device_attributes orelse return error.Internal;
+        const deleter = ret.attributes_deleter orelse return error.Internal;
+        return .{
+            .values = if (ret.attributes == null)
+                &.{}
+            else
+                @ptrCast(ret.attributes[0..ret.num_attributes]),
+            .state = state,
+            .deleter = deleter,
+        };
     }
 
     pub fn isAddressable(self: *const Device, api: *const Api) bool {
@@ -1511,6 +1547,10 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .error_message = error_message.ptr,
             .error_message_size = error_message.len,
         });
+    }
+
+    pub fn setBufferErrorUnknown(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_message: []const u8) ApiError!void {
+        return self.setBufferError(api, buffer_index, c.PJRT_Error_Code_UNKNOWN, error_message);
     }
 
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {

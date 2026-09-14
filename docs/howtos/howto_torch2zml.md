@@ -244,6 +244,7 @@ pub fn main(init: std.process.Init) !void {
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
     var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
+    defer zml.mem.deinitBufferized(allocator, Mlp, &mlp_weights);
 }
 ```
 
