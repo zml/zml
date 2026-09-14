@@ -127,6 +127,7 @@ pub const Loader = struct {
 
         const words = try allocator.alloc(u64, 4 * n);
         errdefer allocator.free(words);
+
         var self: Loader = .{
             .allocator = allocator,
             .io = io,
@@ -147,6 +148,21 @@ pub const Loader = struct {
         self.memory_supported = self.probeMemory();
 
         return self;
+    }
+
+    /// Awaits every pending submission without running executables (their
+    /// outputs stay unwritten, their inputs are freed), then destroys the
+    /// backend.
+    pub fn deinit(self: *Loader) void {
+        while (self.pending.len != 0) self.retireOldest(false) catch {};
+        self.logAdmission();
+        self.pending.deinit(self.allocator);
+        self.delivered.deinit(self.allocator);
+        self.allocator.free(self.submitted_bytes);
+        self.allocator.free(self.pending_execution);
+        self.allocator.free(self.scratch.words);
+        self.backend.destroy();
+        self.* = undefined;
     }
 
     /// Decided once: the CPU plugin logs an unimplemented warning on every
@@ -256,21 +272,6 @@ pub const Loader = struct {
     /// Logical bytes of every submission retired with execution so far.
     pub fn bytesLoaded(self: *const Loader) usize {
         return self.bytes_loaded;
-    }
-
-    /// Awaits every pending submission without running executables (their
-    /// outputs stay unwritten, their inputs are freed), then destroys the
-    /// backend.
-    pub fn deinit(self: *Loader) void {
-        while (self.pending.len != 0) self.retireOldest(false) catch {};
-        self.logAdmission();
-        self.pending.deinit(self.allocator);
-        self.delivered.deinit(self.allocator);
-        self.allocator.free(self.submitted_bytes);
-        self.allocator.free(self.pending_execution);
-        self.allocator.free(self.scratch.words);
-        self.backend.destroy();
-        self.* = undefined;
     }
 
     /// Fills `execution` with the submission's output and temporary bytes
