@@ -272,10 +272,21 @@ pub const Tensor = struct {
             ),
         });
 
+        var x: Tensor = self;
+        switch (kind) {
+            .host_pinned, .host_unpinned => {
+                // XLA doesn't have a notion of "sharded host buffer", explicitly replicate before device to host copy
+                // TODO: check this doesn't emit an all-to-all
+                var replicated_shape = self._shape;
+                replicated_shape._partitioning.buffer = @splat(.replicated);
+                x = self.withPartitionedShape(replicated_shape, .resolve(.replicated, ctx.platform));
+            },
+            .device, .default => {},
+        }
         const op = dialects.stablehlo.custom_call(
             ctx.mlir_ctx,
-            &.{self.value()},
-            &.{self.value().type_()},
+            &.{x.value()},
+            &.{x.value().type_()},
             .{
                 .call_target_name = "annotate_device_placement",
                 .has_side_effect = true,
@@ -287,7 +298,7 @@ pub const Tensor = struct {
             ctx.location,
         ).appendTo(currentBlock());
 
-        const res = _result(self._shape, op.result(0));
+        const res = _result(x._shape, op.result(0));
         ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
@@ -350,6 +361,14 @@ pub const Tensor = struct {
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
             return self;
+        }
+
+        switch (kind) {
+            .host_pinned, .host_unpinned => {
+                // XLA doesn't have a notion of "sharded host buffer"
+                stdx.debug.assert(self._shape.isFullyReplicated(), "onMemory(.{t}) expects a non-sharded tensor, got: {f}", .{ kind, self._shape });
+            },
+            .device, .default => {},
         }
 
         ctx.currentScope().id_to_memory.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
