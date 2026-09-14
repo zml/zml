@@ -134,6 +134,11 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
 }
 
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
+    const physical_topk = triton.paged.topkToPhysical(parameters, topk, tokens_pos, kv_cache.dim(.k_chunk));
+    return sparseAttention(parameters, q, kv_cache, sink, physical_topk, opts);
+}
+
+pub fn sparseAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, opts: MlaOptions) zml.Tensor {
     const output_shape = q.shape().set(.hd, opts.value_rank);
     return zml.ops.manualComputation(
         (struct {
@@ -141,28 +146,15 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
             kv_cache: zml.Tensor,
             sink: ?zml.Tensor,
             topk: zml.Tensor,
-            tokens_pos: zml.Tensor,
-            block_table: zml.Tensor,
-            seq_lens: zml.Tensor,
             query_start_len: zml.Tensor,
             opts: MlaOptions,
             options: triton.paged.Options,
 
             fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                const block_size = self.kv_cache.dim(.k_chunk);
-
-                const parameters_: triton.paged.Parameters = .{
-                    .block_table = self.block_table,
-                    .seq_lens = self.seq_lens,
-                    .query_start_len = self.query_start_len,
-                    .options_ = self.options,
-                };
-
-                const topk_final = triton.paged.topkToPhysical(parameters_, self.topk, self.tokens_pos, block_size);
                 const active_query_count = self.query_start_len
                     .slice(.b, .{ .start = self.query_start_len.dim(.b) - 1 })
                     .squeeze(.b);
-                stdx.debug.assert(topk_final.dim(.q) == self.q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), self.q.dim(.q) });
+                stdx.debug.assert(self.topk.dim(.q) == self.q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ self.topk.dim(.q), self.q.dim(.q) });
 
                 const num_heads: usize = @intCast(self.q.dim(.h));
                 const paged_opts: Options = .{
@@ -181,7 +173,7 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
                     self.q,
                     self.kv_cache,
                     self.sink,
-                    topk_final,
+                    self.topk,
                     active_query_count,
                     paged_opts,
                 );
@@ -192,9 +184,6 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
             .kv_cache = kv_cache,
             .sink = sink,
             .topk = topk,
-            .tokens_pos = tokens_pos,
-            .block_table = parameters.block_table,
-            .seq_lens = parameters.seq_lens,
             .query_start_len = parameters.query_start_len,
             .opts = opts,
             .options = parameters.options_,

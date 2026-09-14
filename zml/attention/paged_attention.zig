@@ -863,15 +863,33 @@ pub const Mla = struct {
         return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
 
-    /// Computes sparse MLA scores over the complete cached key and returns
-    /// `opts.value_rank` output dimensions per head.
+    /// Maps logical token positions through the page table before sparse MLA.
     pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
+        const block_size = switch (kv_cache) {
+            .latent => |latent_kv| latent_kv.dim(.k_chunk),
+            else => std.debug.panic("Sparse Multi-Latent Attention support only latent KV pages, got: {}", .{std.meta.activeTag(kv_cache)}),
+        };
+        const physical_topk = switch (parameters) {
+            inline .triton, .stablehlo => |p| triton.paged.topkToPhysical(p, topk, tokens_pos, block_size),
+            else => @panic("NOPE"),
+        };
+        return sparseAttention(parameters, q, kv_cache, sink, physical_topk, opts);
+    }
+
+    /// Computes sparse MLA from physical cache row offsets in `topk` (.q, .topk).
+    /// Each i32 offset addresses page * k_chunk + slot; -1 masks an entry.
+    /// The caller supplies in-bounds, causally visible rows and masks padded queries.
+    /// Returns `opts.value_rank` output dimensions per head. Parameters provide
+    /// the execution backend and query counts; their page table is not used.
+    pub fn sparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, opts: Mla.Options) zml.Tensor {
         const latent_kv = switch (kv_cache) {
             .latent => |latent_kv| latent_kv,
             else => std.debug.panic("Sparse Multi-Latent Attention support only latent KV pages, got: {}", .{std.meta.activeTag(kv_cache)}),
         };
 
         stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
+        stdx.debug.assert(topk.dtype() == .i32 and topk.shape().hasTags(.{ .q, .topk }), "physical MLA indices must have i32 .q and .topk axes, got {f}", .{topk.shape()});
+        stdx.debug.assert(topk.dim(.q) == q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk.dim(.q), q.dim(.q) });
         stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
         stdx.debug.assert(opts.value_rank > 0, "expected MLA value rank to be positive, got {}", .{opts.value_rank});
         stdx.debug.assert(opts.value_rank == q.dim(.hd) or opts.value_rank + opts.rope_rank == q.dim(.hd), "expected MLA value rank ({}) to cover either the complete qk head ({}) or its non-RoPE prefix ({})", .{ opts.value_rank, q.dim(.hd), q.dim(.hd) - opts.rope_rank });
@@ -879,14 +897,8 @@ pub const Mla = struct {
         stdx.debug.assert(latent_kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), latent_kv.dim(.hd) });
 
         return switch (parameters) {
-            .triton => |triton_parameters| sparse_mla.pagedAttention(triton_parameters, q, latent_kv, sink, topk, tokens_pos, opts),
-            .stablehlo => |stablehlo_parameters| stablehlo_pagedSparseAttention(
-                q,
-                latent_kv,
-                sink,
-                triton.paged.topkToPhysical(stablehlo_parameters, topk, tokens_pos, latent_kv.dim(.k_chunk)),
-                opts,
-            ),
+            .triton => |triton_parameters| sparse_mla.sparseAttention(triton_parameters, q, latent_kv, sink, topk, opts),
+            .stablehlo => stablehlo_pagedSparseAttention(q, latent_kv, sink, topk, opts),
             else => @panic("NOPE"),
         };
     }
