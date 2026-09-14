@@ -7,6 +7,7 @@ const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
+const sparse_mla = @import("sparse_mla.zig");
 
 const PagedAttention = @This();
 
@@ -820,7 +821,10 @@ pub fn partialSoftmax(self: zml.Tensor, axis: anytype) PartialSoftmax {
 }
 
 pub const Mla = struct {
+    pub const Backend = sparse_mla.Backend;
+
     pub const Options = struct {
+        backend: Mla.Backend = .triton,
         rope_rank: i64,
         value_rank: i64,
         scale: ?f32 = null,
@@ -875,7 +879,7 @@ pub const Mla = struct {
         stdx.debug.assert(latent_kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), latent_kv.dim(.hd) });
 
         return switch (parameters) {
-            .triton => |triton_parameters| triton.paged.pagedSparseMla(triton_parameters, q, latent_kv, sink, topk, tokens_pos, opts),
+            .triton => |triton_parameters| sparse_mla.pagedAttention(triton_parameters, q, latent_kv, sink, topk, tokens_pos, opts),
             .stablehlo => |stablehlo_parameters| stablehlo_pagedSparseAttention(
                 q,
                 latent_kv,

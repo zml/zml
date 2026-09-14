@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const attnd = @import("attention/attnd.zig");
+pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const flashattn = @import("attention/flashattn.zig");
 pub const metal = @import("attention/metal_attention.zig");
 pub const nki = @import("attention/nki/attention.zig");
