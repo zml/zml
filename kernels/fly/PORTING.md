@@ -1,9 +1,10 @@
 # Porting a FlyDSL Python kernel to Zig
 
-The Zig DSL emits the same `fly` ops the Python does, so a port is a
-statement-by-statement translation. Work from the pinned FlyDSL tree
-(`third_party/flydsl/repo.bzl`, read with `git show <pin>:<path>`), not from
-FlyDSL HEAD: the plugin only parses what the pin prints.
+The Zig DSL builds Fly IR directly. Work from the revision and patches in
+[the FlyDSL repository rule](../../third_party/flydsl/repo.bzl), reading
+Python sources with `git -C <FlyDSL checkout> show <pin>:<path>`. Check the
+[ROCm plugin pin](../../platforms/rocm/rocm.bzl) as well: the emitter and
+runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 
 ## Cheat sheet
 
@@ -30,7 +31,7 @@ FlyDSL HEAD: the plugin only parses what the pin prints.
 | `fx.make_view(ptr, layout)` | `ptr.view(layout)` |
 | `fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)` | `b.copyAtom(.{ .universal = 128 }, .f32)` |
 | `fx.rocdl.BufferCopy32b()` / `BufferCopyLDS128b()` | `.{ .buffer_copy = 32 }` / `.{ .buffer_copy_lds = 128 }` |
-| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom(try fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{ .m = 16, .n = 16, .k = 4, ... }))` |
+| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom((try fly.rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{ .m = 16, .n = 16, .k = 4, ... })).type_())` |
 | `fx.make_tiled_mma(atom, layout)` | `b.tiledMma(atom, layout, null)` |
 | `fx.make_tiled_copy_tv(atom, thr, val)` | `b.tiledCopyTV(atom, thr, val)` |
 | `fx.make_tiled_copy_A(atom, tiled_mma)` | `b.tiledCopyA(atom, tiled_mma)` |
@@ -63,8 +64,12 @@ FlyDSL HEAD: the plugin only parses what the pin prints.
 ## Method
 
 1. Read the kernel and its helpers at the pin; note every `fx.*` primitive.
-2. Write the Zig `run` top to bottom. Keep the same op order so the emitted
-   IR lines up with the Python module when diffing.
+2. Write the Zig `run` top to bottom, preserving operation order and numeric
+   conversions. For matrix loops, use SSA copy and MMA calls as described
+   under [control flow and register tensors](README.md#control-flow-and-register-tensors):
+   `b.copyAtomLoad` returns vectors, `b.mmaAtomCall` returns the accumulator,
+   and `b.copyAtomStore` writes vectors. Carry accumulator values through
+   `openFor`; do not put mutable register tensors across control-flow regions.
 3. `bazel test //kernels/fly:test` (or a `K.emit` test): the module must
    verify and re-parse. A panic from `fly.<op>: cannot create operation`
    lists the operand types; compare them with the Python trace.
@@ -76,8 +81,24 @@ FlyDSL HEAD: the plugin only parses what the pin prints.
 - Python config (`N`, `dtype_str`, `const_expr(...)` branches) becomes the
   kernel `Config`; branch on it with plain `if` in `run`.
 - Python lists of vectors across an unrolled loop are Zig arrays of `Value`.
+  `v.insert(i, x)` returns a new vector; `v.extract(i)` reads an element.
+  `v.bitcast(dtype)` preserves total bits and adjusts vector length.
+- Keep unsigned semantics explicit for packed bytes and offsets with
+  `toUnsigned`, `divUnsigned`, `remUnsigned` and `cmpUnsigned`.
+- `v.shuffleVector(rhs, indices)` rearranges vector elements within a thread;
+  `v.shuffle(.up, offset, width)` and `shuffleXor` exchange values across lanes.
+- Runtime `while` loops use `b.openWhile(inits, after_types)`, `yieldBefore`
+  and `yieldAfter`; use a plain Zig `while` only for loops unrolled at emit time.
 - Python `Int32(x)` / `Float32(x)` constants are `b.constant(.i32, x)`; most
   arithmetic methods also take a literal directly (`tid.add(256)`).
 - Cached scalars from LDS are read with `t.at(i)`; there is no implicit load.
 - bf16 outputs use `arith.truncf`; the Python's manual round-to-nearest bit
   trick for pre-gfx950 parts is not reproduced.
+
+## Model kernels
+
+The [MoE kernels](../../zml/moe/fly_kernels/) include native routing and
+MXFP4 GEMV/MFMA implementations. The
+[sparse MLA kernel](../../zml/attention/fly_kernels/sparse_mla.zig) uses SSA
+matrix accumulators through attention loops. These are examples of the
+builder APIs with model tensor layouts and launch wrappers.
