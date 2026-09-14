@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const cuda_tile_builder = @import("kernels/cuda_tile/builder");
+const fly_builder = @import("kernels/fly/builder");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
@@ -12,6 +13,7 @@ const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
+const platform_ = @import("platform.zig");
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -507,6 +509,341 @@ pub const cuda_tile = struct {
         };
     }
 };
+
+pub const fly = struct {
+    /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
+    pub fn waveSize(p: *const platform_.Platform) i32 {
+        const cc = platform_.rocm.computeCapability(p) orelse return 64;
+        return switch (cc.architecture()) {
+            .cdna1, .cdna2, .cdna3, .cdna4 => 64,
+            .rdna2, .rdna3, .rdna3_5, .rdna4 => 32,
+        };
+    }
+
+    /// The plugin sizes a block in wavefronts, so a thread count has to divide
+    /// evenly: a kernel's layouts are built for an exact number of threads and
+    /// spare ones would partition out of range.
+    fn warpsFor(p: *const platform_.Platform, threads: i32) i32 {
+        const wave = waveSize(p);
+        if (@rem(threads, wave) != 0) {
+            std.debug.panic("zml.kernel.fly: {d} threads is not a multiple of the {d}-wide wavefront", .{ threads, wave });
+        }
+        return @divExact(threads, wave);
+    }
+
+    pub const Builder = fly_builder.Builder;
+    pub const Value = fly_builder.Value;
+    pub const DType = fly_builder.DType;
+    pub const FinishError = fly_builder.FinishError;
+    pub const TiledCopy = fly_builder.TiledCopy;
+    pub const TiledMma = fly_builder.TiledMma;
+    pub const Arch = fly_builder.Arch;
+    pub const MmaFlavor = fly_builder.MmaFlavor;
+
+    /// The matrix atom this device provides, or null when it has none: WMMA
+    /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.
+    pub fn mmaFlavor(p: *const platform_.Platform) ?MmaFlavor {
+        const cc = platform_.rocm.computeCapability(p) orelse return .cdna3_mfma;
+        return switch (cc.architecture()) {
+            .cdna1, .cdna2, .cdna3, .cdna4 => .cdna3_mfma,
+            .rdna3, .rdna3_5 => .gfx11_wmma,
+            .rdna4 => .gfx120x_wmma,
+            .rdna2 => null,
+        };
+    }
+    pub const layout = fly_builder.layout;
+    pub const Layout = fly_builder.Layout;
+    pub const Tile = fly_builder.Tile;
+    pub const IntTuple = fly_builder.IntTuple;
+    pub const L = fly_builder.L;
+    pub const rowMajor = fly_builder.rowMajor;
+    pub const colMajor = fly_builder.colMajor;
+    pub const ordered = fly_builder.ordered;
+    pub const tile = fly_builder.tile;
+    pub const it = fly_builder.it;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(&fly_builder.dialects_needed);
+    }
+
+    pub fn from(dt: DataType) DType {
+        return switch (dt) {
+            .bool => .i1,
+            .i8, .u8 => .i8,
+            .i16, .u16 => .i16,
+            .i32, .u32 => .i32,
+            .i64, .u64 => .i64,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            .f32 => .f32,
+            .f64 => .f64,
+            .f8e4m3fn => .f8e4m3fn,
+            .f8e4m3fnuz => .f8e4m3fnuz,
+            .f8e5m2 => .f8e5m2,
+            .f8e5m2fnuz => .f8e5m2fnuz,
+            else => std.debug.panic("zml.kernel.fly.from: dtype {s} has no Fly equivalent", .{@tagName(dt)}),
+        };
+    }
+
+    fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            inputs: []const [:0]const u8,
+            outputs: []const [:0]const u8,
+            run: *const fn (*Builder, Config) FinishError!void,
+        };
+    }
+
+    pub fn Kernel(
+        comptime ConfigT: type,
+        comptime spec: Spec(ConfigT),
+    ) type {
+        return struct {
+            pub const name: [:0]const u8 = spec.name;
+            pub const Config = ConfigT;
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+            pub const arg_names = spec.inputs ++ spec.outputs;
+            /// By name, as `!fly.memref` views.
+            pub const Args = StructOf(arg_names, Value);
+
+            pub const CallOpts = struct {
+                cfg: ConfigT,
+                grid: [3]i32,
+                /// Threads per block. Converted to the wavefronts the plugin
+                /// wants using the device's wave size, which is 64 on CDNA and
+                /// 32 on RDNA, so a kernel states the thread count its layouts
+                /// were built for and runs on both.
+                threads: i32,
+                /// > 0 sets `amdgpu-waves-per-eu = "N, N"`: a hard occupancy clamp.
+                waves_per_eu: i32 = 0,
+                /// Required when the body uses `fly.get_dyn_shared`.
+                shared_mem_bytes: i64 = 0,
+                /// Inputs first, then outputs; see `zeroedOutput`. A no-op
+                /// inside command buffers.
+                zeroed_args: []const i32 = &.{},
+                output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
+            };
+
+            /// The arguments `run` was declared with.
+            pub fn args(b: *Builder) Args {
+                var out: Args = undefined;
+                inline for (arg_names, 0..) |fname, i| @field(out, fname) = b.arg(i);
+                return out;
+            }
+
+            /// `zeroed_args` index of an output.
+            pub fn zeroedOutput(comptime f: std.meta.FieldEnum(Outputs)) i32 {
+                return @intCast(spec.inputs.len + @intFromEnum(f));
+            }
+
+            /// `shapes` is inputs, then outputs.
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT, shapes: []const Shape) ![:0]const u8 {
+                std.debug.assert(shapes.len == arg_names.len);
+                const ctx = try newContext();
+                defer ctx.deinit();
+
+                var b = try fly_builder.Builder.open(allocator, ctx, name);
+                defer b.deinit();
+
+                var specs: [arg_names.len]Builder.ArgSpec = undefined;
+                inline for (arg_names, 0..) |fname, i| {
+                    const shape = shapes[i];
+                    specs[i] = .{
+                        .name = fname,
+                        .dtype = from(shape.dtype()),
+                        .dims = if (shape.rank() > 0) shape.dims() else null,
+                    };
+                }
+                try b.declareArgsLow(&specs);
+
+                try spec.run(&b, cfg);
+
+                return b.finish();
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                inline for (spec.inputs, 0..) |fname, i| inputs_arr[i] = @field(inputs, fname);
+
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
+
+                var shapes: [arg_names.len]Shape = undefined;
+                inline for (0..spec.inputs.len) |i| shapes[i] = inputs_arr[i].shape();
+                inline for (0..spec.outputs.len) |i| shapes[spec.inputs.len + i] = outputs_arr[i];
+
+                const ir = emit(cur.allocator, opts.cfg, &shapes) catch |err|
+                    std.debug.panic("zml.kernel.fly.Kernel({s}).call: emit failed: {}", .{ name, err });
+                defer cur.allocator.free(ir);
+
+                const aliases = resolveOutputOperandAliases(opts.output_operand_aliases, 0);
+
+                const tensor_results = ops.fly(inputs_arr, outputs_arr, .{
+                    .name = name,
+                    .ir = ir,
+                    .grid = opts.grid,
+                    .num_warps = warpsFor(cur.platform, opts.threads),
+                    .waves_per_eu = opts.waves_per_eu,
+                    .shared_mem_bytes = opts.shared_mem_bytes,
+                    .zeroed_args = opts.zeroed_args,
+                    .output_operand_aliases = aliases.constSlice(),
+                });
+
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
+                return results;
+            }
+        };
+    }
+};
+
+/// C = A + B over (M, N) f32, 128-bit vectorized and predicated on the
+/// ragged edge.
+const FlyVectorAdd = struct {
+    const Cfg = struct {
+        thr: fly.Layout = fly.ordered(.{ 8, 16 }, .{ 1, 0 }),
+        val: fly.Layout = fly.ordered(.{ 1, 4 }, .{ 0, 1 }),
+    };
+
+    const K = fly.Kernel(Cfg, .{
+        .name = "vector_add",
+        .inputs = &.{ "a", "b" },
+        .outputs = &.{"c"},
+        .run = run,
+    });
+
+    fn run(b: *fly.Builder, cfg: Cfg) fly.FinishError!void {
+        const a = K.args(b);
+        fly_builder.emitVectorAdd(b, cfg.thr, cfg.val, a.a, a.b, a.c);
+    }
+};
+
+test "fly kernel emits a module XLA can parse" {
+    const shapes = [_]Shape{ .init(.{ 100, 1000 }, .f32), .init(.{ 100, 1000 }, .f32), .init(.{ 100, 1000 }, .f32) };
+    const ir = try FlyVectorAdd.K.emit(std.testing.allocator, .{}, &shapes);
+    defer std.testing.allocator.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.func @vector_add(%arg0: !fly.ptr<f32, global>, %arg1: !fly.ptr<f32, global>, %arg2: !fly.ptr<f32, global>) kernel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "fly.static : !fly.tile<[8|64]>") != null);
+}
+
+/// C = A @ B^T with one MFMA-tiled block.
+const FlyTiledMma = struct {
+    const Cfg = struct { flavor: fly.MmaFlavor };
+    const K = fly.Kernel(Cfg, .{
+        .name = "tiled_mma",
+        .inputs = &.{ "a", "b" },
+        .outputs = &.{"c"},
+        .run = run,
+    });
+
+    fn run(b: *fly.Builder, cfg: Cfg) fly.FinishError!void {
+        const a = K.args(b);
+        fly_builder.emitTiledMma(b, cfg.flavor, a.a, a.b, a.c);
+    }
+};
+
+test "fly kernels run on rocm" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    // Compile `forward`, upload both inputs, run, and bring the result back.
+    const call = struct {
+        fn f(comptime forward: anytype, p: *const zml.Platform, ta: Tensor, ha: anytype, tb: Tensor, hb: anytype) !zml.Slice {
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ ta, tb }, p, .{});
+            defer exe.deinit();
+            var ba: zml.Buffer = try .fromBytes(std.testing.io, p, ta.shape(), .replicated, std.mem.sliceAsBytes(ha));
+            defer ba.deinit();
+            var bb: zml.Buffer = try .fromBytes(std.testing.io, p, tb.shape(), .replicated, std.mem.sliceAsBytes(hb));
+            defer bb.deinit();
+            var out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ ba, bb });
+            defer out.deinit();
+            return out.toSliceAlloc(std.testing.allocator, std.testing.io);
+        }
+    }.f;
+
+    // vector add: elementwise over a ragged (100, 1000), predicated at the edge.
+    {
+        const M, const N = .{ 100, 1000 };
+        const Mod = struct {
+            pub fn forward(a: Tensor, b: Tensor) Tensor {
+                return FlyVectorAdd.K.call(.{ .a = a, .b = b }, .{ .c = a.shape() }, .{
+                    .cfg = .{},
+                    .grid = .{ (M + 8 - 1) / 8, (N + 64 - 1) / 64, 1 },
+                    .threads = 8 * 16,
+                }).c;
+            }
+        };
+
+        const ha = try allocator.alloc(f32, M * N);
+        defer allocator.free(ha);
+        const hb = try allocator.alloc(f32, M * N);
+        defer allocator.free(hb);
+        for (ha, hb, 0..) |*va, *vb, i| {
+            va.* = @floatFromInt(i % 977);
+            vb.* = @floatFromInt(1000 + (i % 313));
+        }
+
+        var host = try call(Mod.forward, platform, .init(.{ M, N }, .f32), ha, .init(.{ M, N }, .f32), hb);
+        defer host.free(allocator);
+        for (host.items(f32), 0..) |v, i| try std.testing.expectEqual(ha[i] + hb[i], v);
+    }
+
+    // tiled mma: C = A @ B^T in one block of 256 threads, over whatever matrix
+    // atom this device has. CDNA multiplies f32 through MFMA; RDNA3+ has WMMA,
+    // whose verifier rejects f32 operands, so the operand type and K come from
+    // the flavour rather than being written into the test.
+    if (fly.mmaFlavor(platform)) |flavor| switch (flavor) {
+        inline else => |f| {
+            const Elem = switch (comptime f.operandDType()) {
+                .f32 => f32,
+                .f16 => f16,
+                else => @compileError("unhandled MMA operand type"),
+            };
+            const M, const N = .{ 64, 64 };
+            const Kd = comptime f.blockK();
+            const operand_dtype: DataType = switch (comptime f.operandDType()) {
+                .f32 => .f32,
+                .f16 => .f16,
+                else => unreachable,
+            };
+
+            const Mod = struct {
+                pub fn forward(a: Tensor, b: Tensor) Tensor {
+                    return FlyTiledMma.K.call(.{ .a = a, .b = b }, .{ .c = Shape.init(.{ M, N }, .f32) }, .{
+                        .cfg = .{ .flavor = f },
+                        .grid = .{ 1, 1, 1 },
+                        .threads = comptime f.blockThreads(),
+                    }).c;
+                }
+            };
+
+            var ha: [M * Kd]Elem = undefined;
+            var hb: [N * Kd]Elem = undefined;
+            for (&ha, 0..) |*v, i| v.* = @as(Elem, @floatFromInt((i * 7) % 13)) - 6;
+            for (&hb, 0..) |*v, i| v.* = @as(Elem, @floatFromInt((i * 5) % 11)) - 5;
+
+            var host = try call(Mod.forward, platform, .init(.{ M, Kd }, operand_dtype), &ha, .init(.{ N, Kd }, operand_dtype), &hb);
+            defer host.free(allocator);
+
+            // f16 operands accumulate in f32, so the error is set by the input
+            // rounding rather than the sum.
+            const tol: f32 = if (Elem == f16) 1e-2 else 1e-3;
+            const out = host.items(f32);
+            for (0..M) |m| for (0..N) |n| {
+                var acc: f32 = 0;
+                for (0..Kd) |k| acc += @as(f32, ha[m * Kd + k]) * @as(f32, hb[n * Kd + k]);
+                try std.testing.expectApproxEqAbs(acc, out[m * N + n], tol);
+            };
+        },
+    };
+}
 
 test "cuda_tile kernel emits a module XLA can parse" {
     const Cfg = struct { n: i64 };

@@ -1,0 +1,44 @@
+diff --git a/lib/Dialect/Fly/IR/FlyUniversalOps.cpp b/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
+--- a/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
++++ b/lib/Dialect/Fly/IR/FlyUniversalOps.cpp
+@@ -35,28 +35,36 @@
+   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+ }
+ 
++static int32_t getAtomicValueBitWidth(Type type) {
++  if (auto vectorType = dyn_cast<VectorType>(type)) {
++    return vectorType.getNumElements() *
++           vectorType.getElementType().getIntOrFloatBitWidth();
++  }
++  return type.getIntOrFloatBitWidth();
++}
++
+ bool CopyOpUniversalAtomicType::isStatic() const { return true; }
+ 
+ Value CopyOpUniversalAtomicType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                     Value currentValue) const {
+   if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+     return nullptr;
+-  int32_t bits = getValType().getIntOrFloatBitWidth();
++  int32_t bits = getAtomicValueBitWidth(getValType());
+   return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, bits), bits);
+ }
+ 
+ Attribute CopyOpUniversalAtomicType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+ 
+ Attribute CopyOpUniversalAtomicType::getThrBitLayoutSrc() const {
+-  int32_t bits = getValType().getIntOrFloatBitWidth();
++  int32_t bits = getAtomicValueBitWidth(getValType());
+   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
+ }
+ Attribute CopyOpUniversalAtomicType::getThrBitLayoutDst() const {
+-  int32_t bits = getValType().getIntOrFloatBitWidth();
++  int32_t bits = getAtomicValueBitWidth(getValType());
+   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
+ }
+ Attribute CopyOpUniversalAtomicType::getThrBitLayoutRef() const {
+-  int32_t bits = getValType().getIntOrFloatBitWidth();
++  int32_t bits = getAtomicValueBitWidth(getValType());
+   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
+ }
+ 

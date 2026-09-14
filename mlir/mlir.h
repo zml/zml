@@ -8,6 +8,7 @@
 #include <mlir-c/Dialect/LLVM.h>
 #include <mlir-c/Dialect/Math.h>
 #include <mlir-c/Dialect/MemRef.h>
+#include <mlir-c/Dialect/ROCDL.h>
 #include <mlir-c/Dialect/SCF.h>
 #include <mlir-c/Dialect/Vector.h>
 #include <mlir-c/IR.h>

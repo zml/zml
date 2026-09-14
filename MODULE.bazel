@@ -258,6 +258,7 @@ use_repo(
     "flashattn_linux_arm64",
     "flashinfer_cutlass_moe_linux_amd64",
     "flashinfer_cutlass_moe_linux_arm64",
+    "flydsl",
     "iree",
     "libvaxis",
     "linenoise",
