@@ -582,8 +582,16 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         output_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
     }
 
+    const input_types = try arena.alloc(*const mlir.Type, input_info.len);
+    for (input_types, 0..) |*input_type, i| input_type.* = fn_scope.block.argument(i).type_();
+
+    const output_types = try arena.alloc(*const mlir.Type, output_info.len);
+    for (output_types, output_info.items(.value)) |*output_type, value| output_type.* = value.type_();
+
     const mlir_func = dialects.func.func(mlir_ctx, .{
         .name = "main",
+        .args = input_types,
+        .results = output_types,
         .block = fn_scope.block,
         .location = .unknown(mlir_ctx),
         .args_attributes = input_attributes,
