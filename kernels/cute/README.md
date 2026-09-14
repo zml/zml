@@ -7,7 +7,7 @@ fourth instance of the `kernels/triton` / `kernels/mosaic_tpu` /
 `kernels/cuda_tile` pattern: a `Builder` that owns an MLIR module and appends
 ops to a block stack, a `Value` with fluent scalar arithmetic, and a
 `zml.kernel.cute.Kernel` wrapper that turns a `run` function into a
-`stablehlo.custom_call` XLA compiles with `cute-ir-compile`.
+`stablehlo.custom_call` XLA compiles in process with `libcute_compiler.so`.
 
 The dialect binding lives in `mlir/dialects/cute_ir` (`cute` and
 `cute_nvgpu`, types through the dialect's C API).
@@ -87,7 +87,7 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 * **`nvvm` is not linked into ZML.** Thread indices and barriers are emitted
   as unregistered ops in generic form; the compiler has the dialect.
 * **The module is just the kernel.** `finish` prints `module { func.func
-  @name(...) {...} }`; `cute-ir-compile` makes every public function a kernel
+  @name(...) {...} }`; the CuTe compiler makes every public function a kernel
   entry, so there is no `gpu.module` or host launch function to write.
 * **Not covered yet:** dynamic shapes, `local_tile`/`local_partition`, tiled
   copies and fragments (`TensorSSA`), TMA and MMA atoms.
@@ -96,8 +96,9 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 
 `ops.cute` emits `__gpu$xla.gpu.cute` with a printed dictionary: `name`,
 `kernel_type = "cute"`, `ir` (the textual module), `grid` and `block`
-(3-element arrays), optional `zeroed_outputs`. XLA runs `cute-ir-compile`
-(which dlopens `cutlass_ir.so` from the plugin archive), takes the kernel's
+(3-element arrays), optional `zeroed_outputs`. XLA compiles it in process
+(`lib/libcute_compiler.so`, which pulls in `lib/cutlass_ir.so`, both from the
+sandbox pointed at by `--xla_gpu_cuda_data_dir`), takes the kernel's
 dynamic shared memory requirement from the compiler's metadata, and launches
 the cubin over `grid` × `block`. Every operand and result is one raw device
 pointer in the default layout, operands first; the count is not checked

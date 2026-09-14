@@ -24,7 +24,7 @@ test {
 }
 
 /// `nvvm` is not linked into ZML: its ops are emitted unregistered, in
-/// generic form; cute-ir-compile has the dialect.
+/// generic form; the CuTe compiler has the dialect.
 pub const dialects_needed = [_][]const u8{ "func", "cute", "cute_nvgpu", "arith", "scf", "math", "cf" };
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -767,7 +767,7 @@ pub const Builder = struct {
 
     // ==================== module ====================
 
-    /// The module cute-ir-compile takes: the verified kernel as a public
+    /// The module the CuTe compiler takes: the verified kernel as a public
     /// `func.func`, which the compiler turns into the kernel entry. Grid and
     /// block travel in the custom call; `block` is also pinned as
     /// `nvvm.reqntid`.

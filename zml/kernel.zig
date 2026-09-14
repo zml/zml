@@ -955,7 +955,7 @@ test "fly kernels run on rocm" {
     };
 }
 
-test "cute kernel emits the module cute-ir-compile takes" {
+test "cute kernel emits the module the CuTe compiler takes" {
     const Cfg = struct { n: i64 };
     const AddOne = cute.Kernel(Cfg, .{
         .name = "add_one",

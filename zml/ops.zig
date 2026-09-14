@@ -1350,7 +1350,7 @@ pub const CuteOps = struct {
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
-/// A `__gpu$xla.gpu.cute` custom call: XLA compiles `ir` with cute-ir-compile
+/// A `__gpu$xla.gpu.cute` custom call: XLA compiles `ir` with the CuTe compiler
 /// and launches `name`. Every operand and result arrives as one raw device
 /// pointer, in order, in the default layout.
 pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tensor {

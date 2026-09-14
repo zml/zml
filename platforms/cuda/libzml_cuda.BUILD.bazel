@@ -18,8 +18,8 @@ patchelf(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        "bin/cute-ir-compile",
         "lib/cutlass_ir.so",
+        "lib/libcute_compiler.so",
         ":libzml_cuda_so",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
