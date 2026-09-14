@@ -139,9 +139,7 @@ pub const Partitioning = struct {
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) error{NoSuitableSharding}!Sharding {
-        const sharding = pickSharding(self.shardings, shape, .any_covering) orelse return error.NoSuitableSharding;
-        // std.log.warn("{f} -> {f}", .{ shape, sharding });
-        return sharding;
+        return pickSharding(self.shardings, shape, .any_covering) orelse error.NoSuitableSharding;
     }
 
     fn primarySharding(self: Partitioning) Sharding {

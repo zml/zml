@@ -331,7 +331,11 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts) catch |err| {
+        log.err("\nPjrt failed to compile ({}) the following MLIR:\n{f}", .{ err, compiler.module.operation() });
+        return err;
+    };
+
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
