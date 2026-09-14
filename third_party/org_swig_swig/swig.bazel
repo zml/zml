@@ -63,18 +63,16 @@ genrule(
     name = "swigconfig",
     outs = ["Source/Include/swigconfig.h"],
     cmd = """\
-cat <<EOF >$@
-#define HAVE_BOOL
+echo '#define HAVE_BOOL
 #define HAVE_PCRE
 #define HAVE_POPEN
-#define PACKAGE_BUGREPORT \"http://www.swig.org\"
-#define PACKAGE_VERSION \"4.3.0\"
+#define PACKAGE_BUGREPORT "http://www.swig.org"
+#define PACKAGE_VERSION "4.3.0"
 #define STDC_HEADERS
-#define SWIG_CXX \"bazel4lyfe\"
-#define SWIG_LIB \"external/org_swig_swig/Lib\"
-#define SWIG_LIB_WIN_UNIX \"\"
-#define SWIG_PLATFORM \"bazel4lyfe\"
-EOF
+#define SWIG_CXX "bazel4lyfe"
+#define SWIG_LIB "external/org_swig_swig/Lib"
+#define SWIG_LIB_WIN_UNIX ""
+#define SWIG_PLATFORM "bazel4lyfe"' >$@
 """,
 )
 
@@ -83,29 +81,33 @@ genrule(
     srcs = ["Source/Modules/swigmain.cxx"],
     outs = ["Source/Modules/swigmain-lite.cxx"],
     cmd = """\
-sed -e '/swig_allegrocl/d' \
-    -e '/swig_chicken/d' \
-    -e '/swig_clisp/d' \
-    -e '/swig_csharp/d' \
-    -e '/swig_d/d' \
-    -e '/swig_guile/d' \
-    -e '/swig_go/d' \
-    -e '/swig_java/d' \
-    -e '/swig_lua/d' \
-    -e '/swig_modula3/d' \
-    -e '/swig_mzscheme/d' \
-    -e '/swig_ocaml/d' \
-    -e '/swig_octave/d' \
-    -e '/swig_perl/d' \
-    -e '/swig_php/d' \
-    -e '/swig_pike/d' \
-    -e '/swig_python/d' \
-    -e '/swig_r/d' \
-    -e '/swig_ruby/d' \
-    -e '/swig_scilab/d' \
-    -e '/swig_sexp/d' \
-    -e '/swig_tcl/d' \
-    -e '/swig_uffi/d' \
-    $< >$@
+while IFS= read -r line || [[ -n $$line ]]; do
+  case "$$line" in
+    *swig_allegrocl*) continue ;;
+    *swig_chicken*) continue ;;
+    *swig_clisp*) continue ;;
+    *swig_csharp*) continue ;;
+    *swig_d*) continue ;;
+    *swig_go*) continue ;;
+    *swig_guile*) continue ;;
+    *swig_java*) continue ;;
+    *swig_lua*) continue ;;
+    *swig_modula3*) continue ;;
+    *swig_mzscheme*) continue ;;
+    *swig_ocaml*) continue ;;
+    *swig_octave*) continue ;;
+    *swig_perl*) continue ;;
+    *swig_php*) continue ;;
+    *swig_pike*) continue ;;
+    *swig_python*) continue ;;
+    *swig_r*) continue ;;
+    *swig_ruby*) continue ;;
+    *swig_scilab*) continue ;;
+    *swig_sexp*) continue ;;
+    *swig_tcl*) continue ;;
+    *swig_uffi*) continue ;;
+  esac
+  printf '%s\\n' "$$line"
+done <$< >$@
 """,
 )
