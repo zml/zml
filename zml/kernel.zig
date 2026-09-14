@@ -539,6 +539,7 @@ pub const fly = struct {
     pub const TiledMma = fly_builder.TiledMma;
     pub const Arch = fly_builder.Arch;
     pub const MmaFlavor = fly_builder.MmaFlavor;
+    pub const rocdl = fly_builder.rocdl;
 
     /// The matrix atom this device provides, or null when it has none: WMMA
     /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.

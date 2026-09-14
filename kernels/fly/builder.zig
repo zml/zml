@@ -14,6 +14,7 @@ pub const layout = @import("layout.zig");
 pub const dtypes = @import("dtype.zig");
 
 pub const DType = dtypes.DType;
+pub const rocdl = fly.rocdl;
 pub const IntTuple = layout.IntTuple;
 pub const Layout = layout.Layout;
 pub const Tile = layout.Tile;
@@ -297,11 +298,11 @@ pub const Value = struct {
     fn coerceArith(self: Value, rhs: anytype) struct { Value, Value } {
         const k = self.kern();
         const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
-        const ln = self.vectorLen();
-        const rn = r.vectorLen();
-        if (ln == rn) return .{ self, r };
-        if (rn == 1) return .{ self, k.emit(dialects.vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
-        if (ln == 1) return .{ k.emit(dialects.vector.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
+        if (self.type_().eql(r.type_())) return .{ self, r };
+        if (self.type_().isA(mlir.VectorType) != null and r.type_().isA(mlir.VectorType) == null)
+            return .{ self, k.emit(dialects.vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
+        if (self.type_().isA(mlir.VectorType) == null and r.type_().isA(mlir.VectorType) != null)
+            return .{ k.emit(dialects.vector.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
         std.debug.panic("fly: cannot combine {f} with {f}", .{ self.type_(), r.type_() });
     }
 
@@ -332,6 +333,122 @@ pub const Value = struct {
         return k.emit(arith.remsi(k.ctx, l.inner, r.inner, k.loc()));
     }
 
+    pub fn bitAnd(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.andi(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn bitOr(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.ori(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn bitXor(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.xori(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn shl(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.shli(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn shrU(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.shrui(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn divUnsigned(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.divui(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn remUnsigned(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emit(arith.remui(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn cmpUnsigned(self: Value, pred: Cmp, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        const p: arith.CmpIPredicate = switch (pred) {
+            .eq => .eq,
+            .ne => .ne,
+            .lt => .ult,
+            .le => .ule,
+            .gt => .ugt,
+            .ge => .uge,
+        };
+        return k.emit(arith.cmpi(k.ctx, p, l.inner, r.inner, k.loc()));
+    }
+
+    pub fn neg(self: Value) Value {
+        const k = self.kern();
+        return k.emitFast(arith.negf(k.ctx, self.inner, k.loc()));
+    }
+    /// Propagates NaNs; use `maxNum` to select the numeric operand instead.
+    pub fn maximum(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emitFast(arith.maximumf(k.ctx, l.inner, r.inner, k.loc()));
+    }
+    pub fn maxNum(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const l, const r = self.coerceArith(rhs);
+        return k.emitFast(arith.maxnumf(k.ctx, l.inner, r.inner, k.loc()));
+    }
+
+    /// Interpret integer operands and results as unsigned.
+    pub fn toUnsigned(self: Value, dtype: DType) Value {
+        const k = self.kern();
+        const src = self.scalarDType();
+        if (src == dtype) return self;
+        if (src.isFloat() and dtype.isFloat()) return self.to(dtype);
+        const result = self.withElemType(dtype.toMlir(k.ctx));
+        const op = if (src.isFloat())
+            arith.fptoui(k.ctx, self.inner, result, k.loc())
+        else if (dtype.isFloat())
+            arith.uitofp(k.ctx, self.inner, result, k.loc())
+        else if (dtype.bitWidth() > src.bitWidth())
+            arith.extui(k.ctx, self.inner, result, k.loc())
+        else
+            arith.trunci(k.ctx, self.inner, result, k.loc());
+        return k.emit(op);
+    }
+
+    pub fn splat(self: Value, n: i64) Value {
+        const k = self.kern();
+        std.debug.assert(self.type_().isA(mlir.VectorType) == null and n > 0);
+        return k.emit(dialects.vector.broadcast(k.ctx, self.inner, .vector(&.{n}, self.type_()), k.loc()));
+    }
+
+    /// Preserve total bits, adjusting vector length to the destination element.
+    pub fn bitcast(self: Value, dtype: DType) Value {
+        const k = self.kern();
+        const src = self.scalarDType();
+        if (self.type_().isA(mlir.VectorType)) |vec| {
+            const n = @divExact(vec.dimension(0) * @as(i64, src.bitWidth()), dtype.bitWidth());
+            return k.emit(dialects.vector.bitcast(k.ctx, self.inner, .vector(&.{n}, dtype.toMlir(k.ctx)), k.loc()));
+        }
+        std.debug.assert(src.bitWidth() == dtype.bitWidth());
+        return k.emit(arith.bitcast(k.ctx, self.inner, dtype.toMlir(k.ctx), k.loc()));
+    }
+
+    pub fn insert(self: Value, index: i64, value: Value) Value {
+        const k = self.kern();
+        return k.emit(dialects.vector.insert(k.ctx, value.inner, self.inner, &.{index}, &.{}, k.loc()));
+    }
+
+    pub fn shuffleVector(self: Value, rhs: Value, indices: []const i64) Value {
+        const k = self.kern();
+        return k.emit(dialects.vector.shuffle(k.ctx, self.inner, rhs.inner, indices, .vector(&.{@intCast(indices.len)}, self.scalarElemType()), k.loc()));
+    }
+
+    fn withElemType(self: Value, elem: *const mlir.Type) *const mlir.Type {
+        if (self.type_().isA(mlir.VectorType)) |vec| return .vector(&.{vec.dimension(0)}, elem);
+        return elem;
+    }
+
     pub fn toI32(self: Value) Value {
         const k = self.kern();
         return k.emit(arith.index_cast(k.ctx, self.inner, .int(k.ctx, .i32), k.loc()));
@@ -351,8 +468,7 @@ pub const Value = struct {
         const k = self.kern();
         const src = self.scalarDType();
         if (src == dtype) return self;
-        const n = self.vectorLen();
-        const result = if (n == 1) dtype.toMlir(k.ctx) else mlir.Type.vector(&.{n}, dtype.toMlir(k.ctx));
+        const result = self.withElemType(dtype.toMlir(k.ctx));
         const unsigned_src = src == .i1;
         const op = if (src.isFloat() and dtype.isFloat())
             (if (dtype.bitWidth() > src.bitWidth())
@@ -415,9 +531,9 @@ pub const Value = struct {
 
     pub const ShuffleMode = enum { xor, up, down, idx };
 
-    pub fn shuffle(self: Value, mode: ShuffleMode, offset: i32, width: i32) Value {
+    pub fn shuffle(self: Value, mode: ShuffleMode, offset: anytype, width: i32) Value {
         const k = self.kern();
-        const off = k.constant(.i32, offset);
+        const off: Value = if (@TypeOf(offset) == Value) offset else k.constant(.i32, offset);
         const wid = k.constant(.i32, width);
         const mode_attr = switch (mode) {
             inline else => |m| fly.parseAttr(k.ctx, "#gpu<shuffle_mode " ++ @tagName(m) ++ ">"),
@@ -937,6 +1053,68 @@ pub const Builder = struct {
         return self.emitFast(dialects.math.exp(self.ctx, x.inner, self.loc()));
     }
 
+    pub fn log(self: *Builder, x: Value) Value {
+        return self.emitFast(dialects.math.log(self.ctx, x.inner, self.loc()));
+    }
+    pub fn fma(self: *Builder, a: Value, b: Value, c: Value) Value {
+        return self.emitFast(dialects.math.fma(self.ctx, a.inner, b.inner, c.inner, self.loc()));
+    }
+
+    /// A matrix atom with SSA operands; unlike `gemm`, this needs no register
+    /// allocas and can carry its accumulator through control flow.
+    pub fn mmaAtomCall(self: *Builder, atom: Value, a: Value, b: Value, c: Value) Value {
+        return self.emit(fly.typed(self.ctx, "mma_atom_call_ssa", &.{ atom.inner, a.inner, b.inner, c.inner }, &.{c.type_()}, .empty, self.loc()));
+    }
+
+    /// AMD byte permutation. ROCDL has no corresponding operation at our pin.
+    pub fn perm(self: *Builder, hi: Value, lo: Value, selector: Value) Value {
+        return self.emit(fly.make(self.ctx, "llvm.inline_asm", .{
+            .operands = .{ .flat = &.{ hi.inner, lo.inner, selector.inner } },
+            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
+            .attributes = &.{
+                .named(self.ctx, "asm_string", .string(self.ctx, "v_perm_b32 $0, $1, $2, $3")),
+                .named(self.ctx, "constraints", .string(self.ctx, "=v,v,v,v")),
+            },
+            .location = self.loc(),
+        }));
+    }
+
+    /// CDNA3 packed FP8 conversion, selecting two bytes from the low/high word.
+    pub fn cvtPkF32Fp8(self: *Builder, bits: Value, high: bool) Value {
+        return self.emit(fly.make(self.ctx, "rocdl.cvt.pk.f32.fp8", .{
+            .operands = .{ .flat = &.{bits.inner} },
+            .results = .{ .flat = &.{.vector(&.{2}, .float(self.ctx, .f32))} },
+            .attributes = &.{.named(self.ctx, "wordSel", .boolean(self.ctx, high))},
+            .location = self.loc(),
+        }));
+    }
+
+    pub const AtomicScope = enum { workgroup, agent };
+
+    /// Monotonic i32 addition to a global or shared pointer. Callers provide
+    /// barriers or kernel dependencies before reading the completed counters.
+    pub fn ptrAtomicAdd(self: *Builder, ptr: Value, value: Value, scope: AtomicScope) Value {
+        std.debug.assert(ptr.elemDType() == .i32 and value.type_().eql(DType.i32.toMlir(self.ctx)));
+        const space: i32 = switch (scope) {
+            .workgroup => 3,
+            .agent => 1,
+        };
+        const llvm_ptr = self.emit(fly.inferred(self.ctx, "to_llvm_ptr", &.{ptr.inner}, fly.attrs(&.{
+            .named(self.ctx, "llvm_address_space", .int(self.ctx, .i32, space)),
+        }), self.loc()));
+        return self.emit(fly.make(self.ctx, "llvm.atomicrmw", .{
+            .operands = .{ .flat = &.{ llvm_ptr.inner, value.inner } },
+            .results = .{ .flat = &.{value.type_()} },
+            .attributes = &.{
+                .named(self.ctx, "bin_op", .int(self.ctx, .i64, 1)), // LLVM AtomicBinOp::add.
+                .named(self.ctx, "ordering", .int(self.ctx, .i64, 2)), // LLVM AtomicOrdering::monotonic.
+                .named(self.ctx, "syncscope", .string(self.ctx, @tagName(scope))),
+                .named(self.ctx, "alignment", .int(self.ctx, .i64, 4)),
+            },
+            .location = self.loc(),
+        }));
+    }
+
     /// Static LDS, as an `n:1` tensor in shared memory. Each call is its own
     /// `fly.make_ptr {allocBytes, allocAlign}` leaf, which the plugin lowers
     /// to one LLVM global, so `shared_mem_bytes` may stay 0.
@@ -1255,6 +1433,56 @@ pub const Builder = struct {
         const else_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
         return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block, .else_block = else_block, .result_types = types };
+    }
+
+    pub fn openWhile(
+        self: *Builder,
+        inits: anytype,
+        after_types: anytype,
+    ) WhileScope(
+        tupleArity(@TypeOf(inits), "openWhile: inits"),
+        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
+    ) {
+        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
+        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
+        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".fields;
+
+        var before_types: [N]*const mlir.Type = undefined;
+        var before_locs: [N]*const mlir.Location = undefined;
+        var inits_inner: [N]*const mlir.Value = undefined;
+        inline for (init_fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("openWhile: every init must be a Value");
+            const v: Value = @field(inits, f.name);
+            before_types[i] = v.type_();
+            before_locs[i] = self.loc();
+            inits_inner[i] = v.inner;
+        }
+        const before_block = mlir.Block.init(&before_types, &before_locs);
+
+        var after_tys: [M]*const mlir.Type = undefined;
+        var after_locs: [M]*const mlir.Location = undefined;
+        inline for (type_fields, 0..) |f, i| {
+            if (f.type != *const mlir.Type)
+                @compileError("openWhile: every after_type must be *const mlir.Type");
+            after_tys[i] = @field(after_types, f.name);
+            after_locs[i] = self.loc();
+        }
+        const after_block = mlir.Block.init(&after_tys, &after_locs);
+
+        self.pushBlock(before_block);
+        var before_carried: [N]Value = undefined;
+        for (0..N) |i| before_carried[i] = .{ .inner = before_block.argument(i), .kernel = self };
+
+        return .{
+            .kernel = self,
+            .before_block = before_block,
+            .after_block = after_block,
+            .inits_inner = inits_inner,
+            .after_types = after_tys,
+            .before_carried = before_carried,
+        };
     }
 
     // ---------------------------------------------------------------- finalization
