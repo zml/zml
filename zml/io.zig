@@ -172,7 +172,7 @@ pub const TensorStore = struct {
 
             var shape = source.shape;
             shape = applyTags(shape, tagz);
-            shape = applyPartitioning(shape, partitioning);
+            shape = shape.withPartitioning(partitioning);
 
             const tensor: Tensor = .fromShape(shape);
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false }) catch |e| std.debug.panic("Not handling {} errors", .{e});
@@ -195,25 +195,6 @@ pub const TensorStore = struct {
                     else => shape = shape.withTags(tagz),
                 }
             }
-            return shape;
-        }
-
-        fn applyPartitioning(shape_: Shape, partitioning: anytype) Shape {
-            var shape = shape_;
-
-            if (@TypeOf(partitioning) == @TypeOf(null)) {
-                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
-            }
-
-            switch (@typeInfo(@TypeOf(partitioning))) {
-                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
-                .enum_literal => switch (partitioning) {
-                    .replicated => shape = shape.withReplicatedPartitioning(),
-                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
-                },
-                else => shape = shape.withPartitioning(partitioning),
-            }
-
             return shape;
         }
 
