@@ -264,21 +264,16 @@ pub const paged = struct {
                 options: Options,
 
                 fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const local_k_cache = if (self.k_cache.shape().hasTag(.shard)) |axis| self.k_cache.squeeze(axis) else self.k_cache;
-                    const local_v_cache = if (self.v_cache.shape().hasTag(.shard)) |axis| self.v_cache.squeeze(axis) else self.v_cache;
-                    const local_block_table = if (self.block_table.shape().hasTag(.shard)) |axis| self.block_table.squeeze(axis) else self.block_table;
-                    const local_seq_lens = if (self.seq_lens.shape().hasTag(.shard)) |axis| self.seq_lens.squeeze(axis) else self.seq_lens;
-                    const local_query_start_len = if (self.query_start_len.shape().hasTag(.shard)) |axis| self.query_start_len.squeeze(axis) else self.query_start_len;
                     const parameters_: Parameters = .{
-                        .block_table = local_block_table,
-                        .seq_lens = local_seq_lens,
-                        .query_start_len = local_query_start_len,
+                        .block_table = self.block_table,
+                        .seq_lens = self.seq_lens,
+                        .query_start_len = self.query_start_len,
                         .options_ = self.options,
                     };
 
                     const cu_count = getCuCount();
                     const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
-                    const num_kv_heads: usize = @intCast(local_k_cache.dim(.hkv));
+                    const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
@@ -301,8 +296,8 @@ pub const paged = struct {
                         .num_kv_heads = num_kv_heads,
                         .head_dim = @intCast(self.q.dim(.hd)),
                         .batch_size = @intCast(parameters_.block_table.dim(.b)),
-                        .block_size = @intCast(local_k_cache.dim(.k_chunk)),
-                        .num_blocks = @intCast(local_k_cache.dim(.page)),
+                        .block_size = @intCast(self.k_cache.dim(.k_chunk)),
+                        .num_blocks = @intCast(self.k_cache.dim(.page)),
                         .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
                         .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
                         .block_m = block_m,
@@ -320,11 +315,11 @@ pub const paged = struct {
                         paged_attention_opts.num_kv_heads,
                     );
                     const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, self.q, local_k_cache, local_v_cache, self.opts, paged_attention_opts)
+                        pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else if (isOneapiTarget())
-                        pagedAttention3dOneapi(parameters_, self.q, local_k_cache, local_v_cache, self.opts, paged_attention_opts)
+                        pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else
-                        pagedAttention3d(parameters_, self.q, local_k_cache, local_v_cache, self.opts, paged_attention_opts);
+                        pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
 
                     return output;
                 }
@@ -340,7 +335,7 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
-            .{ .manual_axes = .{ .data, .model } },
+            .{ .manual_axes = .{.model} },
         );
 
         return output;
