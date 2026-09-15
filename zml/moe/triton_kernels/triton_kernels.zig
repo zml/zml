@@ -110,7 +110,7 @@ pub const PerTokenGroupQuantFp8 = struct {
                 // E8M0 stores the biased exponent as a byte.
                 break :blk .{ b.exp2(exponent), exponent.add(127).to(.i32).to(.i8) };
             },
-            .fp8_per_channel, .fp8_per_tensor, .fp8_block128 => .{ scale_raw, scale_raw.to(scale_dt) },
+            .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .{ scale_raw, scale_raw.to(scale_dt) },
             .mxfp4, .nvfp4 => unreachable,
         };
 
@@ -211,6 +211,11 @@ pub const FusedMoe = struct {
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         if (cfg.quant_scheme == .fp8_block128 and cfg.block_size_k != 128) {
             log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K=128", .{});
+            return error.InvalidMlir;
+        }
+
+        if (cfg.quant_scheme == .fp8_block32 and cfg.block_size_k != 32) {
+            log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K=32", .{});
             return error.InvalidMlir;
         }
 
@@ -480,6 +485,40 @@ pub const FusedMoe = struct {
                     }
                     break :scaled acc.add(scaled_dot);
                 },
+                .fp8_block32 => scaled: {
+                    // Activation scales are [token, K/32] and weight scales are
+                    // [expert, N/32, K/32 Compute their addresses from the
+                    // loop index; activation scales are optional.
+                    const stride_bse = b.load(a.stride_bse_ptr);
+                    const stride_bsk = b.load(a.stride_bsk_ptr);
+                    const stride_bsn = b.load(a.stride_bsn_ptr);
+                    const b_scale_ptrs = a.b_scale_ptr.addPtr(
+                        off_experts.mul(stride_bse)
+                            .add(offs_bn.div(32).mul(stride_bsn))
+                            .add(k_iter.mul(stride_bsk)),
+                    );
+                    const dot = b.dotOpts(a_val, if (cfg.a_scale_dtype != null) b_val else b_val.to(.bf16), b.zeros(&.{ block_size_m, block_size_n }, .f32), .{
+                        .input_precision = .tf32,
+                        .max_num_imprecise_acc = 0,
+                    });
+                    const b_s = b.loadOpts(b_scale_ptrs, .{
+                        .mask = offs_bn.lt(n_block),
+                        .other = b.zeros(&.{block_size_n}, cfg.b_scale_dtype orelse .f32),
+                    }).to(.f32);
+                    var scaled_dot = dot.mul(b_s.expandDims(0));
+                    if (cfg.a_scale_dtype) |dtype| {
+                        const a_scale_ptrs = a.a_scale_ptr.addPtr(
+                            offs_token.div(top_k).mul(b.load(a.stride_asm_ptr))
+                                .add(k_iter.mul(b.load(a.stride_ask_ptr))),
+                        );
+                        const a_s = b.loadOpts(a_scale_ptrs, .{
+                            .mask = token_mask,
+                            .other = b.zeros(&.{block_size_m}, dtype),
+                        }).to(.f32);
+                        scaled_dot = scaled_dot.mul(a_s.expandDims(1));
+                    }
+                    break :scaled acc.add(scaled_dot);
+                },
                 .nvfp4 => unreachable,
             } else b.dotOpts(a_val, b_val, acc, .{
                 .input_precision = .tf32,
@@ -580,7 +619,7 @@ test "FP8 activation quantization emits float and E8M0 scales" {
 
 test "FusedMoe emits each FP8 and MXFP4 scaling path" {
     const allocator = std.testing.allocator;
-    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 };
+    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 };
     for (schemes) |scheme| {
         for ([_]DType{ .f8e4m3fn, .f8e4m3fnuz }) |fp8_dtype| {
             if ((scheme == .mxfp4 or scheme == .mxfp8) and fp8_dtype == .f8e4m3fnuz) continue;
@@ -597,7 +636,7 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
                         .routing_weights_dtype = .bf16,
                         .block_size_m = 16,
                         .block_size_n = 32,
-                        .block_size_k = 128,
+                        .block_size_k = if (scheme == .fp8_block32) 32 else 128,
                         .group_size_m = 1,
                         .top_k = 2,
                         .naive_block_assignment = false,
