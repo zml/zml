@@ -80,7 +80,7 @@ pub const Tensor = struct {
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
 
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             // Check that the MLIR value actually have the same shape.
             const other = fromMlirValue(val);
             const eql_dtype = sh.dtype() == other.dtype();
@@ -3595,8 +3595,8 @@ pub const Tensor = struct {
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
             .@"struct" => |info| blk: {
-                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
-                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
+                stdx.debug.assertComptime(info.field_names.len == 1, err_msg, .{});
+                break :blk .{ info.field_names[0], self.axis(@field(named_axis_, info.field_names[0])) };
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };

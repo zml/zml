@@ -111,9 +111,6 @@ pub const VFSBase = struct {
             .netListenUnix = netListenUnix,
             .netConnectUnix = netConnectUnix,
             .netSocketCreatePair = netSocketCreatePair,
-            .netSend = netSend,
-            .netRead = netRead,
-            .netWrite = netWrite,
             .netWriteFile = netWriteFile,
             .netClose = netClose,
             .netShutdown = netShutdown,
@@ -261,7 +258,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.dirAccess(self.inner.userdata, dir, sub_path, options);
     }
 
-    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirCreateFile(self.inner.userdata, dir, sub_path, flags);
     }
@@ -271,7 +268,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.dirCreateFileAtomic(self.inner.userdata, dir, sub_path, options);
     }
 
-    pub fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    pub fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirOpenFile(self.inner.userdata, dir, sub_path, flags);
     }
@@ -496,7 +493,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.fileMemoryMapWrite(self.inner.userdata, memory_map);
     }
 
-    pub fn processExecutableOpen(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.process.OpenExecutableError!std.Io.File {
+    pub fn processExecutableOpen(userdata: ?*anyopaque, flags: std.Io.Dir.OpenFileOptions) std.process.OpenExecutableError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.processExecutableOpen(self.inner.userdata, flags);
     }
@@ -631,29 +628,14 @@ pub const VFSBase = struct {
         return self.inner.vtable.netSocketCreatePair(self.inner.userdata, options);
     }
 
-    pub fn netSend(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, msgs: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netSend(self.inner.userdata, handle, msgs, flags);
-    }
-
-    pub fn netRead(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netRead(self.inner.userdata, src, data);
-    }
-
-    pub fn netWrite(userdata: ?*anyopaque, dest: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netWrite(self.inner.userdata, dest, header, data, splat);
-    }
-
     pub fn netWriteFile(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.net.Stream.Writer.WriteFileError!usize {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netWriteFile(self.inner.userdata, handle, header, reader, limit);
     }
 
-    pub fn netClose(userdata: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+    pub fn netClose(userdata: ?*anyopaque, sockets: []const std.Io.net.Socket) void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        self.inner.vtable.netClose(self.inner.userdata, handles);
+        self.inner.vtable.netClose(self.inner.userdata, sockets);
     }
 
     pub fn netShutdown(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, how: std.Io.net.ShutdownHow) std.Io.net.ShutdownError!void {

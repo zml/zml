@@ -1,4 +1,16 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_library")
+
+write_file(
+    name = "build_options_zig",
+    out = "build_options.zig",
+    content = ["pub const debug_allocations: bool = false;"],
+)
+
+zig_library(
+    name = "build_options",
+    main = ":build_options_zig",
+)
 
 zig_library(
     name = "c_builtins",
@@ -19,6 +31,7 @@ zig_binary(
     main = "src/main.zig",
     linkopts = ["-lc"],
     deps = [
+        ":build_options",
         ":c_builtins",
         ":helpers",
         "@arocc//:aro",

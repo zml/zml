@@ -20,8 +20,8 @@ pub fn isTuple(comptime T: type) bool {
 pub fn isStructOf(comptime T: type, comptime Elem: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (field.type != Elem) {
+            inline for (info.field_types) |FieldType| {
+                if (FieldType != Elem) {
                     break :blk false;
                 }
             }
@@ -34,8 +34,8 @@ pub fn isStructOf(comptime T: type, comptime Elem: type) bool {
 pub fn isStructOfAny(comptime T: type, comptime f: fn (comptime type) bool) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
-                if (f(field.type) == false) {
+            inline for (info.field_types) |FieldType| {
+                if (f(FieldType) == false) {
                     break :blk false;
                 }
             }
@@ -121,9 +121,9 @@ pub fn asSlice(comptime T: type) type {
 }
 
 pub fn TupleRange(comptime T: type, comptime start: ?usize, comptime end: ?usize) type {
-    const fields = std.meta.fields(T);
+    const all_field_types = std.meta.fieldTypes(T);
     const start_ = start orelse 0;
-    const end_ = end orelse fields.len;
+    const end_ = end orelse all_field_types.len;
 
     if (start_ == end_) {
         return @Tuple(&.{});
@@ -131,17 +131,17 @@ pub fn TupleRange(comptime T: type, comptime start: ?usize, comptime end: ?usize
 
     var field_types: [end_ - start_]type = undefined;
     inline for (start_..end_, 0..) |i, j| {
-        field_types[j] = fields[i].type;
+        field_types[j] = all_field_types[i];
     }
     return @Tuple(&field_types);
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
-    const params = @typeInfo(@TypeOf(func)).@"fn".params;
+    const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
     if (n >= params.len) {
         @compileError("param doesn't exist in func");
     }
-    return params[n].type orelse @compileError("anytype is not supported");
+    return params[n] orelse @compileError("anytype is not supported");
 }
 
 pub fn FnReturn(comptime func: anytype) type {
@@ -167,8 +167,8 @@ pub fn FnReturnErrorSet(comptime func: anytype) ?type {
 pub fn Head(comptime Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {
-            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
-            return struct_info.fields[0].type;
+            if (struct_info.field_types.len == 0) @compileError("Can't tail empty tuple");
+            return struct_info.field_types[0];
         },
         else => @compileError("Head works on tuple type"),
     };
@@ -177,10 +177,10 @@ pub fn Head(comptime Tuple: type) type {
 pub fn Tail(comptime Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {
-            if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
-            var types: [struct_info.fields.len - 1]type = undefined;
-            for (struct_info.fields[1..], &types) |field, *type_| {
-                type_.* = field.type;
+            if (struct_info.field_types.len == 0) @compileError("Can't tail empty tuple");
+            var types: [struct_info.field_types.len - 1]type = undefined;
+            for (struct_info.field_types[1..], &types) |FieldType, *type_| {
+                type_.* = FieldType;
             }
             return @Tuple(&types);
         },

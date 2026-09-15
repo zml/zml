@@ -31,7 +31,7 @@ pub const Slice = struct {
         const byte_strides = shape.computeByteStrides();
         return .{
             .bytes = bytes,
-            .mutable = !type_info.pointer.is_const,
+            .mutable = !type_info.pointer.attrs.@"const",
             .shape = shape,
             .offset_bytes = 0,
             .byte_strides = byte_strides,

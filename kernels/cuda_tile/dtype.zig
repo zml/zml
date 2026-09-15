@@ -73,8 +73,8 @@ pub fn intBitwidth(dt: DType) u32 {
 }
 
 pub fn mlirElemToDType(ctx: *mlir.Context, elem: *const mlir.Type) DType {
-    inline for (std.meta.fields(DType)) |f| {
-        const dt = @field(DType, f.name);
+    inline for (comptime std.meta.fieldNames(DType)) |f_name| {
+        const dt = @field(DType, f_name);
         if (elem.eql(dt.toMlir(ctx))) return dt;
     }
     @panic("element type not a recognized CUDA Tile IR DType");
