@@ -46,6 +46,7 @@ bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
+
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.15.1")
@@ -103,7 +104,7 @@ zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     # Ensure Zig actions are run locally only
     extra_exec_compatible_with = ["//platforms:local_execution"],
-    zig_version = "0.17.0-dev.1509+bb296ab9b",
+    zig_version = "0.17.0-dev.1936+5a625d5f3",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
@@ -141,7 +142,7 @@ register_execution_platforms("//platforms:local_execution_platform")
 zls = use_extension("@rules_zig//zig/zls:extensions.bzl", "zls")
 zls.index(file = "@rules_zig//zig/zls/private:versions.json")
 zls.toolchain(
-    zig_version = "0.17.0-dev.1509+bb296ab9b",
+    zig_version = "0.17.0-dev.1936+5a625d5f3",
     zls_version = "0.16.0",
 )
 use_repo(zls, "zls_toolchains")
@@ -234,7 +235,7 @@ tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libzml_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
-use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libzml_neuron", "libstdcpp6")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libstdcpp6", "libzml_neuron")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 

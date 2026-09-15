@@ -196,7 +196,7 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
                 .splat = o.splat,
             } });
         },
-        .device_io_control, .net_receive, .net_read => {
+        .device_io_control, .net_receive, .net_read, .net_send, .net_write => {
             return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
         },
     }
