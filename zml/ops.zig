@@ -2510,9 +2510,12 @@ pub fn manualComputation(
     outputs: stdx.meta.FnParam(body_fn, 1),
     partition_axes: anytype,
 ) manualComputationReturnType(body_fn) {
-    if (@TypeOf(partition_axes) != []const Shape.Tag) {
-        const parsed_partition_axes = Shape.parseTags(partition_axes);
-        return manualComputation(body_fn, inputs, outputs, @as([]const Shape.Tag, parsed_partition_axes.constSlice()));
+    switch (@TypeOf(partition_axes)) {
+        []align(8) const Shape.Tag, []const Shape.Tag => {},
+        else => {
+            const parsed_partition_axes = Shape.parseTags(partition_axes);
+            return manualComputation(body_fn, inputs, outputs, parsed_partition_axes.constSlice());
+        },
     }
 
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
@@ -2567,7 +2570,7 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
 fn manualComputationInternal(
     inputs: anytype,
     outputs: []const Shape,
-    parsed_partition_axes: []const Shape.Tag,
+    partition_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2588,64 +2591,44 @@ fn manualComputationInternal(
     const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
-    const computation_sharding = sharding: for (ctx.partitioning.shardings) |candidate| {
+    var valid_shardings = std.ArrayList(Sharding).empty;
+    for (ctx.partitioning.shardings) |candidate| candidate: {
+        for (partition_axes) |logical_axis| {
+            if (candidate.data.binding(logical_axis) == null) break :candidate;
+        }
         for (input_shapes) |shape| {
-            if (!candidate.data.covers(shape)) continue :sharding;
+            if (!candidate.data.covers(shape)) break :candidate;
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
         }
         for (outputs) |shape| {
-            if (!candidate.data.covers(shape)) continue :sharding;
+            if (!candidate.data.covers(shape)) break :candidate;
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
         }
-        break candidate;
-    } else std.debug.panic(
-        "manualComputation inputs and outputs must use one common sharding; inputs={f}, outputs={f}, known shardings={f}",
-        .{ stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), stdx.fmt.slice(ctx.partitioning.shardings) },
+        try valid_shardings.append(arena, candidate);
+    }
+    const manual_axis_names = try arena.alloc([]const u8, partition_axes.len);
+    for (partition_axes, manual_axis_names) |axis, *name| name.* = std.mem.span(axis);
+    stdx.debug.assert(
+        valid_shardings.items.len == 1,
+        "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: {f}; known shardings: {f}",
+        .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), valid_shardings.items.len, stdx.fmt.slice(valid_shardings.items), stdx.fmt.slice(ctx.partitioning.shardings) },
     );
+    const computation_sharding = valid_shardings.items[0];
 
     for (input_shapes, 0..) |shape, i| {
         input_shardings[i] = computation_sharding;
-        local_input_shapes[i] = computation_sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, computation_sharding });
+        local_input_shapes[i] = computation_sharding.shardedShapeForAxes(shape, partition_axes) catch unreachable;
     }
     for (outputs, 0..) |shape, i| {
         output_shardings[i] = computation_sharding;
-        local_output_shapes[i] = computation_sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, computation_sharding });
-    }
-
-    if (ctx.partitioning.partitioner == .shardy) {
-        var has_physical_manual_axis = false;
-        for (parsed_partition_axes) |logical_axis| {
-            const binding = computation_sharding.data.binding(logical_axis) orelse std.debug.panic(
-                "manualComputation logical axis .{s} has no binding in sharding {f}",
-                .{ std.mem.span(logical_axis), computation_sharding },
-            );
-            has_physical_manual_axis = has_physical_manual_axis or binding.axes.len != 0;
-        }
-
-        // A logical axis bound to a size-one mesh dimension needs no Shardy region. In
-        // particular, emitting a redundant nested region would make it appear to operate
-        // on the physical axes already owned by its parent manual computation.
-        if (!has_physical_manual_axis) {
-            const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, outputs);
-            const body_result = @call(.auto, body_fn, .{ inputs, body_output_shapes });
-            const body_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
-            stdx.debug.assert(body_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ body_outputs.len, outputs.len });
-
-            const direct_outputs = ctx.alloc(Tensor, outputs.len);
-            for (body_outputs, outputs, direct_outputs) |body_output, expected_shape, *direct_output| {
-                stdx.debug.assert(body_output.shape().eql(expected_shape), "manualComputation body returned shape {f}, expected {f}", .{ body_output.shape(), expected_shape });
-                direct_output.* = body_output;
-            }
-            return direct_outputs;
-        }
+        local_output_shapes[i] = computation_sharding.shardedShapeForAxes(shape, partition_axes) catch unreachable;
     }
 
     return switch (ctx.partitioning.partitioner) {
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
-            const all_shardings = try arena.alloc(Sharding, input_shardings.len + output_shardings.len);
-            @memcpy(all_shardings[0..input_shardings.len], input_shardings);
-            @memcpy(all_shardings[input_shardings.len..], output_shardings);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, parsed_partition_axes, all_shardings);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, partition_axes, computation_sharding);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
