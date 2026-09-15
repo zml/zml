@@ -65,8 +65,7 @@ pub const DType = enum {
 
 /// Inverse of `toMlir`.
 pub fn fromMlir(ctx: *mlir.Context, ty: *const mlir.Type) ?DType {
-    inline for (std.meta.fields(DType)) |f| {
-        const dt: DType = @enumFromInt(f.value);
+    inline for (comptime std.enums.values(DType)) |dt| {
         if (ty.eql(dt.toMlir(ctx))) return dt;
     }
     return null;
@@ -77,8 +76,7 @@ test "dtype types round-trip" {
     defer registry.deinit();
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
-    inline for (std.meta.fields(DType)) |f| {
-        const dt: DType = @enumFromInt(f.value);
+    inline for (comptime std.enums.values(DType)) |dt| {
         try std.testing.expectEqual(dt, fromMlir(ctx, dt.toMlir(ctx)).?);
     }
     try std.testing.expectEqual(DType.i8, DType.i1.storageElem());
