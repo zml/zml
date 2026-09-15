@@ -1118,6 +1118,17 @@ pub const Shape = struct {
         try testing.expectEqual(PartitionSpec.init(.feature), shape.partition(.c));
     }
 
+    pub fn partitioningAxes(self: Shape) TagsArray {
+        var partitioning_axes: Shape.TagsArray = .empty;
+        for (self._partitioning.constSlice()) |p| {
+            switch (p) {
+                .axis => |a| partitioning_axes.appendAssumeCapacity(a),
+                else => {},
+            }
+        }
+        return partitioning_axes;
+    }
+
     pub fn containsPartitionSpec(self: Shape, part: PartitionSpec) bool {
         for (self._partitioning.constSlice()[0..self.rank()]) |dim_part| {
             if (dim_part.eql(part)) return true;

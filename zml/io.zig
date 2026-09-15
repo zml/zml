@@ -1564,7 +1564,7 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
     try case.run(.{
         .name = "model_folded_2d_torus",
         .create_options = .{
-            .physical_mesh = .{Sharding.PhysicalMesh.torus2x2},
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),

@@ -4606,10 +4606,11 @@ pub const Tensor = struct {
     /// Use the name parameter to differentiate different print calls in the output.
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
-    pub fn print(input: Tensor, name: []const u8, manual_axes: anytype) void {
+    pub fn print(input: Tensor, name: []const u8) void {
         const ctx = Compiler.current();
         const full_name = std.fmt.allocPrint(ctx.arena.allocator(), "{s}: {f}", .{ name, input.shape() }) catch @panic("OOM");
         defer ctx.arena.allocator().free(full_name);
+        const sharding_axes: Shape.TagsArray = input._shape.partitioningAxes();
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
                 ops.manualComputation((struct {
@@ -4619,7 +4620,7 @@ pub const Tensor = struct {
                     fn body(body_ctx: @This(), _: void) void {
                         ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
-                }).body, .{ .input = input, .name = full_name }, {}, manual_axes);
+                }).body, .{ .input = input, .name = full_name }, {}, sharding_axes.constSlice());
             },
             .oneapi, .neuron => {},
         }

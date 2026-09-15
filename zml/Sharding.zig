@@ -24,7 +24,7 @@ pub const MAX_MESH_RANK = 4;
 
 var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
 
-// special value to make public apis more fluent.
+/// Replicated sharding.
 pub const replicated: Sharding = .{ .data = @ptrCast(&_replicated) };
 
 pub fn resolve(sharding: Sharding, platform: *const Platform) Sharding {
@@ -208,7 +208,7 @@ pub fn sdyManualAxesAttr(
     allocator: std.mem.Allocator,
     ctx: *mlir.Context,
     manual_axes: []const Shape.Tag,
-    shardings: []const Sharding,
+    sharding: Sharding,
 ) error{OutOfMemory}!*const mlir.Attribute {
     var axis_names = std.ArrayList([]const u8).empty;
     defer axis_names.deinit(allocator);
@@ -218,42 +218,13 @@ pub fn sdyManualAxesAttr(
             stdx.debug.assert(!std.mem.eql(u8, std.mem.span(previous), std.mem.span(logical_axis)), "manualComputation manual axis .{s} was specified more than once", .{std.mem.span(logical_axis)});
         }
 
-        var found_binding = false;
-        var expected_names: stdx.BoundedArray([]const u8, MAX_MESH_RANK) = .empty;
-        for (shardings) |sharding| {
-            const binding = sharding.data.binding(logical_axis) orelse continue;
-            found_binding = true;
-
-            var resolved_names: stdx.BoundedArray([]const u8, MAX_MESH_RANK) = .empty;
-            const mesh = sharding.data.resolvedMesh();
-            for (binding.axes.constSlice()) |axis_id| {
-                const name = mesh.axes.get(@intFromEnum(axis_id)).name;
-                resolved_names.appendAssumeCapacity(name);
-            }
-
-            if (resolved_names.len == 0) continue;
-            if (expected_names.len == 0) {
-                expected_names = resolved_names;
-            } else {
-                var same = expected_names.len == resolved_names.len;
-                if (same) {
-                    for (expected_names.constSlice(), resolved_names.constSlice()) |expected, actual| {
-                        if (!std.mem.eql(u8, expected, actual)) {
-                            same = false;
-                            break;
-                        }
-                    }
-                }
-                stdx.debug.assert(
-                    same,
-                    "manualComputation logical axis .{s} resolves inconsistently: expected {f}, got {f} in sharding {f}",
-                    .{ std.mem.span(logical_axis), stdx.fmt.strings(expected_names.constSlice()), stdx.fmt.strings(resolved_names.constSlice()), sharding },
-                );
-            }
-        }
-        stdx.debug.assert(found_binding, "manualComputation logical axis .{s} has no binding in any selected input or output sharding", .{std.mem.span(logical_axis)});
-
-        for (expected_names.constSlice()) |axis_name| {
+        const binding = sharding.data.binding(logical_axis) orelse std.debug.panic(
+            "manualComputation logical axis .{s} has no binding in sharding {f}",
+            .{ std.mem.span(logical_axis), sharding },
+        );
+        const mesh = sharding.data.resolvedMesh();
+        for (binding.axes.constSlice()) |axis_id| {
+            const axis_name = mesh.axes.get(@intFromEnum(axis_id)).name;
             var duplicate = false;
             for (axis_names.items) |existing| {
                 if (std.mem.eql(u8, existing, axis_name)) {
@@ -1934,6 +1905,33 @@ pub fn shardedShape(sharding: Sharding, shape: Shape) Error!Shape {
     return pl.shape;
 }
 
+/// Compute the shape visible inside a manual computation which owns only
+/// `manual_axes`. Partition annotations on free axes remain global.
+pub fn shardedShapeForAxes(sharding: Sharding, shape: Shape, manual_axes: []const Shape.Tag) Error!Shape {
+    var local_shape = shape;
+    var used_axes: u8 = 0;
+
+    for (local_shape._dims.slice(), shape._partitioning.constSlice()) |*dim, spec| {
+        if (spec != .axis) continue;
+
+        var is_manual = false;
+        for (manual_axes) |manual_axis| {
+            if (std.mem.eql(u8, std.mem.span(spec.axis), std.mem.span(manual_axis))) {
+                is_manual = true;
+                break;
+            }
+        }
+        if (!is_manual) continue;
+
+        const plan = try axisPlan(sharding.data, spec, &used_axes);
+        if (plan.num_devices != 1) {
+            if (@rem(dim.*, plan.num_devices) != 0) return error.IncompatibleSharding;
+            dim.* = @divExact(dim.*, plan.num_devices);
+        }
+    }
+    return local_shape;
+}
+
 pub fn placement(sharding: Sharding, shape: Shape) Error!Placement {
     return .init(sharding, shape);
 }
@@ -2494,14 +2492,28 @@ test "sharding: split_1d physical mesh into logical axes" {
         .{ .tag = .link_y, .size = 4 },
     });
     const data: Data = try .init("split_1d", &physical, logical, strategy);
+    const sharding: Sharding = .{ .data = &data };
+    const shape = Shape.init(.{ .data = 4, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model });
     try std.testing.expectEqual(8, data.numPartitions());
     try std.testing.expectEqual(2, data.numPartitionsForLogicalAxis(.data));
     try std.testing.expectEqual(4, data.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqualStrings("#sdy.mesh<[\"link_x\"=2, \"link_y\"=4]>", try data.sdyMeshAttr(arena.allocator()));
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
+
+    const data_axes = Shape.parseTags(.{.data});
+    const model_axes = Shape.parseTags(.{.model});
+    const all_axes = Shape.parseTags(.{ .data, .model });
+    try std.testing.expectEqualSlices(i64, &.{ 2, 8 }, (try sharding.shardedShapeForAxes(shape, data_axes.constSlice())).dims());
+    try std.testing.expectEqualSlices(i64, &.{ 4, 2 }, (try sharding.shardedShapeForAxes(shape, model_axes.constSlice())).dims());
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, (try sharding.shardedShapeForAxes(shape, all_axes.constSlice())).dims());
+
+    const indivisible_free_axis = Shape.init(.{ .data = 3, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model });
+    try std.testing.expectError(error.IncompatibleSharding, sharding.shardedShapeForAxes(indivisible_free_axis, data_axes.constSlice()));
+    try std.testing.expectEqualSlices(i64, &.{ 3, 2 }, (try sharding.shardedShapeForAxes(indivisible_free_axis, model_axes.constSlice())).dims());
+
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .data = 4, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model }),
+        .shape = shape,
         .expected_sdy = "#sdy.sharding<@split_1d, [{\"link_x\"}, {\"link_y\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } },
