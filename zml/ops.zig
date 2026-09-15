@@ -2524,9 +2524,12 @@ pub fn manualComputation(
     outputs: stdx.meta.FnParam(body_fn, 1),
     partition_axes: anytype,
 ) manualComputationReturnType(body_fn) {
-    if (@TypeOf(partition_axes) != []const Shape.Tag) {
-        const parsed_partition_axes = Shape.parseTags(partition_axes);
-        return manualComputation(sharding, body_fn, inputs, outputs, @as([]const Shape.Tag, parsed_partition_axes.constSlice()));
+    switch (@TypeOf(partition_axes)) {
+        []align(8) const Shape.Tag, []const Shape.Tag => {},
+        else => {
+            const parsed_partition_axes = Shape.parseTags(partition_axes);
+            return manualComputation(sharding, body_fn, inputs, outputs, parsed_partition_axes.constSlice());
+        },
     }
 
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
@@ -2582,7 +2585,7 @@ fn manualComputationInternal(
     sharding_: Sharding,
     inputs: anytype,
     outputs: []const Shape,
-    parsed_partition_axes: []const Shape.Tag,
+    partition_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2608,17 +2611,17 @@ fn manualComputationInternal(
         }
 
         stdx.debug.assert(shape._sharding.eql(sharding), "zml.ops.manualComputation expects all input tensors to use the same sharding {s}, got input {d}: {f} with sharding {s}", .{ sharding_.name(), i, shape, shape._sharding.name() });
-        local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        local_input_shapes[i] = sharding.shardedShapeForAxes(shape, partition_axes) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
     for (outputs, 0..) |shape, i| {
-        local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        local_output_shapes[i] = sharding.shardedShapeForAxes(shape, partition_axes) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
 
     return switch (ctx.partitioner) {
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, sharding);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, sharding);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, parsed_partition_axes, &.{sharding});
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, partition_axes, sharding);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {

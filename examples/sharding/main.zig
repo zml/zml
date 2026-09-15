@@ -51,6 +51,7 @@ const DemoModel = struct {
             }).body,
             .{ .y = y, .gate = gate },
             y.shape(),
+            .{ .data, .model },
         );
     }
 };
