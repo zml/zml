@@ -2383,6 +2383,12 @@ pub fn manualComputation(
         },
     }
 
+    // Note: I don't like all the code related to output shapes.
+    // Most of ZML inferes output shape based on the inputs.
+    // Here it's a bit more complicated because each partition computes a shard of the output,
+    // and we need to explain how to glue them together to make the final output.
+    // I think we should force the output tensors to have the `partition_axes` tags,
+    // and concatenate the different input along those axes.
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
