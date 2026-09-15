@@ -241,10 +241,14 @@ pub const Shape = struct {
 
     pub fn parseTags(v: anytype) TagsArray {
         const T = @TypeOf(v);
-        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
         var tags_: TagsArray = .empty;
-        inline for (v) |field| {
-            tags_.appendAssumeCapacity(toTag(field));
+        if (T == @EnumLiteral()) {
+            tags_.appendAssumeCapacity(toTag(v));
+        } else {
+            stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
+            inline for (v) |field| {
+                tags_.appendAssumeCapacity(toTag(field));
+            }
         }
         return tags_;
     }

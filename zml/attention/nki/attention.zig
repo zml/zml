@@ -81,7 +81,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
                 .parameters = parameters,
             },
             q_sharded.shape(),
-            .{ .manual_axes = .{.model} },
+            .model,
         ).convert(q.dtype());
     }
 
@@ -108,6 +108,6 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         }).body,
         .{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .parameters = parameters },
         q_sharded.shape(),
-        .{ .manual_axes = .{.model} },
+        .model,
     ).convert(q.dtype());
 }
