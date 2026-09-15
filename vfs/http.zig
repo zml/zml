@@ -156,7 +156,7 @@ pub const HTTP = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control, .net_receive, .net_read => {
+            .file_write_streaming, .device_io_control, .net_receive, .net_read, .net_send, .net_write => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
