@@ -2627,25 +2627,54 @@ fn manualComputationInternal(
     const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
+    const computation_sharding = sharding: for (ctx.partitioning.shardings) |candidate| {
+        for (input_shapes) |shape| {
+            if (!candidate.data.covers(shape)) continue :sharding;
+        }
+        for (outputs) |shape| {
+            if (!candidate.data.covers(shape)) continue :sharding;
+        }
+        break candidate;
+    } else std.debug.panic(
+        "manualComputation inputs and outputs must use one common sharding; inputs={f}, outputs={f}, known shardings={f}",
+        .{ stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), stdx.fmt.slice(ctx.partitioning.shardings) },
+    );
+
     for (input_shapes, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation input {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        input_shardings[i] = sharding;
-        local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        input_shardings[i] = computation_sharding;
+        local_input_shapes[i] = computation_sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, computation_sharding });
     }
     for (outputs, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation output {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        output_shardings[i] = sharding;
-        local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        output_shardings[i] = computation_sharding;
+        local_output_shapes[i] = computation_sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, computation_sharding });
+    }
+
+    if (ctx.partitioning.partitioner == .shardy) {
+        var has_physical_manual_axis = false;
+        for (manual_axes) |logical_axis| {
+            const binding = computation_sharding.data.binding(logical_axis) orelse std.debug.panic(
+                "manualComputation logical axis .{s} has no binding in sharding {f}",
+                .{ std.mem.span(logical_axis), computation_sharding },
+            );
+            has_physical_manual_axis = has_physical_manual_axis or binding.axes.len != 0;
+        }
+
+        // A logical axis bound to a size-one mesh dimension needs no Shardy region. In
+        // particular, emitting a redundant nested region would make it appear to operate
+        // on the physical axes already owned by its parent manual computation.
+        if (!has_physical_manual_axis) {
+            const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, outputs);
+            const body_result = @call(.auto, body_fn, .{ inputs, body_output_shapes });
+            const body_outputs = manualComputationBodyToSlice(BodyReturnT, arena, body_result);
+            stdx.debug.assert(body_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ body_outputs.len, outputs.len });
+
+            const direct_outputs = ctx.alloc(Tensor, outputs.len);
+            for (body_outputs, outputs, direct_outputs) |body_output, expected_shape, *direct_output| {
+                stdx.debug.assert(body_output.shape().eql(expected_shape), "manualComputation body returned shape {f}, expected {f}", .{ body_output.shape(), expected_shape });
+                direct_output.* = body_output;
+            }
+            return direct_outputs;
+        }
     }
 
     return switch (ctx.partitioning.partitioner) {
