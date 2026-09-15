@@ -186,6 +186,13 @@ use_repo(pip, "huggingface_hub")
 
 pip.parse(
     download_only = True,
+    # fsspec[gcs] -> gcsfs -> fsspec is a circular dependency, install them together.
+    experimental_requirement_cycles = {
+        "fsspec": [
+            "fsspec",
+            "gcsfs",
+        ],
+    },
     hub_name = "xprof_nightly",
     python_version = "3.12",
     requirements_lock = "//tools/xprof:requirements.lock.txt",
