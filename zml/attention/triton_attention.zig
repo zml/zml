@@ -419,7 +419,7 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
-            .{ .manual_axes = .{.model} },
+            .model,
         );
 
         return output;
@@ -1045,7 +1045,7 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             output_shape,
-            .{ .manual_axes = .{ .data, .model } },
+            .{ .data, .model },
         );
     }
 };

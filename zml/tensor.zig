@@ -4619,7 +4619,7 @@ pub const Tensor = struct {
                     fn body(body_ctx: @This(), _: void) void {
                         ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
-                }).body, .{ .input = input, .name = full_name }, {}, .{ .manual_axes = manual_axes });
+                }).body, .{ .input = input, .name = full_name }, {}, manual_axes);
             },
             .oneapi, .neuron => {},
         }

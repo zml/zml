@@ -268,7 +268,7 @@ pub const mosaic_tpu = struct {
                 .parameters = parameters,
             },
             prepared.q.shape(),
-            .{ .manual_axes = .{.model} },
+            .model,
         );
 
         const restored = restoreQueryHeads(q, q_out);

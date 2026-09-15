@@ -989,7 +989,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1077,7 +1077,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1152,7 +1152,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape_decode,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1629,7 +1629,7 @@ pub const paged_fa3 = struct {
                         },
                     },
                     output_shape,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1706,7 +1706,7 @@ pub const paged_fa3 = struct {
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
                     output_shape,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1771,7 +1771,7 @@ pub const paged_fa3 = struct {
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
                     decode_output_shape,
-                    .{ .manual_axes = .{.model} },
+                    .model,
                 );
                 o_decode = o_decode.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
 

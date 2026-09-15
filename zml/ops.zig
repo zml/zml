@@ -2346,79 +2346,40 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
-/// Users might want explicit control of how parts of their computation are partitioned,
-/// and what collectives are used.
-/// For example, some users want to apply collective matmul manually (from the frontend API)
-/// rather than deferring to the compiler.
-/// We provide a Manual Computation API that allows them to do that.
-/// This is the MLIR operation with a single region for the manual sub-computation.
-/// Users would specify input/output shardings to this sub-computation using a subset (including possibly all) of the mesh axes.
-/// The sub-computation would be local/manual w.r.t. the specified mesh axes (aka manual axes),
-/// and global/unpartitioned w.r.t. unspecified ones (aka free axes).
-/// The sub-computation can be further sharded along the free axes during propagation
-/// in the same way that computation outside of this operation can be.
+/// Describes a sub-computation that will run on specific tensors shards instead of tensors spawning all devices.
 ///
-/// For example:
+/// Arguments:
+/// * body
+/// * input tensors
+/// * outputs shapes
+/// * partitioning axes
 ///
-/// @mesh_name = <["data"=2, "model"=2]>
-///
-/// %0 = ... : tensor<16x32xf32>
-/// %1 = sdy.manual_computation(%0)
-///     in_shardings=[<@mesh_name, [{"data"}, {"model",?}]>]
-///     out_shardings=[<@mesh_name, [{"data"}, {?}]>]
-///     manual_axes={"data"}
-///     (%arg1: tensor<8x32xf32>) {
-///   // body
-///   return %42 : tensor<8x32xf32>
-/// } : (tensor<16x32xf32>) -> tensor<16x32xf32>
+/// Split the devices into N partitions following the given partitioning axes of the current logical mesh.
+/// Each device partition will receive it's corresponding subset of the input tensors.
+/// Note that you need to anotate the input tensors with explicit sharding informations for them to be correctly split.
+/// By default tensors are generally replicated, and will be sent in full to each partition.
 ///
 /// Note that the shape of the input and output tensors inside the body
 /// are the local shapes of the corresponding operands and results of the op,
-/// i.e., the shape on a single device if all non-manual axes are replicated.
 /// Therefore, the local shape can be derived from the corresponding in/out sharding and the manual axes.
 /// If an input/output dimension of size d is sharded on axis "x" and that axis is in manual_axes,
 /// then that corresponding input/output dimension inside the body is d/size("x").
 ///
-/// Invariants
-///
-/// * All in_shardings, out_shardings and manual_axes must refer to the same mesh.
-/// manual_axes is sorted w.r.t. the mesh.
-///
-/// * The manual_axes must be explicitly used in all in/out shardings,
-/// i.e., for each sharding, all manual axes must either shard a dimension or be explicitly replicated.
-///
-/// * If a free axis (any mesh axis not in manual_axes)
-/// exists in one of the in/out shardings,
-/// it must be minor to any manual axis in the same dimension sharding
-/// (in the above example, a dimension sharding {"model", "data"} would be invalid).
-///
-/// The region/body of the computation is the local computation (e.g., including user specified collectives).
-/// It must be local w.r.t. the in/out sharding along manual axes (see note above).
-///
-/// You can nest multiple manual computations within one another as long as each one operates on their own unique set of manual axes.
-///
-/// ZML requires callers to declare the logical axes localized by the body explicitly:
-///
-///     manualComputation(body, inputs, outputs, .{ .manual_axes = .{ .data, .model } });
-///
-/// Logical axes are resolved to the physical Shardy mesh axes selected by the input and
-/// output shardings. Use an empty tuple only when the body deliberately localizes no axes.
+/// You can nest multiple manual computations within one another as long as each one operates
+/// on their own unique set of partitioning axes.
 ///
 /// See https://github.com/openxla/shardy/blob/main/docs/compiler_api.md#manual-computation
 pub fn manualComputation(
     comptime body_fn: anytype,
     inputs: stdx.meta.FnParam(body_fn, 0),
-    outputs: anytype,
-    options: anytype,
+    outputs: stdx.meta.FnParam(body_fn, 1),
+    partition_axes: anytype,
 ) manualComputationReturnType(body_fn) {
-    const ManualAxesT = @TypeOf(options.manual_axes);
-    var parsed_manual_axes: Shape.TagsArray = undefined;
-    const manual_axes: []const Shape.Tag = if (ManualAxesT == []const Shape.Tag)
-        options.manual_axes
-    else b: {
-        parsed_manual_axes = Shape.parseTags(options.manual_axes);
-        break :b parsed_manual_axes.constSlice();
-    };
+    if (@TypeOf(partition_axes) != []const Shape.Tag) {
+        const parsed_partition_axes = Shape.parseTags(partition_axes);
+        return manualComputation(body_fn, inputs, outputs, @as([]const Shape.Tag, parsed_partition_axes.constSlice()));
+    }
+
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
@@ -2442,7 +2403,7 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, manual_axes, body_fn) catch |err| switch (err) {
+    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, partition_axes, body_fn) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM"),
     };
     const ReturnT = manualComputationReturnType(body_fn);
@@ -2471,7 +2432,7 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
 fn manualComputationInternal(
     inputs: anytype,
     outputs: []const Shape,
-    manual_axes: []const Shape.Tag,
+    parsed_partition_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2516,7 +2477,7 @@ fn manualComputationInternal(
 
     if (ctx.partitioning.partitioner == .shardy) {
         var has_physical_manual_axis = false;
-        for (manual_axes) |logical_axis| {
+        for (parsed_partition_axes) |logical_axis| {
             const binding = computation_sharding.data.binding(logical_axis) orelse std.debug.panic(
                 "manualComputation logical axis .{s} has no binding in sharding {f}",
                 .{ std.mem.span(logical_axis), computation_sharding },
@@ -2549,7 +2510,7 @@ fn manualComputationInternal(
             const all_shardings = try arena.alloc(Sharding, input_shardings.len + output_shardings.len);
             @memcpy(all_shardings[0..input_shardings.len], input_shardings);
             @memcpy(all_shardings[input_shardings.len..], output_shardings);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, manual_axes, all_shardings);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, parsed_partition_axes, all_shardings);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
@@ -2734,7 +2695,7 @@ test "manualComputation handler API" {
             .rhs = rhs,
         },
         shape,
-        .{ .manual_axes = .{} },
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, configured.shape());
 
@@ -2748,7 +2709,7 @@ test "manualComputation handler API" {
         }).call,
         .{ .input = configured },
         shape,
-        .{ .manual_axes = .{} },
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, passthrough.shape());
 
@@ -2798,7 +2759,7 @@ test "manualComputation handler API" {
             .original_values = original_values,
         },
         shape,
-        .{ .manual_axes = .{} },
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, nested.shape());
 }
@@ -3051,7 +3012,7 @@ pub fn shardingAwareTypedCustomCall(
         Handler.body,
         .{ .input = input, .attributes = attributes },
         @as([]const Shape, &output_shapes),
-        .{ .manual_axes = manual_axes },
+        manual_axes,
     );
 
     // Convert the slice back to a struct
