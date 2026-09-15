@@ -234,7 +234,7 @@ pub const File = struct {
                     },
                 });
             },
-            .device_io_control, .net_receive, .net_read => {
+            .device_io_control, .net_receive, .net_read, .net_send, .net_write => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
