@@ -1,0 +1,26 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "CuteDialect.cpp",
+        "CuteOpsPrivate.cpp",
+        "CuteTypes.cpp",
+        "CuteTypesPrivate.cpp",
+    ],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:private_headers",
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:types_all_defs_inc_gen",
+        "@cute_ir//:dialect_support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:NVVMDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:UBDialect",
+    ],
+)
