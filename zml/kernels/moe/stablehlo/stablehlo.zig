@@ -4,6 +4,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 
@@ -74,7 +75,7 @@ pub fn dequantize(linear: zml.nn.Linear) Tensor {
         // StableHLO bitcast expands the low nibble first along the input axis.
         weight = weight.bitCast(.f4e2m1).merge(.{ .unpacked = .{ linear.tag, .bitcast } }).renameTag(.unpacked, linear.tag);
     }
-    const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
+    const scales = q.logicalScales();
     var result = weight.convert(.f32).mul(expandScales(scales, weight.shape()));
     if (q.global_scale) |scale| result = result.mul(scale.asMultiplier().broad(result.shape()));
     return result;
@@ -100,9 +101,9 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
     if (opts.input_quantization == .none) return x.convert(dtype).convert(.f32);
     const q = linear.quantization orelse return x.convert(dtype).convert(.f32);
     const fixed_mxfp8 = opts.input_quantization == .mxfp8 or opts.input_quantization == .mxfp8_bf16;
-    const scheme = if (fixed_mxfp8) .fp8_block32 else q.scheme;
-    if (scheme == .nvfp4) {
-        const global = if (q.input_scale) |scale| scale.asMultiplier() else Tensor.scalar(1, .f32);
+    const scheme = if (fixed_mxfp8) Scheme.mxfp8 else q.scheme;
+    if (Scheme.eql(scheme, Scheme.nvfp4)) {
+        const global = if (linear.input_scale) |scale| scale.asMultiplier() else Tensor.scalar(1, .f32);
         stdx.debug.assert(global.count() == 1, "reference NVFP4 input scale must be global", .{});
         // Keep both stored rounding boundaries when XLA fuses the quantizer.
         const grouped = x.convert(.bf16).optimizationBarrier().convert(.f32).div(global.asScalar())
@@ -114,20 +115,19 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
         return roundFp4(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
             .reshape(x.shape().withDtype(.f32)).mul(global.asScalar());
     }
-    if (opts.input_quantization == .automatic and (!opts.quantize_input or scheme == .mxfp4)) return x.convert(dtype).convert(.f32);
+    if (opts.input_quantization == .automatic and (!opts.quantize_input or Scheme.eql(scheme, Scheme.mxfp4))) return x.convert(dtype).convert(.f32);
     const output_dtype = if (fixed_mxfp8) .f8e4m3fn else linear.weight.dtype();
-    const group: i64 = switch (scheme) {
-        .mxfp8, .fp8_block32 => 32,
-        .fp8_block128 => 128,
-        .fp8_per_channel, .fp8_per_tensor => x.dim(.in),
-        else => unreachable,
+    const group: i64 = switch (scheme.scaling) {
+        .axis => |size| if (size) |n| n else x.dim(.in),
+        .tensor => x.dim(.in),
+        .tile => |size| size,
     };
     const source = if (opts.input_quantization == .mxfp8_bf16) x.convert(.bf16) else x;
     const grouped = source.convert(.f32).splitAxis(.in, .{ .group = @divExact(x.dim(.in), group), .element = group });
-    const epsilon: f32 = if (scheme == .fp8_block32) 1e-4 else 1e-10;
+    const epsilon: f32 = if (fixed_mxfp8 or Scheme.isTiled(scheme, 32)) 1e-4 else 1e-10;
     const max_value: f32 = if (output_dtype == .f8e4m3fnuz) 224 else 448;
     var scale = grouped.abs().max(.element).maximum(Tensor.scalar(epsilon, .f32)).scale(1 / max_value);
-    if (scheme == .mxfp8 or scheme == .fp8_block32) scale = scale.log().scale(1 / @log(@as(f32, 2))).ceil().scale(@log(@as(f32, 2))).exp();
+    if (Scheme.eql(scheme, Scheme.mxfp8) or Scheme.isTiled(scheme, 32)) scale = scale.log().scale(1 / @log(@as(f32, 2))).ceil().scale(@log(@as(f32, 2))).exp();
     const broad = scale.broad(grouped.shape());
     return grouped.div(broad).clamp(Tensor.scalar(-max_value, .f32), Tensor.scalar(max_value, .f32))
         .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));

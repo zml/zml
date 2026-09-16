@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const zml = @import("../../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 
 const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
@@ -520,7 +521,7 @@ pub fn fusedExperts(
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
-    stdx.debug.assert(quant_scheme == .nvfp4, "FlashInfer CUTLASS MoE only supports NVFP4, got {?}", .{quant_scheme});
+    stdx.debug.assert(Scheme.eql(quant_scheme, Scheme.nvfp4), "FlashInfer CUTLASS MoE only supports NVFP4, got {?}", .{quant_scheme});
 
     const gate_up_weight_unpacked = zml.moe.unpackedWeight(gate_up);
     const down_weight_unpacked = zml.moe.unpackedWeight(down);
@@ -600,10 +601,10 @@ pub fn fusedExperts(
                 .topk_weights = topk_weights,
                 .gate_up_weight_unpacked = gate_up_weight_unpacked,
                 .down_weight_unpacked = down_weight_unpacked,
-                .gate_up_input_scale = gate_up.quantization.?.input_scale.?.asMultiplier(),
+                .gate_up_input_scale = gate_up.input_scale.?.asMultiplier(),
                 .gate_up_scales = gate_up.quantization.?.scales,
                 .gate_up_global_scale = gate_up.quantization.?.global_scale.?.asMultiplier(),
-                .down_input_scale = down.quantization.?.input_scale.?.asMultiplier(),
+                .down_input_scale = down.input_scale.?.asMultiplier(),
                 .down_scales = down.quantization.?.scales,
                 .down_global_scale = down.quantization.?.global_scale.?.asMultiplier(),
                 .activation = runner_options.activation,
@@ -622,10 +623,10 @@ pub fn fusedExperts(
         down_weight_unpacked,
         topk_weights,
         topk_ids,
-        gate_up.quantization.?.input_scale.?.asMultiplier(),
+        gate_up.input_scale.?.asMultiplier(),
         gate_up.quantization.?.scales,
         gate_up.quantization.?.global_scale.?.asMultiplier(),
-        down.quantization.?.input_scale.?.asMultiplier(),
+        down.input_scale.?.asMultiplier(),
         down.quantization.?.scales,
         down.quantization.?.global_scale.?.asMultiplier(),
         runner_options,

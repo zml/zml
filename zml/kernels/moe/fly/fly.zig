@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
@@ -25,7 +26,7 @@ pub fn fusedExperts(
     opts: zml.moe.Options,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
-    const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
+    const layout: zml.moe.ExpertsLayout = if (Scheme.eql(gate_up_scheme, Scheme.mxfp4))
         .{ .gate_up = .interleaved, .packing = .plain }
     else
         .{ .gate_up = .concatenated, .packing = .plain };
@@ -101,20 +102,16 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
     const gate_up_scheme = opts.gate_up.quantizationScheme();
     const down_scheme = opts.down.quantizationScheme();
-    if (gate_up_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support gate_up nvfp4 quantization scheme", .{}),
-        .fp8_block128 => launch_config.block_size_k = 128,
-        .fp8_block32 => launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    if (gate_up_scheme) |scheme| {
+        if (Scheme.eql(scheme, Scheme.nvfp4)) stdx.debug.panic("fly backend doesn't support gate_up nvfp4 quantization scheme", .{});
+        if (scheme.scaling == .tile) launch_config.block_size_k = scheme.scaling.tile;
+    }
 
     var down_launch_config = launchConfigForTokens(num_tokens);
-    if (down_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support down nvfp4 quantization scheme", .{}),
-        .fp8_block128 => down_launch_config.block_size_k = 128,
-        .fp8_block32 => down_launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    if (down_scheme) |scheme| {
+        if (Scheme.eql(scheme, Scheme.nvfp4)) stdx.debug.panic("fly backend doesn't support down nvfp4 quantization scheme", .{});
+        if (scheme.scaling == .tile) down_launch_config.block_size_k = scheme.scaling.tile;
+    }
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
@@ -123,12 +120,12 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "fly backend expected BF16 hidden states, got {}", .{hidden.dtype()});
-    if (gate_up_scheme == .mxfp4) {
+    if (Scheme.eql(gate_up_scheme, Scheme.mxfp4)) {
         stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up.dtype()});
     } else {
         stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "fly backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up.dtype()});
     }
-    if (down_scheme == .mxfp4) {
+    if (Scheme.eql(down_scheme, Scheme.mxfp4)) {
         stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down.dtype()});
     } else {
         stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "fly backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down.dtype()});
@@ -136,8 +133,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "fly backend expected f32 or bf16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "fly backend expected i32 expert ids, got {}", .{ids.dtype()});
-    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
-    const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
+    const gate_up_k = gate_up.dim(.in) * @as(i64, if (Scheme.eql(gate_up_scheme, Scheme.mxfp4) and gate_up.dtype() != .f4e2m1) 2 else 1);
+    const down_k = down.dim(.mid) * @as(i64, if (Scheme.eql(down_scheme, Scheme.mxfp4) and down.dtype() != .f4e2m1) 2 else 1);
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "fly backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
@@ -204,8 +201,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
 // TODO(Corentin): unused for now
 pub fn supports(opts: FusedExpertsArgs) bool {
-    if (opts.hidden_states.dtype() != .bf16 or opts.gate_up.quantizationScheme() != .mxfp4 or
-        opts.down.quantizationScheme() != .mxfp4 or opts.gate_up.bias != null or opts.down.bias != null or
+    if (opts.hidden_states.dtype() != .bf16 or !Scheme.eql(opts.gate_up.quantizationScheme(), Scheme.mxfp4) or
+        !Scheme.eql(opts.down.quantizationScheme(), Scheme.mxfp4) or opts.gate_up.bias != null or opts.down.bias != null or
         opts.routing_weight_placement != .before_down) return false;
     const gate_up = opts.gate_up.weight;
     const down = opts.down.weight;
@@ -238,7 +235,7 @@ pub fn supports(opts: FusedExpertsArgs) bool {
 }
 
 pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
-    std.debug.assert(scheme == .mxfp4);
+    std.debug.assert(Scheme.eql(scheme, Scheme.mxfp4));
     return .{ x.convert(.bf16), null };
 }
 
@@ -258,7 +255,7 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) zml.Tensor {
-    zml.stdx.debug.assert(opts.quant_scheme == .mxfp4 and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
+    zml.stdx.debug.assert(Scheme.eql(opts.quant_scheme, Scheme.mxfp4) and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
     const weight = if (opts.weight.dtype() == .f4e2m1)
         opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
     else
