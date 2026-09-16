@@ -4,6 +4,6 @@ def repo():
     git_repository(
         name = "arocc",
         remote = "https://github.com/Vexu/arocc.git",
-        commit = "5f5a050569a95ecc40a426f0c3666ae7ef987ede",
+        commit = "ec463262c14c1111fc9323086b708ad3b0b9ca11",
         build_file = Label("//third_party/arocc:arocc.bazel"),
     )

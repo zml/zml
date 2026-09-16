@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cuInit = libcuda.lookup(*const fn (c_uint) callconv(.c) c_int, "cuInit").?;
     const cuGetErrorString = libcuda.lookup(*const fn (c_int, *[*c]const u8) callconv(.c) c_int, "cuGetErrorString").?;
 
-    return @intFromEnum(switch (cuInit(0)) {
+    return @backingInt(switch (cuInit(0)) {
         CUDA_SUCCESS => ExitCode.Success,
         CUDA_ERROR_SYSTEM_DRIVER_MISMATCH => ExitCode.SystemDriverMismatch,
         CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE => ExitCode.CompatNotSupportedOnDevice,

@@ -6,10 +6,10 @@ const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.Ar
 const Collector = @import("zml-smi/collector").Collector;
 
 fn setRemote(device: *DeviceInfo) void {
-    inline for (@typeInfo(DeviceInfo).@"union".fields) |field| {
-        if (device.* == @field(smi_info.device_info.Target, field.name)) {
-            @field(device, field.name).values[0].remote = true;
-            @field(device, field.name).values[1].remote = true;
+    inline for (@typeInfo(DeviceInfo).@"union".field_names) |field_name| {
+        if (device.* == @field(smi_info.device_info.Target, field_name)) {
+            @field(device, field_name).values[0].remote = true;
+            @field(device, field_name).values[1].remote = true;
         }
     }
 }
@@ -86,10 +86,10 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
         var device = std.json.parseFromValueLeaky(DeviceInfo, poll_arena.allocator(), item, .{ .ignore_unknown_fields = true }) catch continue;
         setRemote(&device);
 
-        inline for (@typeInfo(DeviceInfo).@"union".fields) |field| {
-            if (devices[i].* == @field(smi_info.device_info.Target, field.name)) {
-                @field(devices[i], field.name).back().* = @field(device, field.name).front().*;
-                @field(devices[i], field.name).swap();
+        inline for (@typeInfo(DeviceInfo).@"union".field_names) |field_name| {
+            if (devices[i].* == @field(smi_info.device_info.Target, field_name)) {
+                @field(devices[i], field_name).back().* = @field(device, field_name).front().*;
+                @field(devices[i], field_name).swap();
             }
         }
     }

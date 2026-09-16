@@ -113,7 +113,7 @@ fn configureInterpreter(init: std.process.Init, config: *c.PyConfig) ![]const u8
     const args = try init.minimal.args.toSlice(arena.allocator());
     const c_args = try arena.allocator().alloc([*:0]const u8, args.len);
     for (args, 0..) |arg, i| {
-        c_args[i] = (try arena.allocator().dupeZ(u8, arg)).ptr;
+        c_args[i] = (try arena.allocator().dupeSentinel(u8, arg, 0)).ptr;
     }
     pyStatusCheck(c.PyConfig_SetBytesArgv(config, @intCast(c_args.len), @ptrCast(c_args.ptr)));
 
@@ -125,7 +125,7 @@ fn configureInterpreter(init: std.process.Init, config: *c.PyConfig) ![]const u8
 
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = try std.fmt.bufPrintZ(&buf, "{f}{d}.{d}", .{
+        const home = try std.mem.printSentinel(&buf, "{f}{d}.{d}", .{
             std.Io.Dir.path.fmtJoin(&.{
                 self_exe_dir,
                 "..",
@@ -134,7 +134,7 @@ fn configureInterpreter(init: std.process.Init, config: *c.PyConfig) ![]const u8
             }),
             c.PY_MAJOR_VERSION,
             c.PY_MINOR_VERSION,
-        });
+        }, 0);
         pyStatusCheck(c.PyConfig_SetBytesString(config, &config.home, home));
         pyStatusCheck(c.PyWideStringList_Append(&config.module_search_paths, &try toPosixPathW(home)));
     }
