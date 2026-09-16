@@ -19,7 +19,7 @@ pub const Shape = struct {
         replicated,
         unknown,
 
-        pub fn init(comptime value: anytype) PartitionSpec {
+        pub fn init(value: anytype) PartitionSpec {
             const T = @TypeOf(value);
 
             if (T == PartitionSpec) {
@@ -141,6 +141,75 @@ pub const Shape = struct {
             try testing.expect(spec_unknown.toTag() == TagUnknown);
         }
     };
+
+    /// A reusable mapping from tensor axis names to partition specs.
+    /// Unspecified axes are unknown, or replicated when initialized with `.replicated`.
+    pub const Partitioning = struct {
+        const Entry = struct { tag: Tag, spec: PartitionSpec };
+
+        _entries: stdx.BoundedArray(Entry, constants.MAX_RANK) = .{
+            .buffer = @splat(.{ .tag = TagUnknown, .spec = .unknown }),
+            .len = 0,
+        },
+        _default: PartitionSpec = .unknown,
+
+        pub fn init(specs: anytype) Partitioning {
+            const T = @TypeOf(specs);
+            if (T == Partitioning) return specs;
+            if (T == @EnumLiteral()) {
+                return switch (specs) {
+                    .replicated => .{ ._default = .replicated },
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                };
+            }
+            stdx.debug.assertComptime(stdx.meta.isStruct(T), "Partitioning expects a struct of partition specs or .replicated, got {any}", .{T});
+
+            var result: Partitioning = .{};
+            inline for (std.meta.fields(T)) |field| {
+                result.append(toTag(field), PartitionSpec.init(@field(specs, field.name)));
+            }
+            return result;
+        }
+
+        pub fn get(self: Partitioning, tag_: anytype) PartitionSpec {
+            const axis_tag = toTag(tag_);
+            for (self._entries.constSlice()) |entry| {
+                if (std.mem.eql(u8, std.mem.span(entry.tag), std.mem.span(axis_tag))) return entry.spec;
+            }
+            return self._default;
+        }
+
+        fn append(self: *Partitioning, axis_tag: Tag, spec: PartitionSpec) void {
+            for (self._entries.constSlice()) |entry| {
+                stdx.debug.assert(!std.mem.eql(u8, std.mem.span(entry.tag), std.mem.span(axis_tag)), "Duplicate partitioning axis {s}", .{axis_tag});
+            }
+            self._entries.append(.{ .tag = axis_tag, .spec = spec }) catch stdx.debug.panic("Too many partitioning axes, max: {d}", .{MAX_RANK});
+        }
+    };
+
+    test "Partitioning preserves runtime specs and applies by tensor axis name" {
+        const specs: []const PartitionSpec = &.{ .init(.model), .replicated, .open, .unknown };
+        for (specs) |spec| {
+            const partitions: Partitioning = .init(.{ .out = spec, .in = .replicated });
+            const shape = Shape.init(.{ .in = 16, .batch = 2, .out = 8 }, .f32)
+                .withPartitioning(.{ .batch = .batch })
+                .withPartitioning(partitions);
+            try testing.expect(partitions.get(.out).eql(spec));
+            try testing.expect(shape.partition(.out).eql(spec));
+            try testing.expect(shape.partition(.in).eql(.replicated));
+            try testing.expect(shape.partition(.batch).eql(.unknown));
+            try testing.expect(partitions.get(.batch).eql(.unknown));
+        }
+    }
+
+    test "Partitioning replicated defaults" {
+        const partitions: Partitioning = .init(.replicated);
+        try testing.expect(partitions.get(.out).eql(.replicated));
+        const shape = Shape.init(.{ 8, 16 }, .f32).withPartitioning(partitions);
+        try testing.expect(shape.partition(0).eql(.replicated));
+        try testing.expect(shape.partition(1).eql(.replicated));
+        try testing.expectEqual(0, Shape.init(.{}, .f32).withPartitioning(.replicated).rank());
+    }
 
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
@@ -516,6 +585,32 @@ pub const Shape = struct {
     /// Compares the two shapes described including tags.
     pub fn eqlWithTags(self: Shape, other: Shape) bool {
         return self.eql(other) and std.mem.eql(Tag, self.tags(), other.tags()) and self.dtype() == other.dtype();
+    }
+
+    /// Compares dimensions, dtype, tags, and per-axis partition specs.
+    pub fn eqlWithTagsAndPartitioning(self: Shape, other: Shape) bool {
+        if (!self.eqlWithTags(other)) return false;
+        for (self._partitioning.constSlice(), other._partitioning.constSlice()) |lhs, rhs| {
+            if (!lhs.eql(rhs)) return false;
+        }
+        return true;
+    }
+
+    test eqlWithTagsAndPartitioning {
+        const shape = Shape.init(.{ .out = 8, .in = 16 }, .f32)
+            .withPartitioning(.{ .out = .model, .in = .replicated });
+        const specs: []const PartitionSpec = &.{ .init(.model), .init(.experts), .replicated, .open, .unknown };
+        for (specs) |spec| {
+            const other = shape.withPartitioning(.{ .out = spec, .in = .replicated });
+            try testing.expect(shape.eqlWithTags(other));
+            try testing.expectEqual(spec.eql(.init(.model)), shape.eqlWithTagsAndPartitioning(other));
+        }
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withPartitioning(.{ .out = .replicated, .in = .model })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withDtype(.bf16)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.setDim(.out, 9)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.rename(.{ .out = .features })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(Shape.init(.{ .out = 8 }, .f32)));
+        try testing.expect(Shape.init(.{}, .f32).eqlWithTagsAndPartitioning(Shape.init(.{}, .f32)));
     }
 
     /// Format the shape.
@@ -909,23 +1004,13 @@ pub const Shape = struct {
     }
 
     pub fn withPartitioning(self: Shape, specs: anytype) Shape {
-        const T = @TypeOf(specs);
-
-        var res = self.withDefaultPartitioning(); // todo add test for this new change
-
-        if (stdx.meta.isStruct(T)) {
-            inline for (std.meta.fields(T)) |field| {
-                const partition_axis = @field(specs, field.name);
-                const axis_ = res.axisFromTagMaybe(toTag(field));
-
-                if (axis_) |ax| {
-                    res._partitioning.set(ax, PartitionSpec.init(partition_axis));
-                } else {
-                    stdx.debug.panic("Partitioning axis {s} not found", .{field.name});
-                }
-            }
-        } else {
-            stdx.debug.panic("Expected a struct of enum literals, got: {any}", .{T});
+        const partitions: Partitioning = .init(specs);
+        var res = self;
+        @memset(res._partitioning.slice(), partitions._default);
+        for (partitions._entries.constSlice()) |entry| {
+            const axis_ = res.axisFromTagMaybe(entry.tag) orelse
+                stdx.debug.panic("Partitioning axis {s} not found", .{entry.tag});
+            res._partitioning.set(axis_, entry.spec);
         }
 
         // Check that no mesh axis is used to partition multiple tensor dimensions.
@@ -1101,6 +1186,32 @@ pub const Shape = struct {
 
         shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
         try testing.expect(!shape.isFullyReplicated());
+    }
+
+    /// Returns partitioning keyed by tensor tags, using `_0`, `_1`, etc. for untagged axes.
+    pub fn partitioning(self: Shape) Partitioning {
+        const positional_tags: [MAX_RANK]Tag = .{ "_0", "_1", "_2", "_3", "_4", "_5", "_6", "_7" };
+        var result: Partitioning = .{};
+        for (self.tags(), self._partitioning.constSlice(), 0..) |axis_tag, spec, i| {
+            result.append(if (axis_tag == TagUnknown) positional_tags[i] else axis_tag, spec);
+        }
+        return result;
+    }
+
+    test partitioning {
+        const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32, .d = 64 }, .f32)
+            .withPartitioning(.{ .a = .model, .b = .replicated, .c = .open, .d = .unknown });
+        const reordered = shape.transpose(.{ 3, 1, 0, 2 }).withPartitioning(shape.partitioning());
+        for (shape.tags()) |axis_tag| {
+            try testing.expect(reordered.partition(axis_tag).eql(shape.partition(axis_tag)));
+        }
+
+        const untagged = Shape.init(.{ 8, 16 }, .f32).withPartitioning(.{ ._0 = .model, ._1 = .replicated });
+        const restored = untagged.withDefaultPartitioning().withPartitioning(untagged.partitioning());
+        for (0..untagged.rank()) |i| {
+            try testing.expect(restored.partition(i).eql(untagged.partition(i)));
+        }
+        try testing.expectEqual(0, Shape.init(.{}, .f32).partitioning()._entries.len);
     }
 
     pub fn partition(self: Shape, ax: anytype) PartitionSpec {
