@@ -23,6 +23,7 @@ zig_shared_library(
 
 cc_library(
     name = "libzml_rocm",
+    hdrs = ["rocm.h"],
     tags = ["manual"],
     deps = ["@libzml_rocm"],
 )
