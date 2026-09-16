@@ -2559,12 +2559,28 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
 ///
 /// You can nest multiple manual computations within one another as long as each one operates on their own unique set of manual axes.
 ///
+/// ZML requires callers to declare the logical axes localized by the body explicitly:
+///
+///     manualComputation(body, inputs, outputs, .{ .manual_axes = .{ .data, .model } });
+///
+/// Logical axes are resolved to the physical Shardy mesh axes selected by the input and
+/// output shardings. Use an empty tuple only when the body deliberately localizes no axes.
+///
 /// See https://github.com/openxla/shardy/blob/main/docs/compiler_api.md#manual-computation
 pub fn manualComputation(
     comptime body_fn: anytype,
     inputs: stdx.meta.FnParam(body_fn, 0),
     outputs: anytype,
+    options: anytype,
 ) manualComputationReturnType(body_fn) {
+    const ManualAxesT = @TypeOf(options.manual_axes);
+    var parsed_manual_axes: Shape.TagsArray = undefined;
+    const manual_axes: []const Shape.Tag = if (ManualAxesT == []const Shape.Tag)
+        options.manual_axes
+    else b: {
+        parsed_manual_axes = Shape.parseTags(options.manual_axes);
+        break :b parsed_manual_axes.constSlice();
+    };
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
@@ -2588,7 +2604,7 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, body_fn) catch |err| switch (err) {
+    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, manual_axes, body_fn) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM"),
     };
     const ReturnT = manualComputationReturnType(body_fn);
@@ -2617,6 +2633,7 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
 fn manualComputationInternal(
     inputs: anytype,
     outputs: []const Shape,
+    manual_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2662,7 +2679,10 @@ fn manualComputationInternal(
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings, outputs, output_shardings);
+            const all_shardings = try arena.alloc(Sharding, input_shardings.len + output_shardings.len);
+            @memcpy(all_shardings[0..input_shardings.len], input_shardings);
+            @memcpy(all_shardings[input_shardings.len..], output_shardings);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, manual_axes, all_shardings);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
@@ -2847,6 +2867,7 @@ test "manualComputation handler API" {
             .rhs = rhs,
         },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, configured.shape());
 
@@ -2860,6 +2881,7 @@ test "manualComputation handler API" {
         }).call,
         .{ .input = configured },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, passthrough.shape());
 
@@ -2909,6 +2931,7 @@ test "manualComputation handler API" {
             .original_values = original_values,
         },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, nested.shape());
 }
@@ -3048,6 +3071,8 @@ pub fn CustomCall(
         /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
         /// sharding, this setting will avoid the shuffling of the buffer's data.
         sharding_aware: bool,
+        /// Logical axes localized when `sharding_aware` is enabled.
+        manual_axes: []const Shape.Tag,
         /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
         /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
@@ -3088,6 +3113,7 @@ pub fn CustomCall(
                     input_tensors,
                     output_shapes,
                     attributes,
+                    params.manual_axes,
                 );
             } else {
                 return typedCustomCall(
@@ -3135,6 +3161,7 @@ pub fn shardingAwareTypedCustomCall(
     input: anytype,
     output: anytype,
     attributes: anytype,
+    manual_axes: []const Shape.Tag,
 ) ShapeToTensor(@TypeOf(output)) {
     const Input = @TypeOf(input);
     const Output = @TypeOf(output);
@@ -3157,6 +3184,7 @@ pub fn shardingAwareTypedCustomCall(
         Handler.body,
         .{ .input = input, .attributes = attributes },
         @as([]const Shape, &output_shapes),
+        .{ .manual_axes = manual_axes },
     );
 
     // Convert the slice back to a struct
