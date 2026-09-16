@@ -1,11 +1,17 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
+cc_library(
+    name = "retain_runfiles_init",
+    linkopts = ["-Wl,-u,_bazel_runfiles_init"],
+)
+
 zig_library(
     name = "bazel",
     tags = ["manual"],
     main = "bazel.zig",
     visibility = ["//visibility:public"],
     deps = [
+        ":retain_runfiles_init",
         "//stdx",
         "@rules_zig//zig/runfiles",
     ],
