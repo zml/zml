@@ -523,7 +523,7 @@ pub const Client = opaque {
     }
 
     pub const CreateViewOfDeviceBufferArgs = struct {
-        data: *anyopaque,
+        device_buffer_ptr: *anyopaque,
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
@@ -539,7 +539,7 @@ pub const Client = opaque {
         const layout = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
-            .device_buffer_ptr = @constCast(args.data),
+            .device_buffer_ptr = @constCast(args.device_buffer_ptr),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
