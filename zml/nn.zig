@@ -43,14 +43,14 @@ pub const Linear = struct {
         return if (self.quantization) |q| q.scales else null;
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
+    pub fn forward(self: Linear, x: Tensor, out_dtype: DataType) Tensor {
         if (self.quantization) |q| {
             if (quantization.quantizeInput(q, x, self.tag, zml.Compiler.current().platform)) |input| {
-                return self.forwardQuantized(input, x.dtype());
+                return self.forwardQuantized(input, out_dtype);
             }
-            return self.forwardScaled(x.convert(.bf16), null, null, x.dtype());
+            return self.forwardScaled(x.convert(.bf16), null, null, out_dtype);
         }
-        const y = x.dot(self.weight.convert(x.dtype()), self.tag);
+        const y = x.dot(self.weight.convert(x.dtype()), self.tag).convert(out_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 
@@ -66,7 +66,7 @@ pub const Linear = struct {
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
-        const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
+        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag);
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
@@ -119,22 +119,28 @@ test "unpackFp4 expands the requested axis" {
 /// dimension must divide its corresponding value dimension.
 ///
 /// CPU has no specialized path.
+///
+/// `out_dtype` is the element type of the returned tensor; only BF16 and F32 stay on
+/// the fused path. It buys no accuracy: the kernels accumulate in F32 either way.
 pub fn scaledDot(
     lhs: Tensor,
     rhs: Tensor,
     lhs_scale: ?Tensor,
     rhs_scale: Tensor,
+    out_dtype: DataType,
     args: anytype,
 ) Tensor {
+    // A narrow output would be an unscaled cast of the F32 accumulator
+    stdx.debug.assert(
+        out_dtype.isFloat() and out_dtype.bitSizeOf() >= 16,
+        "scaledDot output dtype must be a 16-bit-or-wider float, got {s}",
+        .{@tagName(out_dtype)},
+    );
     const dot_axes = lhs.dotAxes(rhs, args);
 
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-    const result_dtype: DataType = switch (lhs.dtype()) {
-        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0 => .bf16,
-        else => lhs.dtype(),
-    };
-    var res_shape: Shape = .{ ._dtype = result_dtype };
+    var res_shape: Shape = .{ ._dtype = out_dtype };
     var lhs_batching_axes: Axes = .empty;
     var rhs_batching_axes: Axes = .empty;
     for (dot_axes.batching.constSlice()) |b_axes| {
@@ -226,12 +232,12 @@ test "block128 scaled dot layouts" {
             const input = quantization.quantizeBlockFp8(x, .k, 128, fp8, .f32);
             const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
             return .{
-                .linear = linear.forward(x),
+                .linear = linear.forward(x, .bf16),
                 .linear_expected = dequantize(input.values, input.scales).dot(dequantize(weight, scales), .k),
                 .actual = if (prequantized)
-                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .k)
+                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .bf16, .k)
                 else
-                    scaledDot(x, weight, null, scales, .k),
+                    scaledDot(x, weight, null, scales, .bf16, .k),
                 .expected = (if (prequantized) dequantize(input.values, input.scales.convert(scales.dtype())) else x)
                     .dot(dequantize(weight, scales), .k),
             };

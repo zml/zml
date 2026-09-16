@@ -260,7 +260,7 @@ pub const Sampler = struct {
     pub fn sampleTokens(input: Input) Output {
         const self = input.sampler;
         const x = self.norm.forward(input.hidden);
-        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
         return .{
             .tokens = next_tokens.convert(.u32),
@@ -523,11 +523,11 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up_projed = self.up_proj.forward(x);
-        const gate = self.gate_proj.forward(x);
+        const up_projed = self.up_proj.forward(x, x.dtype());
+        const gate = self.gate_proj.forward(x, x.dtype());
         const hidden = gate.silu().mul(up_projed);
 
-        const output = self.down_proj.forward(hidden);
+        const output = self.down_proj.forward(hidden, hidden.dtype());
         return output;
     }
 };
@@ -578,7 +578,7 @@ pub const SelfAttn = struct {
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const q_proj = self.q_proj.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
+        const q_proj = self.q_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
         const q, var gate = q_proj.chunkExact(.hd, 2);
         gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
         return .{ q, gate };
@@ -589,8 +589,8 @@ pub const SelfAttn = struct {
             if (self.num_kv_heads > 0) break :b self.num_kv_heads;
             break :b self.num_heads;
         };
-        const k = self.k_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
-        const v = self.v_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const k = self.k_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const v = self.v_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         return .{ k, v };
     }
 
@@ -667,7 +667,7 @@ pub const SelfAttn = struct {
 
         const gated_output = attn_output.mul(gate.sigmoid());
         const projected_output = self.o_proj
-            .forward(gated_output.rename(.{ .d_out_proj = .d }))
+            .forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype())
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated });
 
@@ -874,7 +874,7 @@ pub const GatedDeltaNet = struct {
         const left_pad = self.conv_kernel_size - 1;
 
         const x_in = x.withPartitioning(.{ .d = .replicated });
-        const projected_qkv = self.in_proj_qkv.forward(x_in)
+        const projected_qkv = self.in_proj_qkv.forward(x_in, x_in.dtype())
             .rename(.{ .dout = .mix })
             .withPartitioning(.{ .s = .replicated, .mix = .model });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
@@ -908,10 +908,10 @@ pub const GatedDeltaNet = struct {
         }
         mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
 
-        const z = self.in_proj_z.forward(x_in)
+        const z = self.in_proj_z.forward(x_in, x_in.dtype())
             .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
-        const b = self.in_proj_b.forward(x_in).rename(.{ .dout = .vh });
-        const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh });
+        const b = self.in_proj_b.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh });
+        const a = self.in_proj_a.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh });
 
         const query = mixed_qkv
             .slice(.mix, .{ .start = 0, .end = key_dim })
@@ -957,7 +957,7 @@ pub const GatedDeltaNet = struct {
             .rename(.{ .d = .vhd });
 
         const output = self.out_proj
-            .forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }))
+            .forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }), core_attn_out_normed.dtype())
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(

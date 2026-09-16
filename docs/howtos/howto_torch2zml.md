@@ -259,10 +259,10 @@ const Mlp = struct {
     down_proj: zml.nn.Linear,
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const proj = self.up_proj.forward(x);
-        var output = self.gate_proj.forward(x);
+        const proj = self.up_proj.forward(x, x.dtype());
+        var output = self.gate_proj.forward(x, x.dtype());
         output = output.silu().mul(proj);
-        return self.down_proj.forward(output);
+        return self.down_proj.forward(output, x.dtype());
     }
 };
 ```

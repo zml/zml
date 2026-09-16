@@ -265,7 +265,7 @@ pub const Sampler = struct {
     pub fn sampleTokens(input: Input) Output {
         const self = input.sampler;
         const x = self.norm.forward(input.hidden);
-        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
         return .{
             .tokens = next_tokens.convert(.u32),
@@ -583,7 +583,7 @@ pub const SelfAttn = struct {
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const q_proj = self.q_proj.forward(x)
+        const q_proj = self.q_proj.forward(x, x.dtype())
             .splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
         const q, var gate = q_proj.chunkExact(.hd, 2);
         gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
@@ -592,9 +592,9 @@ pub const SelfAttn = struct {
 
     fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        const k = self.k_proj.forward(x)
+        const k = self.k_proj.forward(x, x.dtype())
             .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
-        const v = self.v_proj.forward(x)
+        const v = self.v_proj.forward(x, x.dtype())
             .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         return .{ k, v };
     }
@@ -650,7 +650,7 @@ pub const SelfAttn = struct {
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -692,11 +692,11 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up_projed = self.up_proj.forward(x);
-        const gate = self.gate_proj.forward(x);
+        const up_projed = self.up_proj.forward(x, x.dtype());
+        const gate = self.gate_proj.forward(x, x.dtype());
         const hidden = gate.silu().mul(up_projed).rename(.{ .dout = .d });
 
-        const output = self.down_proj.forward(hidden);
+        const output = self.down_proj.forward(hidden, hidden.dtype());
         return output;
     }
 };
@@ -721,7 +721,7 @@ const Router = struct {
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const router_logits = self.router.forward(x).convert(.f32);
+        const router_logits = self.router.forward(x, x.dtype()).convert(.f32);
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
         const router_scores = routing.values.softmax(.top_expert);
@@ -785,7 +785,7 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
+        const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
@@ -998,7 +998,7 @@ pub const GatedDeltaNet = struct {
         const left_pad = self.conv_kernel_size - 1;
 
         const x_in = x.withPartitioning(.{ .d = .replicated });
-        const projected_qkv = self.in_proj_qkv.forward(x_in)
+        const projected_qkv = self.in_proj_qkv.forward(x_in, x_in.dtype())
             .rename(.{ .dout = .mix }).withPartitioning(.{ .s = .replicated, .mix = .model });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
         const conv_input = if (use_cached_state)
@@ -1031,11 +1031,11 @@ pub const GatedDeltaNet = struct {
         }
         mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
 
-        const z = self.in_proj_z.forward(x_in)
+        const z = self.in_proj_z.forward(x_in, x_in.dtype())
             .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
             .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
-        const b = self.in_proj_b.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
-        const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
+        const b = self.in_proj_b.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
+        const a = self.in_proj_a.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
 
         const query = mixed_qkv
             .slice(.mix, .{ .start = 0, .end = key_dim })
@@ -1075,7 +1075,7 @@ pub const GatedDeltaNet = struct {
             .rename(.{ .d = .vhd })
             .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
 
-        const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }))
+        const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }), core_attn_out_normed.dtype())
             .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(
             if (use_cached_state) buildUpdatedConvState(conv_input, left_pad) else buildUpdatedConvStateFromPrefix(projected_qkv, left_pad, active_length),

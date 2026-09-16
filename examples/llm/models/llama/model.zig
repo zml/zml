@@ -367,7 +367,7 @@ pub const LmHead = struct {
 
         var logits = blk: {
             if (self.lm_head) |lm_head| {
-                break :blk lm_head.forward(hidden).rename(.{ .dout = .d });
+                break :blk lm_head.forward(hidden, hidden.dtype()).rename(.{ .dout = .d });
             } else {
                 break :blk self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
             }
@@ -491,10 +491,10 @@ const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const proj = self.up_proj.forward(x);
-        var output = self.gate_proj.forward(x);
+        const proj = self.up_proj.forward(x, x.dtype());
+        var output = self.gate_proj.forward(x, x.dtype());
         output = output.silu().mul(proj).rename(.{ .dout = .d });
-        return self.down_proj.forward(output);
+        return self.down_proj.forward(output, output.dtype());
     }
 };
 
@@ -557,9 +557,9 @@ const SelfAttn = struct {
         // This avoids paying gather-style collectives independently for each projection.
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
 
-        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var q = self.q_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var v = self.v_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
@@ -603,7 +603,7 @@ const SelfAttn = struct {
         );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.forward(attn)
+        const delta = self.o_proj.forward(attn, attn.dtype())
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated });
         return .{ delta, new_kv_cache };
