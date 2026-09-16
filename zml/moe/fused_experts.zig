@@ -6,8 +6,9 @@ const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const triton = @import("triton.zig");
 const fly = @import("fly_kernels/moe.zig");
+const triton = @import("triton.zig");
+const callFusedMoe = triton.call;
 
 const log = std.log.scoped(.moe);
 
@@ -79,12 +80,14 @@ pub fn fusedExperts(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !
     if (gate_up_scheme) |scheme| switch (scheme) {
         .nvfp4 => return error.UnsupportedQuantization,
         .fp8_block128 => launch_config.block_size_k = 128,
+        .fp8_block32 => launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
         .fp8_block128 => down_launch_config.block_size_k = 128,
+        .fp8_block32 => down_launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
         .nvfp4 => return error.UnsupportedQuantization,
     };
@@ -265,8 +268,6 @@ pub const GemmOptions = struct {
     top_k: usize,
     output_shape: Shape,
 };
-
-const callFusedMoe = triton.call;
 
 test "FP8 routed GEMM with bias matches dequantized weights" {
     const allocator = std.testing.allocator;

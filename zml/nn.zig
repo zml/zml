@@ -45,11 +45,10 @@ pub const Linear = struct {
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
         if (self.quantization) |q| {
-            const lhs = x.convert(.bf16);
-            if (quantization.quantizeInput(q, lhs, self.tag, zml.Compiler.current().platform)) |input| {
+            if (quantization.quantizeInput(q, x, self.tag, zml.Compiler.current().platform)) |input| {
                 return self.forwardQuantized(input, x.dtype());
             }
-            return self.forwardScaled(lhs, null, null, x.dtype());
+            return self.forwardScaled(x.convert(.bf16), null, null, x.dtype());
         }
         const y = x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
@@ -224,7 +223,7 @@ test "block128 scaled dot layouts" {
 
         fn forward(x: Tensor, w: Tensor, scales: Tensor, fp8: DataType, prequantized: bool) Outputs {
             const weight = w.convert(fp8);
-            const input = quantization.quantizeBlockFp8(x, .k, fp8);
+            const input = quantization.quantizeBlockFp8(x, .k, 128, fp8, .f32);
             const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
             return .{
                 .linear = linear.forward(x),

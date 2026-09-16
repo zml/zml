@@ -1,19 +1,20 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
+
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const log = std.log.scoped(.moe);
-const kernels = @import("triton_kernels/triton_kernels.zig");
 const toDType = zml.kernel.triton.from;
 const shared = @import("fused_experts.zig");
-
 pub const Parameters = shared.Parameters;
 pub const GateUpLayout = shared.GateUpLayout;
 pub const RoutingWeightPlacement = shared.RoutingWeightPlacement;
 pub const FusedExpertsArgs = shared.FusedExpertsArgs;
+const kernels = @import("triton_kernels/triton_kernels.zig");
 
+const log = std.log.scoped(.moe);
 pub fn call(opts: shared.GemmOptions) Tensor {
     // Native FP4 tensors expose logical K; the Triton operand is byte-packed.
     const weight = if (opts.quant_scheme == .mxfp4 and opts.weight.dtype() == .f4e2m1)
@@ -25,6 +26,13 @@ pub fn call(opts: shared.GemmOptions) Tensor {
     if (opts.quant_scheme == .mxfp4) {
         stdx.debug.assert(@mod(weight_k, 32) == 0 and opts.weight_scale != null, "MXFP4 requires K divisible by 32 and weight scales", .{});
         stdx.debug.assert(opts.input.dtype() == .bf16 and opts.input_scale == null, "MXFP4 requires BF16 activations without input scales", .{});
+    }
+
+    if (opts.quant_scheme == .fp8_block32) {
+        const scales = opts.weight_scale orelse stdx.debug.panic("block32 FP8 requires weight scales", .{});
+        stdx.debug.assert(weight.dtype() == .f8e4m3fn and @mod(weight.dim(1), 32) == 0 and @mod(weight_k, 32) == 0, "block32 FP8 requires E4M3FN weights with N and K divisible by 32", .{});
+        stdx.debug.assert(scales.rank() == 3 and scales.dim(0) == weight.dim(0) and scales.dim(1) == @divExact(weight.dim(1), 32) and scales.dim(2) == @divExact(weight_k, 32), "block32 FP8 requires scales shaped [expert, N/32, K/32], got {f}", .{scales.shape()});
+        stdx.debug.assert(scales.dtype() == .f8e8m0 or scales.dtype() == .bf16 or scales.dtype() == .f32, "unsupported block32 FP8 scale dtype {}", .{scales.dtype()});
     }
 
     stdx.debug.assert(opts.quant_scheme != null or (opts.input_scale == null and opts.weight_scale == null), "scales require a quantization scheme", .{});
@@ -50,6 +58,8 @@ pub fn call(opts: shared.GemmOptions) Tensor {
             .mxfp4, .mxfp8 => scale.bitCast(.u8),
             .fp8_per_channel => scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }),
             .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
+            // Tiled FP8 uses ordinary dot products with FP32 scale arithmetic.
+            .fp8_block32 => scale.convert(.f32),
             .fp8_block128, .nvfp4 => scale,
         };
     } else null;
@@ -262,6 +272,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
         .mxfp8 => .{ 32, .u8, 1e-10 },
         .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
         .fp8_block128 => .{ 128, .f32, 1e-10 },
+        .fp8_block32 => .{ 32, .f32, 1e-4 },
         .mxfp4, .nvfp4 => unreachable,
     };
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
