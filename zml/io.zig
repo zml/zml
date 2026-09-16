@@ -647,7 +647,12 @@ pub const MemoryWriter = union(enum) {
             .cuda, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
             },
-            .rocm, .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
+            .rocm => blk: {
+                var writer = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer);
+                writer.memory = memory;
+                break :blk .{ .buffered = writer };
+            },
+            .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
                 .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer) },
@@ -677,6 +682,7 @@ pub const MemoryWriter = union(enum) {
 };
 
 pub const BufferedMemoryWriter = struct {
+    memory: Memory.Kind = .default,
     io: std.Io,
     platform: *const Platform,
     shape: Shape,
@@ -717,7 +723,7 @@ pub const BufferedMemoryWriter = struct {
             self.shape,
             self.sharding,
             @ptrCast(self.interface.buffer),
-            .{ .wait = true },
+            .{ .wait = true, .memory = self.memory },
         ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
@@ -1543,44 +1549,42 @@ const DirectMemoryWriterDeviceTest = struct {
             pool.deinit(dma_allocators[i].allocator());
         };
 
-        var written_buffer: Buffer = undefined;
-        var writer: DirectMemoryWriter = try .init(
-            self.allocator,
-            self.io,
-            platform,
-            pools,
-            dma_allocators,
-            pool_chunk_size,
-            shape,
-            sharding,
-            &written_buffer,
-            memory,
-        );
-        defer writer.deinit();
+        var written_buffer: Buffer = .{ ._platform = platform, ._shape = shape, ._sharding = sharding, ._shards = .empty };
+        var writer: MemoryWriter = if (memory == .host_pinned)
+            try .init(self.allocator, self.io, platform, pools, dma_allocators, pool_chunk_size, shape, sharding, &written_buffer, memory)
+        else
+            .{ .direct = try .init(self.allocator, self.io, platform, pools, dma_allocators, pool_chunk_size, shape, sharding, &written_buffer, memory) };
+        defer writer.deinit(self.allocator);
         defer written_buffer.deinit();
+        const writer_interface = writer.interface();
 
         switch (write_mode) {
             .stream_remaining => {
                 var reader: std.Io.Reader = .fixed(slice.constData());
-                const streamed = try reader.streamRemaining(&writer.interface);
+                const streamed = try reader.streamRemaining(writer_interface);
                 try std.testing.expectEqual(slice.constData().len, streamed);
             },
             .writable_slice_greedy => {
                 var offset: usize = 0;
                 while (offset < slice.constData().len) {
                     const min_len = @max(@as(usize, 1), writable_slice_min_len);
-                    const dest = try writer.interface.writableSliceGreedy(min_len);
+                    const dest = try writer_interface.writableSliceGreedy(min_len);
                     const to_write = @min(dest.len, slice.constData().len - offset);
                     if (to_write == 0) return std.Io.Writer.Error.WriteFailed;
                     @memcpy(dest[0..to_write], slice.constData()[offset..][0..to_write]);
-                    writer.interface.advance(to_write);
+                    writer_interface.advance(to_write);
                     offset += to_write;
                 }
             },
         }
 
-        try writer.interface.flush();
+        try writer_interface.flush();
         try written_buffer.await(self.io);
+        if (memory == .host_pinned) {
+            for (written_buffer._shards.constSlice()) |shard| {
+                try std.testing.expectEqualStrings("pinned_host", shard.memory(platform.pjrt_api).kind_(platform.pjrt_api));
+            }
+        }
 
         var written_slice = try written_buffer.toSliceAlloc(self.allocator, self.io);
         defer written_slice.free(self.allocator);
