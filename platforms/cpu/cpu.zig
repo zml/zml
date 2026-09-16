@@ -24,7 +24,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("zml/platforms/cpu/sandbox/lib", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("zml/platforms/cpu/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for CPU runtime", .{});
         return error.FileNotFound;
     };
@@ -37,7 +37,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         };
 
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libzml_cpu" ++ ext });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_cpu" ++ ext });
         break :blk .loadFrom(path);
     };
 }
