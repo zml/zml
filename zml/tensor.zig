@@ -274,7 +274,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         var copy = flat_tensors;
@@ -311,7 +311,7 @@ pub const Tensor = struct {
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
             .cpu, .neuron, .metal => return,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         meta.visit(struct {

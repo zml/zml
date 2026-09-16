@@ -14,6 +14,11 @@ patchelf(
     set_rpath = "$ORIGIN/../musa-sdk/lib",
 )
 
+filegroup(
+    name = "musa_llvm_pass_guard",
+    srcs = ["musa-compiler/libmusa_llvm_pass_guard.so"],
+)
+
 patchelf(
     name = "libxla_musa_mublas_shim",
     src = "libxla_musa_mublas_shim.so.1",
@@ -52,6 +57,7 @@ copy_to_directory(
         ":libxla_musa_mudnn_shim",
         ":libxla_musa_mufft_shim",
         ":musa_llvm_bridge",
+        ":musa_llvm_pass_guard",
         "@musa_sdk//:builtins_mtgpu_def",
         "@musa_sdk//:clang_offload_bundler",
         "@musa_sdk//:intrinsics_musa_td",
@@ -62,7 +68,8 @@ copy_to_directory(
         "@musa_sdk//:mcc",
         "@musa_sdk//:runtime_libs",
     ],
-    add_directory_to_runfiles = False,
+    # Keep compiler files under the canonical SDK root in test runfiles.
+    add_directory_to_runfiles = True,
     allow_overwrites = True,
     hardlink = "auto",
     include_external_repositories = ["**"],
@@ -83,6 +90,7 @@ copy_to_directory(
         "libxla_musa_mufft_shim": "lib",
         "musa-sdk": "lib/musa-sdk",
         "musa_llvm_bridge": "lib/musa-compiler",
+        "musa-compiler": "lib/musa-compiler",
     },
     root_paths = ["."],
 )
