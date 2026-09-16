@@ -51,6 +51,8 @@ pub const Quantization = struct {
         /// f8e4m3fn, f8e4m3fnuz, or f8e8m0 values, one bf16 or f32 scale per 128x128 tile.
         /// The DeepSeek-style FP8 that model vendors publish themselves, under `weight_scale_inv`.
         fp8_block128,
+        /// E4M3FN weights with E8M0, BF16 or F32 scales per 32x32 tile.
+        fp8_block32,
         /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
         /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
         fp8_per_tensor,
@@ -75,6 +77,9 @@ pub const Quantization = struct {
                     (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
                     scale.dim(0) == n and scale.dim(1) == 1,
+                .fp8_block32 => weight.dtype() == .f8e4m3fn and
+                    (scale.dtype() == .f8e8m0 or ((scale.dtype() == .bf16 or scale.dtype() == .f32) and scale.count() > 1)) and
+                    scale.rank() == 2 and scale.dim(0) * 32 == n and scale.dim(1) * 32 == k,
                 .fp8_block128 => (weight.dtype() == .f8e4m3fn or weight.dtype() == .f8e4m3fnuz or weight.dtype() == .f8e8m0) and
                     (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
@@ -106,40 +111,61 @@ pub const QuantizedInput = struct {
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
     return switch (quantization.scheme) {
-        .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input, global_scale, axis) else null,
-        .fp8_block128 => switch (platform.target) {
-            .cuda => quantizeBlockFp8(input, axis, .f8e4m3fn),
-            .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
-                .cdna4, .rdna4 => quantizeBlockFp8(input, axis, .f8e4m3fn),
-                .cdna3 => quantizeBlockFp8(input, axis, .f8e4m3fnuz),
-                .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
-            } else null,
-            else => null,
+        .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
+        .fp8_block32, .fp8_block128 => blk: {
+            const dtype: DataType = switch (platform.target) {
+                .cuda => .f8e4m3fn,
+                .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+                    .cdna4, .rdna4 => .f8e4m3fn,
+                    .cdna3 => .f8e4m3fnuz,
+                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
+                } else return null,
+                else => return null,
+            };
+            break :blk switch (quantization.scheme) {
+                .fp8_block32 => quantizeBlockFp8(input, axis, 32, dtype, .f8e8m0),
+                .fp8_block128 => quantizeBlockFp8(input.convert(.bf16), axis, 128, dtype, .f32),
+                else => unreachable,
+            };
         },
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
 }
 
-/// Quantize each 128-value activation block, preserving the input's axes.
-/// Scales have the same shape with the contracting dimension divided by 128.
-pub fn quantizeBlockFp8(x: Tensor, axis: anytype, dtype: DataType) QuantizedInput {
-    stdx.debug.assert(dtype == .f8e4m3fn or dtype == .f8e4m3fnuz, "expected E4M3 FP8 dtype, got {s}", .{@tagName(dtype)});
-    stdx.debug.assert(@mod(x.dim(axis), 128) == 0, "block FP8 activation width must be divisible by 128, got {f}", .{x.shape()});
+/// Quantize activation blocks, preserving the input's axes.
+/// E8M0 scales round upward to a power of two to avoid overflowing FP8 values.
+pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataType, scale_dtype: DataType) QuantizedInput {
+    stdx.debug.assert(block_size > 0, "block FP8 size must be positive, got {}", .{block_size});
+    stdx.debug.assert(@mod(x.dim(axis), block_size) == 0, "block FP8 activation width must be divisible by {}, got {f}", .{ block_size, x.shape() });
     // Match the routed-MoE quantizer's FNUZ range.
-    const fp8_max: f32 = if (dtype == .f8e4m3fnuz) 224.0 else 448.0;
-    const grouped = x.convert(.f32).splitAxis(axis, .{ .fp8_ks = -1, .fp8_block = 128 });
-    // Put scale arithmetic before the reduction so it can fuse into the producer.
-    const scales = grouped.abs()
-        .maximum(.scalar(1e-10, .f32))
-        .scale(1.0 / fp8_max)
-        .max(.fp8_block);
+    const fp8_max: f32 = switch (dtype) {
+        .f8e4m3fn => 448.0,
+        .f8e4m3fnuz => 224.0,
+        else => stdx.debug.panic("expected E4M3 FP8 dtype, got {s}", .{@tagName(dtype)}),
+    };
+    const grouped = x.convert(.f32).splitAxis(axis, .{ .fp8_ks = -1, .fp8_block = block_size });
+    const scales = switch (scale_dtype) {
+        // Put scale arithmetic before the reduction so it can fuse into the producer.
+        .f32 => grouped.abs()
+            .maximum(.scalar(1e-10, .f32))
+            .scale(1.0 / fp8_max)
+            .max(.fp8_block),
+        .f8e8m0 => blk: {
+            const raw_scale = grouped.abs().maximum(.scalar(1e-4, .f32)).scale(1.0 / fp8_max).max(.fp8_block);
+            const bits = raw_scale.bitCast(.u32);
+            const exponent = bits.shiftRightLogical(.scalar(23, .u32));
+            const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
+            break :blk exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
+        },
+        else => stdx.debug.panic("expected F32 or E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)}),
+    };
     const values = grouped.div(scales.broad(grouped.shape()))
         .clamp(.scalar(-fp8_max, .f32), .scalar(fp8_max, .f32))
         .convert(dtype)
         .reshape(x.shape().withDtype(dtype));
     return .{
         .values = values,
-        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), 128)).withDtype(.f32)),
+        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), block_size)).withDtype(.f32)).convert(scale_dtype),
         .global_scale = null,
     };
 }
@@ -335,7 +361,7 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         const Local = struct {
             const Outputs = struct { values: Tensor, scales: Tensor };
             fn forward(x: Tensor) Outputs {
-                const input = quantizeBlockFp8(x, .k, dtype);
+                const input = quantizeBlockFp8(x, .k, 128, dtype, .f32);
                 return .{ .values = input.values.convert(.f32), .scales = input.scales };
             }
         };

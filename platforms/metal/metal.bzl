@@ -4,8 +4,8 @@ def _metal_impl(mctx):
     http_archive(
         name = "libzml_metal",
         build_file = "libzml_metal.BUILD.bazel",
-        sha256 = "da6e5e880b950d91cb036b3b68ebd7cd26a8e265b20ff58ea4b52dc242a365bd",
-        url = "https://mirror.zml.ai/plugins/202609161226.43.1.b992d049cec2/zml-metal-darwin-arm64.tar.zst",
+        sha256 = "aa67157ffd996e1a244a7a79c940cf15ac97919f0104617e70f523155d16388a",
+        url = "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-metal-darwin-arm64.tar.zst",
     )
 
     return mctx.extension_metadata(

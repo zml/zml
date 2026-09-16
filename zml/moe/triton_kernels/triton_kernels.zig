@@ -111,6 +111,17 @@ pub const PerTokenGroupQuantFp8 = struct {
                 break :blk .{ b.exp2(exponent), exponent.add(127).to(.i32).to(.i8) };
             },
             .fp8_per_channel, .fp8_per_tensor, .fp8_block128 => .{ scale_raw, scale_raw.to(scale_dt) },
+            .fp8_block32 => blk: {
+                // Match quantizeBlockFp8(..., .f8e8m0), but store the scales as FP32 here.
+                // It is unclear whether power-of-two scaling is best for this kernel,
+                // but it keeps activation quantization consistent with that function.
+                // Round up from the FP32 bits, including values just above a power of two.
+                const bits = b.bitcast(scale_raw, .i32);
+                const exponent = bits.div(0x800000);
+                const fractional = bits.bitAnd(0x7fffff).ne(0).to(.i32);
+                const scale = b.bitcast(exponent.add(fractional).mul(0x800000), .f32);
+                break :blk .{ scale, scale.to(scale_dt) };
+            },
             .mxfp4, .nvfp4 => unreachable,
         };
 
@@ -209,8 +220,9 @@ pub const FusedMoe = struct {
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
-        if (cfg.quant_scheme == .fp8_block128 and cfg.block_size_k != 128) {
-            log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K=128", .{});
+        const fp8_block_size: usize = if (cfg.quant_scheme == .fp8_block32) 32 else 128;
+        if ((cfg.quant_scheme == .fp8_block128 or cfg.quant_scheme == .fp8_block32) and cfg.block_size_k != fp8_block_size) {
+            log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K={}", .{fp8_block_size});
             return error.InvalidMlir;
         }
 
@@ -446,16 +458,16 @@ pub const FusedMoe = struct {
                     .input_precision = .tf32,
                     .max_num_imprecise_acc = 0,
                 }),
-                .fp8_block128 => scaled: {
-                    // Activation scales are [token, K/128] and weight scales are
-                    // [expert, N/128, K/128]. Compute their addresses from the
+                .fp8_block32, .fp8_block128 => scaled: {
+                    // Activation scales are [token, K/block] and weight scales are
+                    // [expert, N/block, K/block]. Compute their addresses from the
                     // loop index; activation scales are optional.
                     const stride_bse = b.load(a.stride_bse_ptr);
                     const stride_bsk = b.load(a.stride_bsk_ptr);
                     const stride_bsn = b.load(a.stride_bsn_ptr);
                     const b_scale_ptrs = a.b_scale_ptr.addPtr(
                         off_experts.mul(stride_bse)
-                            .add(offs_bn.div(128).mul(stride_bsn))
+                            .add(offs_bn.div(fp8_block_size).mul(stride_bsn))
                             .add(k_iter.mul(stride_bsk)),
                     );
                     const dot = b.dotOpts(a_val, if (cfg.a_scale_dtype != null) b_val else b_val.to(.bf16), b.zeros(&.{ block_size_m, block_size_n }, .f32), .{
@@ -561,13 +573,13 @@ pub const FusedMoe = struct {
 };
 
 test "FP8 activation quantization emits float and E8M0 scales" {
-    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128 }) |scheme| {
+    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 }) |scheme| {
         for ([_]DType{ .bf16, .f32 }) |input_dtype| {
             const ir = try PerTokenGroupQuantFp8.Kernel.emit(std.testing.allocator, .{
                 .input_dtype = input_dtype,
                 .output_dtype = .f8e4m3fn,
                 .scale_dtype = if (scheme == .mxfp8) .i8 else .f32,
-                .block = if (scheme == .mxfp8) 32 else 256,
+                .block = if (scheme == .mxfp8 or scheme == .fp8_block32) 32 else 256,
                 .quant_scheme = scheme,
             });
             defer std.testing.allocator.free(ir);
@@ -580,7 +592,7 @@ test "FP8 activation quantization emits float and E8M0 scales" {
 
 test "FusedMoe emits each FP8 and MXFP4 scaling path" {
     const allocator = std.testing.allocator;
-    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 };
+    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 };
     for (schemes) |scheme| {
         for ([_]DType{ .f8e4m3fn, .f8e4m3fnuz }) |fp8_dtype| {
             if ((scheme == .mxfp4 or scheme == .mxfp8) and fp8_dtype == .f8e4m3fnuz) continue;
@@ -597,7 +609,7 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
                         .routing_weights_dtype = .bf16,
                         .block_size_m = 16,
                         .block_size_n = 32,
-                        .block_size_k = 128,
+                        .block_size_k = if (scheme == .fp8_block32) 32 else 128,
                         .group_size_m = 1,
                         .top_k = 2,
                         .naive_block_assignment = false,

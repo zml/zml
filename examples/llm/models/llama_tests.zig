@@ -108,7 +108,15 @@ fn testLayer(
     var out_buffer_expected = try loadBufferFromStore(allocator, io, platform, activation_store, out_key, sharding);
     defer out_buffer_expected.deinit();
 
-    const exe = try platform.compileFn(allocator, io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{sharding} });
+    // `zml.nn.Linear.forward` takes an explicit output dtype; every other layer here
+    // is `fn (self, Tensor) Tensor`.
+    const Layer = @TypeOf(layer);
+    const Call = struct {
+        fn forward(l: Layer, x: zml.Tensor) zml.Tensor {
+            return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
+        }
+    };
+    const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
 
     var args = try exe.args(allocator);
