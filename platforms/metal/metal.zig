@@ -5,12 +5,13 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/metal");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_METAL");
+    return platforms_options.metal;
 }
 
 fn setMetalToolchainEnv(r: anytype) !void {

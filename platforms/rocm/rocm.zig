@@ -5,13 +5,14 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/rocm");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_ROCM");
+    return platforms_options.rocm;
 }
 
 fn hasRocmDevices(io: std.Io) bool {

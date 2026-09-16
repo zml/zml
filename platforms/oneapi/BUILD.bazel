@@ -12,14 +12,7 @@ zig_shared_library(
 )
 
 cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_ONEAPI_DISABLED"],
-    tags = ["manual"],
-)
-
-cc_library(
     name = "libzml_oneapi",
-    defines = ["ZML_RUNTIME_ONEAPI"],
     tags = ["manual"],
     deps = ["@libzml_oneapi"],
 )
@@ -33,12 +26,13 @@ zig_library(
     deps = [
         "//bazel",
         "//pjrt",
+        "//platforms:options",
         "//stdx",
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:oneapi.enabled": [
             ":libzml_oneapi",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )
