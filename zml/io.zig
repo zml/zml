@@ -623,10 +623,10 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{
+            .cuda, .rocm, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer),
             },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{
+            .tpu, .neuron, .cpu, .metal => .{
                 .buffered = try .init(allocator, io, platform, shape, sharding, buffer),
             },
         };
