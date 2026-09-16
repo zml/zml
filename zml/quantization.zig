@@ -51,7 +51,7 @@ pub const Quantization = struct {
         /// f8e4m3fn, f8e4m3fnuz, or f8e8m0 values, one bf16 or f32 scale per 128x128 tile.
         /// The DeepSeek-style FP8 that model vendors publish themselves, under `weight_scale_inv`.
         fp8_block128,
-        /// E4M3FN weights with E8M0, BF16 or F32 scales per 32x32 tile.
+        /// E4M3FN or E4M3FNUZ weights with E8M0, BF16 or F32 scales per 32x32 tile.
         fp8_block32,
         /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
         /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
@@ -77,7 +77,7 @@ pub const Quantization = struct {
                     (scale.dtype() == .bf16 or scale.dtype() == .f32) and
                     scale.count() > 1 and scale.rank() == 2 and
                     scale.dim(0) == n and scale.dim(1) == 1,
-                .fp8_block32 => weight.dtype() == .f8e4m3fn and
+                .fp8_block32 => (weight.dtype() == .f8e4m3fn or weight.dtype() == .f8e4m3fnuz) and
                     (scale.dtype() == .f8e8m0 or ((scale.dtype() == .bf16 or scale.dtype() == .f32) and scale.count() > 1)) and
                     scale.rank() == 2 and scale.dim(0) * 32 == n and scale.dim(1) * 32 == k,
                 .fp8_block128 => (weight.dtype() == .f8e4m3fn or weight.dtype() == .f8e4m3fnuz or weight.dtype() == .f8e8m0) and
@@ -254,6 +254,13 @@ test "Quantization.Scheme.classify" {
         .init(.{ .dout = 5120, .d = 6144 }, .f8e4m3fn),
         .init(.{ .dout = 40, .sc = 48 }, .bf16),
     ));
+
+    inline for (.{ .f8e4m3fn, .f8e4m3fnuz }) |dtype| {
+        try expect(@as(?Quantization.Scheme, .fp8_block32), Quantization.Scheme.classify(
+            .init(.{ .dout = 1280, .d = 5120 }, dtype),
+            .init(.{ .dout = 40, .sc = 160 }, .f8e8m0),
+        ));
+    }
 
     // GLM uses f32 scales and permits a partial final 128-row tile.
     try expect(@as(?Quantization.Scheme, .fp8_block128), Quantization.Scheme.classify(
