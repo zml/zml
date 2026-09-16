@@ -13,6 +13,7 @@ zig_shared_library(
 
 cc_library(
     name = "libzml_oneapi",
+    hdrs = ["oneapi.h"],
     tags = ["manual"],
     deps = ["@libzml_oneapi"],
 )
