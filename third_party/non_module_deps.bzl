@@ -17,6 +17,7 @@ load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
+load("//third_party/zio:repo.bzl", zio = "repo")
 
 def _non_module_deps_impl(mctx):
     cloud_accelerator_diagnostics()
@@ -38,11 +39,10 @@ def _non_module_deps_impl(mctx):
     cuda_tile()
     flydsl()
     cute_ir()
+    zio()
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = "all",
-        root_module_direct_dev_deps = [],
     )
 
 non_module_deps = module_extension(

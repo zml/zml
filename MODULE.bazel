@@ -14,7 +14,7 @@ single_version_override(
     version = "20260526.0",
 )
 
-bazel_dep(name = "bazel_lib", version = "3.2.2")
+bazel_dep(name = "bazel_lib", version = "3.7.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
@@ -285,6 +285,7 @@ use_repo(
     "uucode",
     "xla",
     "zigimg",
+    "zio",
 )
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
