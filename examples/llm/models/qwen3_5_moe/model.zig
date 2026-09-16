@@ -721,7 +721,7 @@ const Router = struct {
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const router_logits = self.router.forward(x, x.dtype()).convert(.f32);
+        const router_logits = self.router.forward(x, .f32);
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
         const router_scores = routing.values.softmax(.top_expert);
