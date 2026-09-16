@@ -50,7 +50,6 @@ genrule(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        "musa-sdk/toolchain-identity.txt",
         ":libmusart_compat",
         ":libpjrt_musa_so",
         ":libxla_musa_mublas_shim",
@@ -67,6 +66,7 @@ copy_to_directory(
         "@musa_sdk//:llvm_readobj",
         "@musa_sdk//:mcc",
         "@musa_sdk//:runtime_libs",
+        "@musa_sdk//:toolchain-identity.txt",
     ],
     # Keep compiler files under the canonical SDK root in test runfiles.
     add_directory_to_runfiles = True,
@@ -91,6 +91,7 @@ copy_to_directory(
         "musa-sdk": "lib/musa-sdk",
         "musa_llvm_bridge": "lib/musa-compiler",
         "musa-compiler": "lib/musa-compiler",
+        "toolchain-identity.txt": "lib/musa-sdk/toolchain-identity.txt",
     },
     root_paths = ["."],
 )

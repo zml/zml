@@ -1,12 +1,8 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 
-# bazel run //examples/benchmark \
-#   --@zml//platforms:cpu=false \
-#   --@zml//platforms:musa=true \
-#   --override_repository=+musa_packages+libpjrt_musa=/home/kevin/musa/xla-override/libpjrt_musa/
-PJRT_MUSA_RELEASE = "musa-5.1.0-s4000-local"
-# Replace with the sha256sum of pjrt-musa_linux-amd64.tar.gz after publishing this release.
-PJRT_MUSA_ARTIFACT_SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+PJRT_MUSA_RELEASE = "musa-5.1.0-s4000"
+PJRT_MUSA_ARTIFACT_SHA256 = "42d8c1e846d2497dd94e84090c73a42178ffed06aac87686d999fd0f42507cec"
+
 PJRT_MUSA_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-musa_linux-amd64.tar.gz".format(
     release = PJRT_MUSA_RELEASE,
 )
@@ -25,11 +21,13 @@ MUSA_SDK_URL = "https://github.com/neudinger/rules-ml-toolchain-redists/releases
     MUSA_SDK_RELEASE = MUSA_SDK_RELEASE,
     MUSA_TOOLKIT_RELEASE = MUSA_TOOLKIT_RELEASE
 )
-MUSA_SDK_SHA256 = "5407266eab8fe42caee83f6a7a979edeaa9ea6e542e197bf65fb5f394f1980b2"
+MUSA_SDK_SHA256 = "afa05b1e73c4816e063fb695c889e37877599aa021a4ef8dba08998c1f3b1f9f"
 MUSA_SDK_STRIP_PREFIX = "musa"
 
 _MUSA_SDK_BUILD_FILE_CONTENT = """\
 package(default_visibility = ["//visibility:public"])
+
+exports_files(["toolchain-identity.txt"])
 
 filegroup(
     name = "runtime_libs",
@@ -45,7 +43,6 @@ filegroup(
         "lib/libmudnn_tensor_unary.so.3",
         "lib/libmudnn_xmma.so.3",
         "lib/libmufft.so.1",
-        "lib/libmusa.so.1",
         "lib/libmusart.so.5",
     ] + glob([
         "lib/libmtfft-device-*.so*",
@@ -102,6 +99,7 @@ filegroup(
 """
 
 def _musa_impl(mctx):
+    sdk_sha256 = mctx.getenv("MUSA_DISTRO_HASH", MUSA_SDK_SHA256)
     http_archive(
         name = "libpjrt_musa",
         # Use an explicit label so edits to the package BUILD definition are
@@ -113,7 +111,19 @@ def _musa_impl(mctx):
     http_archive(
         name = "musa_sdk",
         build_file_content = _MUSA_SDK_BUILD_FILE_CONTENT,
-        sha256 = mctx.getenv("MUSA_DISTRO_HASH", MUSA_SDK_SHA256),
+        # Fingerprint the selected SDK, independently of the plugin archive.
+        generated_files = {
+            "toolchain-identity.txt": "\n".join([
+                "schema=xla-musa-toolchain-v1",
+                "musa_version=5.1.0",
+                "musa_version_number=50100",
+                "musa_device=S4000",
+                "musa_gpu_architectures=mp_22",
+                "distro_sha256=" + sdk_sha256,
+                "",
+            ]),
+        },
+        sha256 = sdk_sha256,
         strip_prefix = mctx.getenv("MUSA_DISTRO_ROOT", MUSA_SDK_STRIP_PREFIX),
         url = mctx.getenv("MUSA_DISTRO_URL", MUSA_SDK_URL),
     )

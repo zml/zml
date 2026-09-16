@@ -27,14 +27,14 @@ fn setupMusaEnv(sandbox_path: []const u8) !void {
 }
 
 fn probeMusaRuntime(sandbox_path: []const u8) !void {
-    var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libmusa.so.1" });
-    _ = std.c.dlopen(driver_path, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
+    // The SDK ships a link-time stub. Use the host driver matching the kernel module.
+    const driver_name = "libmusa.so.1";
+    _ = std.c.dlopen(driver_name, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
         const msg = std.c.dlerror();
         if (msg) |err_msg| {
-            log.warn("Failed to load MUSA driver from {s}: {s}", .{ driver_path, std.mem.span(err_msg) });
+            log.warn("Failed to load system MUSA driver {s}: {s}", .{ driver_name, std.mem.span(err_msg) });
         } else {
-            log.warn("Failed to load MUSA driver from {s}", .{driver_path});
+            log.warn("Failed to load system MUSA driver {s}", .{driver_name});
         }
         return error.Unavailable;
     };
