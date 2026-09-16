@@ -6,6 +6,8 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const upb = @import("upb");
+const zio = @import("zio");
+const zml_options = @import("zml/options");
 
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
@@ -44,7 +46,9 @@ manual_computation_depth: usize = 0,
 channel_id: i64 = 0,
 composite_id: i64 = 0,
 
+var _current_zio: zio.TaskLocal(*Compiler) = .{};
 threadlocal var _current: ?*Compiler = null;
+
 var mlir_global_init_mutex: std.Io.Mutex = .init;
 var mlir_global_registry: ?*mlir.DialectRegistry = null;
 
@@ -182,7 +186,12 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
 }
 
 pub fn deinit(self: *Compiler) void {
-    if (_current == self) _current = null;
+    switch (zml_options.io_impl) {
+        .std => {
+            if (_current == self) _current = null;
+        },
+        .zio => {},
+    }
     std.debug.assert(self.scopes.len == 0);
     self.mlir_pass_manager.deinit();
     self.module.deinit();
@@ -201,11 +210,14 @@ pub fn deactivate(self: *Compiler) void {
 }
 
 pub fn current() *Compiler {
-    return _current.?;
+    return currentOrNull().?;
 }
 
 pub fn currentOrNull() ?*Compiler {
-    return _current;
+    return switch (zml_options.io_impl) {
+        .std => _current,
+        .zio => _current_zio.get(),
+    };
 }
 
 pub fn currentScope(self: *Compiler) *Scope {
@@ -443,11 +455,13 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     var input_info = try createBlockArguments(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
 
-    var result = result: {
-        compiler.activate();
-        defer compiler.deactivate();
-
-        break :result @call(.auto, func, args);
+    var result = switch (zml_options.io_impl) {
+        .std => blk: {
+            compiler.activate();
+            defer compiler.deactivate();
+            break :blk @call(.auto, func, args);
+        },
+        .zio => _current_zio.scoped(compiler, func, args),
     };
 
     var output_info = try collectOutputInfo(compiler, fn_scope, &result);

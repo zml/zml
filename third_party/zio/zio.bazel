@@ -1,0 +1,38 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
+
+zig_option(
+    name = "backend",
+    build_setting_default = "",
+    nullable = True,
+)
+
+zig_option(
+    name = "resolve_beneath_mode",
+    build_setting_default = "strict",
+    enum_name = "ResolveBeneathMode",
+    values = ["strict", "best_effort"],
+)
+
+zig_option(name = "no_hacks", build_setting_default = False)
+zig_option(name = "task_migration", build_setting_default = True)
+zig_option(name = "scheduler_metrics", build_setting_default = False)
+
+zig_options(
+    name = "zio_options",
+    settings = [
+        ":backend",
+        ":resolve_beneath_mode",
+        ":no_hacks",
+        ":task_migration",
+        ":scheduler_metrics",
+    ],
+)
+
+zig_library(
+    name = "zio",
+    main = "src/zio.zig",
+    srcs = glob(["src/**/*.zig"]),
+    deps = [":zio_options"],
+    visibility = ["//visibility:public"],
+)
