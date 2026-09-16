@@ -3,15 +3,15 @@ const builtin = @import("builtin");
 
 const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
-const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/cpu");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_CPU");
+    return platforms_options.cpu;
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {

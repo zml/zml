@@ -1,5 +1,5 @@
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_zig//zig:defs.bzl", "zig_library")
+load("//bazel:zig_options.bzl", "zig_option", "zig_options")
 
 PLATFORMS = {
     "cpu": True,
@@ -12,12 +12,20 @@ PLATFORMS = {
 }
 
 [
-    bool_flag(
+    zig_option(
         name = runtime,
         build_setting_default = default,
+        scope = "universal",
     )
     for runtime, default in PLATFORMS.items()
 ]
+
+zig_options(
+    name = "options",
+    import_name = "platforms/options",
+    settings = [":" + runtime for runtime in PLATFORMS],
+    visibility = ["//platforms:__subpackages__"],
+)
 
 config_setting(
     name = "rocm.enabled",
@@ -60,6 +68,7 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        ":options",
         "//pjrt",
     ] + [
         "//platforms/{}".format(runtime)

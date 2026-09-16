@@ -5,6 +5,7 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const compat_probe = @import("compat_probe.zig");
@@ -26,7 +27,7 @@ fn findCudaSandbox(
 }
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_CUDA");
+    return platforms_options.cuda;
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {

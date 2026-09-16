@@ -2,31 +2,25 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_METAL_DISABLED"],
-    tags = ["manual"],
-)
-
 copy_to_directory(
     name = "metal_toolchain",
     srcs = [
-        "@metal_toolchain//:metal_compile_tools",
         "@metal_toolchain//:metal_compile_runtime",
+        "@metal_toolchain//:metal_compile_tools",
     ],
     out = "metal_toolchain",
+    exec_compatible_with = ["@platforms//os:macos"],
+    include_external_repositories = ["**"],
     replace_prefixes = {
         "Metal.xctoolchain/usr/metal/32023": ".",
     },
-    include_external_repositories = ["**"],
-    exec_compatible_with = ["@platforms//os:macos"],
     target_compatible_with = ["@platforms//os:macos"],
 )
 
 cc_library(
     name = "libzml_metal",
+    hdrs = ["metal.h"],
     data = [":metal_toolchain"],
-    defines = ["ZML_RUNTIME_METAL"],
     tags = ["manual"],
     deps = ["@libzml_metal"],
 )
@@ -39,6 +33,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:options",
     ] + select({
         "//platforms:metal.enabled": [
             ":libzml_metal",
@@ -46,6 +41,6 @@ zig_library(
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )

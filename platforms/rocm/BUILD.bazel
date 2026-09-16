@@ -22,14 +22,8 @@ zig_shared_library(
 )
 
 cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_ROCM_DISABLED"],
-    tags = ["manual"],
-)
-
-cc_library(
     name = "libzml_rocm",
-    defines = ["ZML_RUNTIME_ROCM"],
+    hdrs = ["rocm.h"],
     tags = ["manual"],
     deps = ["@libzml_rocm"],
 )
@@ -42,6 +36,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:options",
     ] + select({
         "//platforms:rocm.enabled": [
             ":libzml_rocm",
@@ -49,6 +44,6 @@ zig_library(
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )

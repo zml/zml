@@ -3,14 +3,14 @@ const builtin = @import("builtin");
 
 const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
-const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/tpu");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_TPU");
+    return platforms_options.tpu;
 }
 
 /// Check if running on Google Compute Engine, because TPUs will poll the

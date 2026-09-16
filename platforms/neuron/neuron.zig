@@ -5,6 +5,7 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/neuron");
@@ -95,7 +96,7 @@ pub fn instance() !Instance {
 }
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_NEURON");
+    return platforms_options.neuron;
 }
 
 fn hasNeuronDevice(io: std.Io) bool {

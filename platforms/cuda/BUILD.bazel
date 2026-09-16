@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_binary");
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 
 zig_binary(
     name = "compat_probe",
@@ -16,12 +16,6 @@ zig_shared_library(
     # to avoid requiring on the _zig_probe_stack symbol.
     zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
-)
-
-cc_library(
-    name = "empty",
-    tags = ["manual"],
-    defines = ["ZML_RUNTIME_CUDA_DISABLED"],
 )
 
 cc_library(
@@ -43,21 +37,21 @@ cc_library(
 
 cc_library(
     name = "libzml_cuda",
-    tags = ["manual"],
     hdrs = ["libzml_cuda.h"],
-    defines = ["ZML_RUNTIME_CUDA"],
+    tags = ["manual"],
     deps = [":libzml_cuda_repo"],
 )
 
 zig_library(
     name = "cuda",
-    tags = ["manual"],
     srcs = ["compat_probe.zig"],
     import_name = "platforms/cuda",
     main = "cuda.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:options",
     ] + select({
         "//platforms:cuda.enabled": [
             ":libzml_cuda",
@@ -65,6 +59,6 @@ zig_library(
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )
