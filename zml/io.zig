@@ -27,6 +27,7 @@ pub const TensorStore = struct {
     pub const Binding = struct {
         tensors: []*safetensors.Tensor,
         transformed: bool,
+        memory: Memory.Kind = .default,
     };
 
     registry: *safetensors.TensorRegistry,
@@ -161,7 +162,19 @@ pub const TensorStore = struct {
             } else false;
         }
 
+        pub const CreateTensorOpts = struct {
+            memory: Memory.Kind = .default,
+        };
+
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{});
+        }
+
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned });
+        }
+
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -175,13 +188,18 @@ pub const TensorStore = struct {
             shape = applyPartitioning(shape, partitioning);
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning) orelse
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{}) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned }) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
@@ -417,14 +435,14 @@ pub const Loader = struct {
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, shardings, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
     fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, source, shape, buffer, .device, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
             return;
@@ -438,6 +456,7 @@ pub const Loader = struct {
         source: *safetensors.Tensor,
         shape: Shape,
         buffer: *Buffer,
+        memory: Memory.Kind,
         shardings: []const Sharding,
         opts: LoadOpts,
     ) !void {
@@ -459,6 +478,7 @@ pub const Loader = struct {
             shape,
             sharding,
             buffer,
+            memory,
         );
         defer writer.deinit(self.allocator);
 
@@ -621,14 +641,16 @@ pub const MemoryWriter = union(enum) {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
+        memory: Memory.Kind,
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda, .oneapi => .{
-                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer),
+                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
             },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{
-                .buffered = try .init(allocator, io, platform, shape, sharding, buffer),
-            },
+            .rocm, .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
+                std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
+            else
+                .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
@@ -1133,6 +1155,7 @@ pub const DirectMemoryWriter = struct {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
+        memory: Memory.Kind,
     ) !DirectMemoryWriter {
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -1150,7 +1173,7 @@ pub const DirectMemoryWriter = struct {
 
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(.default).?;
+            const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
 
@@ -1381,6 +1404,20 @@ pub const DirectMemoryWriter = struct {
     }
 };
 
+fn buildMesh2(
+    allocator: std.mem.Allocator,
+    target: @import("platform.zig").Target,
+    devices: []const @import("platform.zig").Device,
+) !Sharding.PhysicalMesh {
+    if (devices.len < 2) return error.NotEnoughDevices;
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .device(devices[0]),
+        .device(devices[1]),
+    });
+
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
 fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
@@ -1449,6 +1486,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
         pool_chunk_size: usize = 1 << 20,
+        memory: Memory.Kind = .default,
     };
 
     allocator: std.mem.Allocator,
@@ -1467,6 +1505,7 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
             scenario.pool_chunk_size,
+            scenario.memory,
         );
     }
 
@@ -1479,6 +1518,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize,
         pool_chunks: usize,
         pool_chunk_size: usize,
+        memory: Memory.Kind,
     ) !void {
         const slice = try Slice.alloc(self.allocator, shape);
         defer slice.free(self.allocator);
@@ -1514,6 +1554,7 @@ const DirectMemoryWriterDeviceTest = struct {
             shape,
             sharding,
             &written_buffer,
+            memory,
         );
         defer writer.deinit();
         defer written_buffer.deinit();
@@ -1674,5 +1715,24 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
             break :blk strategy;
         },
+    });
+}
+
+test "MemoryWriter can produce a host pinned buffer" {
+    const case: DirectMemoryWriterDeviceTest = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+
+    try case.run(.{
+        .name = "host_pinned",
+        .create_options = .{
+            .physical_mesh = .{ .custom = buildMesh2 },
+        },
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
+            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
+        .strategy = .parseBindings(.{ .model = .link_x }),
+        .memory = .host_pinned,
     });
 }
