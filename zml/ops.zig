@@ -2522,7 +2522,16 @@ pub fn manualComputation(
     comptime body_fn: anytype,
     inputs: stdx.meta.FnParam(body_fn, 0),
     outputs: anytype,
+    options: anytype,
 ) manualComputationReturnType(body_fn) {
+    const ManualAxesT = @TypeOf(options.manual_axes);
+    var parsed_manual_axes: Shape.TagsArray = undefined;
+    const manual_axes: []const Shape.Tag = if (ManualAxesT == []const Shape.Tag)
+        options.manual_axes
+    else b: {
+        parsed_manual_axes = Shape.parseTags(options.manual_axes);
+        break :b parsed_manual_axes.constSlice();
+    };
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
@@ -2546,7 +2555,7 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const sharded_outputs: []const Tensor = manualComputationInternal(sharding, inputs, output_shapes, body_fn) catch |err| switch (err) {
+    const sharded_outputs: []const Tensor = manualComputationInternal(sharding, inputs, output_shapes, manual_axes, body_fn) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM"),
     };
     const ReturnT = manualComputationReturnType(body_fn);
@@ -2576,6 +2585,7 @@ fn manualComputationInternal(
     sharding_: Sharding,
     inputs: anytype,
     outputs: []const Shape,
+    manual_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2611,7 +2621,7 @@ fn manualComputationInternal(
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, sharding);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, sharding);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, outputs, sharding);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, manual_axes, &.{sharding});
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
@@ -2797,6 +2807,7 @@ test "manualComputation handler API" {
             .rhs = rhs,
         },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, configured.shape());
 
@@ -2811,6 +2822,7 @@ test "manualComputation handler API" {
         }).call,
         .{ .input = configured },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, passthrough.shape());
 
@@ -2861,6 +2873,7 @@ test "manualComputation handler API" {
             .original_values = original_values,
         },
         shape,
+        .{ .manual_axes = .{} },
     );
     try zml.testing.expectEqualShapes(shape, nested.shape());
 }
@@ -3065,6 +3078,8 @@ pub fn CustomCall(
         /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
         /// sharding, this setting will avoid the shuffling of the buffer's data.
         sharding_aware: bool,
+        /// Logical axes localized when `sharding_aware` is enabled.
+        manual_axes: []const Shape.Tag,
         /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
         /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
@@ -3106,6 +3121,7 @@ pub fn CustomCall(
                     input_tensors,
                     output_shapes,
                     attributes,
+                    params.manual_axes,
                 );
             } else {
                 return typedCustomCall(
@@ -3154,6 +3170,7 @@ pub fn shardingAwareTypedCustomCall(
     input: anytype,
     output: anytype,
     attributes: anytype,
+    manual_axes: []const Shape.Tag,
 ) ShapeToTensor(@TypeOf(output)) {
     const Input = @TypeOf(input);
     const Output = @TypeOf(output);
@@ -3177,6 +3194,7 @@ pub fn shardingAwareTypedCustomCall(
         Handler.body,
         .{ .input = input, .attributes = attributes },
         @as([]const Shape, &output_shapes),
+        .{ .manual_axes = manual_axes },
     );
 
     // Convert the slice back to a struct

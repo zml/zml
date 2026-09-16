@@ -341,6 +341,7 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
+            .{ .manual_axes = .{ .data, .model } },
         );
 
         return output;
