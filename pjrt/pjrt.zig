@@ -1071,6 +1071,35 @@ pub const MemoryLayout = union(MemoryLayoutType) {
             },
         };
     }
+
+    fn fromCStruct(self: c.PJRT_Buffer_MemoryLayout) MemoryLayout {
+        return switch (self.type) {
+            c.PJRT_Buffer_MemoryLayout_Type_Tiled => b: {
+                const tiled = self.unnamed_0.tiled;
+
+                const minor_to_major: []const i64 = if (tiled.minor_to_major == null) &.{} else tiled.minor_to_major[0..tiled.minor_to_major_size];
+                const tile_dims_sizes: []const usize = if (tiled.tile_dim_sizes == null) &.{} else tiled.tile_dim_sizes[0..tiled.num_tiles];
+
+                const tile_dims: []const i64 = if (tiled.tile_dims == null) &.{} else td: {
+                    var tile_dim_len: usize = 0;
+                    for (tile_dims_sizes) |size| tile_dim_len += size;
+                    break :td tiled.tile_dims[0..tile_dim_len];
+                };
+
+                break :b .{
+                    .tiled = .{
+                        .minor_to_major = minor_to_major,
+                        .tile_dims = tile_dims,
+                        .tile_dims_sizes = tile_dims_sizes,
+                    },
+                };
+            },
+            c.PJRT_Buffer_MemoryLayout_Type_Strides => .{
+                .strides = .{ .byte_strides = self.unnamed_0.strides.byte_strides[0..self.unnamed_0.strides.num_byte_strides] },
+            },
+            else => unreachable,
+        };
+    }
 };
 
 pub const DefaultMemoryLayout = struct {
@@ -1309,6 +1338,11 @@ pub const Buffer = opaque {
         _ = try api.call(.PJRT_Buffer_DecreaseExternalReferenceCount, .{
             .buffer = self.inner(),
         });
+    }
+
+    pub fn memoryLayout(self: *const Buffer, api: *const Api) ApiError!MemoryLayout {
+        const ret = try api.call(.PJRT_Buffer_GetMemoryLayout, .{ .buffer = self.inner() });
+        return .fromCStruct(ret.layout);
     }
 };
 

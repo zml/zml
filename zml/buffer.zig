@@ -336,6 +336,30 @@ pub const Buffer = struct {
     pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
         return self._shards.get(device_id).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
     }
+
+    /// Creates a view of the given buffer
+    pub fn createView(self: Buffer) !Buffer {
+        const platform = self._platform;
+
+        var view_shards_buffer: [MAX_NUM_SHARDS]*pjrt.Buffer = undefined;
+        var view_shard_list: std.ArrayList(*pjrt.Buffer) = .initBuffer(&view_shards_buffer);
+        errdefer for (view_shard_list.items) |shard| {
+            shard.deinit(platform.pjrt_api);
+        };
+
+        for (self._shards.constSlice()) |shard| {
+            const view_shard = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
+                .device_buffer_ptr = try shard.opaqueDeviceMemoryDataPointer(platform.pjrt_api),
+                .dims = shard.dimensions(platform.pjrt_api),
+                .element_type = shard.elementType(platform.pjrt_api),
+                .layout = try shard.memoryLayout(platform.pjrt_api),
+                .device = try shard.device(platform.pjrt_api),
+            });
+            view_shard_list.appendAssumeCapacity(view_shard);
+        }
+
+        return fromPjrtBuffers(platform, self._shape, self._sharding, view_shard_list.items);
+    }
 };
 
 test "device round-trip" {
