@@ -50,12 +50,12 @@ pub const Linear = struct {
             }
             return self.forwardScaled(x.convert(.bf16), null, null, x.dtype());
         }
-        const y = x.dot(self.weight, self.tag);
-        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+        const y = x.dot(self.weight.convert(x.dtype()), self.tag);
+        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 
     /// Apply this layer to reusable quantized activation values and scales.
-    /// Convert to output_dtype before adding bias, which must have the same dtype.
+    /// Convert to output_dtype before adding bias.
     pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput, output_dtype: DataType) Tensor {
         stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
         return self.forwardScaled(input.values, input.scales, input.global_scale, output_dtype);
@@ -68,7 +68,7 @@ pub const Linear = struct {
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, self.tag);
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
-        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+        return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 };
 
