@@ -8,14 +8,14 @@ package(default_visibility = ["//visibility:public"])
 _BUILD_LINUX = "\n".join([
     packages.filegroup(
         name = "libzml_cpu",
-        srcs = ["libzml_cpu.so"],
+        srcs = ["lib/libzml_cpu.so"],
         visibility = ["@zml//platforms/cpu:__subpackages__"],
     ),
 ])
 
 _BUILD_DARWIN = packages.filegroup(
     name = "libzml_cpu",
-    srcs = ["libzml_cpu.dylib"],
+    srcs = ["lib/libzml_cpu.dylib"],
     visibility = ["@zml//platforms/cpu:__subpackages__"],
 )
 

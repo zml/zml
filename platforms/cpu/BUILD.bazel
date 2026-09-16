@@ -31,7 +31,7 @@ copy_to_directory(
         ":darwin_amd64": ["@libzml_cpu_darwin_amd64//:libzml_cpu"],
         "@platforms//os:linux": ["@libzml_cpu_linux_amd64//:libzml_cpu"],
     }),
-    out = "sandbox/lib",
+    out = "sandbox",
     include_external_repositories = ["**"],
 )
 
