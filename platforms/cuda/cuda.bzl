@@ -215,12 +215,12 @@ _UBUNTU_PACKAGES = {
 
 _PLUGINS = {
     "amd64": {
-        "sha256": "5f464f17a514b871945728951d68a729f64782593b691feb6ced3626f322ff7f",
-        "url": "https://mirror.zml.ai/plugins/202609161226.43.1.b992d049cec2/zml-cuda-linux-amd64.tar.zst",
+        "sha256": "45492852cb39295cdc14032c757af2c1edd8a494c737e00be70b5359cc883db5",
+        "url": "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "07521ec4647d1ce4ef8f611b7e65a7ccae5b99b4bc05795c01f3b5a6563cb2a5",
-        "url": "https://mirror.zml.ai/plugins/202609161226.43.1.b992d049cec2/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "7f1dccc1179073d37270ae905623f5eff1ca0ca9f48cd2e127f0ce2e0e6f1d70",
+        "url": "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-cuda-linux-arm64.tar.zst",
     },
 }
 
