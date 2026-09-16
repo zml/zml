@@ -963,7 +963,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     } else return error.MemoryNotFound;
 
     var pjrt_buffer = try pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
-        .data = buffer.data,
+        .device_buffer_ptr = buffer.data,
         .dims = shape.dims(),
         .element_type = pjrtx.bufferTypeFromDtype(shape.dtype()),
         .device = device,
