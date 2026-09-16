@@ -207,48 +207,63 @@ pub fn sdyPerValueShardingAttr(
 pub fn sdyManualAxesAttr(
     allocator: std.mem.Allocator,
     ctx: *mlir.Context,
-    in_shapes: []const Shape,
-    in_shardings: []const Sharding,
-    out_shapes: []const Shape,
-    out_shardings: []const Sharding,
+    manual_axes: []const Shape.Tag,
+    shardings: []const Sharding,
 ) error{OutOfMemory}!*const mlir.Attribute {
     var axis_names = std.ArrayList([]const u8).empty;
     defer axis_names.deinit(allocator);
 
-    const Collect = struct {
-        fn appendUnique(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, axis_name: []const u8) void {
-            for (list.items) |existing| {
-                if (std.mem.eql(u8, existing, axis_name)) return;
-            }
-            list.append(allocator_, axis_name) catch unreachable;
+    for (manual_axes, 0..) |logical_axis, axis_i| {
+        for (manual_axes[0..axis_i]) |previous| {
+            stdx.debug.assert(!std.mem.eql(u8, std.mem.span(previous), std.mem.span(logical_axis)), "manualComputation manual axis .{s} was specified more than once", .{std.mem.span(logical_axis)});
         }
-    };
 
-    for (in_shapes, in_shardings) |shape, sharding| {
-        const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
-        for (0..attr.numReplicatedAxes()) |i| {
-            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-        }
-        for (0..attr.numDimensions()) |i| {
-            const dim = attr.dimension(i);
-            for (0..dim.numAxes()) |j| {
-                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+        var found_binding = false;
+        var expected_names: stdx.BoundedArray([]const u8, MAX_MESH_RANK) = .empty;
+        for (shardings) |sharding| {
+            const binding = sharding.data.binding(logical_axis) orelse continue;
+            found_binding = true;
+
+            var resolved_names: stdx.BoundedArray([]const u8, MAX_MESH_RANK) = .empty;
+            const mesh = sharding.data.resolvedMesh();
+            for (binding.axes.constSlice()) |axis_id| {
+                const name = mesh.axes.get(@intFromEnum(axis_id)).name;
+                resolved_names.appendAssumeCapacity(name);
+            }
+
+            if (resolved_names.len == 0) continue;
+            if (expected_names.len == 0) {
+                expected_names = resolved_names;
+            } else {
+                var same = expected_names.len == resolved_names.len;
+                if (same) {
+                    for (expected_names.constSlice(), resolved_names.constSlice()) |expected, actual| {
+                        if (!std.mem.eql(u8, expected, actual)) {
+                            same = false;
+                            break;
+                        }
+                    }
+                }
+                stdx.debug.assert(
+                    same,
+                    "manualComputation logical axis .{s} resolves inconsistently: expected {f}, got {f} in sharding {f}",
+                    .{ std.mem.span(logical_axis), stdx.fmt.strings(expected_names.constSlice()), stdx.fmt.strings(resolved_names.constSlice()), sharding },
+                );
             }
         }
-    }
-    for (out_shapes, out_shardings) |shape, sharding| {
-        const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
-        for (0..attr.numReplicatedAxes()) |i| {
-            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-        }
-        for (0..attr.numDimensions()) |i| {
-            const dim = attr.dimension(i);
-            for (0..dim.numAxes()) |j| {
-                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+        stdx.debug.assert(found_binding, "manualComputation logical axis .{s} has no binding in any selected input or output sharding", .{std.mem.span(logical_axis)});
+
+        for (expected_names.constSlice()) |axis_name| {
+            var duplicate = false;
+            for (axis_names.items) |existing| {
+                if (std.mem.eql(u8, existing, axis_name)) {
+                    duplicate = true;
+                    break;
+                }
             }
+            if (!duplicate) try axis_names.append(allocator, axis_name);
         }
     }
-    std.log.warn("manualComputation manual_axes: {f}", .{stdx.fmt.strings(axis_names.items)});
 
     const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
     for (axis_names.items, 0..) |axis_name, i| {

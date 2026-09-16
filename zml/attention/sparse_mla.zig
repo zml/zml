@@ -200,5 +200,6 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
             .options = parameters.options_,
         },
         output_shape,
+        .{ .manual_axes = .{ .data, .model } },
     );
 }
