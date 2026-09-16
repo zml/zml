@@ -1,0 +1,32 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "cute_ir",
+    srcs = ["cute_nvgpu.zig"],
+    import_name = "mlir/dialects/cute_ir",
+    main = "cute_ir.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir:c",
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute",
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute_nvgpu",
+        "//mlir/dialects/cute_ir/lib/CAPI:cute",
+        "//mlir/dialects/cute_ir/lib/CAPI:cute_nvgpu",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "zig_test",
+    deps = [":cute_ir"],
+)
+
+test_suite(
+    name = "test",
+    tests = [
+        ":zig_test",
+        "//mlir/dialects/cute_ir/test:capi_registration_test",
+        "//mlir/dialects/cute_ir/test:type_constructors_test",
+    ],
+)
