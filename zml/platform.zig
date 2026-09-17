@@ -727,7 +727,7 @@ pub const CreateOptions = struct {
         allocator: Allocator = .{ .bfc = .{} },
         /// The PJRT C API still exposes this under legacy
         /// `use_tfrt_gpu_client` name.
-        gpu_async_dispatch: bool = true,
+        gpu_async_dispatch: bool = false,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
