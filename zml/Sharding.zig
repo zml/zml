@@ -1191,9 +1191,11 @@ pub const LogicalAxisIntent = enum {
     low_bandwidth,
 };
 
-// Defines the logical mesh used for sharding the model and data.
-// E.g., batch, model, context, experts, etc.
-// Each axis represents a dimension along which the workload can be partitioned. The value is the intent of the axis.
+/// Defines the logical mesh used for sharding the model and data.
+/// E.g., batch, model, context, experts, etc.
+/// Each axis represents a dimension along which the workload can be partitioned.
+/// The value is the intent of the axis.
+///
 /// LogicalMesh defines *semantic* axes only (batch/model/context/...).
 /// It stores intent, not size.
 ///
@@ -1214,6 +1216,11 @@ pub const LogicalMesh = struct {
     axes: Axes,
     intents: Intents,
 
+    /// Creates a mesh from a mapping axis -> intent
+    ///
+    /// eg: `.mesh(.{ .data = .low_bandwith, .model = .high_bandwith })`
+    ///
+    /// see LogicalAxisIntent
     pub fn mesh(axes_: anytype) LogicalMesh {
         const T = @TypeOf(axes_);
 
