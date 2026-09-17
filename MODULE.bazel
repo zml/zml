@@ -193,11 +193,11 @@ pip.parse(
             "gcsfs",
         ],
     },
-    hub_name = "xprof_nightly",
+    hub_name = "xprof",
     python_version = "3.12",
     requirements_lock = "//tools/xprof:requirements.lock.txt",
 )
-use_repo(pip, "xprof_nightly")
+use_repo(pip, "xprof")
 
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_plugin")
 use_repo(cpu, "libzml_cpu_darwin_amd64", "libzml_cpu_darwin_arm64", "libzml_cpu_linux_amd64")
