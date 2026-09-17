@@ -92,10 +92,6 @@ filegroup(
     srcs = ["include/clang/Basic/BuiltinsMTGPU.def"],
 )
 
-filegroup(
-    name = "libmusart_5_1_0",
-    srcs = ["lib/libmusart.so.5.1.0"],
-)
 """
 
 def _musa_impl(mctx):
