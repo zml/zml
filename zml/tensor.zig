@@ -225,21 +225,11 @@ pub const Tensor = struct {
             ),
         });
 
-        var x: Tensor = self;
-        switch (kind) {
-            .host_pinned, .host_unpinned => {
-                // XLA doesn't have a notion of "sharded host buffer", explicitly replicate before device to host copy
-                // TODO: check this doesn't emit an all-to-all
-                var replicated_shape = self._shape;
-                replicated_shape._partitioning.buffer = @splat(.replicated);
-                x = self.withPartitionedShape(replicated_shape, .resolve(.replicated, ctx.platform));
-            },
-            .device, .default => {},
-        }
+        const val = self.value();
         const op = dialects.stablehlo.custom_call(
             ctx.mlir_ctx,
-            &.{x.value()},
-            &.{x.value().type_()},
+            &.{val},
+            &.{val.type_()},
             .{
                 .call_target_name = "annotate_device_placement",
                 .has_side_effect = true,
@@ -251,7 +241,7 @@ pub const Tensor = struct {
             ctx.location,
         ).appendTo(currentBlock());
 
-        const res = _result(x._shape, op.result(0));
+        const res = _result(self._shape, op.result(0));
         ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
@@ -316,14 +306,6 @@ pub const Tensor = struct {
             return self;
         }
 
-        switch (kind) {
-            .host_pinned, .host_unpinned => {
-                // XLA doesn't have a notion of "sharded host buffer"
-                stdx.debug.assert(self._shape.isFullyReplicated(), "onMemory(.{t}) expects a non-sharded tensor, got: {f}", .{ kind, self._shape });
-            },
-            .device, .default => {},
-        }
-
         ctx.currentScope().id_to_memory.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
 
         return self;
@@ -346,7 +328,13 @@ pub const Tensor = struct {
         }.onMemory, kind, &tensors);
     }
 
-    /// Returns a Tensor with new tag names.
+    /// Return a Tensor with new tag names.
+    ///
+    /// Takes a mapping of old names to new names.
+    ///
+    /// ```
+    /// Tensor(.{ .a = 10, .b = 20 }).rename(.{ .b = .batch }); // .{ .a = 10, .batch = 20 };
+    /// ```
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
         res._shape = self._shape.rename(renames);
