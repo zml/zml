@@ -11,8 +11,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-rocm-linux-amd64.tar.zst"
-_PLUGIN_ROCM_SHA256 = "11f8afa002ac7d26a640577e74f984f71aa4f1b9eb657c587b21c8348baf5f18"
+_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202609181631.57.1.f601577e1ab1/zml-rocm-linux-amd64.tar.zst"
+_PLUGIN_ROCM_SHA256 = "c53e93a69505a98e9c42867c8ac330188e377400f416d03ce61a6fd6f1f09232"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
