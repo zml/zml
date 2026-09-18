@@ -6,10 +6,10 @@ const zml = @import("../zml.zig");
 const triton = zml.kernel.triton;
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const MlaOptions = @import("paged_attention.zig").Mla.Options;
+const sparse_mla = @import("sparse_mla.zig");
 const kernels = @import("triton_kernels/unified_attention.zig");
 const kernels_oneapi = @import("triton_kernels/unified_attention_oneapi.zig");
 const mla_kernels = @import("triton_kernels/unified_sparse_mla.zig");
-const sparse_mla = @import("sparse_mla.zig");
 
 const log = std.log.scoped(.@"zml/attention/triton");
 
@@ -831,7 +831,7 @@ pub const paged = struct {
         return out.output.reshape(out_shape);
     }
 
-    fn tokenToSequence(query_start_len: zml.Tensor, query_count: i64) zml.Tensor {
+    pub fn tokenToSequence(query_start_len: zml.Tensor, query_count: i64) zml.Tensor {
         const sequence_count = query_start_len.dim(.b) - 1;
         const starts = query_start_len.slice(.b, .{ .end = sequence_count }).rename(.{ .b = .seq });
         const ends = query_start_len.slice(.b, .{ .start = 1 }).rename(.{ .b = .seq });
