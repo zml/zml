@@ -17,9 +17,7 @@ pub fn env() *const Platform {
         const platform = Platform.auto(
             std.heap.c_allocator,
             std.testing.io,
-            .{
-                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.85 } } },
-            },
+            .{},
         ) catch @panic("Pjrt not available");
 
         // Register shardings required by flash attention.
