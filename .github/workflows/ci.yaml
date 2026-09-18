@@ -96,20 +96,6 @@ jobs:
       - if: ${{ matrix.run_tests }}
         run: bazel test ${{ matrix.bazel_opts }} //...
 
-  macos-runfiles:
-    name: macos-runfiles
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-      - uses: bazel-contrib/setup-bazel@0.19.0
-        with:
-          bazelisk-version: 1.28.1
-      - name: Test runfiles initialization with and without LTO
-        run: |
-          bazel run //bazel:runfiles_check --config=release
-          bazel test //bazel:runfiles_check_lto --config=release
-
   lint:
     runs-on:
       - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-lint

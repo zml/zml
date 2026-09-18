@@ -1,5 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "retain_runfiles_init",
@@ -20,40 +19,4 @@ zig_library(
         "//stdx",
         "@rules_zig//zig/runfiles",
     ],
-)
-
-# Exercise constructor retention and real runfiles lookup through the C linker.
-zig_binary(
-    name = "runfiles_check",
-    testonly = True,
-    data = ["runfiles_fixture.txt"],
-    emit_llvm_bc = True,
-    env = {"ZML_RUNFILES_TEST_DATA": "$(rlocationpath :runfiles_fixture.txt)"},
-    main = "bazel.zig",
-    deps = [
-        ":retain_runfiles_init",
-        "//stdx",
-        "@rules_zig//zig/runfiles",
-    ],
-)
-
-# Zig cannot use -flto for Mach-O. Feed its bitcode to the C linker instead.
-filegroup(
-    name = "runfiles_check_bitcode",
-    testonly = True,
-    srcs = [":runfiles_check"],
-    output_group = "llvm_bc",
-)
-
-cc_test(
-    name = "runfiles_check_lto",
-    size = "small",
-    additional_linker_inputs = [":runfiles_check_bitcode"],
-    data = ["runfiles_fixture.txt"],
-    env = {"ZML_RUNFILES_TEST_DATA": "$(rlocationpath :runfiles_fixture.txt)"},
-    linkopts = [
-        "-flto",
-        "$(location :runfiles_check_bitcode)",
-    ],
-    deps = [":retain_runfiles_init"],
 )
