@@ -21,6 +21,7 @@ def _rocm_repo_name(package_name):
     return package_name.replace(_ROCM_VERSION, "")
 
 _UBUNTU_PACKAGES = {
+    "llvm-libunwind1": packages.filegroup(name = "libunwind", srcs = ["usr/lib/x86_64-linux-gnu/libunwind.so.1"]),
     "libatomic1": packages.filegroup(name = "libatomic1", srcs = ["usr/lib/x86_64-linux-gnu/libatomic.so.1"]),
     "libdrm-common": packages.filegroup(name = "amdgpu_ids", srcs = ["usr/share/libdrm/amdgpu.ids"]),
 }

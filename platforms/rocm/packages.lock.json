@@ -24,13 +24,13 @@
 					"version": "12.3.0-1ubuntu1~22.04"
 				}
 			],
-			"key": "libatomic1_12.3.0-1ubuntu1_22.04_amd64",
-			"name": "libatomic1",
-			"sha256": "56ec991983c7c89a2c15bd5134534531d722ec5b51a60679f7ceaa1a09b37a09",
+			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260916113350-p-ba019b7aafce-1_exp1_20260916233400.76_amd64",
+			"name": "llvm-libunwind1",
+			"sha256": "72f83f34f22e01e1219c9600f9e8562505afc1eabfb5b0cfae5f4603d0694720",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libatomic1_12.3.0-1ubuntu1~22.04_amd64.deb"
+				"https://apt.llvm.org/jammy/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260916113350+ba019b7aafce-1~exp1~20260916233400.76_amd64.deb"
 			],
-			"version": "12.3.0-1ubuntu1~22.04"
+			"version": "1:23.1.2~++20260916113350+ba019b7aafce-1~exp1~20260916233400.76"
 		},
 		{
 			"arch": "amd64",
@@ -73,6 +73,38 @@
 			"sha256": "80a1f5df097af3978f7df2808006ca77197865e5eb7a923712aee6876e7a14cb",
 			"urls": [
 				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/gcc-12-base_12.3.0-1ubuntu1~22.04_amd64.deb"
+			],
+			"version": "12.3.0-1ubuntu1~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				}
+			],
+			"key": "libatomic1_12.3.0-1ubuntu1_22.04_amd64",
+			"name": "libatomic1",
+			"sha256": "56ec991983c7c89a2c15bd5134534531d722ec5b51a60679f7ceaa1a09b37a09",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libatomic1_12.3.0-1ubuntu1~22.04_amd64.deb"
 			],
 			"version": "12.3.0-1ubuntu1~22.04"
 		},

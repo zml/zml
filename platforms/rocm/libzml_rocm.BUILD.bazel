@@ -70,6 +70,7 @@ copy_to_directory(
         "@amdrocm-sparse//:rocsparse",
         "@amdrocm-sysdeps//:system_libs",
         "@libatomic1",
+        "@llvm-libunwind1//:libunwind",
         "@zml//platforms/rocm:zmlxrocm",
     ],
     add_directory_to_runfiles = True,

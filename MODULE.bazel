@@ -321,6 +321,13 @@ use_repo(llvm, "llvm-project")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
+    name = "apt_cpu",
+    lock = "//platforms/cpu:packages.lock.json",
+    manifest = "//platforms/cpu:packages.yaml",
+)
+use_repo(apt, "apt_cpu")
+
+apt.install(
     name = "apt_cuda",
     lock = "//platforms/cuda:packages.lock.json",
     manifest = "//platforms/cuda:packages.yaml",

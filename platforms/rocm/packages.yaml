@@ -4,6 +4,8 @@
 version: 1
 
 sources:
+  - channel: llvm-toolchain-jammy-23 main
+    url: https://apt.llvm.org/jammy
   - channel: stable main
     url: https://nightly.repo.amd.com/rocm/core/packages/ubuntu2204/20260903-33697653391
   - channel: jammy main
@@ -17,6 +19,7 @@ archs:
   - "amd64"
 
 packages:
+  - "llvm-libunwind1" # LLVM 23 runtime from llvm-toolchain-jammy-23.
   - "libatomic1"
   - "libdrm-common"
   - "amdrocm-amdsmi10.1"
