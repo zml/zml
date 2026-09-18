@@ -709,11 +709,12 @@ pub const CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    rocm: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
+    cuda: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
-    oneapi: struct {} = .{},
-    metal: struct {} = .{},
+    oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
 
     pub const Cpu = struct {
         device_count: u32,
@@ -740,6 +741,8 @@ pub const CreateOptions = struct {
             bfc: Options,
             /// use cudaMallocAsync
             async: Options,
+            /// use virtual memory allocator
+            vmm: VmmOptions,
             /// use raw cuMalloc
             platform,
 
@@ -747,6 +750,10 @@ pub const CreateOptions = struct {
                 preallocate: bool = true,
                 memory_fraction: f32 = 0.90,
                 collective_memory_size_mb: i64 = 0,
+            };
+
+            pub const VmmOptions = struct {
+                memory_fraction: f32 = 0.90,
             };
         };
 
@@ -759,7 +766,7 @@ pub const CreateOptions = struct {
                     values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
                         .bfc => "bfc",
                         .async => "cuda_async",
-                        .platform => unreachable,
+                        .platform, .vmm => unreachable,
                     }));
                     values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
@@ -767,6 +774,12 @@ pub const CreateOptions = struct {
                     }
                     if (opt.collective_memory_size_mb > 0) {
                         values.appendAssumeCapacity(.init(.int64, "collective_memory_size", opt.collective_memory_size_mb * 1024 * 1024));
+                    }
+                },
+                .vmm => |opt| {
+                    values.appendAssumeCapacity(.init(.string, "allocator", "vmm"));
+                    if (opt.memory_fraction > 0) {
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
                     }
                 },
             }
@@ -782,7 +795,10 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .cuda => self.cuda.writeNamedValues(target, &values),
+            .rocm => self.rocm.writeNamedValues(target, &values),
+            .oneapi => self.oneapi.writeNamedValues(target, &values),
+            .metal => self.metal.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
