@@ -202,6 +202,15 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
+    "llvm-libunwind1": [
+        """filegroup(
+            name = "libunwind",
+            srcs = select({
+                "@llvm//platforms/config:linux_x86_64": ["usr/lib/x86_64-linux-gnu/libunwind.so.1"],
+                "@llvm//platforms/config:linux_aarch64": ["usr/lib/aarch64-linux-gnu/libunwind.so.1"],
+            }),
+        )""",
+    ],
     "zlib1g": [
         """filegroup(
             name = "zlib1g",

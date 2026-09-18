@@ -19,13 +19,13 @@
 					"version": "12.2.0-14+deb12u1"
 				}
 			],
-			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
-			"name": "zlib1g",
-			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
+			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260916013112-p-21a77e7bb6bf-1_exp1_20260916133123.74_amd64",
+			"name": "llvm-libunwind1",
+			"sha256": "7fe1e2f61f6db688b53a4015a2d391f4474e0c0aec76b4dc262fe91a43854e84",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+				"https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260916013112+21a77e7bb6bf-1~exp1~20260916133123.74_amd64.deb"
 			],
-			"version": "1:1.2.13.dfsg-1"
+			"version": "1:23.1.2~++20260916013112+21a77e7bb6bf-1~exp1~20260916133123.74"
 		},
 		{
 			"arch": "amd64",
@@ -61,6 +61,33 @@
 			"version": "12.2.0-14+deb12u1"
 		},
 		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libc6_2.36-9-p-deb12u10_amd64",
+					"name": "libc6",
+					"version": "2.36-9+deb12u10"
+				},
+				{
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
+					"name": "libgcc-s1",
+					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
+				}
+			],
+			"key": "zlib1g_1-1.2.13.dfsg-1_amd64",
+			"name": "zlib1g",
+			"sha256": "d7dd1d1411fedf27f5e27650a6eff20ef294077b568f4c8c5e51466dc7c08ce4",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+			],
+			"version": "1:1.2.13.dfsg-1"
+		},
+		{
 			"arch": "arm64",
 			"dependencies": [
 				{
@@ -79,13 +106,13 @@
 					"version": "12.2.0-14+deb12u1"
 				}
 			],
-			"key": "zlib1g_1-1.2.13.dfsg-1_arm64",
-			"name": "zlib1g",
-			"sha256": "52b8b8a145bbe1956bba82034f77022cbef0c3d0885c9e32d9817a7932fe1913",
+			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260916013112-p-21a77e7bb6bf-1_exp1_20260916133123.74_arm64",
+			"name": "llvm-libunwind1",
+			"sha256": "d5643512d5108eb0320486a740879223632fb8058ce321654d66604ba4a0439f",
 			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb"
+				"https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260916013112+21a77e7bb6bf-1~exp1~20260916133123.74_arm64.deb"
 			],
-			"version": "1:1.2.13.dfsg-1"
+			"version": "1:23.1.2~++20260916013112+21a77e7bb6bf-1~exp1~20260916133123.74"
 		},
 		{
 			"arch": "arm64",
@@ -119,6 +146,33 @@
 				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_arm64.deb"
 			],
 			"version": "12.2.0-14+deb12u1"
+		},
+		{
+			"arch": "arm64",
+			"dependencies": [
+				{
+					"key": "libc6_2.36-9-p-deb12u10_arm64",
+					"name": "libc6",
+					"version": "2.36-9+deb12u10"
+				},
+				{
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_arm64",
+					"name": "libgcc-s1",
+					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_arm64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
+				}
+			],
+			"key": "zlib1g_1-1.2.13.dfsg-1_arm64",
+			"name": "zlib1g",
+			"sha256": "52b8b8a145bbe1956bba82034f77022cbef0c3d0885c9e32d9817a7932fe1913",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb"
+			],
+			"version": "1:1.2.13.dfsg-1"
 		}
 	],
 	"version": 1
