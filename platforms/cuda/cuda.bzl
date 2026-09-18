@@ -202,6 +202,15 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
+    "llvm-libunwind1": [
+        """filegroup(
+            name = "libunwind",
+            srcs = select({
+                "@llvm//platforms/config:linux_x86_64": ["usr/lib/x86_64-linux-gnu/libunwind.so.1"],
+                "@llvm//platforms/config:linux_aarch64": ["usr/lib/aarch64-linux-gnu/libunwind.so.1"],
+            }),
+        )""",
+    ],
     "zlib1g": [
         """filegroup(
             name = "zlib1g",
@@ -215,12 +224,12 @@ _UBUNTU_PACKAGES = {
 
 _PLUGINS = {
     "amd64": {
-        "sha256": "45492852cb39295cdc14032c757af2c1edd8a494c737e00be70b5359cc883db5",
-        "url": "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-cuda-linux-amd64.tar.zst",
+        "sha256": "f10315ea243b67a575be634e9ff012e5d9eb6fead849c9faeba4edf12bd8a19d",
+        "url": "https://mirror.zml.ai/plugins/202609181726.59.1.6ccbaab9cce9/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "7f1dccc1179073d37270ae905623f5eff1ca0ca9f48cd2e127f0ce2e0e6f1d70",
-        "url": "https://mirror.zml.ai/plugins/202609161604.45.1.80cbf79212e9/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "7e3fd96f3d81c95f8da9c8165a67a5e0925393081bbcdfbe0fca361546d0a93d",
+        "url": "https://mirror.zml.ai/plugins/202609181726.59.1.6ccbaab9cce9/zml-cuda-linux-arm64.tar.zst",
     },
 }
 

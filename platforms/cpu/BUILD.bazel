@@ -27,6 +27,10 @@ copy_to_directory(
     }),
     out = "sandbox",
     include_external_repositories = ["**"],
+    replace_prefixes = {
+        "libzml_cpu_so": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+    },
 )
 
 cc_library(

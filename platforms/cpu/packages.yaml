@@ -1,5 +1,5 @@
 #
-#     bazel run @apt_cuda//:lock
+#     bazel run @apt_cpu//:lock
 #
 version: 1
 
@@ -11,8 +11,6 @@ sources:
 
 archs:
   - "amd64"
-  - "arm64"
 
 packages:
   - "llvm-libunwind1" # LLVM 23 runtime from llvm-toolchain-bookworm-23.
-  - "zlib1g"
