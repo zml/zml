@@ -1161,7 +1161,9 @@ pub const Builder = struct {
         } else {
             c, _ = self.broadcast(c, xv);
         }
-        return self.select(c, xv, yv);
+        // Arithmetic broadcasting can widen i1 when the selected values are
+        // integers. The select predicate must remain boolean.
+        return self.select(c.to(.i1), xv, yv);
     }
 
     pub fn divsi(self: *Builder, lhs: Value, rhs: Value) Value {
