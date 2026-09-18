@@ -191,6 +191,7 @@ pub const targets = struct {
     pub const attnd = zml.ops.CustomCall(Input, Output, Attributes, attndCall, .{
         .name = NAME,
         .sharding_aware = true,
+        .manual_axes = &.{"model".ptr},
         .has_side_effect = false,
         .compute_on_host = true,
     });

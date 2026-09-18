@@ -2481,11 +2481,49 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
+/// Describes a sub-computation that will run on specific tensors shards instead of tensors spawning all devices.
+///
+/// Arguments:
+/// * body
+/// * input tensors
+/// * outputs shapes
+/// * partitioning axes
+///
+/// Split the devices into N partitions following the given partitioning axes of the current logical mesh.
+/// Each device partition will receive it's corresponding subset of the input tensors.
+/// Note that you need to anotate the input tensors with explicit sharding informations for them to be correctly split.
+/// By default tensors are generally replicated, and will be sent in full to each partition.
+///
+/// Note that the shape of the input and output tensors inside the body
+/// are the local shapes of the corresponding operands and results of the op,
+/// Therefore, the local shape can be derived from the corresponding in/out sharding and the manual axes.
+/// If an input/output dimension of size d is sharded on axis "x" and that axis is in manual_axes,
+/// then that corresponding input/output dimension inside the body is d/size("x").
+///
+/// You can nest multiple manual computations within one another as long as each one operates
+/// on their own unique set of partitioning axes.
+///
+/// See https://github.com/openxla/shardy/blob/main/docs/compiler_api.md#manual-computation
 pub fn manualComputation(
     comptime body_fn: anytype,
     inputs: stdx.meta.FnParam(body_fn, 0),
-    outputs: anytype,
+    outputs: stdx.meta.FnParam(body_fn, 1),
+    partition_axes: anytype,
 ) manualComputationReturnType(body_fn) {
+    switch (@TypeOf(partition_axes)) {
+        []align(8) const Shape.Tag, []const Shape.Tag => {},
+        else => {
+            const parsed_partition_axes = Shape.parseTags(partition_axes);
+            return manualComputation(body_fn, inputs, outputs, parsed_partition_axes.constSlice());
+        },
+    }
+
+    // Note: I don't like all the code related to output shapes.
+    // Most of ZML inferes output shape based on the inputs.
+    // Here it's a bit more complicated because each partition computes a shard of the output,
+    // and we need to explain how to glue them together to make the final output.
+    // I think we should force the output tensors to have the `partition_axes` tags,
+    // and concatenate the different input along those axes.
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(outputs))) {
         .void => &.{},
         .@"struct" => |struct_info| b: {
@@ -2509,7 +2547,7 @@ pub fn manualComputation(
         else => @compileError("Unsupported manualComputation output type: " ++ @typeName(@TypeOf(outputs))),
     };
 
-    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, body_fn) catch |err| switch (err) {
+    const sharded_outputs: []const Tensor = manualComputationInternal(inputs, output_shapes, partition_axes, body_fn) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM"),
     };
     const ReturnT = manualComputationReturnType(body_fn);
@@ -2538,6 +2576,7 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
 fn manualComputationInternal(
     inputs: anytype,
     outputs: []const Shape,
+    partition_axes: []const Shape.Tag,
     comptime body_fn: anytype,
 ) error{OutOfMemory}![]Tensor {
     const BodyReturnT = manualComputationReturnType(body_fn);
@@ -2558,32 +2597,44 @@ fn manualComputationInternal(
     const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
+    var valid_shardings = std.ArrayList(Sharding).empty;
+    for (ctx.partitioning.shardings) |candidate| candidate: {
+        for (partition_axes) |logical_axis| {
+            if (candidate.data.binding(logical_axis) == null) break :candidate;
+        }
+        for (input_shapes) |shape| {
+            if (!candidate.data.covers(shape)) break :candidate;
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        }
+        for (outputs) |shape| {
+            if (!candidate.data.covers(shape)) break :candidate;
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        }
+        try valid_shardings.append(arena, candidate);
+    }
+    const manual_axis_names = try arena.alloc([]const u8, partition_axes.len);
+    for (partition_axes, manual_axis_names) |axis, *name| name.* = std.mem.span(axis);
+    stdx.debug.assert(
+        valid_shardings.items.len == 1,
+        "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: {f}; known shardings: {f}",
+        .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), valid_shardings.items.len, stdx.fmt.slice(valid_shardings.items), stdx.fmt.slice(ctx.partitioning.shardings) },
+    );
+    const computation_sharding = valid_shardings.items[0];
+
     for (input_shapes, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation input {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        input_shardings[i] = sharding;
-        local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        input_shardings[i] = computation_sharding;
+        local_input_shapes[i] = computation_sharding.shardedShapeForAxes(shape, partition_axes) catch unreachable;
     }
     for (outputs, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation output {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        output_shardings[i] = sharding;
-        local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        output_shardings[i] = computation_sharding;
+        local_output_shapes[i] = computation_sharding.shardedShapeForAxes(shape, partition_axes) catch unreachable;
     }
 
     return switch (ctx.partitioning.partitioner) {
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings, outputs, output_shardings);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, partition_axes, computation_sharding);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
@@ -2768,6 +2819,7 @@ test "manualComputation handler API" {
             .rhs = rhs,
         },
         shape,
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, configured.shape());
 
@@ -2781,6 +2833,7 @@ test "manualComputation handler API" {
         }).call,
         .{ .input = configured },
         shape,
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, passthrough.shape());
 
@@ -2830,6 +2883,7 @@ test "manualComputation handler API" {
             .original_values = original_values,
         },
         shape,
+        .{},
     );
     try zml.testing.expectEqualShapes(shape, nested.shape());
 }
@@ -2969,6 +3023,8 @@ pub fn CustomCall(
         /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
         /// sharding, this setting will avoid the shuffling of the buffer's data.
         sharding_aware: bool,
+        /// Logical axes localized when `sharding_aware` is enabled.
+        manual_axes: []const Shape.Tag,
         /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
         /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
@@ -3009,6 +3065,7 @@ pub fn CustomCall(
                     input_tensors,
                     output_shapes,
                     attributes,
+                    params.manual_axes,
                 );
             } else {
                 return typedCustomCall(
@@ -3056,6 +3113,7 @@ pub fn shardingAwareTypedCustomCall(
     input: anytype,
     output: anytype,
     attributes: anytype,
+    manual_axes: []const Shape.Tag,
 ) ShapeToTensor(@TypeOf(output)) {
     const Input = @TypeOf(input);
     const Output = @TypeOf(output);
@@ -3078,6 +3136,7 @@ pub fn shardingAwareTypedCustomCall(
         Handler.body,
         .{ .input = input, .attributes = attributes },
         @as([]const Shape, &output_shapes),
+        manual_axes,
     );
 
     // Convert the slice back to a struct

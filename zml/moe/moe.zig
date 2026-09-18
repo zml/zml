@@ -339,6 +339,7 @@ pub fn forwardMoe(
                             .workspace_query_device = runner_options.workspace_query_device,
                         },
                         input.shape(),
+                        .experts,
                     );
                 }
 
@@ -429,6 +430,7 @@ pub fn forwardMoe(
                         .workspace_query_device = runner_options.workspace_query_device,
                     },
                     input.shape(),
+                    .experts,
                 );
             }
 
@@ -488,6 +490,7 @@ pub fn forwardMoe(
                 }).call,
                 .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
                 input.shape(),
+                .experts,
             );
         },
         .mosaic_tpu => b: {
@@ -554,6 +557,7 @@ pub fn forwardMoe(
                         .bias_down = down.bias,
                     },
                     input.shape(),
+                    .experts,
                 );
                 break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }

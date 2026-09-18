@@ -211,6 +211,7 @@ pub const fa2 = struct {
     const fa2_mha_varlen_fwd = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
         .name = "fa2_mha_varlen_fwd",
         .sharding_aware = true,
+        .manual_axes = &.{"model".ptr},
         .has_side_effect = false,
         .output_operand_aliases = .{ .o = .q },
     });
@@ -988,6 +989,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape,
+                    .model,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1075,6 +1077,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape,
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1149,6 +1152,7 @@ pub const paged_fa2 = struct {
                         },
                     },
                     output_shape_decode,
+                    .model,
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -1625,6 +1629,7 @@ pub const paged_fa3 = struct {
                         },
                     },
                     output_shape,
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1701,6 +1706,7 @@ pub const paged_fa3 = struct {
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
                     output_shape,
+                    .model,
                 );
 
                 o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
@@ -1765,6 +1771,7 @@ pub const paged_fa3 = struct {
                         .opts = zml.ops.CustomCallOptions{ .has_side_effect = false },
                     },
                     decode_output_shape,
+                    .model,
                 );
                 o_decode = o_decode.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
 

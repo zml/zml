@@ -335,6 +335,7 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
+            .model,
         );
 
         return output;
