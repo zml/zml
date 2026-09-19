@@ -4015,17 +4015,202 @@ block leases, planning, the pump), unattributed. The other structural
 cost is unchanged: every packed expert is a replicated parameter of the
 pack program, so each GPU receives the full 298.6 GB (2x amplification).
 
+## Nineteenth pass: where the last 30% goes (2026-09-19)
+
+Same fixture as the eighteenth pass (llmd, DeepSeek-V4.1-Flash, two GB300
+on host node 0, `numactl --cpunodebind=0 --membind=0`, warm page cache,
+dummy model bodies, real pack programs), on the committed tree
+(9f4dc2dc, pool follows the task's memory policy). Baseline over the day:
+5.85-6.05 s with 8 MiB blocks; the block screen sometimes picks 16 MiB
+(5.75-5.98 s, 219,474 pieces instead of 254,834), so arms are compared at
+the same block size only.
+
+Tools: the loader's debug metrics (`loader waits`, `loader DMA`), a
+temporary 1 ms sampler thread inside `direct_loader.zig` logging both
+gates and every pump's queue/in-flight state, nsys CUDA traces analysed
+from the sqlite export, the XLA fork (`~/github/openxla/xla`, patch left
+uncommitted) with five environment switches and per-stage timers, and two
+microbenchmarks in the session scratchpad (`dmabench.c`: H2D completion
+paths on the bare driver; `bench.c`: page-cache readers beside two GPUs'
+DMA). Reproduction of the plugin wiring is in the eighteenth pass.
+
+### The reads are not the problem; the readers are starved
+
+Per read (8 MiB, page cache): 1.57 ms in the loader = 5.3 GB/s per thread,
+the same as a bare `preadv` thread under the same DMA load. Only one read
+of 35,688 exceeded 4 ms; the whole 475 GiB directory is page-cache
+resident (mincore). The readers average 11 of 16 busy because they wait
+0.65-0.70 ms per read for a lifecycle credit; the 33 credits are held by
+blocks in the DMA stage, 2.1 ms per block for ~0.13 ms of hardware time.
+The 1 ms sampler shows the pipeline oscillating between two states: every
+credit taken, 0-3 reads running, 250-700 pieces queued per device; and
+16 reads running with 20 pieces queued. The "30% inside the read
+pipeline" of the eighteenth pass is the DMA stage holding the credits.
+
+### Stall 1: allocation sync points behind the pack executes (~1 s)
+
+The GPU client builds every `LocalDeviceState` with
+`kComputeSynchronized`: a buffer allocated at time t records the compute
+stream's next sync point, and `WaitForAllocation` makes its first copy
+wait until the compute stream has passed it (`tracked_device_buffer.cc`,
+`AllocatedRawSEDeviceMemory`). The loader allocates tensors continuously
+(workers, lazily) while `retire` enqueues the pack executables, so every
+tensor allocated during an execute's ~10 ms gets its copies queued behind
+it, and since the H2D stream is in-order, the whole stream stops. In the
+trace, 49 of 50 H2D idle gaps > 3 ms end within 0.3 ms of a graph
+execution's end; the dummy graphs run 0.6-22.6 ms (p50 9.5 ms), 1.36 s of
+GPU time per device; the stalls total 0.6-0.7 s per load (62-66 stalls of
+5-22 ms, one after each submission's retirement), and while stalled the
+credits sit at 33 and the readers at 0. Two proofs:
+
+| arm (executes on unless noted)            | load        | stalls  | readers idle |
+|-------------------------------------------|-------------|---------|--------------|
+| default                                   | 5.87-6.01 s | 690-709 ms | 935-977 ms |
+| no executes (`retire` skips them)         | 4.92-4.95 s | 0       | 125-127 ms   |
+| plugin `XLA_PJRT_GPU_ALLOCATION_MODEL=async` (`kAsynchronous`) | 4.89-4.94 s | 0 | 123-133 ms |
+
+With `kAsynchronous` the executables still run and the load is the same
+as with no executes at all.
+
+The bare switch is not safe on the GPU client. The asynchronous model's
+contract (`local_device_state.h`) is that memory stays alive until the
+device work using it has completed, which TPU's allocator guarantees and
+the GPU BFC allocator does not: `RunGpuAsync` tears down an execution's
+temporaries and dead outputs right after enqueue, and `ExecuteHelper`
+holds inputs and results until the definition event only under
+`kSynchronous`. Under the compute-synchronized model the next allocation's
+sync point makes that safe; without it, a tensor the loader allocates
+during a pack execute can be handed the pack program's temporary and be
+written by DMA while the kernel still runs. The fork commit 145c8a1693
+(`[PJRT:GPU] Opt-in asynchronous allocation model`,
+`XLA_PJRT_GPU_ALLOCATION_MODEL=async`, default unchanged) therefore also
+defers those releases to the definition event: temporaries and dead
+outputs travel in `se_to_be_released`, and the non-compute-synchronized
+branch of `ExecuteHelper` keeps inputs, results and that memory until the
+event fires. Verified by hashing every loaded shard on the host (2,748
+shards, 308 GB, Wyhash per shard): identical hash under both models over
+two runs each. Timing with the stock completion path, host load average
+~49 that evening: async 5.08-5.14 s, default 5.85-5.96 s (three pairs);
+with polled completions the async model reached 4.89-4.94 s.
+
+Tradeoffs of the asynchronous model: memory returns to the allocator when
+the host observes completion rather than at enqueue, so peak use grows by
+the in-flight executions' temporaries, inputs and dead outputs, and an
+allocator query right after an execute (the loader's admission) sees less
+room; a `Delete` during an execution is no longer an immediate free;
+`StallStreamOnError` frees instead of stalling (error path only); the
+transfer manager's `CanBufferBeAccessedNow` DCHECKs run in debug builds.
+A finer fix in XLA would attach the sync point only to chunks freed after
+the last sync point. On the ZML side the same effect needs allocations to
+stop during executes, which the lazy per-worker allocation cannot
+promise.
+
+### Stall 2: tiny pieces drain at ~60k pieces/s per device (0.3-1.2 s)
+
+Expert scales are 256-512 KiB pieces: 38% of the copies, 5.9% of the
+bytes, 7.4% of copy-engine time. In scale-heavy stretches the pump holds
+64 pieces = 21 MiB in flight against the 64 MiB budget, the queue grows to
+700 pieces (every credit's blocks), and the pieces complete at ~60k/s per
+device (~16 us each: PJRT's per-device callback thread runs the event
+bookkeeping, 8 us, then ZML's callback and pump, 5-7 us, serially) =
+20 GB/s, readers idle. With the allocation stalls present these stretches
+cost 0.9-1.2 s per load (they compound: queues back up), without them
+0.3-0.4 s. Raising `max_dma_pieces_per_device` 64 -> 512 changed nothing
+(piece latency 0.9 -> 2.5 ms, rate unchanged): the cap is not the bound,
+the serial completion path is. Fewer pieces (a scale blob per layer in
+the pack recipe) is the lever; the loader cannot merge pieces that land
+in different device buffers.
+
+### The completion path, measured stage by stage
+
+Per piece, stock plugin: ZML submit -> callback = 1.1-1.2 ms; hardware
+(API call -> copy end) p50 133 us. Stage timers in the fork, poll+inline
+arm: sched_delay 0.1 us, memcpy call 3 us, event record 6 us, event wait
+720-800 us (stream queue plus the stalls above), callback-thread delay
+170-190 us, XLA callback 8 us, ZML callback 5-7 us. Stock path extras:
+`cuLaunchHostFunc` blocks 445 us on average (p50 82, p90 1,489): the
+driver serializes host-function launches at ~21 us each with ~21 callers
+blocked (unbounded work-queue threads, 360 of them, all named after their
+spawner); each transfer bounces through that queue (sched_delay 50-75 us)
+and the event pool creates events at 430 us each under the lock convoy.
+On the bare driver (`dmabench`) the same host-function pattern does 62-68k
+pieces/s per GPU at 2 MiB, polling 74k/s; so the serialization is the
+convoy, not the mechanism.
+
+Fork switches and what they bought (8 MiB blocks, executes on):
+
+| switch                                         | piece latency | load        |
+|------------------------------------------------|---------------|-------------|
+| stock                                          | 1.14-1.18 ms  | 5.87-6.05 s |
+| `XLA_PJRT_GPU_POLL_CALLBACKS=1` (event polling thread, no host functions) | 1.00-1.05 ms | 5.85-5.92 s |
+| + `XLA_PJRT_GPU_INLINE_H2D=1` (copy issued on the caller's thread) | 0.88-0.93 ms | 5.86-5.95 s |
+| + `XLA_PJRT_GPU_H2D_CALLBACK_THREAD=1` (own worker for H2D callbacks) | 0.88-0.99 ms | 5.84-5.92 s |
+| `XLA_PJRT_GPU_HOST_TO_DEVICE_STREAMS=3` (eighteenth pass)   | -           | noise       |
+| `ALLOCATION_MODEL=async` alone (stock completion path)      | -           | 5.23 s      |
+| `ALLOCATION_MODEL=async` + poll + inline                    | 0.37-0.46 ms | 4.89-4.94 s |
+
+None of the completion-path changes moves the load while the allocation
+stalls dominate; once they are gone the polling+inline path is worth
+0.3 s (5.23 -> 4.9). Not worth carrying alone.
+
+### Copy engine and memory contention
+
+Copy time fits 2 us + bytes / 100 GB/s per copy during a load (p50 17 us
+for 1.38 MiB), against 155-193 GB/s idle: the readers' writes into the
+node-0 pool and their remote page-cache reads share node 0's memory with
+both GPUs' DMA. `bench.c`: 16 readers at 78 GB/s beside two GPUs at
+230 GB/s total (2 MiB pieces, depth 27). When a copy is queued behind
+another the inter-copy gap is 3.6 us p50; the stream idles 29% of the
+steady state in 26-70 us gaps because nothing is queued, and 53-64% of the
+window overall. Stream time per device: 3.26 s for 279.4 GiB.
+
+### The window and its edges
+
+- 0.85 s before the first submission: `loadPacked` awaits the first pack
+  program's compile (`TMP first loadExecute at 863-891 ms`). Submitting
+  the plain tensors first (a `TransformedTensorNotDelivered` skip plus the
+  reorder in `loadInto`) fills only 0.15 s of it: their 9.17 GiB read in
+  0.2 s; the batch's `done` is logged when the front-end thread gets to
+  await it. A compilation cache for the pack programs is the fix.
+- Active window: 4.70 s default, 3.78-3.82 s with the stalls gone =
+  78.6 GB/s = the 16-reader ceiling beside two GPUs' DMA (bench 77-78).
+  Width 24/32 under the async model: 4.89-4.93 s, no gain, per-read time
+  2.0-2.3 ms.
+- No execute tail: the sampler shows reads and DMA active until 10-50 ms
+  before `Loaded weights`.
+
+Accounting for the 5.9 s: 0.85 s compile wait + 4.7 s window, of which
+~1 s is allocation stalls and their knock-on, the rest the read ceiling.
+With the async allocation model: 0.85 + 3.8 + 0.25 = 4.9 s.
+
+### What to do
+
+1. Plugin: fork commit 145c8a1693 (`XLA_PJRT_GPU_ALLOCATION_MODEL=async`,
+   with the deferred releases the model requires); measured 5.9 -> 5.1 s
+   stock, 4.9 s with polled completions, hashes identical. Decide whether
+   llmd sets it (memory returns later) or the plugin defaults to it.
+2. llmd: cache compiled pack programs, or otherwise fill the 0.85 s.
+3. llmd/loader: a scale blob per layer in the pack recipe to cut the
+   256-512 KiB pieces (0.3 s without stalls, more with).
+4. Keep the completion path as is until 1 lands; then polling+inline
+   copies are worth 0.3 s and are a small plugin patch.
+
+Not worth doing (measured): more H2D streams, a larger piece cap, a
+dedicated H2D callback thread, wider reads.
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
 
-- Eighteenth pass: the read pipeline delivers 53 GB/s where 16 plain
-  `preadv` threads deliver 77 under the same DMA load on the same host;
-  attribute the 30% (per-request gates, leases, planning, pump) with the
-  microbenchmark as the ceiling. The 2x replication of packed experts is
-  the llmd side's next structural cost. `dma_bench` and `live loader ready`
-  are still `debug` on scopes llmd does not enable. A depth derived from the
-  measured rate is written up but not applied (worth ~2% today).
+- Nineteenth pass: the eighteenth pass's "30% in the read pipeline" is
+  attributed: ~1 s of H2D stalls behind the pack executes (PJRT's
+  `kComputeSynchronized` allocation sync points; `kAsynchronous` measured
+  5.9 -> 4.9 s in the fork, needs a free-semantics review before adoption),
+  0.85 s waiting for the first pack program's compile, and the tiny scale
+  pieces draining serially. The 2x replication of packed experts is the
+  llmd side's next structural cost. `dma_bench` and `live loader ready`
+  are still `debug` on scopes llmd does not enable. A depth derived from
+  the measured rate is written up but not applied (worth ~2% today).
 
 - Thirteenth pass (exploration): decided and implemented as the fourteenth
   pass (loader-owned admission, `awaitAll` only). Left for the llmd side, on
