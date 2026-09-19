@@ -1,31 +1,34 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
+
 const zml = @import("../zml.zig");
-const triton = @import("triton_attention.zig");
 const fly = @import("fly_kernels/sparse_mla.zig");
 const MlaOptions = @import("paged_attention.zig").Mla.Options;
+const triton = @import("triton_attention.zig");
 
 pub const Backend = enum {
     triton,
     fly,
 
-    pub fn auto(platform: *const zml.Platform, dtype: zml.DataType) Backend {
-        return switch (platform.target) {
-            .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
-                .gfx942 => switch (dtype) {
-                    .bf16 => .fly,
-                    else => .triton,
-                },
-                else => .triton,
-            },
-            else => .triton,
+    pub fn isAvailable(self: Backend, platform: *const zml.Platform) bool {
+        return switch (self) {
+            .fly => fly.isAvailable(platform),
+            .triton => zml.kernel.triton.isAvailable(platform),
         };
     }
 
+    pub fn auto(platform: *const zml.Platform, dtype: zml.DataType) !Backend {
+        if (Backend.fly.isAvailable(platform) and dtype == .bf16) return .fly;
+        if (Backend.triton.isAvailable(platform)) return .triton;
+        return error.UnsupportedPlatform;
+    }
+
     fn call(self: Backend, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, active_query_count: zml.Tensor, opts: Options) zml.Tensor {
+        const platform = zml.Compiler.current().platform;
         const backend = switch (self) {
-            .fly => auto(zml.Compiler.current().platform, q.dtype()),
-            .triton => .triton,
+            .fly => auto(platform, q.dtype()) catch @panic("Sparse MLA requires a supported GPU backend"),
+            .triton => if (Backend.triton.isAvailable(platform)) .triton else @panic("Sparse MLA requires a Triton backend"),
         };
         switch (backend) {
             .fly => if (fly.pagedAttention(q, kv_cache, sink, topk, active_query_count, opts, triton.getCuCount())) |output| return output,
@@ -74,8 +77,7 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
         .num_splits = 1,
         .direct_programs = undefined,
     };
-    const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform);
-    const is_sm103 = if (cc) |value| value.eql(.{ .major = 10, .minor = 3 }) else false;
+    const is_sm103 = if (zml.Compiler.current().platform.capability) |cc| cc.eql(.{ .cuda = .sm103 }) else false;
 
     // GB300 (sm_103): a single wide query benefits from more head blocks and
     // wider sparse tiles. The split selection below still derives each layer's

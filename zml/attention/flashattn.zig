@@ -356,6 +356,19 @@ pub const fa2 = struct {
 };
 
 pub const fa3 = struct {
+    pub fn isAvailable(platform: *const zml.Platform) bool {
+        return switch (platform.capability orelse return false) {
+            // The pinned v0.0.6-rc9 package builds FA3 only for sm_90a:
+            // https://github.com/zml/flash-attention/blob/v0.0.6-rc9/BUILD.bazel
+            // Architecture-specific sm_90a code is not Blackwell-compatible.
+            .cuda => |cc| switch (cc.architecture()) {
+                .hopper => true,
+                .volta, .turing, .ampere, .ada, .blackwell => false,
+            },
+            .cpu, .rocm, .tpu, .neuron, .oneapi, .metal => false,
+        };
+    }
+
     const custom_call_name = "fa3_mha_fwd";
     const Wrapped = Wrapper(@This(), .runInner);
 

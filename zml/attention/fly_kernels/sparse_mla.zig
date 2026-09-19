@@ -1,9 +1,12 @@
 const std = @import("std");
+
 const zml = @import("../../zml.zig");
-const sparse_mla = @import("../sparse_mla.zig");
 const fly = zml.kernel.fly;
 const Tensor = zml.Tensor;
 const Value = fly.Value;
+const sparse_mla = @import("../sparse_mla.zig");
+
+pub const matrixInstruction: @import("platforms").capabilities.matmul.Instruction = .mfma_f32_16x16x16bf16_1k;
 
 pub const Config = struct {
     queries: i64,
@@ -155,8 +158,9 @@ pub fn call(q: Tensor, kv_cache: Tensor, sink: ?Tensor, indices: Tensor, active:
     }).output;
 }
 
+/// The Fly compiler and its validated MFMA atom on this device.
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    return sparse_mla.Backend.auto(platform, .bf16) == .fly;
+    return fly.supportsMmaAtom(platform, matrixInstruction);
 }
 
 fn runMain2D(b: *fly.Builder, cfg: Config) fly.FinishError!void {
@@ -227,14 +231,7 @@ fn runMain(b: *fly.Builder, cfg: Config, comptime three_d: bool, a: anytype) fly
         const cache_pointer = a.kv_cache.emitIter();
         const shared = b.sharedArray(.i16, 10496, 16);
         const shared_ptr = shared.emitIter();
-        const atom = b.mmaAtom((fly.rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
-            .m = 16,
-            .n = 16,
-            .k = 16,
-            .elemTyA = .float(b.ctx, .bf16),
-            .elemTyB = .float(b.ctx, .bf16),
-            .elemTyAcc = .float(b.ctx, .f32),
-        }) catch return error.InvalidMlir).type_());
+        const atom = b.mmaAtom((fly.mmaAtomType(b.ctx, matrixInstruction) catch return error.InvalidMlir));
         var loop = b.openFor(b.constant(.i64, 0), tiles_per_split, 1, .{
             zero4, zero4, zero4, zero4, zero4, zero4, zero4, zero4, ninf4, zero4,
         });

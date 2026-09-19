@@ -25,10 +25,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const cc = zml.platform.cuda.computeCapability(platform) orelse break :b .vanilla;
-                break :b if (cc.eql(.{ .major = 9, .minor = 0 })) .cuda_fa3 else .cuda_fa2;
-            },
+            .cuda => if (flashattn.fa3.isAvailable(platform)) .cuda_fa3 else .cuda_fa2,
             .neuron => .nki,
             .metal => .metal_fa,
             .cpu, .rocm, .tpu, .oneapi => .vanilla,
@@ -42,7 +39,7 @@ pub const Backend = enum {
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
+            .cuda_fa3 => flashattn.fa3.isAvailable(platform),
         };
     }
 };

@@ -42,6 +42,7 @@ zls_completion(
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",
+        "//platforms"
     ],
 )
 

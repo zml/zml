@@ -9,6 +9,12 @@ const Builder = fly.Builder;
 
 pub const Parameters = shared.Parameters;
 
+/// The Fly compiler and its validated MFMA atom on this device. The operand
+/// contract is checked separately by supports().
+pub fn isAvailable(platform: *const zml.Platform) bool {
+    return fly.supportsMmaAtom(platform, mxfp4.matrixInstruction);
+}
+
 pub fn supports(opts: shared.FusedExpertsArgs) bool {
     if (opts.hidden_states.dtype() != .bf16 or opts.gate_up.quantizationScheme() != .mxfp4 or
         opts.down.quantizationScheme() != .mxfp4 or opts.gate_up.bias != null or opts.down.bias != null or

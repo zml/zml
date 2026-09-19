@@ -113,15 +113,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
         .fp8_block32, .fp8_block128 => blk: {
-            const dtype: DataType = switch (platform.target) {
-                .cuda => .f8e4m3fn,
-                .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
-                    .cdna4, .rdna4 => .f8e4m3fn,
-                    .cdna3 => .f8e4m3fnuz,
-                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
-                } else return null,
-                else => return null,
-            };
+            const dtype = blockFp8Dtype(platform) orelse return null;
             break :blk switch (quantization.scheme) {
                 .fp8_block32 => quantizeBlockFp8(input, axis, 32, dtype, .f8e8m0),
                 .fp8_block128 => quantizeBlockFp8(input.convert(.bf16), axis, 128, dtype, .f32),
@@ -130,6 +122,35 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
         },
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
+}
+
+/// Prefer the hardware's native FP8 encoding; callers keep BF16 inputs when no
+/// native FP8 matmul path is modeled, which includes pre-Ada CUDA.
+fn blockFp8Dtype(platform: *const Platform) ?DataType {
+    const cc = platform.computeCapability() orelse return null;
+    if (cc.supportsMatmulFormat(.f8e4m3fn)) return .f8e4m3fn;
+    if (cc.supportsMatmulFormat(.f8e4m3fnuz)) return .f8e4m3fnuz;
+    return null;
+}
+
+test "block FP8 input quantization follows native format support" {
+    var platform: Platform = undefined;
+    platform.target = .cuda;
+    platform.capability = null;
+    try std.testing.expectEqual(null, blockFp8Dtype(&platform));
+    platform.capability = .{ .cuda = .sm80 };
+    try std.testing.expectEqual(null, blockFp8Dtype(&platform));
+    platform.capability = .{ .cuda = .sm89 };
+    try std.testing.expectEqual(DataType.f8e4m3fn, blockFp8Dtype(&platform));
+    platform.target = .rocm;
+    platform.capability = .{ .rocm = .gfx942 };
+    try std.testing.expectEqual(DataType.f8e4m3fnuz, blockFp8Dtype(&platform));
+    platform.capability = .{ .rocm = .gfx950 };
+    try std.testing.expectEqual(DataType.f8e4m3fn, blockFp8Dtype(&platform));
+    platform.capability = .{ .rocm = .gfx1100 };
+    try std.testing.expectEqual(null, blockFp8Dtype(&platform));
+    platform.capability = .{ .rocm = .gfx1201 };
+    try std.testing.expectEqual(DataType.f8e4m3fn, blockFp8Dtype(&platform));
 }
 
 /// Quantize activation blocks, preserving the input's axes.
@@ -208,7 +229,8 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
 }
 
 fn supportsNvfp4InputQuantization(platform: *const Platform) bool {
-    return if (platform_mod.cuda.computeCapability(platform)) |cc| cc.atLeast(.{ .major = 10, .minor = 0 }) else false;
+    const cc = platform.computeCapability() orelse return false;
+    return cc.supportsMatmulFormat(.nvfp4);
 }
 
 fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {

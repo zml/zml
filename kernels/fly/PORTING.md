@@ -31,7 +31,7 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 | `fx.make_view(ptr, layout)` | `ptr.view(layout)` |
 | `fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)` | `b.copyAtom(.{ .universal = 128 }, .f32)` |
 | `fx.rocdl.BufferCopy32b()` / `BufferCopyLDS128b()` | `.{ .buffer_copy = 32 }` / `.{ .buffer_copy_lds = 128 }` |
-| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom((try fly.rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{ .m = 16, .n = 16, .k = 4, ... })).type_())` |
+| `fx.make_mma_atom(fx.rocdl.MFMA(16,16,4,fx.Float32))` | `b.mmaAtom(try fly.mmaAtomType(b.ctx, .mfma_f32_16x16x4f32))` |
 | `fx.make_tiled_mma(atom, layout)` | `b.tiledMma(atom, layout, null)` |
 | `fx.make_tiled_copy_tv(atom, thr, val)` | `b.tiledCopyTV(atom, thr, val)` |
 | `fx.make_tiled_copy_A(atom, tiled_mma)` | `b.tiledCopyA(atom, tiled_mma)` |

@@ -4,9 +4,16 @@ const zml = @import("../zml.zig");
 pub const kernels = @import("triton_kernels/mxfp4.zig");
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 10;
+    return switch (platform.capability orelse return false) {
+        // ScaledBlockedToMMAv5 accepts SM100..119. SM12x's lowering only
+        // accepts FP4xFP4 / FP8xFP8, but this kernel emits FP4xFP8 plus TMA.
+        // https://github.com/triton-lang/triton/blob/c05aa65087a9a1a6b8a08fdbb474aba834d5cddf/lib/Dialect/TritonGPU/Transforms/AccelerateMatmul.cpp
+        .cuda => |cc| switch (cc) {
+            .sm100, .sm101, .sm103, .sm110 => true,
+            .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm90, .sm120, .sm121 => false,
+        },
+        .cpu, .rocm, .tpu, .neuron, .oneapi, .metal => false,
+    };
 }
 
 pub const Parameters = struct {
