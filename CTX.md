@@ -3838,9 +3838,194 @@ Three defects, none of them in what calibration measures:
   containing the name and then hits `unreachable`, and `host_memory.Backend.init`
   `@panic`s for tpu/neuron/metal. Either the table row or the code should move.
 
+## Eighteenth pass: two-GB300 llmd loads, DMA depth, read width, placement (2026-09-19)
+
+Fixture: monorepo `llmd` loading DeepSeek-V4.1-Flash (278.12 GiB logical:
+160 packed expert tensors through `loadExecute`, then the bulk load), two
+GB300 (`CUDA_VISIBLE_DEVICES=0,1`, both on host node 0) under
+`numactl --cpunodebind=0 --membind=0`, warm page cache,
+`XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB=200`. The model bodies were stubbed for
+the day (pack programs are real, `Compiled all models` is 60 ms), so every
+number below is the loader's `Loaded weights` time. The host carried a
+stray 100%-CPU process all day (load average ~10), so the same arm measured
+about 1 s slower than the day before; compare only same-day interleaved
+rounds. Sweeps fix the DMA block at 8 MiB, which is also what calibration
+picked every time (`dma_bench ... block_bytes=8388608 parallelism=8
+measured_gib_s=179`).
+
+### Where the 16 s went (llmd side, 2026-09-18)
+
+Instrumenting `loadInto`: 7.2 s compiling four `llmd_pack_experts`
+programs one after another with nothing transferring, 8.3 s of pack
+submissions, 0.7 s draining. Two causes, both in `llmd/weights.zig`:
+
+- `packStack` concatenates 384 replicated per-expert parameters and pins
+  only the result to `.expert = .experts`. Each concatenate operand has size
+  1 on the sharded axis, so the partitioner shards every operand on a row
+  axis and reshards the result with one all-to-all per expert: 2310
+  all-to-all ops per module, 6935 lines of HLO, 184,800
+  `ncclDevKernel_SendRecv` launches (5.7 s of GPU time, 71% of all kernel
+  time). A `sharding_constraint` pinning the stacked member replicated makes
+  the partitioned program `dynamic-slice(concatenate, partition_id)` with
+  zero collectives: compile 7.2 -> 2.8 s, pack GPU time 5.6 s -> 15 ms.
+- The four distinct programs compiled serially on the load path; XLA uses
+  ~1.2 cores per compile. Compiling them with `io.async` at discovery and
+  awaiting at first use overlaps the rest.
+
+Three runs each, one binary after the other: 16.23/16.29/16.48 s ->
+7.01/7.04/7.10 s (17.0 -> 39.4 GiB/s).
+
+### PJRT drives every H2D copy of a device through one stream
+
+nsys (`CUPTI_ACTIVITY_KIND_MEMCPY`): all 96,473 H2D copies of GPU 0 are on
+`streamId` 25 and all of GPU 1's on 43. `LocalDeviceState` creates one
+`host_to_device_stream_` and `CopyRawHostToDeviceAndReturnEvent` always
+takes it (`xla/pjrt/se/se_raw_buffer.cc`). So `block_parallelism` is a queue
+depth, never parallel copy engines: the GB300 reports
+`CU_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT = 3`, unreachable through PJRT. The
+CUDA plugin's device attributes are `compute_capability, coords,
+core_count, device_vendor, memory_bandwidth, numa_node, pci_bus_id,
+slice_index, vendor`; `memory_bandwidth` is HBM. Nothing describes the host
+link or the copy engines. The only hardware hint for the depth is the rate
+the block screen already measures (and more streams would not use the other
+engines anyway; next section).
+
+Queue state in the trace (interleaved pool, before the fixes below): 6.5%
+of copies start with an empty queue; after an underrun the next issue
+arrives p50 0.11 / p90 0.51 / p99 0.97 ms later, while the budget
+(8 x 8 MiB at 179 GiB/s) is 0.35 ms of work. That looks like starvation,
+but the sweep says the reads are what is late, not the issue path:
+
+| pool placement | depth 8 | depth 16 | depth 32 | depth 32, width 32 |
+| --- | --- | --- | --- | --- |
+| interleave 0,1 (default) | 8.13 8.10 8.09 | 8.03 8.00 8.01 | 7.95 8.18 7.98 | 7.87 7.86 7.93 |
+| node 0 (policy, below) | 5.96 5.97 | - | 5.77 5.88 | 5.84 5.89 |
+
+Depth is worth nothing on an interleaved pool and about 2% on a node-local
+one. A synthetic width screen would not have found even that: calibration
+already reaches 179 GiB/s at depth 8 while the load ran the same stream at
+60-68 GB/s (91 GB/s after placement) and 58-71% busy, because the load's
+issue latency is the read pipeline's, which no ring benchmark sees. Keep
+the fixed 8. If a depth that scales with the link is ever wanted, derive
+it from the measured rate instead of screening it (Little's law, ~1 ms of
+queued bytes: `clamp(rate * 1 ms / block, 8, 32)` is 8 on MI300X and 23 on
+GB300); it costs no calibration time and no new state.
+
+### More host-to-device streams do not help: one stream already saturates the link
+
+Tried directly, since the plugin is buildable from `~/github/openxla/xla`
+(`bazel build --config=cuda_remote_arm64 --config=baseline_arm64
+//zml/cuda:archive`, ~40 min remote, uncommitted patch in that tree):
+`LocalDeviceState` gains `extra_host_to_device_streams_` and
+`GetHostToDeviceStream()` round-robins raw copies over them, count from
+`XLA_PJRT_GPU_HOST_TO_DEVICE_STREAMS` (default 1, old behaviour); the
+execute-path users of `host_to_device_stream()` are unchanged. Wired into
+zml by pointing `_PLUGINS["arm64"]` at `file://.../archive.tar.zst` with
+its sha256 and `strip_prefix = "lib"` (the fork's tar puts the plugin under
+`lib/`, the mirror archive does not); not committed.
+
+With 3 streams (the `ASYNC_ENGINE_COUNT`), each device's copies split
+evenly over three `streamId`s, yet CUPTI shows an overlap factor of 1.00:
+no two copies of a device ever run at the same time, and the rate over the
+union of busy time is the same 91.9 GB/s. The microbenchmark says why:
+one GPU pulling 8 MiB blocks from node 0 reaches 195.0 GB/s on one stream
+and 194.5 on three at depth 24; two GPUs 327 (one stream each) against
+367 GB/s (three each). Pinned H2D on GB300 is serialized per context and a
+single stream already saturates the C2C link. Loads, two rounds each,
+node-local pool: streams 1 / 3 at depth 8: 5.96 5.98 / 6.05 6.09; at
+depth 24: 6.10 5.86 / 5.86 5.90. Noise. Not worth carrying a plugin
+patch for; the loader's single-stream model is the right one.
+
+### Read width: the plateau is flat, the requests were the problem
+
+Width 24 and 32 at node-local placement: 5.98/6.08 and 6.00/5.93 against
+5.96/5.97 at 16; nothing. What the "width" evidence was hiding: llmd
+submitted each packed tensor as its own `loadExecute`. The two per-layer
+*scale* packs are 384 sources of 360 KiB each (`experts.N.{w1,w2,w3}.scale`
+are contiguous in the shard, 368,640 bytes apart), so they were 30,760 of
+the load's 78,081 reads (39%) for 5.7% of the bytes, and each scale pack
+was a solo phase of 384 latency-bound requests: 22 ms + 9 ms per layer with
+the H2D stream idle, 1.49 s in total (the periodic `>2 ms` gaps in the
+trace, followed by 608 copies of median 0.37 MB). Submitting a layer's four
+packs as one `loadExecute` (bindings grouped up to 8 GiB of outputs,
+`llmd/weights.zig`) lets the planner coalesce across bindings:
+`coalescing_ratio` 1.00/1.99 -> 2.67, reads 78,081 -> 35,688 all of 8 MiB,
+H2D busy 61% -> 71%, 8.05-8.13 -> 7.45-7.53 s. Nothing to change in the
+loader: multi-binding submissions are what `loadExecute` was built for; the
+consumer has to use them.
+
+### Read-path microbenchmark: registration and iovecs are free, the interleave is not
+
+`preadv` of 8 MiB requests from the warm page cache (shards 11-26, 4 GiB per
+thread) into a 256 MiB-per-thread rotating destination, 16 threads on node
+0, optionally with one DMA thread per GPU copying 8 MiB blocks out of the
+same pool at depth 8 (`cuMemcpyHtoDAsync` on one stream, like PJRT). The
+page cache of this checkpoint is 90% on node 1 (`/proc/self/numa_maps`
+after touching one page per 16 MiB; under 1 s for 298 GiB).
+
+| destination | placement | DMA | read GB/s (per thread) | DMA GB/s |
+| --- | --- | --- | --- | --- |
+| anonymous | first touch (node 0) | - | 105.5 (7.9) | |
+| anonymous | interleave 0,1 | - | 80.7 (7.5) | |
+| `cuMemHostRegister` | node 0 | - | 107.2 (8.1) | |
+| registered | interleave | - | 79.5 (7.5) | |
+| registered, 8 or 64 iovecs | interleave | - | 79.3 / 80.4 | |
+| registered, 1 thread | node 0 / node 1 / interleave | GPU 0 | 10.3 / 6.0 / 7.8 | **193 / 54 / 169** |
+| registered | interleave | GPU 0+1 | **40.9 (3.2)** | 208 |
+| registered | node 0 | GPU 0+1 | **77.2 (5.6)** | 211 |
+| registered, 24 / 32 threads | node 0 | GPU 0+1 | 101 / 100 | 206 / 188 |
+| registered, DMA depth 32 or 16 MiB requests | node 0 | GPU 0+1 | 77 / 80 | 215 / 207 |
+
+Pinning costs nothing, the iovec count costs nothing, `MADV_HUGEPAGE` does
+nothing on this 64K-page kernel (only the 512 MiB THP size is enabled;
+`AnonHugePages: 0 kB`). What costs is the interleave once the GPUs pull
+from the pool: with both GPUs on node 0 DMA-ing from a pool that is half on
+node 1, the readers fall to 40.9 GB/s, which is exactly the loader's read
+rate at width 16, and remote H2D runs at 54 GB/s against 193 local (the
+seventh pass measured 110 vs 176 with an idle CPU side; with the readers'
+copies on the same C2C link it is worse). Node-local keeps the readers at
+77 GB/s and reaches ~100 at 24-32 threads while the two links still take
+211 GB/s.
+
+### The change: the pool follows the task's memory policy
+
+`host_memory.Workspace.init` now masks the interleave nodes with the
+task's `get_mempolicy` node set (`taskMemoryPolicyMask`): under
+`numactl --membind=0` the mask is node 0 alone, so the pool is left to the
+kernel there (`placement=unplaced`); without a policy nothing changes
+(interleave over every memory node). An arena `mbind`-interleaved across
+sockets overrides `set_mempolicy`, which is what silently defeated the
+user's `--membind`. Same binary otherwise, three runs:
+7.45/7.53/7.50 s -> **5.99/5.84/5.97 s** (37.1 -> 47.6 GiB/s), and the 256
+MiB arena registers in 3.6 ms instead of 77.
+
+This does not contradict the seventh pass. There, readers were unbound and
+the four GPUs sat on both sockets, so every single-node choice was wrong
+for half of the traffic and interleave was the knowledge-free middle.
+Here the user has already told the kernel where everything lives, and the
+loader must not place pinned pages outside that. The rule is: interleave
+by default, never outside the task's policy.
+
+After the change the H2D stream copies at 92 GB/s while busy but is busy
+only 58% (5.56 s window, 0.70 s of >2 ms gaps, 0.43 s of 0.1-2 ms gaps).
+The load is read-bound at 53 GB/s of unique bytes, against the 77 GB/s the
+same 16 `preadv` threads reach under the same DMA load in the
+microbenchmark: about 30% is still lost inside the read pipeline (gates,
+block leases, planning, the pump), unattributed. The other structural
+cost is unchanged: every packed expert is a replicated parameter of the
+pack program, so each GPU receives the full 298.6 GB (2x amplification).
+
 ## Open work
 
 Third-pass items left open; `PLAN.md` holds the checklist.
+
+- Eighteenth pass: the read pipeline delivers 53 GB/s where 16 plain
+  `preadv` threads deliver 77 under the same DMA load on the same host;
+  attribute the 30% (per-request gates, leases, planning, pump) with the
+  microbenchmark as the ceiling. The 2x replication of packed experts is
+  the llmd side's next structural cost. `dma_bench` and `live loader ready`
+  are still `debug` on scopes llmd does not enable. A depth derived from the
+  measured rate is written up but not applied (worth ~2% today).
 
 - Thirteenth pass (exploration): decided and implemented as the fourteenth
   pass (loader-owned admission, `awaitAll` only). Left for the llmd side, on

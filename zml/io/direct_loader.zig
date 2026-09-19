@@ -160,6 +160,7 @@ pub const Loader = struct {
         errdefer self.pipeline.deinit();
         errdefer self.stopWorkers();
         for (0..workers) |_| try self.worker_group.concurrent(io, workerMain, .{self});
+        load_log.debug("TMP loader created_at raw_ns={d}", .{@as(i64, @intCast(self.created_at.nanoseconds))});
         load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,

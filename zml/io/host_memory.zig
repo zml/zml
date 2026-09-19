@@ -68,7 +68,7 @@ const Backend = union(enum) {
         // a preferred-node policy based on the calling thread. These results
         // favor a knowledge-free default, not a universal locality rule.
         // Interleaving over one node is that node; leave it to the kernel.
-        const numa_mask = interleaveMask(memoryNodeMask(allocator, io));
+        const numa_mask = interleaveMask(memoryNodeMask(allocator, io) & taskMemoryPolicyMask());
         return switch (platform.target) {
             .cuda, .oneapi => .{ .pages = .{
                 .allocator = .init(allocator, platform, numa_mask),
@@ -619,6 +619,19 @@ fn memoryNodeMask(allocator: Allocator, io: std.Io) u64 {
     ) catch return 0;
     defer allocator.free(contents);
     return parseNodeList(contents);
+}
+
+/// The nodes the task's memory policy allows (`numactl --membind`,
+/// `--interleave`, `--preferred`); every node under the default policy.
+/// An arena placed outside them would defeat the policy: `mbind` on a
+/// range overrides `set_mempolicy`.
+fn taskMemoryPolicyMask() u64 {
+    if (comptime builtin.os.tag != .linux) return std.math.maxInt(u64);
+    var mode: c_int = 0;
+    var nodes: [1]u64 = .{0};
+    const rc = std.os.linux.syscall5(.get_mempolicy, @intFromPtr(&mode), @intFromPtr(&nodes), 64, 0, 0);
+    if (std.os.linux.errno(rc) != .SUCCESS or mode == 0 or nodes[0] == 0) return std.math.maxInt(u64);
+    return nodes[0];
 }
 
 /// Interleaving is useful only when the host exposes several memory nodes.
