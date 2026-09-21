@@ -187,7 +187,8 @@ pub const TensorStore = struct {
             shape = applyTags(shape, tagz);
             shape = applyPartitioning(shape, partitioning);
 
-            const tensor: Tensor = .fromShape(shape);
+            var tensor: Tensor = .fromShape(shape);
+            tensor._backing_memory = opts.memory;
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;

@@ -29,6 +29,8 @@ pub const Tensor = struct {
     id: Tensor.Id,
     auto_broadcast: bool = false,
     _shape: Shape,
+    /// Physical backing of an input buffer; independent of XLA computation placement.
+    _backing_memory: Memory.Kind = .default,
     _value: ?*const mlir.Value = null,
 
     const ResolvedAxis = u3;
