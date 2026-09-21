@@ -4,7 +4,7 @@ def repo():
     git_repository(
         name = "zio",
         remote = "https://github.com/lalinsky/zio",
-        commit = "54cb18f05d3feaec431353de85d5d10dac93d37b",
+        commit = "417757935ef6d0f0a2396d4023a44ca82ac1901c",
         build_file = Label("//third_party/zio:zio.bazel"),
         patches = [Label("//third_party/zio:progress-parent-file.patch")],
         patch_args = ["-p1"],

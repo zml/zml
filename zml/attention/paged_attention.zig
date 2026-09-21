@@ -5,9 +5,9 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
+const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
-const sparse_mla = @import("sparse_mla.zig");
 
 const PagedAttention = @This();
 
@@ -322,6 +322,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,
+        .io_impl = .threaded,
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));
@@ -339,6 +340,7 @@ test "Backend.auto selects triton on oneAPI" {
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,
+        .io_impl = .threaded,
     };
 
     try std.testing.expectEqual(Backend.triton, Backend.auto(&platform));

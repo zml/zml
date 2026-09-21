@@ -7,7 +7,6 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const upb = @import("upb");
 const zio = @import("zio");
-const zml_options = @import("zml/options");
 
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
@@ -46,7 +45,6 @@ manual_computation_depth: usize = 0,
 channel_id: i64 = 0,
 composite_id: i64 = 0,
 
-var _current_zio: zio.TaskLocal(*Compiler) = .{};
 threadlocal var _current: ?*Compiler = null;
 
 var mlir_global_init_mutex: std.Io.Mutex = .init;
@@ -186,12 +184,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
 }
 
 pub fn deinit(self: *Compiler) void {
-    switch (zml_options.io_impl) {
-        .std => {
-            if (_current == self) _current = null;
-        },
-        .zio => {},
-    }
+    if (_current == self) _current = null;
     std.debug.assert(self.scopes.len == 0);
     self.mlir_pass_manager.deinit();
     self.module.deinit();
@@ -214,10 +207,7 @@ pub fn current() *Compiler {
 }
 
 pub fn currentOrNull() ?*Compiler {
-    return switch (zml_options.io_impl) {
-        .std => _current,
-        .zio => _current_zio.get(),
-    };
+    return _current;
 }
 
 pub fn currentScope(self: *Compiler) *Scope {
@@ -287,6 +277,24 @@ pub fn compile(
     args: std.meta.ArgsTuple(@TypeOf(func)),
     opts: Options,
 ) Error!Exe {
+    return switch (platform.io_impl) {
+        .threaded => compileInternal(allocator, io, platform, func, args, opts),
+        .zio => try zio.blockInPlace(struct {
+            fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
+                return try compileInternal(allocator_, io_, platform_, func, args_, opts_);
+            }
+        }.call, .{ allocator, io, platform, args, opts }),
+    };
+}
+
+pub fn compileInternal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    comptime func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+    opts: Options,
+) Error!Exe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
@@ -294,22 +302,23 @@ pub fn compile(
     // I think the correct implementation would be to dispatch `emitMlir` to a thread pool, then wait for the result
     // asynchronously using the provided Io. For now, we'll simply make that blocking as it's not a big deal but keep
     // in mind we might want to revisit that later.
-    _ = io;
-    var st_io: std.Io.Threaded = .init_single_threaded;
-    defer st_io.deinit();
+    //
+    // This is NOT compatible with std.Io.Evented.
+    // It is compatible with zio, hence the blockInPlace above.
 
     const span_name = try tracer.formatSpanName(allocator, "zml.module.compile", .{
         .program_name = opts.program_name,
         .arg_count = args.len,
     });
+
     defer allocator.free(span_name);
     var span = tracer.Span.start(span_name);
     defer span.end();
 
-    var compiler: Compiler = .init(allocator, st_io.io(), platform, opts);
+    var compiler: Compiler = .init(allocator, io, platform, opts);
     defer compiler.deinit();
 
-    var result = emitMlir(&compiler, func, args) catch |err| switch (err) {
+    var result = compiler.emitMlir(func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -343,7 +352,7 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
+    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts);
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
@@ -455,13 +464,10 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     var input_info = try createBlockArguments(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
 
-    var result = switch (zml_options.io_impl) {
-        .std => blk: {
-            compiler.activate();
-            defer compiler.deactivate();
-            break :blk @call(.auto, func, args);
-        },
-        .zio => _current_zio.scoped(compiler, func, args),
+    var result = blk: {
+        compiler.activate();
+        defer compiler.deactivate();
+        break :blk @call(.auto, func, args);
     };
 
     var output_info = try collectOutputInfo(compiler, fn_scope, &result);

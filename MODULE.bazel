@@ -316,7 +316,12 @@ use_repo(
 )
 
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
-llvm.configure(targets = ["X86", "NVPTX", "AMDGPU", "AArch64"])
+llvm.configure(targets = [
+    "X86",
+    "NVPTX",
+    "AMDGPU",
+    "AArch64",
+])
 use_repo(llvm, "llvm-project")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
