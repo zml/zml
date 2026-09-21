@@ -387,7 +387,6 @@ pub const Tensor = struct {
                 .implicit => |input| .{ .explicit = input },
                 .explicit => og_donation,
             };
-            // TODO: assert that the sharding/memory and shape are compatibles
             scope.id_to_donation.put(scope.arena.allocator(), self.id, donation) catch @panic("OOM");
         }
         return self;
