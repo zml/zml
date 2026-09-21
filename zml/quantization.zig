@@ -106,10 +106,19 @@ pub const QuantizedInput = struct {
     values: Tensor,
     scales: Tensor,
     global_scale: ?Tensor,
+
+    pub fn reuseBuffer(self: QuantizedInput, other: QuantizedInput) QuantizedInput {
+        return .{
+            .values = self.values.reuseBuffer(other.values),
+            .scales = self.scales.reuseBuffer(other.scales),
+            .global_scale = if (self.global_scale != null and other.global_scale != null) self.global_scale.?.reuseBuffer(other.global_scale.?) else self.global_scale,
+        };
+    }
 };
 
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
+
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
         .fp8_block32, .fp8_block128 => blk: {
@@ -122,6 +131,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
                 } else return null,
                 else => return null,
             };
+
             break :blk switch (quantization.scheme) {
                 .fp8_block32 => quantizeBlockFp8(input, axis, 32, dtype, .f8e8m0),
                 .fp8_block128 => quantizeBlockFp8(input.convert(.bf16), axis, 128, dtype, .f32),
@@ -130,6 +140,37 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
         },
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
+}
+
+pub fn quantizeMxfp4(x: Tensor, axis: anytype, dtype: DataType, scale_dtype: DataType) QuantizedInput {
+    stdx.debug.assert(dtype == .f4e2m1, "expected E2M1 FP4 dtype, got {s}", .{@tagName(dtype)});
+    stdx.debug.assert(scale_dtype == .f8e8m0, "expected E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)});
+    stdx.debug.assert(@mod(x.dim(axis), mx_block_size) == 0, "MXFP4 activation width must be divisible by {}, got {f}", .{ mx_block_size, x.shape() });
+
+    const grouped = x.convert(.f32).splitAxis(axis, .{ .mx_ks = -1, .mx_block = mx_block_size });
+    const raw_scale = grouped.abs().max(.mx_block).maximum(.scalar(6 * 0x1p-126, .f32)).scale(1.0 / 6.0);
+    const scales = ceilPowerOfTwo(raw_scale);
+
+    return .{
+        .values = grouped.div(scales.broad(grouped.shape()))
+            .clamp(.scalar(-6, .f32), .scalar(6, .f32))
+            .convert(dtype)
+            .reshape(x.shape().withDtype(dtype)),
+        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), mx_block_size)).withDtype(.f32)).convert(scale_dtype),
+        .global_scale = null,
+    };
+}
+
+pub fn quantizeMxfp8(x: Tensor, axis: anytype, dtype: DataType, scale_dtype: DataType) QuantizedInput {
+    stdx.debug.assert(scale_dtype == .f8e8m0, "expected E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)});
+    return quantizeBlockFp8(x, axis, mx_block_size, dtype, scale_dtype);
+}
+
+fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
+    const bits = raw_scale.bitCast(.u32);
+    const exponent = bits.shiftRightLogical(.scalar(23, .u32));
+    const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
+    return exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
 }
 
 /// Quantize activation blocks, preserving the input's axes.
@@ -152,10 +193,7 @@ pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataTy
             .max(.fp8_block),
         .f8e8m0 => blk: {
             const raw_scale = grouped.abs().maximum(.scalar(1e-4, .f32)).scale(1.0 / fp8_max).max(.fp8_block);
-            const bits = raw_scale.bitCast(.u32);
-            const exponent = bits.shiftRightLogical(.scalar(23, .u32));
-            const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
-            break :blk exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
+            break :blk ceilPowerOfTwo(raw_scale);
         },
         else => stdx.debug.panic("expected F32 or E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)}),
     };
