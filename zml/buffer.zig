@@ -249,7 +249,13 @@ pub const Buffer = struct {
                 .element_type = element_type,
             };
 
-            const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
+            const shard_buffer = platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args) catch |err| switch (err) {
+                error.ResourceExhausted => {
+                    log.warn("failed to allocate {any}x{t} on device {d}", .{ shard_dims, sh.dtype(), device.id });
+                    return error.OutOfMemory;
+                },
+                else => return err,
+            };
             res._shards.appendAssumeCapacity(shard_buffer);
         }
 

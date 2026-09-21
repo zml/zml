@@ -2624,28 +2624,58 @@ fn manualComputationInternal(
     const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
+    // using explicit logger, because this can be annoying to debug
+    const log = std.log.scoped(.@"zml/Compiler");
+
     var valid_shardings = std.ArrayList(Sharding).empty;
     for (ctx.partitioning.shardings) |candidate| candidate: {
         for (partition_axes) |logical_axis| {
-            if (candidate.data.binding(logical_axis) == null) break :candidate;
+            if (candidate.data.binding(logical_axis) == null) {
+                // log.debug("sharding {s} doesn't cover {s}", .{ candidate.data.name, logical_axis });
+                break :candidate;
+            }
         }
-        for (input_shapes) |shape| {
-            if (!candidate.data.covers(shape)) break :candidate;
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        for (0.., input_shapes) |i, shape| {
+            _ = i; // autofix
+            if (!candidate.data.covers(shape)) {
+                // log.debug("sharding {s} doesn't cover input {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            }
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+                // log.debug("sharding {s} failed to cover input {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            };
         }
-        for (outputs) |shape| {
-            if (!candidate.data.covers(shape)) break :candidate;
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        for (0.., outputs) |i, shape| {
+            _ = i; // autofix
+            if (!candidate.data.covers(shape)) {
+                // log.debug("sharding {s} doesn't cover output {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            }
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+                // log.debug("sharding {s} failed to cover output {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            };
         }
+        log.debug("sharding {s} is accepted !", .{candidate.data.name});
         try valid_shardings.append(arena, candidate);
     }
     const manual_axis_names = try arena.alloc([]const u8, partition_axes.len);
     for (partition_axes, manual_axis_names) |axis, *name| name.* = std.mem.span(axis);
-    stdx.debug.assert(
-        valid_shardings.items.len == 1,
-        "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: {f}; known shardings: {f}",
-        .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), valid_shardings.items.len, stdx.fmt.slice(valid_shardings.items), stdx.fmt.slice(ctx.partitioning.shardings) },
-    );
+
+    if (valid_shardings.items.len == 0) {
+        log.err(
+            "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found no valid shardings among: \n{f}",
+            .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), stdx.fmt.slice(ctx.partitioning.shardings) },
+        );
+        @panic("manualComputation expected exactly one sharding covering partition_axes");
+    } else if (valid_shardings.items.len > 1) {
+        log.err(
+            "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: \n{f}",
+            .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), valid_shardings.items.len, stdx.fmt.slice(valid_shardings.items) },
+        );
+        @panic("manualComputation expected exactly one sharding covering partition_axes");
+    }
     const computation_sharding = valid_shardings.items[0];
     if (ctx.manualAxesConflict(computation_sharding, partition_axes)) |conflict| {
         std.debug.panic(

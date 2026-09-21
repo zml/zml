@@ -197,6 +197,21 @@ pub const Parameters = union(Backend) {
     pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
         return zml.Tensor.toMemoryAll(self, memory);
     }
+
+    pub fn format(self: Parameters, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const shapes = switch (self) {
+            inline .cuda_fa2, .cuda_fa3 => |c| switch (c) {
+                .decode => |d| &.{d.block_table},
+                .mixed => |d| &.{ d.block_table_prefill, d.block_table_decode },
+            },
+            inline else => |t| &.{ t.block_table, t.query_start_len },
+        };
+        switch (shapes.len) {
+            0 => unreachable,
+            1 => try writer.print("attn.Parameters(.{t}={f})", .{ self, shapes[0] }),
+            else => try writer.print("attn.Parameters(.{t}=[{f},{f}])", .{ self, shapes[0], shapes[1] }),
+        }
+    }
 };
 
 pub const AttentionOptions = struct {

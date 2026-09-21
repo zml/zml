@@ -538,9 +538,10 @@ pub const Shape = struct {
                 try writer.print("{d}", .{d});
             }
 
-            const part = self._partitioning.get(i);
-            if (part.toTag() != TagUnknown) {
-                try writer.print("/{s}", .{part.toTag()});
+            switch (self._partitioning.get(i)) {
+                .axis => |axis_name| try writer.print("/{s}", .{axis_name}),
+                .open => try writer.writeAll("/open"),
+                .replicated, .unknown => {},
             }
 
             need_comma = true;
