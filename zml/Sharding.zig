@@ -490,10 +490,10 @@ pub const PhysicalMesh = struct {
         return mesh;
     }
 
-    fn torus2(
+    pub fn torus2(
         allocator: std.mem.Allocator,
         target: Target,
-        devices: []const Device,
+        devices: []const PlatformDevice,
     ) !Sharding.PhysicalMesh {
         if (devices.len < 2) return error.NotEnoughDevices;
         const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
