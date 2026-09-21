@@ -376,6 +376,13 @@ pub const Exe = struct {
         defer span.end();
         return self.internalCall(null, arguments, results_, .{});
     }
+
+    fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.Executable.CompiledMemoryStats {
+        const api = self.platform.pjrt_api;
+        const executable = try self.exe.executable(api);
+        defer executable.deinit(api);
+        return executable.getCompiledMemoryStats(api);
+    }
 };
 
 /// A typed executable whose input and output buffer structures are derived from
