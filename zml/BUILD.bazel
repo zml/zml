@@ -1,22 +1,6 @@
 load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
-load("//bazel:zig_options.bzl", "zig_option", "zig_options")
-
-zig_option(
-    name = "io_impl",
-    build_setting_default = "std",
-    values = [
-        "std",
-        "zio",
-    ],
-)
-
-zig_options(
-    name = "zml_options",
-    import_name = "zml/options",
-    settings = [":io_impl"],
-)
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -164,7 +148,6 @@ zig_library(
         ":profiling_traceme_lib",
         ":xla_compile_options_upb",
         ":xla_data_upb",
-        ":zml_options",
         "//bazel",
         "//ffi:zig",
         "//kernels/cuda_tile:cuda_tile_builder",
