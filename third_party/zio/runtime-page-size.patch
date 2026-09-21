@@ -1,0 +1,297 @@
+diff --git a/src/coro/stack.zig b/src/coro/stack.zig
+--- a/src/coro/stack.zig
++++ b/src/coro/stack.zig
+@@ -10,7 +10,12 @@
+ 
+ const log = @import("../common.zig").log;
+ 
+-pub const page_size = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
++// Pointer types need a comptime alignment; mapping geometry needs the OS page size.
++pub const page_alignment = if (builtin.os.tag == .freestanding) 1 else std.heap.page_size_min;
++
++pub fn pageSize() usize {
++    return if (builtin.os.tag == .freestanding) 1 else std.heap.pageSize();
++}
+ 
+ // Signal type changed from c_int to enum in Zig 0.16
+ const is_pre_016 = builtin.zig_version.major == 0 and builtin.zig_version.minor < 16;
+@@ -24,7 +29,7 @@
+ var old_sigbus_action: posix.Sigaction = undefined;
+ 
+ pub const StackInfo = extern struct {
+-    allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
++    allocation_ptr: [*]align(page_alignment) u8, // deallocation_stack on Windows (TEB offset 0x1478)
+     base: usize, // stack_base on Windows (TEB offset 0x08)
+     limit: usize, // stack_limit on Windows (TEB offset 0x10)
+     allocation_len: usize,
+@@ -45,6 +50,7 @@
+ }
+ 
+ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
++    const page_size = pageSize();
+     // Round maximum_size up to page boundary, then add guard page
+     const aligned_max = std.mem.alignForward(usize, maximum_size, page_size);
+     // Ensure we allocate at least 2 pages (guard + usable space)
+@@ -102,7 +108,7 @@
+     // Commit initial portion at top of stack
+     const stack_top = @intFromPtr(allocation.ptr) + size;
+     const initial_commit_start = stack_top - commit_size;
+-    const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
++    const initial_region: [*]align(page_alignment) u8 = @ptrFromInt(initial_commit_start);
+     posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+         log.err("Failed to mprotect stack region (commit_size={d}): {}", .{ commit_size, err });
+         return error.OutOfMemory;
+@@ -160,6 +166,7 @@
+ /// overflow faults on the guard page and crashes (no SIGSEGV growth handler is
+ /// installed, see setupStackGrowth).
+ fn stackAllocOpenBSD(info: *StackInfo, size: usize) error{OutOfMemory}!void {
++    const page_size = pageSize();
+     const allocation = posix.mmap(
+         null,
+         size,
+@@ -175,7 +182,7 @@
+ 
+     // Turn the lowest page into a PROT_NONE guard page. The rest of the mapping
+     // keeps its MAP_STACK flag, so the stack pointer stays valid for syscalls.
+-    const guard: [*]align(page_size) u8 = allocation.ptr;
++    const guard: [*]align(page_alignment) u8 = allocation.ptr;
+     posix.mprotect(guard[0..page_size], posix.PROT.NONE) catch |err| {
+         log.err("Failed to mprotect OpenBSD stack guard page: {}", .{err});
+         return error.OutOfMemory;
+@@ -197,7 +204,7 @@
+ /// header. Pages between and below slots stay PROT_NONE, so guard pages cost
+ /// nothing extra. POSIX-only (the slab pool is comptime-disabled elsewhere);
+ /// OpenBSD is excluded because MAP_STACK cannot start as PROT_NONE.
+-pub fn slabReserve(len: usize) error{OutOfMemory}![]align(page_size) u8 {
++pub fn slabReserve(len: usize) error{OutOfMemory}![]align(page_alignment) u8 {
+     const prot_flags = posix.PROT.NONE | posix.PROT.MAX(posix.PROT.READ | posix.PROT.WRITE);
+     var map_flags = posix.MAP.PRIVATE | posix.MAP.ANONYMOUS;
+     if (builtin.os.tag == .linux or builtin.os.tag == .netbsd) {
+@@ -216,7 +223,7 @@
+     }
+ 
+     // Commit the header page for the slab bookkeeping.
+-    posix.mprotect(allocation.ptr[0..page_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
++    posix.mprotect(allocation.ptr[0..pageSize()], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+         log.err("Failed to commit stack slab header page: {}", .{err});
+         return error.OutOfMemory;
+     };
+@@ -224,7 +231,7 @@
+     return allocation;
+ }
+ 
+-pub fn slabFree(mem: []align(page_size) u8) void {
++pub fn slabFree(mem: []align(page_alignment) u8) void {
+     posix.munmap(mem) catch {};
+ }
+ 
+@@ -234,7 +241,8 @@
+ /// exactly the layout stackAllocPosix produces, so growth, overflow
+ /// detection, and pooling treat both kinds identically. One mprotect per
+ /// cold slot; a recycled slot pays no syscalls at all.
+-pub fn stackInitSlot(info: *StackInfo, slot: []align(page_size) u8, committed_size: usize, owner_tag: usize) error{OutOfMemory}!void {
++pub fn stackInitSlot(info: *StackInfo, slot: []align(page_alignment) u8, committed_size: usize, owner_tag: usize) error{OutOfMemory}!void {
++    const page_size = pageSize();
+     // Commit at least one page so the pool's FreeNode always fits.
+     const commit_size = @max(std.mem.alignForward(usize, committed_size, page_size), page_size);
+     if (commit_size > slot.len - page_size) {
+@@ -244,7 +252,7 @@
+ 
+     const stack_top = @intFromPtr(slot.ptr) + slot.len;
+     const initial_commit_start = stack_top - commit_size;
+-    const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
++    const initial_region: [*]align(page_alignment) u8 = @ptrFromInt(initial_commit_start);
+     posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+         log.err("Failed to commit slab stack slot (commit_size={d}): {}", .{ commit_size, err });
+         return error.OutOfMemory;
+@@ -299,7 +307,7 @@
+     const committed_size = info.base - info.limit;
+     if (committed_size == 0) return;
+ 
+-    const addr: [*]align(page_size) u8 = @ptrFromInt(committed_start);
++    const addr: [*]align(page_alignment) u8 = @ptrFromInt(committed_start);
+ 
+     // MADV_FREE is available on Linux 4.5+, macOS, FreeBSD, NetBSD
+     // It allows lazy reclamation - physical pages are freed when system needs memory
+@@ -332,6 +340,7 @@
+ /// Mode .grow: Grow by 1.5x current size in 64KB chunks
+ /// Mode .full: Commit all remaining uncommitted stack
+ fn stackExtendPosix(info: *StackInfo, mode: StackExtendMode) error{StackOverflow}!void {
++    const page_size = pageSize();
+     // OpenBSD stacks are fully committed at allocation time (MAP_STACK regions
+     // cannot be grown via mprotect), so there is nothing to extend.
+     if (builtin.os.tag == .openbsd) return;
+@@ -341,7 +350,7 @@
+     // Calculate new limit based on mode
+     const new_limit = switch (mode) {
+         .grow => blk: {
+-            const chunk_size = 64 * 1024;
++            const chunk_size = @max(64 * 1024, page_size);
+             const growth_factor_num = 3;
+             const growth_factor_den = 2;
+ 
+@@ -375,7 +384,7 @@
+     // Commit the memory region
+     const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
+     const commit_size = info.limit - commit_start;
+-    const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
++    const addr: [*]align(page_alignment) u8 = @ptrFromInt(commit_start);
+     posix.mprotect(addr[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch {
+         return error.StackOverflow;
+     };
+@@ -385,6 +394,7 @@
+ }
+ 
+ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
++    const page_size = pageSize();
+     // Round sizes up to page boundary
+     const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+     const max_size = std.mem.alignForward(usize, maximum_size, page_size);
+@@ -457,7 +467,7 @@
+ 
+     // Setup alternate stack for this thread if not already done
+     if (!altstack_installed) {
+-        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
++        const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_alignment), altstack_size);
+         errdefer std.heap.page_allocator.free(mem);
+ 
+         var stack = posix.stack_t{
+@@ -599,7 +609,7 @@
+ 
+     // Stack layout: [guard_page][uncommitted][committed]
+     const stack_base = @intFromPtr(stack_info.allocation_ptr);
+-    const guard_page_end = stack_base + page_size;
++    const guard_page_end = stack_base + pageSize();
+     const uncommitted_start = guard_page_end;
+     const uncommitted_end = stack_info.limit;
+ 
+@@ -631,7 +641,7 @@
+     const stack_base = @intFromPtr(stack_info.allocation_ptr);
+     const stack_size = stack_info.allocation_len;
+     const committed = stack_info.base - stack_info.limit;
+-    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + page_size;
++    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + pageSize();
+ 
+     const msg = std.fmt.bufPrint(
+         &buf,
+@@ -670,7 +680,7 @@
+     // Verify at least the requested amount was committed (minus the owner
+     // tag reserve, which lives in committed memory above `base` on POSIX).
+     // Note: RtlCreateUserStack on Windows may commit more than requested
+-    const commit_size_rounded = std.mem.alignForward(usize, committed_size, page_size);
++    const commit_size_rounded = std.mem.alignForward(usize, committed_size, pageSize());
+     const actual_committed = stack.base - stack.limit;
+     try std.testing.expect(actual_committed + owner_tag_reserve >= commit_size_rounded);
+ 
+diff --git a/src/coro/stack_pool.zig b/src/coro/stack_pool.zig
+--- a/src/coro/stack_pool.zig
++++ b/src/coro/stack_pool.zig
+@@ -33,7 +33,7 @@
+ /// of a standalone stack mapping.
+ const Slab = struct {
+     next: ?*Slab,
+-    memory: []align(stack.page_size) u8,
++    memory: []align(stack.page_alignment) u8,
+     /// Slots handed out at least once. Only the newest slab still carves.
+     carved: usize,
+     /// Slots currently acquired by live coroutines.
+@@ -114,9 +114,10 @@
+     last_shrink: Timestamp,
+ 
+     pub fn init(config: Config) StackPool {
++        const page_size = stack.pageSize();
+         // Same slot layout as stackAllocPosix: usable size rounded to pages,
+         // plus the (never committed) guard page, at least two pages total.
+-        const aligned_max = std.mem.alignForward(usize, config.maximum_size, stack.page_size);
++        const aligned_max = std.mem.alignForward(usize, config.maximum_size, page_size);
+         return .{
+             .config = config,
+             .mutex = .init(),
+@@ -125,7 +126,7 @@
+             .pool_size = 0,
+             .slabs = null,
+             .partial = null,
+-            .slot_size = @max(aligned_max + stack.page_size, stack.page_size * 2),
++            .slot_size = @max(aligned_max + page_size, page_size * 2),
+             .in_use = 0,
+             .epoch_peak = 0,
+             .retain_target = 0,
+@@ -388,11 +389,12 @@
+     /// The new slot is counted as in use on its slab; the caller accounts
+     /// the pool-wide acquire.
+     fn carveSlotLocked(self: *StackPool) ?StackInfo {
++        const page_size = stack.pageSize();
+         const slab = blk: {
+             if (self.slabs) |s| {
+                 if (s.carved < self.config.slab_slots) break :blk s;
+             }
+-            const len = stack.page_size + self.config.slab_slots * self.slot_size;
++            const len = page_size + self.config.slab_slots * self.slot_size;
+             const mem = stack.slabReserve(len) catch return null;
+             const s: *Slab = @ptrCast(@alignCast(mem.ptr));
+             s.* = .{ .next = self.slabs, .memory = mem, .carved = 0, .in_use = 0, .free = null, .partial_prev = null, .partial_next = null };
+@@ -400,8 +402,8 @@
+             break :blk s;
+         };
+ 
+-        const offset = stack.page_size + slab.carved * self.slot_size;
+-        const slot: []align(stack.page_size) u8 = @alignCast(slab.memory[offset .. offset + self.slot_size]);
++        const offset = page_size + slab.carved * self.slot_size;
++        const slot: []align(stack.page_alignment) u8 = @alignCast(slab.memory[offset .. offset + self.slot_size]);
+         var stack_info: StackInfo = undefined;
+         stack.stackInitSlot(&stack_info, slot, self.config.committed_size, @intFromPtr(slab)) catch return null;
+         slab.carved += 1;
+@@ -428,7 +430,7 @@
+     /// The slab this allocation was carved from, or null for an individually
+     /// mapped stack. Must run under mutex (the chain is mutated by carving
+     /// and shrinking).
+-    fn slabOfLocked(self: *StackPool, ptr: [*]align(stack.page_size) u8) ?*Slab {
++    fn slabOfLocked(self: *StackPool, ptr: [*]align(stack.page_alignment) u8) ?*Slab {
+         const addr = @intFromPtr(ptr);
+         var slab = self.slabs;
+         while (slab) |s| : (slab = s.next) {
+@@ -771,3 +773,36 @@
+     pool.shrink(.fromSeconds(30));
+     try std.testing.expectEqual(0, pool.pool_size);
+ }
++
++test "StackPool: runtime page alignment and full growth" {
++    if (!slab_supported) return error.SkipZigTest;
++
++    for ([_]usize{ 0, 2 }) |slab_slots| {
++        var pool = StackPool.init(.{
++            .maximum_size = 8 * 1024 * 1024,
++            .committed_size = 256 * 1024,
++            .slab_slots = slab_slots,
++        });
++        defer pool.deinit();
++
++        // Keep slots live to exercise each offset and cross a slab boundary.
++        var infos: [3]StackInfo = undefined;
++        var acquired: usize = 0;
++        defer for (infos[0..acquired]) |info| pool.release(info);
++        for (&infos) |*info| {
++            info.* = try pool.acquire();
++            acquired += 1;
++            if (slab_slots != 0) {
++                try std.testing.expect(pool.slabOfLocked(info.allocation_ptr) != null);
++            }
++            try std.testing.expectEqual(0, @intFromPtr(info.allocation_ptr) % stack.pageSize());
++            try std.testing.expectEqual(0, info.limit % stack.pageSize());
++            try stack.stackExtend(info, .grow);
++            try stack.stackExtend(info, .full);
++            try std.testing.expectEqual(@intFromPtr(info.allocation_ptr) + stack.pageSize(), info.limit);
++            const memory: [*]u8 = @ptrFromInt(info.limit);
++            memory[0] = 0xAA;
++            memory[info.base - info.limit - 1] = 0xBB;
++        }
++    }
++}
+diff --git a/src/stack_test.zig b/src/stack_test.zig
+--- /dev/null
++++ b/src/stack_test.zig
+@@ -0,0 +1,4 @@
++comptime {
++    _ = @import("coro/stack.zig");
++    _ = @import("coro/stack_pool.zig");
++}
