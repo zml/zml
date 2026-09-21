@@ -352,7 +352,15 @@ pub fn compileInternal(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts);
+    const loaded_executable = try compileModuleToPjrtExecutable(
+        arena.allocator(),
+        io,
+        platform,
+        compiler.module,
+        compiler.partitioning,
+        result.host_pinned_input_bytes,
+        opts,
+    );
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
@@ -408,6 +416,7 @@ const EmitMlirResult = struct {
     func: *mlir.Operation,
     input_info: std.MultiArrayList(TensorInfo),
     output_info: std.MultiArrayList(TensorInfo),
+    host_pinned_input_bytes: u64,
 };
 
 pub const TensorInfo = struct {
@@ -415,6 +424,7 @@ pub const TensorInfo = struct {
     shape: Shape,
     sharding: Sharding,
     value: *const mlir.Value,
+    backing_memory: Memory.Kind = .default,
 
     // Only used for input tensors, stores which output tensor ends up with their buffer
     aliasing_output: ?u32 = null,
@@ -516,6 +526,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
                 .shape = og_shape,
                 .sharding = input_sharding,
                 .value = value,
+                .backing_memory = tensor._backing_memory,
             });
         }
     };
@@ -563,7 +574,7 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
     return context.infos;
 }
 
-fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.MultiArrayList(TensorInfo), output_info: std.MultiArrayList(TensorInfo)) error{OutOfMemory}!EmitMlirResult {
+fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.MultiArrayList(TensorInfo), output_info: std.MultiArrayList(TensorInfo)) !EmitMlirResult {
     var arena_state = std.heap.ArenaAllocator.init(compiler.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -586,6 +597,21 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
             }
             aliasing_output.* = @intCast(output_index);
         }
+    }
+
+    // HACK: XLA doesn't support GPU operations accessing host-pinned memory, well only few. But we still need it for engram, so we hack it
+    //       by pinned the memory but lying to XLA that the memory is on the device. The problem is that XLA accounts for this memory when computing
+    //       its headroom for temporary buffers. This leads XLA to believe it has 0 budget and avoids temporary memory as much as possible, at the cost
+    //       of rematerialization. So we bypass the issue by adding all of those host-pinned tensors memory to the device memory size.
+    var host_pinned_input_bytes: u64 = 0;
+    for (0..input_info.len) |i| {
+        const input = input_info.get(i);
+        if (input.backing_memory != .host_pinned) continue;
+        // XLA already excludes inputs explicitly annotated as host memory.
+        if (fn_scope.id_to_memory.get(input.id) == .host_pinned) continue;
+        const shape = try input.sharding.shardedShape(input.shape.packedShape());
+        // Count inputs once: XLA also deduplicates donated input/output aliases.
+        host_pinned_input_bytes += shape.byteSize();
     }
 
     // Input sharding/memory/aliasing attributes
@@ -623,6 +649,7 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         .func = mlir_func,
         .input_info = input_info,
         .output_info = output_info,
+        .host_pinned_input_bytes = host_pinned_input_bytes,
     };
 }
 
@@ -692,7 +719,7 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: Options) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, host_pinned_input_bytes: u64, opts: Options) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
@@ -731,9 +758,16 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
             }
             if (device_memory_size) |bytes_limit| {
-                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+                // HACK: XLA doesn't support GPU operations accessing host-pinned memory, well only few. But we still need it for engram, so we hack it
+                //       by pinned the memory but lying to XLA that the memory is on the device. The problem is that XLA accounts for this memory when computing
+                //       its headroom for temporary buffers. This leads XLA to believe it has 0 budget and avoids temporary memory as much as possible, at the cost
+                //       of rematerialization. So we bypass the issue by adding all of those host-pinned tensors memory to the device memory size.
+                const host_bytes = switch (platform.target) {
+                    .cuda, .rocm, .oneapi => host_pinned_input_bytes,
+                    else => 0,
+                };
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit + host_bytes));
             }
-
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
                 const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
