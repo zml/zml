@@ -166,6 +166,8 @@ zig_library(
         "//mlir/dialects/mosaic_tpu",
         "//pjrt",
         "//platforms",
+        "//platforms/cuda",
+        "//platforms/rocm",
         "//platforms/tpu:ragged_paged",
         "//stdx",
         "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",

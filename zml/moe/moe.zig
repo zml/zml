@@ -99,7 +99,7 @@ pub const Backend = enum {
                         .triton_mxfp4
                     else
                         .triton,
-                    .nvfp4 => if (cutlass_flashinfer.isNvfp4Supported(platform))
+                    .nvfp4 => if (cutlass_flashinfer.isNvfp4Available(platform))
                         .flashinfer_cutlass
                     else
                         error.UnsupportedQuantization,
@@ -109,7 +109,7 @@ pub const Backend = enum {
             .rocm => b: {
                 const s = scheme orelse break :b .triton;
                 break :b switch (s) {
-                    .mxfp4 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else .triton,
+                    .mxfp4 => if (Backend.fly.isAvailable(platform)) .fly else .triton,
                     .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
                     .nvfp4 => error.UnsupportedQuantization,
                 };
@@ -139,8 +139,8 @@ pub const Backend = enum {
             .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
             .cute_mxfp4 => cute_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
-            .fly => switch (platform.target) {
-                .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
+            .fly => switch (platform.capabilities) {
+                .rocm => |rocm| (rocm orelse return false).compute == .gfx942,
                 else => false,
             },
             .triton => switch (platform.target) {

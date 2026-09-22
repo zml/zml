@@ -200,7 +200,15 @@ def _rocm_base_build_files(loaded_packages):
                 "lib/libhiprtc-builtins.so.7",
             ]),
         ]),
-        _rocm_package_name("amdrocm-runtime-dev"): _glob_filegroup("headers", ["include/**"]),
+        _rocm_package_name("amdrocm-runtime-dev"): "\n\n".join([
+            _glob_filegroup("headers", ["include/**"]),
+            packages.cc_library_hdrs_glob(
+                name = "hip_headers",
+                hdrs_glob = ["include/**"],
+                defines = ["__HIP_PLATFORM_AMD__"],
+                includes = ["include"],
+            ),
+        ]),
         _rocm_package_name("amdrocm-solver-host"): "\n\n".join([
             _rocm_dlopen_patchelf(name = "hipsolver", src = "lib/libhipsolver.so.1"),
             packages.filegroup(name = "rocsolver", srcs = ["lib/librocsolver.so.0"]),
@@ -282,6 +290,7 @@ def _rocm_impl(mctx):
             "amdrocm-profiler-base",
             "amdrocm-rccl",
             "amdrocm-runtime",
+            "amdrocm-runtime-dev",
             "amdrocm-solver",
             "amdrocm-sparse",
             "amdrocm-sysdeps",

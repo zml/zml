@@ -5,9 +5,13 @@ const zml = @import("../zml.zig");
 pub const kernels = @import("triton_kernels/mxfp4.zig");
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 10;
+    return switch (platform.capabilities) {
+        .cuda => |cuda| switch ((cuda orelse return false).compute) {
+            .sm100, .sm103 => true,
+            .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm90, .sm101, .sm110, .sm120, .sm121 => false,
+        },
+        .cpu, .rocm, .tpu, .neuron, .oneapi, .metal, .furiosa => false,
+    };
 }
 
 pub fn validateOptions(opts: zml.moe.Options) void {

@@ -10,9 +10,13 @@ test {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major >= 8;
+    return switch (platform.capabilities) {
+        .cuda => |cuda| switch ((cuda orelse return false).compute) {
+            .sm80, .sm86, .sm87, .sm89, .sm90, .sm100, .sm101, .sm103, .sm110, .sm120, .sm121 => true,
+            .sm70, .sm72, .sm75 => false,
+        },
+        else => false,
+    };
 }
 
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
@@ -92,17 +96,11 @@ const Context = struct {
     }
 };
 
-/// Returns the minimum number of multiprocessors and shared memory per block across all devices in the platform.
-/// If there are no devices, returns 0 for both values.
-/// If any device does not have the required attributes, returns 0 for both values.
 fn decodeResources(platform: *const zml.Platform) kernel.DecodeResources {
-    var result: kernel.DecodeResources = .{ .multiprocessors = std.math.maxInt(i64), .shared_bytes = std.math.maxInt(i64) };
-    if (platform.devices.len == 0) return .{ .multiprocessors = 0, .shared_bytes = 0 };
-    for (platform.devices) |device| {
-        const sms = device.pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return .{ .multiprocessors = 0, .shared_bytes = 0 };
-        const shared = device.pjrt_desc.attribute(platform.pjrt_api, "shared_memory_per_block_optin") orelse return .{ .multiprocessors = 0, .shared_bytes = 0 };
-        result.multiprocessors = @min(result.multiprocessors, sms.int64);
-        result.shared_bytes = @min(result.shared_bytes, shared.int64);
-    }
-    return result;
+    const cuda = platform.capabilities.cuda orelse return .{ .multiprocessors = 0, .shared_bytes = 0 };
+    const hardware = cuda.hardware;
+    return .{
+        .multiprocessors = hardware.properties.multiprocessorCount orelse 0,
+        .shared_bytes = hardware.limits.sharedMemoryPerBlockOptin,
+    };
 }

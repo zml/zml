@@ -2,7 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c");
+pub const Capabilities = @import("platforms").Capabilities;
+const cuda = @import("platforms/cuda");
 const pjrt = @import("pjrt");
+const rocm = @import("platforms/rocm");
 const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
@@ -116,6 +119,7 @@ pub const Device = struct {
     platform: *const Platform,
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
+    capabilities: Capabilities,
     addressable_memories: []*const Memory,
     memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
 
@@ -135,10 +139,17 @@ pub const Device = struct {
             .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
         });
 
+        const description = pjrt_device_.getDescription(platform.pjrt_api);
         return .{
             .platform = platform,
             .pjrt_device = pjrt_device_,
-            .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
+            .pjrt_desc = description,
+            .capabilities = queryDeviceCapabilities(
+                platform.target,
+                description.kind(platform.pjrt_api),
+                description.attributes(platform.pjrt_api),
+                @intCast(pjrt_device_.localHardwareId(platform.pjrt_api)),
+            ),
             .addressable_memories = addressable_memories,
             .memory_by_kind = memory_by_kind,
         };
@@ -220,6 +231,135 @@ pub const Device = struct {
     }
 };
 
+fn capabilitiesFromDevices(target: Target, devices: []const Device) Capabilities {
+    var result: ?Capabilities = null;
+    for (devices) |device| {
+        result = if (result) |common| common.merge(device.capabilities) else device.capabilities;
+    }
+    return result orelse .unknown(target);
+}
+
+fn cudaHardwarePropertiesFromAttributes(attributes: []const pjrt.NamedValue, queried: ?Capabilities.Cuda.Hardware.Properties) Capabilities.Cuda.Hardware.Properties {
+    var device = queried orelse Capabilities.Cuda.Hardware.Properties{};
+    for (attributes) |attribute| {
+        const value = switch (attribute.value()) {
+            .int64 => |value| std.math.cast(u64, value) orelse continue,
+            else => continue,
+        };
+        if (value == 0) continue;
+        // PJRT can expose a smaller resource partition than the driver device.
+        // Keep that restriction even when the driver reports additional limits.
+        if (std.mem.eql(u8, attribute.name(), "core_count")) {
+            const count = std.math.cast(u32, value) orelse continue;
+            device.multiprocessorCount = @min(device.multiprocessorCount orelse count, count);
+        } else if (std.mem.eql(u8, attribute.name(), "shared_memory_per_block_optin")) {
+            const bytes = std.math.cast(u32, value) orelse continue;
+            device.sharedMemoryPerBlockOptinLimit = @min(device.sharedMemoryPerBlockOptinLimit orelse bytes, bytes);
+        } else if (std.mem.eql(u8, attribute.name(), "device_memory_bytes_limit")) {
+            device.globalMemoryBytes = @min(device.globalMemoryBytes orelse value, value);
+        }
+    }
+    return device;
+}
+
+fn rocmHardwarePropertiesFromAttributes(attributes: []const pjrt.NamedValue, queried: ?Capabilities.Rocm.Hardware.Properties) Capabilities.Rocm.Hardware.Properties {
+    var properties = queried orelse Capabilities.Rocm.Hardware.Properties{};
+    for (attributes) |attribute| {
+        const value = switch (attribute.value()) {
+            .int64 => |value| std.math.cast(u64, value) orelse continue,
+            else => continue,
+        };
+        // PJRT uses zero for unavailable device-description properties.
+        if (value == 0) continue;
+        if (std.mem.eql(u8, attribute.name(), "core_count")) {
+            const count = std.math.cast(u32, value) orelse continue;
+            properties.multiprocessorCount = @min(properties.multiprocessorCount orelse count, count);
+        } else if (std.mem.eql(u8, attribute.name(), "shared_memory_per_block_optin")) {
+            const bytes = std.math.cast(u32, value) orelse continue;
+            properties.sharedMemoryPerBlockLimit = @min(properties.sharedMemoryPerBlockLimit orelse bytes, bytes);
+        } else if (std.mem.eql(u8, attribute.name(), "device_memory_bytes_limit")) {
+            properties.globalMemoryBytes = @min(properties.globalMemoryBytes orelse value, value);
+        }
+    }
+    return properties;
+}
+
+fn oneapiHardwarePropertiesFromAttributes(attributes: []const pjrt.NamedValue) Capabilities.OneApi.Hardware.Properties {
+    var properties: Capabilities.OneApi.Hardware.Properties = .{};
+    for (attributes) |attribute| {
+        const value = switch (attribute.value()) {
+            .int64 => |value| std.math.cast(u64, value) orelse continue,
+            else => continue,
+        };
+        // PJRT uses zero for unavailable device-description properties.
+        if (value == 0) continue;
+        if (std.mem.eql(u8, attribute.name(), "core_count")) {
+            const count = std.math.cast(u32, value) orelse continue;
+            properties.coreCount = @min(properties.coreCount orelse count, count);
+        } else if (std.mem.eql(u8, attribute.name(), "shared_memory_per_block_optin")) {
+            const bytes = std.math.cast(u32, value) orelse continue;
+            properties.sharedMemoryPerWorkgroupLimit = @min(properties.sharedMemoryPerWorkgroupLimit orelse bytes, bytes);
+        } else if (std.mem.eql(u8, attribute.name(), "device_memory_bytes_limit")) {
+            properties.globalMemoryBytes = @min(properties.globalMemoryBytes orelse value, value);
+        }
+    }
+    return properties;
+}
+
+fn queryDeviceCapabilities(target: Target, device_kind: []const u8, attributes: []const pjrt.NamedValue, local_hardware_id: i32) Capabilities {
+    const missing: Capabilities = .unknown(target);
+    var capability_text: ?[]const u8 = null;
+    var vendor_id: ?u32 = null;
+    var device_id: ?u32 = null;
+    var ip_version: ?u32 = null;
+    for (attributes) |attr| {
+        if (std.mem.eql(u8, attr.name(), "compute_capability")) {
+            capability_text = switch (attr.value()) {
+                .string => |value| value,
+                else => null,
+            };
+        } else if (std.mem.eql(u8, attr.name(), "vendor_id")) {
+            vendor_id = hardwareIdAttribute(attr);
+        } else if (std.mem.eql(u8, attr.name(), "pci_device_id")) {
+            device_id = hardwareIdAttribute(attr);
+        } else if (std.mem.eql(u8, attr.name(), "ip_version")) {
+            ip_version = hardwareIdAttribute(attr);
+        }
+    }
+    return switch (target) {
+        .cuda => .{ .cuda = .init(
+            Capabilities.Cuda.Compute.parse(capability_text orelse return missing) orelse return missing,
+            cudaHardwarePropertiesFromAttributes(attributes, cuda.queryHardwareProperties(local_hardware_id) catch null),
+        ) },
+        .rocm => .{ .rocm = .init(
+            Capabilities.Rocm.Compute.parse(capability_text orelse return missing) orelse return missing,
+            rocmHardwarePropertiesFromAttributes(attributes, rocm.queryHardwareProperties(local_hardware_id) catch null),
+        ) },
+        .oneapi => blk: {
+            if (vendor_id) |vendor| if (vendor != 0x8086) return missing;
+            const compute = compute: {
+                // A reported but unrecognized numeric identifier must not fall back to branding.
+                if (ip_version) |ip| break :compute Capabilities.OneApi.Compute.fromIpVersion(ip) orelse return missing;
+                if (device_id) |id| break :compute Capabilities.OneApi.Compute.fromDeviceId(id) orelse return missing;
+                if (capability_text) |value| {
+                    if (Capabilities.OneApi.Compute.parse(value)) |cc| break :compute cc;
+                    if (!std.ascii.eqlIgnoreCase(value, "unknown") and value.len != 0) return missing;
+                }
+                break :compute Capabilities.OneApi.Compute.parseDeviceKind(device_kind) orelse return missing;
+            };
+            break :blk .{ .oneapi = .init(compute, oneapiHardwarePropertiesFromAttributes(attributes)) };
+        },
+        .cpu, .tpu, .neuron, .metal, .furiosa => missing,
+    };
+}
+
+fn hardwareIdAttribute(attr: pjrt.NamedValue) ?u32 {
+    return switch (attr.value()) {
+        .int64 => |value| std.math.cast(u32, value),
+        else => null,
+    };
+}
+
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
@@ -295,6 +435,8 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     state: State,
     devices: []const Device,
+    /// Resolved once from all devices; kernel selection and tuning use this view.
+    capabilities: Capabilities,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
@@ -342,6 +484,7 @@ pub const Platform = struct {
                 .replicated_mesh = undefined,
                 // set below
                 .devices = undefined,
+                .capabilities = .unknown(target),
                 .memories = undefined,
                 .physical_mesh = undefined,
                 .io_impl = options.io_impl,
@@ -371,6 +514,8 @@ pub const Platform = struct {
             for (memories) |*platform_memory| {
                 platform_memory.populateAddressableByDevices();
             }
+
+            platform.capabilities = capabilitiesFromDevices(target, devices);
 
             platform.physical_mesh = try switch (options.physical_mesh) {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
@@ -838,114 +983,6 @@ pub const CreateOptions = struct {
     }
 };
 
-// TODO(Corendos): Consider moving that in its own file if its size increase too much.
-pub const cuda = struct {
-    pub const ComputeCapability = struct {
-        major: u8,
-        minor: u8,
-
-        pub fn parse(text: []const u8) ?ComputeCapability {
-            var parts = std.mem.splitScalar(u8, text, '.');
-            return .{
-                .major = std.fmt.parseInt(u8, parts.first(), 10) catch return null,
-                .minor = std.fmt.parseInt(u8, parts.next() orelse "0", 10) catch return null,
-            };
-        }
-
-        pub fn eql(self: ComputeCapability, other: ComputeCapability) bool {
-            return self.major == other.major and self.minor == other.minor;
-        }
-
-        pub fn atLeast(self: ComputeCapability, other: ComputeCapability) bool {
-            return self.major > other.major or (self.major == other.major and self.minor >= other.minor);
-        }
-
-        pub fn sm(self: ComputeCapability) u16 {
-            return @as(u16, self.major) * 10 + self.minor;
-        }
-    };
-
-    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
-        if (platform.target != .cuda) return null;
-        const devices = platform.pjrt_client.devices(platform.pjrt_api);
-        if (devices.len == 0) return null;
-
-        const attributes = devices[0].getDescription(platform.pjrt_api).attributes(platform.pjrt_api);
-        return for (attributes) |attr| {
-            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break ComputeCapability.parse(attr.value().string);
-            }
-        } else null;
-    }
-};
-
-pub const rocm = struct {
-    pub const ComputeCapability = enum {
-        /// CDNA1: MI100.
-        gfx908,
-        /// CDNA2: MI200 series.
-        gfx90a,
-        /// CDNA3: MI300 series.
-        gfx942,
-        /// CDNA4: MI350 series.
-        gfx950,
-        /// RDNA2: RX 6000 series.
-        gfx1030,
-        /// RDNA3 (Navi 31): RX 7900 series.
-        gfx1100,
-        /// RDNA3 (Navi 32): RX 7800 and RX 7700 series.
-        gfx1101,
-        /// RDNA3 (Navi 33): RX 7600 series.
-        gfx1102,
-        /// RDNA3 APU: Phoenix.
-        gfx1103,
-        /// RDNA3.5: newer Ryzen AI APUs.
-        gfx1150,
-        /// RDNA4 (Navi 44): RX 9060 family.
-        gfx1200,
-        /// RDNA4 (Navi 48): RX 9070 family.
-        gfx1201,
-
-        pub const Architecture = enum {
-            cdna1,
-            cdna2,
-            cdna3,
-            cdna4,
-            rdna2,
-            rdna3,
-            rdna3_5,
-            rdna4,
-        };
-
-        pub fn architecture(self: ComputeCapability) Architecture {
-            return switch (self) {
-                .gfx908 => .cdna1,
-                .gfx90a => .cdna2,
-                .gfx942 => .cdna3,
-                .gfx950 => .cdna4,
-                .gfx1030 => .rdna2,
-                .gfx1100, .gfx1101, .gfx1102, .gfx1103 => .rdna3,
-                .gfx1150 => .rdna3_5,
-                .gfx1200, .gfx1201 => .rdna4,
-            };
-        }
-    };
-
-    /// Assumes homogeneous devices.
-    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
-        stdx.debug.assert(platform.target == .rocm, "computeCapability expects .rocm platform, got {}", .{platform.target});
-        const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-        const description = device.getDescription(platform.pjrt_api);
-
-        const attributes = description.attributes(platform.pjrt_api);
-        return for (attributes) |attr| {
-            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break std.meta.stringToEnum(ComputeCapability, std.mem.sliceTo(attr.value().string, ':'));
-            }
-        } else null;
-    }
-};
-
 fn dataTypeFromFfiDataType(ffi_dt: pjrt.ffi.DataType) zml.DataType {
     return switch (ffi_dt) {
         .bool => .bool,
@@ -1063,4 +1100,236 @@ test "platform defaultMemoryLayout is boring" {
             },
         });
     }
+}
+
+test "CUDA hardware properties preserve missing values and PJRT resource partitions" {
+    const reported = cudaHardwarePropertiesFromAttributes(&.{
+        .init(.int64, "core_count", 14),
+        .init(.int64, "shared_memory_per_block_optin", 227 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 10 * 1024 * 1024 * 1024),
+    }, null);
+    try std.testing.expectEqual(14, reported.multiprocessorCount);
+    try std.testing.expectEqual(227 * 1024, reported.sharedMemoryPerBlockOptinLimit);
+    try std.testing.expectEqual(null, reported.l2CacheBytes);
+    try std.testing.expectEqual(null, reported.clusterLaunch);
+
+    const measured = cudaHardwarePropertiesFromAttributes(&.{
+        .init(.int64, "core_count", 14),
+        .init(.int64, "shared_memory_per_block_optin", 64 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 10 * 1024 * 1024 * 1024),
+    }, .{
+        .multiprocessorCount = 132,
+        .sharedMemoryPerBlockOptinLimit = 227 * 1024,
+        .globalMemoryBytes = 80 * 1024 * 1024 * 1024,
+        .persistingL2CacheBytes = 0,
+    });
+    try std.testing.expectEqual(14, measured.multiprocessorCount);
+    try std.testing.expectEqual(64 * 1024, measured.sharedMemoryPerBlockOptinLimit);
+    try std.testing.expectEqual(10 * 1024 * 1024 * 1024, measured.globalMemoryBytes);
+    try std.testing.expectEqual(0, measured.persistingL2CacheBytes);
+
+    const missing = cudaHardwarePropertiesFromAttributes(&.{
+        .init(.string, "core_count", "132"),
+        .init(.int64, "core_count", -1),
+        .init(.int64, "core_count", 0),
+        .init(.int64, "shared_memory_per_block_optin", 1 << 40),
+        .init(.int64, "device_memory_bytes_limit", -1),
+    }, null);
+    try std.testing.expectEqualDeep(Capabilities.Cuda.Hardware.Properties{}, missing);
+}
+
+test "ROCm device discovery retains partition capacities and rejects invalid properties" {
+    const reported = queryDeviceCapabilities(.rocm, "", &.{
+        .init(.string, "compute_capability", "gfx950:sramecc+:xnack-"),
+        .init(.int64, "core_count", 32),
+        .init(.int64, "shared_memory_per_block_optin", 64 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 36 * 1024 * 1024 * 1024),
+    }, -1).rocm.?;
+    try std.testing.expectEqual(Capabilities.Rocm.Compute.gfx950, reported.compute);
+    try std.testing.expectEqual(32, reported.hardware.properties.multiprocessorCount);
+    try std.testing.expectEqual(36 * 1024 * 1024 * 1024, reported.hardware.properties.globalMemoryBytes);
+    try std.testing.expectEqual(64 * 1024, reported.hardware.limits.sharedMemoryPerBlock);
+    try std.testing.expectEqual(null, reported.hardware.properties.xccCount);
+    try std.testing.expectEqual(null, reported.hardware.properties.l2CacheBytes);
+
+    const measured = rocmHardwarePropertiesFromAttributes(&.{
+        .init(.int64, "core_count", 32),
+        .init(.int64, "shared_memory_per_block_optin", 64 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 36 * 1024 * 1024 * 1024),
+    }, .{
+        .multiprocessorCount = 256,
+        .sharedMemoryPerBlockLimit = 160 * 1024,
+        .globalMemoryBytes = 288 * 1024 * 1024 * 1024,
+        .l2CacheBytes = 32 * 1024 * 1024,
+        .asyncEngineCount = 0,
+    });
+    try std.testing.expectEqual(32, measured.multiprocessorCount);
+    try std.testing.expectEqual(64 * 1024, measured.sharedMemoryPerBlockLimit);
+    try std.testing.expectEqual(36 * 1024 * 1024 * 1024, measured.globalMemoryBytes);
+    try std.testing.expectEqual(32 * 1024 * 1024, measured.l2CacheBytes);
+    try std.testing.expectEqual(0, measured.asyncEngineCount);
+
+    const missing = rocmHardwarePropertiesFromAttributes(&.{
+        .init(.string, "core_count", "32"),
+        .init(.int64, "core_count", -1),
+        .init(.int64, "core_count", 0),
+        .init(.int64, "core_count", 1 << 40),
+        .init(.int64, "shared_memory_per_block_optin", 1 << 40),
+        .init(.int64, "shared_memory_per_block_optin", 0),
+        .init(.int64, "device_memory_bytes_limit", -1),
+    }, null);
+    try std.testing.expectEqualDeep(Capabilities.Rocm.Hardware.Properties{}, missing);
+    for ([_][]const u8{ "", "unknown", "gfx999" }) |target| {
+        try std.testing.expectEqualDeep(Capabilities.unknown(.rocm), queryDeviceCapabilities(.rocm, "", &.{
+            .init(.string, "compute_capability", target),
+            .init(.int64, "core_count", 32),
+        }, -1));
+    }
+}
+
+test "device capability discovery handles unavailable queries and unexpected PJRT attributes" {
+    // An invalid ordinal exercises driver failure without querying a real device.
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .cuda = .init(.sm103, .{}) }), queryDeviceCapabilities(.cuda, "", &.{
+        .init(.int64, "unrelated", 7),
+        .init(.string, "compute_capability", "10.3"),
+    }, -1));
+    const reported = queryDeviceCapabilities(.cuda, "", &.{
+        .init(.string, "compute_capability", "9.0"),
+        .init(.int64, "core_count", 14),
+        .init(.int64, "shared_memory_per_block_optin", 99 * 1024),
+    }, -1);
+    try std.testing.expectEqual(Capabilities.Cuda.Compute.sm90, reported.cuda.?.compute);
+    try std.testing.expectEqual(14, reported.cuda.?.hardware.properties.multiprocessorCount);
+    try std.testing.expectEqual(99 * 1024, reported.cuda.?.hardware.limits.sharedMemoryPerBlockOptin);
+    try std.testing.expectEqual(null, reported.cuda.?.hardware.properties.l2CacheBytes);
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .rocm = .init(.gfx950, .{}) }), queryDeviceCapabilities(.rocm, "", &.{
+        .init(.string, "compute_capability", "gfx950:sramecc+:xnack-"),
+    }, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.cuda), queryDeviceCapabilities(.cuda, "", &.{}, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.cuda), queryDeviceCapabilities(.cuda, "", &.{.init(.int64, "compute_capability", 100)}, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.cuda), queryDeviceCapabilities(.cuda, "", &.{.init(.string, "compute_capability", "99.0")}, -1));
+    inline for (.{ Target.cpu, Target.tpu, Target.neuron, Target.metal, Target.furiosa }) |target| {
+        try std.testing.expectEqualDeep(Capabilities.unknown(target), queryDeviceCapabilities(target, "", &.{}, -1));
+    }
+}
+
+test "platform capabilities aggregate devices before kernel selection" {
+    const first: Device = .{
+        .platform = undefined,
+        .pjrt_device = undefined,
+        .pjrt_desc = undefined,
+        .capabilities = .{ .cuda = .init(.sm90, .{ .multiprocessorCount = 132 }) },
+        .addressable_memories = &.{},
+        .memory_by_kind = .initFill(null),
+    };
+    var second = first;
+    second.capabilities.cuda = .init(.sm90, .{ .multiprocessorCount = 60, .sharedMemoryPerBlockOptinLimit = 99 * 1024 });
+    const common = capabilitiesFromDevices(.cuda, &.{ first, second });
+    try std.testing.expectEqual(Capabilities.Cuda.Compute.sm90, common.cuda.?.compute);
+    try std.testing.expectEqual(60, common.cuda.?.hardware.properties.multiprocessorCount);
+    try std.testing.expectEqual(99 * 1024, common.cuda.?.hardware.limits.sharedMemoryPerBlockOptin);
+    try std.testing.expectEqualDeep(Capabilities.unknown(.cuda), capabilitiesFromDevices(.cuda, &.{}));
+
+    second.capabilities.cuda = .init(.sm90, .{});
+    const partial = capabilitiesFromDevices(.cuda, &.{ first, second });
+    try std.testing.expectEqual(null, partial.cuda.?.hardware.properties.multiprocessorCount);
+    const defaults: Capabilities.Cuda = .init(.sm90, .{});
+    try std.testing.expectEqualDeep(defaults.hardware.limits, partial.cuda.?.hardware.limits);
+    for ([_]?Capabilities.Cuda.Compute{ null, .sm100 }) |architecture| {
+        second.capabilities = .{ .cuda = if (architecture) |cc| .init(cc, .{}) else null };
+        try std.testing.expectEqualDeep(Capabilities.unknown(.cuda), capabilitiesFromDevices(.cuda, &.{ first, second, first }));
+    }
+}
+
+test "kernel selection handles a missing architecture on a known CUDA backend" {
+    var platform: Platform = .{
+        .arena = undefined,
+        .target = .cuda,
+        .pjrt_api = undefined,
+        .pjrt_client = undefined,
+        .state = State.init(.cuda),
+        .devices = &.{},
+        .capabilities = .unknown(.cuda),
+        .memories = &.{},
+        .physical_mesh = undefined,
+        .replicated_mesh = undefined,
+        .meshes = .empty,
+        .io_impl = .threaded,
+    };
+    const Case = struct {
+        architecture: ?Capabilities.Cuda.Compute,
+        attention: zml.attention.BackendType,
+        moe: zml.moe.Backend,
+    };
+    for ([_]Case{
+        .{ .architecture = null, .attention = .stablehlo, .moe = .triton },
+        .{ .architecture = .sm75, .attention = .stablehlo, .moe = .triton },
+        .{ .architecture = .sm90, .attention = .flash_attention, .moe = .triton },
+        .{ .architecture = .sm100, .attention = .flash_attention, .moe = .cute_mxfp4 },
+    }) |case| {
+        platform.capabilities = .{ .cuda = if (case.architecture) |cc| .init(cc, .{}) else null };
+        try std.testing.expectEqual(case.attention, std.meta.activeTag(zml.attention.Backend.auto(&platform)));
+        try std.testing.expectEqual(case.moe, try zml.moe.Backend.auto(&platform, .mxfp4, .bf16));
+    }
+}
+
+test "oneAPI capabilities use the visible PJRT resources" {
+    const attributes: []const pjrt.NamedValue = comptime &.{
+        .init(.string, "compute_capability", "PVC"),
+        .init(.int64, "core_count", 32),
+        .init(.int64, "shared_memory_per_block_optin", 64 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 16 * 1024 * 1024 * 1024),
+    };
+    const caps = queryDeviceCapabilities(.oneapi, "", attributes, -1).oneapi.?;
+    try std.testing.expectEqual(32, caps.hardware.properties.coreCount);
+    try std.testing.expectEqual(16 * 1024 * 1024 * 1024, caps.hardware.properties.globalMemoryBytes);
+    try std.testing.expectEqual(64 * 1024, caps.hardware.limits.sharedMemoryPerWorkgroup);
+    try std.testing.expectEqual(128 * 1024, caps.hardware.limits.sharedMemoryPerCore);
+    // Invalid values do not become device facts or erase an earlier report.
+    const invalid: []const pjrt.NamedValue = comptime &.{
+        .init(.string, "core_count", "32"),
+        .init(.int64, "core_count", -1),
+        .init(.int64, "core_count", 0),
+        .init(.int64, "core_count", 1 << 40),
+        .init(.int64, "shared_memory_per_block_optin", -1),
+        .init(.int64, "shared_memory_per_block_optin", 0),
+        .init(.int64, "shared_memory_per_block_optin", 1 << 40),
+        .init(.int64, "device_memory_bytes_limit", -1),
+        .init(.int64, "device_memory_bytes_limit", 0),
+    };
+    try std.testing.expectEqualDeep(Capabilities.OneApi.Hardware.Properties{}, oneapiHardwarePropertiesFromAttributes(invalid));
+    try std.testing.expectEqualDeep(caps.hardware.properties, oneapiHardwarePropertiesFromAttributes(attributes ++ invalid));
+    const larger: []const pjrt.NamedValue = comptime &.{
+        .init(.int64, "core_count", 64),
+        .init(.int64, "shared_memory_per_block_optin", 128 * 1024),
+        .init(.int64, "device_memory_bytes_limit", 32 * 1024 * 1024 * 1024),
+    };
+    try std.testing.expectEqualDeep(caps.hardware.properties, oneapiHardwarePropertiesFromAttributes(attributes ++ larger));
+}
+
+test "oneAPI capability discovery prefers hardware identifiers" {
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .oneapi = .init(.lnl, .{}) }), queryDeviceCapabilities(.oneapi, "Intel(R) Arc(TM) Graphics", &.{
+        .init(.string, "compute_capability", "unknown"),
+        .init(.int64, "vendor_id", 0x8086),
+        .init(.int64, "pci_device_id", 0x64a0),
+    }, -1));
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .oneapi = .init(.ptl, .{}) }), queryDeviceCapabilities(.oneapi, "Intel Arc B580", &.{
+        .init(.int64, "ip_version", 0x07800004),
+    }, -1));
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .oneapi = .init(.pvc, .{}) }), queryDeviceCapabilities(.oneapi, "", &.{
+        .init(.string, "compute_capability", "PVC"),
+    }, -1));
+    try std.testing.expectEqualDeep(@as(Capabilities, .{ .oneapi = .init(.bmg, .{}) }), queryDeviceCapabilities(.oneapi, "Intel(R) Arc(TM) B580 Graphics", &.{
+        .init(.string, "compute_capability", "unknown"),
+    }, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.oneapi), queryDeviceCapabilities(.oneapi, "Intel Arc B580", &.{
+        .init(.int64, "ip_version", 0x0500c000),
+    }, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.oneapi), queryDeviceCapabilities(.oneapi, "Intel Arc B580", &.{
+        .init(.int64, "vendor_id", 0x1002),
+    }, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.oneapi), queryDeviceCapabilities(.oneapi, "Intel Arc B580", &.{
+        .init(.string, "compute_capability", "FUTURE"),
+    }, -1));
+    try std.testing.expectEqualDeep(Capabilities.unknown(.oneapi), queryDeviceCapabilities(.oneapi, "Intel(R) Arc(TM) Graphics", &.{}, -1));
 }
