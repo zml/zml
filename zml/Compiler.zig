@@ -785,6 +785,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
+                // Only capture all-reduce and all-gather collectives in HIP graphs; other collective types execute outside command buffers since they are unsupported in HIP graphs.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_collectives_command_buffer_filter", "ALLREDUCE,ALLGATHER", upb_arena);
                 // Add collectives to the default list
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES,CONDITIONAL,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
                 // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
