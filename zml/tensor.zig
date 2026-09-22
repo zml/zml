@@ -178,6 +178,7 @@ pub const Tensor = struct {
                     .attributes = &.{
                         .named(ctx.mlir_ctx, "sharding", attr),
                     },
+                    .location = ctx.location,
                 }).appendTo(currentBlock());
                 break :blk op.result(0);
             },
@@ -194,7 +195,7 @@ pub const Tensor = struct {
                             .named(ctx.mlir_ctx, "mhlo.sharding", attr),
                         },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    ctx.location,
                 ).appendTo(currentBlock());
                 break :blk op.result(0);
             },
@@ -231,7 +232,7 @@ pub const Tensor = struct {
                     .named(ctx.mlir_ctx, "mhlo.frontend_attributes", frontend_attributes),
                 },
             },
-            .unknown(ctx.mlir_ctx),
+            ctx.location,
         ).appendTo(currentBlock());
 
         const res = _result(self._shape, op.result(0));
@@ -423,7 +424,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
-        const op = dialects.stablehlo.abs(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.abs(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         const dt = switch (self.dtype()) {
             .c64 => .f32,
             .c128 => .f64,
@@ -458,7 +459,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(res_shape, op.result(0));
@@ -471,26 +472,26 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
     pub fn countLeadingZeros(self: Tensor) Tensor {
-        const op = dialects.stablehlo.count_leading_zeros(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.count_leading_zeros(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing booleans indicating if each element of the input Tensor is finite.
     pub fn isFinite(self: Tensor) Tensor {
-        const op = dialects.stablehlo.is_finite(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.is_finite(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise number of bits set in the input Tensor.
     pub fn popcnt(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isInteger(), "popcnt expects tensor type to be an integer, got {}", .{self.dtype()});
-        const op = dialects.stablehlo.popcnt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.popcnt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sign of the input Tensor element-wise.
     pub fn sign(self: Tensor) Tensor {
-        const op = dialects.stablehlo.sign(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.sign(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -553,7 +554,7 @@ pub const Tensor = struct {
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
 
-        const op = dialects.stablehlo.cholesky(mlirCtx(), self.value(), lower, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.cholesky(mlirCtx(), self.value(), lower, currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -562,7 +563,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() >= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank >= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, currentLoc()).appendTo(currentBlock());
         return _result(other._shape, op.result(0));
     }
 
@@ -570,7 +571,7 @@ pub const Tensor = struct {
     pub fn roundNearestAfz(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestAfz expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const op = dialects.stablehlo.round_nearest_afz(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.round_nearest_afz(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -578,7 +579,7 @@ pub const Tensor = struct {
     pub fn roundNearestEven(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestEven expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -587,7 +588,7 @@ pub const Tensor = struct {
         stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {f} and {f}", .{ re._shape, im._shape });
         stdx.debug.assert(re.dtype() == .f32 or re.dtype() == .f64, "complex expects tensors type to be f32 or f64, got {}", .{re.dtype()});
 
-        const op = dialects.stablehlo.complex(mlirCtx(), re.value(), im.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.complex(mlirCtx(), re.value(), im.value(), currentLoc()).appendTo(currentBlock());
         const dt: DataType = if (re.dtype() == .f32) .c64 else .c128;
         return _result(re._shape.withDtype(dt), op.result(0));
     }
@@ -607,7 +608,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const op = dialects.stablehlo.real(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.real(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -628,7 +629,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -672,7 +673,7 @@ pub const Tensor = struct {
             },
         };
 
-        const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, currentLoc()).appendTo(currentBlock());
         return _result(sh, op.result(0));
     }
 
@@ -740,7 +741,7 @@ pub const Tensor = struct {
                 self._state.value(),
                 mlirx.Type.rankedTensor(mlirCtx(), self._state.shape()),
                 mlirx.Type.rankedTensor(mlirCtx(), sh),
-                .unknown(mlirCtx()),
+                currentLoc(),
             ).appendTo(currentBlock());
             return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
         }
@@ -864,7 +865,7 @@ pub const Tensor = struct {
             const a = Tensor.constant(DataType.Value.init(sh.dtype(), opts.mean));
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
-            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
+            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, currentLoc()).appendTo(currentBlock());
             return _result(sh, op.result(0));
         }
 
@@ -970,7 +971,7 @@ pub const Tensor = struct {
         stdx.debug.assert(1 <= exponent_bits, "reducePrecision expects 'exponent_bits' to be >= 1, got {}", .{exponent_bits});
         stdx.debug.assert(0 <= mantissa_bits, "reducePrecision expects 'mantissa_bits' to be positive, got {}", .{mantissa_bits});
 
-        const op = dialects.stablehlo.reduce_precision(mlirCtx(), self.value(), exponent_bits, mantissa_bits, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.reduce_precision(mlirCtx(), self.value(), exponent_bits, mantissa_bits, currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1063,7 +1064,7 @@ pub const Tensor = struct {
             other.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
             used_opts,
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(new_shape, op.result(0));
@@ -1239,12 +1240,12 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise floor operation of the input Tensor.
     pub fn floor(self: Tensor) Tensor {
-        return _result(self._shape, dialects.stablehlo.floor(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
+        return _result(self._shape, dialects.stablehlo.floor(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise ceil operation of the input Tensor.
     pub fn ceil(self: Tensor) Tensor {
-        return _result(self._shape, dialects.stablehlo.ceil(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
+        return _result(self._shape, dialects.stablehlo.ceil(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise conversion to another type.
@@ -1254,7 +1255,7 @@ pub const Tensor = struct {
         }
 
         const res_type = mlirx.Type.rankedTensor(mlirCtx(), self.shape().withDtype(to));
-        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
@@ -1381,13 +1382,13 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
-        const round_op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const round_op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, round_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise clamping operation of the input Tensor.
     pub fn clamp(self: Tensor, min_: Tensor, max_: Tensor) Tensor {
-        const op = dialects.stablehlo.clamp(mlirCtx(), min_.value(), self.value(), max_.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.clamp(mlirCtx(), min_.value(), self.value(), max_.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1566,14 +1567,14 @@ pub const Tensor = struct {
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
                 .dot_precision = .fast,
             },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sigmoid function applied to each element of the input Tensor.
     pub fn sigmoid(self: Tensor) Tensor {
-        const op = dialects.stablehlo.logistic(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.logistic(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1871,7 +1872,7 @@ pub const Tensor = struct {
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
             .{ .permutation = toI64(permutation).constSlice() },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
@@ -1902,7 +1903,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
@@ -1918,7 +1919,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
@@ -2070,7 +2071,7 @@ pub const Tensor = struct {
             self.value(),
             new_shape.dims(),
             start_indices[0..rk],
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         const res = _result(new_shape, op.result(0));
@@ -2094,15 +2095,15 @@ pub const Tensor = struct {
             res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable);
         }
 
-        const ctx = mlirCtx();
+        const ctx = Compiler.current();
         const slice_op = dialects.stablehlo.slice(
-            ctx,
+            ctx.mlir_ctx,
             self.value(),
             start_indices[0..self.rank()],
             limit_indices[0..self.rank()],
             strides[0..self.rank()],
-            mlirx.Type.rankedTensor(ctx, res_shape),
-            .unknown(ctx),
+            mlirx.Type.rankedTensor(ctx.mlir_ctx, res_shape),
+            ctx.location,
         ).appendTo(currentBlock());
 
         var res = _result(res_shape, slice_op.result(0));
@@ -2207,7 +2208,7 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer, a, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer, a, currentLoc()).appendTo(currentBlock());
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -2373,55 +2374,55 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
     pub fn negate(self: Tensor) Tensor {
-        const negate_op = dialects.stablehlo.negate(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const negate_op = dialects.stablehlo.negate(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, negate_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise cosine of the input Tensor.
     pub fn cos(self: Tensor) Tensor {
-        const cosine_op = dialects.stablehlo.cosine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const cosine_op = dialects.stablehlo.cosine(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, cosine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise sine of the input Tensor.
     pub fn sin(self: Tensor) Tensor {
-        const sine_op = dialects.stablehlo.sine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const sine_op = dialects.stablehlo.sine(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, sine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential operation of the input Tensor.
     pub fn exp(self: Tensor) Tensor {
-        const op = dialects.stablehlo.exponential(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.exponential(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise logarithm operation of the input Tensor.
     pub fn log(self: Tensor) Tensor {
-        const op = dialects.stablehlo.log(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.log(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise square-root of the input Tensor.
     pub fn sqrt(self: Tensor) Tensor {
-        const sqrt_op = dialects.stablehlo.sqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const sqrt_op = dialects.stablehlo.sqrt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, sqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise reverse square-root of the input Tensor.
     pub fn rsqrt(self: Tensor) Tensor {
-        const rsqrt_op = dialects.stablehlo.rsqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const rsqrt_op = dialects.stablehlo.rsqrt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, rsqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise hyperbolic tangent of the input Tensor.
     pub fn tanh(self: Tensor) Tensor {
-        const tanh_op = dialects.stablehlo.tanh(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const tanh_op = dialects.stablehlo.tanh(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, tanh_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential minus one operation of the input Tensor.
     pub fn exponentialMinusOne(self: Tensor) Tensor {
-        const expm1_op = dialects.stablehlo.exponential_minus_one(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const expm1_op = dialects.stablehlo.exponential_minus_one(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, expm1_op.result(0));
     }
 
@@ -2442,7 +2443,7 @@ pub const Tensor = struct {
             mlirCtx(),
             0,
             mlirx.Type.rankedTensor(mlirCtx(), sh),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         var res = _result(sh, op.result(0));
 
@@ -2495,7 +2496,7 @@ pub const Tensor = struct {
             mlirCtx(),
             a,
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
@@ -2517,7 +2518,7 @@ pub const Tensor = struct {
             mlirCtx(),
             0,
             mlirx.Type.rankedTensor(mlirCtx(), sh),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         var res = _result(sh, iota_op.result(0));
 
@@ -2566,7 +2567,7 @@ pub const Tensor = struct {
             &.{},
             mlirx.Type.fromDType(mlirCtx(), val.dtype()),
             val.asBytes(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(.init(&.{}, val.dtype()), op.result(0));
     }
@@ -2583,9 +2584,9 @@ pub const Tensor = struct {
             null,
             null,
         );
-        const buffer = dialects.stablehlo.createBuffer(ctx.mlir_ctx, buffer_type, .unknown(ctx.mlir_ctx))
+        const buffer = dialects.stablehlo.createBuffer(ctx.mlir_ctx, buffer_type, ctx.location)
             .appendTo(currentBlock());
-        const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), .unknown(ctx.mlir_ctx))
+        const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), ctx.location)
             .appendTo(currentBlock());
         return _result(sh, tensor.result(0));
     }
@@ -2594,7 +2595,7 @@ pub const Tensor = struct {
     pub fn constantTensor(sh: Shape, bytes_: []const u8) Tensor {
         const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
         //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
-        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, .unknown(mlirCtx())).appendTo(currentBlock());
+        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, currentLoc()).appendTo(currentBlock());
         return _result(sh, constant_op.result(0));
     }
 
@@ -2630,7 +2631,7 @@ pub const Tensor = struct {
             return _result(res_shape, self.value());
         }
         const result_type = mlirx.Type.rankedTensor(mlirCtx(), res_shape);
-        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, currentLoc()).appendTo(currentBlock());
         return _result(res_shape, broadcast_op.result(0));
     }
 
@@ -2690,7 +2691,7 @@ pub const Tensor = struct {
             ctx.mlir_ctx,
             &.{self.value()},
             &.{self.value().type_()},
-            .unknown(ctx.mlir_ctx),
+            ctx.location,
         ).appendTo(ctx.currentScope().block);
 
         return _result(self.shape(), op.result(0));
@@ -2700,7 +2701,7 @@ pub const Tensor = struct {
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const tensor_type = mlirx.Type.rankedTensor(mlirCtx(), output_shape);
-        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, currentLoc()).appendTo(currentBlock());
         return _result(output_shape, reshape_value.result(0));
     }
 
@@ -2742,7 +2743,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .unknown(mlirCtx()),
+            currentLoc(),
             .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
@@ -2788,7 +2789,7 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, reverse_op.result(0));
     }
 
@@ -2983,7 +2984,7 @@ pub const Tensor = struct {
                 .index_vector_dim = index_coord_axis,
                 .indices_are_sorted = opts.indices_are_sorted,
             },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, gather_op.result(0));
     }
@@ -3628,7 +3629,7 @@ pub const Tensor = struct {
                         .has_side_effect = false,
                         .backend_config = .{ .original = backend_config },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    ctx.location,
                 ).appendTo(currentBlock());
 
                 var values = Tensor._result(values_shape, op.result(0));
@@ -4005,7 +4006,7 @@ pub const Tensor = struct {
             self.value(),
             update.value(),
             offset_values[0..self.rank()],
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
@@ -4177,7 +4178,7 @@ pub const Tensor = struct {
             other.value(),
             dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
             getComparisonType(mlirCtx(), self.dtype()).getValue(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(self._shape.withDtype(.bool), op.result(0));
@@ -4349,7 +4350,7 @@ pub const Tensor = struct {
             bool_tensor.value(),
             on_true.value(),
             on_false.value(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(on_true._shape, op.result(0));
@@ -4361,7 +4362,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise not logical operation of the input Tensor.
     pub fn not(self: Tensor) Tensor {
-        const op = dialects.stablehlo.not(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.not(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -4605,6 +4606,10 @@ pub const Tensor = struct {
 
     fn mlirCtx() *mlir.Context {
         return Compiler.current().mlir_ctx;
+    }
+
+    fn currentLoc() *const mlir.Location {
+        return Compiler.current().location;
     }
 
     fn currentBlock() *mlir.Block {
