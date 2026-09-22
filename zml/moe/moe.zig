@@ -5,6 +5,7 @@ const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
 pub const triton_mxfp4 = @import("triton_mxfp4.zig");
+pub const cute_mxfp4 = @import("cute_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
@@ -24,6 +25,7 @@ pub const ActivationMode = enum {
 };
 
 pub const Backend = enum {
+    cute_mxfp4,
     triton_mxfp4,
     flashinfer_cutlass,
     triton,
@@ -98,6 +100,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
+            .cute_mxfp4 => cute_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
             .fly => switch (platform.target) {
                 .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
@@ -114,7 +117,7 @@ pub const Backend = enum {
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
-            .triton_mxfp4 => {},
+            .cute_mxfp4, .triton_mxfp4 => {},
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton, .fly => {},
             .mosaic_tpu => {},
@@ -124,6 +127,7 @@ pub const Backend = enum {
 };
 
 pub const Parameters = union(Backend) {
+    cute_mxfp4: cute_mxfp4.Parameters,
     triton_mxfp4: triton_mxfp4.Parameters,
     flashinfer_cutlass: cutlass_flashinfer.Parameters,
     triton: triton.Parameters,
@@ -132,6 +136,7 @@ pub const Parameters = union(Backend) {
     metal: metal.Parameters,
 
     pub const InitOptions = union(Backend) {
+        cute_mxfp4: cute_mxfp4.Parameters.InitOptions,
         triton_mxfp4: triton_mxfp4.Parameters.InitOptions,
         flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
         triton: triton.Parameters.InitOptions,
@@ -141,7 +146,7 @@ pub const Parameters = union(Backend) {
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
-                .triton_mxfp4 => .{ .triton_mxfp4 = .{ .num_experts_per_tok = num_experts_per_tok, .activation = activation } },
+                inline .cute_mxfp4, .triton_mxfp4 => |backend_tag| @unionInit(InitOptions, @tagName(backend_tag), .{ .num_experts_per_tok = num_experts_per_tok, .activation = activation }),
                 .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
                     .num_experts_per_tok = num_experts_per_tok,
                     .activation = switch (activation) {
@@ -180,6 +185,7 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
+            .cute_mxfp4 => |v| .{ .cute_mxfp4 = cute_mxfp4.Parameters.init(v) },
             .triton_mxfp4 => |v| .{ .triton_mxfp4 = triton_mxfp4.Parameters.init(v) },
             .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
             inline .triton, .fly => |v, backend_tag| @unionInit(Parameters, @tagName(backend_tag), fused_experts.Parameters.init(v)),
@@ -216,7 +222,7 @@ pub fn forwardMoe(
             stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
             stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
         },
-        .triton_mxfp4 => {
+        .cute_mxfp4, .triton_mxfp4 => {
             stdx.debug.assert(opts.gate_up_layout == .interleaved, "Triton MXFP4 MoE backends require interleaved gate/up columns", .{});
         },
     }
@@ -232,6 +238,7 @@ pub fn forwardMoe(
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
 
     return switch (parameters) {
+        .cute_mxfp4 => |p| cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
         .triton_mxfp4 => |p| triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
         .flashinfer_cutlass => b: {
             if (comptime !platforms.isEnabled(.cuda)) {

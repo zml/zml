@@ -8,6 +8,11 @@ def repo():
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "098de2a652cf8f00fd70b2df54051c7eccbb855a",
         build_file = Label("//third_party/cute_ir:cute_ir.bazel"),
+        patches = [
+            Label("//third_party/cute_ir:slice_tensor.patch"),
+            Label("//third_party/cute_ir:dynamic_divisibility.patch"),
+        ],
+        patch_args = ["-p1"],
         strip_prefix = "cutlass_compiler",
         # The DSL spells a dynamic leaf it knows to be a multiple of N as
         # `?{div=N}`; the release's cutegen reads only the width.

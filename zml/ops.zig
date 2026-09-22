@@ -1370,6 +1370,7 @@ pub const CuteOps = struct {
     grid: ?[3]i32 = null,
     block: ?[3]i32 = null,
     zeroed_outputs: []const i32 = &.{},
+    scalars: []const i64 = &.{},
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
@@ -1391,7 +1392,7 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
     }
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 6) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 7) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
         .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cute")),
@@ -1408,6 +1409,13 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
         for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
         attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
+    }
+    if (opts.scalars.len > 0) {
+        const allocator = Compiler.current().allocator;
+        const scalar_attrs = allocator.alloc(*const mlir.Attribute, opts.scalars.len) catch @panic("OOM");
+        defer allocator.free(scalar_attrs);
+        for (opts.scalars, scalar_attrs) |value, *attribute| attribute.* = .int(mlir_ctx, .i64, value);
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "scalars", .array(mlir_ctx, scalar_attrs)));
     }
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
 

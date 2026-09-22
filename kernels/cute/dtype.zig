@@ -12,8 +12,10 @@ pub const DType = enum {
     bf16,
     f32,
     f64,
+    f4e2m1fn,
     f8e4m3fn,
     f8e5m2,
+    f8e8m0fnu,
 
     pub fn toMlir(self: DType, ctx: *mlir.Context) *const mlir.Type {
         return switch (self) {
@@ -26,15 +28,17 @@ pub const DType = enum {
             .bf16 => .float(ctx, .bf16),
             .f32 => .float(ctx, .f32),
             .f64 => .float(ctx, .f64),
+            .f4e2m1fn => .float(ctx, .f4e2m1fn),
             .f8e4m3fn => .float(ctx, .f8e4m3fn),
             .f8e5m2 => .float(ctx, .f8e5m2),
+            .f8e8m0fnu => .float(ctx, .f8e8m0fnu),
         };
     }
 };
 
 pub fn isFloatDtype(dt: DType) bool {
     return switch (dt) {
-        .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => true,
+        .f16, .bf16, .f32, .f64, .f4e2m1fn, .f8e4m3fn, .f8e5m2, .f8e8m0fnu => true,
         else => false,
     };
 }
@@ -42,7 +46,8 @@ pub fn isFloatDtype(dt: DType) bool {
 pub fn dtypeBitwidth(dt: DType) usize {
     return switch (dt) {
         .i1 => 1,
-        .i8, .f8e4m3fn, .f8e5m2 => 8,
+        .f4e2m1fn => 4,
+        .i8, .f8e4m3fn, .f8e5m2, .f8e8m0fnu => 8,
         .i16, .f16, .bf16 => 16,
         .i32, .f32 => 32,
         .i64, .f64 => 64,

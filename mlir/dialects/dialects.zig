@@ -10,6 +10,7 @@ pub const ttir = @import("mlir/dialects/ttir");
 pub const affine = @import("affine.zig");
 pub const arith = @import("arith.zig");
 pub const cf = @import("cf.zig");
+pub const cuda = @import("cuda.zig");
 pub const func = @import("func.zig");
 pub const gpu = @import("gpu.zig");
 pub const math = @import("math.zig");

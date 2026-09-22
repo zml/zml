@@ -6,6 +6,7 @@ zig_library(
         "affine.zig",
         "arith.zig",
         "cf.zig",
+        "cuda.zig",
         "func.zig",
         "gpu.zig",
         "math.zig",
