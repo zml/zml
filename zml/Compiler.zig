@@ -414,7 +414,7 @@ pub fn compileInternal(
 
     compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
         error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compiler.module.operation()});
+            compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Failed to canonicalize invalid MLIR");
             @panic("ZML generated invalid mlir. Please open a bug report");
         },
     };
@@ -422,8 +422,12 @@ pub fn compileInternal(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts);
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation().fmt(.{ .debug_info = true })});
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts) catch |err| {
+        compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Pjrt failed to compile the following MLIR");
+        return err;
+    };
+
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
         allocator,
@@ -915,4 +919,56 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
+}
+
+fn handleCompilationError(compiler: *Compiler, io: std.Io, allocator: std.mem.Allocator, opts: Options, err: anyerror, msg: []const u8) void {
+    const module_op = compiler.module.operation().fmt(.{ .debug_info = true, .debug_info_pretty_form = true });
+    const truncated_msg = "...<truncated>";
+    var too_big: bool = true;
+
+    const buffer: []u8 = allocator.alloc(u8, 8192) catch {
+        log.err("{s} ({}):\n{f}", .{ msg, err, module_op });
+        return;
+    };
+    defer allocator.free(buffer);
+
+    var buffer_writer: std.Io.Writer = .fixed(buffer);
+    const module_mlir: []const u8 = module_mlir: {
+        module_op.format(&buffer_writer) catch {
+            @memcpy(buffer[8192 - truncated_msg.len ..], truncated_msg);
+            too_big = true;
+            break :module_mlir buffer;
+        };
+        too_big = false;
+        break :module_mlir buffer_writer.buffered();
+    };
+
+    log.err("{s} ({}):\n{s}", .{ msg, err, module_mlir });
+    if (!too_big) return;
+
+    if (opts.xla_dump_to == null) {
+        log.warn("To see the full .mlir, set `zml.Compiler.Options.xla_dump_to`", .{});
+        return;
+    }
+    const xla_dir = opts.xla_dump_to.?;
+    const dir = std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch dir: {
+        std.Io.Dir.createDirAbsolute(io, xla_dir, .default_dir) catch |e| {
+            log.err("failed to dump mlir to {s}: {}", .{ xla_dir, e });
+            return;
+        };
+        break :dir std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch unreachable;
+    };
+    const filename = std.fmt.allocPrint(allocator, "{s}.mlir", .{opts.program_name}) catch return;
+    const mlir_file = dir.createFile(io, filename, .{ .truncate = true }) catch |e| {
+        log.err("failed to dump mlir to {s}/{s}: {}", .{ xla_dir, filename, e });
+        return;
+    };
+
+    // Reuse the previously allocated buffer
+    var mlir_file_writer = mlir_file.writer(io, buffer);
+    module_op.format(&mlir_file_writer.interface) catch |e| {
+        log.err("Partial mlir dump at: {s}/{s} ({})", .{ xla_dir, filename, e });
+        return;
+    };
+    log.warn("Full .mlir at: {s}/{s}", .{ xla_dir, filename });
 }
