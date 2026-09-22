@@ -370,7 +370,7 @@ pub const Location = opaque {
         fused: *const Fused,
     };
 
-    pub fn parse(location: *const Location) Tagged {
+    pub fn inspect(location: *const Location) Tagged {
         const loc_ptr = location.ptr();
         return if (c.mlirLocationIsAUnknown(loc_ptr))
             .unknown

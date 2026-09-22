@@ -235,14 +235,17 @@ pub fn pushLocation(self: *Compiler, location: std.builtin.SourceLocation, name:
 
 /// see `zml.Compiler.pushLocation`
 pub fn pushLocationFmt(self: *Compiler, location: std.builtin.SourceLocation, comptime fmt: []const u8, args: anytype) void {
-    const callee: *const mlir.Location = .fromSrc(self.mlir_ctx, location);
-    const named_callee = callee.namedFmt(self.mlir_ctx, fmt, args);
-    self.location = .callSite(named_callee, self.location);
+    const name = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+        return self.pushLocation(location, "<truncated>");
+    };
+    defer self.allocator.free(name);
+
+    return self.pushLocation(location, name);
 }
 
 /// Remove last call frame pushed by `zml.Compiler.pushLocation`
 pub fn popLocation(self: *Compiler) void {
-    switch (self.location.parse()) {
+    switch (self.location.inspect()) {
         .named => {
             // We only pushed a named, when there was no parent location
             self.location = self.unknown_location;
