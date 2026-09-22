@@ -284,11 +284,11 @@ pub fn forwardMoe(
                                     .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
                                 const local_topk_ids = local_route_mask.select(
                                     self.topk_ids.sub(expert_start),
-                                    zml.Tensor.scalar(0, .i32),
+                                    zml.Tensor.scalar(-1, .i32),
                                 );
                                 const local_topk_weights = local_route_mask.select(
                                     self.topk_weights,
-                                    zml.Tensor.scalar(0, self.topk_weights.dtype()),
+                                    zml.Tensor.scalar(-1, self.topk_weights.dtype()),
                                 );
 
                                 const local_output = cutlass_flashinfer.fusedExpertsNvfp4(
@@ -386,11 +386,11 @@ pub fn forwardMoe(
                                 .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
                             const local_topk_ids = local_route_mask.select(
                                 self.topk_ids.sub(expert_start),
-                                zml.Tensor.scalar(0, .i32),
+                                zml.Tensor.scalar(-1, .i32),
                             );
                             const local_topk_weights = local_route_mask.select(
                                 self.topk_weights,
-                                zml.Tensor.scalar(0, self.topk_weights.dtype()),
+                                zml.Tensor.scalar(-1, self.topk_weights.dtype()),
                             );
 
                             const local_output = cutlass_flashinfer.fusedExpertsBf16(
