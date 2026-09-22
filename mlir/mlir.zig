@@ -382,10 +382,11 @@ pub const Location = opaque {
             .{ .file_line_col = @ptrCast(location) }
         else if (c.mlirLocationIsAFused(loc_ptr))
             .{ .fused = @ptrCast(location) }
-        else {
-            log.err("unsupported location {f}", .{location});
-            @panic("unsupported location");
-        };
+        else
+            // Theoritically the C++ API has "OpaqueLoc" but it's not part of C bindings,
+            // I think in this case it's fine to fall back to .unknown
+            // https://mlir.llvm.org/docs/Dialects/Builtin/#opaqueloc
+            .unknown;
     }
 
     pub const Named = opaque {
