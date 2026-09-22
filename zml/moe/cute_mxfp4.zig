@@ -42,13 +42,10 @@ pub fn fusedExperts(
     }
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
-    const experts = gate_up.weight.dim(.expert);
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
     const tokens: i64 = @intCast(input.count() / @as(usize, @intCast(hidden)));
-    if (experts != 384 or hidden != 5120 or intermediate != 2304 or
-        parameters.num_experts_per_tok != 6 or !kernels.isSpecialized(tokens))
-    {
+    if (!kernels.isSupported(tokens, hidden, intermediate)) {
         // Shapes without a CuTe specialization run the Triton backend on the
         // same weights, after restoring the linear scale layout.
         var linear_gate_up = gate_up;

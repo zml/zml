@@ -25,8 +25,10 @@ pub const Inputs = struct {
     ids: zml.Tensor,
 };
 
-pub fn isSpecialized(tokens: i64) bool {
-    return tokens >= 1 and tokens <= 16384;
+/// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
+/// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
+pub fn isSupported(tokens: i64, hidden: i64, intermediate: i64) bool {
+    return hidden == 5120 and intermediate == 2304 and tokens >= 1 and tokens <= 16384;
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping
@@ -100,9 +102,9 @@ pub fn packWeightScales(scales: zml.Tensor) zml.Tensor {
     const experts = scales.dim(0);
     const rows = scales.dim(1);
     const groups = scales.dim(2);
-    return scales.reshape(.{ experts, @divExact(rows, 128), 4, 32, @divExact(groups, 4), 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 })
-        .reshape(scales.shape());
+    const packed_scales = scales.reshape(.{ experts, @divExact(rows, 128), 4, 32, @divExact(groups, 4), 4 })
+        .transpose(.{ 0, 1, 4, 3, 2, 5 });
+    return withShapeOf(packed_scales, scales);
 }
 
 /// Inverse of `packWeightScales`: recover the linear `[E, rows, k/32]` layout.
@@ -110,16 +112,23 @@ pub fn unpackWeightScales(scales: zml.Tensor) zml.Tensor {
     const experts = scales.dim(0);
     const rows = scales.dim(1);
     const groups = scales.dim(2);
-    return scales.reshape(.{ experts, @divExact(rows, 128), @divExact(groups, 4), 32, 4, 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 })
-        .reshape(scales.shape());
+    const linear_scales = scales.reshape(.{ experts, @divExact(rows, 128), @divExact(groups, 4), 32, 4, 4 })
+        .transpose(.{ 0, 1, 4, 3, 2, 5 });
+    return withShapeOf(linear_scales, scales);
+}
+
+/// The swizzle only permutes scales within an expert, so the result keeps the
+/// input tags and partitioning. `reshape` alone resets the partitioning, and
+/// expert-parallel callers would then see unsharded scales.
+fn withShapeOf(swizzled: zml.Tensor, scales: zml.Tensor) zml.Tensor {
+    var result = swizzled.reshape(scales.shape());
+    result._shape = scales.shape();
+    return result;
 }
 
 /// `[tokens, hidden]` BF16 output of the MoE layer.
 pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Inputs) zml.Tensor {
-    if (hidden != 5120 or intermediate != 2304 or (experts != 384 and experts != 192) or topk != 6 or !isSpecialized(tokens)) {
-        @panic("unsupported DeepSeek-v4.1 SM100 CuTe specialization");
-    }
+    if (!isSupported(tokens, hidden, intermediate)) @panic("unsupported SM100 CuTe MoE shape");
     const n = tileN(tokens);
     const direct = isDirect(tokens);
     const routing = route(tokens, hidden, intermediate, experts, topk, n, direct, a.ids);
