@@ -2635,26 +2635,26 @@ fn manualComputationInternal(
                 break :candidate;
             }
         }
-        for (0.., input_shapes) |i, shape| {
-            if (!candidate.data.covers(shape)) {
-                log.debug("sharding {s} doesn't cover input {d} {f}", .{ candidate.data.name, i, shape });
-                break :candidate;
-            }
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
-                log.debug("sharding {s} failed to cover input {d} {f}", .{ candidate.data.name, i, shape });
-                break :candidate;
-            };
-        }
-        for (0.., outputs) |i, shape| {
-            if (!candidate.data.covers(shape)) {
-                log.debug("sharding {s} doesn't cover output {d} {f}", .{ candidate.data.name, i, shape });
-                break :candidate;
-            }
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
-                log.debug("sharding {s} failed to cover output {d} {f}", .{ candidate.data.name, i, shape });
-                break :candidate;
-            };
-        }
+        // for (0.., input_shapes) |i, shape| {
+        //     if (!candidate.data.covers(shape)) {
+        //         log.debug("sharding {s} doesn't cover input {d} {f}", .{ candidate.data.name, i, shape });
+        //         break :candidate;
+        //     }
+        //     _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+        //         log.debug("sharding {s} failed to cover input {d} {f}", .{ candidate.data.name, i, shape });
+        //         break :candidate;
+        //     };
+        // }
+        // for (0.., outputs) |i, shape| {
+        //     if (!candidate.data.covers(shape)) {
+        //         log.debug("sharding {s} doesn't cover output {d} {f}", .{ candidate.data.name, i, shape });
+        //         break :candidate;
+        //     }
+        //     _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+        //         log.debug("sharding {s} failed to cover output {d} {f}", .{ candidate.data.name, i, shape });
+        //         break :candidate;
+        //     };
+        // }
         log.debug("sharding {s} is accepted !", .{candidate.data.name});
         try valid_shardings.append(arena, candidate);
     }
@@ -2662,7 +2662,7 @@ fn manualComputationInternal(
     for (partition_axes, manual_axis_names) |axis, *name| name.* = std.mem.span(axis);
     stdx.debug.assert(
         valid_shardings.items.len == 1,
-        "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: {f}; known shardings:\n{f}",
+        "manualComputation expected exactly one sharding for manual_axes={f}, inputs={f}, outputs={f}; found {d} valid shardings: {f}; known shardings: {f}",
         .{ stdx.fmt.strings(manual_axis_names), stdx.fmt.slice(input_shapes), stdx.fmt.slice(outputs), valid_shardings.items.len, stdx.fmt.slice(valid_shardings.items), stdx.fmt.slice(ctx.partitioning.shardings) },
     );
     const computation_sharding = valid_shardings.items[0];

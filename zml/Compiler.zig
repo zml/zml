@@ -302,16 +302,30 @@ pub const ManualAxisConflict = struct {
     resolved_axis: []const u8,
 };
 
-pub fn manualAxisConflict(self: *const Compiler, sharding: Sharding, shape: Shape) ?ManualAxisConflict {
-    for (shape._partitioning.constSlice(), 0..) |spec, dimension| {
-        if (spec != .axis) continue;
-        const resolved_axes = sharding.resolvedAxisNames(&.{spec.axis});
+pub const ManualAxesConflict = struct {
+    logical_axis: Shape.Tag,
+    resolved_axis: []const u8,
+};
+
+pub fn manualAxesConflict(self: *const Compiler, sharding: Sharding, logical_axes: []const Shape.Tag) ?ManualAxesConflict {
+    for (logical_axes) |logical_axis| {
+        const resolved_axes = sharding.resolvedAxisNames(&.{logical_axis});
         for (resolved_axes.constSlice()) |resolved_axis| {
             for (self.manual_axes.constSlice()) |manual_axis| {
                 if (std.mem.eql(u8, resolved_axis, manual_axis)) {
-                    return .{ .dimension = dimension, .logical_axis = spec.axis, .resolved_axis = resolved_axis };
+                    return .{ .logical_axis = logical_axis, .resolved_axis = resolved_axis };
                 }
             }
+        }
+    }
+    return null;
+}
+
+pub fn manualAxisConflict(self: *const Compiler, sharding: Sharding, shape: Shape) ?ManualAxisConflict {
+    for (shape._partitioning.constSlice(), 0..) |spec, dimension| {
+        if (spec != .axis) continue;
+        if (self.manualAxesConflict(sharding, &.{spec.axis})) |conflict| {
+            return .{ .dimension = dimension, .logical_axis = conflict.logical_axis, .resolved_axis = conflict.resolved_axis };
         }
     }
     return null;
