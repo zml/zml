@@ -3,7 +3,9 @@ const stdx = @import("stdx");
 
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
+
 const zml = @import("../zml.zig");
+const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
 const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
@@ -91,8 +93,6 @@ pub const Variant = enum {
     bf16xbf16,
     nvfp4xnvfp4,
 };
-
-const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
 pub const Runners = struct {
     runners: [std.meta.fieldNames(Variant).len][max_num_devices]?DeviceRunner =
@@ -303,23 +303,25 @@ const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCall
     .has_side_effect = false,
 });
 
-fn computeCapability(platform: *const zml.Platform) !u16 {
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return error.UnsupportedPlatform;
-    return switch (cc.sm()) {
-        90, 100, 103, 120 => |sm| sm,
-        else => error.UnsupportedArchitecture,
-    };
-}
-
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
 ) !void {
     if (comptime platforms.isEnabled(.cuda)) {
+        const sm: u16 = switch (platform.compute_capability) {
+            .cuda => |cc| switch (cc) {
+                .sm90, .sm100, .sm103, .sm120 => |sm| @backingInt(sm),
+                .unknown, .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm101, .sm110, .sm121 => return error.UnsupportedArchitecture,
+            },
+            else => return error.UnsupportedPlatform,
+        };
+
         var cuda_state = &platform.state.cuda;
         if (cuda_state.fi_cutlass_moe_runners != null) return;
-        try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
+
+        try fi_cutlass_moe.load(allocator, io, sm);
+
         const runners = try allocator.create(Runners);
         runners.* = .{};
         cuda_state.fi_cutlass_moe_runners = runners;
@@ -339,16 +341,15 @@ pub fn register(platform: *const zml.Platform) !void {
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
-    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
-    _ = computeCapability(platform) catch return false;
-    return true;
+    return platform.state.cuda.fi_cutlass_moe_runners != null;
 }
 
-pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
-    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
-    const compute_capability = computeCapability(platform) catch return false;
-    return switch (compute_capability) {
-        100, 103, 120 => true,
+pub fn isNvfp4Available(platform: *const zml.Platform) bool {
+    return isAvailable(platform) and switch (platform.compute_capability) {
+        .cuda => |cc| switch (cc) {
+            .sm100, .sm103, .sm120 => true,
+            .unknown, .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm90, .sm101, .sm110, .sm121 => false,
+        },
         else => false,
     };
 }

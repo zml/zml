@@ -10,9 +10,13 @@ test {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major >= 8;
+    return switch (platform.compute_capability) {
+        .cuda => |cc| switch (cc) {
+            .sm80, .sm86, .sm87, .sm89, .sm90, .sm100, .sm101, .sm103, .sm110, .sm120, .sm121 => true,
+            .unknown, .sm70, .sm72, .sm75 => false,
+        },
+        else => false,
+    };
 }
 
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {

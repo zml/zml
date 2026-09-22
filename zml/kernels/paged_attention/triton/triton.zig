@@ -36,9 +36,9 @@ pub const Config2D = struct {
     total_q_blocks: usize,
 };
 
-fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
-    const platform = zml.module.CompilationContext.current().platform;
-    return if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(expected) else false;
+fn isCudaComputeCapability(expected: zml.platform.capabilities.Cuda) bool {
+    const platform = zml.Compiler.current().platform;
+    return platform.compute_capability.eql(.{ .cuda = expected });
 }
 
 /// Largest `BLOCK_M * HEAD_SIZE_PADDED` the 2D kernel survives. That product is
@@ -82,7 +82,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
     // Until we test on other platforms, gate the fix to GB300
-    const is_gb300 = isCudaComputeCapability(.{ .major = 10, .minor = 3 });
+    const is_gb300 = isCudaComputeCapability(.sm103);
 
     var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 
