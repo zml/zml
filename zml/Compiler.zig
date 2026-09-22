@@ -24,7 +24,7 @@ const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const Compiler = @This();
-const log = std.log.scoped(.@"zml/compiler");
+const log = std.log.scoped(.@"zml/Compiler");
 
 allocator: std.mem.Allocator,
 io: std.Io,
@@ -41,6 +41,8 @@ mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
 
 scopes: stdx.BoundedArray(Scope, 16) = .empty,
 manual_computation_depth: usize = 0,
+unknown_location: *const mlir.Location,
+location: *const mlir.Location,
 
 channel_id: i64 = 0,
 composite_id: i64 = 0,
@@ -135,7 +137,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
     mlir_ctx.loadAllAvailableDialects();
 
-    const module = mlir.Module.init(.unknown(mlir_ctx));
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+    const module = mlir.Module.init(unknown_location);
     module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
 
     const pass_manager = mlir.PassManager.init(mlir_ctx);
@@ -180,6 +183,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .module = module,
         .platform = platform,
         .partitioning = partitioning,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
     };
 }
 
@@ -218,6 +223,71 @@ pub fn pushBlock(self: *Compiler, block: *mlir.Block) *Scope {
     const scope = Scope.initFromBlock(self, block);
     self.scopes.appendAssumeCapacity(scope);
     return self.currentScope();
+}
+
+/// Change `Compiler.location` by appending a frame to the current stack of locations
+/// Must be followed by a `defer compiler.popLocation`
+pub fn pushLocation(self: *Compiler, location: std.builtin.SourceLocation, name: []const u8) void {
+    var callee: *const mlir.Location = .fromSrc(self.mlir_ctx, location);
+    if (name.len > 0) callee = callee.named(self.mlir_ctx, name);
+    self.location = if (self.location == self.unknown_location) callee else .callSite(callee, self.location);
+}
+
+/// see `zml.Compiler.pushLocation`
+pub fn pushLocationFmt(self: *Compiler, location: std.builtin.SourceLocation, comptime fmt: []const u8, args: anytype) void {
+    const callee: *const mlir.Location = .fromSrc(self.mlir_ctx, location);
+    const named_callee = callee.namedFmt(self.mlir_ctx, fmt, args);
+    self.location = .callSite(named_callee, self.location);
+}
+
+/// Remove last call frame pushed by `zml.Compiler.pushLocation`
+pub fn popLocation(self: *Compiler) void {
+    switch (self.location.parse()) {
+        .named => {
+            // We only pushed a named, when there was no parent location
+            self.location = self.unknown_location;
+            return;
+        },
+        .callsite => |callsite| {
+            self.location = callsite.caller();
+            return;
+        },
+        .unknown, .file_line_col, .fused => @panic("unexpected location metadata"),
+    }
+}
+
+test pushLocation {
+    const mlir_registry = mlirRegistry(std.testing.io);
+    var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
+    mlir_ctx.loadAllAvailableDialects();
+
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+
+    var compiler: Compiler = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .arena = undefined,
+        .mlir_registry = mlir_registry,
+        .mlir_ctx = mlir_ctx,
+        .mlir_pass_manager = undefined,
+        .mlir_known_types = undefined,
+        .module = undefined,
+        .platform = undefined,
+        .partitioning = undefined,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
+    };
+
+    compiler.pushLocation(@src(), "loc1");
+    const loc1 = compiler.location;
+
+    compiler.pushLocation(@src(), "loc2");
+    compiler.popLocation();
+
+    try std.testing.expectEqual(loc1, compiler.location);
+    compiler.popLocation();
+
+    try std.testing.expectEqual(unknown_location, compiler.location);
 }
 
 pub fn nextChannelId(self: *Compiler) i64 {
@@ -353,7 +423,7 @@ pub fn compileInternal(
     defer arena.deinit();
 
     const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts);
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation().fmt(.{ .debug_info = true })});
 
     const exe = try Exe.init(
         allocator,
