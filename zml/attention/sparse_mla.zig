@@ -134,72 +134,33 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
 }
 
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
-    const output_shape = q.shape().set(.hd, opts.value_rank);
-    return zml.ops.manualComputation(
-        (struct {
-            q: zml.Tensor,
-            kv_cache: zml.Tensor,
-            sink: ?zml.Tensor,
-            topk: zml.Tensor,
-            tokens_pos: zml.Tensor,
-            block_table: zml.Tensor,
-            seq_lens: zml.Tensor,
-            query_start_len: zml.Tensor,
-            opts: MlaOptions,
-            options: triton.paged.Options,
+    const block_size = kv_cache.dim(.k_chunk);
 
-            fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                const block_size = self.kv_cache.dim(.k_chunk);
+    const topk_final = triton.paged.topkToPhysical(parameters, topk, tokens_pos, block_size);
+    const active_query_count = parameters.query_start_len
+        .slice(.b, .{ .start = parameters.query_start_len.dim(.b) - 1 })
+        .squeeze(.b);
+    stdx.debug.assert(topk_final.dim(.q) == q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), q.dim(.q) });
 
-                const parameters_: triton.paged.Parameters = .{
-                    .block_table = self.block_table,
-                    .seq_lens = self.seq_lens,
-                    .query_start_len = self.query_start_len,
-                    .options_ = self.options,
-                };
+    const num_heads: usize = @intCast(q.dim(.h));
+    const paged_opts: Options = .{
+        .qk_rank = @intCast(q.dim(.hd)),
+        .value_rank = @intCast(opts.value_rank),
+        .num_heads = num_heads,
+        .block_size = @intCast(kv_cache.dim(.k_chunk)),
+        .rope_rank = @intCast(opts.rope_rank),
+        .scale = opts.scale,
+        .total_q_blocks = @intCast(q.dim(.q)),
+        .num_kv_splits = opts.num_kv_splits,
+        .all_decode = !parameters.options_.is_prefill,
+    };
 
-                const topk_final = triton.paged.topkToPhysical(parameters_, self.topk, self.tokens_pos, block_size);
-                const active_query_count = self.query_start_len
-                    .slice(.b, .{ .start = self.query_start_len.dim(.b) - 1 })
-                    .squeeze(.b);
-                stdx.debug.assert(topk_final.dim(.q) == self.q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), self.q.dim(.q) });
-
-                const num_heads: usize = @intCast(self.q.dim(.h));
-                const paged_opts: Options = .{
-                    .qk_rank = @intCast(self.q.dim(.hd)),
-                    .value_rank = @intCast(self.opts.value_rank),
-                    .num_heads = num_heads,
-                    .block_size = @intCast(self.kv_cache.dim(.k_chunk)),
-                    .rope_rank = @intCast(self.opts.rope_rank),
-                    .scale = self.opts.scale,
-                    .total_q_blocks = @intCast(self.q.dim(.q)),
-                    .num_kv_splits = self.opts.num_kv_splits,
-                    .all_decode = !self.options.is_prefill,
-                };
-
-                return self.opts.backend.call(
-                    self.q,
-                    self.kv_cache,
-                    self.sink,
-                    topk_final,
-                    active_query_count,
-                    paged_opts,
-                );
-            }
-        }).body,
-        .{
-            .q = q,
-            .kv_cache = kv_cache,
-            .sink = sink,
-            .topk = topk,
-            .tokens_pos = tokens_pos,
-            .block_table = parameters.block_table,
-            .seq_lens = parameters.seq_lens,
-            .query_start_len = parameters.query_start_len,
-            .opts = opts,
-            .options = parameters.options_,
-        },
-        output_shape,
-        .{.model},
+    return opts.backend.call(
+        q,
+        kv_cache,
+        sink,
+        topk_final,
+        active_query_count,
+        paged_opts,
     );
 }
