@@ -10,6 +10,9 @@ const platforms_options = @import("platforms/options");
 const rocm = @import("platforms/rocm");
 const tpu = @import("platforms/tpu");
 
+pub const capabilities = @import("capabilities.zig");
+pub const ComputeCapability = capabilities.ComputeCapability;
+
 const platforms = @This();
 
 pub const Platform = enum {

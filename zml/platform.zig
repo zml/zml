@@ -4,6 +4,8 @@ const builtin = @import("builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
 pub const Target = @import("platforms").Platform;
+pub const capabilities = @import("platforms").capabilities;
+pub const ComputeCapability = capabilities.ComputeCapability;
 const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
@@ -117,6 +119,7 @@ pub const Device = struct {
     platform: *const Platform,
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
+    capability: ?ComputeCapability,
     addressable_memories: []*const Memory,
     memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
 
@@ -136,10 +139,12 @@ pub const Device = struct {
             .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
         });
 
+        const description = pjrt_device_.getDescription(platform.pjrt_api);
         return .{
             .platform = platform,
             .pjrt_device = pjrt_device_,
-            .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
+            .pjrt_desc = description,
+            .capability = computeCapabilityFromAttributes(platform.target, description.attributes(platform.pjrt_api)),
             .addressable_memories = addressable_memories,
             .memory_by_kind = memory_by_kind,
         };
@@ -184,6 +189,11 @@ pub const Device = struct {
         return self.pjrt_desc.kind(self.platform.pjrt_api);
     }
 
+    /// Returns null for unknown architectures or platforms not modeled yet.
+    pub fn computeCapability(self: Device) ?ComputeCapability {
+        return self.capability;
+    }
+
     pub fn debugString(self: Device) []const u8 {
         return self.pjrt_desc.debugString(self.platform.pjrt_api);
     }
@@ -207,6 +217,22 @@ pub const Device = struct {
         return self.memory_by_kind.values[@intFromEnum(memory_kind)];
     }
 };
+
+fn computeCapabilityFromAttributes(target: Target, attributes: []const pjrt.NamedValue) ?ComputeCapability {
+    for (attributes) |attr| {
+        if (!std.mem.eql(u8, attr.name(), "compute_capability")) continue;
+        const text = switch (attr.value()) {
+            .string => |value| value,
+            else => return null,
+        };
+        return switch (target) {
+            .cuda => .{ .cuda = capabilities.Cuda.parse(text) orelse return null },
+            .rocm => .{ .rocm = capabilities.Rocm.parse(text) orelse return null },
+            else => null,
+        };
+    }
+    return null;
+}
 
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
@@ -587,6 +613,17 @@ pub const Platform = struct {
         try writer.writeAll(" }");
     }
 
+    /// Returns a capability only when every addressable device agrees.
+    pub fn computeCapability(self: *const Platform) ?ComputeCapability {
+        if (self.devices.len == 0) return null;
+        const first = self.devices[0].computeCapability() orelse return null;
+        for (self.devices[1..]) |device| {
+            const other = device.computeCapability() orelse return null;
+            if (!first.eql(other)) return null;
+        }
+        return first;
+    }
+
     pub fn memoryKind(self: *const Platform, kind: Memory.Kind) []const u8 {
         for (self.memories) |mem| {
             if (mem.isOfKind(kind)) {
@@ -815,7 +852,7 @@ pub const cuda = struct {
         major: u8,
         minor: u8,
 
-        pub fn parse(text: []const u8) ?ComputeCapability {
+        pub fn parse(text: []const u8) ?cuda.ComputeCapability {
             var parts = std.mem.splitScalar(u8, text, '.');
             return .{
                 .major = std.fmt.parseInt(u8, parts.first(), 10) catch return null,
@@ -823,20 +860,20 @@ pub const cuda = struct {
             };
         }
 
-        pub fn eql(self: ComputeCapability, other: ComputeCapability) bool {
+        pub fn eql(self: cuda.ComputeCapability, other: cuda.ComputeCapability) bool {
             return self.major == other.major and self.minor == other.minor;
         }
 
-        pub fn atLeast(self: ComputeCapability, other: ComputeCapability) bool {
+        pub fn atLeast(self: cuda.ComputeCapability, other: cuda.ComputeCapability) bool {
             return self.major > other.major or (self.major == other.major and self.minor >= other.minor);
         }
 
-        pub fn sm(self: ComputeCapability) u16 {
+        pub fn sm(self: cuda.ComputeCapability) u16 {
             return @as(u16, self.major) * 10 + self.minor;
         }
     };
 
-    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+    pub fn computeCapability(platform: *const zml.Platform) ?cuda.ComputeCapability {
         if (platform.target != .cuda) return null;
         const devices = platform.pjrt_client.devices(platform.pjrt_api);
         if (devices.len == 0) return null;
@@ -844,66 +881,17 @@ pub const cuda = struct {
         const attributes = devices[0].getDescription(platform.pjrt_api).attributes(platform.pjrt_api);
         return for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break ComputeCapability.parse(attr.value().string);
+                break cuda.ComputeCapability.parse(attr.value().string);
             }
         } else null;
     }
 };
 
 pub const rocm = struct {
-    pub const ComputeCapability = enum {
-        /// CDNA1: MI100.
-        gfx908,
-        /// CDNA2: MI200 series.
-        gfx90a,
-        /// CDNA3: MI300 series.
-        gfx942,
-        /// CDNA4: MI350 series.
-        gfx950,
-        /// RDNA2: RX 6000 series.
-        gfx1030,
-        /// RDNA3 (Navi 31): RX 7900 series.
-        gfx1100,
-        /// RDNA3 (Navi 32): RX 7800 and RX 7700 series.
-        gfx1101,
-        /// RDNA3 (Navi 33): RX 7600 series.
-        gfx1102,
-        /// RDNA3 APU: Phoenix.
-        gfx1103,
-        /// RDNA3.5: newer Ryzen AI APUs.
-        gfx1150,
-        /// RDNA4 (Navi 44): RX 9060 family.
-        gfx1200,
-        /// RDNA4 (Navi 48): RX 9070 family.
-        gfx1201,
-
-        pub const Architecture = enum {
-            cdna1,
-            cdna2,
-            cdna3,
-            cdna4,
-            rdna2,
-            rdna3,
-            rdna3_5,
-            rdna4,
-        };
-
-        pub fn architecture(self: ComputeCapability) Architecture {
-            return switch (self) {
-                .gfx908 => .cdna1,
-                .gfx90a => .cdna2,
-                .gfx942 => .cdna3,
-                .gfx950 => .cdna4,
-                .gfx1030 => .rdna2,
-                .gfx1100, .gfx1101, .gfx1102, .gfx1103 => .rdna3,
-                .gfx1150 => .rdna3_5,
-                .gfx1200, .gfx1201 => .rdna4,
-            };
-        }
-    };
+    pub const ComputeCapability = capabilities.Rocm;
 
     /// Assumes homogeneous devices.
-    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+    pub fn computeCapability(platform: *const zml.Platform) ?rocm.ComputeCapability {
         stdx.debug.assert(platform.target == .rocm, "computeCapability expects .rocm platform, got {}", .{platform.target});
         const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
         const description = device.getDescription(platform.pjrt_api);
@@ -911,7 +899,7 @@ pub const rocm = struct {
         const attributes = description.attributes(platform.pjrt_api);
         return for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break std.meta.stringToEnum(ComputeCapability, std.mem.sliceTo(attr.value().string, ':'));
+                break std.meta.stringToEnum(rocm.ComputeCapability, std.mem.sliceTo(attr.value().string, ':'));
             }
         } else null;
     }
@@ -1029,4 +1017,42 @@ test "platform defaultMemoryLayout is boring" {
             },
         });
     }
+}
+
+test "compute capability discovery handles missing and unexpected PJRT attributes" {
+    try std.testing.expectEqualDeep(@as(?ComputeCapability, .{ .cuda = .sm103 }), computeCapabilityFromAttributes(.cuda, &.{
+        .init(.int64, "unrelated", 7),
+        .init(.string, "compute_capability", "10.3"),
+    }));
+    try std.testing.expectEqualDeep(@as(?ComputeCapability, .{ .rocm = .gfx950 }), computeCapabilityFromAttributes(.rocm, &.{
+        .init(.string, "compute_capability", "gfx950:sramecc+:xnack-"),
+    }));
+    try std.testing.expectEqual(null, computeCapabilityFromAttributes(.cuda, &.{}));
+    try std.testing.expectEqual(null, computeCapabilityFromAttributes(.cuda, &.{.init(.int64, "compute_capability", 100)}));
+    try std.testing.expectEqual(null, computeCapabilityFromAttributes(.cuda, &.{.init(.string, "compute_capability", "99.0")}));
+    inline for (.{ Target.cpu, Target.tpu, Target.neuron, Target.oneapi, Target.metal }) |target| {
+        try std.testing.expectEqual(null, computeCapabilityFromAttributes(target, &.{}));
+    }
+}
+
+test "platform compute capability requires all addressable devices to agree" {
+    // Only cached capabilities are read; no PJRT client is needed.
+    var devices: [2]Device = undefined;
+    devices[0].capability = .{ .cuda = .sm100 };
+    devices[1].capability = .{ .cuda = .sm100 };
+    var platform: Platform = undefined;
+    platform.devices = &devices;
+    try std.testing.expectEqualDeep(devices[0].capability, platform.computeCapability());
+    devices[1].capability = .{ .cuda = .sm120 };
+    try std.testing.expectEqual(null, platform.computeCapability());
+    devices[1].capability = .{ .rocm = .gfx950 };
+    try std.testing.expectEqual(null, platform.computeCapability());
+    devices[1].capability = null;
+    try std.testing.expectEqual(null, platform.computeCapability());
+    std.mem.swap(?ComputeCapability, &devices[0].capability, &devices[1].capability);
+    try std.testing.expectEqual(null, platform.computeCapability());
+    devices[1].capability = null;
+    try std.testing.expectEqual(null, platform.computeCapability());
+    platform.devices = &.{};
+    try std.testing.expectEqual(null, platform.computeCapability());
 }

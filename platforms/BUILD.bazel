@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 load("//bazel:zig_options.bzl", "zig_option", "zig_options")
 
 PLATFORMS = {
@@ -64,6 +64,7 @@ config_setting(
 
 zig_library(
     name = "platforms",
+    srcs = ["capabilities.zig"],
     main = "platforms.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
@@ -143,4 +144,10 @@ platform(
     },
     parents = ["@platforms//host"],
     visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "capabilities_test",
+    srcs = ["platforms.zig"],
+    main = "capabilities.zig",
 )
