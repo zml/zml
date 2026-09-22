@@ -476,6 +476,308 @@ pub const Tokenizer = struct {
     };
 };
 
+pub const Normalizer = struct {
+    pub const Kind = union(enum) {
+        /// Unicode Normalization Form C.
+        NFC,
+        /// Unicode Normalization Form D.
+        NFD,
+        /// Unicode Normalization Form KD.
+        NFKD,
+        /// Removes Unicode combining marks.
+        /// filters out characters in the Unicode Mark category (Mn, Mc, Me).
+        StripAccents,
+        /// Converts text to lowercase.
+        Lowercase,
+        /// Substitutes all occurrences of a literal pattern with the specified content.
+        Replace: struct {
+            kind: enum {
+                regex,
+                exact,
+            },
+            pattern: []const u8,
+            content: []const u8,
+        },
+        /// Removes leading and/or trailing whitespace.
+        Strip: enum(u8) {
+            left = 0b10,
+            right = 0b01,
+            both = 0b11,
+        },
+    };
+
+    sequence: *c.iree_tokenizer_normalizer_t,
+    sequence_size: usize,
+
+    // Supported normalizer types as of `4d4e97d00f099a21f38eeff26f82a6d9e3643a11`:
+    //   - Sequence: Chains multiple normalizers in order
+    //   - Lowercase: Unicode case folding
+    //   - Strip: Leading/trailing whitespace removal
+    //   - Prepend: Prefix string insertion
+    //   - StripAccents: Removes combining marks (without NFD)
+    //   - BertNormalizer: Combined BERT normalization pipeline
+    pub fn fromHuggingFaceJson(json: []const u8) !Normalizer {
+        var normalizer: ?*c.iree_tokenizer_normalizer_t = null;
+        errdefer if (normalizer) |ptr| c.iree_tokenizer_normalizer_free(ptr);
+
+        try checkOk(c.iree_tokenizer_huggingface_parse_normalizer(.{ .data = json.ptr, .size = json.len }, c.iree_allocator_system(), &normalizer));
+        if (normalizer == null) return error.NormalizerAllocationFailed;
+
+        const sequence_size: usize = @intCast(c.iree_tokenizer_normalizer_state_size(normalizer.?));
+
+        return .{
+            .sequence = normalizer.?,
+            .sequence_size = sequence_size,
+        };
+    }
+
+    fn createNormalizer(normalizer_kind: Kind) !?*c.iree_tokenizer_normalizer_t {
+        var norm: ?*c.iree_tokenizer_normalizer_t = null;
+
+        const iree_allocator = c.iree_allocator_system();
+
+        const status = switch (normalizer_kind) {
+            .NFC => c.iree_tokenizer_normalizer_nfc_allocate(iree_allocator, &norm),
+            .NFD => c.iree_tokenizer_normalizer_nfd_allocate(iree_allocator, &norm),
+            .NFKD => c.iree_tokenizer_normalizer_nfkd_allocate(iree_allocator, &norm),
+            .StripAccents => c.iree_tokenizer_normalizer_strip_accents_allocate(iree_allocator, &norm),
+            .Lowercase => c.iree_tokenizer_normalizer_lowercase_allocate(iree_allocator, &norm),
+            .Replace => |rule| switch (rule.kind) {
+                .regex => c.iree_tokenizer_normalizer_regex_replace_allocate(
+                    .{ .data = rule.pattern.ptr, .size = rule.pattern.len },
+                    .{ .data = rule.content.ptr, .size = rule.content.len },
+                    iree_allocator,
+                    &norm,
+                ),
+                .exact => c.iree_tokenizer_normalizer_replace_allocate(
+                    .{ .data = rule.pattern.ptr, .size = rule.pattern.len },
+                    .{ .data = rule.content.ptr, .size = rule.content.len },
+                    iree_allocator,
+                    &norm,
+                ),
+            },
+            .Strip => |direction| b: {
+                const strip_left = @intFromEnum(direction) & 0b10 != 0;
+                const strip_right = @intFromEnum(direction) & 0b01 != 0;
+                break :b c.iree_tokenizer_normalizer_strip_allocate(strip_left, strip_right, iree_allocator, &norm);
+            },
+        };
+
+        try checkOk(status);
+        if (norm == null) return error.NormalizerAllocationFailed;
+        return norm;
+    }
+
+    fn init(allocator: std.mem.Allocator, sequence: []const Kind) !Normalizer {
+        if (sequence.len < 0) return error.EmptySequence;
+
+        if (sequence.len == 1) {
+            // IREE requires a sequence of at least two normalizer.
+            const norm = try createNormalizer(sequence[0]) orelse unreachable;
+            const sequence_size: usize = @intCast(c.iree_tokenizer_normalizer_state_size(norm));
+
+            return .{
+                .sequence = norm,
+                .sequence_size = sequence_size,
+            };
+        }
+
+        var initialized: usize = 0;
+        const normalizers: []*c.iree_tokenizer_normalizer_t = try allocator.alloc(*c.iree_tokenizer_normalizer_t, sequence.len);
+        defer allocator.free(normalizers);
+        errdefer for (0..initialized) |i| c.iree_tokenizer_normalizer_free(normalizers[i]);
+
+        for (sequence, 0..) |normalizer, i| {
+            normalizers[i] = try createNormalizer(normalizer) orelse unreachable;
+            initialized += 1;
+        }
+
+        var normalizer_sequence: ?*c.iree_tokenizer_normalizer_t = null;
+        try checkOk(c.iree_tokenizer_normalizer_sequence_allocate(normalizers.ptr, normalizers.len, c.iree_allocator_system(), &normalizer_sequence));
+        initialized = 0;
+        if (normalizer_sequence == null) return error.NormalizerAllocationFailed;
+
+        const sequence_size: usize = @intCast(c.iree_tokenizer_normalizer_state_size(normalizer_sequence.?));
+        if (sequence_size == 0) return error.NormalizerAllocationFailed;
+
+        return .{
+            .sequence = normalizer_sequence.?,
+            .sequence_size = sequence_size,
+        };
+    }
+
+    pub fn deinit(self: *Normalizer) void {
+        c.iree_tokenizer_normalizer_free(self.sequence);
+    }
+
+    pub fn normalize(self: *Normalizer, allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+        const storage: []align(16) u8 = try allocator.alignedAlloc(u8, .@"16", self.sequence_size);
+        defer allocator.free(storage);
+
+        var state: ?*c.iree_tokenizer_normalizer_state_t = null;
+        defer if (state) |ptr| c.iree_tokenizer_normalizer_state_deinitialize(ptr);
+
+        try checkOk(c.iree_tokenizer_normalizer_state_initialize(self.sequence, storage.ptr, &state));
+        if (state == null) return error.NormalizationFailed;
+
+        var buffer: [2048]u8 = undefined;
+        var remaining = text;
+
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+
+        while (remaining.len > 0) {
+            var written: usize = 0;
+            var consumed: usize = 0;
+
+            try checkOk(c.iree_tokenizer_normalizer_state_process(
+                state.?,
+                .{ .data = remaining.ptr, .size = remaining.len },
+                .{ .data = &buffer, .size = buffer.len },
+                c.IREE_TOKENIZER_NORMALIZER_FLAG_SEGMENT_END,
+                &consumed,
+                &written,
+            ));
+
+            if (consumed == 0 and written == 0) return error.NormalizationFailed;
+
+            remaining = remaining[consumed..];
+            try writer.writer.writeAll(buffer[0..written]);
+        }
+
+        var is_pending = true;
+        while (is_pending) {
+            var written: usize = 0;
+
+            try checkOk(c.iree_tokenizer_normalizer_state_finalize(state.?, .{ .data = &buffer, .size = buffer.len }, &written));
+            is_pending = c.iree_tokenizer_normalizer_state_has_pending(state.?);
+
+            try writer.writer.writeAll(buffer[0..written]);
+
+            if (written == 0 and is_pending) return error.NormalizationFailed;
+        }
+
+        return writer.toOwnedSlice();
+    }
+};
+
+test "normalizer from Hugging Face" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "type": "Sequence",
+        \\  "normalizers": [
+        \\    {"type":"NFKD"},
+        \\    {"type":"StripAccents"},
+        \\    {"type":"Lowercase"},
+        \\    {"type":"Replace","pattern":{"Regex":"[ \\t\\r\\n]+"},"content":" "},
+        \\    {"type":"Replace","pattern":{"Regex":"^ $"},"content":"\ue000"},
+        \\    {"type":"Strip","strip_left":true,"strip_right":true},
+        \\    {"type":"Replace","pattern":{"String":"\ue000"},"content":" "}
+        \\  ]
+        \\}
+    ;
+
+    // var normalizer = try tokenizer.normalizer(@constCast(steps[0..]));
+    var normalizer = try Normalizer.fromHuggingFaceJson(json);
+    defer normalizer.deinit();
+
+    const res = try normalizer.normalize(allocator, "      hello");
+    defer allocator.free(res);
+
+    try std.testing.expectEqualSlices(u8, "hello", res);
+}
+
+test "normalizer sequence" {
+    const allocator = std.testing.allocator;
+
+    var normalizer = try Normalizer.init(allocator, &.{.{ .Strip = .both }});
+    defer normalizer.deinit();
+
+    const res = try normalizer.normalize(allocator, "hello ");
+    defer allocator.free(res);
+
+    try std.testing.expectEqualSlices(u8, "hello", res);
+}
+
+test "normalizer preserves whitespace across output and sequence boundaries" {
+    const allocator = std.testing.allocator;
+    for ([_][]const Normalizer.Kind{
+        &.{.{ .Strip = .both }},
+        &.{ .Lowercase, .{ .Strip = .both } },
+        &.{ .Lowercase, .{ .Strip = .both }, .NFC },
+    }) |steps| {
+        var normalizer = try Normalizer.init(allocator, steps);
+        defer normalizer.deinit();
+        for ([_]usize{ 63, 64, 2047, 2048, 4096 }) |prefix_len| {
+            const input = try allocator.alloc(u8, prefix_len + 4);
+            defer allocator.free(input);
+            @memset(input[0..prefix_len], 'a');
+            @memcpy(input[prefix_len..], " b  ");
+            const output = try normalizer.normalize(allocator, input);
+            defer allocator.free(output);
+            try std.testing.expectEqualSlices(u8, input[0 .. prefix_len + 2], output);
+        }
+    }
+}
+
+test "normalizer sequence preserves Unicode across tiles" {
+    const allocator = std.testing.allocator;
+    var normalizer = try Normalizer.fromHuggingFaceJson(
+        \\{"type":"Sequence","normalizers":[{"type":"Lowercase"},{"type":"Strip","strip_left":true,"strip_right":true}]}
+    );
+    defer normalizer.deinit();
+    for ([_][]const u8{ "é", "€", "😀" }) |codepoint| {
+        for (61..65) |prefix_len| {
+            const input = try allocator.alloc(u8, prefix_len + codepoint.len + 1);
+            defer allocator.free(input);
+            @memset(input[0..prefix_len], 'a');
+            @memcpy(input[prefix_len..][0..codepoint.len], codepoint);
+            input[input.len - 1] = 'b';
+            const output = try normalizer.normalize(allocator, input);
+            defer allocator.free(output);
+            try std.testing.expectEqualSlices(u8, input, output);
+        }
+    }
+}
+
+test "normalizer sequence preserves composition across tiles" {
+    const allocator = std.testing.allocator;
+    var normalizer = try Normalizer.init(allocator, &.{ .NFC, .Lowercase });
+    defer normalizer.deinit();
+    const input = "a" ** 63 ++ "e\u{301}b";
+    const output = try normalizer.normalize(allocator, input);
+    defer allocator.free(output);
+    try std.testing.expectEqualSlices(u8, "a" ** 63 ++ "éb", output);
+}
+
+test "normalizer sequence allocation failure retains child ownership" {
+    const FailAllocator = struct {
+        fn control(_: ?*anyopaque, _: c.iree_allocator_command_t, _: ?*const anyopaque, _: [*c]?*anyopaque) callconv(.c) c.iree_status_t {
+            return @ptrFromInt(c.IREE_STATUS_RESOURCE_EXHAUSTED);
+        }
+    };
+    // Include a nested sequence: failure must preserve its shell and children.
+    var nested = try Normalizer.init(std.testing.allocator, &.{ .NFC, .Lowercase });
+    defer nested.deinit();
+    var strip = try Normalizer.init(std.testing.allocator, &.{.{ .Strip = .both }});
+    defer strip.deinit();
+    const children = [_]*c.iree_tokenizer_normalizer_t{ nested.sequence, strip.sequence };
+    var sequence: ?*c.iree_tokenizer_normalizer_t = null;
+    const status = c.iree_tokenizer_normalizer_sequence_allocate(&children, children.len, .{
+        .self = null,
+        .ctl = FailAllocator.control,
+    }, &sequence);
+    defer c.iree_status_free(status);
+    try std.testing.expect(status != null);
+    try std.testing.expectEqual(@as(u32, c.IREE_STATUS_RESOURCE_EXHAUSTED), statusCode(status));
+    try std.testing.expect(sequence == null);
+    const output = try nested.normalize(std.testing.allocator, "HELLO");
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("hello", output);
+}
+
 fn tokenOutputWriter(allocator: std.mem.Allocator) std.Io.Writer.Allocating {
     return std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
 }
