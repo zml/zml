@@ -139,6 +139,15 @@ pub const Tokenizer = struct {
         return Normalizer.fromHuggingFaceJson(json);
     }
 
+    /// Raw vocabulary spelling, borrowed until tokenizer deinit.
+    pub fn tokenText(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        const vocab = c.iree_tokenizer_vocab(self.inner) orelse return null;
+        if (token_id > std.math.maxInt(i32)) return null;
+        const text = c.iree_tokenizer_vocab_token_text(vocab, @intCast(token_id));
+        if (text.data == null) return null;
+        return text.data[0..text.size];
+    }
+
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         const vocab = c.iree_tokenizer_vocab(self.inner);
         if (vocab == null) return null;

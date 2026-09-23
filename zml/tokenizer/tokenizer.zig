@@ -178,6 +178,15 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
+    /// Raw vocabulary spelling, borrowed until tokenizer deinit.
+    /// Returns null for unknown IDs or backends without raw vocabulary access.
+    pub fn tokenText(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        return switch (self.*) {
+            .iree => |*backend| backend.tokenText(token_id),
+            else => null,
+        };
+    }
+
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         return switch (self.*) {
             inline else => |v| v.tokenId(token),
@@ -187,4 +196,18 @@ pub const Tokenizer = union(Tokenizers) {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "tokenText preserves raw vocabulary spelling and rejects unknown IDs" {
+    const json =
+        \\{ "model": { "type": "BPE", "vocab": { "hello": 0, "Ã": 1, "Â": 2 }, "merges": [] },
+        \\  "decoder": { "type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false } }
+    ;
+    var tokenizer = try Tokenizer.fromBytes(std.testing.allocator, json);
+    defer tokenizer.deinit();
+    try std.testing.expectEqualStrings("hello", tokenizer.tokenText(0).?);
+    try std.testing.expectEqualStrings("Ã", tokenizer.tokenText(1).?);
+    try std.testing.expectEqualStrings("Â", tokenizer.tokenText(2).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), tokenizer.tokenText(3));
+    try std.testing.expectEqual(@as(?[]const u8, null), tokenizer.tokenText(std.math.maxInt(u32)));
 }
