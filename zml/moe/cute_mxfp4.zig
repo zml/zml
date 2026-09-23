@@ -9,7 +9,6 @@ test {
 
 pub const Parameters = triton_mxfp4.Parameters;
 
-
 pub const packWeightScales = kernels.packWeightScales;
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
