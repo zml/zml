@@ -601,6 +601,9 @@ pub const Normalizer = struct {
         var normalizer_sequence: ?*c.iree_tokenizer_normalizer_t = null;
         // IREE takes ownership of all the normalizers.
         try checkOk(c.iree_tokenizer_normalizer_sequence_allocate(normalizers.items.ptr, normalizers.items.len, c.iree_allocator_system(), &normalizer_sequence));
+        errdefer c.iree_tokenizer_normalizer_free(normalizer_sequence);
+        normalizers.clearRetainingCapacity();
+
         if (normalizer_sequence == null) return error.NormalizerAllocationFailed;
 
         const sequence_size: usize = @intCast(c.iree_tokenizer_normalizer_state_size(normalizer_sequence.?));
