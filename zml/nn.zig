@@ -66,7 +66,7 @@ pub const Linear = struct {
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
-        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag);
+        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
@@ -129,6 +129,7 @@ pub fn scaledDot(
     rhs_scale: Tensor,
     out_dtype: DataType,
     args: anytype,
+    opts: ScaledDotOpts,
 ) Tensor {
     // A narrow output would be an unscaled cast of the F32 accumulator
     stdx.debug.assert(
@@ -201,10 +202,23 @@ pub fn scaledDot(
             .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
         }),
     });
+    const attributes = [_]mlir.NamedAttribute{
+        .named(mlir_ctx, "dimension_numbers", dnums),
+        .named(mlir_ctx, "rhs_scale_swizzled", .boolean(mlir_ctx, true)),
+    };
+    if (opts.rhs_scale_swizzled) {
+        stdx.debug.assert(rhs.rank() == 2 and rhs_scale.rank() == 2 and rhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled rhs scale needs a [n, k] rhs, got {f}", .{rhs});
+    }
     return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
-        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+        .composite_attributes = if (opts.rhs_scale_swizzled) &attributes else attributes[0..1],
     })[0];
 }
+
+pub const ScaledDotOpts = struct {
+    /// The rhs scale's `[n, k / block]` grid is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
+    // TODO: fine for now, but we should find a better way to express how a scale is laid out.
+    rhs_scale_swizzled: bool = false,
+};
 
 test "block128 scaled dot layouts" {
     const allocator = std.testing.allocator;
@@ -235,9 +249,9 @@ test "block128 scaled dot layouts" {
                 .linear = linear.forward(x, .bf16),
                 .linear_expected = dequantize(input.values, input.scales).dot(dequantize(weight, scales), .k),
                 .actual = if (prequantized)
-                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .bf16, .k)
+                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .bf16, .k, .{})
                 else
-                    scaledDot(x, weight, null, scales, .bf16, .k),
+                    scaledDot(x, weight, null, scales, .bf16, .k, .{}),
                 .expected = (if (prequantized) dequantize(input.values, input.scales.convert(scales.dtype())) else x)
                     .dot(dequantize(weight, scales), .k),
             };
