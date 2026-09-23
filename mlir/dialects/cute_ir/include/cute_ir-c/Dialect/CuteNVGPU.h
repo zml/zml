@@ -3,6 +3,7 @@
 #ifndef CUTE_IR_C_DIALECT_CUTENVGPU_H
 #define CUTE_IR_C_DIALECT_CUTENVGPU_H
 
+#include "cute_ir-c/Dialect/CuteNVGPUAttributes.h"
 #include "cute_ir-c/Dialect/CuteNVGPUTypes.h"
 #include "mlir-c/IR.h"
 

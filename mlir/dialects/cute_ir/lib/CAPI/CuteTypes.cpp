@@ -1,9 +1,25 @@
-// C++ to C bindings for CuTe types.
+// C API for the CuTe types, generated from the dialect's .td files.
 #include "cute_ir-c/Dialect/CuteTypes.h"
-#include "cute_ir/Dialect/Cute/IR/CuteDialectPrivate.h"
+
+#include "cute_ir/Dialect/Cute/IR/CuteDialect.h"
 #include "mlir/CAPI/IR.h"
 
 namespace cute = mlir::cutlass_compiler::cute;
+
+namespace {
+// Unwraps `handle` into `out`: false when it is of another context or not a
+// T, or when it is null and not optional.
+template <typename T, typename H>
+bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
+  auto value = unwrap(handle);
+  if (!value)
+    return optional;
+  if (value.getContext() != ctx)
+    return false;
+  out = llvm::dyn_cast<T>(value);
+  return static_cast<bool>(out);
+}
+} // namespace
 
 bool mlirTypeIsACuteArithTupleIterator(MlirType type) {
   return llvm::isa_and_nonnull<cute::ArithTupleIteratorType>(unwrap(type));
@@ -14,9 +30,8 @@ MlirType mlirCuteArithTupleIteratorTypeGet(MlirContext context,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto arithTupleValue =
-      llvm::dyn_cast_if_present<cute::IntTupleType>(unwrap(arithTuple));
-  if (!arithTupleValue || arithTupleValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::IntTupleType arithTupleValue;
+  if (!unwrapAs(ctx, arithTuple, false, arithTupleValue))
     return {nullptr};
   return wrap(cute::ArithTupleIteratorType::get(ctx, arithTupleValue));
 }
@@ -34,9 +49,8 @@ MlirType mlirCuteComposedLayoutTypeGet(MlirContext context,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue =
-      llvm::dyn_cast_if_present<cute::ComposedLayoutAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::ComposedLayoutAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::ComposedLayoutType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -47,38 +61,26 @@ MlirAttribute mlirCuteComposedLayoutTypeGetAttr(MlirType type) {
       llvm::cast<cute::ComposedLayoutType>(unwrap(type)).getAttr()));
 }
 
-bool mlirTypeIsACuteConstrainedInt32(MlirType type) {
-  return llvm::isa_and_nonnull<cute::ConstrainedInt32Type>(unwrap(type));
+bool mlirTypeIsACuteConstrainedInt(MlirType type) {
+  return llvm::isa_and_nonnull<cute::ConstrainedIntType>(unwrap(type));
 }
-MlirType mlirCuteConstrainedInt32TypeGet(MlirContext context,
-                                         uint64_t divisibleBy) {
+MlirType mlirCuteConstrainedIntTypeGet(MlirContext context,
+                                       int64_t divisibility, unsigned width,
+                                       bool isPow2) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  return wrap(cute::ConstrainedInt32Type::getChecked(
-      [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
-      divisibleBy));
+  return wrap(cute::ConstrainedIntType::get(ctx, divisibility, width, isPow2));
 }
-uint64_t mlirCuteConstrainedInt32TypeGetDivisibleBy(MlirType type) {
-  return llvm::cast<cute::ConstrainedInt32Type>(unwrap(type)).getDivisibleBy();
+int64_t mlirCuteConstrainedIntTypeGetDivisibility(MlirType type) {
+  return llvm::cast<cute::ConstrainedIntType>(unwrap(type)).getDivisibility();
 }
-
-bool mlirTypeIsACuteConstrainedInt64(MlirType type) {
-  return llvm::isa_and_nonnull<cute::ConstrainedInt64Type>(unwrap(type));
+unsigned mlirCuteConstrainedIntTypeGetWidth(MlirType type) {
+  return llvm::cast<cute::ConstrainedIntType>(unwrap(type)).getWidth();
 }
-MlirType mlirCuteConstrainedInt64TypeGet(MlirContext context,
-                                         uint64_t divisibleBy) {
-  auto *ctx = unwrap(context);
-  if (!ctx)
-    return {nullptr};
-  ctx->getOrLoadDialect<cute::CuteDialect>();
-  return wrap(cute::ConstrainedInt64Type::getChecked(
-      [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
-      divisibleBy));
-}
-uint64_t mlirCuteConstrainedInt64TypeGetDivisibleBy(MlirType type) {
-  return llvm::cast<cute::ConstrainedInt64Type>(unwrap(type)).getDivisibleBy();
+bool mlirCuteConstrainedIntTypeGetIsPow2(MlirType type) {
+  return llvm::cast<cute::ConstrainedIntType>(unwrap(type)).getIsPow2();
 }
 
 bool mlirTypeIsACuteCoordTensor(MlirType type) {
@@ -90,12 +92,11 @@ MlirType mlirCuteCoordTensorTypeGet(MlirContext context, MlirType arithTuple,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto arithTupleValue =
-      llvm::dyn_cast_if_present<cute::IntTupleType>(unwrap(arithTuple));
-  if (!arithTupleValue || arithTupleValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::IntTupleType arithTupleValue;
+  if (!unwrapAs(ctx, arithTuple, false, arithTupleValue))
     return {nullptr};
-  auto layoutValue = unwrap(layout);
-  if (!layoutValue || layoutValue.getContext() != ctx)
+  mlir::Type layoutValue;
+  if (!unwrapAs(ctx, layout, false, layoutValue))
     return {nullptr};
   return wrap(cute::CoordTensorType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -118,8 +119,8 @@ MlirType mlirCuteCoordTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::CoordAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::CoordAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::CoordType::get(ctx, attrValue));
 }
@@ -137,15 +138,13 @@ MlirType mlirCuteFastDivmodDivisorTypeGet(MlirContext context, unsigned width,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  return wrap(cute::FastDivmodDivisorType::getChecked(
-      [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx, width,
-      isPow2));
+  return wrap(cute::FastDivmodDivisorType::get(ctx, width, isPow2));
 }
 unsigned mlirCuteFastDivmodDivisorTypeGetWidth(MlirType type) {
   return llvm::cast<cute::FastDivmodDivisorType>(unwrap(type)).getWidth();
 }
 bool mlirCuteFastDivmodDivisorTypeGetIsPow2(MlirType type) {
-  return llvm::cast<cute::FastDivmodDivisorType>(unwrap(type)).getIsPow2();
+  return llvm::cast<cute::FastDivmodDivisorType>(unwrap(type)).getIsPow_2();
 }
 
 bool mlirTypeIsACuteIntTuple(MlirType type) {
@@ -156,8 +155,8 @@ MlirType mlirCuteIntTupleTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::IntTupleAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::IntTupleAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::IntTupleType::get(ctx, attrValue));
 }
@@ -174,8 +173,8 @@ MlirType mlirCuteLayoutTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::LayoutAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::LayoutAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::LayoutType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -195,11 +194,11 @@ MlirType mlirCuteMemRefTypeGet(MlirContext context, MlirType ptr,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto ptrValue = llvm::dyn_cast_if_present<cute::PtrType>(unwrap(ptr));
-  if (!ptrValue || ptrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::PtrType ptrValue;
+  if (!unwrapAs(ctx, ptr, false, ptrValue))
     return {nullptr};
-  auto layoutValue = unwrap(layout);
-  if (!layoutValue || layoutValue.getContext() != ctx)
+  mlir::Type layoutValue;
+  if (!unwrapAs(ctx, layout, false, layoutValue))
     return {nullptr};
   return wrap(cute::MemRefType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -218,34 +217,37 @@ bool mlirTypeIsACutePtr(MlirType type) {
   return llvm::isa_and_nonnull<cute::PtrType>(unwrap(type));
 }
 MlirType mlirCutePtrTypeGet(MlirContext context, MlirType valueType,
-                            MlirAttribute memorySpace, uint64_t alignment,
-                            MlirAttribute swizzle) {
+                            uint32_t addressSpace, uint64_t alignment,
+                            MlirAttribute swizzle, MlirAttribute bitlayout) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto valueTypeValue = unwrap(valueType);
-  if (valueType.ptr && (!valueTypeValue || valueTypeValue.getContext() != ctx))
+  mlir::Type valueTypeValue;
+  if (!unwrapAs(ctx, valueType, true, valueTypeValue))
     return {nullptr};
-  auto memorySpaceValue =
-      llvm::dyn_cast_if_present<mlir::StringAttr>(unwrap(memorySpace));
-  if (!memorySpaceValue || memorySpaceValue.getContext() != ctx)
+  auto addressSpaceValue =
+      ::mlir::cutlass_compiler::cute::symbolizeAddressSpace(addressSpace);
+  if (!addressSpaceValue)
     return {nullptr};
-  auto swizzleValue =
-      llvm::dyn_cast_if_present<cute::SwizzleAttr>(unwrap(swizzle));
-  if (swizzle.ptr && (!swizzleValue || swizzleValue.getContext() != ctx))
+  ::mlir::cutlass_compiler::cute::SwizzleAttr swizzleValue;
+  if (!unwrapAs(ctx, swizzle, true, swizzleValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::BitLayoutAttr bitlayoutValue;
+  if (!unwrapAs(ctx, bitlayout, true, bitlayoutValue))
     return {nullptr};
   return wrap(cute::PtrType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
-      valueTypeValue, memorySpaceValue, alignment, swizzleValue));
+      valueTypeValue, *addressSpaceValue, alignment, swizzleValue,
+      bitlayoutValue));
 }
 MlirType mlirCutePtrTypeGetValueType(MlirType type) {
   return wrap(static_cast<mlir::Type>(
       llvm::cast<cute::PtrType>(unwrap(type)).getValueType()));
 }
-MlirAttribute mlirCutePtrTypeGetMemorySpace(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(
-      llvm::cast<cute::PtrType>(unwrap(type)).getMemorySpace()));
+uint32_t mlirCutePtrTypeGetAddressSpace(MlirType type) {
+  return static_cast<uint32_t>(
+      llvm::cast<cute::PtrType>(unwrap(type)).getAddressSpace());
 }
 uint64_t mlirCutePtrTypeGetAlignment(MlirType type) {
   return llvm::cast<cute::PtrType>(unwrap(type)).getAlignment();
@@ -253,6 +255,10 @@ uint64_t mlirCutePtrTypeGetAlignment(MlirType type) {
 MlirAttribute mlirCutePtrTypeGetSwizzle(MlirType type) {
   return wrap(static_cast<mlir::Attribute>(
       llvm::cast<cute::PtrType>(unwrap(type)).getSwizzle()));
+}
+MlirAttribute mlirCutePtrTypeGetBitlayout(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::PtrType>(unwrap(type)).getBitlayout()));
 }
 
 bool mlirTypeIsACuteShape(MlirType type) {
@@ -263,8 +269,8 @@ MlirType mlirCuteShapeTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::ShapeAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::ShapeAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::ShapeType::get(ctx, attrValue));
 }
@@ -282,8 +288,8 @@ MlirType mlirCuteSparseElemTypeGet(MlirContext context, int numLogical,
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto physicalTypeValue = unwrap(physicalType);
-  if (!physicalTypeValue || physicalTypeValue.getContext() != ctx)
+  mlir::Type physicalTypeValue;
+  if (!unwrapAs(ctx, physicalType, false, physicalTypeValue))
     return {nullptr};
   return wrap(cute::SparseElemType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -305,8 +311,8 @@ MlirType mlirCuteStrideTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::StrideAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::StrideAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::StrideType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -325,8 +331,8 @@ MlirType mlirCuteSwizzleTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::SwizzleAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::SwizzleAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::SwizzleType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -345,8 +351,8 @@ MlirType mlirCuteTileTypeGet(MlirContext context, MlirAttribute attr) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cute::CuteDialect>();
-  auto attrValue = llvm::dyn_cast_if_present<cute::TileAttr>(unwrap(attr));
-  if (!attrValue || attrValue.getContext() != ctx)
+  ::mlir::cutlass_compiler::cute::TileAttr attrValue;
+  if (!unwrapAs(ctx, attr, false, attrValue))
     return {nullptr};
   return wrap(cute::TileType::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
@@ -355,4 +361,148 @@ MlirType mlirCuteTileTypeGet(MlirContext context, MlirAttribute attr) {
 MlirAttribute mlirCuteTileTypeGetAttr(MlirType type) {
   return wrap(static_cast<mlir::Attribute>(
       llvm::cast<cute::TileType>(unwrap(type)).getAttr()));
+}
+
+bool mlirTypeIsACuteTiledCopy(MlirType type) {
+  return llvm::isa_and_nonnull<cute::TiledCopyType>(unwrap(type));
+}
+MlirType mlirCuteTiledCopyTypeGet(MlirContext context, MlirType copyAtom,
+                                  MlirAttribute layoutCopyTv,
+                                  MlirAttribute tilerMn) {
+  auto *ctx = unwrap(context);
+  if (!ctx)
+    return {nullptr};
+  ctx->getOrLoadDialect<cute::CuteDialect>();
+  mlir::Type copyAtomValue;
+  if (!unwrapAs(ctx, copyAtom, false, copyAtomValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::LayoutAttr layoutCopyTvValue;
+  if (!unwrapAs(ctx, layoutCopyTv, false, layoutCopyTvValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::TileAttr tilerMnValue;
+  if (!unwrapAs(ctx, tilerMn, false, tilerMnValue))
+    return {nullptr};
+  return wrap(cute::TiledCopyType::get(ctx, copyAtomValue, layoutCopyTvValue,
+                                       tilerMnValue));
+}
+MlirType mlirCuteTiledCopyTypeGetCopyAtom(MlirType type) {
+  return wrap(static_cast<mlir::Type>(
+      llvm::cast<cute::TiledCopyType>(unwrap(type)).getCopyAtom()));
+}
+MlirType mlirCuteTiledCopyTypeGetAtom(MlirType type) {
+  return mlirCuteTiledCopyTypeGetCopyAtom(type);
+}
+MlirAttribute mlirCuteTiledCopyTypeGetLayoutCopyTv(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledCopyType>(unwrap(type)).getLayoutCopyTv()));
+}
+MlirAttribute mlirCuteTiledCopyTypeGetTilerMn(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledCopyType>(unwrap(type)).getTilerMn()));
+}
+
+bool mlirTypeIsACuteTiledCopyV2(MlirType type) {
+  return llvm::isa_and_nonnull<cute::TiledCopyV2Type>(unwrap(type));
+}
+MlirType mlirCuteTiledCopyV2TypeGet(MlirContext context, MlirType copyAtom,
+                                    MlirAttribute layoutCopyTv,
+                                    MlirAttribute tilerMn) {
+  auto *ctx = unwrap(context);
+  if (!ctx)
+    return {nullptr};
+  ctx->getOrLoadDialect<cute::CuteDialect>();
+  mlir::Type copyAtomValue;
+  if (!unwrapAs(ctx, copyAtom, false, copyAtomValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::LayoutAttr layoutCopyTvValue;
+  if (!unwrapAs(ctx, layoutCopyTv, false, layoutCopyTvValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::TileAttr tilerMnValue;
+  if (!unwrapAs(ctx, tilerMn, false, tilerMnValue))
+    return {nullptr};
+  return wrap(cute::TiledCopyV2Type::get(ctx, copyAtomValue, layoutCopyTvValue,
+                                         tilerMnValue));
+}
+MlirType mlirCuteTiledCopyV2TypeGetCopyAtom(MlirType type) {
+  return wrap(static_cast<mlir::Type>(
+      llvm::cast<cute::TiledCopyV2Type>(unwrap(type)).getCopyAtom()));
+}
+MlirAttribute mlirCuteTiledCopyV2TypeGetLayoutCopyTv(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledCopyV2Type>(unwrap(type)).getLayoutCopyTv()));
+}
+MlirAttribute mlirCuteTiledCopyV2TypeGetTilerMn(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledCopyV2Type>(unwrap(type)).getTilerMn()));
+}
+
+bool mlirTypeIsACuteTiledMma(MlirType type) {
+  return llvm::isa_and_nonnull<cute::TiledMmaType>(unwrap(type));
+}
+MlirType mlirCuteTiledMmaTypeGet(MlirContext context, MlirType mmaAtom,
+                                 MlirAttribute atomLayoutMNK,
+                                 MlirAttribute permutationMNK) {
+  auto *ctx = unwrap(context);
+  if (!ctx)
+    return {nullptr};
+  ctx->getOrLoadDialect<cute::CuteDialect>();
+  mlir::Type mmaAtomValue;
+  if (!unwrapAs(ctx, mmaAtom, false, mmaAtomValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::LayoutAttr atomLayoutMNKValue;
+  if (!unwrapAs(ctx, atomLayoutMNK, false, atomLayoutMNKValue))
+    return {nullptr};
+  ::mlir::cutlass_compiler::cute::TileAttr permutationMNKValue;
+  if (!unwrapAs(ctx, permutationMNK, true, permutationMNKValue))
+    return {nullptr};
+  return wrap(cute::TiledMmaType::getChecked(
+      [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx,
+      mmaAtomValue, atomLayoutMNKValue, permutationMNKValue));
+}
+MlirType mlirCuteTiledMmaTypeGetMmaAtom(MlirType type) {
+  return wrap(static_cast<mlir::Type>(
+      llvm::cast<cute::TiledMmaType>(unwrap(type)).getMmaAtom()));
+}
+MlirType mlirCuteTiledMmaTypeGetAtom(MlirType type) {
+  return mlirCuteTiledMmaTypeGetMmaAtom(type);
+}
+MlirAttribute mlirCuteTiledMmaTypeGetAtomLayoutMNK(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledMmaType>(unwrap(type)).getAtomLayout_MNK()));
+}
+MlirAttribute mlirCuteTiledMmaTypeGetAtomLayoutMnk(MlirType type) {
+  return mlirCuteTiledMmaTypeGetAtomLayoutMNK(type);
+}
+MlirAttribute mlirCuteTiledMmaTypeGetPermutationMNK(MlirType type) {
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cute::TiledMmaType>(unwrap(type)).getPermutation_MNK()));
+}
+MlirAttribute mlirCuteTiledMmaTypeGetPermutationMnk(MlirType type) {
+  return mlirCuteTiledMmaTypeGetPermutationMNK(type);
+}
+
+bool mlirTypeIsACuteTuple(MlirType type) {
+  return llvm::isa_and_nonnull<cute::TupleType>(unwrap(type));
+}
+MlirType mlirCuteTupleTypeGet(MlirContext context, intptr_t numTypes,
+                              MlirType const *types) {
+  auto *ctx = unwrap(context);
+  if (!ctx)
+    return {nullptr};
+  ctx->getOrLoadDialect<cute::CuteDialect>();
+  llvm::SmallVector<mlir::Type> typesValue;
+  for (intptr_t i = 0; i < numTypes; ++i) {
+    mlir::Type element;
+    if (!unwrapAs(ctx, types[i], false, element))
+      return {nullptr};
+    typesValue.push_back(element);
+  }
+  return wrap(cute::TupleType::get(ctx, typesValue));
+}
+intptr_t mlirCuteTupleTypeGetNumTypes(MlirType type) {
+  return static_cast<intptr_t>(
+      llvm::cast<cute::TupleType>(unwrap(type)).getTypes().size());
+}
+MlirType mlirCuteTupleTypeGetType(MlirType type, intptr_t pos) {
+  return wrap(llvm::cast<cute::TupleType>(unwrap(type)).getTypes()[pos]);
 }

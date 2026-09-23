@@ -7,7 +7,12 @@ td_library(
     name = "td_files",
     srcs = glob(["*.td"]),
     includes = ["/mlir/dialects/cute_ir/include"],
-    deps = ["@llvm-project//mlir:OpBaseTdFiles"],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:tabledefs",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
 )
 
 gentbl_cc_library(
@@ -58,6 +63,51 @@ gentbl_cc_library(
     deps = [":td_files"],
 )
 
+# The compiler's nvgpu enums (CuteNVGPUEnums.td does not include the cute
+# enums, which the cute dialect emits).
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "CuteNVGPUEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "CuteNVGPUEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUAttrs.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUAttrs.td",
+    deps = [":td_files"],
+)
+
+# Every cute_nvgpu operation of the compiler's registry.
 gentbl_cc_library(
     name = "ops_inc_gen",
     includes = ["../../../.."],
@@ -81,8 +131,12 @@ cc_library(
     hdrs = ["CuteNVGPUDialect.h"],
     includes = ["../../../.."],
     deps = [
+        ":attrs_inc_gen",
         ":dialect_inc_gen",
+        ":enums_inc_gen",
         ":ops_inc_gen",
         ":types_inc_gen",
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:headers",
+        "@llvm-project//mlir:InferTypeOpInterface",
     ],
 )
