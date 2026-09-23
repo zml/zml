@@ -6,7 +6,10 @@ cc_library(
     name = "dialect",
     srcs = ["CuteNVGPUDialect.cpp"],
     deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:headers",
         "//mlir/dialects/cute_ir/include/cute_ir/Dialect/CuteNVGPU/IR:headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AsmParser",
         "@llvm-project//mlir:IR",
     ],
 )

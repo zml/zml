@@ -542,8 +542,7 @@ pub const Builder = struct {
         const elem = pt.getValueType() orelse @panic("makeTensor: untyped pointer");
         const memref_ty = (cute.MemRefType.get(self.ctx, .{ .ptr = ptr.type_(), .layout = layout.inner.type_() }) catch @panic("bad memref")).type_();
         const v = self.emit(cute.make_view(self.ctx, ptr.inner, layout.inner, memref_ty, self.loc()));
-        const space = std.meta.stringToEnum(MemorySpace, pt.getMemorySpace().isA(mlir.StringAttribute).?.value()) orelse .generic;
-        return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = space };
+        return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.getAddressSpace() };
     }
 
     /// A `!cute.coord` from a tuple of `Value`s and ints; ints stay static in the type.

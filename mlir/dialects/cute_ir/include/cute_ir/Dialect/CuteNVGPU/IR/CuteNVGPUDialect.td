@@ -3,6 +3,7 @@
 #ifndef CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_TD
 #define CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_TD
 
+include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/DialectBase.td"
 include "mlir/IR/OpBase.td"
 
@@ -11,16 +12,17 @@ def CuteNVGPU_Dialect : Dialect {
   let cppNamespace = "::mlir::cutlass_compiler::cute_nvgpu";
   let summary = "NVIDIA GPU operations and atom types used by CuTe-DSL";
   let description = [{
-    This dialect mirrors the operation and type registry embedded in the
-    proprietary CuTe-DSL compiler. Proven types receive concrete TypeDefs;
-    parameterized types remain lossless opaque types until their storage and
-    verification contracts are fully recovered.
+    This dialect mirrors the operation, type and attribute registry of
+    nvidia-cutlass-dsl 4.8.0, embedded in the proprietary CuTe-DSL compiler.
+    The type parser is hand-written only to accept `!cute_nvgpu.iN`, the
+    compiler's alias of `!cute.iN`.
   }];
   let extraClassDeclaration = [{
     ::mlir::Type parseType(::mlir::DialectAsmParser &parser) const override;
     void printType(::mlir::Type type,
                    ::mlir::DialectAsmPrinter &printer) const override;
   }];
+  let useDefaultAttributePrinterParser = 1;
 }
 
 class CuteNVGPU_Op<string mnemonic, list<Trait> traits = []>

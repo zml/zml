@@ -1,10 +1,16 @@
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 def repo():
+    # The cutlass_compiler/ tree of the CUTLASS v4.8.0 release: the open-source
+    # part of the CuTe dialect that mlir/dialects/cute_ir builds on.
     git_repository(
         name = "cute_ir",
         remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "147295a3d4b75f3aeff247c25b8927cea9a7006a",
+        commit = "098de2a652cf8f00fd70b2df54051c7eccbb855a",
         build_file = Label("//third_party/cute_ir:cute_ir.bazel"),
         strip_prefix = "cutlass_compiler",
+        # The DSL spells a dynamic leaf it knows to be a multiple of N as
+        # `?{div=N}`; the release's cutegen reads only the width.
+        patches = [Label("//third_party/cute_ir:cutegen_dynamic_divisibility.patch")],
+        patch_args = ["-p2"],
     )

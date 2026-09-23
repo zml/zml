@@ -3,44 +3,79 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# The release's dialect, attributes and types come from the archive; the DSL
+# compiler's remaining attributes, types and enums are CuteAttrsCompiler.td,
+# CuteTypesCompiler.td and CuteEnums.td, and every one of its operations is
+# CuteOps.td, generated from the DSL's Python bindings and compiler.
 td_library(
-    name = "private_tabledefs",
+    name = "tabledefs",
     srcs = [
-        "CuteOpsPrivate.td",
+        "CuteAttrsAll.td",
+        "CuteAttrsCompiler.td",
+        "CuteEnums.td",
+        "CuteOps.td",
         "CuteTypesAll.td",
-        "CuteTypesPrivate.td",
+        "CuteTypesCompiler.td",
     ],
     includes = ["/mlir/dialects/cute_ir/include"],
-    deps = [
-        "@cute_ir//:dialect_td",
-        "@llvm-project//mlir:BuiltinDialectTdFiles",
-        "@llvm-project//mlir:DataLayoutInterfacesTdFiles",
-        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
-        "@llvm-project//mlir:OpBaseTdFiles",
-        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
-    ],
+    deps = ["@cute_ir//:cute_ir_dialect_td"],
 )
 
 gentbl_cc_library(
-    name = "ops_private_inc_gen",
+    name = "enums_inc_gen",
     includes = ["../../../.."],
     tbl_outs = [
         (
-            ["-gen-op-decls"],
-            "CuteOpsPrivate.h.inc",
+            ["-gen-enum-decls"],
+            "CuteEnums.h.inc",
         ),
         (
-            ["-gen-op-defs"],
-            "CuteOpsPrivate.cpp.inc",
+            ["-gen-enum-defs"],
+            "CuteEnums.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "CuteOpsPrivate.td",
-    deps = [":private_tabledefs"],
+    td_file = "CuteEnums.td",
+    deps = [":tabledefs"],
 )
 
 gentbl_cc_library(
-    name = "types_private_decl_inc_gen",
+    name = "attrs_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cute",
+            ],
+            "CuteAttrDecls.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cute",
+            ],
+            "CuteAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteAttrsAll.td",
+    deps = [":tabledefs"],
+)
+
+# CuteDialect.h includes the attribute declarations first: they bring the
+# enums the attributes and types use.
+genrule(
+    name = "attrs_h_inc",
+    srcs = ["CuteAttrDecls.h.inc"],
+    outs = ["CuteAttrs.h.inc"],
+    cmd = "(echo '#ifdef GET_ATTRDEF_CLASSES'; " +
+          "echo '#include \"cute_ir/Dialect/Cute/IR/CuteEnums.h.inc\"'; " +
+          "echo '#endif'; cat $<) > $@",
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
     includes = ["../../../.."],
     tbl_outs = [
         (
@@ -48,18 +83,8 @@ gentbl_cc_library(
                 "-gen-typedef-decls",
                 "-typedefs-dialect=cute",
             ],
-            "CuteTypesPrivate.h.inc",
+            "CuteTypes.h.inc",
         ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "CuteTypesPrivate.td",
-    deps = [":private_tabledefs"],
-)
-
-gentbl_cc_library(
-    name = "types_all_defs_inc_gen",
-    includes = ["../../../.."],
-    tbl_outs = [
         (
             [
                 "-gen-typedef-defs",
@@ -70,23 +95,44 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "CuteTypesAll.td",
-    deps = [":private_tabledefs"],
+    deps = [":tabledefs"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "CuteOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "CuteOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteOps.td",
+    deps = [":tabledefs"],
 )
 
 cc_library(
-    name = "private_headers",
+    name = "headers",
     hdrs = [
-        "CuteDialectPrivate.h",
+        "CuteAttrs.h.inc",
+        "CuteInference.h",
     ],
     includes = ["../../../.."],
     deps = [
-        ":ops_private_inc_gen",
-        ":types_private_decl_inc_gen",
-        "@cute_ir//:dialect_headers",
+        ":attrs_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+        "@cute_ir//:cute_ir_dialect_header",
+        "@cute_ir//:cutegen",
+        "@llvm-project//mlir:DataLayoutInterfaces",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:SideEffectInterfaces",
     ],
-)
-
-alias(
-    name = "dialect",
-    actual = ":private_headers",
 )

@@ -4,6 +4,7 @@
 #define CUTE_IR_C_DIALECT_CUTE_H
 
 #include "cute_ir-c/Dialect/CuteAttributes.h"
+#include "cute_ir-c/Dialect/CuteCompilerAttributes.h"
 #include "cute_ir-c/Dialect/CuteTypes.h"
 #include "mlir-c/IR.h"
 

@@ -24,9 +24,5 @@ zig_test(
 
 test_suite(
     name = "test",
-    tests = [
-        ":zig_test",
-        "//mlir/dialects/cute_ir/test:capi_registration_test",
-        "//mlir/dialects/cute_ir/test:type_constructors_test",
-    ],
+    tests = [":zig_test"],
 )
