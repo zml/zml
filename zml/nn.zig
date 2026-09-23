@@ -215,7 +215,8 @@ pub fn scaledDot(
 }
 
 pub const ScaledDotOpts = struct {
-    /// The rhs scale's `[n, k / block]` grid is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
+    /// The rhs scale's `[n, k / block]` grid is stored in the 128x4 blocked layout of Blackwell's block-scaled mma,
+    /// each device's slice on its own.
     // TODO: fine for now, but we should find a better way to express how a scale is laid out.
     rhs_scale_swizzled: bool = false,
 };
