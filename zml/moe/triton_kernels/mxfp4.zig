@@ -118,26 +118,30 @@ const GemmConfig = struct {
 const Quant = tri.Kernel(Config, .{ .name = "mxfp4_triton_quant", .inputs = &.{"x"}, .outputs = &.{ "q", "s" }, .run = quantInput });
 const Route = tri.Kernel(Config, .{ .name = "mxfp4_triton_route", .inputs = &.{"ids"}, .outputs = &.{ "counts", "pos" }, .run = route });
 const RouteAtomic = tri.Kernel(Config, .{ .name = "mxfp4_triton_route_atomic", .inputs = &.{ "ids", "zeros" }, .outputs = &.{ "counts", "pos" }, .run = routeAtomic });
-const Schedule = tri.Kernel(Config, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = schedule });
-const NativeScheduleConfig = struct {
+// The same device code serves both backends; only the group geometry differs.
+const ScheduleConfig = struct {
     moe: Config,
+    /// Expert groups the schedule may fill.
     capacity: i64,
-    /// Routed rows per expert group; equals the CuTe GEMM tile N.
+    /// Routed rows per expert group, i.e. the consuming GEMM's tile N.
     group: i64,
 };
-const NativeSchedule = tri.Kernel(NativeScheduleConfig, .{ .name = "mxfp4_triton_native_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleNative });
+// Two symbols for one kernel: both backends can run in the same process, and
+// distinct names keep them apart in profiles.
+const Schedule = tri.Kernel(ScheduleConfig, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleGroups });
+const CuteSchedule = tri.Kernel(ScheduleConfig, .{ .name = "mxfp4_triton_cute_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleGroups });
 const GateUp = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
 const Down = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
 const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = combine });
 
-/// MXFP4 routing shared with the CuTe backend (`zml/moe/cute_mxfp4.zig`),
-/// whose persistent GEMMs consume it. It reuses this backend's `route` and
-/// `schedule` kernels with `group`-row expert groups (the CuTe tile N) and a
-/// compact `capacity`, instead of the fixed `bn` tiles used here.
+/// MXFP4 routing for the CuTe backend (`zml/moe/cute_mxfp4.zig`), whose
+/// persistent GEMMs consume it. It reuses this backend's `route` and
+/// `schedule` kernels with `group`-row expert groups (the CuTe GEMM tile N)
+/// and a compact `capacity`, instead of the fixed `bn` tiles used here.
 /// `route_map` maps routes to routed rows, `route_inverse` rows back to
 /// routes, and `schedule` is `[group experts | group sizes | active group
 /// count]`.
-pub fn scheduleForNative(c: Config, ids: zml.Tensor, capacity: i64, group: i64) struct {
+pub fn scheduleForCute(c: Config, ids: zml.Tensor, capacity: i64, group: i64) struct {
     route_inverse: zml.Tensor,
     route_map: zml.Tensor,
     schedule: zml.Tensor,
@@ -168,7 +172,7 @@ pub fn scheduleForNative(c: Config, ids: zml.Tensor, capacity: i64, group: i64) 
         );
         break :blk .{ .counts = scanned.counts, .pos = scanned.pos };
     };
-    const s = NativeSchedule.call(
+    const s = CuteSchedule.call(
         .{ .ids = ids, .counts = r.counts, .pos = r.pos },
         .{
             .map = .init(.{capacity * group}, .i32),
@@ -222,7 +226,7 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
             .{ .ids = a.ids, .counts = r.counts, .pos = r.pos },
             .{ .map = .init(.{tile_count * bn}, .i32), .perm = .init(.{c.tokens * c.topk}, .i32), .sched = .init(.{2 * tile_count + 1}, .i32) },
             .{
-                .cfg = c,
+                .cfg = .{ .moe = c, .capacity = tile_count, .group = bn },
                 .grid = .{ @intCast(@divTrunc(c.tokens * c.topk + 127, 128)), 1, 1 },
                 .num_warps = 4,
                 .num_stages = 1,
@@ -310,7 +314,7 @@ fn route(b: *B, c: Config) tri.FinishError!void {
 const route_block = 1024;
 const atomic_route_threshold = 6 * 2048;
 
-/// Routing for large batches, used by `scheduleForNative`.
+/// Routing for large batches, used by `scheduleForCute`.
 /// Each route takes the next free slot of its expert with an atomic
 /// increment of `counts` (zero-initialized through `zeros`). Slots within an
 /// expert are therefore unordered, which the grouped GEMMs do not care
@@ -325,17 +329,11 @@ fn routeAtomic(b: *B, c: Config) tri.FinishError!void {
     b.storeOpts(a.pos.addPtr(p), slot, .{ .mask = valid });
 }
 
-fn schedule(b: *B, c: Config) tri.FinishError!void {
-    return scheduleWithCapacity(b, c, tiles(c), bn);
-}
-
-fn scheduleNative(b: *B, c: NativeScheduleConfig) tri.FinishError!void {
-    return scheduleWithCapacity(b, c.moe, c.capacity, c.group);
-}
-
-fn scheduleWithCapacity(b: *B, c: Config, nt: i64, group_size: i64) tri.FinishError!void {
+fn scheduleGroups(b: *B, cfg: ScheduleConfig) tri.FinishError!void {
+    const c = cfg.moe;
+    const nt = cfg.capacity;
     // Route positions are i32 tensors; keep the group size in that type.
-    const group: i32 = @intCast(group_size);
+    const group: i32 = @intCast(cfg.group);
     const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 }, .map = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 } });
     const p = b.programId(.x).mul(128).add(ar(b, 128));
     const e = ld(b, a.ids.addPtr(p), p.lt(c.tokens * c.topk), .i32, -1).sub(ci(b, c.expert_offset));

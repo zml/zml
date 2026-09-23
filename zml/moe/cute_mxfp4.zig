@@ -9,9 +9,7 @@ test {
 
 pub const Parameters = triton_mxfp4.Parameters;
 
-/// This backend consumes expert weight scales in the 128x4 layout read by the
-/// SM100 scale-factor tensor maps. Loaders apply this once to the stacked
-/// `[experts, rows, k/32]` E8M0 scales (gate/up rows interleaved).
+
 pub const packWeightScales = kernels.packWeightScales;
 
 pub fn isAvailable(platform: *const zml.Platform) bool {

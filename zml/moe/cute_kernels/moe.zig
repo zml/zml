@@ -100,7 +100,7 @@ fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n
         .topk = topk,
         .swiglu_limit = 10,
     };
-    const schedule = triton_mxfp4.kernels.scheduleForNative(cfg, flat_ids.reshape(.{ tokens, topk }), groups, n);
+    const schedule = triton_mxfp4.kernels.scheduleForCute(cfg, flat_ids.reshape(.{ tokens, topk }), groups, n);
     return .{ .groups = groups, .route_map = schedule.route_map, .route_inverse = schedule.route_inverse, .schedule = schedule.schedule };
 }
 
