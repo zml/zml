@@ -336,7 +336,14 @@ fn gridTyped(type_: *const mlir.Type) struct { mlir_type: cute.ArgSpec.MlirTypeS
     return .{ .mlir_type = .{ .type_ = type_, .grid_constant = true } };
 }
 
-const device_name = "mxfp4_sm100_persistent_grouped_gemm";
+/// The two projections share this kernel but get distinct symbols, so a
+/// profile shows them as separate rows instead of one merged entry.
+fn deviceName(comptime epilogue: Epilogue) [:0]const u8 {
+    return switch (epilogue) {
+        .swiglu_mxfp8 => "mxfp4_sm100_persistent_grouped_gemm_up_swiglu",
+        .route_rows => "mxfp4_sm100_persistent_grouped_gemm_down_rows",
+    };
+}
 
 fn buildProgram(b: *B, cfg: Config) cute.FinishError!void {
     return switch (cfg.n) {
@@ -452,7 +459,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     const mma_sfb_type = b.blockScaledMmaType(.{ .n = 128 });
 
     // Device ABI. The host function below constructs every non-buffer value.
-    b.beginFunction(device_name, .cuda_kernel);
+    b.beginFunction(deviceName(epilogue), .cuda_kernel);
     const d = try b.declareArgs(switch (epilogue) {
         .swiglu_mxfp8 => .{
             .expert_ids = typed(ids_memref),
@@ -1909,7 +1916,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const config = b.makeLaunchConfig(.{
         .grid = .{ one, one, grid_z },
         .block = .{ b.cst(.i32, 192), one, one },
-        .dynamic_smem = b.kernelSmemSize(device_name),
+        .dynamic_smem = b.kernelSmemSize(deviceName(epilogue)),
         .stream = b.cudaStream(),
         .cluster = .{ one, one, one },
         .use_pdl = true,
@@ -1924,7 +1931,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         b.staticLayout(b.layoutSpec(cfg.groups, 1)),
     );
     const launch = switch (epilogue) {
-        .swiglu_mxfp8 => b.launchEx(device_name, config, mainloop ++ .{
+        .swiglu_mxfp8 => b.launchEx(deviceName(epilogue), config, mainloop ++ .{
             group_sizes,
             b.makeTensorView(b.arg(host_arg.route_inverse), b.staticLayout(b.layoutSpec(cfg.routedRows(), 1))),
             b.makeTensorView(b.arg(host_arg.routing_weights), b.staticLayout(b.layoutSpec(@max(cfg.routes, 1), 1))),
@@ -1932,7 +1939,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             b.makeTensorView(b.arg(host_arg.scales), b.staticLayout(b.layoutSpec(.{ cfg.groups, @divExact(activations, 32) * 128 }, .{ @divExact(activations, 32) * 128, 1 }))),
             tiles_m,
         }),
-        .route_rows => b.launchEx(device_name, config, mainloop ++ .{
+        .route_rows => b.launchEx(deviceName(epilogue), config, mainloop ++ .{
             group_sizes,
             b.makeTensorView(b.arg(host_arg.route_inverse), b.staticLayout(b.layoutSpec(cfg.routedRows(), 1))),
             b.makeTensorView(b.arg(host_arg.output), b.staticLayout(b.layoutSpec(.{ @max(cfg.routes, 1), cfg.m }, .{ cfg.m, 1 }))),
@@ -1957,7 +1964,7 @@ test "MXFP4 GEMM programs emit their host launch for every tile width" {
             };
             const ir = try program[0].emit(std.testing.allocator, cfg);
             defer std.testing.allocator.free(ir);
-            try std.testing.expect(std.mem.indexOf(u8, ir, device_name) != null);
+            try std.testing.expect(std.mem.indexOf(u8, ir, deviceName(program[1])) != null);
             try std.testing.expect(std.mem.indexOf(u8, ir, "cuda.launch_ex") != null);
             try std.testing.expect(std.mem.indexOf(u8, ir, "make_non_exec_tiled_tma_load") != null);
             try std.testing.expect(std.mem.indexOf(u8, ir, std.fmt.comptimePrint("sm100.mma_bs<128x{d}x32", .{n})) != null);
