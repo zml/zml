@@ -204,17 +204,12 @@ pub fn sdyPerValueShardingAttr(
     return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, sharding_attrs).asAttr();
 }
 
-pub fn sdyManualAxesAttr(
-    allocator: std.mem.Allocator,
-    ctx: *mlir.Context,
-    manual_axes: []const Shape.Tag,
-    sharding: Sharding,
-) error{OutOfMemory}!*const mlir.Attribute {
-    var axis_names = std.ArrayList([]const u8).empty;
-    defer axis_names.deinit(allocator);
+/// Resolve logical axes to the names used by Shardy, including split/folded axes.
+pub fn resolvedAxisNames(sharding: Sharding, logical_axes: []const Shape.Tag) stdx.BoundedArray([]const u8, MAX_MESH_RANK) {
+    var axis_names: stdx.BoundedArray([]const u8, MAX_MESH_RANK) = .empty;
 
-    for (manual_axes, 0..) |logical_axis, axis_i| {
-        for (manual_axes[0..axis_i]) |previous| {
+    for (logical_axes, 0..) |logical_axis, axis_i| {
+        for (logical_axes[0..axis_i]) |previous| {
             stdx.debug.assert(!std.mem.eql(u8, std.mem.span(previous), std.mem.span(logical_axis)), "manualComputation manual axis .{s} was specified more than once", .{std.mem.span(logical_axis)});
         }
 
@@ -226,18 +221,29 @@ pub fn sdyManualAxesAttr(
         for (binding.axes.constSlice()) |axis_id| {
             const axis_name = mesh.axes.get(@intFromEnum(axis_id)).name;
             var duplicate = false;
-            for (axis_names.items) |existing| {
+            for (axis_names.constSlice()) |existing| {
                 if (std.mem.eql(u8, existing, axis_name)) {
                     duplicate = true;
                     break;
                 }
             }
-            if (!duplicate) try axis_names.append(allocator, axis_name);
+            if (!duplicate) axis_names.appendAssumeCapacity(axis_name);
         }
     }
 
-    const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
-    for (axis_names.items, 0..) |axis_name, i| {
+    return axis_names;
+}
+
+pub fn sdyManualAxesAttr(
+    allocator: std.mem.Allocator,
+    ctx: *mlir.Context,
+    manual_axes: []const Shape.Tag,
+    sharding: Sharding,
+) error{OutOfMemory}!*const mlir.Attribute {
+    const axis_names = sharding.resolvedAxisNames(manual_axes);
+
+    const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.len);
+    for (axis_names.constSlice(), 0..) |axis_name, i| {
         axes[i] = mlir.StringAttribute.init(ctx, axis_name);
     }
 
