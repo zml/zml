@@ -582,19 +582,17 @@ pub const Normalizer = struct {
             };
         }
 
-        var initialized: usize = 0;
-        const normalizers: []*c.iree_tokenizer_normalizer_t = try allocator.alloc(*c.iree_tokenizer_normalizer_t, sequence.len);
-        defer allocator.free(normalizers);
-        errdefer for (0..initialized) |i| c.iree_tokenizer_normalizer_free(normalizers[i]);
+        var normalizers: std.ArrayList(*c.iree_tokenizer_normalizer_t) = try .initCapacity(allocator, sequence.len);
+        defer normalizers.deinit(allocator);
+        errdefer for (normalizers.items) |normalizer| c.iree_tokenizer_normalizer_free(normalizer);
 
-        for (sequence, 0..) |normalizer, i| {
-            normalizers[i] = try createNormalizer(normalizer) orelse unreachable;
-            initialized += 1;
+        for (sequence) |normalizer| {
+            normalizers.appendAssumeCapacity(try createNormalizer(normalizer) orelse unreachable);
         }
 
         var normalizer_sequence: ?*c.iree_tokenizer_normalizer_t = null;
-        try checkOk(c.iree_tokenizer_normalizer_sequence_allocate(normalizers.ptr, normalizers.len, c.iree_allocator_system(), &normalizer_sequence));
-        initialized = 0;
+        // IREE takes ownership of all the normalizers.
+        try checkOk(c.iree_tokenizer_normalizer_sequence_allocate(normalizers.items.ptr, normalizers.items.len, c.iree_allocator_system(), &normalizer_sequence));
         if (normalizer_sequence == null) return error.NormalizerAllocationFailed;
 
         const sequence_size: usize = @intCast(c.iree_tokenizer_normalizer_state_size(normalizer_sequence.?));
@@ -645,16 +643,16 @@ pub const Normalizer = struct {
             try writer.writer.writeAll(buffer[0..written]);
         }
 
-        var is_pending = true;
-        while (is_pending) {
+        var has_pending = true;
+        while (has_pending) {
             var written: usize = 0;
 
             try checkOk(c.iree_tokenizer_normalizer_state_finalize(state.?, .{ .data = &buffer, .size = buffer.len }, &written));
-            is_pending = c.iree_tokenizer_normalizer_state_has_pending(state.?);
+            has_pending = c.iree_tokenizer_normalizer_state_has_pending(state.?);
 
             try writer.writer.writeAll(buffer[0..written]);
 
-            if (written == 0 and is_pending) return error.NormalizationFailed;
+            if (written == 0 and has_pending) return error.NormalizationFailed;
         }
 
         return writer.toOwnedSlice();
@@ -679,14 +677,29 @@ test "normalizer from Hugging Face" {
         \\}
     ;
 
-    // var normalizer = try tokenizer.normalizer(@constCast(steps[0..]));
     var normalizer = try Normalizer.fromHuggingFaceJson(json);
     defer normalizer.deinit();
 
-    const res = try normalizer.normalize(allocator, "      hello");
-    defer allocator.free(res);
+    const TestCase = struct {
+        input: []const u8,
+        expected: []const u8,
+    };
 
-    try std.testing.expectEqualSlices(u8, "hello", res);
+    for ([_]TestCase{
+        .{ .input = "  hello", .expected = "hello" },
+        .{ .input = "hello   ", .expected = "hello" },
+        .{ .input = "   hello   ", .expected = "hello" },
+        .{ .input = "\nworld\r\n", .expected = "world" },
+        .{ .input = "ÉCOLE", .expected = "ecole" },
+        .{ .input = "  CAFÉ\tAU\nLAIT  ", .expected = "cafe au lait" },
+        .{ .input = "\t \r\n", .expected = " " },
+        .{ .input = "", .expected = "" },
+    }) |case| {
+        const res = try normalizer.normalize(allocator, case.input);
+        defer allocator.free(res);
+
+        try std.testing.expectEqualSlices(u8, case.expected, res);
+    }
 }
 
 test "normalizer sequence" {
