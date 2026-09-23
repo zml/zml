@@ -17,7 +17,8 @@ pub const Quantization = struct {
     scales: Tensor,
     global_scale: ?GlobalScale = null,
     input_scale: ?GlobalScale = null,
-    /// `scales` is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
+    /// HACK: `scales` is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
+    // Something cleaner will need to be done to differentiate different kinds of swizzling
     swizzled_scales: bool = false,
 
     /// A per-tensor scale and the polarity its producer wrote it in
