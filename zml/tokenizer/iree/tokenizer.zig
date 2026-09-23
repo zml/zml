@@ -131,6 +131,14 @@ pub const Tokenizer = struct {
         return Decoder.init(self, self.allocator);
     }
 
+    pub fn normalizer(self: *const Tokenizer, sequence: []const Normalizer.Kind) !Normalizer {
+        return Normalizer.init(self.allocator, sequence);
+    }
+
+    pub fn normalizerFromHuggingFaceJson(_: *const Tokenizer, json: []const u8) !Normalizer {
+        return Normalizer.fromHuggingFaceJson(json);
+    }
+
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         const vocab = c.iree_tokenizer_vocab(self.inner);
         if (vocab == null) return null;
@@ -569,7 +577,7 @@ pub const Normalizer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, sequence: []const Kind) !Normalizer {
-        if (sequence.len < 0) return error.EmptySequence;
+        if (sequence.len == 0) return error.EmptySequence;
 
         if (sequence.len == 1) {
             // IREE requires a sequence of at least two normalizer.
