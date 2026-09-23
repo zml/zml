@@ -65,7 +65,7 @@ fn launchBoundary(b: *B, kernel_name: [:0]const u8, grid: [3]i32, args: anytype)
 /// the routing. Scale bytes use the 128x4 layout consumed by the SM100
 /// block-scaled MMA scale-factor tensor map.
 pub fn groupedQuantize(x: zml.Tensor, route_map: zml.Tensor, cfg: GroupedQuantConfig) struct { q: zml.Tensor, s: zml.Tensor } {
-    std.debug.assert(cfg.group_size == 16 or cfg.group_size == 32 or cfg.group_size == 64 or cfg.group_size == 128 or (cfg.direct and cfg.group_size == 1));
+    std.debug.assert(cfg.group_size == 8 or cfg.group_size == 16 or cfg.group_size == 32 or cfg.group_size == 64 or cfg.group_size == 128);
     const result = GroupedQuantize.call(
         .{ .x = x, .route_map = route_map },
         .{
@@ -133,13 +133,9 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
         .s = .{ .tensor = .{ .dtype = .i8, .shape = &.{ cfg.capacity, @divExact(cfg.hidden, 32) * 128 } } },
     });
 
-    // The persistent GEMM is allowed to launch as soon as this producer has
-    // consumed its inputs. Its PDL dependency still prevents reading outputs
-    // before this grid finishes writing them.
-    b.launchDependents();
     const tid = b.threadIdx().x;
-    // This grid may itself have started early: the routing and the previous
-    // layer produce what it reads below.
+    // This grid may have started before its producer finished: the routing and
+    // the previous layer write what it reads below.
     b.waitForDependency();
     const token = b.blockIdx().y;
     const word = b.blockIdx().x.mul(128).add(tid);
@@ -174,6 +170,9 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
         leader.yieldThen(.{});
         if (scheduled) |*s| s.yieldThen(.{});
     }
+    // Only now are the rows this CTA owns complete: release the persistent
+    // GEMM, which waits on this signal before its first TMA read.
+    b.launchDependents();
 }
 
 /// Each thread owns two adjacent BF16 columns, read and written as one
@@ -207,7 +206,6 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
     });
 
     // The down projection's rows arrive from a grid this one may overlap.
-    b.launchDependents();
     b.waitForDependency();
     const token = b.blockIdx().y;
     const pairs_per_cta = @divExact(cfg.columns_per_cta, 2);
@@ -235,6 +233,7 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
         a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
         in_bounds.yieldThen(.{});
     }
+    b.launchDependents();
 }
 
 test "MXFP4 CuTe boundary kernels emit for decode and prefill batches" {

@@ -7,8 +7,8 @@ const std = @import("std");
 
 const zml = @import("../../zml.zig");
 const triton_mxfp4 = @import("../triton_mxfp4.zig");
-const boundary = @import("mxfp4.zig");
-const persistent = @import("persistent_mxfp4.zig");
+pub const boundary = @import("mxfp4.zig");
+pub const persistent = @import("persistent_mxfp4.zig");
 
 pub const Inputs = struct {
     /// `[tokens, hidden]` BF16.

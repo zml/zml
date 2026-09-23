@@ -99,20 +99,20 @@ pub const Tile = struct {
             // the epilogue scratch at `c`, so the A/B ring stays deep.
             64 => .{
                 .n = 64,
-                .stages = 9,
-                .smem_bytes = 232448,
+                .stages = 8,
+                .smem_bytes = 206848,
                 .tmem_columns = 256,
-                .empty_barriers = 72,
-                .accumulator_full = 144,
-                .accumulator_empty = 160,
-                .tmem_dealloc = 176,
-                .tmem_holding = 184,
+                .empty_barriers = 64,
+                .accumulator_full = 128,
+                .accumulator_empty = 144,
+                .tmem_dealloc = 160,
+                .tmem_holding = 168,
                 .c = 1024,
                 .c_bytes = 512,
                 .a = 2048,
-                .b = 149504,
-                .sfa = 223232,
-                .sfb = 227840,
+                .sfa = 133120,
+                .sfb = 137216,
+                .b = 141312,
             },
             128 => .{
                 .n = 128,
@@ -248,11 +248,12 @@ pub const Config = struct {
     /// active-count sections and `route_inverse` are not read.
     direct: bool = false,
 
-    /// Rows stored per group in the routed operands. Direct routing stores
-    /// one; the B tensor map zero-fills the rest of each N tile, like
-    /// Python's ungrouped `(1, k, routes)` activations.
+    /// Rows stored per group in the routed operands: one whole N tile, of
+    /// which direct routing fills only the first. A tensor map whose row mode
+    /// had extent one would lose that mode altogether — the TMA atom infers a
+    /// zero stride for it — and every group would then read the same row.
     pub fn groupRows(self: Config) i64 {
-        return if (self.direct) 1 else self.n;
+        return self.n;
     }
 
     pub fn routedRows(self: Config) i64 {
@@ -506,8 +507,8 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     b.setFunctionAttribute("cu_attrs", b.parseAttribute("{max_dynamic_shared_size_bytes = #cuda.dev_max_shared_memory_optin, non_portable_cluster_size_allowed = 1 : i32}"));
 
     // Prefetch every tensor-map descriptor before the specialized warps begin
-    // the persistent pipeline.
-    b.launchDependents();
+    // the persistent pipeline. This is the work PDL buys us: it runs while the
+    // producing grid is still writing the operands.
     const warp = b.makeWarpUniform(b.makeWarpUniform(b.threadIdx().x.div(32)));
     var tma_warp = b.openIf(warp.eq(5));
     inline for (.{ d.tma_a, d.tma_b, d.tma_sfa, d.tma_sfb }) |value| {
@@ -515,7 +516,12 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
         b.prefetchTmaDesc(descriptor);
     }
     tma_warp.yieldThen(.{});
+    // Everything below reads the schedule and the quantized activations the
+    // preceding grid produces, so the whole block waits here.
+    b.waitForDependency();
     buildUmmaDevice(b, cfg, tile, epilogue, d);
+    // The epilogue has written every row this CTA owns.
+    b.launchDependents();
     b.endFunction(.{ 192, 1, 1 });
 
     // Public host ABI: the XLA operands, the outputs, then the problem shape.
@@ -628,8 +634,11 @@ fn stageBuffersAt(b: *B, comptime tile: Tile, storage: StageStorage, stage_index
     const all = cute.AlgebraToken.all;
     const a = b.sliceTyped(full.a, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.i8, .smem, 1024, L.ab_swizzle) catch @panic("bad A stage pointer"), b.layoutType(L.aSmem(b, false))));
     const rhs = b.sliceTyped(full.b, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.f8e4m3fn, .smem, 1024, L.ab_swizzle) catch @panic("bad B stage pointer"), b.layoutType(L.bSmem(b, false))));
-    const sfa = b.sliceTyped(full.sfa, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, false))));
-    const sfb = b.sliceTyped(full.sfb, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, false))));
+    // One scale stage is 512 bytes, so slicing a stage out of the ring keeps
+    // that alignment, not the array's.
+    const sf_stage_align = Tile.sf_stage_bytes;
+    const sfa = b.sliceTyped(full.sfa, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
+    const sfb = b.sliceTyped(full.sfb, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
 
     // `tma_partition` preserves a singleton CTA mode. Keep it in the copy
     // views: it is part of the executable TMA atom's expected algebra even
@@ -702,9 +711,14 @@ fn issueTmaStage(
         )),
     );
     const a_source = b.rebuildCoordTensorIterator(3, a_tile, "(?{div=128},?{div=128},?)", .{ 128, 128, 1 }, a_copy_layout);
+    // B's tile spans all of a group's rows, so its N-tile index is zero. Pass
+    // it as a value rather than a literal: a statically zero leaf collapses out
+    // of the coordinate tuple, and the TMA lowering then shifts the remaining
+    // tensor-map coordinates, silently reading group zero for every group.
+    const b_tile_n = b.cst(.i32, 0);
     const b_tile_k = b.sliceTyped(
         partitioned_b_target,
-        .{ all, 0, all, group },
+        .{ all, b_tile_n, all, group },
         b.coordTensorTypePayload(fmt(b, "(0,?{{div={d}}},?)", .{n}), b.layoutSpec(
             .{ .{ .{ 128, n }, 1 }, reduction_tiles },
             .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(128, 1, .{0}) },
@@ -853,13 +867,18 @@ fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: Pipelin
 }
 
 fn accumulatorTmemAt(b: *B, comptime tile: Tile, tmem: V, stage: V) V {
+    // The stage offset is a whole tile width, which `cute.add_offset` needs to
+    // know: it derives the result alignment from what it knows of the offset.
     return b.addOffsetTyped(
         tmem,
-        b.makeIntTuple(.{stage.mul(tile.n)}),
+        b.makeIntTupleDivBy(stage.mul(tile.n), @intCast(tile.n)),
         b.ptrTy(.f32, .tmem, 16) catch @panic("bad accumulator TMEM pointer"),
     ).value();
 }
 
+/// `cute.add_offset` infers the alignment a pointer keeps as the gcd of the
+/// base alignment and the offset, and `cute.recast_iter` may not change it, so
+/// the field's own alignment has to be what the offset leaves.
 fn sharedPointerAt(
     b: *B,
     base: V,
@@ -867,12 +886,28 @@ fn sharedPointerAt(
     comptime dtype: cute.DType,
     comptime alignment: u64,
 ) V {
+    const moved = comptime movedAlignment(byte_offset);
+    comptime std.debug.assert(moved >= alignment);
     const byte_ptr = b.addOffsetTyped(
         base,
         b.makeIntTuple(.{byte_offset}),
-        b.ptrTy(.i8, .smem, alignment) catch @panic("bad shared byte pointer"),
+        b.ptrTy(.i8, .smem, moved) catch @panic("bad shared byte pointer"),
     );
-    return b.recastPointer(byte_ptr, dtype, .smem, alignment);
+    return b.recastPointer(byte_ptr, dtype, .smem, moved);
+}
+
+/// Alignment of `shared_base + byte_offset`, which the shared storage is
+/// allocated with.
+fn movedAlignment(comptime byte_offset: i64) u64 {
+    return offsetAlignment(1024, byte_offset, 1);
+}
+
+/// `cute.add_offset` keeps the gcd of the operand alignment and the offset,
+/// and the op's result type has to say so.
+fn offsetAlignment(base_bytes: u64, offset_elements: i64, element_bytes: u64) u64 {
+    if (offset_elements == 0) return base_bytes;
+    const moved = @as(u64, @intCast(@abs(offset_elements))) * element_bytes;
+    return @max(std.math.gcd(base_bytes, moved), element_bytes);
 }
 
 /// Warp 5 runs independently over every persistent output tile.  Keep the
@@ -1429,8 +1464,8 @@ fn runEpilogue(
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
     const warp_tmem = b.addOffsetTyped(
         accumulator_tmem,
-        b.makeIntTuple(.{warp.mul(32 * 65536)}),
-        b.ptrTy(.f32, .tmem, 0) catch @panic("bad epilogue TMEM pointer"),
+        b.makeIntTupleDivBy(warp.mul(32 * 65536), 4),
+        b.ptrTy(.f32, .tmem, 16) catch @panic("bad epilogue TMEM pointer"),
     ).value();
     // A warp lane holds one routed row, so tiles wider than a warp are drained
     // 32 rows at a time. The accumulator stage is released once its last chunk
@@ -1441,7 +1476,7 @@ fn runEpilogue(
         const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffsetTyped(
             warp_tmem,
             b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
-            b.ptrTy(.f32, .tmem, 0) catch @panic("bad epilogue TMEM pointer"),
+            b.ptrTy(.f32, .tmem, offsetAlignment(16, @intCast(chunk * chunk_rows), 4)) catch @panic("bad epilogue TMEM pointer"),
         ).value();
         // Route metadata does not depend on the accumulator.
         const routed = routedLanes(b, tile, operands, group, chunk);
@@ -1705,9 +1740,12 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ 128, 128, m_tiles, k_tiles, cfg.experts },
         .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(128, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
+    // The group tile covers all of B's rows, so the N-tile mode has extent one
+    // and its stride is inferred as zero. Direct routing is no different: the
+    // tensor map still spans a whole tile of rows, zero-filling all but one.
     const b_local_spec = b.layoutSpec(
         .{ n, 128, 1, k_tiles, cfg.groups },
-        .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(n, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
+        .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const all_tiles = .{ cute.AlgebraToken.all, cute.AlgebraToken.all, cute.AlgebraToken.all };
     const tiled_a = b.localTileTyped(d.gA, b.makeTile(&.{ 128, 128 }), all_tiles, b.coordTensorType(3, a_local_spec), null);
@@ -1719,7 +1757,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     );
     const b_mma_spec = b.layoutSpec(
         .{ .{ n, 32 }, 1, 4, 1, k_tiles, cfg.groups },
-        .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}), b.basis(n, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
+        .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const mma_a = b.tiledMmaPartitionTyped(tiled_mma, tiled_a, .{0}, 0, b.coordTensorType(3, a_mma_spec));
     const mma_b = b.tiledMmaPartitionTyped(tiled_mma, tiled_b, .{0}, 1, b.coordTensorType(3, b_mma_spec));
@@ -1807,9 +1845,6 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // Each role walks the same persistent tile sequence independently. The
     // AB and accumulator mbarriers carry all cross-warp dependencies.
     var tma_warp = b.openIf(warp.eq(5));
-    // The TMA producer consumes buffers produced by the preceding quantizer.
-    // PDL allows this grid to launch early, so wait before the first TMA read.
-    b.waitForDependency();
     switch (k_tiles) {
         inline 18, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
         else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
@@ -1858,9 +1893,12 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const n = tile.n;
     const a_layout = b.layoutSpec(.{ cfg.m, cfg.k, cfg.experts }, .{ cfg.k, 1, cfg.m * cfg.k });
     const b_layout = b.layoutSpec(.{ cfg.groupRows(), cfg.k, cfg.groups }, .{ cfg.k, 1, cfg.k * cfg.groupRows() });
+    // `cute.tile_to_shape` derives that the dynamic strides step whole
+    // 512-byte scale atoms, and the result type has to carry it.
+    const sf_stride: cute.ConstrainedDynamic = .{ .divisible_by = Tile.sf_stage_bytes };
     const dynamic_sf_layout = b.layoutSpec(
         .{ .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ 1, cute.AlgebraToken.dynamic } },
-        .{ .{ .{ 16, 4 }, cute.AlgebraToken.dynamic }, .{ .{ 0, 1 }, 512 }, .{ 0, cute.AlgebraToken.dynamic } },
+        .{ .{ .{ 16, 4 }, sf_stride }, .{ .{ 0, 1 }, 512 }, .{ 0, sf_stride } },
     );
 
     const gA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight), .f4e2m1fn, .gmem, 16), b.staticLayout(a_layout));
@@ -1870,7 +1908,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const active_ptr = b.addOffsetTyped(
         schedule,
         b.makeIntTuple(.{2 * cfg.groups}),
-        b.ptrTy(.i32, .gmem, 4) catch @panic("bad active count pointer"),
+        b.ptrTy(.i32, .gmem, offsetAlignment(16, 2 * cfg.groups, 4)) catch @panic("bad active count pointer"),
     );
     const active = b.makeTensorView(active_ptr, b.staticLayout(b.layoutSpec(1, 1)));
     const gB = b.makeTensorView(b.arg(host_arg.input_quant), b.staticLayout(b_layout));
@@ -1927,7 +1965,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     };
     const activations = @divExact(cfg.m, 2);
     const group_sizes = b.makeTensorView(
-        b.addOffsetTyped(schedule, b.makeIntTuple(.{cfg.groups}), b.ptrTy(.i32, .gmem, 4) catch @panic("bad group size pointer")),
+        b.addOffsetTyped(schedule, b.makeIntTuple(.{cfg.groups}), b.ptrTy(.i32, .gmem, offsetAlignment(16, cfg.groups, 4)) catch @panic("bad group size pointer")),
         b.staticLayout(b.layoutSpec(cfg.groups, 1)),
     );
     const launch = switch (epilogue) {

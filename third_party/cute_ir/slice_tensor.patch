@@ -1,6 +1,6 @@
-diff --git a/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td b/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
---- a/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
-+++ b/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
+diff --git a/cutlass_compiler/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td b/cutlass_compiler/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
+--- a/cutlass_compiler/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
++++ b/cutlass_compiler/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td
 @@ -2990,7 +2990,7 @@
  
  def Cute_SliceOp : Cute_Op<"slice", [
@@ -24,9 +24,9 @@ diff --git a/cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td b/cute_ir/includ
    );
    let assemblyFormat = [{ `(` operands `)` attr-dict `:` type(operands) }];
  }
-diff --git a/cute_ir/lib/Dialect/IR/CuteOps.cpp b/cute_ir/lib/Dialect/IR/CuteOps.cpp
---- a/cute_ir/lib/Dialect/IR/CuteOps.cpp
-+++ b/cute_ir/lib/Dialect/IR/CuteOps.cpp
+diff --git a/cutlass_compiler/cute_ir/lib/Dialect/IR/CuteOps.cpp b/cutlass_compiler/cute_ir/lib/Dialect/IR/CuteOps.cpp
+--- a/cutlass_compiler/cute_ir/lib/Dialect/IR/CuteOps.cpp
++++ b/cutlass_compiler/cute_ir/lib/Dialect/IR/CuteOps.cpp
 @@ -1327,6 +1327,15 @@
        });
  }

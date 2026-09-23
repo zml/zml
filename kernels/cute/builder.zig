@@ -521,8 +521,8 @@ fn formatName(format: TmaFormat, dtype: DType) []const u8 {
 fn tmaFormatAttribute(b: *Builder, format: TmaFormat) ?*const mlir.Attribute {
     return switch (format) {
         .default => null,
-        .u4_unpack_u8 => b.targetAttribute("#cute_nvgpu.tma_data_format<U4_UNPACK_U8>"),
-        .u16 => b.targetAttribute("#cute_nvgpu.tma_data_format<U16>"),
+        .u4_unpack_u8 => b.parseAttribute("#cute_nvgpu.tma_data_format<U4_UNPACK_U8>"),
+        .u16 => b.parseAttribute("#cute_nvgpu.tma_data_format<U16>"),
     };
 }
 
@@ -1029,7 +1029,7 @@ pub const Builder = struct {
         const attr = try cute.SwizzleAttr.get(self.ctx, text);
         return (try cute.PtrType.get(self.ctx, .{
             .valueType = dt.toMlir(self.ctx),
-            .memorySpace = .string(self.ctx, @tagName(space)),
+            .addressSpace = space,
             .alignment = alignment,
             .swizzle = attr.attribute(),
         })).type_();
@@ -1368,6 +1368,16 @@ pub const Builder = struct {
         return .{ .inner = value.inner, .kernel = self };
     }
 
+    /// A one-element integer tuple holding a value known to be a multiple of
+    /// `divisor`. Ops that derive alignment from an offset, such as
+    /// `cute.add_offset`, need that to keep the operand's alignment.
+    pub fn makeIntTupleDivBy(self: *Builder, value: anytype, comptime divisor: u32) View {
+        const constrained = self.assumeDivBy(value, divisor);
+        const payload = std.fmt.allocPrint(self.arena.allocator(), "!cute.int_tuple<\"?{{div={d}}}\">", .{divisor}) catch @panic("OOM");
+        const tuple = self.emit(cute.make_int_tuple(self.ctx, &.{constrained.inner}, self.parseType(payload), self.loc()));
+        return .{ .inner = tuple.inner, .kernel = self };
+    }
+
     /// Refine an integer SSA value with the divisibility information CuTe
     /// derives while slicing a tiled coordinate tensor.
     pub fn assumeDivBy(self: *Builder, value: anytype, comptime divisor: u32) Value {
@@ -1439,8 +1449,12 @@ pub const Builder = struct {
         ));
 
         const leaf_types = self.arena.allocator().alloc(*const mlir.Type, leaf_count) catch @panic("OOM");
+        // 0 marks a leaf the producer knows to be statically zero, 1 a leaf
+        // with no known divisibility.
         inline for (leaf_divisibility, 0..) |divisor, i| {
-            const leaf_payload = if (divisor == 1)
+            const leaf_payload = if (divisor == 0)
+                "0"
+            else if (divisor == 1)
                 "?"
             else
                 std.fmt.allocPrint(self.arena.allocator(), "?{{div={d}}}", .{divisor}) catch @panic("OOM");
@@ -1512,12 +1526,12 @@ pub const Builder = struct {
         return .{ .inner = value.inner, .kernel = self };
     }
 
-    pub fn tileToShapeTyped(self: *Builder, input: anytype, shape: anytype, order: ?View, result_type: *const mlir.Type) View {
+    pub fn tileToShapeTyped(self: *Builder, input: anytype, shape: anytype, order: View, result_type: *const mlir.Type) View {
         const result = self.emit(cute.tile_to_shape(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(shape).inner,
-            if (order) |value| value.inner else null,
+            order.inner,
             result_type,
             self.loc(),
         ));
@@ -1978,7 +1992,7 @@ pub const Builder = struct {
             self.asValue(cta_map).inner,
             self.tmaLoadAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
-            self.targetAttribute("#cute_nvgpu.tiled_tma_load<sm_90>"),
+            self.parseAttribute("#cute_nvgpu.tiled_tma_load<sm_90>"),
             .int(self.ctx, .i32, config.num_multicast),
             tmaFormatAttribute(self, config.format),
             self.loc(),
@@ -2074,12 +2088,12 @@ pub const Builder = struct {
     }
 
     pub fn makeExecTma(self: *Builder, descriptor: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, self.parseType(result_type), null, null, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeExecTmaTyped(self: *Builder, descriptor: Atom, result_type: *const mlir.Type) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, result_type, self.loc()));
+        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, result_type, null, null, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -2090,7 +2104,7 @@ pub const Builder = struct {
             atom.inner,
             barrier.inner,
             atom.type_(),
-            self.targetAttribute("#cute_nvgpu.atom_copy_field_tmaload<tma_bar>"),
+            self.parseAttribute("#cute_nvgpu.atom_copy_field_tmaload<tma_bar>"),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -2188,7 +2202,7 @@ pub const Builder = struct {
             mma.inner,
             enabled.inner,
             mma.type_(),
-            self.targetAttribute("#cute_nvgpu.atom_mma_field_sm100_block_scaled<accum_c>"),
+            self.parseAttribute("#cute_nvgpu.atom_mma_field_sm100_block_scaled<accum_c>"),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -2199,6 +2213,7 @@ pub const Builder = struct {
     pub fn tcgen05Commit(self: *Builder, barrier: Value) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.commit", .{
             .operands = .{ .flat = &.{self.sharedBarrierPtr(barrier).inner} },
+            .attributes = &.{.named(self.ctx, "group", self.parseAttribute("#nvvm.cta_group<cta_1>"))},
             .location = self.loc(),
         }));
     }
@@ -2206,7 +2221,7 @@ pub const Builder = struct {
     /// Wait until asynchronous tensor-memory loads have reached registers.
     pub fn fenceTmemLoad(self: *Builder) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.wait", .{
-            .attributes = &.{.named(self.ctx, "kind", self.targetAttribute("#nvvm.tcgen05_wait<load>"))},
+            .attributes = &.{.named(self.ctx, "kind", self.parseAttribute("#nvvm.tcgen05_wait<load>"))},
             .location = self.loc(),
         }));
     }
@@ -2416,7 +2431,7 @@ pub const Builder = struct {
     /// `cute.arch.sync_threads()`.
     pub fn syncThreads(self: *Builder) void {
         _ = mlir.Operation.make(self.ctx, "nvvm.barrier", .{
-            .attributes = &.{.named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 0, 0 }))},
+            .attributes = &.{.named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 0, 0, 0 }))},
             .location = self.loc(),
         }).appendTo(self.currentBlock());
     }
@@ -2619,6 +2634,7 @@ pub const Builder = struct {
     pub fn mbarrierInit(self: *Builder, barrier: Value, arrivals: u32) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.init", .{
             .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, arrivals).inner } },
+            .attributes = &.{.named(self.ctx, "layout", self.parseAttribute("#nvvm.mbarrier_layout<v0>"))},
             .location = self.loc(),
         }));
     }
@@ -2628,6 +2644,11 @@ pub const Builder = struct {
     pub fn mbarrierArriveExpectTx(self: *Builder, barrier: Value, bytes: u32) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.arrive.expect_tx", .{
             .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, bytes).inner } },
+            .attributes = &.{
+                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 0, 0 })),
+                .named(self.ctx, "relaxed", .boolean(self.ctx, false)),
+                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mem_scope<cta>")),
+            },
             .location = self.loc(),
         }));
     }
@@ -2635,6 +2656,11 @@ pub const Builder = struct {
     pub fn mbarrierArrive(self: *Builder, barrier: Value, count: u32) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.arrive", .{
             .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, count).inner } },
+            .attributes = &.{
+                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 0 })),
+                .named(self.ctx, "relaxed", .boolean(self.ctx, false)),
+                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mem_scope<cta>")),
+            },
             .location = self.loc(),
         }));
     }
@@ -2644,7 +2670,10 @@ pub const Builder = struct {
         return self.emit(mlir.Operation.make(self.ctx, "nvvm.mbarrier.wait.parity", .{
             .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, phase.inner } },
             .results = .{ .flat = &.{.int(self.ctx, .i1)} },
-            .attributes = &.{.named(self.ctx, "kind", self.parseAttribute("#nvvm.mbar_wait<\"try\">"))},
+            .attributes = &.{
+                .named(self.ctx, "kind", self.parseAttribute("#nvvm.mbar_wait<try>")),
+                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mbar_scope<cta>")),
+            },
             .location = self.loc(),
         }));
     }
@@ -2654,6 +2683,7 @@ pub const Builder = struct {
     pub fn mbarrierTryWaitParity(self: *Builder, barrier: Value, phase: Value, suspend_time: u32) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.try_wait.parity", .{
             .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, phase.inner, self.cst(.i32, suspend_time).inner } },
+            .attributes = &.{.named(self.ctx, "useIntrinsic", .boolean(self.ctx, false))},
             .location = self.loc(),
         }));
     }
@@ -2679,8 +2709,8 @@ pub const Builder = struct {
     pub fn fenceProxyAsyncShared(self: *Builder) void {
         self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.fence.proxy", .{
             .attributes = &.{
-                .named(self.ctx, "kind", self.targetAttribute("#nvvm.proxy_kind<async.shared>")),
-                .named(self.ctx, "space", self.targetAttribute("#nvvm.shared_space<cta>")),
+                .named(self.ctx, "kind", self.parseAttribute("#nvvm.proxy_kind<async.shared>")),
+                .named(self.ctx, "space", self.parseAttribute("#nvvm.shared_space<cta>")),
             },
             .location = self.loc(),
         }));
@@ -3011,7 +3041,7 @@ test "guard, shared memory, sync, layouts, for loop" {
     defer std.testing.allocator.free(kernel);
     try expectContains(kernel, "cute_nvgpu.arch.alloc_smem");
     try expectContains(kernel, "!cute.ptr<f32, smem, align<16>>");
-    try expectContains(kernel, "\"nvvm.barrier\"() {operandSegmentSizes = array<i32: 0, 0>} : () -> ()");
+    try expectContains(kernel, "\"nvvm.barrier\"() {operandSegmentSizes = array<i32: 0, 0, 0>} : () -> ()");
     try expectContains(kernel, "bar.sync 2, 128;");
     try expectContains(kernel, "griddepcontrol.launch_dependents;");
     try expectContains(kernel, "griddepcontrol.wait;");
