@@ -2610,6 +2610,15 @@ fn manualComputationInternal(
 
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
+    if (ctx.manualAxesConflict(sharding, partition_axes)) |conflict| {
+        std.debug.panic(
+            "manualComputation cannot make logical axis '{s}' in sharding '{s}' manual: it resolves to mesh axis '{s}', " ++
+                "which is already manual in an enclosing manualComputation. Nested manual computations must use disjoint mesh axes. " ++
+                "Remove this axis from the inner manualComputation's partition axes, or move the computation outside the enclosing manual region.",
+            .{ conflict.logical_axis, sharding.data.name, conflict.resolved_axis },
+        );
+    }
+
     for (input_shapes, 0..) |shape, i| {
         if (shape.isFullyReplicated()) {
             local_input_shapes[i] = shape;
@@ -2622,6 +2631,14 @@ fn manualComputationInternal(
     for (outputs, 0..) |shape, i| {
         local_output_shapes[i] = sharding.shardedShapeForAxes(shape, partition_axes) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
+
+    const previous_manual_axes_len = ctx.manual_axes.len;
+    const resolved_manual_axes = sharding.resolvedAxisNames(partition_axes);
+    ctx.manual_axes.appendSlice(resolved_manual_axes.constSlice()) catch std.debug.panic("manualComputation supports at most 8 active manual axes across nested computations", .{});
+    defer ctx.manual_axes.len = previous_manual_axes_len;
+    const was_in_manual_computation = ctx.in_manual_computation;
+    ctx.in_manual_computation = true;
+    defer ctx.in_manual_computation = was_in_manual_computation;
 
     return switch (ctx.partitioner) {
         .shardy => {
@@ -2646,9 +2663,6 @@ fn manualComputationInternal(
             for (0..input_shapes.len) |i| {
                 local_input_tensors[i] = Tensor._result(local_input_shapes[i], manual_block.argument(i));
             }
-
-            ctx.manual_computation_depth += 1;
-            defer ctx.manual_computation_depth -= 1;
 
             const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
@@ -2719,8 +2733,6 @@ fn manualComputationInternal(
                 local_input_tensors[i] = Tensor._result(local_input_shapes[i], local_input_values[i]);
             }
 
-            ctx.manual_computation_depth += 1;
-            defer ctx.manual_computation_depth -= 1;
             const local_inputs = try manualComputationLocalizeInputs(arena, inputs, local_input_tensors);
             const body_output_shapes = manualComputationOutputShapesArg(BodyOutputShapesT, local_output_shapes);
             const body_result = @call(.auto, body_fn, .{ local_inputs, body_output_shapes });
@@ -2946,6 +2958,123 @@ test "manualComputation uses the explicit mesh for every input and output" {
                 try std.testing.expect(std.mem.indexOf(u8, writer.written(), "other_manual_mesh") == null);
             }
         }
+    }
+}
+
+test "manualComputation tracks nested manual axes on a split physical mesh" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+    var devices: [8]Sharding.PhysicalNode = undefined;
+    for (&devices, 0..) |*device, id| {
+        device.* = .{ .leaf = .{ .id = @intCast(id), .coords = @splat(0xff) } };
+    }
+    var physical = try Sharding.PhysicalMesh.fromTree(allocator, .cpu, .axis(.link, .point_to_point, &devices));
+    defer physical.deinit(allocator);
+
+    const logical: Sharding.LogicalMesh = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth });
+    var strategy: Sharding.Strategy = .parseBindings(.{ .data = .link_x, .model = .link_y });
+    strategy.addSplit(.link, &.{
+        .{ .tag = .link_x, .size = 2 },
+        .{ .tag = .link_y, .size = 4 },
+    });
+    const data: Sharding.Data = try .init("nested_manual_mesh", &physical, logical, strategy);
+    try std.testing.expectEqual(2, data.numPartitionsForLogicalAxis(.data));
+    try std.testing.expectEqual(4, data.numPartitionsForLogicalAxis(.model));
+
+    const alias_logical: Sharding.LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .feature = .high_bandwidth, .combined = .high_bandwidth });
+    var alias_strategy: Sharding.Strategy = .parseBindings(.{ .batch = .link_x, .feature = .link_y, .combined = .{ .link_y, .link_x } });
+    alias_strategy.addSplit(.link, &.{
+        .{ .tag = .link_x, .size = 2 },
+        .{ .tag = .link_y, .size = 4 },
+    });
+    const alias_data: Sharding.Data = try .init("aliased_manual_mesh", &physical, alias_logical, alias_strategy);
+
+    for ([_]Sharding.Partitioner{ .shardy, .gspmd }) |partitioner| {
+        var comp: Compiler = .init(allocator, std.testing.io, zml.testing.env(), .{
+            .partitioner = partitioner,
+        });
+        defer comp.deinit();
+        // This IR-only test uses synthetic devices rather than the runtime mesh.
+        comp.partitioning = try .init(partitioner, &.{ .{ .data = &data }, .{ .data = &alias_data } });
+        comp.activate();
+        defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        const scope = comp.pushBlock(block);
+        defer scope.pop();
+
+        const shape = Shape.init(.{ .b = 32, .d = 64 }, .f32).withPartitioning(.{ .b = .data });
+        const input = Tensor.constant(.{ .f32 = 1 }).broad(shape);
+        const Body = struct {
+            fn checkConflict(input_local: Tensor, specs: anytype, expected: ?[]const u8) void {
+                const ctx = Compiler.current();
+                const partitioned_shape = input_local.shape().withPartitioning(specs);
+                const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch unreachable;
+                const conflict = ctx.manualAxisConflict(sharding, partitioned_shape);
+                const requested_axes = partitioned_shape.partitioningAxes();
+                const nesting_conflict = ctx.manualAxesConflict(sharding, requested_axes.constSlice());
+                stdx.debug.assert((nesting_conflict == null) == (conflict == null), "Constraint and nesting checks disagree", .{});
+                if (nesting_conflict) |nested| {
+                    stdx.debug.assert(std.mem.eql(u8, nested.resolved_axis, expected.?), "Wrong resolved axis for invalid nesting", .{});
+                }
+
+                if (expected) |axis_name| {
+                    stdx.debug.assert(conflict != null, "Expected a conflict for {f} on resolved axis {s}", .{ partitioned_shape, axis_name });
+                    stdx.debug.assert(std.mem.eql(u8, conflict.?.resolved_axis, axis_name), "Wrong resolved manual axis: {s}", .{conflict.?.resolved_axis});
+                } else {
+                    stdx.debug.assert(conflict == null, "Unexpected manual-axis conflict for {f}", .{partitioned_shape});
+                }
+            }
+
+            fn model(input_local: Tensor, output_shape: Shape) Tensor {
+                const ctx = Compiler.current();
+                stdx.debug.assert(ctx.manual_axes.len == 2, "Expected both data and model to be manual", .{});
+                stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(0), "link_x"), "Lost the parent manual axis", .{});
+                stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(1), "link_y"), "Missing the inner manual axis", .{});
+                checkConflict(input_local, .{ .b = .batch }, "link_x");
+                checkConflict(input_local, .{ .d = .feature }, "link_y");
+                // Model replicas retain the full reduction dimension.
+                stdx.debug.assert(input_local.dim(.b) == 16 and input_local.dim(.d) == 64, "Unexpected model-local shape: {f}", .{input_local.shape()});
+                const result = input_local.sum(.d).squeeze(.d);
+                stdx.debug.assert(result.shape().eql(output_shape), "Unexpected model-local output: {f}", .{result.shape()});
+                return result;
+            }
+
+            fn empty(_: void, _: void) void {}
+
+            fn dataAxis(input_local: Tensor, output_shape: Shape) Tensor {
+                const ctx = Compiler.current();
+                stdx.debug.assert(ctx.manual_axes.len == 1, "Expected only data to be manual", .{});
+                stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(0), "link_x"), "Missing the outer manual axis", .{});
+                stdx.debug.assert(input_local.dim(.b) == 16 and input_local.dim(.d) == 64, "Unexpected data-local shape: {f}", .{input_local.shape()});
+                checkConflict(input_local, .{ .b = .data }, "link_x");
+                // Different logical names in a second sharding still resolve to the parent's axis.
+                checkConflict(input_local, .{ .b = .batch }, "link_x");
+                // A logical axis can resolve to several mesh axes; check all of them.
+                checkConflict(input_local, .{ .b = .combined }, "link_x");
+                checkConflict(input_local, .{ .d = .feature }, null);
+                _ = input_local.withPartitioning(.{ .d = .feature });
+                // A different logical alias of a free resolved axis is valid for nesting.
+                manualComputation(empty, {}, {}, .{.feature});
+                stdx.debug.assert(ctx.manual_axes.len == 1, "Aliased manual computation did not restore its parent scope", .{});
+                // A free axis is still allowed in withPartitioning.
+                _ = input_local.withPartitioning(.{ .d = .model });
+                const result = manualComputation(model, input_local, output_shape, .{.model});
+                stdx.debug.assert(ctx.manual_axes.len == 1 and ctx.in_manual_computation, "Inner manual computation did not restore its parent scope", .{});
+                checkConflict(input_local, .{ .d = .feature }, null);
+                _ = input_local.withPartitioning(.{ .d = .model });
+                return result;
+            }
+        };
+        const output = manualComputation(Body.dataAxis, input, shape.remove(.d), .{.data});
+        try zml.testing.expectEqualShapes(shape.remove(.d), output.shape());
+        try std.testing.expectEqual(0, comp.manual_axes.len);
+        try std.testing.expect(!comp.in_manual_computation);
+        Body.checkConflict(input, .{ .b = .batch, .d = .feature }, null);
+        _ = input.withPartitioning(.{ .b = .batch, .d = .feature });
+        // Both axes are available again outside the manual computation.
+        _ = input.withPartitioning(.{ .b = .data, .d = .model });
     }
 }
 
@@ -3225,7 +3354,7 @@ pub fn typedCustomCall(
     const ctx = Compiler.current();
     const allocator = ctx.arena.allocator();
 
-    stdx.debug.assert(!opts.has_side_effect or ctx.manual_computation_depth > 0, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
+    stdx.debug.assert(!opts.has_side_effect or ctx.in_manual_computation, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
 
     const input_tensors: []const Tensor = switch (@typeInfo(Input)) {
         .@"struct" => |struct_info| b: {
@@ -3316,7 +3445,7 @@ pub fn typedCustomCall(
         ctx.location,
     ).appendTo(ctx.currentScope().block);
 
-    if (ctx.manual_computation_depth > 0 and ctx.partitioner == .gspmd) {
+    if (ctx.in_manual_computation and ctx.partitioner == .gspmd) {
         op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
     }
 

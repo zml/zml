@@ -183,6 +183,14 @@ pub const Tensor = struct {
 
         const sharding = self._shape._sharding.resolveReplicated(ctx.platform);
         const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        if (ctx.manualAxisConflict(sharding, partitioned_shape)) |conflict| {
+            std.debug.panic(
+                "Tensor.withPartitioning cannot partition dimension '{s}' on logical axis '{s}' in sharding '{s}': it resolves to mesh axis '{s}', " ++
+                    "which is already manual in an enclosing manualComputation. The tensor is already local along this axis. " ++
+                    "Remove this partitioning from withPartitioning inside the body; specify it on the manualComputation inputs and outputs instead. Tensor shape: {f}",
+                .{ partitioned_shape.debugTag(conflict.dimension), conflict.logical_axis, sharding.data.name, conflict.resolved_axis, self.shape() },
+            );
+        }
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
