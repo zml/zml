@@ -859,7 +859,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
             },
             .rocm => {
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
+                // Avoid forcing concurrent command-buffer scheduling on ROCm: the tested HIP
+                // runtime skips its single-stream cost heuristic above four dependency levels.
+                // On deep DS4.1 graphs, multiple HIP streams added thousands of barriers and
+                // completion signals for unchanged kernels, outweighing the benefit of overlap.
+                // try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
                 // Only capture all-reduce and all-gather collectives in HIP graphs; other collective types execute outside command buffers since they are unsupported in HIP graphs.
