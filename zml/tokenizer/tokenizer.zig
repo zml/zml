@@ -14,6 +14,28 @@ const Tokenizers = enum {
 };
 
 pub const Tokenizer = union(Tokenizers) {
+    pub const Normalizer = union(Tokenizers) {
+        pub const Kind = iree.Normalizer.Kind;
+
+        iree: iree.Normalizer,
+        sentencepiece: void,
+        homemade: void,
+
+        pub fn deinit(self: *Normalizer) void {
+            switch (self.*) {
+                .iree => |*n| n.deinit(),
+                else => {},
+            }
+        }
+
+        pub fn normalize(self: *Normalizer, allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+            return switch (self.*) {
+                .iree => |*n| n.normalize(allocator, text),
+                else => error.UnsupportedNormalizer,
+            };
+        }
+    };
+
     pub const Encoder = union(Tokenizers) {
         iree: iree.Tokenizer.Encoder,
         sentencepiece: sentencepiece.Encoder,
@@ -139,6 +161,20 @@ pub const Tokenizer = union(Tokenizers) {
     pub fn decoder(self: *const Tokenizer) !Decoder {
         return switch (self.*) {
             inline else => |*v, tag| @unionInit(Decoder, @tagName(tag), try v.*.decoder()),
+        };
+    }
+
+    pub fn normalizer(self: *const Tokenizer, sequence: []const Normalizer.Kind) !Normalizer {
+        return switch (self.*) {
+            .iree => |*backend| .{ .iree = try backend.normalizer(sequence) },
+            else => error.UnsupportedNormalizer,
+        };
+    }
+
+    pub fn normalizerFromHuggingFaceJson(self: *const Tokenizer, json: []const u8) !Normalizer {
+        return switch (self.*) {
+            .iree => |*backend| .{ .iree = try backend.normalizerFromHuggingFaceJson(json) },
+            else => error.UnsupportedNormalizer,
         };
     }
 
