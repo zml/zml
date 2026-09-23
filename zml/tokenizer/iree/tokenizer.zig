@@ -497,7 +497,7 @@ pub const Normalizer = struct {
         StripAccents,
         /// Converts text to lowercase.
         Lowercase,
-        /// Substitutes all occurrences of a literal pattern with the specified content.
+        /// Substitutes occurrences of a literal or regular-expression pattern with the specified content.
         Replace: struct {
             kind: enum {
                 regex,

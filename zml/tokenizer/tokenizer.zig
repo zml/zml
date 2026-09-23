@@ -171,6 +171,13 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
+    pub fn normalizerFromHuggingFaceJson(self: *const Tokenizer, json: []const u8) !Normalizer {
+        return switch (self.*) {
+            .iree => |*backend| .{ .iree = try backend.normalizerFromHuggingFaceJson(json) },
+            else => error.UnsupportedNormalizer,
+        };
+    }
+
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         return switch (self.*) {
             inline else => |v| v.tokenId(token),
