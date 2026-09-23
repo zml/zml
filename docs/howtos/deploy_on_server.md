@@ -16,6 +16,7 @@ following arguments to the command line when compiling / running a model:
 
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
+- Moore Threads MUSA S80: `--@zml//platforms:musa=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
 - **AVOID CPU:** `--@zml//platforms:cpu=false`

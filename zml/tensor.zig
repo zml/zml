@@ -208,7 +208,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -274,7 +274,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         var copy = flat_tensors;
@@ -292,7 +292,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -311,7 +311,7 @@ pub const Tensor = struct {
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
             .cpu, .neuron, .metal => return,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         meta.visit(struct {
@@ -3640,7 +3640,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4599,7 +4599,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron => {},
+            .oneapi, .musa, .neuron => {},
         }
     }
 

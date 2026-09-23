@@ -3,6 +3,7 @@ const std = @import("std");
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
 const metal = @import("platforms/metal");
+const musa = @import("platforms/musa");
 const neuron = @import("platforms/neuron");
 const pjrt = @import("pjrt");
 const rocm = @import("platforms/rocm");
@@ -14,6 +15,7 @@ const platforms = @This();
 pub const Platform = enum {
     cpu,
     cuda,
+    musa,
     rocm,
     tpu,
     neuron,

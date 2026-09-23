@@ -19,6 +19,8 @@ bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 # ROCm
 bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
+# MUSA S80
+bazel run //examples/llm --@zml//platforms:musa=true --@zml//platforms:cpu=false -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 ```
 
 From a local directory:

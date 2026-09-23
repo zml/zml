@@ -626,7 +626,7 @@ pub const MemoryWriter = union(enum) {
             .cuda, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer),
             },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{
+            .rocm, .tpu, .neuron, .cpu, .metal, .musa => .{
                 .buffered = try .init(allocator, io, platform, shape, sharding, buffer),
             },
         };

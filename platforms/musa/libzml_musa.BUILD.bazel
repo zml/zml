@@ -1,0 +1,45 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+patchelf(
+    name = "libzml_musa_so",
+    src = "libzml_musa.so",
+    set_rpath = "$ORIGIN/musa-sdk/lib:$ORIGIN",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libzml_musa_so",
+        "@musa_sdk//:builtins_mtgpu_def",
+        "@musa_sdk//:clang_offload_bundler",
+        "@musa_sdk//:intrinsics_musa_td",
+        "@musa_sdk//:libclang_cpp",
+        "@musa_sdk//:libdevice",
+        "@musa_sdk//:lld",
+        "@musa_sdk//:llvm_readobj",
+        "@musa_sdk//:mcc",
+        "@musa_sdk//:runtime_libs",
+        "@musa_sdk//:toolchain-identity.txt",
+    ],
+    add_directory_to_runfiles = True,
+    allow_overwrites = True,
+    hardlink = "auto",
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "bin": "lib/musa-sdk/bin",
+        "include": "lib/musa-sdk/include",
+        "lib": "lib/musa-sdk/lib",
+        "libzml_musa_so": "lib",
+        "mtgpu": "lib/musa-sdk/mtgpu",
+        "toolchain-identity.txt": "lib/musa-sdk/toolchain-identity.txt",
+    },
+    root_paths = ["."],
+)
+
+cc_library(
+    name = "libzml_musa",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/musa:__subpackages__"],
+)

@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .musa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -88,7 +88,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .musa, .rocm, .oneapi, .tpu => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -211,7 +211,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .musa => device.id(),
     };
 }
 
@@ -237,6 +237,7 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 pub const State = union(Target) {
     cpu: void,
     cuda: CudaState,
+    musa: void,
     rocm: void,
     tpu: void,
     neuron: void,
@@ -263,6 +264,7 @@ pub const State = union(Target) {
             .neuron => .{ .neuron = {} },
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
+            .musa => .{ .musa = {} },
         };
     }
 
@@ -399,6 +401,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .musa,
             .oneapi,
             .metal,
             .cpu,
@@ -679,7 +682,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .musa => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -710,6 +713,9 @@ pub const CreateOptions = struct {
     // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
     xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    // MUSA 4.0.1 BFC suballocations do not consistently meet XLA's required
+    // 256-byte device-buffer alignment. Use aligned passthrough allocations.
+    musa: XlaGpu = .{ .allocator = .platform },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
@@ -783,6 +789,7 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .musa => self.musa.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -792,6 +799,30 @@ pub const CreateOptions = struct {
         return values.items;
     }
 };
+
+test "MUSA create options use the platform allocator by default" {
+    var storage: [8]pjrt.NamedValue = undefined;
+
+    const musa_values = (CreateOptions{}).toNamedValues(.musa, &storage);
+    try std.testing.expectEqual(@as(usize, 1), musa_values.len);
+    try std.testing.expectEqualStrings("allocator", musa_values[0].name());
+    try std.testing.expectEqual(pjrt.NamedValue.Kind.string, musa_values[0].kind());
+    try std.testing.expectEqualStrings("platform", musa_values[0].value().string);
+
+    const overridden: CreateOptions = .{
+        .musa = .{ .allocator = .{ .bfc = .{
+            .preallocate = false,
+            .memory_fraction = 0,
+        } } },
+    };
+    const overridden_values = overridden.toNamedValues(.musa, &storage);
+    try std.testing.expectEqual(@as(usize, 2), overridden_values.len);
+    try std.testing.expectEqualStrings("bfc", overridden_values[0].value().string);
+    try std.testing.expect(!overridden_values[1].value().bool);
+
+    const cuda_values = (CreateOptions{}).toNamedValues(.cuda, &storage);
+    try std.testing.expectEqualStrings("bfc", cuda_values[0].value().string);
+}
 
 // TODO(Corendos): Consider moving that in its own file if its size increase too much.
 pub const cuda = struct {
